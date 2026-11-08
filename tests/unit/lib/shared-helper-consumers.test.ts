@@ -47,7 +47,7 @@ const REGISTRY = [
     consumers: [
       'src/lib/providers/hetzner.js', // destroy sweeps + fetchServerTypes catalog
       'scripts/sweep-hetzner.js', // standalone zero-orphan audit
-      'tests/e2e/scenarios/_run-lifecycle.ts', // per-run orphan sweep
+      'tests/e2e/utils/sweep-hetzner.ts', // per-run orphan sweep (lifecycle + iter-step)
     ],
     deepTests: [
       'tests/unit/providers/hetzner-pagination.test.ts',

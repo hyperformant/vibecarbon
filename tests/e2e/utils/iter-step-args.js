@@ -5,6 +5,7 @@
  */
 
 import { COMMANDS } from '../../../src/lib/cli/command-registry.js';
+import { parseFlags } from '../../../src/lib/cli/parse-flags.js';
 
 /** The steps iter-step can run, each a vibecarbon command of the same name. */
 export const ITER_STEPS = [
@@ -44,4 +45,23 @@ export async function iterStepCliArgs(step, envPrefix, extraArgs) {
   const takesEnv = (spec.positional ?? []).some((p) => p.name === 'env');
   const takesYes = (spec.flags ?? []).some((f) => f.name === 'y');
   return [step, ...(takesEnv ? [envPrefix] : []), ...(takesYes ? ['-y'] : []), ...stepArgs];
+}
+
+/**
+ * Is this step a full teardown: `destroy` with `-purge`? Only then does
+ * iter-step run the lifecycle's post-destroy cleanup (tests/e2e/utils/
+ * rig-teardown.ts). A plain destroy keeps the backup bucket on purpose, and
+ * the orphan sweep would delete it. Read with the CLI's own parser and spec,
+ * so it means what `vibecarbon destroy` itself takes the flag to mean.
+ *
+ * @param {string} step
+ * @param {string[]} extraArgs - the caller's own arguments
+ * @returns {Promise<boolean>}
+ */
+export async function isPurgeDestroy(step, extraArgs) {
+  if (step !== 'destroy') return false;
+  const entry = COMMANDS.find((c) => c.name === 'destroy');
+  if (!entry) throw new Error('no vibecarbon command named "destroy"');
+  const { values } = parseFlags(extraArgs, await entry.loadSpec());
+  return values.purge === true;
 }

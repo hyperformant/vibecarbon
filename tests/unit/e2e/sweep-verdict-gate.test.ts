@@ -10,12 +10,14 @@ import { describe, expect, it } from 'vitest';
  * quiescent sweep. "All steps passed" is not green unless the sweep both
  * completed and found nothing.
  *
- * Source-shape pins (the destructuring itself is type-enforced — every
- * sweep now returns { counts, enumFailed }): the lifecycle must (a) fold
- * sweepRegression into the verdict, (b) treat the no-sweep default arm as
- * an enumeration failure, (c) set the flag from orphan totals OR
- * enumFailed. Mutation-check: flip any of these in _run-lifecycle.ts and
- * the matching assertion fails.
+ * Source-shape pins on the lifecycle (the shape itself is type-enforced:
+ * the one dispatch, tests/e2e/utils/sweep-provider.ts, returns
+ * { counts, enumFailed }): it must (a) fold sweepRegression into the
+ * verdict, (b) take enumFailed from that dispatch, (c) set the flag from
+ * orphan totals OR enumFailed. The dispatch's no-sweep arm counting as an
+ * enumeration failure is tested on the dispatch itself
+ * (sweep-provider.test.ts). Mutation-check: flip any of these in
+ * _run-lifecycle.ts and the matching assertion fails.
  */
 describe('teardown sweep gates the scenario verdict', () => {
   const src = readFileSync(
@@ -29,17 +31,15 @@ describe('teardown sweep gates the scenario verdict', () => {
 
   it('orphans OR incomplete enumeration set the flag', () => {
     expect(src).toMatch(
-      /if \(sweepOrphanTotal > 0 \|\| sweepEnumFailed\) \{\s*sweepRegression = true/,
+      /if \(orphanTotal\(sweepCounts\) > 0 \|\| sweepEnumFailed\) \{\s*sweepRegression = true/,
     );
   });
 
-  it('the no-sweep default arm counts as an enumeration failure', () => {
-    const defaultArm = src.split('no orphan sweep implemented')[1]?.slice(0, 800) ?? '';
-    expect(defaultArm).toContain('sweepEnumFailed = true');
-  });
-
-  it('every provider arm consumes enumFailed (type-enforced shape, pinned here too)', () => {
-    const arms = src.match(/enumFailed: sweepEnumFailed \}/g) || [];
-    expect(arms.length).toBeGreaterThanOrEqual(4); // hetzner, digitalocean, linode, vultr
+  it('the sweep result, enumFailed included, comes from the one shared dispatch', () => {
+    expect(src).toMatch(
+      /const \{ counts: sweepCounts, enumFailed: sweepEnumFailed \} = await sweepProjectOrphans\(\{/,
+    );
+    // No second, local dispatch beside it.
+    expect(src).not.toMatch(/sweepOrphaned[A-Za-z]+Resources\(/);
   });
 });
