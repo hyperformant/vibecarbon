@@ -164,6 +164,14 @@
           "tlsAllowanceS": 40,
           "samples": 8
         }
+      },
+      "k8s": {
+        "standard": {
+          "ownedS": 330,
+          "endToEndS": 345,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
       }
     },
     "scaleway": {
