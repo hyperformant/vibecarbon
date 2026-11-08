@@ -12,6 +12,7 @@ on:
       - 'src/autoscaler/**'
       - 'src/lib/providers/**'
       - 'src/lib/images.js'
+      - '.github/scripts/image-const.mjs'
       - 'scripts/mirror-matrix.mjs'
       - '.github/workflows/publish-images.yml'
       - '.github/workflows/mirror-images.yml'
@@ -39,8 +40,9 @@ jobs:
       - id: ref
         name: Resolve ref from src/lib/images.js
         run: |
-          IMG=$(grep -oP "CARBON_AUTOSCALER_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
-          TAG=$(grep -oP "CARBON_AUTOSCALER_TAG\s*=\s*'\K[^']+" src/lib/images.js)
+          set -euo pipefail
+          IMG=$(node .github/scripts/image-const.mjs CARBON_AUTOSCALER_IMAGE)
+          TAG=$(node .github/scripts/image-const.mjs CARBON_AUTOSCALER_TAG)
           echo "image=$IMG:$TAG" >> "$GITHUB_OUTPUT"
       # amd64-only, deliberately. This image has exactly ONE consumer: the
       # `carbon-autoscaler` sidecar in carbon/k8s/base/cluster-autoscaler/

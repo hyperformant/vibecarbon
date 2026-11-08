@@ -8,10 +8,9 @@
  * (a) the Dockerfile's `npm install` pins the same two gRPC dep ranges as
  *     root package.json — a version bump in one without the other would
  *     silently ship a mismatched runtime dep inside the image;
- * (b) the publish workflow's `grep -oP` tag-resolution patterns actually
- *     match the current images.js lines — a rename of an exported const
- *     would otherwise fail silently in CI (empty $GITHUB_OUTPUT, not a
- *     visible test failure) until the next push-triggered publish run;
+ * (b) the publish workflow reads its tag constants through
+ *     .github/scripts/image-const.mjs (an import), and asks only for the
+ *     carbon-autoscaler ones;
  * (c) EVERY deploy-facing reference to the upstream cluster-autoscaler image
  *     resolves through `clusterAutoscalerImageRef()` — no file may pin
  *     `registry.k8s.io/autoscaling/cluster-autoscaler` outside a comment.
@@ -92,55 +91,26 @@ describe('Dockerfile runtime dep pins match root package.json', () => {
   });
 });
 
-describe('publish workflow tag-resolution grep matches images.js', () => {
+describe('publish workflow tag-resolution reads images.js by import', () => {
   const workflow = readFileSync(WORKFLOW_PATH, 'utf8');
-  const imagesJs = readFileSync(join(ROOT, 'src', 'lib', 'images.js'), 'utf8');
-
-  // Pull each `grep -oP "<PATTERN>"` string out of the workflow and convert
-  // it to an equivalent JS RegExp (grep -oP's \K becomes a plain capture), so
-  // these tests fail the moment a workflow grep pattern and an images.js
-  // export name drift apart — whitespace between the const name/`=`/quote is
-  // tolerated on both sides, same as the workflow's own `\s*` does at run
-  // time.
-  const grepPatterns = [...workflow.matchAll(/grep -oP "([^"]+)"/g)].map((m) => m[1]);
-  const resolve = (pattern: string) => {
-    const jsPattern = pattern.replace('\\K', '');
-    const [, prefix] = jsPattern.match(/^(.*?)\[\^'\]\+$/) ?? [];
-    expect(prefix, `unexpected grep pattern shape: ${pattern}`).toBeDefined();
-    return imagesJs.match(new RegExp(`${prefix}([^']+)`))?.[1];
-  };
-
-  it('every grep in the workflow resolves against images.js (none silently empty)', () => {
-    // An unresolved pattern writes an empty value into $GITHUB_OUTPUT and the
-    // job then pushes/mirrors a ref like ":" — a silent CI failure, not a
-    // visible one. Every pattern must hit.
-    expect(grepPatterns.length).toBeGreaterThanOrEqual(2);
-    for (const pattern of grepPatterns) {
-      expect(
-        resolve(pattern),
-        `grep -oP "${pattern}" resolves to nothing in images.js`,
-      ).toBeTruthy();
-    }
-  });
+  // The names handed to .github/scripts/image-const.mjs, which imports
+  // images.js. The census in tests/unit/deploy/workflow-image-reads.test.ts
+  // resolves every name; this pins which constants the publish job needs.
+  const names = [...workflow.matchAll(/image-const\.mjs\s+(\w+)/g)].map((m) => m[1]);
 
   it('resolves exactly the constants the publish job needs', () => {
-    const results = grepPatterns.map(resolve);
-    // publish job (carbon-autoscaler sidecar — the image we BUILD).
-    expect(results).toContain(CARBON_AUTOSCALER_IMAGE);
-    expect(results).toContain(CARBON_AUTOSCALER_TAG);
+    // publish job (carbon-autoscaler sidecar, the image we BUILD).
+    expect(names).toContain('CARBON_AUTOSCALER_IMAGE');
+    expect(names).toContain('CARBON_AUTOSCALER_TAG');
   });
 
-  it('no longer greps the MIRROR refs — those come from the matrix generator', () => {
-    // The mirror set outgrew grep. It used to be two scalar constants
-    // (cluster-autoscaler only, #222); it is now a list of (repo, tag) tuples
-    // spanning the CSI sidecars too, which no `grep -oP` can express — it would
-    // need one pattern per entry, and a pattern that matches nothing writes an
-    // empty ref like ":" into $GITHUB_OUTPUT instead of failing. The workflow
-    // now runs scripts/mirror-matrix.mjs, which IMPORTS src/lib/images.js, so
-    // there is no pattern left to drift. Guarded end-to-end by
+  it('no longer reads the MIRROR refs by name: those come from the matrix generator', () => {
+    // The mirror set is a list of (repo, tag) tuples, which no per-constant
+    // read can express. The workflow runs scripts/mirror-matrix.mjs, which
+    // imports src/lib/images.js. Guarded end-to-end by
     // tests/unit/deploy/k8s-image-mirrors.test.ts, which executes that script.
-    for (const pattern of grepPatterns) {
-      expect(pattern).not.toContain('CLUSTER_AUTOSCALER');
+    for (const name of names) {
+      expect(name).not.toContain('CLUSTER_AUTOSCALER');
     }
   });
 

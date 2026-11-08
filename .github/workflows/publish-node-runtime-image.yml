@@ -30,6 +30,7 @@ on:
       - 'docker/node-runtime/**'
       - '!docker/node-runtime/README.md'
       - 'src/lib/images.js'
+      - '.github/scripts/image-const.mjs'
       - '.github/scripts/smoke-node-runtime-image.sh'
       - '.github/workflows/publish-node-runtime-image.yml'
   workflow_dispatch: {}
@@ -59,7 +60,7 @@ jobs:
         name: Resolve the ref from src/lib/images.js and whether it exists
         run: |
           set -euo pipefail
-          REF=$(grep -oP "^export const NODE_RUNTIME_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
+          REF=$(node .github/scripts/image-const.mjs NODE_RUNTIME_IMAGE)
           # A published ref carries @sha256:<index digest>; the tag is what
           # this workflow publishes, so drop the digest first.
           REF=${REF%@*}

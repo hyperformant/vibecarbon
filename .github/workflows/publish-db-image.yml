@@ -6,6 +6,7 @@ on:
       - 'docker/wal-g/**'
       - 'docker/postgres-walg/**'
       - 'src/lib/images.js'
+      - '.github/scripts/image-const.mjs'
       - '.github/workflows/publish-db-image.yml'
   workflow_dispatch: {}
 # Job-scoped writes only (OpenSSF Scorecard Token-Permissions: any
@@ -131,8 +132,8 @@ jobs:
         name: Resolve the release ref from src/lib/images.js and whether it exists
         run: |
           set -euo pipefail
-          IMG=$(grep -oP "^export const DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
-          TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
+          IMG=$(node .github/scripts/image-const.mjs DB_IMAGE)
+          TAG=$(node .github/scripts/image-const.mjs DB_IMAGE_TAG)
           test -n "$IMG" && test -n "$TAG"
           # Only a definite "not found" means build; any other lookup error
           # fails the run rather than risk re-minting an existing tag.

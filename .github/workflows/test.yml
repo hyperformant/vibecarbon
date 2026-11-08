@@ -285,7 +285,10 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Read the node runtime ref the CLI pins
-        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('NODE_RUNTIME_TAG_REF=' + m.NODE_RUNTIME_IMAGE.split('@')[0]);" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          REF=$(node .github/scripts/image-const.mjs NODE_RUNTIME_IMAGE)
+          echo "NODE_RUNTIME_TAG_REF=${REF%@*}" >> "$GITHUB_ENV"
 
       - name: Build the node runtime base from this commit
         run: docker build -t "$NODE_RUNTIME_TAG_REF" docker/node-runtime
