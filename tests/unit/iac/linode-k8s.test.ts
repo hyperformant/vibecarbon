@@ -145,6 +145,22 @@ describe('buildLinodeK8sProgram config guard', () => {
     expect(build).toThrow(/65 characters/);
   });
 
+  // Each node takes its Linode label as hostname and so as its k8s node name,
+  // which Kubernetes caps at 63. The longest is an autoscaler worker,
+  // `<cluster>-ca-` plus 8 characters.
+  it('refuses a cluster whose autoscaler node names would pass 63 characters', () => {
+    const fits = { ...baseConfig, environment: 'prod', existingSshKeyId: '424242' };
+    // 46 + '-prod' = a 51-character cluster: its autoscaler nodes are 63.
+    expect(() =>
+      buildLinodeK8sProgram({ ...fits, projectName: `p${'x'.repeat(45)}` }),
+    ).not.toThrow();
+    const build = () => buildLinodeK8sProgram({ ...fits, projectName: `p${'x'.repeat(46)}` });
+    expect(build).toThrow(/node name/);
+    expect(build).toThrow(/64 characters/);
+    expect(build).toThrow(/allows 63/);
+    expect(build).toThrow(/shorter project or environment name/);
+  });
+
   it('builds the longest e2e names with room to spare', () => {
     expect(() =>
       buildLinodeK8sProgram({
@@ -239,7 +255,10 @@ describe('buildLinodeK8sProgram resource graph', () => {
       expect(i.inputs.interfaceGeneration).toBe('legacy_config');
       expect(i.inputs.interfaces[0].purpose).toBe('public');
       expect(i.inputs.interfaces[1].purpose).toBe('vpc');
-      expect(i.inputs.interfaces[1].vpcId).toBe(1234);
+      // The provider computes vpc_id from the subnet and refuses a set value
+      // at create ("Can't configure a value for interface.1.vpc_id"), live
+      // 2026-11-08. Preview does not catch it: the id is unknown there.
+      expect(Object.keys(i.inputs.interfaces[1]).sort()).toEqual(['ipv4', 'purpose', 'subnetId']);
       expect(i.inputs.interfaces[1].subnetId).toBe(5678);
       return i.inputs.interfaces[1].ipv4.vpc;
     };
