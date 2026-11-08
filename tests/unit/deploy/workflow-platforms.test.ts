@@ -461,8 +461,8 @@ describe('the release db publish is unchanged by the dev channel', () => {
     expect(build.with?.['build-contexts']).toBeUndefined();
     // Anchored on DB_IMAGE itself: DEV_DB_IMAGE must never satisfy the grep.
     const ref = runsOf(wf.jobs['db-ref']);
-    expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE\\s\*=/);
-    expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE_TAG\\s\*=/);
+    expect(ref).toMatch(/image-const\.mjs DB_IMAGE\)/);
+    expect(ref).toMatch(/image-const\.mjs DB_IMAGE_TAG\)/);
     expect(read('.github/workflows/publish-db-image.yml')).not.toMatch(/postgres-dev|DEV_DB_IMAGE/);
   });
 
@@ -512,7 +512,7 @@ describe('the node runtime base publishes on merge, once per revision tag', () =
   });
 
   it('reads the ref from NODE_RUNTIME_IMAGE in src/lib/images.js, the CLI authority', () => {
-    expect(ref).toMatch(/grep -oP "\^export const NODE_RUNTIME_IMAGE\\s\*=/);
+    expect(ref).toMatch(/REF=\$\(node \.github\/scripts\/image-const\.mjs NODE_RUNTIME_IMAGE\)/);
     // A post-publish ref carries @sha256; the tag is split off it first.
     const strip = ref.search(/REF=\$\{REF%@\*\}/);
     expect(strip).toBeGreaterThan(-1);
@@ -542,8 +542,9 @@ describe("test.yml builds the app FROM this commit's node runtime base", () => {
 
   it('exists, reading the ref from src/lib/images.js', () => {
     expect(job).toBeDefined();
-    expect(runsOf(job)).toContain("import('./src/lib/images.js')");
-    expect(runsOf(job)).toContain("m.NODE_RUNTIME_IMAGE.split('@')[0]");
+    expect(runsOf(job)).toContain('image-const.mjs NODE_RUNTIME_IMAGE');
+    // The digest is stripped so the job builds under the tag ref.
+    expect(runsOf(job)).toContain('NODE_RUNTIME_TAG_REF=${REF%@*}');
   });
 
   it('builds the runtime from docker/node-runtime, then carbon FROM it, then runs node', () => {
@@ -673,7 +674,7 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
   });
 
   it('publishes only to postgres-dev, refusing any other name', () => {
-    expect(plan).toMatch(/grep -oP "\^export const DEV_DB_IMAGE\\s\*=/);
+    expect(plan).toMatch(/image-const\.mjs DEV_DB_IMAGE\)/);
     expect(plan).toMatch(/case "\$IMG" in \*\/postgres-dev\) ;;/);
     expect(build.uses).toBe(REUSABLE);
     expect(build.with?.image).toBe(expr('needs.plan.outputs.image'));
@@ -714,7 +715,11 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
           ? p
           : `${p}/**`,
     );
-    expect((wf.on.push as { paths: string[] }).paths).toEqual(asTrigger);
+    // The reader script is a trigger too, but not a db image input.
+    const triggers = (wf.on.push as { paths: string[] }).paths.filter(
+      (p) => p !== '.github/scripts/image-const.mjs',
+    );
+    expect(triggers).toEqual(asTrigger);
     const quoted = DB_IMAGE_INPUT_PATHSPEC.map((p: string) =>
       p.startsWith(':') ? `'${p}'` : p,
     ).join(' ');
