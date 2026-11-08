@@ -5,6 +5,7 @@ import {
   isCsiVolumeName,
   parseCsiPersistentVolumes,
 } from '../../../src/lib/csi-volumes.js';
+import { linodePv } from '../../_shared/linode-csi-pv.js';
 
 /**
  * Layer 1 of the CSI-volume destroy leak fix: capture the PROVIDER volume ids
@@ -330,5 +331,65 @@ describe('isCsiVolumeName', () => {
     expect(isCsiVolumeName('pvc-')).toBe(false);
     expect(isCsiVolumeName('vibecarbon-db-data')).toBe(false);
     expect(isCsiVolumeName(undefined)).toBe(false);
+  });
+});
+
+describe('parseCsiPersistentVolumes — linode-blockstorage-csi-driver v1.1.5 fixtures', () => {
+  it('reads the Linode volume id from the front of the volume key', () => {
+    const { volumes, unreadable } = parseCsiPersistentVolumes({
+      items: [linodePv(PVC_A, '18990608-pvc-3f78299e01d6487f')],
+    });
+    expect(unreadable).toEqual([]);
+    expect(volumes).toEqual([
+      {
+        pvName: PVC_A,
+        driver: 'linodebs.csi.linode.com',
+        providerId: 'linode',
+        volumeId: '18990608',
+        regions: ['us-iad'],
+        phase: 'Bound',
+        reclaimPolicy: 'Delete',
+      },
+    ]);
+  });
+
+  it('reports a Linode volume key it cannot read instead of guessing at an id', () => {
+    for (const handle of ['pvc-3f78299e01d6487f', '18990608', '-pvc-x', 'abc-pvc-x']) {
+      const { volumes, unreadable } = parseCsiPersistentVolumes({
+        items: [linodePv(PVC_A, handle)],
+      });
+      expect(volumes, handle).toEqual([]);
+      expect(unreadable, handle).toEqual([
+        { pvName: PVC_A, driver: 'linodebs.csi.linode.com', volumeHandle: handle },
+      ]);
+    }
+  });
+
+  it('keeps the Hetzner and DigitalOcean handles as they are', () => {
+    const { volumes } = parseCsiPersistentVolumes({
+      items: [hetznerPv(PVC_A, '100604631'), doPv(PVC_B, '506f78a4-e098-11e5-ad9f-000f53306ae1')],
+    });
+    expect(volumes.map((v) => v.volumeId)).toEqual([
+      '100604631',
+      '506f78a4-e098-11e5-ad9f-000f53306ae1',
+    ]);
+  });
+});
+
+describe('captureClusterCsiVolumes — a volume key it cannot read', () => {
+  // A capture that silently dropped such a PV would still read as complete,
+  // and destroy would then defer that PV's volume as proven "not ours", the
+  // same silent leak. Failing the capture sends destroy to the loud
+  // project-label backstop instead.
+  it('fails the capture, naming the PersistentVolume', () => {
+    const runCommand = vi.fn(() =>
+      JSON.stringify({
+        items: [linodePv(PVC_A, '18990608-pvc-3f78299e01d6487f'), linodePv(PVC_B, 'not-a-key')],
+      }),
+    );
+    const capture = captureClusterCsiVolumes('/kc', { runCommand, existsSync: () => true });
+    expect(capture.ok).toBe(false);
+    expect(capture.reason).toContain(PVC_B);
+    expect(capture.reason).toContain('linodebs.csi.linode.com');
   });
 });

@@ -85,19 +85,29 @@ import { runCommand as nodeRunCommand } from './command.js';
  *
  * `regionKeys` are the PV nodeAffinity matchExpression keys each driver writes
  * its topology segment under (see the module doc for the upstream constants).
+ * `volumeId` reads the provider volume id out of a `volumeHandle`, or returns
+ * null for a handle it cannot read.
  */
 export const CSI_DRIVERS = {
   'csi.hetzner.cloud': {
     providerId: 'hetzner',
     regionKeys: ['csi.hetzner.cloud/location'],
+    volumeId: (handle) => handle,
   },
   'dobs.csi.digitalocean.com': {
     providerId: 'digitalocean',
     regionKeys: ['region', 'topology.kubernetes.io/region'],
+    volumeId: (handle) => handle,
   },
   'linodebs.csi.linode.com': {
     providerId: 'linode',
     regionKeys: ['topology.linode.com/region', 'topology.kubernetes.io/region'],
+    // The handle is the driver's volume key, `<volume id>-<label>`
+    // (linode-blockstorage-csi-driver v1.1.5 pkg/linode-volumes/utils.go:
+    // GetVolumeKey, read back with `strings.SplitN(key, "-", 2)`). Taken
+    // whole, it matched no volume, and destroy deferred every Linode CSI
+    // volume as not ours (live 2026-11-08).
+    volumeId: (handle) => /^(\d+)-./.exec(handle)?.[1] ?? null,
   },
 };
 
@@ -166,7 +176,7 @@ function regionsFromNodeAffinity(pv, driverKeys) {
  * exception that costs us the whole answer.
  *
  * @param {object|string} payload - Parsed JSON, or the raw stdout string.
- * @returns {{ volumes: Array<{ pvName: string, driver: string, providerId: string, volumeId: string, regions: string[], phase: string|null, reclaimPolicy: string|null }>, skippedDrivers: string[] }}
+ * @returns {{ volumes: Array<{ pvName: string, driver: string, providerId: string, volumeId: string, regions: string[], phase: string|null, reclaimPolicy: string|null }>, skippedDrivers: string[], unreadable: Array<{ pvName: string, driver: string, volumeHandle: string }> }}
  *   `skippedDrivers` lists distinct CSI drivers present in the cluster that we
  *   do NOT know how to delete against — surfaced so an unrecognised storage
  *   backend shows up in the destroy report instead of silently leaking.
@@ -184,6 +194,7 @@ export function parseCsiPersistentVolumes(payload) {
   const volumes = [];
   const skipped = new Set();
   const seen = new Set();
+  const unreadable = [];
 
   for (const pv of items) {
     const csi = pv?.spec?.csi;
@@ -196,7 +207,11 @@ export function parseCsiPersistentVolumes(payload) {
     }
     const handle = csi.volumeHandle;
     if (handle === undefined || handle === null || handle === '') continue;
-    const volumeId = String(handle);
+    const volumeId = known.volumeId(String(handle));
+    if (volumeId === null) {
+      unreadable.push({ pvName: pv?.metadata?.name ?? '', driver, volumeHandle: String(handle) });
+      continue;
+    }
     if (seen.has(volumeId)) continue;
     seen.add(volumeId);
     volumes.push({
@@ -210,7 +225,7 @@ export function parseCsiPersistentVolumes(payload) {
     });
   }
 
-  return { volumes, skippedDrivers: [...skipped] };
+  return { volumes, skippedDrivers: [...skipped], unreadable };
 }
 
 /**
@@ -277,7 +292,15 @@ export function captureClusterCsiVolumes(kubeconfigPath, deps = {}) {
     return { ...empty, reason: 'kubectl get pv output had no items array' };
   }
 
-  const { volumes, skippedDrivers } = parseCsiPersistentVolumes(parsed);
+  const { volumes, skippedDrivers, unreadable } = parseCsiPersistentVolumes(parsed);
+  // A PV of a driver we know whose handle we cannot read is a volume this
+  // cluster owns that we cannot name. Dropping it would leave the capture
+  // looking complete, and destroy would then defer that volume as proven not
+  // ours. Failing the capture sends destroy to its loud backstop instead.
+  if (unreadable.length > 0) {
+    const named = unreadable.map((u) => `${u.pvName} (${u.driver}: ${u.volumeHandle})`).join(', ');
+    return { ...empty, reason: `could not read the volume id of PersistentVolume ${named}` };
+  }
   const regions = new Set();
   for (const volume of volumes) for (const region of volume.regions) regions.add(region);
 
