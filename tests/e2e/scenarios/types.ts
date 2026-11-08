@@ -65,63 +65,70 @@ export interface ScenarioConfig {
   skipSteps?: readonly string[];
 }
 
-export type StepName =
-  | 'create'
-  | 'setup-repo'
-  | 'add-features'
-  | 'deploy'
-  | 'verify-deploy'
+/**
+ * Every lifecycle step, in the order a scenario runs them. The run summary
+ * draws its step matrix in this order, so a new step only needs adding here.
+ */
+export const STEP_NAMES = [
+  'create',
+  'setup-repo',
+  'add-features',
+  'deploy',
+  'verify-deploy',
   // The CLI's own view of the environment (`vibecarbon status -json`) must
   // agree with what verify-deploy just proved from the outside. See
   // tests/e2e/checks/status-health.ts.
-  | 'verify-status'
+  'verify-status',
   // Re-invokes `vibecarbon deploy` against the already-provisioned env to
   // time the no-op convergence path — the push-to-deploy iteration loop
   // customers actually live in after the initial cold deploy.
-  | 'warm-deploy'
+  'warm-deploy',
   // k8s only. Mutates a bundled manifest AND an app source file, re-invokes
   // `vibecarbon deploy` against the EXISTING state, and asserts both changes
   // are live. Deliberately a separate step from `warm-deploy` (which is a
   // curated perf-table column measuring the NO-OP convergence path — making
   // that step mutating would silently redefine a published number and move
   // the anomaly-guard baselines).
-  | 'warm-redeploy-change'
+  'warm-redeploy-change',
   // Lightweight concurrent-burst probe right after verify-deploy. Catches
   // "deploy passed but app is dead under any concurrency" without turning
   // into a sustained load test (operators run those via `pnpm test:loadtest`
   // against a dedicated env). Always runs.
-  | 'verify-load'
+  'verify-load',
   // Phase 9: gated on `--expanded` + (mode === 'k8s' || mode === 'k8s-ha').
   // Drives the cluster-autoscaler ceiling end-to-end (load → poll → drain →
   // poll). Only runs in the expanded e2e tier.
-  | 'verify-autoscale'
-  | 'scale'
-  | 'verify-scale'
-  | 'backup'
-  | 'destroy'
+  'verify-autoscale',
+  'scale',
+  'verify-scale',
+  'backup',
+  'destroy',
   // k8s and k8s-ha. Right after `destroy`: `deploy -restore latest` stands the
   // environment up again from the preserved backups, and the marker row
   // written before the backup must be there.
-  | 'restore-deploy'
-  | 'restore'
-  | 'verify-restore'
-  | 'failover'
-  | 'verify-failover'
+  'restore-deploy',
+  'restore',
+  'verify-restore',
+  'failover',
+  'verify-failover',
   // Both HA modes. A failover before the reconverge deploy must refuse,
   // naming `vibecarbon deploy`, and move no role.
-  | 'second-failover'
+  'second-failover',
   // Both HA modes. Re-invokes `vibecarbon deploy` after failover: k8s-ha
   // converges the recovered ex-primary to pilot-light (app tier + workers to
   // zero, full serial reseed as the new streaming standby), compose-ha
   // rebuilds the retired node as the standby. Proves the DR posture that
   // failover alone leaves degraded is actually restorable.
-  | 'reconverge-deploy'
+  'reconverge-deploy',
   // compose-ha only. A planned failover back to the original node once the
   // reconverge restored streaming, then the post-failover checks again.
-  | 'failback'
-  | 'verify-failback'
-  | 'final-destroy'
-  | 'teardown-repo';
+  'failback',
+  'verify-failback',
+  'final-destroy',
+  'teardown-repo',
+] as const;
+
+export type StepName = (typeof STEP_NAMES)[number];
 
 /**
  * Why a step (or scenario) failed. Lets a 0/4 morning of "infra is having
