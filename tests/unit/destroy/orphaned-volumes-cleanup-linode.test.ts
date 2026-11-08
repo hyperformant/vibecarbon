@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cleanupOrphanedVolumes } from '../../../src/destroy.js';
-import { isCsiVolumeName } from '../../../src/lib/csi-volumes.js';
+import { isCsiVolumeName, parseCsiPersistentVolumes } from '../../../src/lib/csi-volumes.js';
 import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { linodePv } from '../../_shared/linode-csi-pv.js';
 
 /**
  * A detached Linode CSI volume is labelled `pvc-<16 hex>` and carries the
@@ -57,6 +58,34 @@ describe('cleanupOrphanedVolumes on Linode', () => {
     const { provider, deleteVolume } = setup([volume('pvc-backups', 'proj')]);
     await run(provider);
     expect(deleteVolume).not.toHaveBeenCalled();
+  });
+});
+
+// Live 2026-11-08: destroy captured the cluster's PersistentVolumes in full,
+// matched none of its 3 volumes, and deferred every one as "not ours" (6 left
+// behind across two clusters). The capture took Linode's volume key,
+// `<volume id>-<label>`, for the id.
+describe('cleanupOrphanedVolumes on Linode, with the PersistentVolumes captured', () => {
+  it('deletes the volume behind a captured PersistentVolume', async () => {
+    const pvName = 'pvc-3f78299e-01d6-487f-9a1b-2c3d4e5f6071';
+    const { volumes: pvs } = parseCsiPersistentVolumes({
+      items: [linodePv(pvName, '18990608-pvc-3f78299e01d6487f')],
+    });
+    const { provider, deleteVolume } = setup([
+      volume('pvc-3f78299e01d6487f', 'proj', { id: 18990608 }),
+    ]);
+    const { deleted, deferred } = await cleanupOrphanedVolumes(
+      provider,
+      'proj',
+      'prod',
+      [],
+      pvs.map((v) => v.volumeId),
+      ['us-iad'],
+      { identityComplete: true, report: () => {} },
+    );
+    expect(deferred).toEqual([]);
+    expect(deleteVolume).toHaveBeenCalledWith(18990608);
+    expect(deleted).toEqual(['pvc-3f78299e01d6487f']);
   });
 });
 
