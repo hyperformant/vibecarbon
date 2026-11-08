@@ -145,6 +145,22 @@ describe('buildLinodeK8sProgram config guard', () => {
     expect(build).toThrow(/65 characters/);
   });
 
+  // Each node takes its Linode label as hostname and so as its k8s node name,
+  // which Kubernetes caps at 63. The longest is an autoscaler worker,
+  // `<cluster>-ca-` plus 8 characters.
+  it('refuses a cluster whose autoscaler node names would pass 63 characters', () => {
+    const fits = { ...baseConfig, environment: 'prod', existingSshKeyId: '424242' };
+    // 46 + '-prod' = a 51-character cluster: its autoscaler nodes are 63.
+    expect(() =>
+      buildLinodeK8sProgram({ ...fits, projectName: `p${'x'.repeat(45)}` }),
+    ).not.toThrow();
+    const build = () => buildLinodeK8sProgram({ ...fits, projectName: `p${'x'.repeat(46)}` });
+    expect(build).toThrow(/node name/);
+    expect(build).toThrow(/64 characters/);
+    expect(build).toThrow(/allows 63/);
+    expect(build).toThrow(/shorter project or environment name/);
+  });
+
   it('builds the longest e2e names with room to spare', () => {
     expect(() =>
       buildLinodeK8sProgram({

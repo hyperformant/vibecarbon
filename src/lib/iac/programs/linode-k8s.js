@@ -56,6 +56,9 @@ const WORKER_IP_BASE = 10;
  */
 const LINODE_LABEL_MAX = 64;
 
+/** Kubernetes node names are DNS labels here (the hostname): 63 at most. */
+const K8S_NODE_NAME_MAX = 63;
+
 /**
  * Refuse, before any resource exists, a label Linode would reject. These
  * labels are not squeezed: the autoscaler config, destroy and the e2e sweep
@@ -132,6 +135,17 @@ export function buildLinodeK8sProgram(config) {
     ['subnet', subnetLabel],
     ...(config.existingSshKeyId ? [] : [['SSH key', sshKeyLabel]]),
   ]);
+  // Every node's Linode label becomes its hostname and k8s node name (see
+  // the boot scripts), which Kubernetes caps at 63. The longest is an
+  // autoscaler worker: `<cluster>-ca-` plus 8 random characters.
+  const longestNodeName = `${clusterName}-ca-xxxxxxxx`;
+  if (longestNodeName.length > K8S_NODE_NAME_MAX) {
+    throw new Error(
+      `Kubernetes on Linode cannot give this cluster's nodes a node name: the longest, ` +
+        `"${clusterName}-ca-<8 characters>", is ${longestNodeName.length} characters and ` +
+        `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
+    );
+  }
   const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
   const image = LinodeProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;

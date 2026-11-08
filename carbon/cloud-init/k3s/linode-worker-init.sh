@@ -85,6 +85,19 @@ if ! echo "$NODE_ID" | grep -qE '^[0-9]+$'; then
 fi
 echo "Linode ID: $NODE_ID"
 
+# Linode boots every image as "localhost", and k3s names the node after the
+# hostname, so every node would register as the same node (live 2026-11-08:
+# the master read the worker's address off that one node and crash-looped).
+# Name the host after its Linode label, which is unique in the account.
+# A reboot keeps it.
+NODE_NAME=$(metadata_value "$INSTANCE_META" "label")
+if ! echo "$NODE_NAME" | grep -qE '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; then
+  echo "FATAL: Linode label \"$NODE_NAME\" is not a valid Kubernetes node name (lowercase letters, digits and hyphens, at most 63 characters)"
+  exit 1
+fi
+hostnamectl set-hostname "$NODE_NAME"
+echo "Node name: $NODE_NAME"
+
 # Configure containerd to mirror pulls for the local registry running on
 # the master, at the master's private IP. The program fixes that VPC address
 # (10.0.1.2), so it is known at render time and this node is created in

@@ -3,7 +3,9 @@
  * carbon/cloud-init/k3s/linode-{master,worker,db}-init.sh templates.
  * Mirrors digitalocean-k8s-user-data.test.ts.
  */
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
@@ -65,6 +67,68 @@ describe('LinodeProvider k8s user-data statics', () => {
       expect(rendered).not.toMatch(/digitalocean|hetzner|hcloud|droplet/i);
     },
   );
+
+  // Linode boots every image as `localhost`, and k3s names the node after the
+  // hostname: live 2026-11-08, all three nodes registered as one node
+  // "localhost" and the master's k3s crash-looped. Run the script's own
+  // identity block against a fake metadata service.
+  describe.each(roles)('%s: names the host after its Linode label', (_role, vars, render) => {
+    const run = async (label: string) => {
+      const rendered = await (render as (v: unknown) => Promise<string>)(vars);
+      const start = rendered.indexOf('METADATA_TOKEN=""');
+      const endMarker = 'echo "Node name: $NODE_NAME"';
+      const end = rendered.indexOf(endMarker);
+      expect(start, 'identity block start').toBeGreaterThan(-1);
+      expect(end, 'identity block end').toBeGreaterThan(start);
+      const dir = mkdtempSync(join(tmpdir(), 'vc-linode-hostname-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'curl'),
+        [
+          '#!/bin/sh',
+          'for a in "$@"; do last="$a"; done',
+          'case "$last" in',
+          '  */v1/token) echo tok ;;',
+          `  */v1/instance) printf 'id: 42\\nlabel: %s\\nregion: us-iad\\n' "$FAKE_LABEL" ;;`,
+          "  */v1/network) printf 'ipv4.public: 203.0.113.7/32\\nipv4.vpc: 10.0.1.10/32\\n' ;;",
+          'esac',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      writeFileSync(join(bin, 'hostnamectl'), '#!/bin/sh\necho "$@" >> "$HOSTNAME_LOG"\n', {
+        mode: 0o755,
+      });
+      const log = join(dir, 'hostnamectl.log');
+      const result = spawnSync('bash', ['-c', rendered.slice(start, end + endMarker.length)], {
+        env: { PATH: `${bin}:/usr/bin:/bin`, FAKE_LABEL: label, HOSTNAME_LOG: log },
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      const calls = existsSync(log) ? readFileSync(log, 'utf8') : '';
+      rmSync(dir, { recursive: true, force: true });
+      return { status: result.status, stdout: result.stdout, calls };
+    };
+
+    it('sets the hostname to a valid label', async () => {
+      const label = 'testapp-k8s-ha-1794098138605-8q2aul-l4-primary-ca-0a1b2c3d';
+      const { status, calls } = await run(label);
+      expect(status).toBe(0);
+      expect(calls.trim()).toBe(`set-hostname ${label}`);
+    });
+
+    it.each([
+      ['64 characters', 'a'.repeat(64)],
+      ['upper case', 'Testapp-master'],
+      ['an underscore', 'testapp_master'],
+      ['empty', ''],
+    ])('refuses a label with %s and sets nothing', async (_why, label) => {
+      const { status, stdout, calls } = await run(label);
+      expect(status).toBe(1);
+      expect(stdout).toContain('FATAL');
+      expect(calls).toBe('');
+    });
+  });
 
   it('master: creates the linode Secret, applies the pinned CSI asset and the tagged StorageClass', async () => {
     const rendered = await LinodeProvider.getK8sMasterUserData(masterVars);
