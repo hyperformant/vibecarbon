@@ -1,5 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it, vi } from 'vitest';
 import {
   SERVER_CREATE_TIMEOUT,
@@ -276,6 +277,90 @@ describe('server-class create timeouts (census)', () => {
       }
     },
   );
+
+  // Speed: a scale or failover resizes the db and workers alongside the
+  // master. converge-cluster.js refuses any plan that replaces the master, so
+  // there the master's id and private address cannot change during the up, and
+  // it hands the program both as prior state records them (`priorMaster`).
+  // Built from the live master instead, every worker (and DO's db) waits for
+  // the master's own update to finish: a Linode k8s scale held its worker 7
+  // minutes behind the master's resize (2026-11-08, scale 872 s). The trigger
+  // keeps the value state already holds, so it replaces nothing and still
+  // counts (proved on real Pulumi, 2026-11-08).
+  const K8S = ['hetzner-k8s.js', 'linode-k8s.js', 'digitalocean-k8s.js'];
+  const PRIOR = { id: '5000001', privateIp: '10.0.1.2' };
+
+  /** What a node is built from, as `<resource>.<property>` refs and plain text. */
+  async function builtFrom(node: { args: unknown; opts?: unknown }) {
+    const out: string[] = [];
+    const walk = async (v: unknown): Promise<void> => {
+      if (pulumi.Output.isInstance(v)) {
+        const value = await new Promise((resolve) =>
+          (v as pulumi.Output<unknown>).apply((x) => {
+            resolve(x);
+            return x;
+          }),
+        );
+        return walk(value);
+      }
+      // A recorder output: an inert value that prints as `<name>.<property>`.
+      if (v && typeof v === 'object' && Object.keys(v).join() === 'apply,toString') {
+        out.push(String(v));
+        return;
+      }
+      if (Array.isArray(v)) {
+        for (const x of v) await walk(x);
+        return;
+      }
+      if (v && typeof v === 'object') {
+        for (const x of Object.values(v)) await walk(x);
+        return;
+      }
+      out.push(String(v));
+    };
+    await walk(node.args);
+    const opts = (node.opts ?? {}) as { replacementTrigger?: unknown; dependsOn?: unknown[] };
+    await walk(opts.replacementTrigger);
+    // A recorder resource has no own keys: name it by its urn.
+    for (const dep of opts.dependsOn ?? []) out.push(String((dep as { urn: unknown }).urn));
+    return out.join('\n');
+  }
+  const MASTER_REF = /\bmaster\.(id|urn|ipv4AddressPrivate|ipv4Address|ipAddress)\b/;
+
+  it.each(K8S)(
+    '%s: a scale or failover resizes its db and workers alongside the master',
+    async (file) => {
+      const { config } = PROGRAMS[file];
+      const nodesOf = (resources: Awaited<ReturnType<typeof runProgram>>) =>
+        resources.filter((r) => r.token in SERVER_RESOURCE_TYPES && /^(worker-|db$)/.test(r.name));
+
+      const converged = nodesOf(await runProgram(file, { ...config, priorMaster: PRIOR }));
+      expect(converged.filter((n) => n.name.startsWith('worker-'))).toHaveLength(2);
+      for (const node of converged) {
+        const from = await builtFrom(node);
+        expect(from, `${file}: ${node.name} waits on the master`).not.toMatch(MASTER_REF);
+        if (node.name.startsWith('worker-')) {
+          expect(from, `${file}: ${node.name} trigger`).toContain(`master=${PRIOR.id}@`);
+        }
+      }
+
+      // Non-vacuous: a deploy (no priorMaster) still builds every worker's
+      // trigger from the live master, and DO's db and workers its address.
+      const deployed = nodesOf(await runProgram(file));
+      for (const node of deployed) {
+        if (node.name === 'db' && !file.startsWith('digitalocean-')) continue;
+        expect(await builtFrom(node), `${file}: ${node.name}`).toMatch(MASTER_REF);
+      }
+    },
+  );
+
+  it.each(K8S)('%s: exports the master id converge-cluster reads back', async (file) => {
+    const { builder, config } = PROGRAMS[file];
+    const mod = await import(`../../../src/lib/iac/programs/${file}`);
+    const outputs = await mod[builder](config)();
+    expect(String(outputs.masterId)).toBe('master.id');
+    expect(outputs.masterPrivateIp).toBeDefined();
+  });
 
   it('digitalocean-k8s.js: a first deploy keeps the trigger, its workers wait on the master anyway', async () => {
     const { k3sToken: _existing, ...fresh } = PROGRAMS['digitalocean-k8s.js'].config;

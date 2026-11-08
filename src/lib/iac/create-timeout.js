@@ -140,7 +140,11 @@ export function serverResourceOptions(type, extra = {}) {
  *
  * Building that trigger needs the master's id, and the SDK resolves a trigger
  * before it registers the worker, so the worker cannot start until the master
- * has finished. `omitJoinTrigger` leaves it out when the deploy has no k3s
+ * has finished. A scale or failover passes the master's id as prior state
+ * records it (converge-cluster.js priorMasterFrom), a plain value that
+ * resolves at once and equals what state holds, so the worker resizes
+ * alongside the master and the trigger replaces nothing (proved on real
+ * Pulumi, 2026-11-08). `omitJoinTrigger` leaves it out when the deploy has no k3s
  * token to replay, which normally means no cluster exists and no worker needs
  * protecting. The next deploy adds it, replacing nothing, and it counts from
  * then on. That reading is not proof of a new stack (a failed state read looks

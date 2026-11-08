@@ -84,6 +84,10 @@ function assertLabelsFit(labels) {
  * @property {string} sshPublicKey       OpenSSH-format public key
  * @property {string} [existingSshKeyId] k8s-ha's shared key: reuse, create nothing
  * @property {string} [k3sToken]         Auto-generated if omitted
+ * @property {{id: string, privateIp: string}} [priorMaster] The master as the
+ *   prior state records it. Set only by converge-cluster.js (scale and
+ *   failover), whose preview refuses any plan that replaces the master; the
+ *   db and workers are built from it so they resize alongside the master.
  * @property {string} location           Linode region slug (e.g. us-east)
  * @property {string} masterServerType
  * @property {string} dbServerType
@@ -320,7 +324,9 @@ export function buildLinodeK8sProgram(config) {
             // workerResourceOptions.
             omitJoinTrigger: !config.k3sToken,
             joinTarget: {
-              masterId: master.id,
+              // A scale or failover names the master from prior state, so the
+              // worker resizes alongside it: see priorMasterFrom.
+              masterId: config.priorMaster?.id ?? master.id,
               masterPrivateIp: MASTER_IP,
               k3sVersion: config.k3sVersion,
             },
@@ -331,6 +337,8 @@ export function buildLinodeK8sProgram(config) {
 
     return {
       masterIp: reservedIp.address,
+      // Read back by a scale or failover (converge-cluster.js priorMasterFrom).
+      masterId: master.id,
       masterPrivateIp: MASTER_IP,
       dbIp: dbServer.ipAddress,
       dbPrivateIp: DB_IP,
