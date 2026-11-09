@@ -871,6 +871,13 @@ async function writeK8sHaDnsRecords(options, { primaryIp, standbyIp, warmup, onP
  * (ctx.dnsUpdatePromise): this awaits it (a refusal fails the deploy here)
  * and writes again only if the clusters' final IPs differ from what it wrote,
  * or when nothing started it.
+ *
+ * This is the only writer of a k8s-ha deploy's records, on every kind of
+ * deploy (first, warm, moved IPs, after a failover): the orchestrator's
+ * post-deploy block writes single k8s's record only, and the 0.0.0.0 warm-up
+ * at deploy start precedes the write above, which awaits it. Without a zone
+ * id or token nothing writes the records, and the deploy says to set them by
+ * hand.
  */
 async function haK8sUpdateDns(ctx) {
   const options = ctx.options;
@@ -896,7 +903,7 @@ async function haK8sUpdateDns(ctx) {
       standbyIp: standbyResult.floatingIp,
     });
   }
-  p.log.info('DNS configured — use `vibecarbon failover` to switch regions');
+  p.log.info('DNS configured, use `vibecarbon failover` to switch regions');
 }
 
 /** Print the HA deploy summary + failover-command notes. */

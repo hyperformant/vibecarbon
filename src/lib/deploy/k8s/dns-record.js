@@ -1,20 +1,26 @@
 /**
- * The k8s tiers' domain A record: one record, at the cluster's floating IP
- * (else its master), gated on {domain, provider, ip} by the `k8s-dns-update`
- * state step.
+ * Single-cluster k8s's domain records (apex + wildcard, the provider's
+ * setupSimple): one target, the cluster's floating IP (else its master),
+ * gated on {domain, provider, ip} by the `k8s-dns-update` state step.
  *
- * Single-cluster k8s starts the write from deployK3s's onInfraReady hook, the
- * moment the cluster's addresses exist, so the write and the record's
- * propagation overlap the image delivery and the manifest apply instead of
- * following the whole cluster deploy (DO e2e 2026-10-31: dns.create ran after
- * k3s.full, 290 s in). The orchestrator's post-deploy block calls finish()
- * before the public probe: it awaits that write (a refusal fails the deploy
- * there) and then writes the record itself when nothing did, which is every
- * k8s-ha deploy (its fan-out owns onInfraReady) and any rerun whose IP moved.
- * The gate makes that second call a no-op when the early write already set
- * the same IP, so the record is written once. Every write first persists its
- * target (`persistOwnedIp`, single k8s) so destroy owns the record even when
- * the deploy fails before its final save.
+ * Single k8s only. A k8s-ha deploy never builds this writer: its records have
+ * one writer, the plan's update-dns step (effects/k8s-ha.js, the provider's
+ * setupHA at the serving primary), and a setupSimple write after it would
+ * replace what setupHA wrote (TTL, health checks) while the first certificate
+ * may still be issuing.
+ *
+ * The write starts from deployK3s's onInfraReady hook, the moment the
+ * cluster's addresses exist, so the write and the record's propagation overlap
+ * the image delivery and the manifest apply instead of following the whole
+ * cluster deploy (DO e2e 2026-10-31: dns.create ran after k3s.full, 290 s in).
+ * The orchestrator's post-deploy block calls finish() before the public probe:
+ * it awaits that write (a refusal fails the deploy there) and then writes the
+ * record itself only when nothing set this IP: the hook never fired, the
+ * cluster reported no floating IP (the master's address is the target then),
+ * or the final IP differs from the early one. The gate makes that second call
+ * a no-op when the early write already set the same IP, so the record is
+ * written once. Every write first persists its target (`persistOwnedIp`) so
+ * destroy owns the record even when the deploy fails before its final save.
  */
 import { hasAutomatedDns } from '../../dns-provider.js';
 import { perfAsync } from '../../perf.js';
