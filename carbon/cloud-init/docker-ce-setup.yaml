@@ -58,11 +58,34 @@ write_files:
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
 
-  # Bound Docker's json-file logs at the DAEMON level so every container the
-  # deploy later starts inherits the cap - no per-service logging block needed.
-  # Without this, a chatty container grows /var/lib/docker/containers/*/*.log
-  # without limit until the single-VPS root disk fills and the whole stack
-  # wedges (slow disk-fill outage). 10m x 3 files = 30MB/container ceiling.
+  # The one Docker daemon config of every compose server (all five providers,
+  # compose and compose-ha, and the server a compose scale builds).
+  #
+  # Logs: bound Docker's json-file logs at the DAEMON level so every container
+  # the deploy later starts inherits the cap - no per-service logging block
+  # needed. Without this, a chatty container grows
+  # /var/lib/docker/containers/*/*.log without limit until the single-VPS root
+  # disk fills and the whole stack wedges (slow disk-fill outage).
+  # 10m x 3 files = 30MB/container ceiling.
+  #
+  # Image store: the classic one (overlay2), not the containerd image store
+  # Docker 29 made the default on fresh installs. Only the classic store's pull
+  # retries a failed layer download (max-download-attempts, default 5); the
+  # containerd store's pull makes one attempt. Seven times from 2026-11-06 a
+  # fresh server's first pull failed with `connection reset by peer` (six on
+  # Linode, from ghcr.io over IPv6) and a rerun always worked. The cause is
+  # still unknown, so Docker's own per-layer retry was chosen (2026-11-09).
+  # write_files runs before runcmd, where each provider splices the Docker
+  # install, so dockerd starts on the classic store and no image ever lands in
+  # the other one. A server made before this change keeps the store it has: a
+  # live server never sees new user data, and switching stores hides every
+  # image and container it holds.
+  # tests/unit/iac/docker-daemon-config-census.test.ts holds every compose
+  # server to this, and tests/integration/docker/server-image-store.test.ts
+  # runs this file on a real Docker 29: a reset in the middle of a layer is
+  # retried and the pull succeeds (on the containerd store the same reset
+  # fails the pull with `failed to copy: ... connection reset by peer`).
+  #
   # A fresh Ubuntu + Docker install ships no daemon.json, so this is a create,
   # not a merge; if that ever changes, fold these keys into the existing file.
   - path: /etc/docker/daemon.json
@@ -73,6 +96,9 @@ write_files:
         "log-opts": {
           "max-size": "10m",
           "max-file": "3"
+        },
+        "features": {
+          "containerd-snapshotter": false
         }
       }
 
@@ -93,13 +119,15 @@ write_files:
       MaxSessions 64
 
 runcmd:
-  # Docker first (a provider that installs it splices that install above this
-  # line). Ensure it is running and restart it so it picks up
-  # /etc/docker/daemon.json written above: write_files runs before runcmd, but
-  # the install above has already started the daemon with the OLD
-  # config (the package starts it on install), so `enable --now` alone would leave the log cap unapplied. The
-  # restart is cheap here - no containers exist yet at boot. Nothing below
-  # restarts Docker again, so the boot pull started next never races a restart.
+  # Docker first (every provider splices the one install above this line).
+  # Ensure it is running and restart it, so the daemon the boot pull and every
+  # deploy pull talk to runs /etc/docker/daemon.json above (the log cap and
+  # the classic image store). write_files runs before runcmd, so the daemon the
+  # package starts on install already reads the file; the restart makes that
+  # hold even for a daemon started before the file existed (an image with
+  # Docker preinstalled). It is cheap here - no containers exist yet at boot.
+  # Nothing below restarts Docker again, so the boot pull started next never
+  # races a restart, and the ready marker the deploy waits on comes after it.
   #
   # Boot timing: one `<id> <epoch seconds.nanoseconds>` line per major phase (and a
   # begin/end pair around the background boot pull), read back by the deploy

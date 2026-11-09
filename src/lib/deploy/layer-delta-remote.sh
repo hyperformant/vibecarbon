@@ -110,7 +110,10 @@ if [ "$runtime" = k3s ]; then
 else
   # Save each source image once, then pair ITS manifest Layers[j] with ITS
   # config diff_ids[j]: a containerd-store save names gzip layers by their
-  # compressed digest, so the file name says nothing about the diffID.
+  # compressed digest, so the file name says nothing about the diffID. A
+  # compose server made from 2026-11-09 runs the classic store, whose save
+  # holds uncompressed layers; an older one can run the containerd store
+  # (carbon/cloud-init/docker-ce-setup.yaml). The pairing reads both.
   # --platform came in Docker 28.0. An older server holds one variant of each
   # image, so its plain save gives the same layers.
   save_cmd='docker save'

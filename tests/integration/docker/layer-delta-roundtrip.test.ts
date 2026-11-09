@@ -12,7 +12,10 @@ import { acquireUplinkLock } from '../../../src/lib/deploy/uplink-lock.js';
 
 // The layer delta (src/lib/deploy/layer-delta.js + layer-delta-remote.sh) end
 // to end on every store a deploy target can have: docker:29-dind with the
-// classic store, docker:29-dind with the containerd snapshotter, and k3s
+// classic store (every compose server made from 2026-11-09, see
+// carbon/cloud-init/docker-ce-setup.yaml), docker:29-dind with the containerd
+// snapshotter (Docker 29's default, which a compose server made before then
+// can run), and k3s
 // (`ctr images import`, then a push into a registry:3.1.2 sidecar and a
 // `ctr images pull --plain-http` back, the call
 // src/lib/deploy/k8s/ha/image-copy.js makes).

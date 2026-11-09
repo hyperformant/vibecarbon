@@ -13,6 +13,11 @@
  * server without a CLI release. tests/unit/iac/docker-install-census.test.ts
  * fails on a pin.
  *
+ * The daemon's config is not here: the shared cloud-init writes
+ * /etc/docker/daemon.json (log cap, classic image store) in write_files, which
+ * runs before this install, so the daemon the package starts already uses it.
+ * tests/unit/iac/docker-daemon-config-census.test.ts holds that order.
+ *
  * Boot refreshes only what it installs: the apt update is limited to Docker's
  * own source and runs with Ubuntu's post-update hooks silenced; cloud-init no
  * longer does a `package_update`. The other packages we use (ufw,

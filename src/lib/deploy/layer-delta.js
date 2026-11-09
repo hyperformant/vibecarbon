@@ -11,6 +11,11 @@
  * pushes the result into the in-cluster registry.
  *
  * Facts this rests on (tests/integration/docker/layer-delta-roundtrip.test.ts):
+ *   - a docker target runs either image store. A compose server made from
+ *     2026-11-09 runs the classic one (carbon/cloud-init/docker-ce-setup.yaml
+ *     turns the containerd snapshotter off); an older one can run the
+ *     containerd store, Docker 29's default on a fresh install. The delta
+ *     reads both the same way, and the round trip proves each.
  *   - a save's manifest.json Layers[i] pairs with its config rootfs.diff_ids[i].
  *     The file name is not the diffID: a containerd-store save or a ctr export
  *     names gzip layers by their compressed digest. Every pairing reads the
