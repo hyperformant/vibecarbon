@@ -4814,6 +4814,10 @@ export async function deliverAppImage({
  * every warm redeploy, asks no registry and a GHCR blip cannot fail it.
  *
  * Rejects with ctr's own one-line cause (deliverImage adds the GHCR hint).
+ * No retry (Brandon, 2026-11-09): a download the network cut off says so and
+ * that running the deploy again finishes it. On 2026-11-08 a linode/k8s
+ * deploy lost its base this way (`connection reset by peer`) while kubelet
+ * pulled about 15 images in the same minute; the cause is still open.
  *
  * @param {object} o
  * @param {string} o.masterIp
@@ -4839,9 +4843,21 @@ export async function pullK3sRuntimeBase({ masterIp, sshKeyPath, baseRef, run })
       .split('\n')
       .map((l) => l.trim())
       .find((l) => l && !l.startsWith('Warning:'));
-    throw new Error(cause || String(err?.message ?? err).split('\n')[0], { cause: err });
+    const line = cause || String(err?.message ?? err).split('\n')[0];
+    // Only ctr's own line: ctr ran, so the master is up and only the
+    // download failed. An ssh that never connected is not told this.
+    const dropped = line.startsWith('ctr: ') && NETWORK_DROP.test(line);
+    throw new Error(dropped ? `${line}. ${BASE_PULL_DROPPED}` : line, { cause: err });
   }
 }
+
+/** How ctr words a download the network cut off, as opposed to one refused. */
+const NETWORK_DROP = /reset by peer|i\/o timeout|unexpected EOF|TLS handshake timeout|broken pipe/i;
+
+/** What a deploy whose base download was cut off tells the operator. */
+export const BASE_PULL_DROPPED =
+  'The connection to the registry dropped partway through the download. ' +
+  'That is the network, not your project, so run the deploy again to finish it.';
 
 /**
  * Does the primary's own registry still hold the app image tag? One ssh round
