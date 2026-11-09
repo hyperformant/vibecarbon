@@ -27,6 +27,7 @@ vi.mock('../../../src/lib/command.js', async (orig) => ({
 }));
 
 import {
+  BASE_PULL_DROPPED,
   buildPrePullImages,
   clusterAutoscalerPodImages,
   formatPrePullSummary,
@@ -163,12 +164,16 @@ describe('pullK3sRuntimeBase', () => {
   });
 
   /** Runs the script against a stub `k3s`; `held` is what `images ls -q` lists. */
-  function stubK3s(held: string, pullExit = 0) {
+  function stubK3s(
+    held: string,
+    pullExit = 0,
+    pullErr = 'ctr: failed to resolve reference "x": unauthorized',
+  ) {
     dir = mkdtempSync(join(tmpdir(), 'k3s-base-'));
     const log = join(dir, 'calls');
     writeFileSync(
       join(dir, 'k3s'),
-      `#!/bin/sh\necho "$*" >> ${log}\ncase "$4 $5" in\n  "images ls") printf '%s' '${held}' ;;\n  "images pull") [ ${pullExit} -eq 0 ] || { echo 'ctr: failed to resolve reference "x": unauthorized' >&2; exit 1; } ;;\nesac\n`,
+      `#!/bin/sh\necho "$*" >> ${log}\ncase "$4 $5" in\n  "images ls") printf '%s' '${held}' ;;\n  "images pull") [ ${pullExit} -eq 0 ] || { echo '${pullErr}' >&2; exit 1; } ;;\nesac\n`,
     );
     chmodSync(join(dir, 'k3s'), 0o755);
     const run = async (script: string) => {
@@ -206,6 +211,53 @@ describe('pullK3sRuntimeBase', () => {
     await expect(
       pullK3sRuntimeBase({ masterIp: 'm', sshKeyPath: '/k', baseRef: BASE, run: k.run }),
     ).rejects.toThrow(/^ctr: failed to resolve reference "x": unauthorized$/);
+  });
+
+  // Brandon's ruling, 2026-11-09: no retry. A download the network cut off
+  // (the 2026-11-08 linode/k8s deploy, `connection reset by peer`) says what
+  // happened and that running the deploy again finishes it.
+  it.each([
+    'ctr: failed to copy: read tcp [2600:3c05::1]:41234->[2606:50c0:8002::154]:443: read: connection reset by peer',
+    'ctr: failed to copy: httpReadSeeker: failed open: failed to do request: Get "https://pkg-containers.githubusercontent.com/x": dial tcp 185.199.108.154:443: i/o timeout',
+    'ctr: failed to copy: unexpected EOF',
+  ])('a download the network cut off says to run the deploy again: %s', async (line) => {
+    const k = stubK3s('', 1, line);
+    const err = await pullK3sRuntimeBase({
+      masterIp: 'm',
+      sshKeyPath: '/k',
+      baseRef: BASE,
+      run: k.run,
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(`${line}. ${BASE_PULL_DROPPED}`);
+  });
+
+  it('an ssh that never reached the master is not told only the download failed', async () => {
+    const run = async () => {
+      throw Object.assign(new Error('Command failed: ssh root@m sh -s'), {
+        stderr: 'kex_exchange_identification: read: Connection reset by peer\n',
+      });
+    };
+    const err = await pullK3sRuntimeBase({
+      masterIp: 'm',
+      sshKeyPath: '/k',
+      baseRef: BASE,
+      run,
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(
+      'kex_exchange_identification: read: Connection reset by peer',
+    );
+  });
+
+  it('a pull that failed for another reason is not told a rerun fixes it', async () => {
+    const line = 'ctr: failed to extract layer sha256:ab: write /var/lib: no space left on device';
+    const k = stubK3s('', 1, line);
+    const err = await pullK3sRuntimeBase({
+      masterIp: 'm',
+      sshKeyPath: '/k',
+      baseRef: BASE,
+      run: k.run,
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(line);
   });
 
   it('quotes the ref into the script', async () => {
