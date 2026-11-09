@@ -146,7 +146,9 @@ import {
   setK8sWalgRole,
   WALG_ROLE_DIR,
 } from '../walg-role.js';
+import { awaitAcmeChallengesSettled, challengeWaitLine } from './acme-challenges.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { DEPLOY_OWNED_CERTIFICATES } from './acme-order-recovery.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -4619,6 +4621,28 @@ export async function applyK3sManifests({
   //     on the hostPort race), then wait briefly for the replacement to
   //     stabilize. If anything in this block fails, the deploy still
   //     succeeds — the public probe will catch a real issue.
+  // 10a. Never while an ACME challenge is live. Traefik serves the HTTP-01
+  //     token Let's Encrypt fetches, and the Certificate was created by the
+  //     base apply (step 5), so issuance can be mid-validation right now; a
+  //     force-deleted Traefik leaves port 80 closed until its replacement
+  //     starts, and a validation that lands in that gap fails the order. So
+  //     the restart first waits, bounded, until no Challenge of a
+  //     deploy-owned Certificate is live (acme-challenges.js has the bound and
+  //     why it is enough). Usually that is one read: issuance finished while
+  //     the app rolled. Past the bound the restart goes ahead, since the race
+  //     above leaves the domain dead for good while a failed order is
+  //     repaired by the ACME watchdog. A pilot standby skips the wait: its
+  //     Certificate uses the self-signed issuer, so it has no challenge.
+  if (!pilotStandby) {
+    await perfAsync(`deploy.${perfPrefix}.traefik.challengeWait`, async () => {
+      const settled = await awaitAcmeChallengesSettled({
+        runKubectl: quietKubectl(env, { timeoutMs: 10_000 }),
+        namespaces: [...new Set(DEPLOY_OWNED_CERTIFICATES.map((key) => key.split('/')[0]))],
+      });
+      const line = challengeWaitLine(settled);
+      if (line) progressLog(`[k3s] ${line}`);
+    });
+  }
   try {
     await perfAsync(`deploy.${perfPrefix}.traefik.restart`, async () => {
       await runKubectlWithRetry(

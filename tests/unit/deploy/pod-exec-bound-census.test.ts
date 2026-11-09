@@ -54,7 +54,13 @@ const ROOTS = [
 const POD_VERB = /^(exec|logs|attach|cp|port-forward)$/;
 
 /** The functions that return a pod argv, whose callers the census reads instead. */
-const ARGV_BUILDERS = ['dbExecArgv', 'k8sDbMarkerExec', 'k8sWalgAuditArgv', 'k8sWalgRoleExecArgv'];
+const ARGV_BUILDERS = [
+  'certManagerLogArgv',
+  'dbExecArgv',
+  'k8sDbMarkerExec',
+  'k8sWalgAuditArgv',
+  'k8sWalgRoleExecArgv',
+];
 
 /** A runner that binds what it runs: the census cannot see this from the call. */
 const BOUND_BY_RUNNER: Record<string, string> = {
@@ -62,6 +68,8 @@ const BOUND_BY_RUNNER: Record<string, string> = {
     'the post-deploy diagnostics helper: its one runCommandAsync passes timeout: 30_000',
   'src/lib/deploy/k8s/k3s.js:clusterAutoscalerDiagnosticCommands':
     'returns argvs that only runDeployDiagnostic runs, at DIAGNOSTIC_TIMEOUT_MS',
+  'src/lib/deploy/k8s/acme-challenges.js:runKubectl':
+    "explainOrderFailure's injected runner is the ACME watchdog's, which passes timeout: 30_000",
 };
 
 /**
@@ -274,6 +282,10 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
       'timeout: DIAGNOSTIC_TIMEOUT_MS',
     );
     expect(k3s.match(/clusterAutoscalerDiagnosticCommands\(/g)?.length).toBe(2);
+    expect(orchestrator.match(/createAcmeIssuanceWatchdog\(\{/g)?.length).toBe(1);
+    expect(orchestrator).toMatch(
+      /createAcmeIssuanceWatchdog\(\{\s*runKubectl: async \(argv\) =>[\s\S]{0,160}timeout: 30_000/,
+    );
   });
 });
 
