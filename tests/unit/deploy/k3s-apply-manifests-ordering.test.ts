@@ -411,7 +411,9 @@ function installSpawnMock() {
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
     }
-    if (cmd === 'kubectl' && argv.includes('challenges.acme.cert-manager.io')) {
+    // An exact argv element (a resource name, not a URL): CodeQL reads
+    // includes() of a dotted name as a host substring test.
+    if (cmd === 'kubectl' && argv.some((a) => a === 'challenges.acme.cert-manager.io')) {
       const stdout =
         challengeReads.length > 1
           ? (challengeReads.shift() as string)
@@ -2235,7 +2237,7 @@ describe('applyK3sManifests never restarts Traefik under a live ACME challenge',
   });
 
   const isChallengeRead = (a: string[]) =>
-    a[0] === 'kubectl' && a.includes('challenges.acme.cert-manager.io');
+    a[0] === 'kubectl' && a.some((x) => x === 'challenges.acme.cert-manager.io');
   const isTraefikDelete = (a: string[]) =>
     a[0] === 'kubectl' && a.includes('delete') && a.includes('app=vibecarbon-traefik');
   const liveChallenge = JSON.stringify({
