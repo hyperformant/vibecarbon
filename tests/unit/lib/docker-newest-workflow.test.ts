@@ -44,18 +44,25 @@ describe('docker-newest workflow', () => {
     expect(script).not.toMatch(/docker-ce[=:]/);
   });
 
-  it('tests the layer delta and the socket proxy, on a server side that floats too', () => {
+  it('tests the layer delta, the server image store and the socket proxy, on a server side that floats too', () => {
     const paths = script.match(/tests\/integration\/docker\/\S+\.test\.ts/g) ?? [];
     expect(paths.map((p) => p.split('/').pop())).toEqual(
-      expect.arrayContaining(['layer-delta-roundtrip.test.ts', 'traefik-socket-proxy.test.ts']),
+      expect.arrayContaining([
+        'layer-delta-roundtrip.test.ts',
+        'server-image-store.test.ts',
+        'traefik-socket-proxy.test.ts',
+      ]),
     );
     for (const path of paths) expect(existsSync(path), path).toBe(true);
     const test = steps.find((s) => s.run?.includes('layer-delta-roundtrip'));
+    expect(test?.run).toContain('server-image-store');
     expect(test?.env?.DOCKER_INTEGRATION).toBe('true');
     expect(test?.env?.VC_DIND_IMAGE).toBe('docker:dind');
-    expect(readFileSync('tests/integration/docker/layer-delta-roundtrip.test.ts', 'utf-8')).toMatch(
-      /process\.env\.VC_DIND_IMAGE/,
-    );
+    for (const file of ['layer-delta-roundtrip.test.ts', 'server-image-store.test.ts']) {
+      expect(readFileSync(`tests/integration/docker/${file}`, 'utf-8'), file).toMatch(
+        /process\.env\.VC_DIND_IMAGE/,
+      );
+    }
   });
 
   it('tests the refs the version channel hands it, and the bundled ones otherwise', () => {
