@@ -43,9 +43,17 @@
  * workaround "delete the CertificateRequest, then wait an hour"
  * (cert-manager#4441). Recovery therefore has to clear the failure stamp on
  * the Certificate status as well.
+ *
+ * WHY A FAILURE IS NAMED BEFORE THE REPAIR: deleting the failed request takes
+ * its Order and Challenges with it, and the Challenge is where Let's Encrypt's
+ * reason lives; an Order a failed Challenge turned invalid has none of its
+ * own (acme-challenges.js). Hetzner k8s-ha, CI run 42426102569: the watchdog
+ * logged only `order is in "invalid" state: `, repaired, and the cause was
+ * lost.
  */
 
 import { rowFor } from '../../runtime-floors.js';
+import { explainOrderFailure } from './acme-challenges.js';
 
 /**
  * `Order.status.state` values that cert-manager never transitions out of on
@@ -276,6 +284,12 @@ export const PROBED_APEX_CERTIFICATE = 'vibecarbon/vibecarbon-tls';
  * probe that polls fifty times still only ever attempts `maxRecoveries`
  * repairs per Certificate.
  *
+ * Every terminal failure it reports gets one line naming WHY, before any
+ * repair deletes the evidence: `[acme-watchdog] order <name> failed: <cause>`
+ * (explainOrderFailure, acme-challenges.js: the Challenge's reason, else the
+ * Order's, else the last cert-manager log lines naming it, else "reason
+ * unavailable" and why). The abort reason carries the same cause.
+ *
  * @param {object} args
  * @param {(argv: string[]) => Promise<string>} args.runKubectl
  * @param {number} [args.maxRecoveries] repairs attempted per Certificate
@@ -306,17 +320,45 @@ export function createAcmeIssuanceWatchdog({
   };
   const keyOf = (f) => `${f.namespace}/${f.certificate}`;
 
+  /**
+   * One compact line naming why a finding failed (acme-challenges.js,
+   * explainOrderFailure): `order <name> failed: <cause>`. A request that
+   * failed before it had an Order carries its own message. Never throws.
+   */
+  async function explain(f, items) {
+    if (!f.order) {
+      const cause = f.reason || 'reason unavailable: the request has no Order and no message';
+      return {
+        found: Boolean(f.reason),
+        cause,
+        line: `[acme-watchdog] request ${f.request} failed: ${cause}`,
+      };
+    }
+    const { found, cause } = await explainOrderFailure({
+      items,
+      namespace: f.namespace,
+      order: f.order,
+      runKubectl,
+    });
+    return { found, cause, line: `[acme-watchdog] order ${f.order} failed: ${cause}` };
+  }
+
   async function pollOnce() {
     let findings;
+    /** @type {Array<Record<string, any>>} */
+    let items;
     try {
+      // Challenges ride along: when an Order fails, the reason Let's Encrypt
+      // gave is on its Challenge (acme-challenges.js), and the Challenge is
+      // gone once the failed request below is deleted.
       const raw = await runKubectl([
         'get',
-        'certificate,certificaterequest,order',
+        'certificate,certificaterequest,order,challenge',
         '--all-namespaces',
         '-o',
         'json',
       ]);
-      const items = JSON.parse(raw)?.items ?? [];
+      items = JSON.parse(raw)?.items ?? [];
       findings = findTerminalAcmeFailures(items);
     } catch (err) {
       // No kubeconfig, API server not reachable, malformed JSON — none of
@@ -335,6 +377,7 @@ export function createAcmeIssuanceWatchdog({
         `[acme-watchdog] ${keyOf(f)} is terminally failed (state="${f.state}") but is NOT ` +
           `deploy-owned, reporting only, not repairing: ${f.reason}`,
       );
+      safeLog((await explain(f, items)).line);
     }
 
     const ours = findings.filter((f) => owned.has(keyOf(f)));
@@ -346,6 +389,10 @@ export function createAcmeIssuanceWatchdog({
       (f) => keyOf(f) === abortOn && (attempts.get(keyOf(f)) ?? 0) >= maxRecoveries,
     );
     if (stuckApex) {
+      // The cause, when the cluster or the controller log names one, in place
+      // of cert-manager's wording: for an Order a failed Challenge turned
+      // invalid that wording ends in `order is in "invalid" state: `.
+      const why = await explain(stuckApex, items);
       return {
         action: 'abort',
         findings: [stuckApex],
@@ -353,7 +400,7 @@ export function createAcmeIssuanceWatchdog({
           `cert-manager issuance for ${keyOf(stuckApex)} is terminally failed ` +
           `after ${maxRecoveries} recovery attempts` +
           (stuckApex.order ? ` (order ${stuckApex.order}, state "${stuckApex.state}")` : '') +
-          `: ${stuckApex.reason}`,
+          `: ${why.found ? why.cause : stuckApex.reason}`,
       };
     }
 
@@ -371,6 +418,9 @@ export function createAcmeIssuanceWatchdog({
       safeLog(
         `[acme-watchdog] ${key} is terminally failed (${f.order ? `order ${f.order} ` : ''}state="${f.state}"): ${f.reason}`,
       );
+      // WHY, before the delete below takes the Order and its Challenges (and
+      // so the reason) with it.
+      safeLog((await explain(f, items)).line);
       safeLog(
         `[acme-watchdog] recovering ${key}, deleting failed request ${f.request} and clearing the issuance-failure backoff (attempt ${used + 1}/${maxRecoveries})`,
       );

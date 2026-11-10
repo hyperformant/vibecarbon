@@ -459,3 +459,183 @@ describe('createAcmeIssuanceWatchdog', () => {
     expect((await poll()).action).toBe('abort');
   });
 });
+
+/**
+ * Hetzner k8s-ha, CI run 42426102569 (2026-11-08): the Order went invalid
+ * with an EMPTY reason, the watchdog logged only cert-manager's wording
+ * ("order is in "invalid" state: "), deleted the request, and the cause went
+ * with it. The reason Let's Encrypt gives lives on the Challenge (see
+ * acme-challenges.ts), so the watchdog names it, in one line, BEFORE the
+ * delete. The LE problem below is illustrative; the run's was never captured.
+ */
+describe('the watchdog names why the order failed, before it deletes anything', () => {
+  const ORDER = 'vibecarbon-tls-1-4255483814';
+  const LE_REASON =
+    'Error accepting authorization: acme: authorization error for ci4.example.test: 403 ' +
+    'urn:ietf:params:acme:error:unauthorized: Invalid response from http://ci4.example.test/.well-known/acme-challenge/t: 404';
+
+  function invalidChain({ challengeReason = LE_REASON }: { challengeReason?: string | null } = {}) {
+    return [
+      certificate('vibecarbon-tls'),
+      certificateRequest('vibecarbon-tls-1', 'vibecarbon-tls'),
+      order(ORDER, 'vibecarbon-tls-1', { state: 'invalid', reason: '' }),
+      ...(challengeReason === null
+        ? []
+        : [
+            {
+              kind: 'Challenge',
+              metadata: {
+                name: `${ORDER}-3698937788`,
+                namespace: 'vibecarbon',
+                ownerReferences: [{ kind: 'Order', name: ORDER, controller: true }],
+              },
+              spec: { dnsName: 'ci4.example.test', type: 'HTTP-01' },
+              status: { state: 'invalid', reason: challengeReason, processing: false },
+            },
+          ]),
+    ];
+  }
+
+  /** One timeline of log lines and kubectl calls, in the order they happened. */
+  function recorder(items: unknown[], logText: string | Error = '') {
+    const timeline: string[] = [];
+    const runKubectl = vi.fn(async (argv: string[]) => {
+      timeline.push(`kubectl ${argv.join(' ')}`);
+      if (argv[0] === 'get') return JSON.stringify({ items });
+      if (argv.includes('logs')) {
+        if (logText instanceof Error) throw logText;
+        return logText;
+      }
+      return '';
+    });
+    const log = (m: string) => timeline.push(`log ${m}`);
+    return { timeline, runKubectl, log };
+  }
+
+  it('reads the Challenges in the same state read (no extra round trip)', async () => {
+    const { runKubectl, log } = recorder(invalidChain());
+    await createAcmeIssuanceWatchdog({ runKubectl, log })();
+    expect(runKubectl.mock.calls[0][0]).toEqual([
+      'get',
+      'certificate,certificaterequest,order,challenge',
+      '--all-namespaces',
+      '-o',
+      'json',
+    ]);
+    expect(runKubectl.mock.calls.filter(([a]) => a[0] === 'get')).toHaveLength(1);
+  });
+
+  it("logs the Challenge's reason in one line, before the request is deleted", async () => {
+    const { timeline, runKubectl, log } = recorder(invalidChain());
+    expect((await createAcmeIssuanceWatchdog({ runKubectl, log })()).action).toBe('recovered');
+
+    const why = timeline.findIndex((e) =>
+      e.startsWith(`log [acme-watchdog] order ${ORDER} failed: `),
+    );
+    const del = timeline.findIndex((e) => e.includes(' delete certificaterequest '));
+    expect(why).toBeGreaterThan(-1);
+    expect(del).toBeGreaterThan(why);
+    expect(timeline[why]).toBe(
+      `log [acme-watchdog] order ${ORDER} failed: HTTP-01 challenge for ci4.example.test is invalid: ${LE_REASON}`,
+    );
+    // The cause came off the Challenge: no log read was needed.
+    expect(timeline.some((e) => e.includes(' logs '))).toBe(false);
+  });
+
+  it('falls back to the cert-manager log, bounded, still before the delete', async () => {
+    const logText =
+      `E1108 00:00:38.1 1 sync.go:420] "error waiting for authorization" err="${LE_REASON}" ` +
+      `resource_name="${ORDER}-3698937788"\n`;
+    const { timeline, runKubectl, log } = recorder(
+      invalidChain({ challengeReason: null }),
+      logText,
+    );
+    await createAcmeIssuanceWatchdog({ runKubectl, log })();
+
+    const read = timeline.findIndex((e) => e.includes(' logs deployment/cert-manager '));
+    const why = timeline.findIndex((e) =>
+      e.startsWith(`log [acme-watchdog] order ${ORDER} failed:`),
+    );
+    const del = timeline.findIndex((e) => e.includes(' delete certificaterequest '));
+    expect(read).toBeGreaterThan(-1);
+    expect(timeline[read]).toMatch(/--since=\d+m --tail=\d+ --request-timeout=\d+s$/);
+    expect(why).toBeGreaterThan(read);
+    expect(del).toBeGreaterThan(why);
+    expect(timeline[why]).toContain('cert-manager log: "error waiting for authorization"');
+    expect(timeline[why]).toContain('urn:ietf:params:acme:error:unauthorized');
+  });
+
+  it('says the reason was unavailable, and why, when nothing names it; still recovers', async () => {
+    const { timeline, runKubectl, log } = recorder(invalidChain({ challengeReason: null }), '');
+    expect((await createAcmeIssuanceWatchdog({ runKubectl, log })()).action).toBe('recovered');
+    const line = timeline.find((e) => e.startsWith(`log [acme-watchdog] order ${ORDER} failed:`));
+    expect(line).toMatch(
+      /failed: reason unavailable: .*no cert-manager log line in the last \d+ minutes names it$/,
+    );
+    expect(timeline.some((e) => e.includes(' delete certificaterequest '))).toBe(true);
+  });
+
+  it('a log read that fails costs nothing but the line: recovery still runs', async () => {
+    const { timeline, runKubectl, log } = recorder(
+      invalidChain({ challengeReason: null }),
+      new Error('Unable to connect to the server: i/o timeout'),
+    );
+    expect((await createAcmeIssuanceWatchdog({ runKubectl, log })()).action).toBe('recovered');
+    const line = timeline.find((e) => e.startsWith(`log [acme-watchdog] order ${ORDER} failed:`));
+    expect(line).toContain(
+      'the cert-manager log could not be read (Unable to connect to the server',
+    );
+    expect(timeline.some((e) => e.includes(' delete certificaterequest '))).toBe(true);
+  });
+
+  it('the abort reason carries the cause instead of an empty "invalid" wording', async () => {
+    const { runKubectl, log } = recorder(invalidChain());
+    const poll = createAcmeIssuanceWatchdog({ runKubectl, log, maxRecoveries: 1 });
+    expect((await poll()).action).toBe('recovered');
+    const verdict = await poll();
+    expect(verdict.action).toBe('abort');
+    expect(verdict.reason).toContain(`(order ${ORDER}, state "invalid")`);
+    expect(verdict.reason).toContain(
+      `HTTP-01 challenge for ci4.example.test is invalid: ${LE_REASON}`,
+    );
+  });
+
+  it('a foreign Certificate gets the same line, and still no write', async () => {
+    const foreign = [
+      certificate('wildcard-tls', { namespace: 'ingress-nginx' }),
+      certificateRequest('wildcard-tls-1', 'wildcard-tls', { namespace: 'ingress-nginx' }),
+      order('wildcard-tls-1-777', 'wildcard-tls-1', {
+        namespace: 'ingress-nginx',
+        state: 'invalid',
+        reason: '',
+      }),
+      {
+        kind: 'Challenge',
+        metadata: {
+          name: 'wildcard-tls-1-777-1',
+          namespace: 'ingress-nginx',
+          ownerReferences: [{ kind: 'Order', name: 'wildcard-tls-1-777' }],
+        },
+        spec: { dnsName: 'x.example.test', type: 'HTTP-01' },
+        status: { state: 'invalid', reason: LE_REASON },
+      },
+    ];
+    const { timeline, runKubectl, log } = recorder(foreign);
+    expect(await createAcmeIssuanceWatchdog({ runKubectl, log })()).toEqual({ action: 'none' });
+    expect(timeline).toContain(
+      `log [acme-watchdog] order wildcard-tls-1-777 failed: HTTP-01 challenge for x.example.test is invalid: ${LE_REASON}`,
+    );
+    expect(runKubectl.mock.calls.map(([a]) => a[0])).toEqual(['get']);
+  });
+
+  it('a request that failed before it had an Order names its own message', async () => {
+    const { timeline, runKubectl, log } = recorder([
+      certificate('vibecarbon-tls'),
+      certificateRequest('vibecarbon-tls-1', 'vibecarbon-tls', { reason: 'Denied' }),
+    ]);
+    await createAcmeIssuanceWatchdog({ runKubectl, log })();
+    expect(timeline).toContain(
+      'log [acme-watchdog] request vibecarbon-tls-1 failed: Failed to wait for order resource: Denied',
+    );
+  });
+});

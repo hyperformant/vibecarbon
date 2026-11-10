@@ -65,6 +65,23 @@ vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
   };
 });
 
+// The Traefik restart's wait for live ACME challenges (acme-challenges.js)
+// polls every 2 s for up to a minute; here it polls every millisecond, for a
+// bound a test can shorten, so a test that keeps a challenge live stays fast.
+const challengeWait = vi.hoisted(() => ({ budgetMs: 60_000 }));
+vi.mock('../../../src/lib/deploy/k8s/acme-challenges.js', async (orig) => {
+  const actual = (await orig()) as typeof import('../../../src/lib/deploy/k8s/acme-challenges.js');
+  return {
+    ...actual,
+    awaitAcmeChallengesSettled: (args: Parameters<typeof actual.awaitAcmeChallengesSettled>[0]) =>
+      actual.awaitAcmeChallengesSettled({
+        ...args,
+        intervalMs: 1,
+        budgetMs: challengeWait.budgetMs,
+      }),
+  };
+});
+
 // Every perf span applyK3sManifests opens, in order: the markers test reads it.
 const perfNames = vi.hoisted(() => [] as string[]);
 vi.mock('../../../src/lib/perf.js', async (orig) => {
@@ -246,6 +263,12 @@ const DB_POD_WITH_ROLE_MOUNT = JSON.stringify({
 // rendered dir is removed right after the apply).
 let certManagerKustomizationAtApply: string | null = null;
 
+// Answers to `kubectl get challenges.acme.cert-manager.io -A -o json`, one per
+// read; the last one repeats. Default: no Challenge at all (a warm deploy, or
+// issuance that finished while the app rolled).
+let challengeReads: string[] = [];
+const NO_CHALLENGES = '{"items":[]}';
+
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((
     cmd: string,
@@ -387,6 +410,15 @@ function installSpawnMock() {
         stdout: secretVersionOut[name] ?? '1',
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
+    }
+    // An exact argv element (a resource name, not a URL): CodeQL reads
+    // includes() of a dotted name as a host substring test.
+    if (cmd === 'kubectl' && argv.some((a) => a === 'challenges.acme.cert-manager.io')) {
+      const stdout =
+        challengeReads.length > 1
+          ? (challengeReads.shift() as string)
+          : (challengeReads[0] ?? NO_CHALLENGES);
+      return fakeChild({ stdout, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     const leaderStdout = certManagerLeaderStdout(cmd, argv);
     if (leaderStdout !== null) {
@@ -2176,5 +2208,109 @@ describe('perf markers attribute every step of the apply', () => {
     expect(at('db.preflight')).toBeLessThan(at('applyBase'));
     // The probe deployK3s already ran is gone from here.
     expect(at('controlPlane.serving')).toBe(-1);
+  });
+});
+
+/**
+ * Step 10 force-restarts Traefik (the April 2026 kube-router race), and
+ * Traefik serves the HTTP-01 token for the Certificate the base apply created
+ * in step 5. A restart under a live challenge closes port 80 while Let's
+ * Encrypt may be validating, and the order fails (hetzner k8s-ha, CI run
+ * 42426102569, showed nothing stopping it). The restart waits, bounded,
+ * until no Challenge of a deploy-owned Certificate is live; a pilot standby,
+ * which has no ACME challenge, does not wait at all.
+ */
+describe('applyK3sManifests never restarts Traefik under a live ACME challenge', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    challengeReads = [];
+    challengeWait.budgetMs = 60_000;
+    installSpawnMock();
+  });
+  afterEach(() => {
+    challengeReads = [];
+    challengeWait.budgetMs = 60_000;
+  });
+
+  const isChallengeRead = (a: string[]) =>
+    a[0] === 'kubectl' && a.some((x) => x === 'challenges.acme.cert-manager.io');
+  const isTraefikDelete = (a: string[]) =>
+    a[0] === 'kubectl' && a.includes('delete') && a.includes('app=vibecarbon-traefik');
+  const liveChallenge = JSON.stringify({
+    items: [
+      {
+        kind: 'Challenge',
+        metadata: {
+          name: 'vibecarbon-tls-1-1-2',
+          namespace: DEPLOY_OWNED_CERTIFICATES[0].split('/')[0],
+          ownerReferences: [{ kind: 'Order', name: 'vibecarbon-tls-1-1' }],
+        },
+        spec: { dnsName: 'app.example.test', type: 'HTTP-01' },
+        status: { state: 'pending', processing: true, presented: true },
+      },
+    ],
+  });
+
+  it('the restart begins only after a read that found no live challenge', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    // Live on the first two reads, gone (the Order went valid) on the third.
+    challengeReads = [liveChallenge, liveChallenge, NO_CHALLENGES];
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    const reads = cmdCalls.map((a, i) => (isChallengeRead(a) ? i : -1)).filter((i) => i >= 0);
+    const del = cmdCalls.findIndex(isTraefikDelete);
+    expect(reads).toHaveLength(3);
+    expect(del).toBeGreaterThan(reads[2]);
+    // Nothing restarted Traefik while the first two reads saw it live.
+    expect(cmdCalls.slice(0, reads[2]).some(isTraefikDelete)).toBe(false);
+    // One cluster-wide read per poll, filtered to the deploy-owned namespace.
+    expect(cmdCalls[reads[0]]).toEqual([
+      'kubectl',
+      'get',
+      'challenges.acme.cert-manager.io',
+      '--all-namespaces',
+      '-o',
+      'json',
+    ]);
+  });
+
+  it('with no challenge (warm deploy, issuance done) it costs one read', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const reads = cmdCalls.filter(isChallengeRead);
+    expect(reads).toHaveLength(1);
+    expect(cmdCalls.findIndex(isTraefikDelete)).toBeGreaterThan(
+      cmdCalls.findIndex(isChallengeRead),
+    );
+  });
+
+  it('past its bound the restart still runs (the kube-router race outranks a repairable order)', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    challengeWait.budgetMs = 30;
+    challengeReads = [liveChallenge];
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(cmdCalls.filter(isChallengeRead).length).toBeGreaterThan(1);
+    expect(cmdCalls.some(isTraefikDelete)).toBe(true);
+  });
+
+  it('the pilot standby restarts without reading challenges (self-signed issuer)', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    challengeReads = [liveChallenge];
+    await applyK3sManifests({ ...baseArgs(makeProjectDir()), role: 'standby' });
+    expect(cmdCalls.some(isChallengeRead)).toBe(false);
+    expect(cmdCalls.some(isTraefikDelete)).toBe(true);
+  });
+
+  it('the k8s-ha primary waits like a single cluster', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    challengeReads = [liveChallenge, NO_CHALLENGES];
+    await applyK3sManifests({ ...baseArgs(makeProjectDir()), role: 'primary' });
+    const reads = cmdCalls.map((a, i) => (isChallengeRead(a) ? i : -1)).filter((i) => i >= 0);
+    expect(reads).toHaveLength(2);
+    expect(cmdCalls.findIndex(isTraefikDelete)).toBeGreaterThan(reads[1]);
   });
 });

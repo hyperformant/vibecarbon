@@ -36,11 +36,12 @@ describe('vibecarbon diagnose', () => {
     assertSuccess(r);
     assertExitWith(r, 0, 'nodes');
     assertExitWith(r, 0, 'pods');
+    assertExitWith(r, 0, 'tls');
     assertExitWith(r, 0, 'flux');
     assertExitWith(r, 0, 'egress');
   });
 
-  it.each(['nodes', 'pods', 'network', 'flux', 'hcloud', 'egress', 'all'])(
+  it.each(['nodes', 'pods', 'tls', 'network', 'flux', 'hcloud', 'egress', 'all'])(
     'accepts known section "%s"',
     (section) => {
       const r = runCli('diagnose', ['prod', section], {

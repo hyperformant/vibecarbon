@@ -13,6 +13,9 @@
  *              + journalctl -u k3s + ip addr + dmesg via SSH
  *   pods     — kubectl get pods -A, describe non-Running pods, logs for
  *              crashlooping pods
+ *   tls      - cert-manager Certificates, CertificateRequests, Orders and
+ *              Challenges (with their reasons) in every namespace, and the
+ *              tail of the cert-manager controller log
  *   network  — CoreDNS configmap + logs, Flannel + kube-proxy logs,
  *              hcloud-ccm + hcloud-csi logs, in-cluster busybox DNS probe
  *   flux     — kubectl -n flux-system get gitrepository,kustomization,
@@ -40,6 +43,7 @@ import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary
 import { c } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
+import { certManagerLogArgv } from './lib/deploy/k8s/acme-challenges.js';
 import { isComposeTier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DIAG_BUSYBOX_IMAGE, DIAG_NETSHOOT_IMAGE } from './lib/images.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
@@ -65,7 +69,7 @@ export function hcloudGateSkipNote(providerId) {
 // excluded — its netshoot image pull + multi-probe battery can take 30-60s,
 // which is fine for an explicit `diagnose <env> egress` invocation but
 // disproportionate for the default sweep.
-const SECTIONS = ['nodes', 'pods', 'network', 'flux', 'hcloud'];
+const SECTIONS = ['nodes', 'pods', 'tls', 'network', 'flux', 'hcloud'];
 const OPTIONAL_SECTIONS = ['egress'];
 const ALL_VALID_SECTIONS = [...SECTIONS, ...OPTIONAL_SECTIONS];
 
@@ -96,6 +100,10 @@ export const SPEC = {
   examples: [
     { command: 'vibecarbon diagnose e3', description: 'full dump (excludes heavy egress probe)' },
     { command: 'vibecarbon diagnose e3 network', description: 'CoreDNS + CCM + DNS probe' },
+    {
+      command: 'vibecarbon diagnose e3 tls',
+      description: 'why a certificate is pending: cert-manager objects + controller log',
+    },
     {
       command: 'vibecarbon diagnose e3 egress',
       description: 'netshoot DNS + MTU + route battery',
@@ -334,6 +342,51 @@ function diagnosePods(report, env, kubeconfig) {
       );
     }
   }
+}
+
+/**
+ * The bounds of the tls section's reads: a deploy's worth of controller log
+ * (the window and a line cap), and kubectl's request timeout on each read so
+ * a slow API costs seconds, not the probe's whole minute.
+ */
+export const DIAGNOSE_LOG_BOUNDS = Object.freeze({
+  sinceMinutes: 120,
+  tailLines: 300,
+  requestTimeoutSec: 20,
+});
+
+/**
+ * cert-manager state: why a certificate is pending. When an Order fails,
+ * Let's Encrypt's reason is on its Challenge (the Reason column of `-o wide`)
+ * and in the controller log, never on the Order itself
+ * (src/lib/deploy/k8s/acme-challenges.js). Every namespace, so a Certificate
+ * elsewhere racing ours for the same name shows too. Both reads are bounded.
+ */
+export function diagnoseTls(report, env, kubeconfig) {
+  report.section('TLS (cert-manager)');
+  probe(
+    report,
+    'certificates, requests, orders, challenges (all namespaces)',
+    'kubectl',
+    [
+      '--kubeconfig',
+      kubeconfig,
+      'get',
+      'certificate,certificaterequest,order,challenge',
+      '--all-namespaces',
+      '-o',
+      'wide',
+      `--request-timeout=${DIAGNOSE_LOG_BOUNDS.requestTimeoutSec}s`,
+    ],
+    env,
+  );
+  probe(
+    report,
+    `cert-manager controller log (last ${DIAGNOSE_LOG_BOUNDS.sinceMinutes} min, at most ${DIAGNOSE_LOG_BOUNDS.tailLines} lines)`,
+    'kubectl',
+    ['--kubeconfig', kubeconfig, ...certManagerLogArgv(DIAGNOSE_LOG_BOUNDS)],
+    env,
+  );
 }
 
 function diagnoseNetwork(report, env, kubeconfig, Provider) {
@@ -817,7 +870,7 @@ export async function diagnoseK8s(ctx) {
   const requestedHcloud = sectionsToRun.includes('hcloud');
   const includesHcloud = requestedHcloud && providerId === 'hetzner';
   const needsKubectl = sectionsToRun.some((s) =>
-    ['nodes', 'pods', 'network', 'flux', 'egress'].includes(s),
+    ['nodes', 'pods', 'tls', 'network', 'flux', 'egress'].includes(s),
   );
 
   if (requestedHcloud && !includesHcloud) report.warn(hcloudGateSkipNote(providerId));
@@ -831,6 +884,7 @@ export async function diagnoseK8s(ctx) {
       if (sectionsToRun.includes('nodes'))
         diagnoseNodes(report, cmdEnv, kubeconfig, sshKey, controlplaneIp);
       if (sectionsToRun.includes('pods')) diagnosePods(report, cmdEnv, kubeconfig);
+      if (sectionsToRun.includes('tls')) diagnoseTls(report, cmdEnv, kubeconfig);
       if (sectionsToRun.includes('network')) diagnoseNetwork(report, cmdEnv, kubeconfig, Provider);
       if (sectionsToRun.includes('egress'))
         diagnoseEgress(report, cmdEnv, kubeconfig, sshKey, controlplaneIp, Provider);

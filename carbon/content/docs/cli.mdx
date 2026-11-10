@@ -794,6 +794,9 @@ vibecarbon diagnose prod
 vibecarbon diagnose prod network
 vibecarbon diagnose prod flux
 
+# Why a certificate is pending (cert-manager objects + controller log)
+vibecarbon diagnose prod tls
+
 # Heavy egress probe (netshoot DNS + MTU + route battery)
 vibecarbon diagnose prod egress
 ```
@@ -801,8 +804,11 @@ vibecarbon diagnose prod egress
 Streams sections to stdout AND writes the full report to
 `~/.vibecarbon/diag-<env>-<timestamp>.txt`.
 
-**Sections:** `nodes`, `pods`, `network`, `flux`, `hcloud`, `egress`, `all`
-(default, excludes `egress`).
+**Sections:** `nodes`, `pods`, `tls`, `network`, `flux`, `hcloud`, `egress`, `all`
+(default, excludes `egress`). `tls` lists every Certificate, CertificateRequest,
+Order and Challenge with its reason, and the last two hours of the cert-manager
+controller log: when an order fails, the reason Let's Encrypt gave is on its
+Challenge, not on the Order.
 
 ---
 
