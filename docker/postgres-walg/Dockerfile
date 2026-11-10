@@ -32,7 +32,7 @@
 # since the docker ecosystem watches this directory) plus a DB_IMAGE_TAG
 # revision bump. The dev channel (publish-db-image-dev.yml) overrides this
 # exact ref with a build context when a branch rebuilt wal-g.
-FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:f7d7ceff084156ea83417b7017c0622d40737f5e5ad981701c25b3cd6a32dc29 AS walg
+FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:ac450461f1ec32d59b50b08d3d86ffcdbd5ca2525e4a343352cdbc273fef95f6 AS walg
 
 # --- pg_cron builder -------------------------------------------------------
 # Compiled from a pinned upstream release tag. ADD --checksum verifies the
@@ -52,7 +52,7 @@ FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:f7d7ceff084156ea83417b7017c0622d407
 # also emit JIT bitcode and need clang + llvm (hundreds of MB) in the builder.
 # The bitcode only lets the JIT inline pg_cron's C functions, which no query
 # path of ours benefits from.
-FROM postgres:17.11-alpine3.24@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b AS pg_cron
+FROM postgres:17.11-alpine3.24@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac AS pg_cron
 ARG PG_CRON_VERSION=1.6.8
 ADD --checksum=sha256:c19ab9bb35406c60fb51ecda993737c083850abe424acb6c1030439d00a1f8e4 \
     https://github.com/citusdata/pg_cron/archive/refs/tags/v${PG_CRON_VERSION}.tar.gz /tmp/pg_cron.tar.gz
@@ -63,7 +63,7 @@ RUN apk add --no-cache build-base \
  && make -C /tmp/pg_cron with_llvm=no install DESTDIR=/out
 
 # --- db: the official image plus our additions, LLVM still present ----------
-FROM postgres:17.11-alpine3.24@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b AS db
+FROM postgres:17.11-alpine3.24@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac AS db
 
 # pg_cron: the shared library and the extension's control + SQL scripts. Only
 # those two directories come across; no compiler, headers or build output.

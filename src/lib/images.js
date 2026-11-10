@@ -28,16 +28,16 @@
 // wal-g's physical backups do not cross majors, so moving to 18 is a data
 // migration for every live database, not a tag edit. Minors move freely.
 export const DB_IMAGE = 'ghcr.io/hyperformant/postgres';
-export const DB_IMAGE_TAG = '17.11-walg3.0.9-r4';
+export const DB_IMAGE_TAG = '17.11-walg3.0.9-r5';
 
 // sha256 fingerprint of docker/postgres-walg's inputs (every file there but
 // README.md; see tests/unit/deploy/db-image-fingerprint.test.ts for the exact
 // hashing). Changing any input fails that test until you bump the -r revision
 // in DB_IMAGE_TAG above AND paste the new hash here: a deliberate two-line edit.
 export const DB_IMAGE_INPUTS_SHA256 =
-  'e6b480e7bbeca9482f1a66c641b799bf22ae50fedb65096884f1d2c16701b131';
+  '3194a7bd6948f10a86ae4ff789ec172cdd2d79394fea990cca0a6a32cc29cef0';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r4" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r5" */
 export function dbImageRef() {
   return `${DB_IMAGE}:${DB_IMAGE_TAG}`;
 }
