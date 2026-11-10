@@ -98,8 +98,10 @@ const MODE_OPTION_TIER = {
 // IS the HA answer, so it is listed.
 const COMPOSE_HA_OPTION = {
   value: 'compose-ha',
-  label: 'Docker Compose HA (Auto Failover)',
-  hint: '2 VPS - Simple failover without K8s complexity - Enterprise resiliency',
+  // Failover is one manual command (`vibecarbon failover`), never automatic:
+  // nothing watches the primary and promotes the standby on its own.
+  label: 'Docker Compose HA (Failover)',
+  hint: '2 VPS - One-command failover without K8s complexity - Enterprise resiliency',
 };
 
 /**
