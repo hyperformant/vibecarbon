@@ -172,9 +172,10 @@ describe('compose: the A record is written while cloud-init runs', () => {
     expect(calls).not.toContain('startComposeStack');
   });
 
-  it('writes the record exactly once', async () => {
+  it('writes the record exactly once, through setupSimple only', async () => {
     await runPlan(planDeploy('compose', {}), composeCtx(), effects(REAL));
     expect(setupSimple).toHaveBeenCalledTimes(1);
+    expect(setupHA).not.toHaveBeenCalled();
   });
 
   it('digitalocean: waits for the A record to propagate before Traefik starts', async () => {
@@ -237,6 +238,9 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
       { onProgress: expect.any(Function) },
     );
     expect(setupHA).toHaveBeenCalledTimes(1);
+    // One writer, as k8s-ha (k8s-ha-dns-single-writer.test.ts): no
+    // single-server write of the same records before or after it.
+    expect(setupSimple).not.toHaveBeenCalled();
     expect(calls.indexOf('dns:setupHA')).toBeLessThan(calls.indexOf('haPullImages'));
   });
 

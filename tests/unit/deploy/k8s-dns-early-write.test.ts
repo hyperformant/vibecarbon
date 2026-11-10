@@ -11,7 +11,8 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
  * deploy (DO e2e 2026-10-31: dns.create ran after k3s.full, 290 s in). The
  * record, its value (the floating IP, else the master) and the k8s-dns-update
  * gate are unchanged; the post-deploy block still awaits it before the public
- * probe and writes it itself when nothing did (k8s-ha, a rerun).
+ * probe and writes it itself when nothing set that IP. Single k8s only: k8s-ha
+ * never builds this writer (k8s-ha-dns-single-writer.test.ts).
  */
 let setupSimple: ReturnType<typeof vi.fn>;
 let calls: string[];
@@ -86,7 +87,7 @@ describe('createK8sDnsWriter', () => {
     }
   });
 
-  it('nothing started it (k8s-ha, no hook): the post-deploy block writes it, once', async () => {
+  it('nothing started it (the hook never fired): the post-deploy block writes it, once', async () => {
     const { w } = writer();
     await w.finish('203.0.113.9');
     expect(setupSimple).toHaveBeenCalledExactlyOnceWith(
@@ -196,6 +197,6 @@ describe('the orchestrator wires it', () => {
   });
 
   it('the post-deploy DNS block goes through the same writer', () => {
-    expect(src).toMatch(/await k8sDns\.finish\(k8sFloatingIp\)/);
+    expect(src).toMatch(/await k8sDns\.finish\(k8sIp\)/);
   });
 });

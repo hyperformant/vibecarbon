@@ -2091,31 +2091,35 @@ export async function executeDeployment(args, gatheredConfig) {
     });
   }
 
-  // The k8s tiers' A record (k8s/dns-record.js): single k8s starts it from
-  // deployK3s's onInfraReady; the post-deploy block below finishes it. Loaded
-  // for the k8s tiers only: compose never touches the k8s engine.
-  const k8sDns = isK8sTier(tier)
-    ? (await import('./k8s/index.js')).createK8sDnsWriter({
-        domain,
-        dnsProvider,
-        dnsToken,
-        dnsZoneId,
-        state,
-        dnsWarmupPromise,
-        getDnsProvider,
-        // Single k8s: the record's target is on disk before the record points
-        // at it, so destroy owns it if the deploy fails (the final save
-        // writes the same floatingIp). k8s-ha persists per cluster instead.
-        persistOwnedIp:
-          tier === 'k8s'
-            ? (ip) =>
-                updateProjectConfig((onDisk) => {
-                  const env = onDisk.environments?.[environment];
-                  if (env) env.floatingIp = ip;
-                })
-            : null,
-      })
-    : null;
+  // Single k8s's A record (k8s/dns-record.js): started from deployK3s's
+  // onInfraReady, finished by the post-deploy block below. Single k8s only.
+  // A k8s-ha deploy's records have one writer, its plan's update-dns step
+  // (effects/k8s-ha.js, the provider's setupHA), and a second, single-cluster
+  // write after it would replace the HA records with setupSimple's while the
+  // first certificate may still be issuing. Compose never touches the k8s engine.
+  const k8sDns =
+    tier === 'k8s'
+      ? (await import('./k8s/index.js')).createK8sDnsWriter({
+          domain,
+          dnsProvider,
+          dnsToken,
+          dnsZoneId,
+          state,
+          dnsWarmupPromise,
+          getDnsProvider,
+          // Single k8s: the record's target is on disk before the record points
+          // at it, so destroy owns it if the deploy fails (the final save
+          // writes the same floatingIp). k8s-ha persists per cluster instead.
+          persistOwnedIp:
+            tier === 'k8s'
+              ? (ip) =>
+                  updateProjectConfig((onDisk) => {
+                    const env = onDisk.environments?.[environment];
+                    if (env) env.floatingIp = ip;
+                  })
+              : null,
+        })
+      : null;
 
   let deployResult;
   if (tier === 'compose') {
@@ -2327,27 +2331,21 @@ export async function executeDeployment(args, gatheredConfig) {
       // and the cluster leaks.
     }
 
-    // --- Post-deploy DNS update ---
+    // --- Post-deploy DNS barrier (single k8s) ---
     // The dnsWarmupPromise (started in Step 4) created records pointing at
-    // 0.0.0.0 so Cloudflare's edge has the zone record cached before traffic
-    // hits. Now we know the cluster's actual floating IP and need to update
-    // the records to point at it — without this, the verify-app-health probe
-    // below resolves to 0.0.0.0 and times out.
+    // 0.0.0.0; the probe below needs them at the cluster's real IP, or it
+    // resolves to 0.0.0.0 and times out. Single k8s started that write at
+    // infra-ready: finish() awaits it (a refusal fails the deploy here) and is
+    // then a gated no-op, writing only when nothing did or the IP moved.
     //
-    // Compose does the equivalent in its own branch above (line ~436).
-    // Local-first k3s manages DNS records inline here rather than via
-    // Flux annotations + external-dns.
-    {
-      const k8sFloatingIp =
-        deployResult.primary?.floatingIp ||
-        deployResult.floatingIp ||
-        deployResult.primary?.masterIp ||
-        deployResult.masterIp;
-      if (domain && hasAutomatedDns(dnsProvider) && k8sFloatingIp) {
-        // Single k8s usually wrote it already (started at infra-ready): this
-        // awaits that write and is then a gated no-op. k8s-ha writes it here.
-        await k8sDns.finish(k8sFloatingIp);
-      }
+    // k8s-ha has no writer here (k8sDns is null): its plan's update-dns step
+    // wrote the records through setupHA, at the serving primary, and settled
+    // before the plan returned. Compose writes in its own plans. Local-first
+    // k3s manages DNS records here rather than via Flux annotations +
+    // external-dns.
+    if (k8sDns && domain && hasAutomatedDns(dnsProvider)) {
+      const k8sIp = deployResult.floatingIp || deployResult.masterIp;
+      if (k8sIp) await k8sDns.finish(k8sIp);
     }
 
     // --- Verifiable success gate for k8s ---
