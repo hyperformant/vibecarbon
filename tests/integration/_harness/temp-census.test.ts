@@ -9,17 +9,30 @@
  *   temp root, so the census would look at an empty dir and pass anything.
  * - A census that cannot finish (a test removed its own temp dir) still fails
  *   the file with a message and removes the file's temp root.
+ * - A tracked temp dir that cannot be removed (a test locked it) fails the
+ *   file with a message, and the census still runs after it.
  *
  * Each run's root is a temp dir with its own config (only the setup file), so
  * it never reads the repo's vitest.config.ts or its test globs.
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../..');
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+/** Make every dir under `dir` writable again, so it can be removed. */
+function unlockAll(dir: string) {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (!statSync(p).isDirectory()) continue;
+    chmodSync(p, 0o700);
+    unlockAll(p);
+  }
+}
 
 /**
  * Run vitest on `files` (name to source) with the repo's global-setup and
@@ -59,7 +72,12 @@ function runVitest(files: Record<string, string>, testOptions: Record<string, un
       timeout: 120_000,
     },
   );
-  return { status: run.status, out: `${run.stdout}\n${run.stderr}`, left: readdirSync(outerTmp) };
+  return {
+    status: run.status,
+    out: `${run.stdout}\n${run.stderr}`,
+    left: readdirSync(outerTmp),
+    outerTmp,
+  };
 }
 
 const CLEAN = "it('makes nothing', () => { expect(1).toBe(1); });\n";
@@ -105,4 +123,29 @@ describe('the temp-dir census on a real vitest run', () => {
     expect(run.out).toMatch(/the temp census could not finish \(ENOENT/);
     expect(run.left).toEqual([]);
   }, 120_000);
+
+  it.skipIf(isRoot)(
+    'fails a file whose temp dirs cannot be removed, and still runs the census',
+    () => {
+      const run = runVitest({
+        'locked.test.mjs':
+          "import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\n" +
+          `import { createTempDir } from ${JSON.stringify(join(REPO_ROOT, 'tests/_shared/temp-dir.ts'))};\n` +
+          "it('locks a dir it made', () => {\n  const d = createTempDir('vc-locked-');\n" +
+          "  mkdirSync(join(d, 'locked'));\n  writeFileSync(join(d, 'locked', 'f'), '');\n" +
+          "  chmodSync(join(d, 'locked'), 0o500);\n});\n",
+      });
+      try {
+        expect(run.status).toBe(1);
+        expect(run.out).toMatch(
+          /the temp dirs this file's tests made could not all be removed \(EACCES/,
+        );
+        // The census ran after it (and could not remove the locked dir either).
+        expect(run.out).toMatch(/the temp census could not finish \(EACCES/);
+      } finally {
+        unlockAll(run.outerTmp);
+      }
+    },
+    120_000,
+  );
 });

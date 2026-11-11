@@ -329,7 +329,8 @@ export async function withBundle(projectName, options, fn) {
 /**
  * Render the deployment bundle to a private temp dir. The caller owns the dir
  * and must remove it (removeTempDir), as withBundle and the deploy's dispatch
- * do. A render that throws removes its own dir.
+ * do (tests/unit/lib/temp-dir-census.test.ts holds every caller to it). A
+ * render that throws removes its own dir.
  * @param {string} projectName
  * @param {object} options
  * @returns {string} The path to the staged bundle directory

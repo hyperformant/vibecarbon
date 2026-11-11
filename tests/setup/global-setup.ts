@@ -84,8 +84,15 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  // Clean up any remaining temp directories
-  await cleanupAllTempDirs();
+  // Remove the temp dirs this file's tests made. One that cannot be removed
+  // (a test left a dir it locked) fails the file through `problems`, and the
+  // census, the residue check and the TMPDIR restore below still run.
+  let cleanupProblem: string | null = null;
+  try {
+    await cleanupAllTempDirs();
+  } catch (err) {
+    cleanupProblem = `the temp dirs this file's tests made could not all be removed (${(err as Error).message})`;
+  }
   // A census that throws still fails the file, through `problems`, so the
   // residue check and the TMPDIR restore below always run.
   let tempProblem: string | null;
@@ -118,6 +125,7 @@ afterAll(async () => {
         'updateProjectConfig or point the test at a temp dir (vi.spyOn(process, "cwd"))',
     );
   }
+  if (cleanupProblem) problems.push(cleanupProblem);
   if (tempProblem) problems.push(tempProblem);
   if (problems.length > 0) throw new Error(problems.join('. Also, '));
 });
