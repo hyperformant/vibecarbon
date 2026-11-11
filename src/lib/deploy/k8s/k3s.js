@@ -2025,6 +2025,63 @@ export function secretReaders(list, secretNames) {
   return [...readers].sort();
 }
 
+/**
+ * Of `keys` of Secret `secretName`, the ones a Deployment, StatefulSet or
+ * DaemonSet in a `kubectl get -o json` list reads, each with its readers as
+ * `kind/name`, sorted: an env var's secretKeyRef of the key, an envFrom of
+ * the Secret (every key), or a secret or projected volume of it whose items
+ * name the key, or that has none (it mounts every key). Containers, init
+ * and ephemeral ones too, as secretReaders.
+ *
+ * @param {{items?: Array<{kind?: string, metadata?: {name?: string}, spec?: {template?: {spec?: object}}}>}} list
+ * @param {string} secretName
+ * @param {string[]} keys
+ * @returns {Record<string, string[]>} only the keys something reads
+ */
+export function secretKeyReaders(list, secretName, keys) {
+  const wanted = new Set(keys);
+  /** @type {Record<string, Set<string>>} */
+  const found = {};
+  for (const item of list?.items ?? []) {
+    if (!item?.kind || !item.metadata?.name) continue;
+    const pod = item.spec?.template?.spec ?? {};
+    const read = new Set();
+    const every = () => {
+      for (const key of keys) read.add(key);
+    };
+    /** A secret or projected volume's items: none mounts every key. */
+    const mounted = (items) => {
+      if (!items?.length) return every();
+      for (const { key } of items) if (wanted.has(key)) read.add(key);
+    };
+    for (const c of [
+      ...(pod.containers ?? []),
+      ...(pod.initContainers ?? []),
+      ...(pod.ephemeralContainers ?? []),
+    ]) {
+      for (const e of c?.env ?? []) {
+        const ref = e?.valueFrom?.secretKeyRef;
+        if (ref?.name === secretName && wanted.has(ref.key)) read.add(ref.key);
+      }
+      if ((c?.envFrom ?? []).some((e) => e?.secretRef?.name === secretName)) every();
+    }
+    for (const v of pod.volumes ?? []) {
+      if (v?.secret?.secretName === secretName) mounted(v.secret.items);
+      for (const source of v?.projected?.sources ?? []) {
+        if (source?.secret?.name === secretName) mounted(source.secret.items);
+      }
+    }
+    for (const key of read) {
+      found[key] = (found[key] ?? new Set()).add(
+        `${item.kind.toLowerCase()}/${item.metadata.name}`,
+      );
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(found).map(([key, readers]) => [key, [...readers].sort()]),
+  );
+}
+
 /** `a`, `a and b`, `a, b and c`. */
 function listing(items) {
   return items.length < 2
@@ -2075,6 +2132,25 @@ export const READER_ROLLOUT_TIMEOUT_S = 300;
  */
 
 /**
+ * The Deployments, StatefulSets and DaemonSets in a namespace, as one
+ * `kubectl get -o json` list: what secretReaders and secretKeyReaders read.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace: string, signal?: AbortSignal}} args
+ */
+async function listWorkloads({ env, namespace, signal }) {
+  const out = await runKubectlWithRetry(
+    ['-n', namespace, 'get', 'deployments,statefulsets,daemonsets', '-o', 'json'],
+    {
+      env,
+      captureStdout: true,
+      ...(signal && { signal }),
+      description: `list the workloads in ${namespace}`,
+    },
+  );
+  return parseKubectlJson(String(out ?? ''), `the workloads in ${namespace}`);
+}
+
+/**
  * The workloads in a namespace whose pods read any of `secretNames`, found
  * live from what each pod template references (secretReaders), so an
  * upstream manifest that adds or renames a reader needs no list here.
@@ -2090,16 +2166,7 @@ export const READER_ROLLOUT_TIMEOUT_S = 300;
 export async function findSecretReaders({ env, namespace, secretNames, signal }) {
   let list;
   try {
-    const out = await runKubectlWithRetry(
-      ['-n', namespace, 'get', 'deployments,statefulsets,daemonsets', '-o', 'json'],
-      {
-        env,
-        captureStdout: true,
-        ...(signal && { signal }),
-        description: `list the workloads in ${namespace}`,
-      },
-    );
-    list = parseKubectlJson(String(out ?? ''), `the workloads in ${namespace}`);
+    list = await listWorkloads({ env, namespace, signal });
   } catch (err) {
     const secrets = listing(secretNames.map((name) => `${namespace}/${name}`));
     throw new Error(
@@ -2264,10 +2331,10 @@ export async function restartSecretReaders({
 /**
  * Delete a cloud Secret an earlier vibecarbon wrote that nothing reads any
  * more (ProviderClass.K8S_RETIRED_CLOUD_SECRETS), one more copy of the
- * token. `--ignore-not-found`, so a cluster without it is one quiet call;
- * kubectl prints a line only when it deleted one, and only then does this
- * say so. A failure warns and the deploy goes on: nothing reads it, and the
- * next deploy tries again.
+ * token, once removeRetired has found it there and no workload reading it.
+ * `--ignore-not-found`, and kubectl prints a line only when it deleted one,
+ * and only then does this say so. A failure warns and the deploy goes on:
+ * nothing reads it, and the next deploy tries again.
  *
  * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, namespace: string, name: string}} args
  */
@@ -2327,6 +2394,83 @@ async function removeRetiredKeys({ env, namespace, name, keys }) {
 }
 
 /**
+ * Whether a Secret exists, by name only: `-o name` prints no value, so
+ * none of it reaches this process.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace: string, name: string}} args
+ */
+async function secretExists({ env, namespace, name }) {
+  const out = await runKubectlWithRetry(
+    ['-n', namespace, 'get', 'secret', name, '--ignore-not-found', '-o', 'name'],
+    { env, captureStdout: true, description: `look for Secret ${namespace}/${name}` },
+  );
+  return String(out ?? '').trim() !== '';
+}
+
+/**
+ * Remove what an earlier vibecarbon wrote that this deploy found, the whole
+ * Secrets (`whole`, deleteRetiredSecret) and the keys of Secrets it applies
+ * (`keyed`, removeRetiredKeys), and only what no workload in its namespace
+ * reads now (secretReaders, secretKeyReaders): the census holds the record
+ * to what upstream's manifests read, and this holds it to what the cluster
+ * runs, which an operator's own workload or an older controller may
+ * differ from. One kept says what still reads it, and the next deploy
+ * looks again. A list that fails keeps everything in its namespace and
+ * says so; the deploy goes on either way.
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, whole: Array<{namespace: string, name: string}>, keyed: Array<{namespace: string, name: string, keys: string[]}>}} args
+ */
+async function removeRetired({ env, ProviderClass, whole, keyed }) {
+  const namespaces = [...new Set([...whole, ...keyed].map(({ namespace }) => namespace))];
+  for (const namespace of namespaces) {
+    const secrets = whole.filter((r) => r.namespace === namespace);
+    const keys = keyed.filter((r) => r.namespace === namespace);
+    let list;
+    try {
+      list = await listWorkloads({ env, namespace });
+    } catch (err) {
+      const what = [
+        ...secrets.map(({ name }) => `${namespace}/${name}`),
+        ...keys.map(
+          (r) =>
+            `the ${listing(r.keys)} ${r.keys.length === 1 ? 'key' : 'keys'} in ${namespace}/${r.name}`,
+        ),
+      ];
+      const one = secrets.length + keys.reduce((n, r) => n + r.keys.length, 0) === 1;
+      progressLog(
+        `Couldn't check what reads ${listing(what)}, so this deploy kept ${one ? 'it' : 'them'}; ` +
+          `the next deploy tries again.\n${err.message}`,
+      );
+      continue;
+    }
+    const kept = (what, readers) =>
+      progressLog(
+        `Kept ${what}, because ${listing(readers)} still ${readers.length === 1 ? 'reads' : 'read'} ` +
+          'it. The next deploy removes it once nothing does.',
+      );
+    for (const { name } of secrets) {
+      const readers = secretReaders(list, [name]);
+      if (readers.length === 0) {
+        await deleteRetiredSecret({ env, ProviderClass, namespace, name });
+      } else {
+        kept(
+          `${namespace}/${name}, an extra copy of your ${ProviderClass.NAME} API token`,
+          readers,
+        );
+      }
+    }
+    for (const { name, keys: these } of keys) {
+      const read = secretKeyReaders(list, name, these);
+      for (const key of these) {
+        if (read[key]) kept(`the ${key} key in ${namespace}/${name}`, read[key]);
+      }
+      const unread = these.filter((key) => !read[key]);
+      if (unread.length > 0) await removeRetiredKeys({ env, namespace, name, keys: unread });
+    }
+  }
+}
+
+/**
  * Hand the provider API token to the cluster: the Secrets its cloud
  * controller and CSI driver read it from (ProviderClass.k8sCloudSecrets), in
  * one server-side apply from this machine. deployK3s runs it on every deploy
@@ -2352,10 +2496,13 @@ async function removeRetiredKeys({ env, namespace, name, keys }) {
  * listed for a new one either, so a first deploy never fails on the list.
  *
  * What an earlier vibecarbon wrote and nothing reads any more
- * (ProviderClass.K8S_RETIRED_CLOUD_SECRETS) goes too: a whole Secret is
- * deleted alongside the reads (deleteRetiredSecret), and a retired key the
- * read found is patched out after the apply (removeRetiredKeys). Either
- * failure warns, and the next deploy tries again.
+ * (ProviderClass.K8S_RETIRED_CLOUD_SECRETS) goes too, once the apply has
+ * handed the token over, so an apply that fails leaves the copies the
+ * running controllers may read: a whole Secret is looked for alongside the
+ * reads, by name (secretExists), and a retired key the read found is
+ * known; after the apply each goes unless a workload still reads it
+ * (removeRetired). A steady-state deploy is one look per retired Secret.
+ * Every failure there warns, and the next deploy tries again.
  *
  * The boot script's client-side apply left kubectl's last-applied annotation
  * on its Secrets, a copy of what it applied, token included. kubectl 1.26 and
@@ -2389,7 +2536,8 @@ export async function applyCloudSecrets({ env, ProviderClass, token }) {
       .flatMap((r) => r.keys);
   const names = secrets.map(({ namespace, name }) => `${namespace}/${name}`);
   progressLog(`Handing your ${ProviderClass.NAME} API token to the cluster (${names.join(', ')}).`);
-  const [live] = await Promise.all([
+  const retiredWhole = retired.filter((r) => !r.keys);
+  const [live, retiredThere] = await Promise.all([
     Promise.all(
       secrets.map(({ namespace, name, stringData }) =>
         readSecretFingerprints({
@@ -2400,9 +2548,17 @@ export async function applyCloudSecrets({ env, ProviderClass, token }) {
         }),
       ),
     ),
-    ...retired
-      .filter((r) => !r.keys)
-      .map(({ namespace, name }) => deleteRetiredSecret({ env, ProviderClass, namespace, name })),
+    Promise.all(
+      retiredWhole.map(({ namespace, name }) =>
+        secretExists({ env, namespace, name }).catch((err) => {
+          progressLog(
+            `Couldn't look for ${namespace}/${name}, an extra copy of your ${ProviderClass.NAME} ` +
+              `API token an earlier vibecarbon made; the next deploy looks again.\n${err.message}`,
+          );
+          return false;
+        }),
+      ),
+    ),
   ]);
   /** Per namespace, the Secrets that existed and this deploy changes. */
   const changed = new Map();
@@ -2421,9 +2577,19 @@ export async function applyCloudSecrets({ env, ProviderClass, token }) {
       .join('\n---\n'),
     description: `applyCloudSecrets: kubectl apply --server-side ${names.join(' ')}`,
   });
+  await removeRetired({
+    env,
+    ProviderClass,
+    whole: retiredWhole.filter((_, i) => retiredThere[i]),
+    keyed: secrets
+      .map(({ namespace, name }, i) => ({
+        namespace,
+        name,
+        keys: retiredKeys(namespace, name).filter((key) => live[i]?.fingerprints[key]),
+      }))
+      .filter(({ keys }) => keys.length > 0),
+  });
   for (const [i, { namespace, name }] of secrets.entries()) {
-    const present = retiredKeys(namespace, name).filter((key) => live[i]?.fingerprints[key]);
-    if (present.length > 0) await removeRetiredKeys({ env, namespace, name, keys: present });
     if (live[i]?.lastApplied) await dropLastApplied({ env, namespace, name });
   }
   for (const found of readers) await restartSecretReaders({ env, ...found });

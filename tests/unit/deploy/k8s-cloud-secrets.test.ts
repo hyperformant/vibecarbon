@@ -114,6 +114,9 @@ function secretJson(namespace: string, name: string, data: Record<string, string
  */
 function fakeKubectl(args: string[], input?: string): string {
   if (failWhen?.test(args.join(' ')) && kubectlFails) throw kubectlFails;
+  if (args[0] === '-n' && args[2] === 'get' && args[3] === 'secret' && args[7] === 'name') {
+    return cluster.has(`${args[1]}/${args[4]}`) ? `secret/${args[4]}\n` : '';
+  }
   if (args[0] === '-n' && args[2] === 'get' && args[3] === 'secret') {
     const data = cluster.get(`${args[1]}/${args[4]}`);
     if (secretOutput !== null) return secretOutput;
@@ -205,6 +208,7 @@ const {
   readSecretFingerprints,
   restartSecretReaders,
   secretDataChanged,
+  secretKeyReaders,
   secretReaders,
   takesHostPorts,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
@@ -1046,7 +1050,8 @@ describe('applyCloudSecrets', () => {
           '{"data":{"network":null}}',
         ],
       ]);
-      // The next deploy finds nothing to remove: a quiet delete, no patch.
+      // The next deploy finds nothing to remove: one quiet look, by name
+      // only, no list, no delete, no patch.
       calls.length = 0;
       logged = [];
       await apply(PROVIDERS.hetzner);
@@ -1054,18 +1059,181 @@ describe('applyCloudSecrets', () => {
         'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud).',
       ]);
       expect(kubectl('patch')).toEqual([]);
-      expect(kubectl('delete')).toEqual([
-        ['kubectl', '-n', 'kube-system', 'delete', 'secret', 'hcloud-csi', '--ignore-not-found'],
+      expect(kubectl('delete')).toEqual([]);
+      expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+      expect(kubectl('name')).toEqual([
+        [
+          'kubectl',
+          '-n',
+          'kube-system',
+          'get',
+          'secret',
+          'hcloud-csi',
+          '--ignore-not-found',
+          '-o',
+          'name',
+        ],
       ]);
     });
 
-    it('hetzner: the delete goes alongside the reads, before the apply', async () => {
+    it('hetzner: the look goes alongside the reads; the delete and the key removal after the apply', async () => {
       holdLegacy(PROVIDERS.hetzner, TOKEN);
       await apply(PROVIDERS.hetzner);
       const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
+      const lookAt = calls.findIndex(({ argv }) => argv.includes('name'));
       const deleteAt = calls.findIndex(({ argv }) => argv[3] === 'delete');
-      expect(deleteAt).toBeGreaterThan(-1);
-      expect(deleteAt).toBeLessThan(applyAt);
+      const patchAt = calls.findIndex(({ argv }) => argv[3] === 'patch');
+      expect(lookAt).toBeGreaterThan(-1);
+      expect(lookAt).toBeLessThan(applyAt);
+      expect(deleteAt).toBeGreaterThan(applyAt);
+      expect(patchAt).toBeGreaterThan(applyAt);
+    });
+
+    it('hetzner: an apply that fails leaves hcloud-csi and the network key as they were', async () => {
+      holdLegacy(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      failWhen = /^apply /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl apply'), {
+        status: 1,
+        stderr: 'error: the server could not find the requested resource\n',
+      });
+      await expect(apply(PROVIDERS.hetzner)).rejects.toThrow();
+      // What the running controllers may still read stays until a deploy
+      // has handed the token over.
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(true);
+      expect(cluster.get('kube-system/hcloud')).toHaveProperty('network');
+      expect(kubectl('delete')).toEqual([]);
+      expect(kubectl('patch')).toEqual([]);
+    });
+
+    it('hetzner: a Secret something still reads is kept, and the line says what reads it', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      workloads['kube-system'] = [
+        envReader('hcloud-csi-controller', 'hcloud-csi'),
+        {
+          kind: 'DaemonSet',
+          metadata: { name: 'mounts-it' },
+          spec: {
+            template: {
+              spec: {
+                containers: [{ name: 'c' }],
+                volumes: [{ name: 'v', secret: { secretName: 'hcloud-csi' } }],
+              },
+            },
+          },
+        },
+        ...nonReaders,
+      ];
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(true);
+      expect(kubectl('delete')).toEqual([]);
+      expect(logged).toContain(
+        'Kept kube-system/hcloud-csi, an extra copy of your Hetzner Cloud API token, because ' +
+          'daemonset/mounts-it and deployment/hcloud-csi-controller still read it. The next ' +
+          'deploy removes it once nothing does.',
+      );
+      // The network key nothing reads still goes.
+      expect(cluster.get('kube-system/hcloud')).not.toHaveProperty('network');
+      // Once nothing reads it, the next deploy removes it.
+      workloads['kube-system'] = [...nonReaders];
+      logged = [];
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(false);
+      expect(logged).toContain(
+        'Removed kube-system/hcloud-csi, an extra copy of your Hetzner Cloud API token that ' +
+          'nothing reads.',
+      );
+    });
+
+    it.each([
+      [
+        'an env var',
+        { env: [{ name: 'N', valueFrom: { secretKeyRef: { name: 'hcloud', key: 'network' } } }] },
+        {},
+      ],
+      ['an envFrom of the Secret', { envFrom: [{ secretRef: { name: 'hcloud' } }] }, {}],
+      ['a volume of every key', {}, { volumes: [{ name: 'v', secret: { secretName: 'hcloud' } }] }],
+      [
+        'a projected volume naming it',
+        {},
+        {
+          volumes: [
+            {
+              name: 'v',
+              projected: {
+                sources: [{ secret: { name: 'hcloud', items: [{ key: 'network', path: 'n' }] } }],
+              },
+            },
+          ],
+        },
+      ],
+    ])('hetzner: a key something still reads is kept: %s', async (_what, container, pod) => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      workloads['kube-system'] = [
+        readerLike('reads-network', 'hcloud', { container, pod }),
+        ...nonReaders,
+      ];
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.get('kube-system/hcloud')).toHaveProperty('network');
+      expect(kubectl('patch')).toEqual([]);
+      expect(logged).toContain(
+        'Kept the network key in kube-system/hcloud, because deployment/reads-network still ' +
+          'reads it. The next deploy removes it once nothing does.',
+      );
+      // hcloud-csi, which nothing reads, still goes.
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(false);
+    });
+
+    it('hetzner: a volume that mounts other keys of the Secret keeps nothing', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      workloads['kube-system'] = [
+        readerLike('mounts-token', 'hcloud', {
+          pod: {
+            volumes: [
+              { name: 'v', secret: { secretName: 'hcloud', items: [{ key: 'token', path: 't' }] } },
+            ],
+          },
+        }),
+      ];
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.get('kube-system/hcloud')).not.toHaveProperty('network');
+    });
+
+    it('hetzner: a list of what reads them that fails keeps both, says so, and the deploy goes on', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
+        status: 1,
+        stderr: 'error: deployments.apps is forbidden\n',
+      });
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(true);
+      expect(cluster.get('kube-system/hcloud')).toHaveProperty('network');
+      expect(logged).toContain(
+        "Couldn't check what reads kube-system/hcloud-csi and the network key in " +
+          'kube-system/hcloud, so this deploy kept them; the next deploy tries again.\n' +
+          'list the workloads in kube-system failed with exit 1: error: deployments.apps is forbidden',
+      );
+      expect(cluster.get('kube-system/hcloud')?.token).toBe(TOKEN);
+    });
+
+    it('hetzner: a look for hcloud-csi that fails warns, and the deploy goes on', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      failWhen = /^-n kube-system get secret hcloud-csi --ignore-not-found -o name$/;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
+        status: 1,
+        stderr: 'error: secrets "hcloud-csi" is forbidden\n',
+      });
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(true);
+      expect(logged).toContain(
+        "Couldn't look for kube-system/hcloud-csi, an extra copy of your Hetzner Cloud API token " +
+          'an earlier vibecarbon made; the next deploy looks again.\n' +
+          'look for Secret kube-system/hcloud-csi failed with exit 1: ' +
+          'error: secrets "hcloud-csi" is forbidden',
+      );
+      expect(cluster.get('kube-system/hcloud')?.token).toBe(TOKEN);
+      // The key it did find still goes.
+      expect(cluster.get('kube-system/hcloud')).not.toHaveProperty('network');
     });
 
     it('a failed delete warns with the command to run, and the deploy goes on', async () => {
@@ -1153,11 +1321,9 @@ describe('applyCloudSecrets', () => {
         holdAll(Provider, TOKEN);
         await apply(Provider);
         const reads = Provider.k8sCloudSecrets({ token: TOKEN }).map(() => 'get');
-        // A retired Secret's delete finds nothing and says nothing.
-        const deletes = Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys).map(
-          () => 'delete',
-        );
-        expect(verbs()).toEqual([...reads, ...deletes, 'apply']);
+        // A look for each retired Secret, by name, finds nothing and says nothing.
+        const looks = Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys).map(() => 'get');
+        expect(verbs()).toEqual([...reads, ...looks, 'apply']);
         expect(logged).toHaveLength(1);
       },
     );
@@ -1208,8 +1374,13 @@ describe('applyCloudSecrets', () => {
         holdAll(Provider, TOKEN, { boot: true });
         readerPerSecret(Provider);
         await apply(Provider, 'vc-sentinel-token-new');
-        const reads = kubectl('secret').filter((argv) => argv[3] === 'get');
+        const gets = kubectl('secret').filter((argv) => argv[3] === 'get');
+        const reads = gets.filter((argv) => argv.at(-1) === 'json');
         expect(reads.length).toBe(Provider.k8sCloudSecrets({ token: TOKEN }).length);
+        // A retired Secret is looked for by name only: no value comes back.
+        expect(gets.filter((argv) => argv.at(-1) !== 'json').map((argv) => argv.at(-1))).toEqual(
+          Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys).map(() => 'name'),
+        );
         const out = logged.join('\n');
         expect(out).not.toContain(MARK);
         expect(out).not.toContain(Buffer.from(TOKEN).toString('base64').slice(0, 16));
@@ -1267,6 +1438,88 @@ describe('applyCloudSecrets', () => {
       expect(absent).toBeNull();
       expect(secretDataChanged(absent, { token: TOKEN })).toBe(false);
     });
+  });
+});
+
+describe('secretKeyReaders', () => {
+  const list = (...items: Workload[]) => ({ items });
+  const w = (kind: string, name: string, pod: Record<string, unknown>): Workload => ({
+    kind,
+    metadata: { name },
+    spec: { template: { spec: pod } },
+  });
+
+  it('each way a pod reads a key, in every workload kind, each reader once', () => {
+    const found = secretKeyReaders(
+      list(
+        w('Deployment', 'env', {
+          containers: [
+            { env: [{ name: 'A', valueFrom: { secretKeyRef: { name: 's', key: 'a' } } }] },
+          ],
+        }),
+        w('StatefulSet', 'init-env', {
+          initContainers: [
+            { env: [{ name: 'B', valueFrom: { secretKeyRef: { name: 's', key: 'b' } } }] },
+          ],
+        }),
+        w('DaemonSet', 'env-from', { containers: [{ envFrom: [{ secretRef: { name: 's' } }] }] }),
+        w('Deployment', 'volume-items', {
+          containers: [{}],
+          volumes: [{ secret: { secretName: 's', items: [{ key: 'b', path: 'b' }] } }],
+        }),
+        w('Deployment', 'projected-all', {
+          containers: [{}],
+          volumes: [{ projected: { sources: [{ secret: { name: 's' } }] } }],
+        }),
+        w('Deployment', 'twice', {
+          containers: [
+            { env: [{ name: 'A', valueFrom: { secretKeyRef: { name: 's', key: 'a' } } }] },
+            { env: [{ name: 'A', valueFrom: { secretKeyRef: { name: 's', key: 'a' } } }] },
+          ],
+        }),
+      ),
+      's',
+      ['a', 'b', 'c'],
+    );
+    expect(found).toEqual({
+      a: ['daemonset/env-from', 'deployment/env', 'deployment/projected-all', 'deployment/twice'],
+      b: [
+        'daemonset/env-from',
+        'deployment/projected-all',
+        'deployment/volume-items',
+        'statefulset/init-env',
+      ],
+      c: ['daemonset/env-from', 'deployment/projected-all'],
+    });
+  });
+
+  it('only the keys asked about, of that Secret: another Secret, another key or nothing is none', () => {
+    expect(
+      secretKeyReaders(
+        list(
+          w('Deployment', 'other-secret', {
+            containers: [
+              { env: [{ name: 'A', valueFrom: { secretKeyRef: { name: 't', key: 'a' } } }] },
+              { envFrom: [{ secretRef: { name: 't' } }] },
+            ],
+            volumes: [{ secret: { secretName: 't' } }],
+          }),
+          w('Deployment', 'other-key', {
+            containers: [
+              { env: [{ name: 'Z', valueFrom: { secretKeyRef: { name: 's', key: 'z' } } }] },
+            ],
+            volumes: [{ secret: { secretName: 's', items: [{ key: 'z', path: 'z' }] } }],
+          }),
+          w('Deployment', 'config-map', {
+            containers: [{ envFrom: [{ configMapRef: { name: 's' } }] }],
+          }),
+        ),
+        's',
+        ['a'],
+      ),
+    ).toEqual({});
+    expect(secretKeyReaders({ items: [] }, 's', ['a'])).toEqual({});
+    expect(secretKeyReaders(undefined as never, 's', ['a'])).toEqual({});
   });
 });
 
