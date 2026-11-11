@@ -13,6 +13,18 @@ const fileRoot = mkdtempSync(join(tmpdir(), 'vc-test-'));
 const fileTmp = join(fileRoot, 'tmp');
 mkdirSync(fileTmp);
 process.env.TMPDIR = fileTmp;
+// The census needs a fresh worker process per file. A reused one (vitest
+// `isolate: false`) still has the last file's replaced process.env object, so
+// the line above never reaches the real environment os.tmpdir() reads, and
+// the census would inspect an empty dir and pass whatever a test leaves.
+if (tmpdir() !== fileTmp) {
+  rmSync(fileRoot, { recursive: true, force: true });
+  throw new Error(
+    `the temp census needs each test file in its own worker process, but os.tmpdir() is ` +
+      `${tmpdir()} here, not this file's ${fileTmp}: the worker was reused (isolate: false), ` +
+      "so a temp dir a test leaves would go unseen. Run with vitest's default isolation.",
+  );
+}
 
 // Per-file uplink-lock dir: vitest workers are real processes, and the
 // cross-process uplink lock (src/lib/deploy/uplink-lock.js) would otherwise
@@ -74,7 +86,19 @@ afterEach(() => {
 afterAll(async () => {
   // Clean up any remaining temp directories
   await cleanupAllTempDirs();
-  const tempProblem = closeTempRoot(fileRoot, fileTmp);
+  // A census that throws still fails the file, through `problems`, so the
+  // residue check and the TMPDIR restore below always run.
+  let tempProblem: string | null;
+  try {
+    tempProblem = closeTempRoot(fileRoot, fileTmp);
+  } catch (err) {
+    tempProblem = `the temp census could not finish (${(err as Error).message})`;
+    try {
+      rmSync(fileRoot, { recursive: true, force: true });
+    } catch (rmErr) {
+      tempProblem += `, and ${fileRoot} is still there (${(rmErr as Error).message})`;
+    }
+  }
 
   const appeared = CONFIG_RESIDUE.filter(
     (f) => !residueAtStart.has(f) && existsSync(join(REPO_ROOT, f)),
