@@ -73,6 +73,8 @@ import {
   staleClusterIssuersProblem,
   staleObservabilityTlsProblem,
 } from './k8s/index.js';
+import { clusterIngressIp } from './k8s/ingress-ip.js';
+import { releaseRetiredReservedIps } from './k8s/retired-reserved-ip.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
 import { k8sPsqlRunner } from './replication.js';
@@ -954,19 +956,43 @@ function pendingStandbyRecord(secondaryRegion, types) {
 }
 
 /**
- * The success save's per-side k8s-ha record: each cluster's IPs, region,
- * stack identity and the server types it ACTUALLY deployed with, plus the
- * pilot standby's worker spec. Exported for tests.
+ * The floating IP a k8s-ha side records: the cluster's own (Hetzner, Linode),
+ * else a reserved IP the same stack still has on record (a DigitalOcean
+ * cluster made before 2026-11 whose release failed,
+ * k8s/retired-reserved-ip.js), so the next deploy or destroy can still
+ * release it. Matched by stack, which a failover's role swap carries along,
+ * else by role for a side recorded without one.
+ */
+function sideFloatingIp(result, priorHa) {
+  if (result.floatingIp) return result.floatingIp;
+  const byStack = [priorHa?.primary, priorHa?.standby].find(
+    (side) => side?.stack && side.stack === result.stack,
+  );
+  if (byStack) return byStack.floatingIp;
+  // A record saved before sides carried `.stack` (never swapped, since a
+  // failover records it): matched by role, as destroy's backstop does.
+  const role = ['primary', 'standby'].find((r) => String(result.stack ?? '').endsWith(`-${r}`));
+  const byRole = role ? priorHa?.[role] : undefined;
+  return byRole && !byRole.stack ? byRole.floatingIp : undefined;
+}
+
+/**
+ * The success save's per-side k8s-ha record: each cluster's IPs (`ingressIp`
+ * is the address its records point at, clusterIngressIp), region, stack
+ * identity and the server types it ACTUALLY deployed with, plus the pilot
+ * standby's worker spec. Exported for tests.
  *
  * @param {{primary: object, standby: object}} deployResult - the fan-out's per-side results
  * @param {{region: string, secondaryRegion: string, minWorkers?: number}} fallback
+ * @param {object} [priorHa] - the `ha` record on disk before this save
  * @returns {{primary: object, standby: object, standbyWorkerSpec: object}}
  */
-export function haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }) {
+export function haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }, priorHa) {
   return {
     primary: {
       masterIp: deployResult.primary.masterIp,
-      floatingIp: deployResult.primary.floatingIp,
+      ingressIp: clusterIngressIp(deployResult.primary),
+      floatingIp: sideFloatingIp(deployResult.primary, priorHa),
       dbIp: deployResult.primary.dbIp,
       // The database node's PRIVATE IP — the local WireGuard-relay
       // endpoint the failover/restore re-seed dials (deterministic
@@ -994,7 +1020,8 @@ export function haSidesRecord(deployResult, { region, secondaryRegion, minWorker
     },
     standby: {
       masterIp: deployResult.standby.masterIp,
-      floatingIp: deployResult.standby.floatingIp,
+      ingressIp: clusterIngressIp(deployResult.standby),
+      floatingIp: sideFloatingIp(deployResult.standby, priorHa),
       dbIp: deployResult.standby.dbIp,
       dbPrivateIp: deployResult.standby.dbPrivateIp,
       region: deployResult.standby.region ?? secondaryRegion,
@@ -2109,19 +2136,28 @@ export async function executeDeployment(args, gatheredConfig) {
           getDnsProvider,
           // Single k8s: the record's target is on disk before the record points
           // at it, so destroy owns it if the deploy fails (the final save
-          // writes the same floatingIp). k8s-ha persists per cluster instead.
+          // writes the same ingressIp). The cluster's floating IP, where it
+          // has one, is recorded beside it, never a master's own address:
+          // destroy releases a recorded floatingIp by address. k8s-ha
+          // persists per cluster instead.
           persistOwnedIp:
             tier === 'k8s'
-              ? (ip) =>
+              ? ({ ingressIp, floatingIp }) =>
                   updateProjectConfig((onDisk) => {
                     const env = onDisk.environments?.[environment];
-                    if (env) env.floatingIp = ip;
+                    if (!env) return;
+                    env.ingressIp = ingressIp;
+                    if (floatingIp) env.floatingIp = floatingIp;
                   })
               : null,
         })
       : null;
 
   let deployResult;
+  // Where this run's managed-DNS writer has the domain's records and since
+  // when ({target, changedAt}, k8s tiers): read by the release of a retired
+  // DigitalOcean reserved IP below. Null when the records are kept by hand.
+  let dnsWrite = null;
   if (tier === 'compose') {
     // Compose (single, non-HA) runs through the pure step-plan + effect
     // registry (planDeploy → runPlan → EFFECTS), which REPLACES the former
@@ -2249,6 +2285,7 @@ export async function executeDeployment(args, gatheredConfig) {
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );
+    dnsWrite = k8sHaCtx.dnsWrite ?? null;
     // The retired cluster is the standby this deploy just rebuilt and gated on
     // streaming (or finalized degraded under -allow-degraded): this deploy
     // stamps deployedAt, so the fence comes off here, before that save. A
@@ -2344,8 +2381,11 @@ export async function executeDeployment(args, gatheredConfig) {
     // k3s manages DNS records here rather than via Flux annotations +
     // external-dns.
     if (k8sDns && domain && hasAutomatedDns(dnsProvider)) {
-      const k8sIp = deployResult.floatingIp || deployResult.masterIp;
-      if (k8sIp) await k8sDns.finish(k8sIp);
+      // The cluster's ingress IP (clusterIngressIp): its floating IP, or on
+      // DigitalOcean its master's own address, so a master this run replaced
+      // has its record at the new address before the probe below (the early
+      // write already set it, or this call does).
+      dnsWrite = await k8sDns.finish(deployResult);
     }
 
     // --- Verifiable success gate for k8s ---
@@ -2575,6 +2615,53 @@ export async function executeDeployment(args, gatheredConfig) {
         throw new Error(`Public health probe failed: ${reason}`);
       }
     }
+  }
+
+  // A DigitalOcean k8s cluster made before 2026-11 still has its reserved IP
+  // on record, assigned to the master (every up takes it out of the stack's
+  // state, lib/iac/retired-resources.js). Release it by address once the
+  // domain's own nameservers no longer answer with it, no A record in a
+  // managed zone has it, and the record's TTL has passed since DNS moved,
+  // else keep it for a later deploy; with DNS kept by hand, say where to
+  // point the records (k8s/retired-reserved-ip.js). After the public probe,
+  // which throws on failure; before the save below, which reads the record
+  // fresh and so keeps only an address that stayed. A no-op on Hetzner and
+  // Linode.
+  if (isK8sTier(tier)) {
+    const IngressProvider = providerFor(envConfig);
+    const ingressProviderId = providerIdFor(envConfig);
+    // A warm redeploy skips the up, so the stack can still list the address:
+    // the release takes it out first, as every up would, or destroy would
+    // fail on an address already gone.
+    const dropRetired = async (stackName) => {
+      const { dropRetiredStackResources, getOrCreateStack } = await import('../iac/index.js');
+      const stack = await getOrCreateStack(stackName, async () => ({}), {
+        provider: ingressProviderId,
+        providerToken: apiToken,
+        s3Config,
+        projectName: projectConfig.projectName,
+        requireExisting: true,
+      });
+      await dropRetiredStackResources(stack, ingressProviderId);
+    };
+    // Managed DNS: every A record in the zone at the address, through the
+    // same backend and token that wrote the records.
+    const zoneRecordsAt =
+      hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId
+        ? async (address) =>
+            (await getDnsProvider(dnsProvider)).findARecordsAt(dnsToken, dnsZoneId, address)
+        : null;
+    await releaseRetiredReservedIps({
+      environment,
+      Provider: IngressProvider,
+      provider: new IngressProvider(apiToken),
+      log: p.log,
+      domain,
+      dnsWrite,
+      newAddress: clusterIngressIp(deployResult.primary ?? deployResult),
+      dropRetired,
+      zoneRecordsAt,
+    });
   }
 
   // --- STEP 6: Finalize Config (Consolidated) ---
@@ -2819,13 +2906,14 @@ export async function executeDeployment(args, gatheredConfig) {
         // image; only `-allow-degraded` finalizes a warm/degraded standby,
         // which the inner deploy flags on deployResult.
         ...haDegradedRecord(deployResult),
-        // Persist per-cluster floatingIp + dbIp under ha.primary /
-        // ha.standby so failover.identifyServers takes the structured
-        // path that surfaces floatingIp. Without these, identifyServers
-        // falls through to the flat `servers[]` lookup which has only
-        // `ip` — failover then targets the standby's master IP for the
-        // DNS A record instead of the floating IP, bypassing the
-        // FIP-based design.
+        // Persist per-cluster ingressIp (+ floatingIp where the cluster
+        // has one) and dbIp under ha.primary / ha.standby so
+        // failover.identifyServers takes the structured path that
+        // surfaces each cluster's ingress address. Without these,
+        // identifyServers falls through to the flat `servers[]` lookup
+        // which has only `ip` — failover then targets the standby's
+        // master IP for the DNS A record even where the cluster takes
+        // traffic at a floating IP.
         ha: {
           enabled: true,
           failoverRegion: secondaryRegion,
@@ -2840,7 +2928,11 @@ export async function executeDeployment(args, gatheredConfig) {
           // leaves it unset, so an unplanned failover refuses until one does.
           ...haSeedRecord(deployResult),
           ...(deployResult.primary && {
-            ...haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }),
+            ...haSidesRecord(
+              deployResult,
+              { region, secondaryRegion, minWorkers },
+              persistedEnvConfig.ha,
+            ),
             scaleUpList: deriveScaleUpList({
               appManifestText: readFileSync(
                 join(process.cwd(), 'k8s/base/app/deployment.yaml'),
@@ -2893,20 +2985,28 @@ export async function executeDeployment(args, gatheredConfig) {
         masterServerType,
         dbServerType,
         workerServerType,
-        // Single (non-HA) k8s's floating/reserved ingress IP (M3 Task 9f).
-        // `status.js` has read `envConfig.floatingIp` for a long time, but
-        // nothing ever wrote it — deployResult.floatingIp comes straight
-        // back from deployK3s/Pulumi outputs (same key both hetzner-k8s.js
-        // and digitalocean-k8s.js export) and was only ever used in-memory
-        // for the DNS warm-up above. Without persisting it, `destroy`
-        // can't attribute the k8s DNS A record to this env (it points at
-        // the floating IP, not any server's own IP) and, on DO, can't
-        // backstop-delete the Reserved IP by address either — both leaked
-        // silently. HA persists its own per-cluster floatingIp under
+        // Single (non-HA) k8s's floating ingress IP (M3 Task 9f), on the
+        // providers whose clusters have one (Hetzner, Linode). `status.js`
+        // has read `envConfig.floatingIp` for a long time, but nothing ever
+        // wrote it — deployResult.floatingIp comes straight back from
+        // deployK3s/Pulumi outputs and was only ever used in-memory for the
+        // DNS warm-up above. Without persisting it, `destroy` can't
+        // attribute the k8s DNS A record to this env (it points at the
+        // floating IP, not any server's own IP) and, on Linode, can't
+        // backstop-release the reserved IP by address either — both leaked
+        // silently. A DigitalOcean cluster has none: a reserved IP the env
+        // still records here is one the release above could not free, and
+        // the spread of persistedEnvConfig keeps it for the next deploy or
+        // destroy. HA persists its own per-cluster floatingIp under
         // `ha.primary/standby` above instead; this key is absent there
         // since `deployResult.floatingIp` is undefined for an HA result
         // shape.
         ...(deployResult.floatingIp && { floatingIp: deployResult.floatingIp }),
+        // The address the domain's records point at (clusterIngressIp): the
+        // floating IP, or on DigitalOcean the master's own. destroy
+        // attributes the records by it; an HA result has none at the top
+        // level (each side records its own under `ha`).
+        ...(clusterIngressIp(deployResult) && { ingressIp: clusterIngressIp(deployResult) }),
         minWorkers,
         maxWorkers,
       }),

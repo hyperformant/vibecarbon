@@ -122,20 +122,32 @@ export function planDestroyTargets(envConfig, projectConfig, environment) {
   // Owned IPs gate every DNS delete — only records pointing at this env's
   // servers are removed. See the ownership-filtered delete docs in the DNS backends.
   //
-  // k8s DNS records point at the cluster's floating/reserved ingress IP, not
-  // any server's own IP — without folding it in here, every k8s destroy
-  // preserved its own DNS record as "unowned" (M3 Task 9f evidence: both
-  // Hetzner and DO k8s destroys left the A record behind, hand-deleted
-  // afterwards). Single k8s persists it at `envConfig.floatingIp`
-  // (orchestrator.js); k8s-ha persists one per cluster at
-  // `envConfig.ha.primary/standby.floatingIp`. Compose tiers have no
-  // floating-IP concept, so both are simply absent there.
+  // k8s DNS records point at the cluster's ingress IP (clusterIngressIp): its
+  // floating/reserved IP on Hetzner and Linode, which is not any server's own
+  // IP — without folding it in here, every k8s destroy preserved its own DNS
+  // record as "unowned" (M3 Task 9f evidence: both Hetzner and DO k8s
+  // destroys left the A record behind, hand-deleted afterwards). Single k8s
+  // persists it at `envConfig.ingressIp` (orchestrator.js, before the record
+  // points at it); k8s-ha persists one per cluster at
+  // `envConfig.ha.primary/standby.ingressIp`. A record made before
+  // `ingressIp` existed has only the `floatingIp` keys, still read here, as
+  // is a DigitalOcean cluster's retired reserved IP that a deploy could not
+  // release (its records may still point at it). Compose tiers have neither,
+  // so all six are simply absent there. Each address once: on Hetzner and
+  // Linode the ingress IP is the floating IP.
   const ownedIps = [
-    ...(envConfig.servers || []).map((srv) => srv.ip).filter(Boolean),
-    envConfig.floatingIp,
-    envConfig.ha?.primary?.floatingIp,
-    envConfig.ha?.standby?.floatingIp,
-  ].filter(Boolean);
+    ...new Set(
+      [
+        ...(envConfig.servers || []).map((srv) => srv.ip),
+        envConfig.ingressIp,
+        envConfig.ha?.primary?.ingressIp,
+        envConfig.ha?.standby?.ingressIp,
+        envConfig.floatingIp,
+        envConfig.ha?.primary?.floatingIp,
+        envConfig.ha?.standby?.floatingIp,
+      ].filter(Boolean),
+    ),
+  ];
   return { tier, stackEnvs, hasPulumiStack, clusterNames, ownedIps };
 }
 
@@ -2498,7 +2510,7 @@ export function recordPulumiDestroyFailure({
  * that comparison — there is nothing internally inconsistent about it.
  * Only the CALLER can tell (a) from (b), because only the caller holds
  * `envConfig`: if this environment has recorded real infrastructure
- * (servers and/or a floating/reserved IP persisted at deploy time), a
+ * (servers and/or an ingress or floating/reserved IP persisted at deploy time), a
  * resourceCount of 0 is case (b), not (a).
  *
  * Sets `results.pulumiDestroyFailed` on an unverified outcome — the k8s
@@ -2530,6 +2542,9 @@ export function recordPulumiDestroyOutcome({
 }) {
   const hasRecordedInfra =
     (envConfig.servers || []).length > 0 ||
+    !!envConfig.ingressIp ||
+    !!envConfig.ha?.primary?.ingressIp ||
+    !!envConfig.ha?.standby?.ingressIp ||
     !!envConfig.floatingIp ||
     !!envConfig.ha?.primary?.floatingIp ||
     !!envConfig.ha?.standby?.floatingIp;
@@ -2647,6 +2662,13 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
  * pre-d4 shape) named a cluster that never existed on k8s-ha — both real
  * per-stack firewalls/VPCs and BOTH reserved IPs leaked every HA destroy.
  *
+ * - `floatingIp` is a recorded floating/reserved IP only (`floatingIp`, never
+ *   `ingressIp`), so the backstop never releases a master's own address. A
+ *   DigitalOcean cluster made since 2026-11 has none (K8S_FLOATING_IP false;
+ *   its domain points at the master), so its target is null; one made before
+ *   still has its reserved IP recorded until a deploy releases it
+ *   (lib/deploy/k8s/retired-reserved-ip.js), and this releases it if that
+ *   deploy never ran or its release failed.
  * - `sshKeyName` is null on HA: both clusters share one key created OUTSIDE
  *   Pulumi (`${project}-${env}-ha-key`), swept by its own block.
  * - `floatingIp` follows the STACK identity: failover swaps roles under
@@ -2780,14 +2802,16 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s, p
     // k8s, envConfig.ha.{primary,standby}.floatingIp per stack for HA.
     // Also feeds plan.ownedIps above so the DNS record finally matches.
     //
-    // This backstop is not belt-and-braces here, it is THE mechanism: the
-    // reserved IP is the one resource `pulumi destroy` has been observed to
-    // leave behind every time. The upstream provider defects that explain it
-    // (a Delete that never unassigns + an assignment resource that deletes
-    // itself from state on refresh) are written up at the
-    // `digitalocean.ReservedIp` construction site in
-    // src/lib/iac/programs/digitalocean-k8s.js. By the time this runs the
-    // droplets are gone, so the IP is unassigned and a plain DELETE works.
+    // On DigitalOcean only clusters made before 2026-11 have one (today's
+    // program makes none), and this backstop is not belt-and-braces there,
+    // it is THE mechanism: the reserved IP is the one resource `pulumi
+    // destroy` was observed to leave behind every time. The upstream provider
+    // defects that explained it (a Delete that never unassigns + an
+    // assignment resource that deletes itself from state on refresh) were
+    // written up at the former `digitalocean.ReservedIp` construction site in
+    // src/lib/iac/programs/digitalocean-k8s.js (git history). By the time
+    // this runs the droplets are gone, so the IP is unassigned and a plain
+    // DELETE works.
     //
     // A provider whose reserved IPs carry tags (Linode) is asked first
     // whether the saved address is still this cluster's (savedReservedIpOwner).
@@ -3408,7 +3432,8 @@ async function destroyK8sTier({
     // never been observed to leak these, so it opts out of this and only gets the
     // ownedIps fix above (its k8s DNS record was the actual gap there).
     // One pass per Pulumi STACK: k8s-ha is two stacks (`<env>-primary` /
-    // `<env>-standby`), each with its own firewall/VPC/reserved IP — deriving
+    // `<env>-standby`), each with its own firewall/VPC (and reserved IP, on
+    // Linode or a DigitalOcean cluster made before 2026-11) — deriving
     // one cluster name from the user-facing environment here (the pre-d4
     // shape) named a cluster that never existed on HA and leaked all of them.
     // Target list + naming is planK8sBackstopTargets (exported, unit-pinned);

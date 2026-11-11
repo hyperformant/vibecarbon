@@ -23,13 +23,30 @@
  *     order to be referenced in a request" — whereas `droplet_create.yml`'s
  *     `tags` field uses its own schema: "Tag names can either be existing
  *     or new tags," i.e. droplet creation auto-creates a missing tag).
- *     `Vpc`/`ReservedIp`/`ReservedIpAssignment`/`SshKey` have no `tags`
- *     input in `@pulumi/digitalocean` at all, so `Firewall` is the ONLY
- *     resource here needing a pre-created `digitalocean.Tag` (M3 Task 9b) —
- *     see the `tag`/`firewall` declarations below for the dependsOn chain.
- *   - `digitalocean.ReservedIp` + `ReservedIpAssignment` replace Hetzner's
- *     `FloatingIp` + `FloatingIpAssignment` (DO renamed the concept; API
- *     shape differs, same purpose — stable ingress).
+ *     `Vpc`/`SshKey` have no `tags` input in `@pulumi/digitalocean` at all,
+ *     so `Firewall` is the ONLY resource here needing a pre-created
+ *     `digitalocean.Tag` (M3 Task 9b) — see the `tag`/`firewall`
+ *     declarations below for the dependsOn chain.
+ *   - No reserved IP (Hetzner's `FloatingIp`, Linode's `ReservedIp`): the
+ *     cluster's domain points at the master droplet's own public IPv4, as
+ *     DigitalOcean compose's does (clusterIngressIp,
+ *     lib/deploy/k8s/ingress-ip.js). On DigitalOcean the reserved IP never
+ *     moved: failover flips DNS between the two clusters and a resize keeps
+ *     the droplet's address. Its assignment was the one droplet action this
+ *     program ran, and it failed the standby's deploy in run 42401297085
+ *     with `422 Droplet already has a pending event`, on an event the API
+ *     never shows. A cluster made before carries one in its stack and its
+ *     record. Pulumi never deletes it: before every up and preview, and
+ *     before the deploy releases the address, the reserved IP and its
+ *     assignment are taken out of the stack's state
+ *     (lib/iac/retired-resources.js), so the address stays assigned to the
+ *     master and keeps serving while DNS moves. The deploy then releases it
+ *     by address once nothing in DNS points at it
+ *     (lib/deploy/k8s/retired-reserved-ip.js); Pulumi's own delete would
+ *     have cut the domain off before DNS moved, and the provider's delete
+ *     left it allocated and billing on every `pulumi destroy` ever observed
+ *     (the upstream defects are written up in git history, at this file's
+ *     former `digitalocean.ReservedIp('ingress')`).
  *   - No `PlacementGroup` equivalent — DO has no droplet spread/
  *     anti-affinity primitive (M3 dossier §8-repo). Workers are NOT spread
  *     across failure domains the way Hetzner's workers are.
@@ -57,16 +74,16 @@
  *   - Vpc
  *   - Tag (pre-created `cluster:<name>` tag — see Task 9b note below)
  *   - Firewall (tag-attached)
- *   - ReservedIp + ReservedIpAssignment (to master)
  *   - Master droplet (cloud-init: do-master-init.sh via the provider static)
  *   - database droplet (cloud-init: do-db-init.sh via the provider static)
  *   - Worker droplets × N (cloud-init: do-worker-init.sh via the provider static)
  *
  * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp,
- * workerIps, floatingIp, networkId, sshKeyId, k3sToken, clusterName — the
- * SAME key set hetzner-k8s.js exports (wire contract; renderCarbonAutoscaler-
- * Config and deployK3s read these generically through `infraOutputs`
- * regardless of provider). masterPrivateIp/dbPrivateIp are REAL
+ * workerIps, networkId, sshKeyId, k3sToken, clusterName — the key set
+ * hetzner-k8s.js exports minus `floatingIp`, which a cluster without one
+ * leaves out (`DigitalOceanProvider.K8S_FLOATING_IP = false`; renderCarbon-
+ * AutoscalerConfig and deployK3s read these generically through
+ * `infraOutputs` regardless of provider). masterPrivateIp/dbPrivateIp are REAL
  * Pulumi-assigned addresses here (not hardcoded literals — DO has no
  * static-IP assignment to pin them to, unlike Hetzner's byte-identical
  * `10.0.1.1`/`10.0.1.2`). PLUS one DO-only additive key (M3 Task 9c):
@@ -83,7 +100,6 @@ import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
 import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
-import { waitForDropletIdle } from '../droplet-idle.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -300,9 +316,8 @@ export function buildDigitalOceanK8sProgram(config) {
     // do-master-init.sh), so unlike hetzner-k8s.js's master render (which
     // needs the floating IP + network id as template vars), the master
     // user-data here needs neither its own private IP (unknowable
-    // pre-create) nor the Reserved IP (assigned to the master AFTER it
-    // already exists, below) — its var set is exactly
-    // {k3s_version, k3s_token, do_token}.
+    // pre-create) nor an ingress IP (the cluster has none besides its own
+    // address) — its var set is exactly {k3s_version, k3s_token, do_token}.
     const masterUserDataRaw = await DigitalOceanProvider.getK8sMasterUserData({
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
@@ -329,69 +344,6 @@ export function buildDigitalOceanK8sProgram(config) {
       // master to carry it transitively.
       serverResourceOptions('digitalocean:index/droplet:Droplet', { dependsOn: [firewall] }),
     );
-
-    // Reserved IP (stable ingress) + assignment to master. Created after
-    // the master (needs its droplet id) — unlike hetzner-k8s.js's floating
-    // IP, which is created BEFORE the master so its address can be baked
-    // into the master's cloud-init as a --tls-san entry. do-master-init.sh
-    // deliberately has no such entry (see its own comment): DO's Reserved
-    // IP uses a provider-managed anchor mechanism, terminates at traefik
-    // on 80/443, and never touches the k8s API port — so the API server's
-    // certificate never needs to cover it, and there is no ordering
-    // constraint forcing this resource before the master.
-    //
-    // KNOWN GAP (investigated 2026-07-30, deliberately NOT fixed here): on DO
-    // k8s destroys the reserved IP survives `pulumi destroy` and is only
-    // removed by destroy.js's name/address backstop
-    // (provider.deleteReservedIpByAddress — which does clean the cloud). Read
-    // against terraform-provider-digitalocean (the provider
-    // @pulumi/digitalocean 4.76 bridges), two upstream landmines sit on this
-    // exact topology, and BOTH are silent:
-    //
-    //   1. `digitalocean_reserved_ip`'s Delete only performs the Unassign
-    //      action when `droplet_id` is set in ITS OWN state
-    //      (digitalocean/reservedip/resource_reserved_ip.go — `if _, ok :=
-    //      d.GetOk("droplet_id"); ok { ...Unassign... }` guarding the final
-    //      `ReservedIPs.Delete`). We assign via the separate
-    //      ReservedIpAssignment below, so `droplet_id` is never on THIS
-    //      resource — every correctness guarantee therefore rests on the
-    //      sibling assignment still being in state at destroy time.
-    //   2. `digitalocean_reserved_ip_assignment`'s Read DELETES ITSELF FROM
-    //      STATE (`d.SetId("")`) whenever the API reports the IP as not
-    //      assigned to that exact droplet id
-    //      (resource_reserved_ip_assignment.go — `if reservedIP.Droplet == nil
-    //      || reservedIP.Droplet.ID != dropletID`). destroyStack runs
-    //      `stack.refresh()` before every destroy (src/lib/iac/index.js), so a
-    //      single such Read — DO's assign/unassign are async actions, and the
-    //      IP is briefly unassigned around any droplet replacement — silently
-    //      removes the only resource that would have unassigned. Its Delete
-    //      also dereferences `reservedIP.Droplet.ID` with no nil guard, i.e. a
-    //      provider panic on an already-unassigned IP (same shape as the
-    //      hcloud Firewall-delete nil-deref upStack already works around).
-    //
-    // The clean fix is to drop ReservedIpAssignment and set `dropletId`
-    // directly on the ReservedIp (the provider's own docs say the two
-    // mechanisms exist and "cannot be used together"), which restores the
-    // unassign-then-delete path and removes the panic-prone resource. It is
-    // NOT applied because migrating an EXISTING stack makes Pulumi delete the
-    // assignment and then update the ReservedIp to add `droplet_id`, which
-    // calls `ReservedIPActions.Assign` on an IP already assigned to that same
-    // droplet — a 422 that would wedge deploy/destroy on any live DO env until
-    // the stack is recreated. Not cheap, not safe: the backstop stays the
-    // mechanism, and this comment is the map for whoever revisits it.
-    const reservedIp = new digitalocean.ReservedIp('ingress', {
-      region: config.location,
-    });
-    new digitalocean.ReservedIpAssignment('ingress-assignment', {
-      ipAddress: reservedIp.ipAddress,
-      // Resolves only once the master's `create` action has finished: the
-      // provider returns at status `active`, DO refuses a second action
-      // ("Droplet already has a pending event") until `create` completes.
-      dropletId: master.id.apply(async (id) => {
-        await waitForDropletIdle({ token: config.apiToken, dropletId: id });
-        return Number.parseInt(id, 10);
-      }),
-    });
 
     // The master's private address, and what its db and workers wait on. A
     // deploy reads both off the live master. A scale or failover names the
@@ -503,7 +455,6 @@ export function buildDigitalOceanK8sProgram(config) {
       dbIp: dbServer.ipv4Address,
       dbPrivateIp: dbServer.ipv4AddressPrivate,
       workerIps: workers.map((w) => w.ipv4Address),
-      floatingIp: reservedIp.ipAddress,
       networkId: network.id,
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
       k3sToken,

@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BILLING_EXTRAS,
   computeEnvMonthly,
+  extrasFor,
   main,
   parseHetznerExtras,
   providerEntry,
@@ -329,6 +330,12 @@ describe('billing extras', () => {
     expect(String(ip.source)).toMatch(/techdocs\.akamai\.com/);
     const volume = BILLING_EXTRAS.linode.volume as Record<string, unknown>;
     expect(volume).toMatchObject({ perGbMonthly: 0.1, gb: 10 });
+  });
+
+  it('a DigitalOcean k8s cluster bills no ingress IP, only its db volume (the domain points at the master)', () => {
+    expect(BILLING_EXTRAS.digitalocean).not.toHaveProperty('reservedIp');
+    expect(DigitalOceanProvider.K8S_FLOATING_IP).toBe(false);
+    expect(extrasFor(DigitalOceanProvider).perCluster('nyc3')).toBe(0.1 * 10);
   });
 
   it('the Scaleway root volume price is marked unverified, with both SKUs it may bill as', () => {

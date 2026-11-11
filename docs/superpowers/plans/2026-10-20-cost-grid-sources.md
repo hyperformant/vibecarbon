@@ -74,7 +74,7 @@ Plus object storage for backups and uploads, billed once per provider account an
 
 - hetzner-compose: 1 server (+ primary IPv4). compose-ha = 2 of these.
 - hetzner-k8s: 3 servers (+3 primary IPv4), 1 floating IPv4 (ingress), network / placement group / firewall (no charge). db PVC 10Gi on hcloud-volumes (`carbon/k8s/base/db/statefulset.yaml`) = 11 GB volume.
-- digitalocean-k8s: 3 droplets, 1 reserved IP (no charge while assigned), VPC / firewall (no charge), db PVC 10 GiB on do-block-storage.
+- digitalocean-k8s: 3 droplets, VPC / firewall (no charge), db PVC 10 GiB on do-block-storage. No reserved IP since 2026-11: the domain points at the master's own address (it was no charge while assigned, so the grid did not move).
 - linode/vultr compose: 1 instance, IPv4 included. scaleway-compose: 1 server + flexible IPv4 + 40 GB SBS root.
 - Observability add-on (opt-in, off by default) adds 25 GiB of k8s volumes per cluster (grafana 5, loki 10, prometheus 10): about +$2.07 Hetzner, +$2.50 DO.
 - No load balancers, no provider backups, no snapshots by default.

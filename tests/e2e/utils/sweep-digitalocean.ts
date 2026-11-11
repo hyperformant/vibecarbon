@@ -381,9 +381,13 @@ export async function sweepOrphanedDigitalOceanResources(
     );
   }
 
-  // Reserved IPs. digitalocean-k8s.js's `ingress` ReservedIp mints one and it bills WHILE UNASSIGNED — deleting
-  // the droplet it was attached to does NOT release it, so a failed destroy
-  // strands a billing IP.
+  // Reserved IPs. No vibecarbon program mints one on DigitalOcean today: k8s
+  // clusters made since 2026-11 point their domain at the master's own
+  // address. Clusters made before had an `ingress` ReservedIp, released by
+  // their next deploy or by destroy's backstop; one whose release failed is
+  // still out there. A reserved IP bills WHILE UNASSIGNED, and deleting the
+  // droplet it was attached to does NOT release it, so a failed destroy or
+  // release strands a billing IP. This pass is what still looks for them.
   //
   // This counter used to be a hardcoded `floatingIps: 0` with the comment
   // a claim that this tier mints none. True of the

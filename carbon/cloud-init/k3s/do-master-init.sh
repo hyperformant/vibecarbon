@@ -112,15 +112,10 @@ REGEOF
 # --advertise-address is the PRIVATE IP: it's what every pod's 10.43.0.1
 # Endpoints DNATs to, and what agents dial for the apiserver<->kubelet
 # reverse tunnel.
-# --tls-san covers the public and private IPs only. There is deliberately
-# NO entry here for the cluster's stable-ingress Reserved IP (see
-# digitalocean-k8s.js, M3 Task 5): the Reserved IP is not known at boot --
-# it's assigned to this master via a separate API call after the droplet
-# already exists (M3 dossier SS5) -- and DigitalOcean's Reserved IPs use a
-# provider-managed anchor mechanism rather than an OS-level IP binding, so
-# ingress via the Reserved IP terminates at traefik on 80/443 on this
-# node -- it never touches the k8s API port, so the API server's
-# certificate never needs to cover it.
+# --tls-san covers the public and private IPs only. The cluster has no
+# other ingress address: its domain points at this droplet's own public IP
+# (digitalocean-k8s.js), and that traffic terminates at traefik on 80/443,
+# never on the k8s API port.
 # --kubelet-arg=provider-id pre-seeds the CCM's node<->droplet match
 # (removes any name-matching fragility for autoscaler-spawned workers).
 # --disable-cloud-controller + --kubelet-arg=cloud-provider=external

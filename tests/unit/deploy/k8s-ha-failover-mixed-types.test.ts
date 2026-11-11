@@ -34,7 +34,7 @@ const deployK3s = vi.fn(async (opts: Record<string, unknown>) => {
     dbIp: opts.role === 'primary' ? '1.1.1.2' : '2.2.2.2',
     dbPrivateIp: '10.0.1.2',
     masterPrivateIp: '10.0.1.11',
-    floatingIp: opts.role === 'primary' ? '9.9.9.1' : '9.9.9.2',
+    // No floatingIp: a DigitalOcean cluster takes traffic at its master.
   };
   (opts.onInfraReady as (i: unknown) => void)(cluster);
   (opts.onNamespaceReady as () => void)();

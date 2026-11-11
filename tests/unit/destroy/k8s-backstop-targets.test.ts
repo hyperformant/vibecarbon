@@ -116,6 +116,49 @@ describe('planK8sBackstopTargets', () => {
     });
     expect(t.floatingIp).toBeNull();
   });
+
+  it("a cluster on today's program: its ingressIp (the master's own address) is never a release target", () => {
+    const [single] = planK8sBackstopTargets({
+      plan: { tier: 'k8s', stackEnvs: ['e3'] },
+      envConfig: { region: 'nyc3', ingressIp: '198.51.100.7' },
+      projectConfig,
+    });
+    expect(single.floatingIp).toBeNull();
+    const ha = planK8sBackstopTargets({
+      plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
+      envConfig: {
+        ha: {
+          primary: { stack: 'e4-primary', ingressIp: '198.51.100.1' },
+          standby: { stack: 'e4-standby', ingressIp: '198.51.100.2' },
+        },
+      },
+      projectConfig,
+    });
+    expect(ha.map((t) => t.floatingIp)).toEqual([null, null]);
+  });
+
+  it('a reserved IP a DigitalOcean env still holds (not released yet) is released by destroy', () => {
+    // A deploy moved DNS to the master but kept the old reserved IP until DNS
+    // had moved off it (k8s/retired-reserved-ip.js): it stays on record as
+    // floatingIp beside the ingressIp, and destroy releases it by address.
+    const [single] = planK8sBackstopTargets({
+      plan: { tier: 'k8s', stackEnvs: ['e3'] },
+      envConfig: { region: 'nyc3', ingressIp: '198.51.100.7', floatingIp: '203.0.113.9' },
+      projectConfig,
+    });
+    expect(single.floatingIp).toBe('203.0.113.9');
+    const ha = planK8sBackstopTargets({
+      plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
+      envConfig: {
+        ha: {
+          primary: { stack: 'e4-primary', ingressIp: '198.51.100.1', floatingIp: '203.0.113.10' },
+          standby: { stack: 'e4-standby', ingressIp: '198.51.100.2', floatingIp: '203.0.113.20' },
+        },
+      },
+      projectConfig,
+    });
+    expect(ha.map((t) => t.floatingIp)).toEqual(['203.0.113.10', '203.0.113.20']);
+  });
 });
 
 describe('planK8sBackstopTargets on Linode', () => {

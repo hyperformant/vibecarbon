@@ -81,6 +81,25 @@ describe('recordPulumiDestroyOutcome', () => {
     expect(results.pulumiDestroyFailed).toBe(true);
   });
 
+  it('records an unverified verdict when resourceCount is 0 but only an ingressIp is recorded (DigitalOcean k8s)', () => {
+    for (const envConfig of [
+      { servers: [], ingressIp: '198.51.100.7' },
+      { servers: [], ha: { standby: { ingressIp: '198.51.100.8' } } },
+    ]) {
+      const results = makeResults();
+      const verified = recordPulumiDestroyOutcome({
+        destroyResult: { destroyed: true, resourceCount: 0 },
+        envConfig,
+        stackEnv: 'prod',
+        dirLabel: '',
+        results,
+        providerName: 'DigitalOcean',
+      });
+      expect(verified).toBe(false);
+      expect(results.pulumiDestroyFailed).toBe(true);
+    }
+  });
+
   it('records an unverified verdict when resourceCount is 0 but a k8s-ha primary/standby floatingIp is recorded', () => {
     const results = makeResults();
     const envConfig = { servers: [], ha: { primary: { floatingIp: '9.9.9.1' } } };

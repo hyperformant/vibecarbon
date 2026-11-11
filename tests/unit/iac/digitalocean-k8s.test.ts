@@ -6,26 +6,19 @@
  * shape, never actually invoking the program), this file runs the program
  * for real through `pulumi.runtime.setMocks` — the standard Pulumi
  * unit-test harness (no prior precedent in this repo). Mocks return
- * synthetic ids/computed fields (ipv4Address, ipv4AddressPrivate, vpc id,
- * reserved-ip address) so the program's actual resource graph — including
+ * synthetic ids/computed fields (ipv4Address, ipv4AddressPrivate, vpc id)
+ * so the program's actual resource graph — including
  * the master-private-IP-dependent database/worker user-data `.apply()`
  * chains — executes end to end, letting these tests assert on REAL
  * resolved resource inputs rather than re-deriving them by hand.
  */
 import * as pulumi from '@pulumi/pulumi';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
   buildDigitalOceanK8sProgram,
   vpcCidrForCluster,
 } from '../../../src/lib/iac/programs/digitalocean-k8s.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
-
-// The ReservedIpAssignment waits for the master's `create` action to finish
-// (waitForDropletIdle). Stand in for the DO API: every droplet is idle.
-vi.stubGlobal(
-  'fetch',
-  vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ actions: [] }) })),
-);
 
 type CapturedResource = { type: string; name: string; inputs: Record<string, unknown> };
 
@@ -39,10 +32,7 @@ pulumi.runtime.setMocks(
       switch (args.type) {
         case 'digitalocean:index/droplet:Droplet': {
           dropletCounter += 1;
-          // Numeric-string ids (mirrors real DO droplet ids) — the program
-          // does `master.id.apply((id) => Number.parseInt(id, 10))` for the
-          // ReservedIpAssignment, so a non-numeric mock id would silently
-          // produce NaN and mask a real bug.
+          // Numeric-string ids (mirrors real DO droplet ids).
           const id = String(9_000_000 + dropletCounter);
           return {
             id,
@@ -55,10 +45,6 @@ pulumi.runtime.setMocks(
         }
         case 'digitalocean:index/vpc:Vpc':
           return { id: 'vpc-mock-id', state: { ...args.inputs } };
-        case 'digitalocean:index/reservedIp:ReservedIp':
-          return { id: '203.0.113.250', state: { ...args.inputs, ipAddress: '203.0.113.250' } };
-        case 'digitalocean:index/reservedIpAssignment:ReservedIpAssignment':
-          return { id: 'assignment-mock-id', state: { ...args.inputs } };
         case 'digitalocean:index/sshKey:SshKey':
           return { id: '999888', state: { ...args.inputs } };
         case 'digitalocean:index/firewall:Firewall':
@@ -151,10 +137,11 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   beforeAll(async () => {
     const program = buildDigitalOceanK8sProgram(baseConfig);
     const rawOutputs = await program();
-    // sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment,
-    // db, worker-1, worker-2 = 10 resources for this config (M3 Task
-    // 9b added the pre-created cluster Tag the firewall dependsOn).
-    await waitForResourceCount(10);
+    // sshKey, vpc, tag, firewall, master, db, worker-1, worker-2 = 8
+    // resources for this config (M3 Task 9b added the pre-created cluster
+    // Tag the firewall dependsOn; the reserved IP and its assignment left
+    // in 2026-11).
+    await waitForResourceCount(8);
     // pulumi.output(...).promise() deeply resolves every nested Output
     // (including the workerIps array) into a plain value tree — the
     // program's raw return contains live Output instances, not resolved
@@ -189,7 +176,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     );
   });
 
-  it('exports EXACTLY the frozen output-contract keys, plus the DO-only vpcCidr addition (M3 Task 9c)', () => {
+  it('exports EXACTLY the frozen output-contract keys minus floatingIp, plus the DO-only vpcCidr addition (M3 Task 9c)', () => {
     expect(Object.keys(outputs).sort()).toEqual(
       [
         'masterIp',
@@ -199,7 +186,6 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
         'dbIp',
         'dbPrivateIp',
         'workerIps',
-        'floatingIp',
         'networkId',
         'sshKeyId',
         'k3sToken',
@@ -235,8 +221,9 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect(outputs.dbPrivateIp).not.toBe(outputs.masterPrivateIp);
   });
 
-  it('floatingIp output is the Reserved IP address; networkId is the Vpc id; sshKeyId the SshKey id', () => {
-    expect(outputs.floatingIp).toBe('203.0.113.250');
+  it('no floatingIp output (the domain points at masterIp); networkId is the Vpc id; sshKeyId the SshKey id', () => {
+    expect(outputs).not.toHaveProperty('floatingIp');
+    expect(DigitalOceanProvider.K8S_FLOATING_IP).toBe(false);
     expect(outputs.networkId).toBe('vpc-mock-id');
     expect(outputs.sshKeyId).toBe('999888');
   });
@@ -256,17 +243,8 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     }
   });
 
-  it('assigns the Reserved IP to the master droplet (ReservedIpAssignment)', () => {
-    const master = byType('digitalocean:index/droplet:Droplet').find(
-      (d) => d.inputs.name === `${CLUSTER_NAME}-master`,
-    );
-    const assignment = byType('digitalocean:index/reservedIpAssignment:ReservedIpAssignment')[0];
-    expect(assignment.inputs.ipAddress).toBe('203.0.113.250');
-    // master is always the first Droplet-type resource registered (db
-    // and every worker's inputs depend on master.ipv4AddressPrivate, so
-    // Pulumi cannot resolve them before master resolves) — id 9000001.
-    expect(assignment.inputs.dropletId).toBe(9_000_001);
-    expect(master?.inputs).toBeDefined();
+  it('creates no reserved IP and no assignment (run 42401297085: the assign 422d on a hidden pending event)', () => {
+    expect(capturedResources.some((r) => /reservedIp/i.test(r.type))).toBe(false);
   });
 
   it('tags every droplet with the canonical role/node-pool/cluster tags (Task 1 encodeLabel contract)', () => {
@@ -350,12 +328,12 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   });
 
   // M3 Task 5b (Fix D.2) — exact-total resource-count pin. Catches a
-  // silent resource add/drop (e.g. a future edit that stops creating the
-  // ReservedIpAssignment, or accidentally doubles up a Droplet) that none
-  // of the by-type/by-name assertions above would notice on their own.
-  // M3 Task 9b bumped 9 -> 10 (added the pre-created cluster Tag).
-  it('registers EXACTLY 10 resources for minWorkers:2 (sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment, db, 2x worker)', () => {
-    expect(capturedResources.length).toBe(10);
+  // silent resource add/drop (e.g. a reserved IP coming back, or a doubled
+  // Droplet) that none of the by-type/by-name assertions above would notice
+  // on their own. M3 Task 9b bumped 9 -> 10 (added the pre-created cluster
+  // Tag); dropping the reserved IP and its assignment took it to 8.
+  it('registers EXACTLY 8 resources for minWorkers:2 (sshKey, vpc, tag, firewall, master, db, 2x worker)', () => {
+    expect(capturedResources.length).toBe(8);
   });
 
   // M3 Task 5b (Fix D.2) — the outbound rules were declared but never
@@ -416,10 +394,9 @@ describe('buildDigitalOceanK8sProgram — existingSshKeyId reuse (HA shared key)
       existingSshKeyId: '424242',
     });
     const rawOutputs = await program();
-    // vpc, tag, firewall, master, reservedIp, reservedIpAssignment, db,
-    // worker-1, worker-2 = 9 resources (no SshKey — existingSshKeyId reused;
-    // M3 Task 9b bumped 8 -> 9 for the pre-created cluster Tag).
-    await waitForResourceCount(runStart + 9);
+    // vpc, tag, firewall, master, db, worker-1, worker-2 = 7 resources (no
+    // SshKey — existingSshKeyId reused).
+    await waitForResourceCount(runStart + 7);
     outputs = (await pulumi.output(rawOutputs).promise()) as Record<string, unknown>;
   });
 
@@ -451,7 +428,7 @@ describe('buildDigitalOceanK8sProgram — a scale or failover (priorMaster)', ()
       k3sToken: 'replayed',
       priorMaster: PRIOR,
     })();
-    await waitForResourceCount(start + 10);
+    await waitForResourceCount(start + 8);
     mine = capturedResources.slice(start);
   });
 

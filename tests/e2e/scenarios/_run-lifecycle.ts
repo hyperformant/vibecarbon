@@ -1497,21 +1497,22 @@ export async function runLifecycle(
           allResults.push(
             await runDnsFailoverFlipCheck({
               domain: config.domain,
-              // k8s-ha failover moves a floating IP between nodes and never
-              // rewrites the A record, so there is no flip to assert — and
-              // comparing the record against a node IP there would fail a
-              // perfectly healthy failover.
+              // k8s-ha failover repoints the A record at the promoted
+              // cluster's ingress IP (clusterIngressIp: its floating IP, or a
+              // DigitalOcean master's own address), which this node-IP
+              // comparison does not model; runDnsFlipVerified below asserts
+              // that flip, on every provider, through the DNS provider's API.
               expectedIp: config.mode === 'compose-ha' ? (sshCheckMasterIp ?? null) : null,
               skipReason:
                 config.mode === 'compose-ha'
                   ? null
-                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved), which readServingIp reads back in the DNS-provider check below; this node-IP comparison does not apply, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
+                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (its floating/reserved IP, or a DigitalOcean master's own address), which readServingIp reads back in the DNS-provider check below; this node-IP comparison does not apply, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
             }),
           );
           // The same flip read back through the DNS provider's own API (the
           // read the CLI's flipAndVerifyDns trusts), on BOTH modes: k8s-ha's
-          // record carries the promoted cluster's floating IP, which
-          // .vibecarbon.json does track.
+          // record carries the promoted cluster's ingress IP, which
+          // .vibecarbon.json does track (ha.primary.ingressIp).
           allResults.push(await runDnsFlipVerified());
         }
 

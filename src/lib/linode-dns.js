@@ -152,6 +152,21 @@ async function walkPages(apiToken, path, errorPrefix) {
 }
 
 /**
+ * A record's name as the zone stores it, fully qualified: the apex spelling
+ * ('@', '') is the zone itself, a name already under the zone stays.
+ * @param {string} name
+ * @param {string} zoneName
+ * @returns {string}
+ */
+function relativeToFqdn(name, zoneName) {
+  const clean = String(name ?? '').replace(/\.$/, '');
+  const zone = String(zoneName).replace(/\.$/, '');
+  if (clean === '@' || clean === '' || clean === zone) return zone;
+  if (clean.endsWith(`.${zone}`)) return clean;
+  return `${clean}.${zone}`;
+}
+
+/**
  * Resolve the domain NAME behind a numeric zone id. Every public entry point
  * calls this exactly once and passes the result down, so a multi-record
  * operation costs one lookup rather than one per record.
@@ -333,6 +348,27 @@ export async function readARecord(apiToken, zoneId, name) {
   const records = await getRecords(apiToken, zoneId);
   const fqdn = String(name).replace(/\.$/, '');
   return matching(records, fqdnToRelative(name, zoneName), fqdn, 'A').map((r) => r.target);
+}
+
+/**
+ * Every A record in the zone whose value is `address`, by fully qualified
+ * name. The deploy asks before it releases an address the domain used to
+ * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
+ * apex and the wildcard, one the user added, would hand its name to whoever
+ * the address goes to next. Throws when the zone's records cannot be listed.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone identity
+ * @param {string} address - an IPv4 address
+ * @returns {Promise<string[]>} sorted, each name once
+ */
+export async function findARecordsAt(apiToken, zoneId, address) {
+  const zoneName = await getZoneName(apiToken, zoneId);
+  const records = await getRecords(apiToken, zoneId);
+  const names = records
+    .filter((r) => r.type === 'A' && r.target === address)
+    .map((r) => relativeToFqdn(r.name, zoneName));
+  return [...new Set(names)].sort();
 }
 
 /**

@@ -27,6 +27,7 @@ import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
+import { retiredReservedIps } from './lib/deploy/k8s/retired-reserved-ip.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
 import { fetchPublicDomain } from './lib/deploy/public-domain-probe.js';
 import {
@@ -1421,6 +1422,37 @@ export function isHaConfigured(envConfig) {
   return (envConfig.servers ?? []).some((sv) => sv?.role === 'standby');
 }
 
+/**
+ * The environment's held IP rows. A floating IP is the cluster's ingress on
+ * Hetzner and Linode. On DigitalOcean, whose clusters take traffic at the
+ * master's own address, a recorded reserved IP is one a cluster made before
+ * 2026-11 still holds until a deploy sees DNS has moved off it and releases
+ * it (lib/deploy/k8s/retired-reserved-ip.js). Where the record that holds it
+ * (the environment, or the k8s-ha side) also names an ingressIp, a deploy
+ * with this program has run and the domain belongs at that address, so the
+ * reserved IP is the old one. Where none is named, no such deploy has run
+ * yet and the reserved IP is still where the domain points: labelled that
+ * way, so someone checking their DNS sees the address it should show.
+ * Exported for tests.
+ *
+ * @param {object} envConfig
+ * @returns {string[]}
+ */
+export function formatAddressLines(envConfig) {
+  const Provider = resolveEnvProvider(envConfig);
+  if (Provider.K8S_FLOATING_IP === false) {
+    const owners = [envConfig, envConfig.ha?.primary, envConfig.ha?.standby];
+    return retiredReservedIps(Provider, envConfig).map((ip) => {
+      const moved = owners.some((o) => o?.floatingIp === ip && o.ingressIp);
+      const note = moved
+        ? '(old, not released yet)'
+        : '(the ingress until the domain moves to the master)';
+      return `${c.dim('Reserved IP')}    ${ip} ${c.dim(note)}`;
+    });
+  }
+  return envConfig.floatingIp ? [`${c.dim('Floating IP')}    ${envConfig.floatingIp}`] : [];
+}
+
 function renderEnvironment(envName, envConfig, checks) {
   const lines = [];
 
@@ -1447,10 +1479,7 @@ function renderEnvironment(envName, envConfig, checks) {
     lines.push(`${c.dim('Domain')}         ${c.info(envConfig.domain)}`);
   }
 
-  // Floating IP
-  if (envConfig.floatingIp) {
-    lines.push(`${c.dim('Floating IP')}    ${envConfig.floatingIp}`);
-  }
+  lines.push(...formatAddressLines(envConfig));
 
   // S3 Bucket
   if (envConfig.s3?.bucket) {

@@ -213,6 +213,30 @@ export class BaseProvider {
    */
   static K8S_STORAGE_CLASS = '';
 
+  /**
+   * Whether this provider's k8s program gives each cluster a floating (or
+   * reserved) IP for its ingress, exported as the `floatingIp` output, which
+   * deployK3s then requires. Hetzner and Linode do. DigitalOcean does not:
+   * its clusters' domains point at the master's own address
+   * (clusterIngressIp, lib/deploy/k8s/ingress-ip.js), and a deploy releases
+   * the reserved IP a cluster made before that still has on record
+   * (lib/deploy/k8s/retired-reserved-ip.js). The program census
+   * (tests/unit/iac/k8s-floating-ip-output-census.test.ts) holds every k8s
+   * program's outputs to this flag.
+   * @type {boolean}
+   */
+  static K8S_FLOATING_IP = true;
+
+  /**
+   * Resources this provider's programs once declared and no longer do, which
+   * every `up` and preview takes out of the stack's state first
+   * (lib/iac/retired-resources.js, `dropRetiredStackResources`) so Pulumi
+   * never deletes them: what they hold is released another way, once that
+   * is safe. Matched by type token and logical name.
+   * @type {ReadonlyArray<{type: string, name: string}>}
+   */
+  static RETIRED_STACK_RESOURCES = Object.freeze([]);
+
   // ── S3-egress VPC allowance (M3 Task 9c) ─────────────────────────────
   // On DigitalOcean, same-region Spaces endpoints resolve INSIDE pods to a
   // VPC-internal gateway address (e.g. nyc3.digitaloceanspaces.com ->
@@ -1334,6 +1358,8 @@ export class BaseProvider {
   //   k8s:     { masterIp, masterPrivateIp, dbIp, dbPrivateIp,
   //              workerIps, floatingIp, networkId, sshKeyId, k3sToken,
   //              clusterName }
+  //   k8s without a floating IP (K8S_FLOATING_IP false, DigitalOcean):
+  //     the same keys minus floatingIp; the domain points at masterIp.
   //   k8s (DO-only additive, M3 Task 9c): vpcCidr — the Vpc's actual
   //     ipRange, threaded to `applyK3sManifests` so DO deploys can extend
   //     the S3-purposed NetworkPolicy egress rules (see DEFAULT_VPC_CIDR /
@@ -1359,7 +1385,8 @@ export class BaseProvider {
    * MUST dynamic-import the provider's program module inside the method
    * body — see the IAC PROGRAM DISPATCH block above.
    * @param {object} config - Provider-specific k8s stack config
-   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string|number, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr?: string}>>}
+   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp?: string, networkId: string|number, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr?: string}>>}
+   *   `floatingIp` exactly when K8S_FLOATING_IP is true.
    */
   static async getK8sProgram(_config) {
     throw new Error('getK8sProgram() must be implemented by subclass');

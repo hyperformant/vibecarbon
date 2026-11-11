@@ -20,22 +20,32 @@
  * every `getK8sProgram(config)` call, which is how we inspect the assembled
  * program config without exporting internals.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const upStackMock = vi.fn();
 const getStackOutputsMock = vi.fn();
 const getOrCreateStackMock = vi.fn();
 const classifyK3sTokenProbeMock = vi.fn();
+const dropRetiredMock = vi.fn();
+const recordRetiredMock = vi.fn();
 
 vi.mock('../../../src/lib/iac/index.js', () => ({
   upStack: (...a: unknown[]) => upStackMock(...a),
   getStackOutputs: (...a: unknown[]) => getStackOutputsMock(...a),
   getOrCreateStack: (...a: unknown[]) => getOrCreateStackMock(...a),
+  dropRetiredStackResources: (...a: unknown[]) => dropRetiredMock(...a),
   classifyK3sTokenProbe: (...a: unknown[]) => classifyK3sTokenProbeMock(...a),
   // Real implementation is a pure string helper; converge uses it to shape
   // Pulumi aborts so they stop reading "code: -2" (2026-08-06 RCA).
   summarizePulumiError: (err: unknown) =>
     (err instanceof Error ? err.message : String(err)).split('\n')[0],
+}));
+
+// The recorder writes the cwd project config: stood in for here.
+vi.mock('../../../src/lib/deploy/k8s/retired-reserved-ip.js', () => ({
+  recordRetiredReservedIps: (...a: unknown[]) => recordRetiredMock(...a),
 }));
 
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
@@ -82,6 +92,9 @@ beforeEach(() => {
   getStackOutputsMock.mockReset();
   getOrCreateStackMock.mockReset();
   classifyK3sTokenProbeMock.mockReset();
+  dropRetiredMock.mockReset();
+  dropRetiredMock.mockResolvedValue({ removed: [], addresses: [], deployment: null });
+  recordRetiredMock.mockReset();
 
   // Defaults: probe returns an empty (fresh-stack) classification, preview
   // emits no events (no master replace), upStack succeeds with outputs.
@@ -341,5 +354,94 @@ describe('convergeClusterInfra', () => {
     const { Provider, programCalls } = makeProvider();
     await convergeClusterInfra({ ...baseArgs(), Provider });
     expect(programCalls[1]).not.toHaveProperty('priorMaster');
+  });
+  // A DigitalOcean cluster made before 2026-11 still holds a reserved IP its
+  // domain may point at. Scale and failover converge the current program,
+  // which no longer declares it: without the surgery the preview plans, and
+  // the up runs, its delete, cutting the domain off with no DNS move
+  // (lib/iac/retired-resources.js). So it leaves the state before either.
+  it('(i) takes retired resources out of the stack before the preview and the up', async () => {
+    const order: string[] = [];
+    const stack = { name: 'prod', preview: vi.fn(async () => order.push('preview')) };
+    getOrCreateStackMock.mockResolvedValue(stack);
+    dropRetiredMock.mockImplementation(async () => {
+      order.push('drop');
+      return [];
+    });
+    upStackMock.mockImplementation(async () => {
+      order.push('up');
+      return { outputs: { masterIp: '1.2.3.4' }, summary: {} };
+    });
+    const { Provider } = makeProvider();
+
+    await convergeClusterInfra({
+      ...baseArgs({
+        envConfig: { provider: 'digitalocean', minWorkers: 2, maxWorkers: 5, serverType: 'x' },
+      }),
+      Provider,
+    });
+
+    expect(order).toEqual(['drop', 'preview', 'up']);
+    expect(dropRetiredMock).toHaveBeenCalledWith(stack, 'digitalocean', {
+      recordAddresses: expect.any(Function),
+    });
+    // What the surgery takes out goes onto the record of this cluster's stack,
+    // in the environment as the operator names it.
+    const [, , { recordAddresses }] = dropRetiredMock.mock.calls[0];
+    recordAddresses(['203.0.113.9']);
+    expect(recordRetiredMock).toHaveBeenCalledWith({
+      environment: 'unit-cluster-xyz',
+      stackName: 'unit-cluster-xyz',
+      addresses: ['203.0.113.9'],
+    });
+  });
+
+  it('(i2) a failed surgery stops the converge before the preview and the up', async () => {
+    const stack = { name: 'prod', preview: vi.fn(async () => {}) };
+    getOrCreateStackMock.mockResolvedValue(stack);
+    dropRetiredMock.mockRejectedValue(new Error('Could not take the retired reserved IP out'));
+    const { Provider } = makeProvider();
+
+    await expect(
+      convergeClusterInfra({
+        ...baseArgs({
+          envConfig: { provider: 'digitalocean', minWorkers: 2, maxWorkers: 5, serverType: 'x' },
+        }),
+        Provider,
+      }),
+    ).rejects.toThrow(/Could not take the retired reserved IP out/);
+    expect(stack.preview).not.toHaveBeenCalled();
+    expect(upStackMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * (i) holds for scale and failover only while both reach the stack through
+ * this seam. Failover's provisionStandbyCapacity defaults its converge to
+ * makeDefaultConverge, which binds convergeClusterInfra; a failover that grew
+ * its own up or preview would plan the standby's reserved IP's delete, and the
+ * DNS flip that follows targets that very address on a standby no deploy has
+ * moved yet (failover/server-identification.test.ts).
+ */
+describe('scale and failover converge through this seam', () => {
+  const read = (rel: string) =>
+    readFileSync(fileURLToPath(new URL(`../../../src/${rel}`, import.meta.url)), 'utf8');
+
+  it("failover: provisionStandbyCapacity's default converge is convergeClusterInfra", () => {
+    const src = read('failover.js');
+    const start = src.indexOf('async function makeDefaultConverge(');
+    const seam = src.slice(start, src.indexOf('\n}\n', start));
+    expect(start).toBeGreaterThan(0);
+    expect(seam).toContain("await import('./lib/iac/converge-cluster.js')");
+    expect(seam).toMatch(/convergeClusterInfra\(\{\s*\.\.\.args,/);
+    expect(src).toContain('converge = await makeDefaultConverge(creds);');
+    // No other route from failover to a Pulumi up or preview.
+    expect(src).not.toMatch(/\bupStack\(|\.preview\(|\.up\(\{/);
+  });
+
+  it('scale: its infra change goes through convergeClusterInfra', () => {
+    const src = read('scale.js');
+    expect(src).toMatch(/await convergeClusterInfra\(\{/);
+    expect(src).not.toMatch(/\bupStack\(|\.preview\(|\.up\(\{/);
   });
 });

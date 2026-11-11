@@ -4,9 +4,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * k8s-ha writes its DNS records as soon as both clusters' ingress (floating)
- * IPs are known, so the first certificate's issuance overlaps the rest of the
- * deploy, instead of after the replication gate.
+ * k8s-ha writes its DNS records as soon as both clusters' ingress IPs (the
+ * floating IP, or a DigitalOcean cluster's master) are known, so the first
+ * certificate's issuance overlaps the rest of the deploy, instead of after the
+ * replication gate.
  *
  * Why the step sat after the replication gate (archived history: the step
  * was "5." in the first deployK8sHA, after replication, with no comment or
@@ -28,10 +29,12 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => ({
 
 let gate: Promise<void> | null = null;
 let failRole: string | null = null;
-const IPS: Record<string, { masterIp: string; floatingIp: string }> = {
+const FLOATING = {
   'e4-primary': { masterIp: '10.9.0.1', floatingIp: '203.0.113.1' },
   'e4-standby': { masterIp: '10.9.0.2', floatingIp: '203.0.113.2' },
 };
+/** What deployK3s reports per stack; no floatingIp is a DigitalOcean cluster. */
+let IPS: Record<string, { masterIp: string; floatingIp?: string }> = FLOATING;
 const deployK3s = vi.fn(async (opts: Record<string, unknown>) => {
   const ips = IPS[opts.environment as string];
   (opts.onInfraReady as (i: object) => void)?.({
@@ -63,7 +66,7 @@ vi.mock('../../../src/lib/deploy/k8s/ha/image-copy.js', () => ({
 const { K8S_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/k8s-ha.js');
 const { haStacksFrom } = await import('../../../src/lib/deploy/standby-types.js');
 const { swapHaRoles } = await import('../../../src/failover.js');
-const { planDestroyTargets } = await import('../../../src/destroy.js');
+const { planDestroyTargets, planK8sBackstopTargets } = await import('../../../src/destroy.js');
 
 let dir: string;
 const config = () => JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf8'));
@@ -96,6 +99,7 @@ beforeEach(() => {
   deployK3s.mockClear();
   gate = null;
   failRole = null;
+  IPS = FLOATING;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -224,6 +228,129 @@ describe('k8s-ha DNS: written once both ingress IPs are known', () => {
     };
     await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
     await expect(K8S_HA_EFFECTS.haK8sUpdateDns(ctx)).rejects.toThrow(/zone locked/);
+  });
+
+  it('no floating IP (DigitalOcean): the masters, on disk as ingressIp only, before the write', async () => {
+    IPS = {
+      'e4-primary': { masterIp: '198.51.100.1' },
+      'e4-standby': { masterIp: '198.51.100.2' },
+    };
+    const ctx: Record<string, unknown> = {
+      options: options(),
+      dnsWarmupPromise: Promise.resolve(),
+    };
+    setupHA.mockImplementation(async () => {
+      const env = config().environments.e4;
+      expect(env.ha.primary.ingressIp).toBe('198.51.100.1');
+      expect(env.ha.standby.ingressIp).toBe('198.51.100.2');
+      return { success: true };
+    });
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
+    expect(setupHA.mock.calls[0][3]).toEqual([
+      { name: 'q-nbg1', ip: '198.51.100.1' },
+      { name: 'q-hel1', ip: '198.51.100.2' },
+    ]);
+    const env = config().environments.e4;
+    expect(env.ha.primary).not.toHaveProperty('floatingIp');
+    expect(env.ha.standby).not.toHaveProperty('floatingIp');
+    // destroy owns both records, and its reserved-IP backstop is never
+    // handed a master's own address.
+    const plan = planDestroyTargets(env, { projectName: 'q' }, 'e4');
+    expect(plan.ownedIps).toEqual(expect.arrayContaining(['198.51.100.1', '198.51.100.2']));
+    const targets = planK8sBackstopTargets({
+      plan,
+      envConfig: env,
+      projectConfig: { projectName: 'q' },
+    });
+    expect(targets.map((t: { floatingIp: string | null }) => t.floatingIp)).toEqual([null, null]);
+    // The barrier finds the same addresses and writes nothing more.
+    await K8S_HA_EFFECTS.haK8sUpdateDns(ctx);
+    expect(setupHA).toHaveBeenCalledTimes(1);
+  });
+
+  it('no floating IP: a retired reserved IP on record survives the write, for its release', async () => {
+    // A DigitalOcean env made before 2026-11: each side still records the
+    // reserved IP its domain pointed at. The write moves the records to the
+    // masters and keeps the reserved IP on record, where the deploy's
+    // release (and destroy's backstop) find it.
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'q',
+        environments: {
+          e4: {
+            deployMode: 'kubernetes',
+            status: 'deployed',
+            ha: {
+              enabled: true,
+              primary: { stack: 'e4-primary', floatingIp: '203.0.113.1' },
+              standby: { stack: 'e4-standby', floatingIp: '203.0.113.2' },
+            },
+          },
+        },
+      }),
+    );
+    IPS = {
+      'e4-primary': { masterIp: '198.51.100.1' },
+      'e4-standby': { masterIp: '198.51.100.2' },
+    };
+    const ctx: Record<string, unknown> = {
+      options: options(),
+      dnsWarmupPromise: Promise.resolve(),
+    };
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
+    expect((setupHA.mock.calls[0][3] as Array<{ ip: string }>).map((s) => s.ip)).toEqual([
+      '198.51.100.1',
+      '198.51.100.2',
+    ]);
+    const { ha } = config().environments.e4;
+    expect(ha.primary).toMatchObject({ ingressIp: '198.51.100.1', floatingIp: '203.0.113.1' });
+    expect(ha.standby).toMatchObject({ ingressIp: '198.51.100.2', floatingIp: '203.0.113.2' });
+  });
+
+  it('the barrier reports where the records point and since when (ctx.dnsWrite)', async () => {
+    // The orchestrator releases a DigitalOcean env's retired reserved IP only
+    // once the record's TTL has passed since this write (retired-reserved-ip.js).
+    IPS = {
+      'e4-primary': { masterIp: '198.51.100.1' },
+      'e4-standby': { masterIp: '198.51.100.2' },
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse('2026-11-11T09:00:00Z'));
+      const ctx: Record<string, unknown> = {
+        options: options(),
+        dnsWarmupPromise: Promise.resolve(),
+      };
+      await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
+      vi.setSystemTime(Date.parse('2026-11-11T09:20:00Z'));
+      await K8S_HA_EFFECTS.haK8sUpdateDns(ctx);
+      // The early write's time, not the barrier's: nothing was written then.
+      expect(ctx.dnsWrite).toEqual({
+        target: '198.51.100.1',
+        changedAt: Date.parse('2026-11-11T09:00:00Z'),
+      });
+
+      // A primary whose address moved after the early write: the barrier's own write.
+      ctx.primaryResult = { masterIp: '198.51.100.11' };
+      await K8S_HA_EFFECTS.haK8sUpdateDns(ctx);
+      expect(ctx.dnsWrite).toEqual({
+        target: '198.51.100.11',
+        changedAt: Date.parse('2026-11-11T09:20:00Z'),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('manual DNS: the barrier reports no write', async () => {
+    const ctx: Record<string, unknown> = {
+      options: options({ dnsProvider: 'manual' }),
+      dnsWarmupPromise: Promise.resolve(),
+    };
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
+    await K8S_HA_EFFECTS.haK8sUpdateDns(ctx);
+    expect(ctx.dnsWrite).toBeUndefined();
   });
 
   it('manual DNS: nothing written early', async () => {

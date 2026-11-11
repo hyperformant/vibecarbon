@@ -34,6 +34,47 @@ describe('identifyServers', () => {
     });
   });
 
+  it('flips DNS to the recorded ingressIp, over a retired reserved IP still on record', () => {
+    // A DigitalOcean env whose deploy moved its records to the masters but
+    // could not release the old reserved IP: the flip target is the master.
+    const envConfig = {
+      ha: {
+        enabled: true,
+        primary: {
+          masterIp: '1.2.3.4',
+          ingressIp: '1.2.3.4',
+          floatingIp: '10.0.0.1',
+          region: 'nyc3',
+        },
+        standby: { masterIp: '5.6.7.8', ingressIp: '5.6.7.8', region: 'sfo3' },
+      },
+    };
+
+    const result = identifyServers('prod', envConfig, { environments: {} });
+    expect(result?.primary.floatingIp).toBe('1.2.3.4');
+    expect(result?.standby.floatingIp).toBe('5.6.7.8');
+  });
+
+  it('a DigitalOcean standby not yet deployed on this version flips DNS to its reserved IP', () => {
+    // No deploy has recorded an ingressIp, so the domain still points at the
+    // reserved IPs. Failover's converge takes the standby's reserved IP out
+    // of the stack's state rather than delete it (lib/iac/retired-resources.js),
+    // so it is still assigned to the standby's master and serving: the flip
+    // target is that address, never the master's own, which no record or
+    // cache has ever named.
+    const envConfig = {
+      ha: {
+        enabled: true,
+        primary: { masterIp: '1.2.3.4', floatingIp: '203.0.113.9', region: 'nyc3' },
+        standby: { masterIp: '5.6.7.8', floatingIp: '203.0.113.10', region: 'sfo3' },
+      },
+    };
+
+    const result = identifyServers('prod', envConfig, { environments: {} });
+    expect(result?.standby.floatingIp).toBe('203.0.113.10');
+    expect(result?.primary.floatingIp).toBe('203.0.113.9');
+  });
+
   it('identifies servers from the servers array by role', () => {
     const envConfig = {
       servers: [

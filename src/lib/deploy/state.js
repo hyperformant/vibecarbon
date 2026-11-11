@@ -167,6 +167,18 @@ export class StateTracker {
   }
 
   /**
+   * When a completed step last completed, as epoch ms, or null.
+   * @param {string} stepId
+   * @returns {number|null}
+   */
+  getStepCompletedAt(stepId) {
+    const stepState = this.state.steps[stepId];
+    if (stepState?.status !== 'completed') return null;
+    const at = Date.parse(stepState.completedAt ?? '');
+    return Number.isFinite(at) ? at : null;
+  }
+
+  /**
    * Forget one step, so the next deploy runs it. For a path that changes what
    * the step produced without changing the step's inputs.
    * @param {string} stepId

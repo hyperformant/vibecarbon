@@ -172,10 +172,39 @@ export class DigitalOceanProvider extends BaseProvider {
   // M3 Task 6 lifted k8s; d4 (2026-08-27) lifted k8s-ha — the pilot-light
   // standby is the SAME digitalocean-k8s.js program instantiated in the
   // standby region (getDefaultStandbyRegion below picks it), with failover
-  // as a pure DNS flip between the two clusters' own reserved IPs.
+  // as a pure DNS flip between the two clusters' master addresses.
   static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
-  /** Pulumi destroy has left the k8s reserved IP, VPC, firewall and key behind; destroy sweeps them by name. */
+  /**
+   * No reserved IP: a k8s cluster's domain points at its master droplet's
+   * own address, as compose's does. The reserved IP never moved here
+   * (failover flips DNS, a resize keeps the droplet's address), and its
+   * assignment failed a deploy on a pending event the API never shows (run
+   * 42401297085). See digitalocean-k8s.js's module doc.
+   */
+  static K8S_FLOATING_IP = false;
+
+  /**
+   * The reserved IP a k8s cluster made before 2026-11 holds, and its
+   * assignment to the master. Taken out of the stack's state before any `up`
+   * or preview (deploy, scale, failover), never deleted by Pulumi: the
+   * address stays on the master and keeps serving until the deploy has seen
+   * DNS move off it and releases it by address
+   * (lib/deploy/k8s/retired-reserved-ip.js). See lib/iac/retired-resources.js.
+   */
+  static RETIRED_STACK_RESOURCES = Object.freeze([
+    Object.freeze({ type: 'digitalocean:index/reservedIp:ReservedIp', name: 'ingress' }),
+    Object.freeze({
+      type: 'digitalocean:index/reservedIpAssignment:ReservedIpAssignment',
+      name: 'ingress-assignment',
+    }),
+  ]);
+
+  /**
+   * Pulumi destroy has left the k8s VPC, firewall and key behind (and the
+   * reserved IP clusters made before 2026-11 still hold); destroy sweeps them
+   * by name, and the reserved IP by its recorded address.
+   */
   static K8S_DESTROY_BACKSTOP = true;
 
   // Droplet regions WITH Spaces availability only — keeps backup/S3 traffic
@@ -1799,15 +1828,16 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Delete a Reserved IP by its address — the k8s destroy sweep's backstop
-   * for `digitalocean-k8s.js`'s `reservedIp` resource (M3 Task 9f;
-   * DO-only). Unlike every other resource this provider tears down by
-   * name, DO's Reserved IP has no `name` field at all (verified against
-   * `digitalocean-k8s.js`'s program — `new digitalocean.ReservedIp('ingress',
-   * {region})` takes no name input, and the wire API's own path param is the
-   * address itself: `DELETE /v2/reserved_ips/{reserved_ip}`). The only
-   * durable attribution is the address, persisted into `envConfig.floatingIp`
-   * at deploy time (orchestrator.js) — callers pass that value straight
+   * Delete a Reserved IP by its address. k8s clusters made before 2026-11
+   * had one (`digitalocean-k8s.js`'s former `ReservedIp('ingress')`); today's
+   * program makes none. Two callers release it: the first deploy on the
+   * current program (lib/deploy/k8s/retired-reserved-ip.js), once DNS points
+   * at the master, and the destroy sweep's backstop (M3 Task 9f), for a
+   * cluster destroyed before that deploy or whose release failed. DO's
+   * Reserved IP has no `name` field at all, and the wire API's own path param
+   * is the address itself (`DELETE /v2/reserved_ips/{reserved_ip}`), so the
+   * only durable attribution is the address recorded as `envConfig.floatingIp`
+   * (`ha.<role>.floatingIp` on k8s-ha) — callers pass that value straight
    * through. Idempotent — 404 counts as already-gone/success.
    * @param {string} address
    * @returns {Promise<boolean>} true on success or if already gone (404)
@@ -2005,7 +2035,8 @@ export class DigitalOceanProvider extends BaseProvider {
    * static-load graph — mirrors getComposeProgram's shape exactly, and
    * HetznerProvider.getK8sProgram's dispatch pattern.
    * @param {import('../iac/programs/digitalocean-k8s.js').K8sStackConfig} config
-   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   *   No `floatingIp`: K8S_FLOATING_IP is false (the domain points at masterIp).
    *   `vpcCidr` (M3 Task 9c) is the Vpc's actual `ipRange` — see
    *   getS3EgressExtraCidrs above.
    */

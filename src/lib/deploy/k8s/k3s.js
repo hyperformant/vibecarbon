@@ -156,6 +156,7 @@ import {
   registryImageTag,
   standbyImageRef,
 } from './image-delivery.js';
+import { infraFloatingIp } from './ingress-ip.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
 import {
   removeRetiredObservabilityCertificate,
@@ -172,6 +173,7 @@ import {
   kubectlSkewNotice,
   watchAppMigrationFailure,
 } from './readiness.js';
+import { recordRetiredReservedIps } from './retired-reserved-ip.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
 import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
 
@@ -4995,7 +4997,9 @@ export async function reapInFlight(inFlight) {
  * `vibecarbon` namespace exists, so the HA fan-out can start on signals.
  *
  * @param {K3sDeployOptions} options
- * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
+ * @returns {Promise<{masterIp: string, floatingIp?: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
+ *   `floatingIp` only on a provider with K8S_FLOATING_IP: the domain's
+ *   address is clusterIngressIp of this result (k8s/ingress-ip.js).
  */
 export async function deployK3s(options) {
   // What deployK3sSteps started in the background and must not outlive a
@@ -5157,6 +5161,8 @@ async function deployK3sSteps(options, inFlight) {
     });
 
     s.start('Provisioning k3s cluster (Pulumi up)');
+    const requiredOutputs =
+      Provider.K8S_FLOATING_IP === false ? ['masterIp'] : ['masterIp', 'floatingIp'];
     const { outputs } = await perfAsync(`deploy.${perfPrefix}.iac.upStack`, () =>
       upStack(options.environment, program, {
         perfStem: `deploy.${perfPrefix}.iac.upStack`,
@@ -5164,19 +5170,33 @@ async function deployK3sSteps(options, inFlight) {
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
+        // A DigitalOcean cluster made before 2026-11: the reserved IP the up
+        // takes out of this stack goes onto the environment's record, where
+        // the release and destroy find it (k8s/retired-reserved-ip.js).
+        recordRetiredAddresses: (addresses) =>
+          recordRetiredReservedIps({
+            environment: options.operatorEnv ?? options.environment,
+            stackName: options.environment,
+            addresses,
+          }),
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays the loud last resort. Same
         // family member as the compose provision sites (bc94b18): this gate
         // was validation-without-recovery, the exact pre-fix shape that
-        // failed e1's restore re-deploy twice on 2026-08-06/07.
-        requiredOutputs: ['masterIp', 'floatingIp'],
+        // failed e1's restore re-deploy twice on 2026-08-06/07. A provider
+        // without a floating IP (K8S_FLOATING_IP false) outputs none.
+        requiredOutputs,
       }),
     );
-    if (!outputs.masterIp || !outputs.floatingIp) {
-      throw new Error('Pulumi outputs missing masterIp or floatingIp');
+    const missing = requiredOutputs.filter((key) => !outputs[key]);
+    if (missing.length > 0) {
+      throw new Error(`Pulumi outputs missing ${missing.join(' and ')}`);
     }
     state.completeStep('k3s-infra', outputs);
-    s.stop(`Cluster provisioned: master=${outputs.masterIp} floating=${outputs.floatingIp}`);
+    s.stop(
+      `Cluster provisioned: master=${outputs.masterIp}` +
+        (outputs.floatingIp ? ` floating=${outputs.floatingIp}` : ''),
+    );
   }
   const infraOutputs = state.getStepResult('k3s-infra');
   const {
@@ -5190,7 +5210,6 @@ async function deployK3sSteps(options, inFlight) {
     // guard below fails the deploy instead. Re-run the infra step
     // (redeploy) to refresh the persisted outputs.
     masterPrivateIp,
-    floatingIp,
     dbIp,
     dbPrivateIp,
     workerIps,
@@ -5204,6 +5223,11 @@ async function deployK3sSteps(options, inFlight) {
     // fallback there is harmless.
     vpcCidr = Provider.DEFAULT_VPC_CIDR,
   } = infraOutputs;
+  // The cluster's floating IP, only on a provider whose clusters have one. A
+  // DigitalOcean cluster made before 2026-11 saved its reserved IP here; a
+  // skipped step hands that result back, and it must not become the
+  // domain's address again (infraFloatingIp, ./ingress-ip.js).
+  const floatingIp = infraFloatingIp(infraOutputs, Provider);
   if (!masterPrivateIp || !dbPrivateIp) {
     throw new Error(
       'k3s-infra step result is missing masterPrivateIp/dbPrivateIp — the IaC ' +
