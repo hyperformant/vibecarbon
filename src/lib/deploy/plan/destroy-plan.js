@@ -67,8 +67,11 @@ const k8sTail = () => [
   // because the state bucket holds the ONLY evidence a retry — or an operator,
   // by hand — can use to find what is still deployed, and deleting it in the
   // same run that failed to verify a teardown destroyed the evidence alongside
-  // the failure. Keeping the bucket unconditionally is strictly safer than the
-  // gate was, so the condition has nothing left to protect.
+  // the failure. The step must still run on such a destroy: it is where the
+  // bucket is reported kept. The effect itself keeps the bucket, -purge or
+  // not, whenever this destroy keeps the environment's entry (an unverified
+  // Pulumi destroy or an unreleased reserved IP; entryKeptReason in
+  // src/destroy.js), so the retry finds it; only a clean -purge deletes it.
   defineStep({ name: 'retain-state-bucket', effect: 'retainStateBucket' }),
   defineStep({ name: 'handle-backup-bucket', effect: 'handleBackupBucket' }),
   defineStep({ name: 'delete-github-env', effect: 'deleteGithubEnv' }),

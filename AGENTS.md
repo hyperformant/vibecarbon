@@ -68,7 +68,10 @@ derivation. The app uploads bucket is separate: one per environment
 plain destroy and deleted by `-purge`. The derived state bucket is project-level, so `-purge` deletes it
 only with the last live environment, then clears the record and rotates
 `stateBucketGeneration` so the next deploy derives a fresh name instead of
-recreating the deleted one. destroy also records the environment's
+recreating the deleted one. A destroy that keeps the environment's entry
+(`entryKeptReason`: an unverified Pulumi destroy or an unreleased reserved IP)
+keeps the state bucket too, `-purge` or not, because the retry opens its stacks
+there; the next clean `-purge` deletes it. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see
 `lib/env-identity.js`) under `destroyedEnvironments.<env>`; `deploy` seeds a
 same-named environment from it and clears it once the env is live. A sibling

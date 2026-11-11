@@ -1368,7 +1368,15 @@ function preservedBackupHolders(projectConfig, environment, bucketName) {
  * Hetzner, object storage bills per ACCOUNT rather than per bucket, so an extra
  * empty bucket is close to free.
  */
-async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks, environment) {
+async function retainStateBucket(
+  envConfig,
+  projectConfig,
+  args,
+  spinner,
+  leaks,
+  environment,
+  entryKept = null,
+) {
   const stateBucket = envConfig.s3?.stateBucket;
   // Pre-split environments kept Pulumi state in the app storage bucket, which
   // the normal app-bucket path deletes; there is no separate bucket to keep.
@@ -1403,6 +1411,23 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks,
     spinner.start('Pulumi state bucket');
     spinner.stop(
       `Pulumi state bucket kept for ${others.length} other environment(s): ${stateBucket}`,
+    );
+    return { purged: false };
+  }
+
+  // A destroy that keeps the environment's entry (entryKeptReason) left
+  // something the next `vibecarbon destroy` of this environment retries from
+  // that entry, and the retry opens its stacks in this bucket. So -purge
+  // keeps it this time, without rotating the generation or forgetting the
+  // retained name: the retry must resolve this same bucket. The next clean
+  // destroy -purge deletes it. Plain output, like every kept bucket here.
+  if (args?.purgeBackups && entryKept) {
+    spinner.start('Pulumi state bucket');
+    spinner.stop(
+      `Pulumi state bucket kept: ${stateBucket}. This destroy keeps ${environment}'s entry ` +
+        `because ${entryKept.because}, and your next \`vibecarbon destroy ${environment}\` ` +
+        `needs this bucket to retry; a clean \`vibecarbon destroy ${environment} -purge\` ` +
+        'deletes it then.',
     );
     return { purged: false };
   }
@@ -1804,6 +1829,7 @@ async function retainStateBucketEffect(ctx) {
     spinner,
     results.leaks,
     environment,
+    entryKeptReason(results),
   );
   if (outcome?.purged) results.stateBucketPurged = true;
   // What this destroy decided about retainedStateBucket, for the config write
@@ -1855,6 +1881,34 @@ async function deleteGithubEnvEffect(ctx) {
 function joinAddresses(addresses) {
   if (addresses.length <= 1) return addresses.join('');
   return `${addresses.slice(0, -1).join(', ')} and ${addresses.at(-1)}`;
+}
+
+/**
+ * Why this destroy keeps the environment's entry in .vibecarbon.json, or null
+ * when it removes it. The one predicate both readers share: the config step
+ * keeps the entry (updateProjectConfigEffect) and the state-bucket step keeps
+ * the bucket the retry needs (retainStateBucket), so the two cannot disagree.
+ *
+ *   - `unverified`: the Pulumi destroy could not be verified
+ *     (recordPulumiDestroyOutcome, or destroyK8sTier's catch).
+ *   - `unreleased`: a recorded reserved IP of ours the backstop could not
+ *     prove released (keepUnreleased), each address once: on k8s-ha both side
+ *     stacks can name one environment-level address.
+ *
+ * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[]}} results
+ * @returns {{unverified: true, because: string} | {unreleased: string[], because: string} | null}
+ */
+function entryKeptReason(results) {
+  if (results.pulumiDestroyFailed) {
+    return { unverified: true, because: 'its Pulumi destroy was not verified' };
+  }
+  const unreleased = [...new Set(results.unreleasedReservedIps ?? [])];
+  if (unreleased.length === 0) return null;
+  const named =
+    unreleased.length === 1
+      ? `the reserved IP ${unreleased[0]} is`
+      : `the reserved IPs ${joinAddresses(unreleased)} are`;
+  return { unreleased, because: `${named} not released yet` };
 }
 
 /**
@@ -1910,7 +1964,8 @@ async function updateProjectConfigEffect(ctx) {
   // right past the state bucket the round-1 fix just preserved. Never runs
   // for compose tiers — they don't touch Pulumi in destroy.js's sense, so
   // this flag is never set there.
-  if (results.pulumiDestroyFailed) {
+  const kept = entryKeptReason(results);
+  if (kept?.unverified) {
     spinner.start('Updating project configuration');
     writeProjectLevelOnly();
     spinner.stop('Configuration kept (Pulumi destroy was not verified; see the leak report)');
@@ -1926,18 +1981,12 @@ async function updateProjectConfigEffect(ctx) {
   // A recorded reserved IP of ours that the backstop could not prove released
   // (sweepK8sBackstopTargets) is named nowhere but this entry: kept, as
   // above, so the next destroy retries it. The backstop's own leak line says
-  // so; this adds none. Each address once: on k8s-ha both side stacks can
-  // name one environment-level address.
-  const unreleased = [...new Set(results.unreleasedReservedIps ?? [])];
-  if (unreleased.length > 0) {
+  // so; this adds none.
+  if (kept?.unreleased) {
     spinner.start('Updating project configuration');
     writeProjectLevelOnly();
-    const named =
-      unreleased.length === 1
-        ? `the reserved IP ${unreleased[0]} is`
-        : `the reserved IPs ${joinAddresses(unreleased)} are`;
     spinner.stop(
-      `Configuration kept: ${named} not released yet, ` +
+      `Configuration kept: ${kept.because}, ` +
         `so the next \`vibecarbon destroy ${environment}\` can retry`,
     );
     return;
