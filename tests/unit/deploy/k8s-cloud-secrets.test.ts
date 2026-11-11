@@ -428,8 +428,35 @@ describe('applyCloudSecrets', () => {
         const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
         const restartAt = calls.findIndex(({ argv }) => argv[3] === 'rollout');
         expect(restartAt).toBeGreaterThan(applyAt);
+        // Found before it: a list that fails must leave the old value in place.
+        const listAt = calls.findIndex(({ argv }) =>
+          argv.includes('deployments,statefulsets,daemonsets'),
+        );
+        expect(listAt).toBeGreaterThan(-1);
+        expect(listAt).toBeLessThan(applyAt);
       },
     );
+
+    it('a list of what reads it that fails changes nothing, and says to deploy again', async () => {
+      holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
+      readerPerSecret(PROVIDERS.linode);
+      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
+        status: 1,
+        stderr: 'error: deployments.apps is forbidden\n',
+      });
+      const err = await apply(PROVIDERS.linode).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(
+        "Couldn't list the workloads in kube-system to find what reads kube-system/linode, so " +
+          'this deploy left it as it was. Deploy again to hand the new value over.\n' +
+          'list the workloads in kube-system failed with exit 1: error: deployments.apps is forbidden',
+      );
+      // The next deploy finds the Secret still changed and does it all again.
+      expect(applies()).toEqual([]);
+      expect(cluster.get('kube-system/linode')).toEqual({ token: 'vc-sentinel-token-old' });
+      expect(logged.join('\n')).not.toContain(MARK);
+    });
 
     it.each(K8S_PROVIDERS)(
       '%s: Secrets this deploy creates restart nothing',

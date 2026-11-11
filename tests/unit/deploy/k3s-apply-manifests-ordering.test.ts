@@ -1313,6 +1313,57 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
     expect(restarts()).toEqual([]);
     expect(cmdCalls.some((a) => a.includes('deployments,statefulsets,daemonsets'))).toBe(false);
   });
+
+  /** The spawn options of every call, by its argv's position in cmdCalls. */
+  const recordOptions = () => {
+    const options: { signal?: AbortSignal }[] = [];
+    const fake = vi.mocked(spawn).getMockImplementation();
+    vi.mocked(spawn).mockImplementation(((cmd: string, args: string[], opts: object) => {
+      options[cmdCalls.length] = opts ?? {};
+      return fake?.(cmd, args as never, opts as never);
+    }) as typeof spawn);
+    return options;
+  };
+  const isSecretRead = (a: string[]) =>
+    a.includes('get') && a.includes('secret') && a.includes('carbon-autoscaler-config');
+  const isWorkloadList = (a: string[]) => a.includes('deployments,statefulsets,daemonsets');
+
+  it('reads the Secret with no stop signal: a kill after kubectl wrote it would print it under CI', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    const options = recordOptions();
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const readAt = cmdCalls.findIndex(isSecretRead);
+    expect(readAt).toBeGreaterThan(-1);
+    expect(options[readAt]?.signal).toBeUndefined();
+    // What else the autoscaler chain runs still stops with a failed deploy.
+    expect(options[cmdCalls.findIndex(isWorkloadList)]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('finds what reads it before the Secret is applied, so a failed list leaves the old token in place', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const listAt = cmdCalls.findIndex(isWorkloadList);
+    const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+    expect(listAt).toBeGreaterThan(cmdCalls.findIndex(isSecretRead));
+    expect(listAt).toBeLessThan(Number(applied?.seq));
+
+    // The list answers with something that is not JSON: the deploy fails
+    // before the apply, and says to deploy again.
+    cmdCalls = [];
+    stdinCalls = [];
+    kubeSystemWorkloadsOut = 'not json';
+    const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String((err as Error).message)).toContain(
+      "Couldn't list the workloads in kube-system to find what reads " +
+        'kube-system/carbon-autoscaler-config, so this deploy left it as it was. ' +
+        'Deploy again to hand the new value over.',
+    );
+    expect(stdinCalls.some((c) => c.data.includes('name: carbon-autoscaler-config'))).toBe(false);
+    expect(restarts()).toEqual([]);
+  });
 });
 
 describe('applyK3sManifests pilot-standby role', () => {

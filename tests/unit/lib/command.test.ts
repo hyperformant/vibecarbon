@@ -344,4 +344,59 @@ describe('runCommandAsync signal', () => {
     const { runCommandAsync } = await import('../../../src/lib/command.js');
     await expect(runCommandAsync(['true'], { silent: true })).resolves.toBe('');
   });
+
+  describe('under CI, what the child printed', () => {
+    // A child that prints a line, then part of another, then waits. The part
+    // is delivered from the 'close' handler (onStdoutLine), so once it arrives
+    // that handler has run, echo and all.
+    const CHILD = [
+      process.execPath,
+      '-e',
+      "process.stdout.write('vc-sentinel-line\\nvc-sentinel-part'); setTimeout(() => process.exit(3), 5000)",
+    ];
+    let echoed: string[];
+
+    beforeEach(() => {
+      vi.stubEnv('CI', 'true');
+      echoed = [];
+      vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+        echoed.push(args.map(String).join(' '));
+      });
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+    });
+
+    it('an aborted child: never echoed, since its caller may have been reading a Secret', async () => {
+      const { runCommandAsync } = await import('../../../src/lib/command.js');
+      const ac = new AbortController();
+      let closed!: () => void;
+      const close = new Promise<void>((resolve) => {
+        closed = resolve;
+      });
+      const run = runCommandAsync(CHILD, {
+        silent: true,
+        signal: ac.signal,
+        onStdoutLine: (line: string) => {
+          if (line === 'vc-sentinel-line') ac.abort();
+          if (line === 'vc-sentinel-part') closed();
+        },
+      });
+      await expect(run).rejects.toThrow(/abort/i);
+      await close;
+      expect(echoed.join('\n')).not.toContain('vc-sentinel');
+    });
+
+    it('a child that fails on its own: echoed, as before', async () => {
+      const { runCommandAsync } = await import('../../../src/lib/command.js');
+      const quick = [
+        process.execPath,
+        '-e',
+        "process.stdout.write('vc-sentinel-out'); process.exit(3)",
+      ];
+      await expect(runCommandAsync(quick, { silent: true })).rejects.toThrow(/Command failed/);
+      expect(echoed.join('\n')).toContain('vc-sentinel-out');
+    });
+  });
 });

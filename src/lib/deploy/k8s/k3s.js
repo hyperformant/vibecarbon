@@ -1915,16 +1915,19 @@ export const LAST_APPLIED_ANNOTATION = 'kubectl.kubernetes.io/last-applied-confi
  * presence outlive the call, nothing is printed or logged, and a call that
  * fails has printed nothing to stdout for the CI log to echo.
  *
- * @param {{env: NodeJS.ProcessEnv, namespace: string, name: string, keys: string[], signal?: AbortSignal}} args
+ * It takes no abort signal. A read killed after kubectl wrote the Secret is a
+ * failed command, and under CI or DEBUG a failed command's captured output
+ * is printed; a read is one short call, so letting it finish costs nothing.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace: string, name: string, keys: string[]}} args
  * @returns {Promise<{fingerprints: Record<string, string>, lastApplied: boolean}|null>}
  */
-export async function readSecretFingerprints({ env, namespace, name, keys, signal }) {
+export async function readSecretFingerprints({ env, namespace, name, keys }) {
   const out = await runKubectlWithRetry(
     ['-n', namespace, 'get', 'secret', name, '--ignore-not-found', '-o', 'json'],
     {
       env,
       captureStdout: true,
-      ...(signal && { signal }),
       description: `read Secret ${namespace}/${name}`,
     },
   );
@@ -2030,35 +2033,71 @@ function listing(items) {
 }
 
 /**
- * Restart the workloads that read Secrets this deploy just changed: they read
- * them when they start (env from secretKeyRef, the upstream CCM/CSI manifests
- * and the cluster autoscaler), so a new value reaches them only through a new
- * pod. Found live from what each pod template references, so an upstream
- * manifest that adds or renames a reader needs no list here. `kubectl rollout
- * restart` and no wait: the rollout runs on its own.
+ * @typedef {Object} SecretReaders
+ * @property {string} namespace
+ * @property {string[]} readers the workloads whose pods read any of the Secrets, as `kind/name`
+ * @property {string[]} read the Secrets something reads, by name
+ */
+
+/**
+ * The workloads in a namespace whose pods read any of `secretNames`, found
+ * live from what each pod template references (secretReaders), so an
+ * upstream manifest that adds or renames a reader needs no list here.
+ *
+ * Run BEFORE the apply that changes the Secrets. A list that fails there
+ * leaves them as they were, so the next deploy finds them still changed and
+ * does it all again. Run after, it would leave a changed Secret that no
+ * restart follows and no later deploy would ever restart for.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace: string, secretNames: string[], signal?: AbortSignal}} args
+ * @returns {Promise<SecretReaders>}
+ */
+export async function findSecretReaders({ env, namespace, secretNames, signal }) {
+  let list;
+  try {
+    const out = await runKubectlWithRetry(
+      ['-n', namespace, 'get', 'deployments,statefulsets,daemonsets', '-o', 'json'],
+      {
+        env,
+        captureStdout: true,
+        ...(signal && { signal }),
+        description: `list the workloads in ${namespace}`,
+      },
+    );
+    list = parseKubectlJson(String(out ?? ''), `the workloads in ${namespace}`);
+  } catch (err) {
+    const secrets = listing(secretNames.map((name) => `${namespace}/${name}`));
+    throw new Error(
+      `Couldn't list the workloads in ${namespace} to find what reads ${secrets}, so this ` +
+        `deploy left ${secretNames.length === 1 ? 'it as it was' : 'them as they were'}. ` +
+        `Deploy again to hand the new value over.\n${err.message}`,
+      { cause: err },
+    );
+  }
+  return {
+    namespace,
+    readers: secretReaders(list, secretNames),
+    // The restart line names only the Secrets something reads.
+    read: secretNames.filter((name) => secretReaders(list, [name]).length > 0),
+  };
+}
+
+/**
+ * Restart the workloads that read Secrets this deploy just changed, as
+ * findSecretReaders found them before the apply: they read them when they
+ * start (env from secretKeyRef, the upstream CCM/CSI manifests and the
+ * cluster autoscaler), so a new value reaches them only through a new pod.
+ * `kubectl rollout restart` and no wait: the rollout runs on its own.
  *
  * A restart that fails leaves them on the old value, and the next deploy
  * finds the Secret already matching and restarts nothing, so the error says
  * how to restart them by hand.
  *
- * @param {{env: NodeJS.ProcessEnv, namespace: string, secretNames: string[], signal?: AbortSignal}} args
+ * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal}} args
  * @returns {Promise<string[]>} what it restarted, as `kind/name`
  */
-export async function restartSecretReaders({ env, namespace, secretNames, signal }) {
-  const out = await runKubectlWithRetry(
-    ['-n', namespace, 'get', 'deployments,statefulsets,daemonsets', '-o', 'json'],
-    {
-      env,
-      captureStdout: true,
-      ...(signal && { signal }),
-      description: `list the workloads in ${namespace}`,
-    },
-  );
-  const list = parseKubectlJson(String(out ?? ''), `the workloads in ${namespace}`);
-  const readers = secretReaders(list, secretNames);
+export async function restartSecretReaders({ env, namespace, readers, read, signal }) {
   if (readers.length === 0) return readers;
-  // The line names only the Secrets something reads.
-  const read = secretNames.filter((name) => secretReaders(list, [name]).length > 0);
   const secrets = listing(read.map((name) => `${namespace}/${name}`));
   const one = readers.length === 1;
   progressLog(
@@ -2105,10 +2144,10 @@ export async function restartSecretReaders({ env, namespace, secretNames, signal
  *
  * The controllers read the token when they start. So each Secret is read
  * first (readSecretFingerprints), and when one that existed now gets other
- * values, the workloads that read it are restarted after the apply
- * (restartSecretReaders). An unchanged Secret restarts nothing, and neither
- * does a new one: its readers could not start without it, and they pick it
- * up as soon as it exists.
+ * values, the workloads that read it are found before the apply
+ * (findSecretReaders) and restarted after it (restartSecretReaders). An
+ * unchanged Secret restarts nothing, and neither does a new one: its readers
+ * could not start without it, and they pick it up as soon as it exists.
  *
  * The boot script's client-side apply left kubectl's last-applied annotation
  * on its Secrets, a copy of what it applied, token included. kubectl 1.26 and
@@ -2162,6 +2201,15 @@ export async function applyCloudSecrets({
       readSecretFingerprints({ env, namespace, name, keys: Object.keys(stringData) }),
     ),
   );
+  const changed = new Map();
+  secrets.forEach(({ namespace, name, stringData }, i) => {
+    if (!secretDataChanged(live[i], stringData)) return;
+    changed.set(namespace, [...(changed.get(namespace) ?? []), name]);
+  });
+  const readers = [];
+  for (const [namespace, secretNames] of changed) {
+    readers.push(await findSecretReaders({ env, namespace, secretNames }));
+  }
   await runKubectlWithRetry([...CLOUD_SECRETS_APPLY_ARGV], {
     env,
     input: secrets
@@ -2172,14 +2220,7 @@ export async function applyCloudSecrets({
   for (const [i, { namespace, name }] of secrets.entries()) {
     if (live[i]?.lastApplied) await dropLastApplied({ env, namespace, name });
   }
-  const changed = new Map();
-  secrets.forEach(({ namespace, name, stringData }, i) => {
-    if (!secretDataChanged(live[i], stringData)) return;
-    changed.set(namespace, [...(changed.get(namespace) ?? []), name]);
-  });
-  for (const [namespace, secretNames] of changed) {
-    await restartSecretReaders({ env, namespace, secretNames });
-  }
+  for (const found of readers) await restartSecretReaders({ env, ...found });
 }
 
 /**
@@ -4043,18 +4084,27 @@ export async function applyK3sManifests({
         sshKeyName: caSshKeyName,
       });
       // The token as the autoscaler holds it now: it reads it only when it
-      // starts, so a replaced one restarts it once the apply below is done.
+      // starts, so a replaced one restarts it once the apply below is done,
+      // and what reads it is found before that apply (findSecretReaders).
       // Its last-applied annotation needs no removal (dropLastApplied): every
       // writer of this Secret (this apply, `scale`) applies it client-side,
       // which rewrites the record, so it holds the token just applied, never
-      // a replaced one.
+      // a replaced one. The read takes no stop signal (readSecretFingerprints
+      // says why); it is one short call.
       const caTokenBefore = await readSecretFingerprints({
         env,
         namespace: 'kube-system',
         name: 'carbon-autoscaler-config',
         keys: ['token'],
-        signal: caStop.signal,
       });
+      const caReaders = secretDataChanged(caTokenBefore, { token: apiToken })
+        ? await findSecretReaders({
+            env,
+            namespace: 'kube-system',
+            secretNames: ['carbon-autoscaler-config'],
+            signal: caStop.signal,
+          })
+        : null;
       {
         const caSecretYaml = [
           'apiVersion: v1',
@@ -4126,14 +4176,7 @@ export async function applyK3sManifests({
       // A replaced token: the env var it reads it into is set at start, and
       // config.json, the other key, is a file it reloads on its own. After
       // the apply and the image pin, so the rollout wait below covers it.
-      if (secretDataChanged(caTokenBefore, { token: apiToken })) {
-        await restartSecretReaders({
-          env,
-          namespace: 'kube-system',
-          secretNames: ['carbon-autoscaler-config'],
-          signal: caStop.signal,
-        });
-      }
+      if (caReaders) await restartSecretReaders({ env, ...caReaders, signal: caStop.signal });
       if (pilotStandby) {
         // Pilot-light: CA has nothing to scale for until a failover promotes
         // this cluster, so zero it the same way as the app Deployment (step 5).

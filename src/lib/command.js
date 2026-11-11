@@ -312,7 +312,11 @@ export function runCommandAsync(cmd, options = {}) {
         error.status = code;
         error.timedOut = timedOut;
 
-        if (process.env.CI || process.env.DEBUG) {
+        // A child its caller aborted was stopped on purpose, not a failure to
+        // debug, and the promise already rejected with the AbortError. What
+        // it printed stays unechoed: a caller that captures output may have
+        // been reading a Secret.
+        if ((process.env.CI || process.env.DEBUG) && !options.signal?.aborted) {
           console.error(`Command failed: ${commandStr}`);
           console.error('stdout:', stdout);
           console.error('stderr:', stderr);
