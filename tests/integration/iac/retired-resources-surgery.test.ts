@@ -21,6 +21,10 @@
  *     assigned to the master), and a second surgery is a no-op;
  *   - a child parented to the removed IP moves to the IP's parent and the
  *     import accepts that too;
+ *   - k8s-ha with the address on the environment's own record, which names
+ *     both side stacks: one side lets go of it and the other cannot (its
+ *     state is locked by another run). Nothing is released, the address
+ *     stays on record and assigned, and both stacks still destroy;
  *   - a warm redeploy (no up, so the stack still lists the IP and its
  *     assignment): the deploy's release takes them out of the stack before
  *     it releases the address, and destroy then succeeds. The control
@@ -39,7 +43,10 @@ import { fileURLToPath } from 'node:url';
 import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { releaseRetiredReservedIps } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
+import {
+  createDropRetired,
+  releaseRetiredReservedIps,
+} from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
 
 const hasPulumi = (() => {
@@ -309,6 +316,114 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
       await current.destroy();
       const after = JSON.stringify((await current.exportStack()).deployment ?? {});
       expect(after).not.toContain('::master');
+    });
+
+    it('k8s-ha: one side lets go and the other cannot, so nothing is released and both stacks still destroy', async () => {
+      const primaryUp = await (await stackFor('mix-primary', oldProgram())).up();
+      const standbyUp = await (await stackFor('mix-standby', oldProgram())).up();
+      const address = ipOf(primaryUp.outputs);
+      const standbyAddress = ipOf(standbyUp.outputs);
+      const masterId = String(primaryUp.outputs.masterId.value);
+
+      // The address is on the environment's own record, so it could be either
+      // side's: both side stacks are asked to let go of it, primary first.
+      const config = {
+        environments: {
+          mix: {
+            floatingIp: address,
+            ingressIp: MASTER,
+            ha: { primary: { stack: 'mix-primary' }, standby: { stack: 'mix-standby' } },
+          },
+        },
+      };
+      const updateConfig = (fn: (c: typeof config) => void) => fn(config);
+      // Another run holds the standby's state: its import is refused.
+      const standbyLocks = join(backend, '.pulumi/locks/organization/vcretired/mix-standby');
+      mkdirSync(standbyLocks, { recursive: true });
+      writeFileSync(
+        join(standbyLocks, '11111111-2222-3333-4444-555555555555.json'),
+        JSON.stringify({
+          pid: 4194000,
+          username: 'someone',
+          hostname: 'another-laptop',
+          timestamp: new Date().toISOString(),
+        }),
+      );
+
+      const dropRetired = createDropRetired({
+        environment: 'mix',
+        openStack: (stackName) => stackFor(stackName, newProgram(address)),
+        // The surgery every up runs, as dropRetiredStackResources runs it:
+        // record what it takes out, then import.
+        drop: async (stack, { recordAddresses }) => {
+          const s = stack as Awaited<ReturnType<typeof stackFor>>;
+          const { deployment, removed, addresses } = dropStackResources(
+            await s.exportStack(),
+            RETIRED,
+          );
+          if (removed.length === 0) return;
+          await recordAddresses(addresses);
+          await s.importStack(deployment);
+        },
+        updateConfig: updateConfig as never,
+      });
+      const deletes: string[] = [];
+      const out = await releaseRetiredReservedIps({
+        environment: 'mix',
+        Provider: { K8S_FLOATING_IP: false, NAME: 'DigitalOcean' },
+        provider: {
+          deleteReservedIpByAddress: async (a: string) => {
+            deletes.push(a);
+            return releaseByAddress(a);
+          },
+        },
+        log: { info: () => {}, warn: () => {} },
+        domain: DOMAIN,
+        dnsWrite: { target: MASTER, changedAt: Date.now() - 3_600_000 },
+        newAddress: MASTER,
+        dropRetired,
+        zoneRecordsAt: async () => [],
+        lookup: moved as never,
+        readConfig: () => config,
+        updateConfig: updateConfig as never,
+      });
+
+      // Nothing released: no DELETE, the address on record and still assigned.
+      expect(out.released).toEqual([]);
+      expect(out.kept).toEqual([{ address, reason: expect.stringContaining('stack mix-standby') }]);
+      expect(deletes).toEqual([]);
+      expect(config.environments.mix.floatingIp).toBe(address);
+      expect(readCloud().things?.['fakecloud:index:ReservedIp'][address]?.assignedTo).toBe(
+        masterId,
+      );
+      // The primary let go of its IP; the standby still lists its own.
+      const primaryHeld = JSON.stringify(
+        (await stackFor('mix-primary', newProgram(address)).then((st) => st.exportStack()))
+          .deployment,
+      );
+      expect(primaryHeld).not.toContain('::ingress-assignment');
+      const standbyHeld = JSON.stringify(
+        (await stackFor('mix-standby', newProgram(address)).then((st) => st.exportStack()))
+          .deployment,
+      );
+      expect(standbyHeld).toContain('::ingress-assignment');
+
+      // Once the other run is done, both stacks destroy.
+      rmSync(standbyLocks, { recursive: true, force: true });
+      for (const [name, held] of [
+        ['mix-primary', address],
+        ['mix-standby', standbyAddress],
+      ] as const) {
+        const current = await stackFor(name, newProgram(held));
+        await current.refresh();
+        await current.destroy();
+        const after = JSON.stringify((await current.exportStack()).deployment ?? {});
+        expect(after, `${name} destroyed`).not.toContain('::master');
+      }
+      // The primary's address outlived both stacks, still on record: destroy's
+      // reserved-IP backstop releases it by that record.
+      expect(readCloud().things?.['fakecloud:index:ReservedIp'][address]).toBeDefined();
+      expect(readCloud().things?.['fakecloud:index:ReservedIp'][standbyAddress]).toBeUndefined();
     });
 
     it('a child of the removed IP moves to its parent, and the import accepts it', async () => {

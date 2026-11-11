@@ -198,6 +198,50 @@ export function createDropRetired({
 }
 
 /**
+ * The deploy's `dropRetired` (orchestrator, before the release): open the
+ * stack as it exists in the state backend the deploy used, never an empty
+ * one made in its place (requireExisting), and run on it the same surgery
+ * every up runs (dropRetiredStackResources), recording each address it takes
+ * out where the record names none (createDropRetired).
+ *
+ * @param {object} o
+ * @param {string} o.environment - the environment as the operator names it
+ * @param {string} o.providerId - the cluster's provider, whose RETIRED_STACK_RESOURCES the surgery removes
+ * @param {string} o.providerToken
+ * @param {object|null} o.s3Config - the state backend (PULUMI_BACKEND_URL overrides it)
+ * @param {string} o.projectName
+ * @param {(fn: (config: object) => void) => unknown} [o.updateConfig]
+ * @returns {(stackName: string) => Promise<void>}
+ */
+export function createDeployDropRetired({
+  environment,
+  providerId,
+  providerToken,
+  s3Config,
+  projectName,
+  updateConfig = updateProjectConfig,
+}) {
+  return createDropRetired({
+    environment,
+    openStack: async (stackName) => {
+      const { getOrCreateStack } = await import('../../iac/index.js');
+      return getOrCreateStack(stackName, async () => ({}), {
+        provider: providerId,
+        providerToken,
+        s3Config,
+        projectName,
+        requireExisting: true,
+      });
+    },
+    drop: async (stack, options) => {
+      const { dropRetiredStackResources } = await import('../../iac/index.js');
+      return dropRetiredStackResources(stack, providerId, options);
+    },
+    updateConfig,
+  });
+}
+
+/**
  * @typedef {{ target: string, changedAt: number }} DnsWrite
  *   This run's managed-DNS writer has the domain's records at `target`, as
  *   set by the write at `changedAt` (epoch ms): this run's, or an earlier

@@ -65,16 +65,17 @@ describe('the release is told where DNS points', () => {
     expect(args).toMatch(/\bzoneRecordsAt,/);
     const gate = src.lastIndexOf('if (isK8sTier(tier)) {', release);
     const setup = src.slice(gate, release);
-    // An existing stack only (never an empty one made in its place), and the
-    // same surgery every up runs.
-    const drop = setup.slice(setup.indexOf('const dropRetired = createDropRetired({'));
-    expect(drop).toMatch(/getOrCreateStack\(stackName, async \(\) => \(\{\}\), \{/);
-    expect(drop).toContain('requireExisting: true,');
-    // The options createDropRetired hands the surgery carry its recorder, so
-    // an address the surgery takes out that no record names is recorded
-    // (createDropRetired's own test), never left with no record.
-    expect(drop).toContain('dropRetiredStackResources(stack, ingressProviderId, options)');
-    expect(drop.slice(0, drop.indexOf('openStack'))).toMatch(/\benvironment,/);
+    // The deploy's own builder, on this cluster's provider, token and state
+    // backend. What it does (an existing stack only, the surgery every up
+    // runs, the address recorded where no record names it) runs on the real
+    // engine in tests/integration/iac/deploy-drop-retired.test.ts.
+    const drop = setup.slice(setup.indexOf('const dropRetired = createDeployDropRetired({'));
+    const call = drop.slice(0, drop.indexOf('});'));
+    expect(call).toMatch(/\benvironment,/);
+    expect(call).toContain('providerId: ingressProviderId,');
+    expect(call).toContain('providerToken: apiToken,');
+    expect(call).toMatch(/\bs3Config,/);
+    expect(call).toContain('projectName: projectConfig.projectName,');
     // Managed DNS only, through the backend that wrote the records.
     expect(setup).toMatch(
       /const zoneRecordsAt =\s+hasAutomatedDns\(dnsProvider\) && dnsToken && dnsZoneId\s+\? async \(address\) =>\s+\(await getDnsProvider\(dnsProvider\)\)\.findARecordsAt\(dnsToken, dnsZoneId, address\)\s+: null;/,
