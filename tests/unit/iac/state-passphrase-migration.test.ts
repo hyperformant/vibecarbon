@@ -65,8 +65,10 @@ const exportRefusal = refusal('passphrase-incorrect-on-export');
 const { destroyStack, getOrCreateStack, getStackOutputs, removeStackState, upStack } = await import(
   '../../../src/lib/iac/index.js'
 );
-const { __resetStateProbesForTests } = await import('../../../src/lib/iac/index.js');
-const { isStatePassphraseFailure, StateUndecryptableError } = await import(
+const { __resetStateProbesForTests, classifyK3sTokenProbe } = await import(
+  '../../../src/lib/iac/index.js'
+);
+const { isStatePassphraseFailure, StateMigrationError, StateUndecryptableError } = await import(
   '../../../src/lib/iac/state-error.js'
 );
 const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
@@ -353,6 +355,8 @@ describe('a migration that fails for any reason but the passphrase is never rule
 
     expect(err).toBeInstanceOf(StackHeldError);
     expect(err).not.toBeInstanceOf(StateUndecryptableError);
+    // The k3s token probe rethrows it: the up's own open may read the state.
+    expect(() => classifyK3sTokenProbe({ error: err as Error })).toThrow(err as Error);
     expect((err as Error).message).toContain('Stack "e1" is in use by another run');
     expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1']);
     expect(infos).toEqual([]);
@@ -390,12 +394,14 @@ describe('a migration that fails for any reason but the passphrase is never rule
     expect(infos).toEqual([MIGRATED]);
   });
 
-  it("anything else: a plain error naming the step with Pulumi's line, never the typed one", async () => {
+  it("anything else: a StateMigrationError naming the step with Pulumi's line, never the typed one", async () => {
     legacyMigratingAfter(STORE_FAULT);
 
     const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(Error);
+    // Named, so the k3s token probe rethrows it instead of minting a token.
+    expect(err).toBeInstanceOf(StateMigrationError);
+    expect(() => classifyK3sTokenProbe({ error: err as Error })).toThrow(err as Error);
     expect(err).not.toBeInstanceOf(StateUndecryptableError);
     expect(err).not.toBeInstanceOf(StackHeldError);
     expect(isStatePassphraseFailure(err)).toBe(false);

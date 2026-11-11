@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyK3sTokenProbe } from '../../../src/lib/iac/index.js';
-import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
+import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
 import { StatePassphraseError } from '../../../src/lib/state-passphrase.js';
 import { STATE_ERROR_CORPUS } from './fixtures/state-error-corpus.js';
 
@@ -132,6 +133,45 @@ describe('classifyK3sTokenProbe', () => {
 
     it('rethrows even when outputs came back alongside the error', () => {
       const error = new StateUndecryptableError('e4-primary');
+      expect(() => classifyK3sTokenProbe({ outputs: { k3sToken: 'abc' }, error })).toThrow(error);
+    });
+  });
+
+  // The first open of a legacy stack migrates it, and that can stop for a
+  // reason that clears on the next open in the same process: the child
+  // re-encrypted the state and then exited non-zero, or another run held the
+  // stack's lock and has since finished. "errored" here would mint a token,
+  // and the up's own open, reading the state after all, would carry it onto
+  // the live cluster. Neither is a passphrase failure (destroy keeps the
+  // record), and both are rethrown like one.
+  describe('a stopped migration or a stack another run holds is rethrown, never classified', () => {
+    const stopped = () =>
+      new StateMigrationError(
+        'Stopped while re-encrypting the Pulumi state for e4-primary: error: could not import deployment.',
+        { cause: new Error('error: could not import deployment') },
+      );
+    const held = () =>
+      new StackHeldError('e4-primary', [
+        { user: 'someone', host: 'laptop', pid: 4242, at: '2026-11-11T10:00:00Z' },
+      ]);
+
+    it.each([
+      ['a migration that stopped', stopped],
+      ['a stack another run holds', held],
+      ["either, inside a caller's wrapper", () => new Error('probe failed', { cause: held() })],
+    ])('%s: the same object is thrown', (_label, make) => {
+      const error = make();
+      let thrown: unknown;
+      try {
+        classifyK3sTokenProbe({ error });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBe(error);
+    });
+
+    it('rethrows even when outputs came back alongside the error', () => {
+      const error = stopped();
       expect(() => classifyK3sTokenProbe({ outputs: { k3sToken: 'abc' }, error })).toThrow(error);
     });
   });

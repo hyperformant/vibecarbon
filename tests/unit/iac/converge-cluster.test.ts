@@ -451,36 +451,58 @@ describe('convergeClusterInfra — a state the passphrase cannot read', () => {
   // A passphrase failure must stop the converge before the real program is
   // built, because building it without a recovered token mints a fresh one
   // into every new node's user data.
-  it('stops before the real program: no fresh k3s token, no preview, no up', async () => {
-    const real = await vi.importActual<typeof import('../../../src/lib/iac/index.js')>(
-      '../../../src/lib/iac/index.js',
-    );
-    const { StateUndecryptableError } = await import('../../../src/lib/iac/state-error.js');
-    classifyK3sTokenProbeMock.mockImplementation(real.classifyK3sTokenProbe);
-    const failure = new StateUndecryptableError('unit-cluster-xyz');
-    getStackOutputsMock.mockRejectedValue(failure);
-    const { Provider, programCalls } = makeProvider();
-    // The plain spinner, whose lines land in p.log.
-    vi.stubEnv('VIBECARBON_PLAIN', '1');
-    const p = await import('@clack/prompts');
-    const success = vi.spyOn(p.log, 'success').mockImplementation(() => {});
-    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+  // A held stack or a stopped legacy migration stops it the same way: both
+  // can clear by the up's own open, which would then carry a minted token
+  // onto the live cluster.
+  it.each([
+    ['the passphrase cannot read it', 'StateUndecryptableError'],
+    ['another run holds the stack', 'StackHeldError'],
+    ['the legacy migration stopped', 'StateMigrationError'],
+  ])(
+    '%s: stops before the real program: no fresh k3s token, no preview, no up',
+    async (_label, kind) => {
+      const real = await vi.importActual<typeof import('../../../src/lib/iac/index.js')>(
+        '../../../src/lib/iac/index.js',
+      );
+      const { StateMigrationError, StateUndecryptableError } = await import(
+        '../../../src/lib/iac/state-error.js'
+      );
+      const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
+      classifyK3sTokenProbeMock.mockImplementation(real.classifyK3sTokenProbe);
+      const failure =
+        kind === 'StackHeldError'
+          ? new StackHeldError('unit-cluster-xyz', [
+              { user: 'someone', host: 'laptop', pid: 4242, at: '2026-11-11T10:00:00Z' },
+            ])
+          : kind === 'StateMigrationError'
+            ? new StateMigrationError(
+                'Stopped while re-encrypting the Pulumi state for unit-cluster-xyz: error: could not import deployment.',
+              )
+            : new StateUndecryptableError('unit-cluster-xyz');
+      getStackOutputsMock.mockRejectedValue(failure);
+      const { Provider, programCalls } = makeProvider();
+      // The plain spinner, whose lines land in p.log.
+      vi.stubEnv('VIBECARBON_PLAIN', '1');
+      const p = await import('@clack/prompts');
+      const success = vi.spyOn(p.log, 'success').mockImplementation(() => {});
+      const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
 
-    try {
-      await expect(convergeClusterInfra({ ...baseArgs(), Provider })).rejects.toBe(failure);
+      try {
+        await expect(convergeClusterInfra({ ...baseArgs(), Provider })).rejects.toBe(failure);
 
-      // [0] is the probe program; a second call would be the real program,
-      // built with a minted token.
-      expect(programCalls).toHaveLength(1);
-      expect(getOrCreateStackMock).not.toHaveBeenCalled();
-      expect(upStackMock).not.toHaveBeenCalled();
-      // The spinner says what happened, never that the state was read.
-      expect(success.mock.calls.flat().join('\n')).not.toContain('Prior cluster state read');
-      expect(error).toHaveBeenCalledWith("Prior cluster state can't be read (unit-cluster-xyz)");
-    } finally {
-      success.mockRestore();
-      error.mockRestore();
-      vi.unstubAllEnvs();
-    }
-  });
+        // [0] is the probe program; a second call would be the real program,
+        // built with a minted token.
+        expect(programCalls).toHaveLength(1);
+        expect(getOrCreateStackMock).not.toHaveBeenCalled();
+        expect(upStackMock).not.toHaveBeenCalled();
+        // The spinner says what happened, never that the state was read.
+        expect(success.mock.calls.flat().join('\n')).not.toContain('Prior cluster state read');
+        expect(error).toHaveBeenCalledWith("Prior cluster state can't be read (unit-cluster-xyz)");
+      } finally {
+        success.mockRestore();
+        error.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 });

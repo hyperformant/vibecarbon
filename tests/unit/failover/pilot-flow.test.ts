@@ -39,7 +39,8 @@ import {
   waitForWorkersReady,
 } from '../../../src/failover.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
-import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
+import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
 /** `kubectl get nodes --no-headers` output with `n` Ready worker rows (+ master). */
@@ -1164,6 +1165,54 @@ describe('preflightPilotFailover exit branches', () => {
     expect(said).toContain('Nothing was changed.');
     expect(said).not.toContain('unreachable');
     expect(said).not.toContain('PULUMI_CONFIG_PASSPHRASE');
+  });
+
+  // The backend answered, so "unreachable or missing" would send the operator
+  // after the wrong fault: a held stack or a stopped legacy migration says
+  // what happened and that rerunning is the way on.
+  it.each([
+    [
+      'another run holds the stack',
+      () =>
+        new StackHeldError('e4-standby', [
+          { user: 'someone', host: 'laptop', pid: 4242, at: '2026-11-11T10:00:00Z' },
+        ]),
+      'Stack "e4-standby" is in use by another run',
+    ],
+    [
+      'the legacy migration stopped',
+      () =>
+        new StateMigrationError(
+          'Stopped while re-encrypting the Pulumi state for e4-standby: error: could not import deployment. Running this again is safe.',
+        ),
+      'Stopped while re-encrypting the Pulumi state for e4-standby',
+    ],
+  ])('%s: exits(1) with its own message', async (_kind, make, expected) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const envConfig = {
+      ha: {
+        standbyWorkerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
+        standby: { stack: 'e4-standby' },
+      },
+    };
+    await expect(
+      preflightPilotFailover('e4', envConfig, {
+        resolveCreds: async () => ({ apiToken: 't', s3Creds: null }),
+        readStackOutputs: async () => {
+          throw make();
+        },
+      }),
+    ).rejects.toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const said = error.mock.calls.flat().join('\n');
+    expect(said).toContain(expected);
+    expect(said).toContain('Failover changed no servers.');
+    expect(said).not.toContain('unreachable');
   });
 
   it('returns the persisted pieces + resolved creds on a reachable backend', async () => {

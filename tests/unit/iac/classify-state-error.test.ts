@@ -5,6 +5,7 @@ import {
   classifyStateError,
   findStatePassphraseError,
   isStatePassphraseFailure,
+  StateMigrationError,
   StateUndecryptableError,
 } from '../../../src/lib/iac/state-error.js';
 import { StatePassphraseError } from '../../../src/lib/state-passphrase.js';
@@ -221,6 +222,21 @@ describe('isStatePassphraseFailure', () => {
     }
     expect(isStatePassphraseFailure(undefined)).toBe(false);
     expect(isStatePassphraseFailure(null)).toBe(false);
+  });
+
+  it('is false for a legacy migration that stopped, whatever its cause says', () => {
+    // The migration names its own step; a refusal it carries as the cause
+    // (a re-encryption that ended with the project passphrase still refused)
+    // proves '' read the state, so nothing about it is a lost passphrase.
+    const refusal = new Error(
+      STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-export')?.message,
+    );
+    expect(isStatePassphraseFailure(refusal)).toBe(true);
+    const stopped = new StateMigrationError('Stopped after re-encrypting the state for e1', {
+      cause: refusal,
+    });
+    expect(isStatePassphraseFailure(stopped)).toBe(false);
+    expect(isStatePassphraseFailure(new Error('wrapped', { cause: stopped }))).toBe(false);
   });
 
   it('survives a cause cycle, visiting each error once', () => {

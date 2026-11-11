@@ -4985,11 +4985,13 @@ export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegi
  * k3s-infra block for why replay is load-bearing (a minted token on a live
  * stack leaves new nodes unable to join).
  *
- * The one error that propagates is a passphrase failure:
- * classifyK3sTokenProbe rethrows it. Unlike an unreachable backend, the up
- * that follows may read this state after all (the one-time legacy migration
- * re-encrypts it on first open), so a token minted here would reach a live
- * cluster.
+ * Three errors propagate, rethrown by classifyK3sTokenProbe: a passphrase
+ * failure, a StateMigrationError (the one-time legacy migration stopped) and
+ * a StackHeldError (another run holds the stack). Unlike an unreachable
+ * backend, each can clear by the time the up that follows opens the stack
+ * again (the migration re-encrypts it on first open, the child may have
+ * finished before it exited non-zero, the other run ends), so a token minted
+ * here would reach a live cluster.
  *
  * @param {any} Provider  provider class (getK8sProgram static)
  * @param {Record<string, unknown>} programConfig  same config the real program uses
@@ -5012,7 +5014,7 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
     });
     probe = classifyK3sTokenProbe({ outputs });
   } catch (err) {
-    // Rethrows a passphrase failure instead of classifying it (see above).
+    // Rethrows the three failures above instead of classifying them.
     probe = classifyK3sTokenProbe({ error: err instanceof Error ? err : new Error(String(err)) });
   }
   if (probe.status !== 'recovered') {

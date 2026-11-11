@@ -116,7 +116,11 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
-import { asStateUndecryptableError, isStatePassphraseFailure } from './lib/iac/state-error.js';
+import {
+  asStateUndecryptableError,
+  isStackOpenInterrupted,
+  isStatePassphraseFailure,
+} from './lib/iac/state-error.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfTimer } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -1412,6 +1416,14 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
       p.log.error(
         `${/** @type {Error} */ (asStateUndecryptableError(err, standbyStack)).message} Nothing was changed.`,
       );
+      process.exit(1);
+    }
+    // The backend answered here too: another run holds the stack, or the
+    // one-time legacy migration stopped. Its own message says what happened
+    // and that running this again is the way on.
+    if (isStackOpenInterrupted(err)) {
+      s.stop(`Standby stack state not read (${standbyStack})`);
+      p.log.error(`${firstErrorLine(err)} Failover changed no servers.`);
       process.exit(1);
     }
     s.stop('Standby stack state unreachable');

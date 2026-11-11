@@ -329,10 +329,11 @@ export async function convergeClusterInfra({
   } catch (err) {
     probeError = err instanceof Error ? err : new Error(String(err));
   }
-  // Throws on a passphrase failure rather than returning `errored`: a state
-  // this project's passphrase cannot read still holds the cluster's token, and
-  // building the real program below without it would mint a fresh one into
-  // every new node's user data. The spinner line follows the verdict.
+  // Throws on a passphrase failure, a stopped legacy migration or a stack
+  // another run holds, rather than returning `errored`: each leaves a state
+  // that still holds the cluster's token unread, and building the real
+  // program below without it would mint a fresh one into every new node's
+  // user data. The spinner line follows the verdict.
   let probe;
   try {
     probe = classifyK3sTokenProbe({ outputs: probeOutputs, error: probeError });

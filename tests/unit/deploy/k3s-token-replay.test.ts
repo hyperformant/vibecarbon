@@ -14,7 +14,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const getStackOutputs = vi.fn();
-const { StateUndecryptableError } = await import('../../../src/lib/iac/state-error.js');
+const { StateMigrationError, StateUndecryptableError } = await import(
+  '../../../src/lib/iac/state-error.js'
+);
+const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
 const { StatePassphraseError } = await import('../../../src/lib/state-passphrase.js');
 
 vi.mock('../../../src/lib/iac/index.js', async (importOriginal) => {
@@ -93,6 +96,42 @@ describe('resolveStackK3sToken', () => {
     ];
 
     it.each(passphraseFailures)('%s: the probe error propagates', async (_label, make) => {
+      const failure = make();
+      getStackOutputs.mockRejectedValueOnce(failure);
+      const log = vi.fn();
+      const resolveStackK3sToken = await load();
+      await expect(
+        resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log }),
+      ).rejects.toBe(failure);
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+    });
+  });
+
+  // The probe is often the first open of the stack in the process, so the
+  // one-time legacy migration runs inside it, and it can stop for a reason
+  // that clears on the up's own open moments later: the child re-encrypted
+  // the state and exited non-zero, or another run held the lock and has now
+  // finished. A token minted on that "errored" probe would ride the up onto
+  // the live cluster, and every later deploy would replay it.
+  describe('never mints a token when the open stopped for a reason a later open clears', () => {
+    const stops: Array<[string, () => Error]> = [
+      [
+        'the legacy migration stopped',
+        () =>
+          new StateMigrationError(
+            'Stopped while re-encrypting the Pulumi state for e4-primary: error: could not import deployment.',
+          ),
+      ],
+      [
+        'another run holds the stack',
+        () =>
+          new StackHeldError('e4-primary', [
+            { user: 'someone', host: 'laptop', pid: 4242, at: '2026-11-11T10:00:00Z' },
+          ]),
+      ],
+    ];
+
+    it.each(stops)('%s: the probe error propagates', async (_label, make) => {
       const failure = make();
       getStackOutputs.mockRejectedValueOnce(failure);
       const log = vi.fn();

@@ -46,7 +46,9 @@ import {
   failingPulumiCommandVerb,
   HISTORY_WRITE_PATTERN,
   isHistoryWriteOnlyFailure,
+  isStackOpenInterrupted,
   isStatePassphraseFailure,
+  StateMigrationError,
 } from './state-error.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
 
@@ -675,8 +677,9 @@ async function migrateFromEmptyPassphrase(stack, passphrase, key) {
     }
     migrationsAttempted.add(key);
     // Whether the child got as far as the import or not, the next open reads
-    // the state with one passphrase or the other.
-    throw new Error(
+    // the state with one passphrase or the other: named, so no reader takes
+    // it for a passphrase failure or for "no stack".
+    throw new StateMigrationError(
       `Stopped while ${step}: ${summarizeCommandError(message).replace(/\.$/, '')}. It may already be re-encrypted with this project's passphrase, so vibecarbon 0.52 and earlier may no longer open it. Running this again is safe.`,
       { cause: err },
     );
@@ -1702,22 +1705,28 @@ export async function getStackOutputs(stackName, program, options = {}) {
  *   - `errored`:   the probe call itself threw — backend unreachable,
  *                  expired creds, etc. Caller should surface loudly.
  *
- * A passphrase failure (isStatePassphraseFailure) is none of the three: it is
- * rethrown. A state this project's passphrase cannot read still holds the
- * cluster's token, so treating it as "no token" would have the caller mint
- * one, and a later call in the same run that CAN read the state (the
- * one-time legacy migration re-encrypts it on first open) would carry that
- * token onto a live cluster whose new nodes then cannot join.
+ * Three failures are none of the three: they are rethrown. Each leaves a
+ * state that still holds the cluster's token unread, and each can clear on a
+ * later open in the same run, so treating it as "no token" would have the
+ * caller mint one that the up (which opens the stack again) then carries
+ * onto a live cluster whose new nodes cannot join:
+ *
+ *   - a passphrase failure (isStatePassphraseFailure): the one-time legacy
+ *     migration re-encrypts a legacy stack on its first open;
+ *   - a StateMigrationError: that migration stopped, and the child may have
+ *     re-encrypted the state before it exited non-zero;
+ *   - a StackHeldError: another run held the lock the migration needs, and
+ *     may have finished (or migrated the stack itself) by the up's open.
  *
  * No I/O; the Pulumi state read happens upstream.
  *
  * @param {{ outputs?: Record<string, unknown> | null, error?: Error | null }} probe
  * @returns {{ status: 'recovered' | 'empty' | 'errored', priorK3sToken?: string, reason: string }}
- * @throws the probe's own error when it is a passphrase failure
+ * @throws the probe's own error when it is one of those three
  */
 export function classifyK3sTokenProbe({ outputs, error } = {}) {
   if (error) {
-    if (isStatePassphraseFailure(error)) throw error;
+    if (isStatePassphraseFailure(error) || isStackOpenInterrupted(error)) throw error;
     // The probe reads Pulumi state, so its failures carry the same
     // `code: N\nstdout:…` envelope — first-line-only would report `code: -2`
     // as the reason a k3s-token recovery was refused.

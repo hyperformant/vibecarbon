@@ -369,11 +369,35 @@ function environmentOfStack(stackName) {
 }
 
 /**
+ * The one-time legacy migration (iac/index.js, migrateFromEmptyPassphrase)
+ * stopped at a step that is not a passphrase refusal: the child failed for
+ * another reason (the store, an import), or it exited 0 and the project's
+ * passphrase still could not read what it wrote. The empty passphrase read
+ * the state in both, and the next open may well read it with the project's,
+ * so it is never a passphrase failure (isStatePassphraseFailure stops at it,
+ * whatever its cause says): destroy keeps the stack's record, and the k3s
+ * token probe rethrows it rather than mint a token. REMOVE AFTER 2027-02-11
+ * with the migration.
+ */
+export class StateMigrationError extends Error {
+  /**
+   * @param {string} message names the step that stopped
+   * @param {{ cause?: unknown }} [options]
+   */
+  constructor(message, options) {
+    super(message, options);
+    this.name = 'StateMigrationError';
+  }
+}
+
+/**
  * Is this failure about the state passphrase? True for a raw Pulumi refusal
  * (classified PASSPHRASE) anywhere in the `cause` chain, for this module's
  * StateUndecryptableError, and for state-passphrase.js's StatePassphraseError
  * (a missing, mismatched or invalid value, refused before Pulumi runs).
- * Matched by name rather than instanceof so this module keeps no imports.
+ * False from a StateMigrationError down: what it carries is the migration's
+ * own step, not a passphrase nobody has. Matched by name rather than
+ * instanceof so this module keeps no imports.
  *
  * @param {unknown} err
  * @returns {boolean}
@@ -382,8 +406,30 @@ export function isStatePassphraseFailure(err) {
   const seen = new Set();
   for (let e = err; e != null && typeof e === 'object' && !seen.has(e); e = e.cause) {
     seen.add(e);
+    if (e.name === 'StateMigrationError') return false;
     if (e.name === 'StatePassphraseError' || e.name === 'StateUndecryptableError') return true;
     if (classifyStateError({ message: e.message }).cause === STATE_CAUSE.PASSPHRASE) return true;
+  }
+  return false;
+}
+
+/**
+ * Did a stack open stop for a reason a later open, in this process or the
+ * next, can clear? A StackHeldError (stack-lock.js: another run holds the
+ * stack's lock) or a StateMigrationError (the legacy migration stopped),
+ * anywhere in the `cause` chain. Either way the state was not read, and it
+ * may hold exactly what the caller looked for: a reader must not take it as
+ * "no stack" and fall back to a default. Matched by name, like
+ * isStatePassphraseFailure.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isStackOpenInterrupted(err) {
+  const seen = new Set();
+  for (let e = err; e != null && typeof e === 'object' && !seen.has(e); e = e.cause) {
+    seen.add(e);
+    if (e.name === 'StackHeldError' || e.name === 'StateMigrationError') return true;
   }
   return false;
 }
