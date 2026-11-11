@@ -67,7 +67,11 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
-import { findStatePassphraseError, isStatePassphraseFailure } from './lib/iac/state-error.js';
+import {
+  findStatePassphraseError,
+  isStatePassphraseFailure,
+  passphraseMadeThisRunText,
+} from './lib/iac/state-error.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
@@ -86,7 +90,7 @@ import { sshKeyPathFor } from './lib/ssh.js';
 import {
   findStatePassphraseProblem,
   STATE_PASSPHRASE_KEY,
-  statePassphraseGeneratedThisRun,
+  statePassphraseProvenance,
 } from './lib/state-passphrase.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
@@ -3262,23 +3266,65 @@ export function passphraseRecoveryHint(error, environment) {
 }
 
 /**
- * What to do when Pulumi refused a passphrase this run made (ensure found
- * neither a value nor a fingerprint): the project's real passphrase most
- * likely exists, just not in this clone.
+ * What to do when Pulumi refused a passphrase this clone made
+ * (statePassphraseProvenance): the project's real passphrase most likely
+ * exists, just not in this clone, so the record was kept.
+ *
+ *   - this run made it (ensure found neither a value nor a fingerprint):
+ *     deploy's StateUndecryptableError says the same (passphraseMadeThisRunText);
+ *   - an earlier run made it, and git's HEAD doesn't record its fingerprint;
+ *   - git couldn't say.
+ *
+ * The way out when the passphrase that wrote the state is gone: in a git
+ * checkout, commit .vibecarbon.json so the fingerprint is the project's, then
+ * destroy again; outside one, the next run no longer counts as making it,
+ * so a plain rerun removes the record.
  *
  * Exported for unit testing.
  *
  * @param {string} environment
+ * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} provenance
  * @returns {string}
  */
-export function passphraseMadeThisRunHint(environment) {
+export function passphraseMadeThisRunHint(environment, provenance) {
   const again = `run \`vibecarbon destroy ${environment}\` again`;
+  const removes = 'that run removes the record.';
+  const teammate = `If a teammate deployed this project, pull the latest .vibecarbon.json and copy their ${STATE_PASSPHRASE_KEY} into .env.local, then ${again}.`;
+  if (provenance.thisRun) {
+    const lost =
+      provenance.head === 'no-git'
+        ? `If it's lost for good, ${again} as it is: ${removes}`
+        : `If it's lost for good, commit .vibecarbon.json, then ${again}: ${removes}`;
+    return `${passphraseMadeThisRunText('this state', again)} ${lost}`;
+  }
+  if (provenance.head === 'unknown') {
+    return (
+      `vibecarbon couldn't check with git whether this clone's .vibecarbon.json fingerprint is committed (git said: ${provenance.detail}), so it kept the record: the passphrase that reads it may be a teammate's. ` +
+      `${teammate} ` +
+      `If the passphrase that wrote this state is lost for good, fix what git reports and commit .vibecarbon.json, then ${again}: ${removes}`
+    );
+  }
   return (
-    "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read this state. " +
-    `If the project has one, pull the latest .vibecarbon.json (dropping the \`stateEncryption\` entry this run wrote) and copy the project's ${STATE_PASSPHRASE_KEY} into .env.local in place of the new one, then ${again}. ` +
-    `If it's lost for good, ${again} as it is: that run removes the record.`
+    "This clone's .vibecarbon.json records a state passphrase fingerprint that isn't committed, so the passphrase was most likely made here, and it can't read this state. " +
+    `${teammate} ` +
+    `If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then ${again}: ${removes}`
   );
 }
+
+/**
+ * Why the record stayed, for a passphrase this clone made.
+ * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} provenance
+ */
+function madeHereReason(provenance) {
+  if (provenance.thisRun) return "the passphrase this run made doesn't decrypt it";
+  if (provenance.head === 'unknown') {
+    return "this project's passphrase doesn't decrypt it, and git couldn't say whether this clone made it";
+  }
+  return "the passphrase this clone made, whose fingerprint isn't committed, doesn't decrypt it";
+}
+
+/** No sign this clone made the passphrase (the default for a caller that can't tell). */
+const NOT_MADE_HERE = Object.freeze({ madeHere: false, thisRun: false, head: 'no-git' });
 
 /**
  * The sentence for a record left alone because the environment's
@@ -3321,10 +3367,11 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  *       starts clean; what the sweeps could not cover is reported.
  *   (b) Refused before Pulumi ran (a StatePassphraseError anywhere in the
  *       cause chain: missing, mismatched or invalid), or refused by Pulumi
- *       when this run made the passphrase (statePassphraseGeneratedThisRun:
- *       the clone had neither the value nor its fingerprint, so the real one
- *       likely exists elsewhere). The right value may come back, and the
- *       record is what Pulumi would then destroy. Removed only when a
+ *       when this clone made the passphrase (statePassphraseProvenance: this
+ *       run made it, or, in a git checkout, HEAD doesn't record its
+ *       fingerprint, or git can't tell; the real one likely exists in a
+ *       teammate's clone). The right value may come back, and the record is
+ *       what Pulumi would then destroy. Removed only when a
  *       K8S_DESTROY_BACKSTOP provider's by-name sweeps cover the stack and
  *       the ledger is clean; otherwise kept, with how to get the value back.
  *
@@ -3347,7 +3394,9 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  * @param {boolean} params.backendResolved - false when the environment has an S3
  *   backend whose credentials could not be resolved: a removal would reach the
  *   local fallback backend and miss the real stack.
- * @param {boolean} params.passphraseMadeThisRun - statePassphraseGeneratedThisRun.
+ * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} [params.passphraseProvenance]
+ *   statePassphraseProvenance for the project; absent, nothing says this
+ *   clone made it.
  * @param {(stackEnv: string) => Promise<unknown>} params.removeRecord
  * @param {{ start: Function, stop: Function }} params.s
  */
@@ -3359,7 +3408,7 @@ export async function settleUnreadableStacks({
   providerName,
   backstop,
   backendResolved,
-  passphraseMadeThisRun,
+  passphraseProvenance = NOT_MADE_HERE,
   removeRecord,
   s,
 }) {
@@ -3370,15 +3419,13 @@ export async function settleUnreadableStacks({
   for (const { stackEnv, dirLabel, error } of stacks) {
     const resource = `${stackEnv}${dirLabel}`;
     const precheck = findStatePassphraseError(error);
-    const madeNow = !precheck && passphraseMadeThisRun === true;
-    const why = madeNow
-      ? "the passphrase this run made doesn't decrypt it"
-      : unreadableStateReason(error);
+    const madeNow = !precheck && passphraseProvenance.madeHere === true;
+    const why = madeNow ? madeHereReason(passphraseProvenance) : unreadableStateReason(error);
     if (!backendResolved || ((precheck || madeNow) && !(backstop && sweptClean))) {
       results.pulumiDestroyFailed = true;
       const hints = [];
       if (precheck) hints.push(passphraseRecoveryHint(precheck, environment));
-      else if (madeNow) hints.push(passphraseMadeThisRunHint(environment));
+      else if (madeNow) hints.push(passphraseMadeThisRunHint(environment, passphraseProvenance));
       if (!backendResolved) hints.push(stateCredentialsHint(environment));
       results.leaks.unverified({
         resourceClass: 'pulumi-stack',
@@ -4713,8 +4760,9 @@ async function destroyK8sTier({
         providerName: Provider.NAME,
         backstop,
         backendResolved: !(envConfig.s3 && !destroyS3Config),
-        // The project dir getOrCreateStack checked the passphrase in.
-        passphraseMadeThisRun: statePassphraseGeneratedThisRun(process.cwd()),
+        // The project dir getOrCreateStack checked the passphrase in. Asks
+        // git, so only here, once a stack has been refused.
+        passphraseProvenance: statePassphraseProvenance(process.cwd()),
         removeRecord: (stackEnv) =>
           removeStackState(stackEnv, {
             projectName: projectConfig.projectName,

@@ -16,6 +16,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import * as p from '@clack/prompts';
 import { readProjectConfigFile, updateProjectConfig } from './config.js';
+import { readProjectConfigAtHead } from './git-head.js';
 import { readOperatorVar } from './operator-env.js';
 import { describeCredentialSource, loadEnvVariables, setEnvVar } from './project.js';
 
@@ -44,6 +45,64 @@ export function __resetStatePassphraseForTests() {
  */
 export function statePassphraseGeneratedThisRun(projectDir) {
   return generatedHere.has(resolve(projectDir));
+}
+
+/**
+ * @typedef {object} StatePassphraseProvenance
+ * @property {boolean} madeHere this clone most likely made the passphrase: a
+ *   state Pulumi refuses with it may be one a teammate's passphrase reads
+ * @property {boolean} thisRun this process made it (statePassphraseGeneratedThisRun)
+ * @property {'committed' | 'uncommitted' | 'unknown' | 'no-git'} head what
+ *   git's HEAD says about the fingerprint .vibecarbon.json records:
+ *   committed (HEAD's copy records the same one), uncommitted (HEAD lacks
+ *   the file or its `stateEncryption`, or records another), unknown (git
+ *   failed some other way, or HEAD's copy doesn't parse), no-git (not a git
+ *   checkout, or git isn't installed)
+ * @property {string} [detail] git's own line, for `unknown`
+ */
+
+/**
+ * Was this project's passphrase made in this clone, across processes? Destroy
+ * asks once Pulumi has refused it on a stack: a passphrase made here (an
+ * `upgrade` or deploy on a clone that hadn't pulled a teammate's
+ * .vibecarbon.json) says nothing about whether the team's passphrase reads
+ * the state, so that record must stay.
+ *
+ * In a git checkout the signal lasts: a fingerprint HEAD doesn't record was
+ * made in this clone and not yet committed as the project's, whichever run
+ * made it, and a git failure that can't tell counts the same way (keep).
+ * Outside a git checkout, or without git, nothing lasts from one run to the
+ * next, so only this process making it counts (the rule before git was
+ * asked). Spawns git, so it is for that rare path only.
+ *
+ * @param {string} projectDir
+ * @returns {StatePassphraseProvenance}
+ */
+export function statePassphraseProvenance(projectDir) {
+  const dir = resolve(projectDir);
+  const thisRun = generatedHere.has(dir);
+  const recorded = recordedFingerprint(dir);
+  const read = readProjectConfigAtHead(dir);
+  /** @type {StatePassphraseProvenance['head']} */
+  let head;
+  let detail;
+  if (read.state === 'no-git') head = 'no-git';
+  else if (read.state === 'absent') head = 'uncommitted';
+  else if (read.state === 'unknown') {
+    head = 'unknown';
+    detail = read.detail;
+  } else {
+    let committed;
+    try {
+      committed = JSON.parse(read.content)?.stateEncryption?.fingerprint ?? null;
+    } catch {
+      head = 'unknown';
+      detail = "the .vibecarbon.json committed at HEAD isn't valid JSON";
+    }
+    head ??= recorded && committed === recorded ? 'committed' : 'uncommitted';
+  }
+  const madeHere = thisRun || head === 'uncommitted' || head === 'unknown';
+  return { madeHere, thisRun, head, ...(detail !== undefined && { detail }) };
 }
 
 export class StatePassphraseError extends Error {
@@ -119,7 +178,7 @@ function invalidError(from) {
 function missingError(expected) {
   return new StatePassphraseError(
     'missing',
-    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again. If it's lost for good, delete the \`stateEncryption\` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one. Then run \`vibecarbon destroy\` (once more if it asks) and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.`,
+    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it (a teammate who deployed this project has it too), then run this again. If it's lost for good, first run \`vibecarbon backup\` for each environment you deployed with it, to keep a copy of its database. Then delete the \`stateEncryption\` entry from .vibecarbon.json; vibecarbon makes a new passphrase the next time it needs one. Run \`vibecarbon destroy\` (once more if it asks) and deploy again for each of those environments: their state can't be read any more, so destroy removes the record.`,
   );
 }
 

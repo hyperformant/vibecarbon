@@ -247,6 +247,22 @@ describe('first open of a stack: a full export, and a migration only on a passph
     expect(fakePulumi.calls.slice(0, 2)).toEqual(['select:e1', 'exportStack']);
   });
 
+  it("a passphrase this open made, refused and '' refused too: the typed error says how to bring in the project's", async () => {
+    vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', undefined);
+    delete process.env.VIBECARBON_STATE_PASSPHRASE;
+    fakePulumi.behaviour.exportStack = () => {
+      throw exportRefusal();
+    };
+
+    const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StateUndecryptableError);
+    expect((err as Error).message).toContain(
+      "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read the Pulumi state for e1.",
+    );
+    expect((err as Error).message).not.toContain('If a teammate deployed this project');
+  });
+
   it('a migration that reports success but leaves the state unreadable is the typed error', async () => {
     fakePulumi.behaviour.exportStack = () => {
       throw exportRefusal();

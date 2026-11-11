@@ -5,6 +5,7 @@ import {
   classifyStateError,
   findStatePassphraseError,
   isStatePassphraseFailure,
+  passphraseMadeThisRunText,
   StateMigrationError,
   StateUndecryptableError,
 } from '../../../src/lib/iac/state-error.js';
@@ -247,13 +248,33 @@ describe('isStatePassphraseFailure', () => {
 });
 
 describe('StateUndecryptableError', () => {
-  it('says what happened, what it means, and what still works', () => {
+  it('leads with the cause a teammate can fix, and backs up before any destroy', () => {
     const err = new StateUndecryptableError('prod');
     expect(err.message).toBe(
-      "vibecarbon can't decrypt the Pulumi state for prod with this project's passphrase. If it was written with a passphrase you no longer have, that state can't be recovered. You can still remove the servers with `vibecarbon destroy prod` and deploy again.",
+      "vibecarbon can't decrypt the Pulumi state for prod with this project's passphrase. " +
+        'If a teammate deployed this project, pull the latest .vibecarbon.json and copy their VIBECARBON_STATE_PASSPHRASE into .env.local. Then run this again. ' +
+        "If it was written with a passphrase nobody has any more, that state can't be recovered. " +
+        'Run `vibecarbon backup prod` first to keep a copy of your database, then `vibecarbon destroy prod` removes the servers so you can deploy again.',
+    );
+    expect(err.message.indexOf('vibecarbon backup')).toBeLessThan(
+      err.message.indexOf('vibecarbon destroy'),
     );
     expect(err.message).not.toContain('—');
     expect(err.stackName).toBe('prod');
+  });
+
+  it('a passphrase this run made: the same words destroy uses, then the backup before destroy', () => {
+    const err = new StateUndecryptableError('prod', { madeThisRun: true });
+    expect(err.message).toBe(
+      "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read the Pulumi state for prod. " +
+        "If the project has one, pull the latest .vibecarbon.json (dropping the `stateEncryption` entry this run wrote) and copy the project's VIBECARBON_STATE_PASSPHRASE into .env.local in place of the new one, then run this again. " +
+        "If it was written with a passphrase nobody has any more, that state can't be recovered. " +
+        'Run `vibecarbon backup prod` first to keep a copy of your database, then `vibecarbon destroy prod` removes the servers so you can deploy again.',
+    );
+    expect(passphraseMadeThisRunText('this state', 'run `vibecarbon destroy prod` again')).toBe(
+      "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read this state. " +
+        "If the project has one, pull the latest .vibecarbon.json (dropping the `stateEncryption` entry this run wrote) and copy the project's VIBECARBON_STATE_PASSPHRASE into .env.local in place of the new one, then run `vibecarbon destroy prod` again.",
+    );
   });
 
   it('names the environment, not the HA stack, in the destroy command', () => {
@@ -273,6 +294,13 @@ describe('StateUndecryptableError', () => {
     expect(typed).toBeInstanceOf(StateUndecryptableError);
     expect(typed.stackName).toBe('e1');
     expect(typed.cause).toBe(raw);
+    expect(typed.message).toContain('If a teammate deployed this project');
+    // The caller says when this run made the passphrase.
+    const made = asStateUndecryptableError(raw, 'e1', { madeThisRun: true });
+    expect(made.message).toContain(
+      "vibecarbon made this project's state passphrase during this run",
+    );
+    expect(made.cause).toBe(raw);
 
     // Already typed, or not about the passphrase: handed back untouched.
     const precheck = new StatePassphraseError('mismatch', 'mismatch');

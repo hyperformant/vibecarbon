@@ -57,6 +57,24 @@ vi.mock('node:child_process', async (orig) =>
   ),
 );
 
+// What git's HEAD holds for the project's .vibecarbon.json (lib/git-head.js).
+// Not a git checkout unless a test says so: then only this process's own
+// making counts as "made here", the rule outside git.
+type HeadRead =
+  | { state: 'committed'; content: string }
+  | { state: 'absent' }
+  | { state: 'no-git' }
+  | { state: 'unknown'; detail: string };
+let gitHead: (dir: string) => HeadRead = () => ({ state: 'no-git' });
+vi.mock('../../../src/lib/git-head.js', () => ({
+  readProjectConfigAtHead: (dir: string) => gitHead(dir),
+}));
+/** `git commit` of .vibecarbon.json as it is now: HEAD holds this copy from here on. */
+const commitManifest = (dir: string) => {
+  const content = readFileSync(join(dir, '.vibecarbon.json'), 'utf8');
+  gitHead = () => ({ state: 'committed', content });
+};
+
 const passphraseRefusal = () =>
   new Error(
     STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-refresh')?.message ?? '',
@@ -250,6 +268,7 @@ beforeEach(() => {
   fakePulumi.removed = null;
   cloudCalls.length = 0;
   backstop = true;
+  gitHead = () => ({ state: 'no-git' });
   firewallDeleteFails = false;
   serverListing = 'complete';
   __resetStatePassphraseForTests();
@@ -563,6 +582,126 @@ describe('k8s, Pulumi refused a passphrase this run made: the real one may exist
 
     expect(removals()).toEqual([REMOVE('e1')]);
     expect(stackEntries(ctx)).toEqual([]);
+  });
+});
+
+describe("k8s in a git checkout: a refused passphrase whose fingerprint isn't committed was made in this clone", () => {
+  // A teammate who hasn't pulled made their own passphrase in an earlier run
+  // (upgrade, deploy). The team's passphrase still reads the state, so the
+  // record stays until this clone pulls, or commits the new fingerprint as
+  // the project's.
+  const stillKept = (ctx: Ctx) => {
+    expect(removals()).toEqual([]);
+    const [entry, ...rest] = stackEntries(ctx);
+    expect(rest).toEqual([]);
+    expect(entry.reason).toContain('stack record was kept');
+    expect(entry.hint).not.toContain('—');
+    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+    return entry;
+  };
+  const nextProcess = () => {
+    __resetStatePassphraseForTests();
+    __resetStateProbesForTests();
+    fakePulumi.reset();
+    fakePulumi.refuseReads(passphraseRefusal);
+  };
+
+  it('uncommitted: kept, with the pull first and the commit that lets it go; committed: removed', async () => {
+    project({ value: PASSPHRASE });
+    gitHead = () => ({ state: 'absent' });
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    // The servers still go through the API.
+    expect(cloudCalls).toContain('deleteServer:21');
+    const entry = stillKept(ctx);
+    expect(entry.reason).toContain(
+      "the passphrase this clone made, whose fingerprint isn't committed, doesn't decrypt it",
+    );
+    expect(entry.hint).toContain(
+      "This clone's .vibecarbon.json records a state passphrase fingerprint that isn't committed, so the passphrase was most likely made here, and it can't read this state.",
+    );
+    expect(entry.hint).toContain(
+      'If a teammate deployed this project, pull the latest .vibecarbon.json and copy their VIBECARBON_STATE_PASSPHRASE into .env.local, then run `vibecarbon destroy e1` again.',
+    );
+    expect(entry.hint).toContain(
+      'If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then run `vibecarbon destroy e1` again: that run removes the record.',
+    );
+
+    // HEAD records another fingerprint (a teammate's, say): still made here.
+    nextProcess();
+    gitHead = () => ({
+      state: 'committed',
+      content: JSON.stringify({ stateEncryption: { fingerprint: 'sha256:0123456789abcdef' } }),
+    });
+    const rerun = makeCtx('k8s', dir);
+    await run('destroyK8sInfra', rerun);
+    stillKept(rerun);
+
+    // Committed as the project's: no value this project has reads it, and
+    // the record goes.
+    nextProcess();
+    commitManifest(dir);
+    const after = makeCtx('k8s', dir);
+    await run('destroyK8sInfra', after);
+    expect(removals()).toEqual([REMOVE('e1')]);
+  });
+
+  it("git can't tell (dubious ownership): kept, naming what git said", async () => {
+    project({ value: PASSPHRASE });
+    gitHead = () => ({
+      state: 'unknown',
+      detail: "fatal: detected dubious ownership in repository at '/srv/proj'",
+    });
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    const entry = stillKept(ctx);
+    expect(entry.hint).toContain(
+      "vibecarbon couldn't check with git whether this clone's .vibecarbon.json fingerprint is committed (git said: fatal: detected dubious ownership in repository at '/srv/proj'), so it kept the record: the passphrase that reads it may be a teammate's.",
+    );
+    expect(entry.hint).toContain(
+      'If a teammate deployed this project, pull the latest .vibecarbon.json and copy their VIBECARBON_STATE_PASSPHRASE into .env.local, then run `vibecarbon destroy e1` again.',
+    );
+  });
+
+  it('the lost-for-good path: delete stateEncryption, destroy (kept), commit, destroy again (removed)', async () => {
+    // The old passphrase is gone and its fingerprint deleted from the
+    // committed .vibecarbon.json.
+    project({ value: undefined, recorded: false });
+    gitHead = () => ({ state: 'committed', content: '{}\n' });
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+
+    // This run makes a new passphrase, which can't read the state: kept, and
+    // in a git checkout the way on is a commit, not a bare rerun.
+    const first = makeCtx('k8s', dir);
+    await run('destroyK8sInfra', first);
+    const entry = stillKept(first);
+    expect(entry.reason).toContain("the passphrase this run made doesn't decrypt it");
+    expect(entry.hint).toContain(
+      "If it's lost for good, commit .vibecarbon.json, then run `vibecarbon destroy e1` again: that run removes the record.",
+    );
+    expect(entry.hint).not.toContain('as it is');
+
+    // A rerun without the commit keeps it again: the new fingerprint is
+    // still only in this clone.
+    nextProcess();
+    const rerun = makeCtx('k8s', dir);
+    await run('destroyK8sInfra', rerun);
+    stillKept(rerun);
+
+    // Committed: the next destroy removes the record.
+    nextProcess();
+    commitManifest(dir);
+    await run('destroyK8sInfra', makeCtx('k8s', dir));
+    expect(removals()).toEqual([REMOVE('e1')]);
   });
 });
 

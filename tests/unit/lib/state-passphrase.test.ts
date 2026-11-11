@@ -19,6 +19,15 @@ vi.mock('../../../src/lib/config.js', async (importActual) => {
   };
 });
 
+// What git's HEAD holds for .vibecarbon.json (lib/git-head.js, which the
+// integration tier runs against real repositories).
+const gitHead = vi.hoisted(() => ({
+  read: vi.fn((_dir: string): unknown => ({ state: 'no-git' })),
+}));
+vi.mock('../../../src/lib/git-head.js', () => ({
+  readProjectConfigAtHead: (dir: string) => gitHead.read(dir),
+}));
+
 import * as p from '@clack/prompts';
 import * as configModule from '../../../src/lib/config.js';
 import { bootstrapOperatorEnv } from '../../../src/lib/project.js';
@@ -32,6 +41,7 @@ import {
   StatePassphraseError,
   statePassphraseFingerprint,
   statePassphraseGeneratedThisRun,
+  statePassphraseProvenance,
 } from '../../../src/lib/state-passphrase.js';
 
 const KEY = 'VIBECARBON_STATE_PASSPHRASE';
@@ -118,13 +128,20 @@ describe('state passphrase', () => {
   it('case 4: missing also says what to do when the passphrase is lost for good', async () => {
     writeManifest('sha256:abcdabcdabcdabcd');
     const err = await ensureStatePassphrase(dir).catch((e) => e);
-    // Delete the fingerprint, then destroy and redeploy what the old value
-    // deployed: destroy removes a record it can't read.
+    // A teammate has it; otherwise back up, delete the fingerprint, then
+    // destroy and redeploy what the old value deployed: destroy removes a
+    // record it can't read.
     expect(err.message).toContain(
-      "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one.",
+      'Copy it into .env.local from where you saved it (a teammate who deployed this project has it too), then run this again.',
     );
     expect(err.message).toContain(
-      "Then run `vibecarbon destroy` (once more if it asks) and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.",
+      "If it's lost for good, first run `vibecarbon backup` for each environment you deployed with it, to keep a copy of its database. Then delete the `stateEncryption` entry from .vibecarbon.json; vibecarbon makes a new passphrase the next time it needs one.",
+    );
+    expect(err.message).toContain(
+      "Run `vibecarbon destroy` (once more if it asks) and deploy again for each of those environments: their state can't be read any more, so destroy removes the record.",
+    );
+    expect(err.message.indexOf('vibecarbon backup')).toBeLessThan(
+      err.message.indexOf('vibecarbon destroy'),
     );
     expect(err.message).not.toContain('—');
   });
@@ -311,6 +328,77 @@ describe('state passphrase', () => {
       expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
       await ensureStatePassphrase(dir);
       expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+    });
+  });
+
+  describe('statePassphraseProvenance: was the passphrase made in this clone?', () => {
+    const committing = (manifestJson: unknown) =>
+      gitHead.read.mockReturnValue({ state: 'committed', content: JSON.stringify(manifestJson) });
+
+    afterEach(() => {
+      gitHead.read.mockReset();
+      gitHead.read.mockReturnValue({ state: 'no-git' });
+    });
+
+    it('outside a git checkout, or without git, only this process making it counts', async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      await ensureStatePassphrase(dir); // case 2: an existing value
+      expect(statePassphraseProvenance(dir)).toEqual({
+        madeHere: false,
+        thisRun: false,
+        head: 'no-git',
+      });
+      expect(gitHead.read).toHaveBeenCalledWith(resolve(dir));
+
+      delete process.env[KEY];
+      const other = mkdtempSync(join(tmpdir(), 'vc-state-pass-'));
+      try {
+        await ensureStatePassphrase(other); // case 5: made now
+        expect(statePassphraseProvenance(other)).toMatchObject({ madeHere: true, thisRun: true });
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
+
+    it("in a git checkout: committed means the project's, anything else means made here", async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      await ensureStatePassphrase(dir);
+      const fp = statePassphraseFingerprint(v);
+
+      committing({ projectName: 'x', stateEncryption: { fingerprint: fp } });
+      expect(statePassphraseProvenance(dir)).toEqual({
+        madeHere: false,
+        thisRun: false,
+        head: 'committed',
+      });
+
+      // HEAD lacks the file, lacks the entry, or records another value's.
+      gitHead.read.mockReturnValue({ state: 'absent' });
+      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'uncommitted' });
+      committing({ projectName: 'x' });
+      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'uncommitted' });
+      committing({ stateEncryption: { fingerprint: 'sha256:0123456789abcdef' } });
+      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'uncommitted' });
+    });
+
+    it("git can't tell: counts as made here, and says what git said", async () => {
+      process.env[KEY] = generateStatePassphrase();
+      await ensureStatePassphrase(dir);
+      gitHead.read.mockReturnValue({
+        state: 'unknown',
+        detail: 'fatal: detected dubious ownership',
+      });
+      expect(statePassphraseProvenance(dir)).toEqual({
+        madeHere: true,
+        thisRun: false,
+        head: 'unknown',
+        detail: 'fatal: detected dubious ownership',
+      });
+      // HEAD's copy that doesn't parse can't tell either.
+      gitHead.read.mockReturnValue({ state: 'committed', content: '<<<<<<< HEAD\n{' });
+      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'unknown' });
     });
   });
 

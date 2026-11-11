@@ -34,6 +34,7 @@ import {
   ensureStatePassphrase,
   resolveStatePassphrase,
   STATE_PASSPHRASE_KEY,
+  statePassphraseGeneratedThisRun,
 } from '../state-passphrase.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
@@ -337,7 +338,7 @@ export async function getOrCreateStack(stackName, program, options = {}) {
   // --force`) opts out of both with `decrypts: false`.
   let statePassphrase;
   if (options.decrypts !== false) {
-    statePassphrase = await ensureStatePassphrase(options.projectDir ?? process.cwd());
+    statePassphrase = await ensureStatePassphrase(projectDirOf(options));
   }
   recordStateOp('stack-select');
   const pulumiProject = requirePulumiProject(options);
@@ -432,7 +433,7 @@ export async function getOrCreateStack(stackName, program, options = {}) {
     // soon is a read-after-write the store may not answer yet: it counts as
     // read. The up that follows reads it as it always has.
     if (created) stateProbes.set(probeKey, Promise.resolve());
-    else await probeStackState(stack, probeKey, statePassphrase);
+    else await probeStackState(stack, probeKey, statePassphrase, projectDirOf(options));
   }
   return stack;
 }
@@ -513,14 +514,15 @@ export function takeProbedDeployment(stack) {
  * @param {object} stack - the Automation API Stack just selected
  * @param {string} key - backend URL, project and stack
  * @param {string} passphrase - the project's verified passphrase
+ * @param {string} projectDir - the project it was verified for
  */
-async function probeStackState(stack, key, passphrase) {
+async function probeStackState(stack, key, passphrase, projectDir) {
   const earlier = stateProbes.get(key);
   if (earlier) {
     await earlier;
     return;
   }
-  const read = readOrMigrateState(stack, passphrase, key);
+  const read = readOrMigrateState(stack, passphrase, key, projectDir);
   const settled = read.then(() => undefined);
   // The failure reaches this caller through `read`; a concurrent opener
   // awaiting `settled` gets it too, and with none, nothing is left unhandled.
@@ -557,9 +559,10 @@ function exportForProbe(stack) {
  * @param {object} stack
  * @param {string} passphrase
  * @param {string} key the probe key (see migrationsAttempted)
+ * @param {string} projectDir the project the passphrase belongs to
  * @returns {Promise<object>} the exported deployment
  */
-async function readOrMigrateState(stack, passphrase, key) {
+async function readOrMigrateState(stack, passphrase, key, projectDir) {
   let refused;
   try {
     const deployment = await exportForProbe(stack);
@@ -593,7 +596,7 @@ async function readOrMigrateState(stack, passphrase, key) {
     } catch (err) {
       if (!isStatePassphraseFailure(err)) throw err;
     }
-    const typed = passphraseRefusal(refused, stack.name, 'state read');
+    const typed = passphraseRefusal(refused, stack.name, 'state read', projectDir);
     progressLog(
       `[pulumi] the empty passphrase older vibecarbon versions used doesn't open it either: ${migration.detail}`,
     );
@@ -604,7 +607,7 @@ async function readOrMigrateState(stack, passphrase, key) {
     deployment = await exportForProbe(stack);
   } catch (err) {
     if (isStatePassphraseFailure(err)) {
-      throw passphraseRefusal(err, stack.name, 'state read after re-encrypting');
+      throw passphraseRefusal(err, stack.name, 'state read after re-encrypting', projectDir);
     }
     throw err;
   }
@@ -1084,7 +1087,7 @@ async function prepareStackForUp(stackName, program, options) {
       // A passphrase the state refuses here refuses the up the same way:
       // stop with the error that says what still works.
       if (isStatePassphraseFailure(err)) {
-        throw passphraseRefusal(err, stackName, 'pre-up refresh');
+        throw passphraseRefusal(err, stackName, 'pre-up refresh', projectDirOf(options));
       }
       // refresh can fail if the state file is completely corrupt or a
       // resource is unreachable. Log and proceed — `up` may still succeed
@@ -1202,7 +1205,9 @@ async function runUp(stack, options) {
     } else {
       // A refused passphrase gets the typed error, which says what still
       // works; passphraseRefusal logs Pulumi's own line once.
-      if (isStatePassphraseFailure(err)) throw passphraseRefusal(err, stack.name, 'up');
+      if (isStatePassphraseFailure(err)) {
+        throw passphraseRefusal(err, stack.name, 'up', projectDirOf(options));
+      }
       // Band-aid removal 2026-08-16: the startup-staleness guarded re-run and
       // the post-up read-only reread that lived here are DELETED with their
       // manufactured trigger (fresh/recreated buckets under our own parallel
@@ -1276,18 +1281,41 @@ function flattenOutputs(rawOutputs) {
 }
 
 /**
- * The error destroyStack throws for a passphrase refusal, after logging
- * Pulumi's own one-line text once. The typed error is what the operator
- * acts on; the raw line is what shows a misclassified failure for what it
- * was. Pulumi's output never carries the passphrase (it travels in the
- * workspace environment, never in argv).
+ * The project dir a stack open checks the passphrase in: the caller's, or the
+ * working directory every command runs from (assertInProjectDir).
+ * @param {{ projectDir?: string }} [options]
+ */
+function projectDirOf(options) {
+  return options?.projectDir ?? process.cwd();
+}
+
+/**
+ * The typed error for a passphrase refusal on `stackName` (worded for a
+ * passphrase this run made when it did), after logging Pulumi's own one-line
+ * text once. The typed error is what the operator acts on; the raw line is
+ * what shows a misclassified failure for what it was. Pulumi's output never
+ * carries the passphrase (it travels in the workspace environment, never in
+ * argv).
  * @param {unknown} err
  * @param {string} stackName
  * @param {string} step
+ * @param {string} projectDir
  */
-function passphraseRefusal(err, stackName, step) {
+function passphraseRefusal(err, stackName, step, projectDir) {
   progressLog(`[pulumi] ${step} refused the state passphrase: ${summarizePulumiError(err)}`);
-  return asStateUndecryptableError(err, stackName);
+  return undecryptable(err, stackName, projectDir);
+}
+
+/**
+ * asStateUndecryptableError, told whether this process made the passphrase.
+ * @param {unknown} err
+ * @param {string} stackName
+ * @param {string} projectDir
+ */
+function undecryptable(err, stackName, projectDir) {
+  return asStateUndecryptableError(err, stackName, {
+    madeThisRun: statePassphraseGeneratedThisRun(projectDir),
+  });
 }
 
 /**
@@ -1374,8 +1402,9 @@ export async function destroyStack(stackName, program, options = {}) {
     // A passphrase that cannot open the state refuses every later step the
     // same way (exportStack, destroy, the read-back of what is left), so stop
     // here with the error that says what still works. The stack record stays.
-    if (isStatePassphraseFailure(err))
-      throw passphraseRefusal(err, stackName, 'pre-destroy refresh');
+    if (isStatePassphraseFailure(err)) {
+      throw passphraseRefusal(err, stackName, 'pre-destroy refresh', projectDirOf(options));
+    }
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
   // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
@@ -1411,7 +1440,9 @@ export async function destroyStack(stackName, program, options = {}) {
     );
   } catch (err) {
     if (err instanceof StackHeldError) throw err;
-    if (isStatePassphraseFailure(err)) throw passphraseRefusal(err, stackName, 'destroy');
+    if (isStatePassphraseFailure(err)) {
+      throw passphraseRefusal(err, stackName, 'destroy', projectDirOf(options));
+    }
     throw await describeDestroyFailure(stack, stackName, err);
   }
 
@@ -1678,7 +1709,7 @@ export async function getStackOutputs(stackName, program, options = {}) {
   try {
     raw = await stack.outputs();
   } catch (err) {
-    throw asStateUndecryptableError(err, stackName);
+    throw undecryptable(err, stackName, projectDirOf(options));
   }
   const outputs = {};
   for (const [key, { value }] of Object.entries(raw)) {

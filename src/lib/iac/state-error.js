@@ -333,9 +333,30 @@ export function classifyStateError({ message } = {}) {
 }
 
 /**
+ * Why a passphrase this run made cannot read a state, and how to bring in the
+ * project's own: the words deploy's StateUndecryptableError and destroy's
+ * kept-record hint (passphraseMadeThisRunHint) share, so the two never tell
+ * the same clone different stories.
+ *
+ * @param {string} subject what it can't read ("this state", "the Pulumi state for prod")
+ * @param {string} then what to run once the project's passphrase is in place
+ * @returns {string}
+ */
+export function passphraseMadeThisRunText(subject, then) {
+  return (
+    "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, " +
+    `and that new passphrase can't read ${subject}. ` +
+    "If the project has one, pull the latest .vibecarbon.json (dropping the `stateEncryption` entry this run wrote) and copy the project's " +
+    `VIBECARBON_STATE_PASSPHRASE into .env.local in place of the new one, then ${then}.`
+  );
+}
+
+/**
  * A stack whose Pulumi state this project's passphrase cannot decrypt. The
- * message is the whole story for the operator: what failed, what it means,
- * and that `destroy` still works without the state.
+ * message is the whole story for the operator: what failed, the likely cause
+ * they can fix (a teammate deployed with the passphrase this clone hasn't
+ * got, or this run made a new one), and only then, for a passphrase nobody
+ * has, a backup before the destroy that still works without the state.
  *
  * Carries the raw Pulumi failure as `cause`. Pulumi's own text advises
  * setting PULUMI_CONFIG_PASSPHRASE, which vibecarbon overrides with the
@@ -344,14 +365,22 @@ export function classifyStateError({ message } = {}) {
 export class StateUndecryptableError extends Error {
   /**
    * @param {string} stackName
-   * @param {{ cause?: unknown }} [options]
+   * @param {{ cause?: unknown, madeThisRun?: boolean }} [options] `madeThisRun`:
+   *   the process that refused it made the passphrase (state-passphrase.js
+   *   statePassphraseGeneratedThisRun)
    */
-  constructor(stackName, options) {
+  constructor(stackName, options = {}) {
+    const { madeThisRun = false, ...errorOptions } = options;
+    const environment = environmentOfStack(stackName);
+    const lead = madeThisRun
+      ? passphraseMadeThisRunText(`the Pulumi state for ${stackName}`, 'run this again')
+      : `vibecarbon can't decrypt the Pulumi state for ${stackName} with this project's passphrase. ` +
+        'If a teammate deployed this project, pull the latest .vibecarbon.json and copy their VIBECARBON_STATE_PASSPHRASE into .env.local. Then run this again.';
     super(
-      `vibecarbon can't decrypt the Pulumi state for ${stackName} with this project's passphrase. ` +
-        "If it was written with a passphrase you no longer have, that state can't be recovered. " +
-        `You can still remove the servers with \`vibecarbon destroy ${environmentOfStack(stackName)}\` and deploy again.`,
-      options,
+      `${lead} ` +
+        "If it was written with a passphrase nobody has any more, that state can't be recovered. " +
+        `Run \`vibecarbon backup ${environment}\` first to keep a copy of your database, then \`vibecarbon destroy ${environment}\` removes the servers so you can deploy again.`,
+      errorOptions,
     );
     this.name = 'StateUndecryptableError';
     this.stackName = stackName;
@@ -459,11 +488,12 @@ export function findStatePassphraseError(err) {
  *
  * @param {unknown} err
  * @param {string} stackName
+ * @param {{ madeThisRun?: boolean }} [options] see StateUndecryptableError
  * @returns {unknown}
  */
-export function asStateUndecryptableError(err, stackName) {
+export function asStateUndecryptableError(err, stackName, { madeThisRun = false } = {}) {
   const name = /** @type {{ name?: string }} */ (err)?.name;
   if (name === 'StatePassphraseError' || name === 'StateUndecryptableError') return err;
   if (!isStatePassphraseFailure(err)) return err;
-  return new StateUndecryptableError(stackName, { cause: err });
+  return new StateUndecryptableError(stackName, { cause: err, madeThisRun });
 }

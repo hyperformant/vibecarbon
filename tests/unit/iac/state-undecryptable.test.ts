@@ -69,6 +69,23 @@ describe('an undecryptable stack surfaces as StateUndecryptableError', () => {
     expect((err as Error & { cause?: unknown }).cause).toBe(raw);
   });
 
+  it('getStackOutputs: a passphrase this run made says so, with the way to bring in the real one', async () => {
+    // This clone had neither the value nor its fingerprint, so this open
+    // made both, and the state refuses it.
+    vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', undefined);
+    delete process.env.VIBECARBON_STATE_PASSPHRASE;
+    fakePulumi.behaviour.outputs = () => {
+      throw refusal('passphrase-incorrect-on-outputs');
+    };
+    const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StateUndecryptableError);
+    expect((err as Error).message).toContain(
+      "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read the Pulumi state for e1.",
+    );
+    expect((err as Error).message).toContain('then run this again.');
+    expect((err as Error).message).toContain('Run `vibecarbon backup e1` first');
+  });
+
   it('getStackOutputs: any other failure passes through untouched', async () => {
     const other = new Error('error: could not read bucket: NoSuchBucket: status code: 404');
     fakePulumi.behaviour.outputs = () => {
