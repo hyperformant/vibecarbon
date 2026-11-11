@@ -485,7 +485,7 @@ async function haProvisionServers(ctx) {
  * as is.
  *
  * @param {Record<string, any> & {
- *   backupS3Config: { bucket: string, region: string, endpoint: string } | null,
+ *   backupS3Config: import('../../backups-bucket.js').BackupsTarget | null,
  * }} ctx
  */
 async function haPersistPendingConfig(ctx) {

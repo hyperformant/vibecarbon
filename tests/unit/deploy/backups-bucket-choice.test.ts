@@ -33,7 +33,17 @@ function live(storage: string, bucket: string, region = storage) {
   };
 }
 
-function project(environments: object = {}, destroyedEnvironments?: object) {
+type ProjectConfig = {
+  projectName: string;
+  bucketSalt?: string;
+  environments?: Record<string, unknown>;
+  destroyedEnvironments?: Record<string, unknown>;
+};
+
+function project(
+  environments: Record<string, unknown> = {},
+  destroyedEnvironments?: Record<string, unknown>,
+): ProjectConfig {
   return {
     projectName: 'myapp',
     bucketSalt: 'abc123',
@@ -42,8 +52,11 @@ function project(environments: object = {}, destroyedEnvironments?: object) {
   };
 }
 
-const choose = (projectConfig: object, region: string, envConfig: object = {}) =>
-  chooseBackupsBucket({ environment: 'staging', envConfig, projectConfig, region } as never);
+const choose = (
+  projectConfig: ProjectConfig,
+  region: string,
+  envConfig: Record<string, unknown> = {},
+) => chooseBackupsBucket({ environment: 'staging', envConfig, projectConfig, region });
 
 describe('backupsTargetOf (the one reader of environments.<env>.backupS3)', () => {
   it('returns the record as is', () => {
@@ -56,7 +69,7 @@ describe('backupsTargetOf (the one reader of environments.<env>.backupS3)', () =
 
   it('is null without a record or without a bucket', () => {
     expect(backupsTargetOf({})).toBeNull();
-    expect(backupsTargetOf(undefined as never)).toBeNull();
+    expect(backupsTargetOf(undefined)).toBeNull();
     expect(backupsTargetOf({ backupS3: { region: 'nbg1' } })).toBeNull();
   });
 
@@ -85,7 +98,7 @@ describe('backupsTargetOf (the one reader of environments.<env>.backupS3)', () =
 describe('backupsHoldings and backupsBucketHolders', () => {
   it('counts every live record, and leaves out the excepted environment', () => {
     const config = project({ prod: live('nbg1', BASE), staging: live('fsn1', FSN1) });
-    expect(backupsHoldings(config as never, { except: 'staging' })).toEqual([
+    expect(backupsHoldings(config, { except: 'staging' })).toEqual([
       { env: 'prod', bucket: BASE, region: 'nbg1' },
     ]);
   });
@@ -101,9 +114,7 @@ describe('backupsHoldings and backupsBucketHolders', () => {
         },
       },
     );
-    expect(backupsHoldings(config as never, {})).toEqual([
-      { env: 'old', bucket: BASE, region: 'nbg1' },
-    ]);
+    expect(backupsHoldings(config, {})).toEqual([{ env: 'old', bucket: BASE, region: 'nbg1' }]);
   });
 
   it('a live sibling deployed by an older CLI, with no record, holds the base name in its uploads region', () => {
@@ -111,9 +122,7 @@ describe('backupsHoldings and backupsBucketHolders', () => {
     // A skeleton that never finished holds nothing.
     const skeleton = { status: 'deploying', s3: { region: 'nbg1' } };
     const config = project({ legacy, skeleton });
-    expect(backupsHoldings(config as never, {})).toEqual([
-      { env: 'legacy', bucket: BASE, region: 'hel1' },
-    ]);
+    expect(backupsHoldings(config, {})).toEqual([{ env: 'legacy', bucket: BASE, region: 'hel1' }]);
   });
 
   it('names each environment holding exactly that bucket, once', () => {
@@ -122,13 +131,9 @@ describe('backupsHoldings and backupsBucketHolders', () => {
       // A rebuild in flight: the destroyed record and the new live entry share a name.
       { prod: { backupS3: { bucket: BASE, region: 'nbg1' } } },
     );
-    expect(backupsBucketHolders(config as never, { bucket: BASE, except: 'preview' })).toEqual([
-      'prod',
-    ]);
-    expect(backupsBucketHolders(config as never, { bucket: FSN1, except: 'prod' })).toEqual([
-      'staging',
-    ]);
-    expect(backupsBucketHolders(config as never, { bucket: FSN1, except: 'staging' })).toEqual([]);
+    expect(backupsBucketHolders(config, { bucket: BASE, except: 'preview' })).toEqual(['prod']);
+    expect(backupsBucketHolders(config, { bucket: FSN1, except: 'prod' })).toEqual(['staging']);
+    expect(backupsBucketHolders(config, { bucket: FSN1, except: 'staging' })).toEqual([]);
   });
 });
 
@@ -242,7 +247,7 @@ describe('settleBackupsBucket', () => {
   });
 
   it("re-chooses in the uploads bucket's region when the plan named another", async () => {
-    const rechoose = vi.fn(() => ({ bucket: FSN1, region: 'fsn1', source: 'region' }));
+    const rechoose = vi.fn(() => ({ bucket: FSN1, region: 'fsn1', source: 'region' as const }));
     const create = vi.fn(async (_b: string, region: string) => created(region));
     const settled = await settleBackupsBucket({
       plan: { bucket: BASE, region: 'nbg1', source: 'first' },
@@ -252,7 +257,7 @@ describe('settleBackupsBucket', () => {
       rechoose,
       create,
       log: vi.fn(),
-    } as never);
+    });
     expect(rechoose).toHaveBeenCalledWith('fsn1');
     expect(create.mock.calls).toEqual([[FSN1, 'fsn1']]);
     expect(settled).toEqual({
@@ -273,7 +278,7 @@ describe('settleBackupsBucket', () => {
       rechoose,
       create,
       log: vi.fn(),
-    } as never);
+    });
     expect(rechoose).not.toHaveBeenCalled();
     expect(create.mock.calls).toEqual([[BASE, 'nbg1']]);
     expect(settled.target).toEqual({ bucket: BASE, region: 'nbg1', endpoint: EP('nbg1') });
@@ -292,7 +297,7 @@ describe('settleBackupsBucket', () => {
       rechoose: vi.fn(),
       create,
       log,
-    } as never);
+    });
     expect(create.mock.calls).toEqual([
       [BASE, 'fsn1'],
       [FSN1, 'fsn1'],
@@ -319,7 +324,7 @@ describe('settleBackupsBucket', () => {
       rechoose: vi.fn(),
       create: vi.fn(async () => created('hel1', false)),
       log,
-    } as never);
+    });
     expect(settled.target).toEqual({ bucket: HEL1, region: 'hel1', endpoint: EP('hel1') });
     // Only a `first` plan switches.
     expect(log).not.toHaveBeenCalled();
@@ -335,7 +340,7 @@ describe('settleBackupsBucket', () => {
       rechoose: vi.fn(),
       create: vi.fn(async (_b: string, region: string) => created(region)),
       log,
-    } as never);
+    });
     expect(settled).toEqual({
       target: { bucket: BASE, region: 'fsn1', endpoint: EP('fsn1') },
       created: true,

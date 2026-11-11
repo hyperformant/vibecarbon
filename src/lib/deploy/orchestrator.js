@@ -1088,8 +1088,9 @@ export async function executeDeployment(args, gatheredConfig) {
   } = gatheredConfig;
   // The backups bucket this deploy settled on, `{ bucket, region, endpoint }`:
   // chosen and created in s3-setup below (src/lib/backups-bucket.js), never
-  // gathered, so a name is never recorded before its bucket exists.
-  /** @type {{ bucket: string, region: string, endpoint: string } | null} */
+  // gathered, so a name this deploy chose is recorded only once its bucket
+  // exists.
+  /** @type {import('../backups-bucket.js').BackupsTarget | null} */
   let backupS3Config = null;
 
   const { deployMode } = config;
@@ -1322,7 +1323,10 @@ export async function executeDeployment(args, gatheredConfig) {
   // `backupsBucket` (was `backupBucket`) is renamed on purpose: every env's
   // hash changes once, so each env re-runs this step once after upgrading and
   // its step result gains the settled backups target the apply below reads.
-  // That run only HEADs buckets that already exist.
+  // That run creates no bucket: each one already exists and is found.
+  // The hash names the PLAN's bucket and the record the SETTLED one, so an env
+  // whose settle switched or re-chose also re-runs this step once on its next
+  // deploy (its plan is then `recorded`), harmlessly, for the same reason.
   const s3Inputs = {
     bucket: s3Config.bucket,
     backupsBucket: backupsPlan.bucket,
@@ -1402,15 +1406,21 @@ export async function executeDeployment(args, gatheredConfig) {
         ...(domain ? { domain } : {}),
         ...(dnsProvider ? { dnsProvider } : {}),
         s3: envS3Record(s3Config, existingEnv.s3),
-        // The settled backups target once s3-setup ran; before that, the
-        // record on disk carried unchanged (none for a new environment).
+        // The settled backups target once s3-setup ran. Before that, the
+        // environment's own record: the one on disk, else the one this deploy
+        // was seeded with (a rebuild of a destroyed environment, whose live
+        // entry does not exist yet). Without the seed's, a run that dies in
+        // s3-setup leaves a live skeleton with no record, the retry's seed is
+        // that skeleton, and the chooser (which never counts the env's own
+        // destroyed record) picks a new bucket where restore finds nothing.
+        // None for a new environment.
         backupS3: backupS3Config
           ? {
               bucket: backupS3Config.bucket,
               region: backupS3Config.region,
               endpoint: backupS3Config.endpoint,
             }
-          : (backupsTargetOf(existingEnv) ?? undefined),
+          : (backupsTargetOf(existingEnv) ?? backupsTargetOf(envConfig) ?? undefined),
         ...(deployMode === 'compose-ha' || (deployMode === 'kubernetes' && secondaryRegion)
           ? {
               ha: {
@@ -1537,7 +1547,10 @@ export async function executeDeployment(args, gatheredConfig) {
           `${environment} is the first environment with storage in ${settled.target.region}, so its backups get their own bucket there: ${settled.target.bucket}`,
         );
       }
-      if (settled.target.region !== app.region) {
+      // Only the environment's own record can put earlier backups in another
+      // region than its uploads; any other bucket answering from elsewhere has
+      // none of this environment's backups yet, so the line would be untrue.
+      if (settled.source === 'recorded' && settled.target.region !== app.region) {
         p.log.info(
           `${environment}'s backups stay in ${settled.target.bucket} (${settled.target.region}), where its earlier backups are; its uploads are in ${app.region}`,
         );
@@ -1546,8 +1559,18 @@ export async function executeDeployment(args, gatheredConfig) {
       // Dedicated Pulumi-state bucket. Created imperatively (like the app +
       // backup buckets) BEFORE any Pulumi stack op. NOT
       // web-facing: no CORS, not public.
+      // A state bucket the environment has on record is asked in the region
+      // recorded for it, so a redeploy finds it with one HEAD there instead of
+      // a CreateBucket from the requested region (answered BucketAlreadyExists,
+      // then a search). A new one is created at the requested region, through
+      // the same client as always (forRegion of its own region is itself).
+      const recordedS3 = envConfig.s3;
+      const stateRegion =
+        recordedS3?.stateBucket === stateBucket && recordedS3?.stateBucketRegion
+          ? recordedS3.stateBucketRegion
+          : s3Config.region;
       s3Spinner.start(`Creating Pulumi state bucket: ${stateBucket}`);
-      const stateBucketResult = await s3Provider.createBucket(stateBucket);
+      const stateBucketResult = await s3Provider.forRegion(stateRegion).createBucket(stateBucket);
       assertBucketReady(stateBucketResult, 'Pulumi state');
       stateBucketCreated = stateBucketResult.created;
       s3Spinner.stop(
