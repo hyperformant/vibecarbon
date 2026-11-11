@@ -214,6 +214,13 @@ function fakeChild({
   return child;
 }
 
+// What `kubectl -n kube-system get secret carbon-autoscaler-config
+// --ignore-not-found -o json` prints before the CA Secret apply, and what
+// `get deployments,statefulsets,daemonsets -o json` lists there. Default: no
+// Secret yet, as on a first deploy, so nothing restarts.
+let caSecretOut = '';
+let kubeSystemWorkloadsOut = '{"items":[]}';
+
 // `kubectl get nodes -o name` answer for the stale-worker reap (pilot
 // standby). Default: no nodes reported — every unrelated test sees an empty
 // cluster and the reap stays a no-op.
@@ -278,6 +285,14 @@ function installSpawnMock() {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
+    if (cmd === 'kubectl' && argv.includes('secret') && argv.includes('carbon-autoscaler-config')) {
+      return fakeChild({ stdout: caSecretOut, argv: full }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (cmd === 'kubectl' && argv.includes('deployments,statefulsets,daemonsets')) {
+      return fakeChild({ stdout: kubeSystemWorkloadsOut, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
     if (cmd === 'kubectl' && argv[0] === 'kustomize') {
       const target = String(argv[1]);
       if (target.endsWith('/cluster-autoscaler')) {
@@ -1189,6 +1204,117 @@ describe('applyK3sManifests deploy-time optimizations', () => {
  * all stay — failover needs the registry (CA-spawned workers pull from it)
  * and the serving master.
  */
+describe('a replaced provider token restarts the cluster autoscaler', () => {
+  // Its sidecar reads the token from carbon-autoscaler-config into an env var
+  // when it starts (deployment.yaml PROVIDER_API_TOKEN), and nothing else in
+  // the apply touches its pod template, so a new token reached the Secret and
+  // never the running autoscaler. config.json, the Secret's other key, is a
+  // file it reloads on its own.
+  const caSecret = (token: string, config = '{"nodeGroups":[]}') =>
+    JSON.stringify({
+      kind: 'Secret',
+      metadata: { name: 'carbon-autoscaler-config', namespace: 'kube-system' },
+      data: {
+        token: Buffer.from(token).toString('base64'),
+        'config.json': Buffer.from(config).toString('base64'),
+      },
+    });
+  const AUTOSCALER = {
+    kind: 'Deployment',
+    metadata: { name: 'cluster-autoscaler' },
+    spec: {
+      template: {
+        spec: {
+          containers: [
+            { name: 'cluster-autoscaler' },
+            {
+              name: 'carbon-autoscaler',
+              env: [
+                {
+                  name: 'PROVIDER_API_TOKEN',
+                  valueFrom: { secretKeyRef: { name: 'carbon-autoscaler-config', key: 'token' } },
+                },
+              ],
+            },
+          ],
+          volumes: [
+            { name: 'autoscaler-config', secret: { secretName: 'carbon-autoscaler-config' } },
+          ],
+        },
+      },
+    },
+  };
+  const COREDNS = {
+    kind: 'Deployment',
+    metadata: { name: 'coredns' },
+    spec: { template: { spec: { containers: [{ name: 'coredns' }] } } },
+  };
+
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    kubeSystemWorkloadsOut = JSON.stringify({ items: [AUTOSCALER, COREDNS] });
+    installSpawnMock();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+  afterEach(() => {
+    caSecretOut = '';
+    kubeSystemWorkloadsOut = '{"items":[]}';
+    vi.restoreAllMocks();
+  });
+
+  const restarts = () =>
+    cmdCalls.filter((a) => a[0] === 'kubectl' && a.includes('rollout') && a.includes('restart'));
+  const setImageAt = () =>
+    cmdCalls.findIndex(
+      (a) =>
+        a.includes('set') && a.includes('image') && a.includes('deployment/cluster-autoscaler'),
+    );
+  const rolloutAt = () =>
+    cmdCalls.findIndex(
+      (a) =>
+        a.includes('rollout') && a.includes('status') && a.includes('deploy/cluster-autoscaler'),
+    );
+
+  it('a token other than the one it holds restarts it, after the image pin, before the rollout wait', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(restarts()).toEqual([
+      ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/cluster-autoscaler'],
+    ]);
+    const restartAt = cmdCalls.indexOf(restarts()[0]);
+    expect(restartAt).toBeGreaterThan(setImageAt());
+    expect(restartAt).toBeLessThan(rolloutAt());
+    // Read before the Secret is applied: after it, the old token is gone.
+    const readAt = cmdCalls.findIndex(
+      (a) => a.includes('get') && a.includes('secret') && a.includes('carbon-autoscaler-config'),
+    );
+    const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+    expect(readAt).toBeGreaterThan(-1);
+    expect(readAt).toBeLessThan(Number(applied?.seq));
+  });
+
+  it('the same token restarts nothing, whatever config.json became', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret(baseArgs('').apiToken, '{"nodeGroups":["changed"]}');
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(restarts()).toEqual([]);
+  });
+
+  it('a Secret this apply creates restarts nothing', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = '';
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(restarts()).toEqual([]);
+    expect(cmdCalls.some((a) => a.includes('deployments,statefulsets,daemonsets'))).toBe(false);
+  });
+});
+
 describe('applyK3sManifests pilot-standby role', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();

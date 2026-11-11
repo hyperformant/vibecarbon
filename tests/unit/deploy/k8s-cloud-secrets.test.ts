@@ -16,7 +16,11 @@
  *   - applyCloudSecrets: one `kubectl apply --server-side --force-conflicts
  *     --field-manager=vibecarbon-cli -f -`, with every Secret on stdin; the
  *     token never on argv, never in a log line or the error; a missing value
- *     refuses before kubectl runs;
+ *     refuses before kubectl runs, saying what to do next;
+ *   - restarts: each Secret is read before the apply, its values kept as
+ *     keyed digests and never printed; a Secret that existed and changed
+ *     restarts exactly the workloads that read it (found from their pod
+ *     templates, secretReaders), an unchanged or a new one restarts nothing;
  *   - deployK3s: the call has its own perf span, runs after the control-plane
  *     gate and the restore-marker read, before the k3s-apply skip gate, in a
  *     block no condition guards, so a first deploy, a warm redeploy, `deploy
@@ -38,7 +42,67 @@ import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 
 type Call = { argv: string[]; input?: string; env?: NodeJS.ProcessEnv };
 const calls: Call[] = [];
+/** A kubectl call whose argv (after `kubectl`) this matches fails with kubectlFails. */
+let failWhen: RegExp | null = null;
 let kubectlFails: Error | null = null;
+
+/** The Secrets the fake apiserver holds, `namespace/name` to decoded data. */
+const cluster = new Map<string, Record<string, string>>();
+/** The pod templates `get deployments,statefulsets,daemonsets -o json` lists, per namespace. */
+let workloads: Record<string, unknown[]> = {};
+/** What `get secret -o json` prints instead of the Secret, when set. */
+let secretOutput: string | null = null;
+
+/** A Secret as `kubectl get -o json` prints it, the boot script's last-applied annotation and all. */
+function secretJson(namespace: string, name: string, data: Record<string, string>) {
+  const encoded = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, Buffer.from(v).toString('base64')]),
+  );
+  return JSON.stringify({
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name,
+      namespace,
+      resourceVersion: '4242',
+      annotations: {
+        'kubectl.kubernetes.io/last-applied-configuration': JSON.stringify({ stringData: data }),
+      },
+    },
+    data: encoded,
+    type: 'Opaque',
+  });
+}
+
+/** kubectl against `cluster`: reads, the server-side apply, the workload list, restarts. */
+function fakeKubectl(args: string[], input?: string): string {
+  if (failWhen?.test(args.join(' ')) && kubectlFails) throw kubectlFails;
+  if (args[0] === '-n' && args[2] === 'get' && args[3] === 'secret') {
+    const data = cluster.get(`${args[1]}/${args[4]}`);
+    if (secretOutput !== null) return secretOutput;
+    return data ? secretJson(args[1], args[4], data) : '';
+  }
+  if (args[0] === 'apply') {
+    for (const doc of loadAll(String(input)) as {
+      metadata: { namespace: string; name: string };
+      stringData: Record<string, string>;
+    }[]) {
+      const key = `${doc.metadata.namespace}/${doc.metadata.name}`;
+      cluster.set(key, { ...cluster.get(key), ...doc.stringData });
+    }
+    return '';
+  }
+  if (args[0] === '-n' && args[2] === 'get' && args[3] === 'deployments,statefulsets,daemonsets') {
+    return JSON.stringify({ apiVersion: 'v1', kind: 'List', items: workloads[args[1]] ?? [] });
+  }
+  if (args[0] === '-n' && args[2] === 'rollout' && args[3] === 'restart') {
+    return args
+      .slice(4)
+      .map((r) => `${r} restarted\n`)
+      .join('');
+  }
+  throw new Error(`the fake kubectl has no answer for: kubectl ${args.join(' ')}`);
+}
 
 vi.mock('../../../src/lib/command.js', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../../../src/lib/command.js');
@@ -46,15 +110,18 @@ vi.mock('../../../src/lib/command.js', async () => {
     ...actual,
     runCommandAsync: vi.fn(async (argv: string[], opts: { input?: string; env?: never }) => {
       calls.push({ argv, input: opts?.input, env: opts?.env });
-      if (kubectlFails) throw kubectlFails;
-      return '';
+      return fakeKubectl(argv.slice(1), opts?.input);
     }),
   };
 });
 
-const { applyCloudSecrets, CLOUD_SECRETS_APPLY_ARGV } = await import(
-  '../../../src/lib/deploy/k8s/k3s.js'
-);
+const {
+  applyCloudSecrets,
+  CLOUD_SECRETS_APPLY_ARGV,
+  readSecretFingerprints,
+  secretDataChanged,
+  secretReaders,
+} = await import('../../../src/lib/deploy/k8s/k3s.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 const { BaseProvider } = await import('../../../src/lib/providers/base.js');
 
@@ -113,6 +180,10 @@ describe('applyCloudSecrets', () => {
 
   beforeEach(() => {
     calls.length = 0;
+    cluster.clear();
+    workloads = {};
+    secretOutput = null;
+    failWhen = null;
     kubectlFails = null;
     logged = [];
     const record = (...args: unknown[]) => {
@@ -138,15 +209,62 @@ describe('applyCloudSecrets', () => {
     applyCloudSecrets({
       env: { ...process.env, KUBECONFIG },
       ProviderClass: Provider,
+      stack: 'prod-primary',
+      operatorEnv: 'prod',
       ...values,
     });
+  const kubectl = (verb: string) =>
+    calls.filter(({ argv }) => argv.includes(verb)).map(({ argv }) => argv);
+  const applies = () => calls.filter(({ argv }) => argv[1] === 'apply');
+  const restarts = () => kubectl('rollout');
+  /** Every token this provider hands over, as the cluster holds them after `token`'s deploy. */
+  const holdAll = (Provider: typeof BaseProvider, token: string) => {
+    for (const { namespace, name, stringData } of Provider.k8sCloudSecrets({
+      token,
+      networkId: NETWORK,
+    })) {
+      cluster.set(`${namespace}/${name}`, { ...stringData });
+    }
+  };
+  /** A Deployment whose container reads `secret`'s `key` into its env, as the upstream CCM/CSI do. */
+  const envReader = (name: string, secret: string, key = 'token') => ({
+    kind: 'Deployment',
+    metadata: { name },
+    spec: {
+      template: {
+        spec: {
+          containers: [
+            {
+              name: 'c',
+              env: [{ name: 'TOKEN', valueFrom: { secretKeyRef: { name: secret, key } } }],
+            },
+          ],
+        },
+      },
+    },
+  });
+  const nonReaders = [
+    envReader('reads-another-secret', 'carbon-autoscaler-config'),
+    {
+      kind: 'DaemonSet',
+      metadata: { name: 'reads-nothing' },
+      spec: { template: { spec: { containers: [{ name: 'c' }] } } },
+    },
+  ];
+  /** One reader per Secret of this provider, beside two workloads that read none of them. */
+  const readerPerSecret = (Provider: typeof BaseProvider) => {
+    for (const { namespace, name } of Provider.k8sCloudSecrets({ token: TOKEN })) {
+      workloads[namespace] = [...(workloads[namespace] ?? []), envReader(`reads-${name}`, name)];
+    }
+    for (const ns of Object.keys(workloads)) workloads[ns].push(...nonReaders);
+  };
 
   it.each(K8S_PROVIDERS)(
     '%s: one server-side apply, owned by the CLI, every Secret on stdin',
     async (_id, Provider) => {
       await apply(Provider);
-      expect(calls).toHaveLength(1);
-      const [{ argv, input, env }] = calls;
+      expect(applies()).toHaveLength(1);
+      const [{ argv, input, env }] = applies();
       expect(argv).toEqual(['kubectl', ...CLOUD_SECRETS_APPLY_ARGV]);
       expect(CLOUD_SECRETS_APPLY_ARGV).toEqual([
         'apply',
@@ -175,10 +293,12 @@ describe('applyCloudSecrets', () => {
   it.each(K8S_PROVIDERS)(
     '%s: the token rides stdin only, never argv or a log line',
     async (_id, Provider) => {
+      holdAll(Provider, 'vc-sentinel-token-old');
+      readerPerSecret(Provider);
       await apply(Provider);
-      const [{ argv, input }] = calls;
-      expect(String(input)).toContain(MARK);
-      expect(argv.join(' ')).not.toContain(MARK);
+      expect(restarts()).toHaveLength(1);
+      expect(String(applies()[0].input)).toContain(MARK);
+      for (const { argv } of calls) expect(argv.join(' ')).not.toContain(MARK);
       expect(logged.join('\n')).not.toContain(MARK);
     },
   );
@@ -200,6 +320,7 @@ describe('applyCloudSecrets', () => {
   });
 
   it('a failed apply names the Secrets, never the token', async () => {
+    failWhen = /^apply /;
     kubectlFails = Object.assign(new Error('Command failed: kubectl apply'), {
       status: 1,
       stderr: 'error: the server could not find the requested resource\n',
@@ -211,23 +332,28 @@ describe('applyCloudSecrets', () => {
     expect(logged.join('\n')).not.toContain(MARK);
   });
 
-  it.each(K8S_PROVIDERS)('%s: no token, no apply', async (_id, Provider) => {
-    const [{ namespace, name, stringData }] = Provider.k8sCloudSecrets({ token: TOKEN });
-    const key = Object.keys(stringData).find((k) => stringData[k] === TOKEN);
-    for (const token of ['', undefined]) {
-      await expect(apply(Provider, { token, networkId: NETWORK } as never)).rejects.toThrow(
-        `Can't hand your ${Provider.NAME} API token to the cluster: this deploy has no ${key} for Secret ${namespace}/${name}.`,
-      );
-    }
-    expect(calls).toHaveLength(0);
-    expect(logged).toEqual([]);
-  });
+  it.each(K8S_PROVIDERS)(
+    '%s: no token, no kubectl, and where to set one',
+    async (_id, Provider) => {
+      for (const token of ['', undefined]) {
+        await expect(apply(Provider, { token, networkId: NETWORK } as never)).rejects.toThrow(
+          `Can't hand your ${Provider.NAME} API token to the cluster: this deploy has none. ` +
+            `Set ${Provider.TOKEN_ENV} (in .env.local or your shell), then deploy again.`,
+        );
+      }
+      expect(calls).toHaveLength(0);
+      expect(logged).toEqual([]);
+    },
+  );
 
-  it("Hetzner without the cluster's network id refuses before kubectl runs", async () => {
+  it("Hetzner without the cluster's network id refuses before kubectl runs, and says how to refresh it", async () => {
     await expect(
       apply(PROVIDERS.hetzner, { token: TOKEN, networkId: undefined } as never),
     ).rejects.toThrow(
-      "Can't hand your Hetzner Cloud API token to the cluster: this deploy has no network for Secret kube-system/hcloud.",
+      "Can't hand your Hetzner Cloud API token to the cluster: the cluster outputs this deploy " +
+        'saved have no network for Secret kube-system/hcloud. Delete ' +
+        '.vibecarbon/deploy-state-prod-primary.json and run `vibecarbon deploy prod` again, ' +
+        "so it reads them from the cluster's stack again.",
     );
     expect(calls).toHaveLength(0);
   });
@@ -236,6 +362,270 @@ describe('applyCloudSecrets', () => {
     await apply(Provider);
     expect(calls).toHaveLength(0);
     expect(logged).toEqual([]);
+  });
+
+  describe('restarts what reads a changed Secret, and nothing else', () => {
+    it.each(K8S_PROVIDERS)('%s: unchanged Secrets restart nothing', async (_id, Provider) => {
+      holdAll(Provider, TOKEN);
+      readerPerSecret(Provider);
+      await apply(Provider);
+      expect(applies()).toHaveLength(1);
+      expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+      expect(restarts()).toEqual([]);
+    });
+
+    it.each(K8S_PROVIDERS)(
+      '%s: a replaced token restarts exactly the workloads that read it',
+      async (_id, Provider) => {
+        holdAll(Provider, 'vc-sentinel-token-old');
+        readerPerSecret(Provider);
+        await apply(Provider);
+        const secrets = Provider.k8sCloudSecrets({ token: TOKEN });
+        const namespaces = [...new Set(secrets.map(({ namespace }) => namespace))];
+        expect(restarts()).toEqual(
+          namespaces.map((ns) => [
+            'kubectl',
+            '-n',
+            ns,
+            'rollout',
+            'restart',
+            ...secrets
+              .filter(({ namespace }) => namespace === ns)
+              .map(({ name }) => `deployment/reads-${name}`)
+              .sort(),
+          ]),
+        );
+        // After the apply: a pod that starts sooner would read the old token.
+        const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
+        const restartAt = calls.findIndex(({ argv }) => argv[3] === 'rollout');
+        expect(restartAt).toBeGreaterThan(applyAt);
+      },
+    );
+
+    it.each(K8S_PROVIDERS)(
+      '%s: Secrets this deploy creates restart nothing',
+      async (_id, Provider) => {
+        readerPerSecret(Provider);
+        await apply(Provider);
+        expect(applies()).toHaveLength(1);
+        expect(restarts()).toEqual([]);
+      },
+    );
+
+    it('only the Secret that changed: its readers restart, the other one’s do not', async () => {
+      // hcloud already holds this token; hcloud-csi still the boot script's.
+      holdAll(PROVIDERS.hetzner, TOKEN);
+      cluster.set('kube-system/hcloud-csi', { token: 'vc-sentinel-token-old' });
+      readerPerSecret(PROVIDERS.hetzner);
+      await apply(PROVIDERS.hetzner);
+      expect(restarts()).toEqual([
+        ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/reads-hcloud-csi'],
+      ]);
+    });
+
+    it('a changed Secret nothing reads restarts nothing', async () => {
+      holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [...nonReaders];
+      await apply(PROVIDERS.linode);
+      expect(kubectl('deployments,statefulsets,daemonsets')).toHaveLength(1);
+      expect(restarts()).toEqual([]);
+    });
+
+    it('says what restarts and why, in one line', async () => {
+      holdAll(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        envReader('hcloud-cloud-controller-manager', 'hcloud'),
+        envReader('hcloud-csi-controller', 'hcloud'),
+        ...nonReaders,
+      ];
+      await apply(PROVIDERS.hetzner);
+      // Both Secrets changed; only kube-system/hcloud has readers, as upstream.
+      expect(logged).toEqual([
+        'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud, kube-system/hcloud-csi).',
+        'Restarting deployment/hcloud-cloud-controller-manager and deployment/hcloud-csi-controller ' +
+          'so they pick up the new kube-system/hcloud: they read it only when they start.',
+      ]);
+      logged = [];
+      cluster.set('kube-system/linode', { token: 'vc-sentinel-token-old' });
+      workloads['kube-system'] = [envReader('csi-linode-controller', 'linode'), ...nonReaders];
+      await apply(PROVIDERS.linode);
+      expect(logged.at(-1)).toBe(
+        'Restarting deployment/csi-linode-controller so it picks up the new kube-system/linode: ' +
+          'it reads it only when it starts.',
+      );
+      logged = [];
+      holdAll(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        envReader('reads-hcloud', 'hcloud'),
+        envReader('reads-hcloud-csi', 'hcloud-csi'),
+      ];
+      await apply(PROVIDERS.hetzner);
+      expect(logged.at(-1)).toBe(
+        'Restarting deployment/reads-hcloud and deployment/reads-hcloud-csi so they pick up the ' +
+          'new kube-system/hcloud and kube-system/hcloud-csi: they read them only when they start.',
+      );
+    });
+
+    it('a restart that fails says how to restart by hand, since the next deploy will not', async () => {
+      holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
+      readerPerSecret(PROVIDERS.linode);
+      failWhen = /^-n kube-system rollout restart /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout restart'), {
+        status: 1,
+        stderr: 'error: deployments.apps "reads-linode" is forbidden\n',
+      });
+      const err = await apply(PROVIDERS.linode).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(
+        "kube-system/linode changed, but restarting deployment/reads-linode didn't go through, " +
+          "so it still runs with the old value, and the next deploy won't restart it: the Secret " +
+          `already matches. Run \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout restart ` +
+          'deployment/reads-linode`.\nrestart deployment/reads-linode failed with exit 1: ' +
+          'error: deployments.apps "reads-linode" is forbidden',
+      );
+      expect(logged.join('\n')).not.toContain(MARK);
+    });
+  });
+
+  describe('the read before the apply never shows a value', () => {
+    it.each(K8S_PROVIDERS)(
+      '%s: nothing it read reaches stdout, stderr, a log line or an error',
+      async (_id, Provider) => {
+        // The Secret the cluster holds carries the token in data (base64)
+        // and in the boot script's last-applied annotation (plain).
+        holdAll(Provider, TOKEN);
+        readerPerSecret(Provider);
+        await apply(Provider, { token: 'vc-sentinel-token-new', networkId: NETWORK });
+        expect(kubectl('secret').length).toBe(Provider.k8sCloudSecrets({ token: TOKEN }).length);
+        const out = logged.join('\n');
+        expect(out).not.toContain(MARK);
+        expect(out).not.toContain(Buffer.from(TOKEN).toString('base64').slice(0, 16));
+        expect(out).not.toContain('last-applied-configuration');
+      },
+    );
+
+    it('output that is not JSON fails without quoting it', async () => {
+      holdAll(PROVIDERS.digitalocean, TOKEN);
+      secretOutput = `{"data": {"access-token": "${MARK}"`;
+      const err = await apply(PROVIDERS.digitalocean).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(
+        "kubectl's output for Secret kube-system/digitalocean was not the JSON it asks for.",
+      );
+      expect(logged.join('\n')).not.toContain(MARK);
+      expect(applies()).toHaveLength(0);
+    });
+
+    it('keeps keyed digests, never values: a missing key, a missing Secret, a match', async () => {
+      const env = { ...process.env, KUBECONFIG };
+      cluster.set('kube-system/hcloud', { token: TOKEN });
+      const live = await readSecretFingerprints({
+        env,
+        namespace: 'kube-system',
+        name: 'hcloud',
+        keys: ['token', 'network'],
+      });
+      expect(live).not.toBeNull();
+      expect(JSON.stringify(live)).not.toContain(MARK);
+      expect(live?.network).toBe('');
+      expect(secretDataChanged(live, { token: TOKEN })).toBe(false);
+      expect(secretDataChanged(live, { token: `${TOKEN}x` })).toBe(true);
+      expect(secretDataChanged(live, { token: TOKEN, network: String(NETWORK) })).toBe(true);
+      const absent = await readSecretFingerprints({
+        env,
+        namespace: 'kube-system',
+        name: 'hcloud-csi',
+        keys: ['token'],
+      });
+      expect(absent).toBeNull();
+      expect(secretDataChanged(absent, { token: TOKEN })).toBe(false);
+    });
+  });
+});
+
+describe('secretReaders', () => {
+  const workload = (kind: string, name: string, pod: Record<string, unknown>) => ({
+    kind,
+    metadata: { name },
+    spec: { template: { spec: pod } },
+  });
+  const ref = (secret: string) => ({ secretKeyRef: { name: secret, key: 'token' } });
+
+  it('finds every way a pod reads a Secret, in every workload kind', () => {
+    const list = {
+      items: [
+        workload('Deployment', 'env', {
+          containers: [{ name: 'c', env: [{ name: 'T', valueFrom: ref('s') }] }],
+        }),
+        workload('StatefulSet', 'init-env', {
+          containers: [{ name: 'c' }],
+          initContainers: [{ name: 'i', env: [{ name: 'T', valueFrom: ref('s') }] }],
+        }),
+        workload('DaemonSet', 'env-from', {
+          containers: [{ name: 'c', envFrom: [{ secretRef: { name: 's' } }] }],
+        }),
+        workload('Deployment', 'volume', {
+          containers: [{ name: 'c' }],
+          volumes: [{ name: 'v', secret: { secretName: 's' } }],
+        }),
+        workload('Deployment', 'projected', {
+          containers: [{ name: 'c' }],
+          volumes: [{ name: 'v', projected: { sources: [{ secret: { name: 's' } }] } }],
+        }),
+        workload('Deployment', 'ephemeral', {
+          containers: [{ name: 'c' }],
+          ephemeralContainers: [{ name: 'e', envFrom: [{ secretRef: { name: 's' } }] }],
+        }),
+      ],
+    };
+    expect(secretReaders(list, ['s'])).toEqual([
+      'daemonset/env-from',
+      'deployment/env',
+      'deployment/ephemeral',
+      'deployment/projected',
+      'deployment/volume',
+      'statefulset/init-env',
+    ]);
+  });
+
+  it('leaves out what reads another Secret, a ConfigMap or nothing', () => {
+    const list = {
+      items: [
+        workload('Deployment', 'other-secret', {
+          containers: [{ name: 'c', env: [{ name: 'T', valueFrom: ref('other') }] }],
+          volumes: [{ name: 'v', secret: { secretName: 'other' } }],
+        }),
+        workload('Deployment', 'configmap', {
+          containers: [
+            {
+              name: 'c',
+              env: [{ name: 'T', valueFrom: { configMapKeyRef: { name: 's', key: 'k' } } }],
+              envFrom: [{ configMapRef: { name: 's' } }],
+            },
+          ],
+          volumes: [{ name: 'v', configMap: { name: 's' } }],
+        }),
+        workload('DaemonSet', 'nothing', { containers: [{ name: 'c' }] }),
+      ],
+    };
+    expect(secretReaders(list, ['s'])).toEqual([]);
+  });
+
+  it('names a reader of two of the Secrets once, and reads an empty list as none', () => {
+    const both = workload('Deployment', 'both', {
+      containers: [
+        {
+          name: 'c',
+          env: [
+            { name: 'A', valueFrom: ref('a') },
+            { name: 'B', valueFrom: ref('b') },
+          ],
+        },
+      ],
+    });
+    expect(secretReaders({ items: [both] }, ['a', 'b'])).toEqual(['deployment/both']);
+    expect(secretReaders({ items: [] }, ['a'])).toEqual([]);
+    expect(secretReaders({}, ['a'])).toEqual([]);
   });
 });
 
@@ -283,6 +673,10 @@ describe('deployK3s hands the token over on every deploy', () => {
     expect(text).toContain('ProviderClass: Provider');
     expect(text).toContain('token: options.apiToken');
     expect(text).toMatch(/\bnetworkId\b/);
+    // The refusal's next step names this cluster's state file and the
+    // environment the operator deploys.
+    expect(text).toContain('stack: options.environment');
+    expect(text).toContain('operatorEnv: options.operatorEnv ?? options.environment');
   });
 
   it('after the control-plane gate and the marker read, before the k3s-apply gate', () => {

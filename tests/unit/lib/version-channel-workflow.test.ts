@@ -4,7 +4,7 @@
  * could publish something it should not, or stop publishing unnoticed.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { amd64Child, planOutputs } from '../../../scripts/version-channel.mjs';
@@ -126,13 +126,34 @@ describe('version-channel workflow', () => {
     expect(job.steps?.[0].env?.REFS).toContain('needs.plan.outputs.refs');
   });
 
-  it('the k3s smoke test exists and runs the versions about to go out', () => {
-    const step = jobs['k3s-smoke'].steps?.find((s) => s.run?.includes('vitest'));
-    const test = step?.run?.match(/tests\/integration\/docker\/\S+\.test\.ts/)?.[0] as string;
-    expect(existsSync(test), test).toBe(true);
+  const k3sSmokeStep = () => jobs['k3s-smoke'].steps?.find((s) => s.run?.includes('vitest'));
+  const k3sSmokeTests = () =>
+    [...(k3sSmokeStep()?.run ?? '').matchAll(/tests\/integration\/docker\/\S+\.test\.ts/g)].map(
+      ([test]) => test,
+    );
+
+  it('the k3s smoke tests exist and each runs the versions about to go out', () => {
+    const step = k3sSmokeStep();
     expect(step?.env?.DOCKER_INTEGRATION).toBe('true');
     expect(step?.env?.VC_K3S_VERSION).toContain('needs.plan.outputs.k3s');
-    expect(readFileSync(test, 'utf-8')).toMatch(/process\.env\.VC_K3S_VERSION/);
+    const tests = k3sSmokeTests();
+    expect(tests.length).toBeGreaterThan(0);
+    for (const test of tests) {
+      expect(existsSync(test), test).toBe(true);
+      expect(readFileSync(test, 'utf-8'), test).toMatch(/process\.env\.VC_K3S_VERSION/);
+    }
+  });
+
+  it('every Docker test on the k3s release the CLI installs runs in the k3s smoke', () => {
+    // A test that boots k3sVersion() proves something about that release, so
+    // it has to prove it about the next one before the list names it.
+    const dir = 'tests/integration/docker';
+    const onRelease = readdirSync(dir, { recursive: true, encoding: 'utf-8' })
+      .filter((f) => f.endsWith('.test.ts'))
+      .map((f) => `${dir}/${f}`)
+      .filter((f) => /\bk3sVersion\(\)/.test(readFileSync(f, 'utf-8')));
+    expect(onRelease.length).toBeGreaterThan(0);
+    expect(k3sSmokeTests().sort()).toEqual(onRelease.sort());
   });
 
   it('only publish writes the branch, without force, after the CLI validator', () => {
