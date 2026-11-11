@@ -1874,6 +1874,23 @@ async function updateProjectConfigEffect(ctx) {
     });
     return;
   }
+  // A recorded reserved IP of ours that the backstop could not prove released
+  // (sweepK8sBackstopTargets) is named nowhere but this entry: kept, as
+  // above, so the next destroy retries it. The backstop's own leak line says
+  // so; this adds none.
+  const unreleased = results.unreleasedReservedIps ?? [];
+  if (unreleased.length > 0) {
+    spinner.start('Updating project configuration');
+    const named =
+      unreleased.length === 1
+        ? `the reserved IP ${unreleased[0]} is`
+        : `the reserved IPs ${unreleased.join(' and ')} are`;
+    spinner.stop(
+      `Configuration kept: ${named} not released yet, ` +
+        `so the next \`vibecarbon destroy ${environment}\` can retry`,
+    );
+    return;
+  }
   spinner.start('Updating project configuration');
   // One locked write onto the file as it is now: the in-memory projectConfig
   // was loaded when this destroy started, and a failover journal or another
@@ -2739,9 +2756,17 @@ async function savedReservedIpOwner(provider, address, projectName, stackEnv) {
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
- * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string}} args
+ * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string}} args
+ *   `environment`: the environment as the operator names it, for the retry line.
  */
-export async function sweepK8sBackstopTargets({ provider, targets, results, s, projectName }) {
+export async function sweepK8sBackstopTargets({
+  provider,
+  targets,
+  results,
+  s,
+  projectName,
+  environment,
+}) {
   const Provider = provider.constructor;
   for (const target of targets) {
     // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
@@ -2808,51 +2833,72 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s, p
     // assignment resource that deletes itself from state on refresh) were
     // written up at the former `digitalocean.ReservedIp` construction site in
     // src/lib/iac/programs/digitalocean-k8s.js (git history). By the time
-    // this runs the droplets are gone, so the IP is unassigned and a plain
-    // DELETE works.
+    // this runs the droplets are gone, so the IP is unassigned. DigitalOcean's
+    // delete counts it released only once the read by address answers 404
+    // (DigitalOceanProvider.deleteReservedIpByAddress): DO has answered a
+    // DELETE with success and kept the IP.
     //
     // A provider whose reserved IPs carry tags (Linode) is asked first
     // whether the saved address is still this cluster's (savedReservedIpOwner).
+    //
+    // An address of ours that is not proven released keeps the environment's
+    // record (results.unreleasedReservedIps, read by updateProjectConfigEffect):
+    // the record is the only place the address is named, so the next destroy
+    // retries it.
     if (target.floatingIp) {
-      s.start(`Verifying ${Provider.NAME} reserved IP is gone: ${target.floatingIp}`);
+      const address = target.floatingIp;
+      const retry =
+        `Run \`vibecarbon destroy ${environment}\` again to retry it: the environment ` +
+        'stays in .vibecarbon.json until it is released. Or release it in the ' +
+        `${Provider.NAME} console (look for reserved IPs under networking).`;
+      s.start(`Verifying ${Provider.NAME} reserved IP is gone: ${address}`);
       try {
-        const owner = await savedReservedIpOwner(
-          provider,
-          target.floatingIp,
-          projectName,
-          target.stackEnv,
-        );
+        const owner = await savedReservedIpOwner(provider, address, projectName, target.stackEnv);
         if (owner.verdict === 'released') {
           s.stop('Reserved IP already released');
         } else if (owner.verdict === 'foreign') {
-          s.stop(`Reserved IP ${target.floatingIp} left alone: it is no longer this cluster's`);
+          s.stop(`Reserved IP ${address} left alone: it is no longer this cluster's`);
           results.leaks.foreign({
             resourceClass: 'reserved-ip',
-            resource: target.floatingIp,
+            resource: address,
             reason:
               `not released: it carries ${owner.tags.length ? owner.tags.join(', ') : 'no tags'}, ` +
               `not project ${projectName} and stack ${target.stackEnv}, so the address was likely reissued`,
             hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
           });
         } else {
-          const deleted = await provider.deleteReservedIpByAddress(target.floatingIp);
-          s.stop(deleted ? 'Reserved IP released (backstop)' : 'Reserved IP backstop failed');
-          if (!deleted) {
-            results.leaks.leak({
+          const outcome = await provider.deleteReservedIpByAddress(address);
+          if (outcome.released) {
+            s.stop('Reserved IP released (backstop)');
+          } else {
+            s.stop(`Reserved IP ${address} is not released: ${outcome.reason}`);
+            results.unreleasedReservedIps.push(address);
+            const entry = {
               resourceClass: 'reserved-ip',
-              resource: target.floatingIp,
-              reason: 'backstop delete did not release it',
-              hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
-            });
+              resource: describeResource({ name: address, region: outcome.region }),
+              hint: retry,
+            };
+            if (outcome.held) {
+              results.leaks.leak({
+                ...entry,
+                reason: `${outcome.reason}, so it is not released and keeps billing on your ${Provider.NAME} account`,
+              });
+            } else {
+              results.leaks.unverified({
+                ...entry,
+                reason: `${outcome.reason}, so vibecarbon cannot tell whether ${Provider.NAME} released it; if not, it keeps billing`,
+              });
+            }
           }
         }
       } catch (error) {
         s.stop(`Reserved IP backstop check failed: ${error.message}`);
+        results.unreleasedReservedIps.push(address);
         results.leaks.unverified({
           resourceClass: 'reserved-ip',
-          resource: target.floatingIp,
-          reason: `backstop check threw: ${error.message}, could not confirm it is released`,
-          hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
+          resource: address,
+          reason: `backstop check threw: ${error.message}, could not confirm it is released; if it is not, it keeps billing`,
+          hint: retry,
         });
       }
     }
@@ -3443,6 +3489,7 @@ async function destroyK8sTier({
         results,
         s,
         projectName: projectConfig.projectName,
+        environment,
       });
     }
 
@@ -4207,6 +4254,10 @@ async function main(argv = []) {
     // bucket holds the ONLY evidence a retry can use, so it must survive an
     // unverified destroy.
     pulumiDestroyFailed: false,
+    // Recorded reserved IPs of ours the k8s backstop could not prove released
+    // (sweepK8sBackstopTargets). updateProjectConfigEffect keeps the
+    // environment's entry while any is listed, so the next destroy retries.
+    unreleasedReservedIps: [],
   };
 
   // ========== PRE-TEARDOWN: S3-CONFIG / KEYS MISMATCH ==========

@@ -205,6 +205,36 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
     expect(store.state.writes).toEqual([]);
     expect(ctx.projectConfig.stateBucketGeneration).toBe('aaaaaa');
   });
+
+  // The reserved-IP backstop could not prove an address released (the read
+  // by address did not answer 404). The environment's record is the only
+  // place that address is named, so the entry stays and the next destroy
+  // retries it; the backstop's own leak line already says so, once.
+  it('keeps the environment entry while a reserved IP is not proven released', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = ['203.0.113.7'];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    expect(store.state.writes).toEqual([]);
+    expect(ctx.projectConfig.environments).toHaveProperty('prod');
+    expect(ctx.projectConfig).not.toHaveProperty('destroyedEnvironments');
+    expect(ctx.results.leaks.entries).toEqual([]);
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain('203.0.113.7');
+    expect(message).toContain('`vibecarbon destroy prod`');
+    expect(message).not.toContain('—');
+  });
+
+  it('removes the entry as before once every reserved IP is released', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = [];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    expect(store.state.writes[0].environments).not.toHaveProperty('prod');
+    expect(ctx.spinner.stop).toHaveBeenCalledWith('Configuration updated');
+  });
 });
 
 describe('storageBucketGeneration', () => {

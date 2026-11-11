@@ -74,7 +74,7 @@ import {
   staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { clusterIngressIp } from './k8s/ingress-ip.js';
-import { releaseRetiredReservedIps } from './k8s/retired-reserved-ip.js';
+import { createDropRetired, releaseRetiredReservedIps } from './k8s/retired-reserved-ip.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
 import { k8sPsqlRunner } from './replication.js';
@@ -2634,18 +2634,25 @@ export async function executeDeployment(args, gatheredConfig) {
     const ingressProviderId = providerIdFor(envConfig);
     // A warm redeploy skips the up, so the stack can still list the address:
     // the release takes it out first, as every up would, or destroy would
-    // fail on an address already gone.
-    const dropRetired = async (stackName) => {
-      const { dropRetiredStackResources, getOrCreateStack } = await import('../iac/index.js');
-      const stack = await getOrCreateStack(stackName, async () => ({}), {
-        provider: ingressProviderId,
-        providerToken: apiToken,
-        s3Config,
-        projectName: projectConfig.projectName,
-        requireExisting: true,
-      });
-      await dropRetiredStackResources(stack, ingressProviderId);
-    };
+    // fail on an address already gone. Every address the surgery takes out
+    // that the stack's record lacks is recorded (createDropRetired).
+    const dropRetired = createDropRetired({
+      environment,
+      openStack: async (stackName) => {
+        const { getOrCreateStack } = await import('../iac/index.js');
+        return getOrCreateStack(stackName, async () => ({}), {
+          provider: ingressProviderId,
+          providerToken: apiToken,
+          s3Config,
+          projectName: projectConfig.projectName,
+          requireExisting: true,
+        });
+      },
+      drop: async (stack, options) => {
+        const { dropRetiredStackResources } = await import('../iac/index.js');
+        return dropRetiredStackResources(stack, ingressProviderId, options);
+      },
+    });
     // Managed DNS: every A record in the zone at the address, through the
     // same backend and token that wrote the records.
     const zoneRecordsAt =

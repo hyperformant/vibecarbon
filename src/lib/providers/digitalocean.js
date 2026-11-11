@@ -122,6 +122,25 @@ export function normalizePublicKey(publicKey) {
   return `${type || ''} ${body || ''}`.trim();
 }
 
+/**
+ * What a provider's `deleteReservedIpByAddress` says about the address.
+ * `released`: it is off the account. Otherwise `held` is true when it is
+ * still on the account (still listed, or the delete refused) and null when
+ * nothing proves it either way; `region` is where the provider lists it,
+ * when it said; `reason` is a clause for the line that reports it.
+ * @typedef {{released: true}
+ *   | {released: false, held: true|null, region: string|null, reason: string}} ReservedIpRelease
+ */
+
+/**
+ * A reserved IP whose release nothing proves either way.
+ * @param {string} reason
+ * @returns {ReservedIpRelease}
+ */
+function notProven(reason) {
+  return { released: false, held: null, region: null, reason };
+}
+
 export class DigitalOceanProvider extends BaseProvider {
   /**
    * Documented object-storage operational limits (docs.digitalocean.com,
@@ -1843,16 +1862,42 @@ export class DigitalOceanProvider extends BaseProvider {
    * is the address itself (`DELETE /v2/reserved_ips/{reserved_ip}`), so the
    * only durable attribution is the address recorded as `envConfig.floatingIp`
    * (`ha.<role>.floatingIp` on k8s-ha) — callers pass that value straight
-   * through. Idempotent — 404 counts as already-gone/success.
+   * through.
+   *
+   * Released means the read by address answers 404, whatever the DELETE
+   * said: DO has answered a DELETE with success and kept the IP, and its
+   * answers disagree with themselves around a write (a 404 for an SSH key
+   * that still existed, a deleted key listed for 22 s; deleteSSHKeyById). So
+   * after the DELETE, one GET: 404 is released, a listing is not, and
+   * anything else proves nothing either way. No waiting and no second try:
+   * an address that is not proven released stays on the caller's record, and
+   * the next deploy or destroy asks again. A DELETE that throws throws.
    * @param {string} address
-   * @returns {Promise<boolean>} true on success or if already gone (404)
+   * @returns {Promise<ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
-    const response = await fetchWithRetry(
-      `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    return response.ok || response.status === 404;
+    const url = `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`;
+    const headers = { Authorization: `Bearer ${this.apiToken}` };
+    const deleted = await fetchWithRetry(url, { method: 'DELETE', headers });
+    const refused =
+      deleted.ok || deleted.status === 404
+        ? null
+        : `DigitalOcean refused the delete (HTTP ${deleted.status})`;
+    let read;
+    try {
+      read = await fetchWithRetry(url, { headers });
+    } catch (err) {
+      return notProven(`the read-back after the delete failed (${err?.message ?? err})`);
+    }
+    if (read.status === 404) return { released: true };
+    if (!read.ok) return notProven(`the read-back after the delete failed (HTTP ${read.status})`);
+    const body = await read.json().catch(() => ({}));
+    return {
+      released: false,
+      held: true,
+      region: body?.reserved_ip?.region?.slug ?? null,
+      reason: refused ?? 'DigitalOcean still lists it after the delete',
+    };
   }
 
   /**

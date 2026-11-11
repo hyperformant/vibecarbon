@@ -166,12 +166,18 @@ async function plan(stack: Awaited<ReturnType<typeof stackFor>>) {
 const ipOf = (stackOutputs: Record<string, { value: unknown }>) =>
   String(stackOutputs.floatingIp.value);
 
-/** DigitalOcean's DELETE /v2/reserved_ips/{address}: the address leaves the account. */
+/**
+ * DigitalOcean's DELETE /v2/reserved_ips/{address} and the read that proves
+ * it: the address leaves the account, and is released once it is not listed.
+ */
 function releaseByAddress(address: string) {
   const cloud = readCloud();
   delete cloud.things?.['fakecloud:index:ReservedIp'][address];
   writeFileSync(cloudFile, JSON.stringify(cloud));
-  return true;
+  const listed = Boolean(readCloud().things?.['fakecloud:index:ReservedIp'][address]);
+  return listed
+    ? { released: false, held: true, region: null, reason: 'still listed' }
+    : { released: true };
 }
 
 const DOMAIN = 'app.example.test';

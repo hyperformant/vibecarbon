@@ -67,10 +67,14 @@ describe('the release is told where DNS points', () => {
     const setup = src.slice(gate, release);
     // An existing stack only (never an empty one made in its place), and the
     // same surgery every up runs.
-    const drop = setup.slice(setup.indexOf('const dropRetired = async (stackName) => {'));
+    const drop = setup.slice(setup.indexOf('const dropRetired = createDropRetired({'));
     expect(drop).toMatch(/getOrCreateStack\(stackName, async \(\) => \(\{\}\), \{/);
     expect(drop).toContain('requireExisting: true,');
-    expect(drop).toContain('await dropRetiredStackResources(stack, ingressProviderId);');
+    // The options createDropRetired hands the surgery carry its recorder, so
+    // an address the surgery takes out that no record names is recorded
+    // (createDropRetired's own test), never left with no record.
+    expect(drop).toContain('dropRetiredStackResources(stack, ingressProviderId, options)');
+    expect(drop.slice(0, drop.indexOf('openStack'))).toMatch(/\benvironment,/);
     // Managed DNS only, through the backend that wrote the records.
     expect(setup).toMatch(
       /const zoneRecordsAt =\s+hasAutomatedDns\(dnsProvider\) && dnsToken && dnsZoneId\s+\? async \(address\) =>\s+\(await getDnsProvider\(dnsProvider\)\)\.findARecordsAt\(dnsToken, dnsZoneId, address\)\s+: null;/,

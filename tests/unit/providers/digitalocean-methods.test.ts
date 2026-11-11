@@ -1570,27 +1570,81 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
     });
   });
 
-  // M3 Task 9f — the k8s destroy sweep's DO-only backstop for
-  // digitalocean-k8s.js's `reservedIp` resource. Unlike every other DO
-  // resource here, ReservedIp has no `name` — the wire path param IS the
-  // address, so this is deliberately a simple boolean idempotent delete
-  // (deleteVolume's shape), not deleteFirewallByName's richer shape.
+  // A reserved IP has no `name`: the wire path param IS the address. DO has
+  // answered a DELETE with success and kept the IP, and its 404 has meant
+  // nothing on its own (SSH keys, 2026-11-06), so the release is the read
+  // by address: 404 is gone, a listing is not released, anything else
+  // proves nothing. One DELETE, one read, no waiting.
   describe('deleteReservedIpByAddress', () => {
-    it('DELETEs /reserved_ips/{address} (true on ok)', async () => {
-      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204));
-      const out = await provider.deleteReservedIpByAddress('203.0.113.9');
-      expect(calls()).toEqual([['DELETE', `${BASE}/reserved_ips/203.0.113.9`]]);
-      expect(out).toBe(true);
+    const IP = '203.0.113.9';
+    const URL_IP = `${BASE}/reserved_ips/${IP}`;
+    const listed = (droplet: unknown = null) =>
+      resp({ reserved_ip: { ip: IP, region: { slug: 'nyc3', name: 'New York 3' }, droplet } });
+
+    it('released only when the read by address answers 404: one DELETE, one GET', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
+      expect(calls()).toEqual([
+        ['DELETE', URL_IP],
+        ['GET', URL_IP],
+      ]);
     });
 
-    it('returns true on 404 (already gone — idempotent)', async () => {
-      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404));
-      expect(await provider.deleteReservedIpByAddress('203.0.113.9')).toBe(true);
+    it('a DELETE DO accepts while it still lists the address is not released, with its region', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(listed());
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: true,
+        region: 'nyc3',
+        reason: 'DigitalOcean still lists it after the delete',
+      });
+      expect(calls()).toHaveLength(2);
     });
 
-    it('returns false on a genuine failure (e.g. 500)', async () => {
-      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 500));
-      expect(await provider.deleteReservedIpByAddress('203.0.113.9')).toBe(false);
+    it('a 404 DELETE proves nothing alone: the read decides', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404)).mockResolvedValueOnce(listed());
+      expect(await provider.deleteReservedIpByAddress(IP)).toMatchObject({
+        released: false,
+        held: true,
+      });
+    });
+
+    it('a refused DELETE whose address is still listed names the refusal', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ message: 'busy' }, 422))
+        .mockResolvedValueOnce(listed({ id: 7 }));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: true,
+        region: 'nyc3',
+        reason: 'DigitalOcean refused the delete (HTTP 422)',
+      });
+    });
+
+    it('a refused DELETE whose address reads back 404 is gone all the same', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 500)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
+    });
+
+    it('a read that answers anything else, or throws, proves nothing either way', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(resp({}, 503));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: null,
+        region: null,
+        reason: 'the read-back after the delete failed (HTTP 503)',
+      });
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({}, 204))
+        .mockRejectedValueOnce(new Error('socket hang up'));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: null,
+        region: null,
+        reason: 'the read-back after the delete failed (socket hang up)',
+      });
     });
   });
 

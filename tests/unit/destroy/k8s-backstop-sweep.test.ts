@@ -24,7 +24,12 @@ import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.j
 beforeEach(() => fetchWithRetryMock.mockReset());
 
 const spinner = () => ({ start: vi.fn(), stop: vi.fn() });
-const makeResults = () => ({ firewalls: [], sshKeys: [], leaks: createLeakLedger() });
+const makeResults = () => ({
+  firewalls: [],
+  sshKeys: [],
+  leaks: createLeakLedger(),
+  unreleasedReservedIps: [] as string[],
+});
 const tags = (project: string, environment: string) => [
   encodeLabel('project', project),
   encodeLabel('environment', environment),
@@ -49,7 +54,7 @@ describe('sweepK8sBackstopTargets on Linode', () => {
     const deleteSSHKeyByName = vi.spyOn(provider, 'deleteSSHKeyByName').mockResolvedValue(true);
     const deleteReservedIpByAddress = vi
       .spyOn(provider, 'deleteReservedIpByAddress')
-      .mockResolvedValue(true);
+      .mockResolvedValue({ released: true });
     const deleteNetworkByName = vi
       .spyOn(provider, 'deleteNetworkByName')
       .mockResolvedValue({ deleted: true });
@@ -82,7 +87,12 @@ describe('sweepK8sBackstopTargets on Linode', () => {
     const provider = new LinodeProvider('token');
     vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
     vi.spyOn(provider, 'deleteSSHKeyByName').mockResolvedValue(false);
-    vi.spyOn(provider, 'deleteReservedIpByAddress').mockResolvedValue(false);
+    vi.spyOn(provider, 'deleteReservedIpByAddress').mockResolvedValue({
+      released: false,
+      held: true,
+      region: null,
+      reason: 'Linode refused the delete (HTTP 500)',
+    });
     vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
     reservedIpsListing([{ address: '203.0.113.7', tags: tags('proj', 'prod') }]);
     const results = makeResults();
@@ -100,12 +110,16 @@ describe('sweepK8sBackstopTargets on Linode', () => {
       results,
       s: spinner(),
       projectName: 'proj',
+      environment: 'prod',
     });
     expect(
       results.leaks.entries.map(
         (e: { resourceClass: string; severity: string }) => `${e.severity}:${e.resourceClass}`,
       ),
     ).toEqual(['leak:reserved-ip']);
+    expect(results.leaks.entries[0].reason).toContain('Linode refused the delete (HTTP 500)');
+    // Still recorded, so the next destroy finds it again.
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
 });
 
@@ -138,6 +152,7 @@ describe('a saved reserved IP address is released only while it is still ours', 
       results,
       s: spinner(),
       projectName: 'proj',
+      environment: 'prod',
     });
 
   it('Linode: releases the address when it carries this project and stack', async () => {
@@ -159,6 +174,8 @@ describe('a saved reserved IP address is released only while it is still ours', 
     expect(deleteUrls()).toEqual([]);
     expect(severities(results)).toEqual(['foreign:reserved-ip']);
     expect(results.leaks.counts().leak + results.leaks.counts().unverified).toBe(0);
+    // Somebody else's address: nothing of ours to retry.
+    expect(results.unreleasedReservedIps).toEqual([]);
   });
 
   it('Linode: an address no longer reserved on the account is already released', async () => {
@@ -175,6 +192,8 @@ describe('a saved reserved IP address is released only while it is still ours', 
     await sweep(linode(), results);
     expect(deleteUrls()).toEqual([]);
     expect(severities(results)).toEqual(['unverified:reserved-ip']);
+    // Not proven released: the record stays for the next destroy.
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
 
   it('DigitalOcean: reserved IPs carry no tags, so the address alone still releases it', async () => {
@@ -183,12 +202,113 @@ describe('a saved reserved IP address is released only while it is still ours', 
     vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
     const deleteReservedIpByAddress = vi
       .spyOn(provider, 'deleteReservedIpByAddress')
-      .mockResolvedValue(true);
+      .mockResolvedValue({ released: true });
     const results = makeResults();
     await sweep(provider, results);
     expect(deleteReservedIpByAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
     expect(fetchWithRetryMock).not.toHaveBeenCalled();
     expect(results.leaks.entries).toHaveLength(0);
+  });
+});
+
+// DigitalOcean has answered a DELETE with success and kept the address, and a
+// 404 alone has proved nothing (its SSH key API, 2026-11-06). The reserved IP
+// is released only when the read by address answers 404; anything else is
+// reported, and the environment's record stays so the next destroy retries.
+describe('DigitalOcean: the backstop reads the reserved IP back before it reports it released', () => {
+  const IP = '203.0.113.7';
+  const IP_URL = `https://api.digitalocean.com/v2/reserved_ips/${IP}`;
+  const target = {
+    stackEnv: 'prod',
+    firewallName: 'proj-prod-firewall',
+    sshKeyName: null,
+    floatingIp: IP,
+    networkName: 'proj-prod-network',
+  };
+  /** The DELETE answers `del` (or throws it); the read by address answers `read`. */
+  const api = (del: number | Error, read: number | 'listed' | Error) =>
+    fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') {
+        if (del instanceof Error) throw del;
+        return { ok: del < 300, status: del, json: async () => ({}) };
+      }
+      if (read instanceof Error) throw read;
+      if (read === 'listed') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ reserved_ip: { ip: IP, region: { slug: 'nyc3' }, droplet: null } }),
+        };
+      }
+      return { ok: read < 300, status: read, json: async () => ({}) };
+    });
+  const sweep = async () => {
+    const provider = new DigitalOceanProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    const results = makeResults();
+    const s = spinner();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: [target],
+      results,
+      s,
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    return { results, s };
+  };
+  const stops = (s: ReturnType<typeof spinner>) => s.stop.mock.calls.map(([line]) => line);
+
+  it('DELETE accepted and the read answers 404: released, nothing reported or kept', async () => {
+    api(204, 404);
+    const { results, s } = await sweep();
+    expect(
+      fetchWithRetryMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${url}`),
+    ).toEqual([`DELETE ${IP_URL}`, `GET ${IP_URL}`]);
+    expect(results.leaks.entries).toHaveLength(0);
+    expect(results.unreleasedReservedIps).toEqual([]);
+    expect(stops(s)).toContain('Reserved IP released (backstop)');
+  });
+
+  it('DELETE accepted but DigitalOcean still lists it: a leak naming the address, region and bill, and the record kept', async () => {
+    api(204, 'listed');
+    const { results, s } = await sweep();
+    expect(stops(s)).not.toContain('Reserved IP released (backstop)');
+    expect(results.leaks.entries).toHaveLength(1);
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({
+      severity: 'leak',
+      resourceClass: 'reserved-ip',
+      resource: `${IP} (nyc3)`,
+    });
+    expect(entry.reason).toContain('DigitalOcean still lists it after the delete');
+    expect(entry.reason).toContain('keeps billing on your DigitalOcean account');
+    expect(entry.hint).toContain('Run `vibecarbon destroy prod` again');
+    expect(entry.hint).toContain('stays in .vibecarbon.json');
+    expect(`${entry.reason} ${entry.hint}`).not.toContain('—');
+    expect(results.unreleasedReservedIps).toEqual([IP]);
+  });
+
+  it('a read that fails proves nothing: unverified, and the record kept', async () => {
+    api(204, 503);
+    const { results } = await sweep();
+    expect(results.leaks.entries).toHaveLength(1);
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({ severity: 'unverified', resourceClass: 'reserved-ip' });
+    expect(entry.reason).toContain('the read-back after the delete failed (HTTP 503)');
+    expect(entry.reason).toContain('cannot tell whether DigitalOcean released it');
+    expect(results.unreleasedReservedIps).toEqual([IP]);
+  });
+
+  it('a DELETE that throws: unverified, and the record kept', async () => {
+    api(new Error('socket hang up'), 404);
+    const { results } = await sweep();
+    expect(results.leaks.entries.map((e: { severity: string }) => e.severity)).toEqual([
+      'unverified',
+    ]);
+    expect(results.leaks.entries[0].reason).toContain('socket hang up');
+    expect(results.unreleasedReservedIps).toEqual([IP]);
   });
 });
 

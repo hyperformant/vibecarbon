@@ -1566,31 +1566,45 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}).
-   * Idempotent: 404 counts as already gone.
+   * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}),
+   * answered in DigitalOcean's shape (ReservedIpRelease) so destroy reads
+   * both one way. Here the DELETE alone decides: 2xx or 404 is released, any
+   * other status is a refusal. DigitalOcean's twin reads the address back
+   * because DO has kept an IP it answered a DELETE for; nothing like that has
+   * been seen on Linode, and destroy reads Linode's listing before it deletes
+   * (reservedIpLabelMatch).
    * @param {string} address
-   * @returns {Promise<boolean>} true on success or if already gone (404)
+   * @returns {Promise<import('./digitalocean.js').ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
     const response = await fetchWithRetry(
       `${LinodeProvider.API_BASE}/networking/reserved/ips/${address}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
     );
-    return response.ok || response.status === 404;
+    if (response.ok || response.status === 404) return { released: true };
+    return {
+      released: false,
+      held: true,
+      region: null,
+      reason: `Linode refused the delete (HTTP ${response.status})`,
+    };
   }
 
   /**
    * Every reserved IPv4 on the account (guarded paginated walk of
-   * GET /networking/reserved/ips).
+   * GET /networking/reserved/ips). An account past the guard is not read in
+   * full, and a partial listing must not pass for the whole: destroy reads an
+   * address missing from it as already released (reservedIpLabelMatch).
    * @returns {Promise<Array<{ address: string, tags?: string[] }>>}
-   * @throws when a page cannot be read
+   * @throws when a page cannot be read, or there are more pages than the guard reads
    */
   async _listReservedIps() {
     const ips = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
+    const pageSize = 100;
+    const maxPages = 20;
+    for (let page = 1; page <= maxPages; page++) {
       const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=100`,
+        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=${pageSize}`,
         { headers: { Authorization: `Bearer ${this.apiToken}` } },
       );
       if (!response.ok) {
@@ -1598,10 +1612,11 @@ export class LinodeProvider extends BaseProvider {
       }
       const data = await response.json();
       ips.push(...(data.data ?? []));
-      if (!data.pages || page >= data.pages) break;
-      page++;
+      if (!data.pages || page >= data.pages) return ips;
     }
-    return ips;
+    throw new Error(
+      `the Linode account has more than ${maxPages * pageSize} reserved IPs, more than vibecarbon reads`,
+    );
   }
 
   /**
@@ -1647,7 +1662,7 @@ export class LinodeProvider extends BaseProvider {
     const deleted = [];
     const failed = [];
     for (const address of matches) {
-      if (await this.deleteReservedIpByAddress(address)) deleted.push(address);
+      if ((await this.deleteReservedIpByAddress(address)).released) deleted.push(address);
       else failed.push({ address });
     }
     return { deleted, failed };
