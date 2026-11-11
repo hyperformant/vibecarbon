@@ -51,8 +51,10 @@ beforeEach(() => {
   vi.resetModules();
   selectStackMock.mockReset();
   createStackMock.mockReset();
-  selectStackMock.mockResolvedValue({ name: 'production' });
-  createStackMock.mockResolvedValue({ name: 'production' });
+  // getOrCreateStack reads the state it opens once (the passphrase probe).
+  const stack = { name: 'production', exportStack: async () => ({ deployment: {} }) };
+  selectStackMock.mockResolvedValue(stack);
+  createStackMock.mockResolvedValue(stack);
 });
 
 describe('provider stack config', () => {

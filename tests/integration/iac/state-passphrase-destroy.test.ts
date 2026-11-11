@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  __resetStateProbesForTests,
   destroyStack,
   getStackOutputs,
   removeStackState,
@@ -59,7 +60,9 @@ describe.runIf(hasPulumi || process.env.CI)('a stack the passphrase cannot open'
   // every test, and without this the CLI falls back to ~/.vibecarbon/pulumi-state.
   beforeEach(() => {
     process.env.PULUMI_BACKEND_URL = `file://${backend}`;
+    // A new process each, so every open reads (and may migrate) afresh.
     __resetStatePassphraseForTests();
+    __resetStateProbesForTests();
   });
   beforeAll(async () => {
     mkdirSync(backend);

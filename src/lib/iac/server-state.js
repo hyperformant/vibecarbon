@@ -162,7 +162,8 @@ export async function syncServerState(stackName, target, options) {
   if (!spec) {
     throw new Error(`Pulumi state cannot follow a replaced compose server on ${options.provider}`);
   }
-  const { getOrCreateStack, resolveBackendUrl, withStateBackendRetry } = await import('./index.js');
+  const { getOrCreateStack, resolveBackendUrl, takeProbedDeployment, withStateBackendRetry } =
+    await import('./index.js');
   const { withStateLock } = await import('./state-lock.js');
   return withStateLock(
     resolveBackendUrl(options.s3Config, options.provider),
@@ -172,7 +173,10 @@ export async function syncServerState(stackName, target, options) {
         ...options,
         requireExisting: true,
       });
-      const state = await withStateBackendRetry(() => stack.exportStack(), 'server-state export');
+      // The open read the state already, under this same lock.
+      const state =
+        takeProbedDeployment(stack) ??
+        (await withStateBackendRetry(() => stack.exportStack(), 'server-state export'));
       const resolved = spec.ipResource
         ? { ...target, ipId: await flexibleIpIdFor(target.ip, options) }
         : target;

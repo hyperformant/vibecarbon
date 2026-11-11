@@ -155,6 +155,7 @@ const { syncServerState } = await import('../../../src/lib/iac/server-state.js')
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 const { __resetStatePassphraseForTests } = await import('../../../src/lib/state-passphrase.js');
+const { __resetStateProbesForTests } = await import('../../../src/lib/iac/index.js');
 
 /**
  * What the pulumi child receives: the Automation SDK spawns it with
@@ -179,6 +180,7 @@ describe('state passphrase census: every decrypting entry point carries the pass
   beforeEach(() => {
     seenEnvs.length = 0;
     __resetStatePassphraseForTests();
+    __resetStateProbesForTests();
     dir = createTempDir('state-passphrase-census-');
     writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
     vi.spyOn(process, 'cwd').mockReturnValue(dir);

@@ -30,6 +30,7 @@ const refuse = (id: string) => () => {
 const { getStackOutputs, destroyStack } = await import('../../../src/lib/iac/index.js');
 const { StateUndecryptableError } = await import('../../../src/lib/iac/state-error.js');
 const { __resetStatePassphraseForTests } = await import('../../../src/lib/state-passphrase.js');
+const { __resetStateProbesForTests } = await import('../../../src/lib/iac/index.js');
 
 const BASE = { projectName: 'proj' };
 
@@ -39,6 +40,7 @@ describe('an undecryptable stack surfaces as StateUndecryptableError', () => {
   beforeEach(() => {
     fakePulumi.reset();
     __resetStatePassphraseForTests();
+    __resetStateProbesForTests();
     const dir = createTempDir('state-undecryptable-');
     writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
     vi.spyOn(process, 'cwd').mockReturnValue(dir);
@@ -79,8 +81,10 @@ describe('an undecryptable stack surfaces as StateUndecryptableError', () => {
     fakePulumi.behaviour.refresh = refuse('passphrase-incorrect-on-refresh');
     const err = await destroyStack('e1', async () => ({}), BASE).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(StateUndecryptableError);
-    // Once: the refusal is not retried, and nothing after it runs.
-    expect(fakePulumi.calls).toEqual(['select:e1', 'refresh']);
+    // Once: the refusal is not retried, and nothing after it runs. (The
+    // open's export read the state; a refresh refusing it after that stands
+    // for any refusal that comes later than the open.)
+    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'refresh']);
   });
 
   it("destroyStack: logs Pulumi's own line once, and never the passphrase", async () => {

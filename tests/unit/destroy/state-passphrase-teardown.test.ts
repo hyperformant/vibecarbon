@@ -49,6 +49,12 @@ vi.mock('@clack/prompts', async (orig) => {
 vi.mock('@pulumi/pulumi/automation/index.js', async () =>
   (await import('../../_shared/fake-pulumi-workspace.js')).fakeAutomationModule(),
 );
+// The one-time legacy migration's child (`pulumi stack change-secrets-provider`).
+vi.mock('node:child_process', async (orig) =>
+  (await import('../../_shared/fake-pulumi-workspace.js')).fakeChildProcessModule(
+    await orig<typeof import('node:child_process')>(),
+  ),
+);
 
 const passphraseRefusal = () =>
   new Error(
@@ -148,6 +154,7 @@ const { __resetStatePassphraseForTests, statePassphraseFingerprint } = await imp
 const { DESTROY_EFFECTS, passphraseRecoveryHint, settleUnreadableStacks } = await import(
   '../../../src/destroy.js'
 );
+const { __resetStateProbesForTests } = await import('../../../src/lib/iac/index.js');
 
 const spinner = { start: () => {}, stop: () => {}, message: () => {} };
 const S3 = {
@@ -245,6 +252,7 @@ beforeEach(() => {
   firewallDeleteFails = false;
   serverListing = 'complete';
   __resetStatePassphraseForTests();
+  __resetStateProbesForTests();
   vi.stubEnv('HETZNER_ACCESS_KEY', 'AK');
   vi.stubEnv('HETZNER_SECRET_KEY', 'SK');
 });
@@ -401,7 +409,7 @@ describe('k8s, refused before Pulumi ran: the record goes only when the backstop
 });
 
 describe('k8s, Pulumi refused the passphrase: the record goes on every provider', () => {
-  it('no backstop: one refused refresh, servers swept, record removed, leftovers named for the console', async () => {
+  it('no backstop: one refused read, servers swept, record removed, leftovers named for the console', async () => {
     project({ value: PASSPHRASE });
     fakePulumi.refuseReads(passphraseRefusal);
     backstop = false;
@@ -409,9 +417,16 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
 
     await run('destroyK8sInfra', ctx);
 
-    // One refresh, refused: no destroy, no retry. Then the record goes
-    // without being read.
-    expect(fakePulumi.calls).toEqual(['select:e1', 'refresh', 'select:e1', REMOVE('e1')]);
+    // The open's one read, refused, and the empty passphrase of a legacy
+    // stack refused too: no refresh, no destroy, no retry. Then the record
+    // goes without being read.
+    expect(fakePulumi.calls).toEqual([
+      'select:e1',
+      'exportStack',
+      'migrate:e1',
+      'select:e1',
+      REMOVE('e1'),
+    ]);
     expect(cloudCalls).toContain('deleteServer:21');
     expect(cloudCalls.some((c) => c.startsWith('deleteNetworkByName'))).toBe(false);
 
@@ -528,6 +543,7 @@ describe('k8s, Pulumi refused a passphrase this run made: the real one may exist
     // The next run, as it is: a new process with the passphrase this run
     // saved, which is no longer new. Pulumi refuses it again, and the record goes.
     __resetStatePassphraseForTests();
+    __resetStateProbesForTests();
     fakePulumi.reset();
     fakePulumi.refuseReads(passphraseRefusal);
     const again = makeCtx('k8s', dir);
@@ -545,6 +561,52 @@ describe('k8s, Pulumi refused a passphrase this run made: the real one may exist
     expect(removals()).toEqual([REMOVE('e1')]);
     expect(stackEntries(ctx)).toEqual([]);
   });
+});
+
+describe('k8s, a legacy stack (written with the empty passphrase): migrated, then destroyed by Pulumi', () => {
+  it.each([
+    ['the project passphrase', { value: PASSPHRASE }],
+    ['a passphrase this run made', { value: undefined, recorded: false }],
+  ])(
+    'with %s: re-encrypted on the open, `pulumi destroy` runs, and the unreadable path never sees it',
+    async (_label, setup) => {
+      project(setup);
+      fakePulumi.legacy('e1', passphraseRefusal);
+      // Once it reads, it holds the cluster's master.
+      fakePulumi.behaviour.exportStack = () => ({
+        deployment: {
+          resources: [
+            { type: 'pulumi:pulumi:Stack' },
+            { type: 'hcloud:index/server:Server', id: '21', outputs: { name: 'proj-e1-master' } },
+          ],
+        },
+      });
+      backstop = false;
+      const ctx = makeCtx('k8s', dir);
+
+      await run('destroyK8sInfra', ctx);
+
+      // Read, re-encrypted, read again; then the refresh, the destroy and
+      // Pulumi's own removal of the destroyed stack (no `--force`).
+      expect(fakePulumi.calls).toEqual([
+        'select:e1',
+        'exportStack',
+        'migrate:e1',
+        'exportStack',
+        'refresh',
+        'exportStack',
+        'destroy',
+        'removeStack:e1:undefined',
+      ]);
+      expect(removals()).toEqual(['removeStack:e1:undefined']);
+      expect(infos).toContain(
+        "Your Pulumi state for e1 was stored with an empty passphrase. vibecarbon re-encrypted it with this project's passphrase.",
+      );
+      expect(warnings.join('\n')).not.toContain("can't read the Pulumi state");
+      expect(stackEntries(ctx)).toEqual([]);
+      expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    },
+  );
 });
 
 describe('k8s-ha: each stack of the pair is settled, under its own name', () => {
