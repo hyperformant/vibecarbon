@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — plain JS ops script, no types
-import { CLOUD_KINDS, delWithRetry } from '../../../scripts/sweep-hetzner.js';
+import { CLOUD_KINDS, delWithRetry, recheckResidue } from '../../../scripts/sweep-hetzner.js';
 
 describe('delWithRetry', () => {
   it('returns true without retrying when the first DELETE succeeds', async () => {
@@ -83,5 +83,58 @@ describe('sweep recheck coverage', () => {
 
   it('servers are swept first — they hold references to every other kind', () => {
     expect(CLOUD_KINDS[0][0]).toBe('servers');
+  });
+});
+
+describe('recheckResidue', () => {
+  // The CSI pass defers pvc-* volumes while any server exists, and their
+  // names carry neither the label nor the scratch prefix, so the scoped kinds
+  // loop never lists them. The recheck used to print "recheck clean" over
+  // them.
+  const uuid = 'e5a3c1f0-1234-4abc-9def-0123456789ab';
+  const none = async () => ({ items: [], complete: true });
+  const volumes =
+    (items: object[], complete = true) =>
+    async () => ({ items, complete });
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('counts an unattached pvc-* volume as a leftover when every scoped kind is empty', async () => {
+    const { leaked, blind } = await recheckResidue({
+      listScoped: none,
+      listVolumes: volumes([{ id: 5, name: `pvc-${uuid}`, server: null }]),
+    });
+    expect(leaked).toBe(1);
+    expect(blind).toBe(0);
+  });
+
+  it('leaves attached pvc-* volumes and non-CSI volumes out of the count', async () => {
+    const { leaked } = await recheckResidue({
+      listScoped: none,
+      listVolumes: volumes([
+        { id: 5, name: `pvc-${uuid}`, server: 42 },
+        { id: 6, name: 'db-volume', server: null },
+      ]),
+    });
+    expect(leaked).toBe(0);
+  });
+
+  it('cannot certify clean when the volume listing stopped early', async () => {
+    const { blind } = await recheckResidue({ listScoped: none, listVolumes: volumes([], false) });
+    expect(blind).toBe(1);
+  });
+
+  it('still sums leftovers from the scoped kinds', async () => {
+    const { leaked } = await recheckResidue({
+      kinds: [['servers', 'servers', (s: { id: number }) => `${s.id}`]],
+      listScoped: async () => ({ items: [{ id: 1 }], complete: true }),
+      listVolumes: volumes([]),
+    });
+    expect(leaked).toBe(1);
   });
 });
