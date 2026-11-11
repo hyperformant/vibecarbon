@@ -37,7 +37,7 @@ describe('create-vibecarbon E2E', () => {
   describe('a state passphrase exported in the shell', () => {
     it('belongs to another project: create makes its own and records that one', () => {
       const other = 'x'.repeat(43);
-      execSync(
+      const out = execSync(
         `node ${join(process.cwd(), 'src/cli.js')} create shell-pass -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile`,
         {
           cwd: tempDir,
@@ -46,6 +46,10 @@ describe('create-vibecarbon E2E', () => {
           env: { ...pmScrubbedEnv(), VIBECARBON_STATE_PASSPHRASE: other },
         },
       );
+      // Says which variable, why, and never the value.
+      expect(out).toContain('VIBECARBON_STATE_PASSPHRASE');
+      expect(out).toContain('wins over .env.local');
+      expect(out).not.toContain(other);
       const dir = join(tempDir, 'shell-pass');
       const value = parseDotenv(
         readFileSync(join(dir, '.env.local'), 'utf-8'),

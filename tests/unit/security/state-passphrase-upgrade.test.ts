@@ -1,6 +1,7 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import {
@@ -17,7 +18,11 @@ import { ensureStatePassphraseForUpgrade } from '../../../src/upgrade.js';
  */
 describe('upgrade backfills the state passphrase', () => {
   let dir: string;
+  let info: ReturnType<typeof vi.spyOn>;
+  let warn: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
+    info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', undefined);
     __resetStatePassphraseForTests();
     dir = mkdtempSync(join(tmpdir(), 'vc-spu-'));
@@ -25,7 +30,11 @@ describe('upgrade backfills the state passphrase', () => {
     writeFileSync(join(dir, '.env.local'), 'PROJECT_NAME=demo\n');
     writeFileSync(join(dir, '.env'), 'PROJECT_NAME=demo\n');
   });
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   const read = (file: string) => readFileSync(join(dir, file), 'utf-8');
   const valueIn = (file: string) => parseDotenv(read(file)).VIBECARBON_STATE_PASSPHRASE;
@@ -67,6 +76,8 @@ describe('upgrade backfills the state passphrase', () => {
     expect(await ensureStatePassphraseForUpgrade(dir)).toBe('recorded');
 
     expect(valueIn('.env.local')).toBe(mine);
+    // The user is told to commit the changed .vibecarbon.json.
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('Commit it'));
     expect(JSON.parse(read('.vibecarbon.json')).stateEncryption.fingerprint).toBe(
       statePassphraseFingerprint(mine),
     );
@@ -90,6 +101,24 @@ describe('upgrade backfills the state passphrase', () => {
     );
 
     await expect(ensureStatePassphraseForUpgrade(dir)).resolves.toBe('problem');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("isn't set"));
     expect(read('.env.local')).toBe('PROJECT_NAME=demo\n');
+  });
+
+  it('a stored passphrase survives an empty exported value, in the dry run and the real one', async () => {
+    const stored = 'S'.repeat(43);
+    writeFileSync(
+      join(dir, '.env.local'),
+      `PROJECT_NAME=demo\nVIBECARBON_STATE_PASSPHRASE=${stored}\n`,
+    );
+    vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', '');
+
+    expect(await ensureStatePassphraseForUpgrade(dir, { dryRun: true })).toBe('recorded');
+    expect(await ensureStatePassphraseForUpgrade(dir)).toBe('recorded');
+
+    expect(valueIn('.env.local')).toBe(stored);
+    expect(JSON.parse(read('.vibecarbon.json')).stateEncryption.fingerprint).toBe(
+      statePassphraseFingerprint(stored),
+    );
   });
 });

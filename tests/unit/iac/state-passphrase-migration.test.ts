@@ -402,6 +402,7 @@ describe('a migration that fails for any reason but the passphrase is never rule
     expect((err as Error).message).toBe(
       'Stopped while re-encrypting the Pulumi state for e1: error: could not import deployment: ' +
         'write s3://proj-state/.pulumi/stacks/proj/e1.json: RequestError: send request failed. ' +
+        "It may already be re-encrypted with this project's passphrase, so vibecarbon 0.52 and earlier may no longer open it. " +
         'Running this again is safe.',
     );
     // One run, not retried, and no read after it: '' was never refused.

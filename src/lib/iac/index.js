@@ -677,7 +677,7 @@ async function migrateFromEmptyPassphrase(stack, passphrase, key) {
     // Whether the child got as far as the import or not, the next open reads
     // the state with one passphrase or the other.
     throw new Error(
-      `Stopped while ${step}: ${summarizeCommandError(message).replace(/\.$/, '')}. Running this again is safe.`,
+      `Stopped while ${step}: ${summarizeCommandError(message).replace(/\.$/, '')}. It may already be re-encrypted with this project's passphrase, so vibecarbon 0.52 and earlier may no longer open it. Running this again is safe.`,
       { cause: err },
     );
   }

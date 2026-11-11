@@ -137,6 +137,38 @@ describe('state passphrase', () => {
     expect(String(vi.mocked(p.log.info).mock.calls[0][0])).not.toContain(v);
   });
 
+  describe('an empty exported value counts as unset', () => {
+    const stored = 'S'.repeat(43);
+    const withStored = () => {
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      writeFileSync(join(dir, '.env.local'), `${KEY}=${stored}\n`);
+      process.env[KEY] = '';
+    };
+
+    it('ensure adopts the passphrase stored in .env.local and never overwrites it', async () => {
+      withStored();
+      await expect(ensureStatePassphrase(dir)).resolves.toBe(stored);
+      expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(`${KEY}=${stored}\n`);
+      expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(stored));
+      expect(p.log.info).not.toHaveBeenCalled();
+    });
+
+    it('find reads the same value ensure would use', () => {
+      withStored();
+      expect(findStatePassphraseProblem(dir)).toBeNull();
+      writeFileSync(join(dir, '.env.local'), `${KEY}=short\n`);
+      expect(findStatePassphraseProblem(dir)?.reason).toBe('invalid');
+    });
+
+    it('with nothing stored it still makes one', async () => {
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      process.env[KEY] = '';
+      const made = await ensureStatePassphrase(dir);
+      expect(made).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toContain(`${KEY}=${made}`);
+    });
+  });
+
   it('case 5 does not write an existing .env', async () => {
     writeFileSync(join(dir, '.env'), 'FOO=bar\n');
     const v = await ensureStatePassphrase(dir);

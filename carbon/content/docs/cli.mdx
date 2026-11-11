@@ -413,7 +413,7 @@ The add-ons you installed with `vibecarbon add` are upgraded too: their compose,
 
 A project created before sign-in moved into the app gets a `BETTER_AUTH_SECRET` in `.env.local` and `.env`, and `upgrade` warns you that a server you already deployed needs a fresh database: accounts are not carried over, and the old tables still point at the previous auth service. Run `vibecarbon backup` if you want a copy of the old data, then `vibecarbon destroy` and `vibecarbon deploy`.
 
-A project created before the per-project state passphrase gets one too: `VIBECARBON_STATE_PASSPHRASE` goes into `.env.local` only (never `.env`), and `.vibecarbon.json` records its fingerprint, which you commit. Keep a copy of the passphrase in your password manager. See State encryption in the security guide.
+A project created before the per-project state passphrase gets one too. It encrypts the secret values in your deploy state, so `VIBECARBON_STATE_PASSPHRASE` goes into `.env.local` only (never `.env`) and `.vibecarbon.json` records its fingerprint, which you commit. Keep a copy of the passphrase in your password manager.
 
 {/* BEGIN GENERATED: flags upgrade */}
 | Flag | Description |

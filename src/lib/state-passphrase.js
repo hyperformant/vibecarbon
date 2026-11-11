@@ -142,10 +142,10 @@ function mismatchError(expected, actual, from) {
  * nothing. The one verdict both ensureStatePassphrase and
  * findStatePassphraseProblem act on, so they cannot disagree.
  *
- * A value in the environment wins. Without one, and only when a fingerprint
- * is recorded, `.env.local` is read from disk: the CLI folds it into the
- * environment once at startup, and a process that started while another was
- * still generating can have missed the file. Either value gets the same
+ * A value in the environment wins; an empty one counts as unset. Without
+ * one, `.env.local` is read from disk: the CLI folds it into the environment
+ * once at startup, and a process that started while another was still
+ * generating, or with an empty export in the shell, can have missed the file. Either value gets the same
  * shape check before its fingerprint is compared.
  *
  * @param {string} dir absolute project dir
@@ -155,7 +155,10 @@ function mismatchError(expected, actual, from) {
 function inspectStatePassphrase(dir, expected) {
   let read = 'environment';
   let found = readOperatorVar(STATE_PASSPHRASE_KEY);
-  if (!found.value && expected) {
+  // An empty export counts as unset (readOperatorVar yields no value for it),
+  // so .env.local is read whether or not a fingerprint is recorded: a stored
+  // passphrase must never be passed over for a new one.
+  if (!found.value) {
     read = 'disk';
     found = readOperatorVar(STATE_PASSPHRASE_KEY, {
       env: { [STATE_PASSPHRASE_KEY]: loadEnvVariables(dir)[STATE_PASSPHRASE_KEY] },
@@ -231,6 +234,17 @@ export async function ensureStatePassphrase(projectDir) {
   let generated = false;
   updateProjectConfig((manifest) => {
     if (manifest.stateEncryption?.fingerprint) return;
+    // Never overwrite a stored passphrase (a process that missed it, or an
+    // empty shell export, can reach here): record its fingerprint and let the
+    // re-check below adopt it.
+    const stored = loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
+    if (stored) {
+      manifest.stateEncryption = {
+        ...manifest.stateEncryption,
+        fingerprint: statePassphraseFingerprint(stored),
+      };
+      return;
+    }
     // SECURITY: .env.local only (localOnly), never .env, which ships to servers.
     setEnvVar(STATE_PASSPHRASE_KEY, fresh, dir, { localOnly: true });
     manifest.stateEncryption = {

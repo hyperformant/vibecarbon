@@ -218,7 +218,13 @@ export async function ensureStatePassphraseForUpgrade(cwd, { dryRun = false } = 
     return 'problem';
   }
   if (hadFingerprint) return null;
-  return statePassphraseGeneratedThisRun(cwd) ? 'generated' : 'recorded';
+  if (statePassphraseGeneratedThisRun(cwd)) return 'generated';
+  p.log.info(
+    loadEnvVariables(cwd)[STATE_PASSPHRASE_KEY]
+      ? "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it."
+      : "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it. The passphrase itself is only in your shell: add it to .env.local too.",
+  );
+  return 'recorded';
 }
 
 /**
