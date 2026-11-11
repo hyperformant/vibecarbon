@@ -17,7 +17,15 @@
  * are stubs that record what the bundle looked like while they ran. Each
  * deploy stops right after its plan (at the write-fence read), or inside it.
  */
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -435,6 +443,25 @@ describe('a k8s deploy', () => {
     expect(run.seen.map((s) => s.effect)).toContain('k8sDeployCluster');
     expect(during).toEqual([]);
     expect(run.bundlePath).toBeNull();
+  });
+});
+
+describe('a deploy and the bundles earlier versions left', () => {
+  it('removes an old one in the background and says so once', async () => {
+    // A bundle an earlier version left two days ago, in this file's temp dir.
+    const stale = join(tmpdir(), 'vc-deploy-bundle-stale');
+    mkdirSync(stale);
+    writeFileSync(join(stale, '.env'), 'BETTER_AUTH_SECRET=not-a-real-secret\n');
+    const at = (Date.now() - 2 * 24 * 60 * 60 * 1000) / 1000;
+    utimesSync(stale, at, at);
+    run.effects.provisionServer = PROVISION.compose;
+    await expect(executeDeployment({ yes: true }, gathered('compose') as never)).rejects.toThrow(
+      'STOP_AFTER_PLAN',
+    );
+    await vi.waitFor(() => expect(existsSync(stale)).toBe(false));
+    expect(clackMock.log.info).toHaveBeenCalledWith(
+      `removed 1 old vibecarbon temp dir from ${tmpdir()}: earlier versions left them there, with deploy secrets in them`,
+    );
   });
 });
 

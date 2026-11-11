@@ -22,11 +22,16 @@
  *      checked; the behaviour tests own that
  *      (tests/unit/deploy/deploy-bundle-lifetime.test.ts and the per-site
  *      tests), and the exit sweep is the backstop.
+ *   4. every temp-dir prefix src/ makes is either one the stale sweep removes
+ *      (STALE_SECRET_PREFIXES: it held secrets, so a leftover from an earlier
+ *      version or a killed run must go) or listed below with why it never
+ *      holds one.
  * Each rule has a bite test below.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
 import { CODE, lexMask } from '../helpers/js-call-scan.js';
 
 const HELPER = join('src', 'lib', 'temp-dir.js');
@@ -36,6 +41,41 @@ const TMPDIR_ALLOWED: Record<string, string> = {
   [join('src', 'lib', 'deploy', 'layer-delta.js')]:
     'the base of the private per-user root (deltaWorkRoot); the work dirs in it come from makeTempDir',
 };
+
+/**
+ * Temp-dir prefixes in src/ that never hold a secret, each with why. Every
+ * other prefix is in STALE_SECRET_PREFIXES.
+ */
+const NO_SECRET_PREFIXES: Record<string, string> = {
+  'vibecarbon-shell-': "the shell's rc file, which names the provider token only as <set>",
+  'vc-bin-':
+    "docker's ssh wrapper and its mux socket: no key material, and the socket closes 60 s after its last use",
+  'vibecarbon-k8s-':
+    'rendered k8s manifests: bucket, endpoint and region; the Secrets go to kubectl on stdin',
+  'vibecarbon-cert-manager-': "cert-manager's kustomization",
+  DELTA_DIR_PREFIX:
+    "the app image's layers, under the private per-user root that sweepStaleDeltaDirs clears",
+  'vibecarbon-script-': 'runShellScript, which nothing in src/ calls',
+};
+
+/**
+ * The prefix each temp dir src/ makes is named by: the string (or the
+ * template's text before its first `${`) or the constant passed first to
+ * makeTempDir, withTempDir or withTempDirSync.
+ */
+function tempDirPrefixes(files: Record<string, string>): Map<string, string> {
+  const found = new Map<string, string>();
+  for (const [file, text] of Object.entries(files)) {
+    if (file === HELPER) continue;
+    const mask = lexMask(text);
+    const calls =
+      /\b(?:makeTempDir|withTempDirSync|withTempDir)\s*\(\s*(?:(['"`])((?:(?!\1|\$\{).)*)|([A-Za-z_$][\w$]*))/g;
+    for (const m of codeMatchesOf(text, mask, calls)) {
+      found.set(m[2] ?? m[3], `${file}:${lineOf(text, m.index ?? 0)}`);
+    }
+  }
+  return found;
+}
 
 function srcFiles(dir: string): string[] {
   const out: string[] = [];
@@ -218,6 +258,22 @@ describe('temp dir census (src/)', () => {
     );
   });
 
+  it('every temp-dir prefix is swept as secret-bearing or says why it holds no secret', () => {
+    const found = tempDirPrefixes(files);
+    const unclassified = [...found]
+      .filter(
+        ([prefix]) => !STALE_SECRET_PREFIXES.includes(prefix) && !(prefix in NO_SECRET_PREFIXES),
+      )
+      .map(([prefix, at]) => `${at} ${prefix}`);
+    expect(unclassified).toEqual([]);
+    // No entry outlives its temp dir, and none sits in both lists.
+    for (const prefix of [...STALE_SECRET_PREFIXES, ...Object.keys(NO_SECRET_PREFIXES)]) {
+      expect(found.has(prefix), prefix).toBe(true);
+    }
+    for (const prefix of STALE_SECRET_PREFIXES) expect(prefix in NO_SECRET_PREFIXES).toBe(false);
+    for (const why of Object.values(NO_SECRET_PREFIXES)) expect(why.length).toBeGreaterThan(20);
+  });
+
   it('every allowed file still calls tmpdir(), and says why', () => {
     for (const [file, why] of Object.entries(TMPDIR_ALLOWED)) {
       const text = readFileSync(file, 'utf-8');
@@ -305,6 +361,16 @@ describe('the census bites', () => {
         "// mkdtempSync(join(tmpdir(), 'x'))\nconst s = 'mkdtemp tmpdir() makeTempDir(';\nfunction f() {\n  // const d = makeTempDir('x-');\n}\n",
       ),
     ).toEqual([]);
+  });
+
+  it('reads each prefix the way it is written', () => {
+    const found = tempDirPrefixes({
+      'src/a.js':
+        "makeTempDir('a-');\nwithTempDir(`b-" +
+        '$' +
+        '{x}-`, f);\nwithTempDirSync("c-", f);\nmakeTempDir(D_PREFIX, { parent });\n// makeTempDir(\'comment-\');\n',
+    });
+    expect([...found.keys()]).toEqual(['a-', 'b-', 'c-', 'D_PREFIX']);
   });
 
   it('the helper itself and an allowed file are exempt where stated', () => {

@@ -9,8 +9,13 @@
  * that is the only cleanup a Ctrl-C reaches, since cli.js answers SIGINT with
  * process.exit(130) and no finally block runs. A kill that skips exit
  * handlers (SIGKILL, a terminal hang-up) still leaves a dir behind.
+ *
+ * Earlier versions left the deploy bundle (and other dirs with secrets in
+ * them) behind on every deploy. sweepStaleSecretTempDirs removes those, once
+ * per deploy, in the background.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
+import { lstat, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -104,4 +109,69 @@ export function sweepTempDirs({ report = (line) => process.stderr.write(line) } 
   }
   live.clear();
   process.off('exit', onExit);
+}
+
+/**
+ * The temp dirs that held secrets, by prefix: what an earlier version (or a
+ * killed run) can have left in the OS temp dir. tests/unit/lib/temp-dir-census.test.ts
+ * holds every temp-dir prefix in src/ to this list or a stated reason.
+ */
+export const STALE_SECRET_PREFIXES = Object.freeze([
+  // The deploy bundle (deploy/bundle.js): the rendered .env and app.env.
+  'vc-deploy-bundle-',
+  // The bundle's tarball (deploy/compose/index.js): the same .env.
+  'vc-bundle-tar-',
+  // A server's .env, pulled down for a merge (deploy/utils.js).
+  'vibecarbon-envmerge-',
+  // A script run over ssh (ssh.js), which can carry a token.
+  'vb-sshscript-',
+]);
+
+/** How old a leftover must be before the sweep takes it: no live run is that old. */
+export const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove the secret-bearing temp dirs earlier runs left: each entry of the OS
+ * temp dir (one readdir) with a STALE_SECRET_PREFIXES prefix that is a real
+ * directory (lstat: a symlink is never followed), owned by this user, and
+ * last changed more than 24 h ago. Best effort: an entry that fails is
+ * skipped, a sweep that fails stops, and it never rejects. Runs in the
+ * background, one removal at a time, so a deploy never waits on it. Reports
+ * one line only when it removed something.
+ *
+ * @param {{ dir?: string, now?: number, uid?: number | null, report?: (line: string) => void }} [opts]
+ * @returns {Promise<number>} how many it removed
+ */
+export async function sweepStaleSecretTempDirs({
+  dir = tmpdir(),
+  now = Date.now(),
+  uid = process.getuid?.() ?? null,
+  report = (line) => process.stderr.write(`${line}\n`),
+} = {}) {
+  // With no user id to compare (null: Windows has no process.getuid), no
+  // entry's owner matches, so nothing goes.
+  let removed = 0;
+  try {
+    for (const name of await readdir(dir)) {
+      if (!STALE_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
+      const path = join(dir, name);
+      try {
+        const st = await lstat(path);
+        if (!st.isDirectory() || st.uid !== uid || now - st.mtimeMs <= STALE_AFTER_MS) continue;
+        await rm(path, { recursive: true, force: true });
+        removed += 1;
+      } catch {
+        // Gone already, or not ours to remove: the next deploy looks again.
+      }
+    }
+    if (removed > 0) {
+      report(
+        `removed ${removed} old vibecarbon temp ${removed === 1 ? 'dir' : 'dirs'} from ${dir}: ` +
+          'earlier versions left them there, with deploy secrets in them',
+      );
+    }
+  } catch {
+    // Best effort: an unreadable temp dir costs the deploy nothing.
+  }
+  return removed;
 }
