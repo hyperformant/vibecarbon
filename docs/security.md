@@ -165,8 +165,8 @@ Each add-on's role has its own password, so a leaked add-on credential is that r
 1. Create a new token in the Hetzner Cloud Console.
 2. Test: `curl -H "Authorization: Bearer NEW" https://api.hetzner.cloud/v1/servers`.
 3. Update the token in the project's `.env.local` (or export `HCLOUD_TOKEN` for the deploy session).
-4. `vibecarbon deploy <env>`: Pulumi `preview` runs first; expect no drift on the resource graph. On Kubernetes the deploy also hands the new token to the cluster and restarts the cloud controller and CSI driver, which read it only when they start, so nothing on the cluster holds the old one afterwards.
-5. Revoke the old token in the console.
+4. `vibecarbon deploy <env>`: Pulumi `preview` runs first; expect no drift on the resource graph. On Kubernetes the deploy also hands the new token to the cluster and restarts what reads it only when it starts: the cloud controller, the CSI driver and the cluster autoscaler. It waits up to 5 minutes for each to come back, and fails, naming the one that didn't, since that one may still run with the old token. A reader whose pod takes a port on its node (DigitalOcean's cloud controller) is moved to the Recreate strategy first, so its old pod is gone before the new one starts.
+5. Once that deploy has succeeded, revoke the old token in the console. If it failed while waiting for a restart, check the one it named with the `kubectl rollout status` command in the error first: deploying again won't restart it, because the Secret already holds the new token.
 
 The same steps rotate `DIGITALOCEAN_API_TOKEN` and `LINODE_API_TOKEN`, in their own consoles.
 

@@ -28,7 +28,9 @@
  * older one first on PATH to check one). It must leave an unchanged Secret
  * alone, resourceVersion included, since it runs on every deploy, replace a
  * rotated token, and restart exactly the workloads that read a changed one:
- * no pod reads a Secret again once it has started. A new one restarts
+ * no pod reads a Secret again once it has started. (With no node, those
+ * readers run at zero replicas, so the CLI's wait for each restart finishes
+ * at once.) A new one restarts
  * nothing: the kubelet starts what waited for it
  * (tests/integration/docker/k8s-secret-readers-restart.test.ts).
  *
@@ -291,6 +293,14 @@ describe.skipIf(SKIPPED)(
           }
         }
         installed = workloads().filter((w) => !before.has(id(w)));
+        // No node runs their pods, and a rotation waits for each restarted
+        // reader's rollout: at zero replicas one finishes at once. What this
+        // file checks is the Secrets and which workloads were restarted;
+        // pods on a node are k8s-secret-readers-restart.test.ts's.
+        const scalable = installed.filter((w) => w.kind !== 'DaemonSet').map(id);
+        if (scalable.length > 0) {
+          kube(['-n', 'kube-system', 'scale', ...scalable, '--replicas=0']);
+        }
       }, LONG);
 
       const hand = (token: string) =>

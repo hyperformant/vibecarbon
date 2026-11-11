@@ -2033,10 +2033,45 @@ function listing(items) {
 }
 
 /**
+ * Whether a workload's pods take a port on their node: hostNetwork, or a
+ * container (init ones too) with a hostPort. Two such pods cannot both run
+ * on one node: with hostNetwork and no port declared (the DigitalOcean CCM)
+ * the scheduler places the second beside the first and it cannot bind; with
+ * a hostPort the scheduler never places it there.
+ *
+ * @param {{spec?: {template?: {spec?: object}}}} item
+ */
+export function takesHostPorts(item) {
+  const pod = item?.spec?.template?.spec ?? {};
+  if (pod.hostNetwork === true) return true;
+  return [...(pod.containers ?? []), ...(pod.initContainers ?? [])].some((c) =>
+    (c?.ports ?? []).some((p) => Boolean(p?.hostPort)),
+  );
+}
+
+/**
+ * The merge patch that moves a Deployment to the Recreate strategy. Recreate
+ * takes no rollingUpdate, and the apiserver refuses one left beside it.
+ */
+const RECREATE_PATCH = JSON.stringify({
+  spec: { strategy: { type: 'Recreate', rollingUpdate: null } },
+});
+
+/**
+ * How long a deploy waits for each restarted reader of a rotated token:
+ * one Recreate or StatefulSet cycle (the old pod goes, then the new one
+ * starts) plus a pull on a node that lacks the image, the same budget as the
+ * cluster autoscaler's rollout wait.
+ */
+export const READER_ROLLOUT_TIMEOUT_S = 300;
+
+/**
  * @typedef {Object} SecretReaders
  * @property {string} namespace
  * @property {string[]} readers the workloads whose pods read any of the Secrets, as `kind/name`
  * @property {string[]} read the Secrets something reads, by name
+ * @property {string[]} [recreate] the reader Deployments to move to the Recreate strategy before
+ *   the restart, as `deployment/name` (takesHostPorts, on a strategy that is not Recreate)
  */
 
 /**
@@ -2074,11 +2109,22 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
       { cause: err },
     );
   }
+  const readers = secretReaders(list, secretNames);
   return {
     namespace,
-    readers: secretReaders(list, secretNames),
+    readers,
     // The restart line names only the Secrets something reads.
     read: secretNames.filter((name) => secretReaders(list, [name]).length > 0),
+    recreate: (list?.items ?? [])
+      .filter(
+        (item) =>
+          item?.kind === 'Deployment' &&
+          readers.includes(`deployment/${item.metadata?.name}`) &&
+          item.spec?.strategy?.type !== 'Recreate' &&
+          takesHostPorts(item),
+      )
+      .map((item) => `deployment/${item.metadata.name}`)
+      .sort(),
   };
 }
 
@@ -2087,7 +2133,20 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
  * findSecretReaders found them before the apply: they read them when they
  * start (env from secretKeyRef, the upstream CCM/CSI manifests and the
  * cluster autoscaler), so a new value reaches them only through a new pod.
- * `kubectl rollout restart` and no wait: the rollout runs on its own.
+ *
+ * `kubectl rollout restart`, then a wait for each rollout (`rollout status`,
+ * READER_ROLLOUT_TIMEOUT_S), so a deploy that succeeds left nothing on the
+ * old value. A Deployment whose pods take a port on their node
+ * (takesHostPorts) is moved to the Recreate strategy first (`recreate`):
+ * on the default rolling update its new pod cannot run beside the old one,
+ * the rollout never finishes, and the old pod, holding the old token, stays.
+ * Recreate is the Deployment controller's own promise that the old pod is
+ * gone before the new one starts; deleting the pod instead would race its
+ * replacement against the terminating pod for the port, and let two
+ * `--leader-elect=false` controllers run at once. A StatefulSet's rollout
+ * already deletes before it creates, and a DaemonSet's replaces one node's
+ * pod at a time. `wait: false` for a caller that waits on its own (the
+ * cluster autoscaler's rollout wait, with its diagnostics).
  *
  * Never for a Secret this deploy creates. Its readers have waited for it since
  * the master booted, and the kubelet starts each waiting pod on its own retry
@@ -2097,40 +2156,106 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
  * started), and ran a Deployment's waiting pod beside its replacement
  * (tests/integration/docker/k8s-secret-readers-restart.test.ts).
  *
- * A restart that fails leaves them on the old value, and the next deploy
- * finds the Secret already matching and restarts nothing, so the error says
- * how to restart them by hand.
+ * A patch, restart or wait that fails leaves them on the old value, and the
+ * next deploy finds the Secret already matching and restarts nothing, so
+ * the error says what to run by hand, and not to revoke the old token yet.
  *
- * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal}} args
+ * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal, wait?: boolean}} args
  * @returns {Promise<string[]>} what it restarted, as `kind/name`
  */
-export async function restartSecretReaders({ env, namespace, readers, read, signal }) {
+export async function restartSecretReaders({
+  env,
+  namespace,
+  readers,
+  read,
+  recreate = [],
+  signal,
+  wait = true,
+}) {
   if (readers.length === 0) return readers;
   const secrets = listing(read.map((name) => `${namespace}/${name}`));
   const one = readers.length === 1;
+  const kubeconfig = env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>';
+  const kubectl = `KUBECONFIG=${kubeconfig} kubectl -n ${namespace}`;
+  const restartByHand = `\`${kubectl} rollout restart ${readers.join(' ')}\``;
+  const opts = (description) => ({
+    env,
+    captureStdout: true,
+    ...(signal && { signal }),
+    description,
+  });
   progressLog(
     `Restarting ${listing(readers)} so ${one ? 'it picks' : 'they pick'} up the new ${secrets}: ` +
       `${one ? 'it reads' : 'they read'} ${read.length === 1 ? 'it' : 'them'} only when ` +
       `${one ? 'it starts' : 'they start'}.`,
   );
-  const argv = ['-n', namespace, 'rollout', 'restart', ...readers];
-  const byHand =
-    `\`KUBECONFIG=${env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>'} kubectl -n ` +
-    `${namespace} rollout restart ${readers.join(' ')}\``;
+  if (recreate.length > 0) {
+    const r1 = recreate.length === 1;
+    progressLog(
+      `Moving ${listing(recreate)} to the Recreate strategy first: ` +
+        `${r1 ? 'its pod takes a port on its node' : 'their pods take ports on their nodes'}, ` +
+        `so a new pod can't start beside the old one, and a ` +
+        `rolling update would keep the old one running with the old value.`,
+    );
+    for (const workload of recreate) {
+      try {
+        await runKubectlWithRetry(
+          ['-n', namespace, 'patch', workload, '--type=merge', '-p', RECREATE_PATCH],
+          opts(`move ${workload} to the Recreate strategy`),
+        );
+      } catch (err) {
+        const patches = recreate.map(
+          (w) => `\`${kubectl} patch ${w} --type=merge -p '${RECREATE_PATCH}'\``,
+        );
+        throw new Error(
+          `${secrets} changed, but moving ${workload} to the Recreate strategy didn't go through, ` +
+            `so this deploy restarted nothing and ${listing(readers)} ` +
+            `${one ? 'still runs' : 'still run'} with the old value. The next deploy won't ` +
+            `restart ${one ? 'it' : 'them'}: the Secret already matches. ` +
+            `Run ${listing(patches)}, then ${restartByHand}.\n${err.message}`,
+          { cause: err },
+        );
+      }
+    }
+  }
   try {
-    await runKubectlWithRetry(argv, {
-      env,
-      captureStdout: true,
-      ...(signal && { signal }),
-      description: `restart ${readers.join(' ')}`,
-    });
+    await runKubectlWithRetry(
+      ['-n', namespace, 'rollout', 'restart', ...readers],
+      opts(`restart ${readers.join(' ')}`),
+    );
   } catch (err) {
     throw new Error(
       `${secrets} changed, but restarting ${listing(readers)} didn't go through, so ` +
         `${one ? 'it still runs' : 'they still run'} with the old value, and the next deploy ` +
-        `won't restart ${one ? 'it' : 'them'}: the Secret already matches. Run ${byHand}.\n` +
+        `won't restart ${one ? 'it' : 'them'}: the Secret already matches. Run ${restartByHand}.\n` +
         err.message,
       { cause: err },
+    );
+  }
+  if (!wait) return readers;
+  const results = await Promise.allSettled(
+    readers.map((workload) =>
+      runKubectlWithRetry(
+        ['-n', namespace, 'rollout', 'status', workload, `--timeout=${READER_ROLLOUT_TIMEOUT_S}s`],
+        opts(`wait for ${workload} to restart`),
+      ),
+    ),
+  );
+  const stuck = readers.filter((_, i) => results[i].status === 'rejected');
+  if (stuck.length > 0) {
+    const s1 = stuck.length === 1;
+    const reasons = results
+      .filter((r) => r.status === 'rejected')
+      .map((r) => r.reason?.message ?? String(r.reason));
+    throw new Error(
+      `${listing(stuck)} in ${namespace} didn't finish restarting within ` +
+        `${READER_ROLLOUT_TIMEOUT_S} s, so ${s1 ? 'it' : 'they'} may still run with the old ` +
+        `${secrets}, and the next deploy won't restart ${s1 ? 'it' : 'them'} again: the Secret ` +
+        `already matches. Don't revoke your old token until ${s1 ? 'it has' : 'they have'}. See ` +
+        `where ${s1 ? 'it stands' : 'they stand'} with ` +
+        `\`${kubectl} rollout status ${stuck.join(' ')}\`.\n` +
+        reasons.join('\n'),
+      { cause: results.find((r) => r.status === 'rejected')?.reason },
     );
   }
   return readers;
@@ -2219,8 +2344,8 @@ async function removeRetiredKeys({ env, namespace, name, keys }) {
  *
  * The controllers read the token when they start. So each Secret is read
  * first (readSecretFingerprints), and when one now gets other values, the
- * workloads that read it are found before the apply (findSecretReaders) and
- * restarted after it (restartSecretReaders). An unchanged Secret restarts
+ * workloads that read it are found before the apply (findSecretReaders),
+ * restarted after it, and waited for (restartSecretReaders). An unchanged Secret restarts
  * nothing, and so does a new one: its readers have waited for it since the
  * master booted, and the kubelet starts them on its own retry
  * (restartSecretReaders says why a restart there does harm). Nothing is
@@ -4257,7 +4382,10 @@ export async function applyK3sManifests({
       // A replaced token: the env var it reads it into is set at start, and
       // config.json, the other key, is a file it reloads on its own. After
       // the apply and the image pin, so the rollout wait below covers it.
-      if (caReaders) await restartSecretReaders({ env, ...caReaders, signal: caStop.signal });
+      // Its own rollout wait below, with the diagnostics, covers the restart.
+      if (caReaders) {
+        await restartSecretReaders({ env, ...caReaders, signal: caStop.signal, wait: false });
+      }
       if (pilotStandby) {
         // Pilot-light: CA has nothing to scale for until a failover promotes
         // this cluster, so zero it the same way as the app Deployment (step 5).

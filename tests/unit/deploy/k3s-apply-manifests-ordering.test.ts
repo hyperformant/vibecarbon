@@ -1290,6 +1290,15 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
     const restartAt = cmdCalls.indexOf(restarts()[0]);
     expect(restartAt).toBeGreaterThan(setImageAt());
     expect(restartAt).toBeLessThan(rolloutAt());
+    // One wait, the autoscaler's own with its diagnostics: the restart adds none.
+    expect(
+      cmdCalls.filter(
+        (a) =>
+          a.includes('rollout') &&
+          a.includes('status') &&
+          a.some((x) => x.endsWith('/cluster-autoscaler')),
+      ),
+    ).toHaveLength(1);
     // Read before the Secret is applied: after it, the old token is gone.
     const readAt = cmdCalls.findIndex(
       (a) => a.includes('get') && a.includes('secret') && a.includes('carbon-autoscaler-config'),

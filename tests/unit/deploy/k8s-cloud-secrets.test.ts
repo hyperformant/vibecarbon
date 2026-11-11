@@ -65,8 +65,14 @@ let kubectlFails: Error | null = null;
 
 /** The Secrets the fake apiserver holds, `namespace/name` to decoded data. */
 const cluster = new Map<string, Record<string, string>>();
+/** A workload as `get deployments,statefulsets,daemonsets -o json` lists it. */
+type Workload = {
+  kind: string;
+  metadata: { name: string };
+  spec: { strategy?: Record<string, unknown>; template: { spec: Record<string, unknown> } };
+};
 /** The pod templates `get deployments,statefulsets,daemonsets -o json` lists, per namespace. */
-let workloads: Record<string, unknown[]> = {};
+let workloads: Record<string, Workload[]> = {};
 /** What `get secret -o json` prints instead of the Secret, when set. */
 let secretOutput: string | null = null;
 /**
@@ -102,7 +108,10 @@ function secretJson(namespace: string, name: string, data: Record<string, string
   });
 }
 
-/** kubectl against `cluster`: reads, the server-side apply, the workload list, restarts. */
+/**
+ * kubectl against `cluster`: reads, the server-side apply, the workload list,
+ * strategy patches, restarts and rollout waits.
+ */
 function fakeKubectl(args: string[], input?: string): string {
   if (failWhen?.test(args.join(' ')) && kubectlFails) throw kubectlFails;
   if (args[0] === '-n' && args[2] === 'get' && args[3] === 'secret') {
@@ -128,6 +137,24 @@ function fakeKubectl(args: string[], input?: string): string {
       .slice(4)
       .map((r) => `${r} restarted\n`)
       .join('');
+  }
+  if (args[0] === '-n' && args[2] === 'rollout' && args[3] === 'status') {
+    return `${args[4]} successfully rolled out\n`;
+  }
+  if (
+    args[0] === '-n' &&
+    args[2] === 'patch' &&
+    args[3].startsWith('deployment/') &&
+    args[4] === '--type=merge'
+  ) {
+    const item = (workloads[args[1]] ?? []).find(
+      (w) => w.kind === 'Deployment' && `deployment/${w.metadata.name}` === args[3],
+    );
+    if (!item) throw new Error(`Error from server (NotFound): ${args[3]} not found`);
+    const { strategy } = (JSON.parse(args[6]) as { spec: { strategy: Record<string, unknown> } })
+      .spec;
+    item.spec.strategy = Object.fromEntries(Object.entries(strategy).filter(([, v]) => v !== null));
+    return `${args[3].replace('deployment/', 'deployment.apps/')} patched\n`;
   }
   if (args[0] === '-n' && args[2] === 'delete' && args[3] === 'secret') {
     const key = `${args[1]}/${args[4]}`;
@@ -176,8 +203,10 @@ const {
   applyCloudSecrets,
   CLOUD_SECRETS_APPLY_ARGV,
   readSecretFingerprints,
+  restartSecretReaders,
   secretDataChanged,
   secretReaders,
+  takesHostPorts,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 const { BaseProvider } = await import('../../../src/lib/providers/base.js');
@@ -366,7 +395,14 @@ describe('applyCloudSecrets', () => {
   const kubectl = (verb: string) =>
     calls.filter(({ argv }) => argv.includes(verb)).map(({ argv }) => argv);
   const applies = () => calls.filter(({ argv }) => argv[1] === 'apply');
-  const restarts = () => kubectl('rollout');
+  const rollout = (verb: string) =>
+    calls.filter(({ argv }) => argv[3] === 'rollout' && argv[4] === verb).map(({ argv }) => argv);
+  const restarts = () => rollout('restart');
+  const waits = () => rollout('status');
+  const strategyPatches = () =>
+    calls
+      .filter(({ argv }) => argv[3] === 'patch' && argv[4].startsWith('deployment/'))
+      .map(({ argv }) => argv);
   /**
    * Every Secret this provider hands over, as the cluster holds them with
    * `token`: after a deploy took them over, or (`boot`) as the master's boot
@@ -379,7 +415,7 @@ describe('applyCloudSecrets', () => {
     }
   };
   /** A Deployment whose container reads `secret`'s `key` into its env, as the upstream CCM/CSI do. */
-  const envReader = (name: string, secret: string, key = 'token') => ({
+  const envReader = (name: string, secret: string, key = 'token'): Workload => ({
     kind: 'Deployment',
     metadata: { name },
     spec: {
@@ -395,7 +431,34 @@ describe('applyCloudSecrets', () => {
       },
     },
   });
-  const nonReaders = [
+  /** envReader with `kind`, its pod spec, its container and its spec added to. */
+  const readerLike = (
+    name: string,
+    secret: string,
+    {
+      kind = 'Deployment',
+      pod = {},
+      container = {},
+      spec = {},
+    }: {
+      kind?: string;
+      pod?: Record<string, unknown>;
+      container?: Record<string, unknown>;
+      spec?: Record<string, unknown>;
+    },
+  ): Workload => {
+    const base = envReader(name, secret);
+    const [c] = base.spec.template.spec.containers as Record<string, unknown>[];
+    return {
+      kind,
+      metadata: base.metadata,
+      spec: {
+        ...spec,
+        template: { spec: { ...pod, containers: [{ ...c, ...container }] } },
+      },
+    };
+  };
+  const nonReaders: Workload[] = [
     envReader('reads-another-secret', 'carbon-autoscaler-config'),
     {
       kind: 'DaemonSet',
@@ -705,6 +768,240 @@ describe('applyCloudSecrets', () => {
       );
       expect(logged.join('\n')).not.toContain(MARK);
     });
+
+    it.each(K8S_PROVIDERS)(
+      '%s: waits for each restarted reader, so a deploy that succeeds left none on the old token',
+      async (_id, Provider) => {
+        holdAll(Provider, 'vc-sentinel-token-old');
+        readerPerSecret(Provider);
+        await apply(Provider);
+        const restarted = restarts().flatMap((argv) => argv.slice(5).map((w) => [argv[2], w]));
+        expect(restarted.length).toBeGreaterThan(0);
+        expect(waits()).toEqual(
+          restarted.map(([ns, w]) => [
+            'kubectl',
+            '-n',
+            ns,
+            'rollout',
+            'status',
+            w,
+            '--timeout=300s',
+          ]),
+        );
+        // After the restart it waits for.
+        const restartAt = calls.findIndex(({ argv }) => argv[4] === 'restart');
+        const firstWaitAt = calls.findIndex(({ argv }) => argv[4] === 'status');
+        expect(firstWaitAt).toBeGreaterThan(restartAt);
+      },
+    );
+
+    it('moves a reader whose pods take a port on their node to Recreate first, and only such a one', async () => {
+      holdAll(PROVIDERS.digitalocean, 'vc-sentinel-token-old');
+      const s = 'digitalocean';
+      workloads['kube-system'] = [
+        // hostNetwork on upstream's default strategy, as the DigitalOcean CCM.
+        readerLike('host-net', s, { pod: { hostNetwork: true } }),
+        readerLike('host-port', s, {
+          container: { ports: [{ containerPort: 10258, hostPort: 10258 }] },
+        }),
+        readerLike('init-host-port', s, {
+          pod: { initContainers: [{ name: 'i', ports: [{ containerPort: 9, hostPort: 9 }] }] },
+        }),
+        readerLike('host-net-rolling', s, {
+          pod: { hostNetwork: true },
+          spec: { strategy: { type: 'RollingUpdate', rollingUpdate: { maxSurge: 1 } } },
+        }),
+        // Already Recreate, as the cluster autoscaler: nothing to move.
+        readerLike('host-net-recreate', s, {
+          pod: { hostNetwork: true },
+          spec: { strategy: { type: 'Recreate' } },
+        }),
+        // A StatefulSet deletes before it creates, a DaemonSet replaces one
+        // node's pod at a time.
+        readerLike('host-net-sts', s, { kind: 'StatefulSet', pod: { hostNetwork: true } }),
+        readerLike('host-net-ds', s, { kind: 'DaemonSet', pod: { hostNetwork: true } }),
+        readerLike('container-port', s, { container: { ports: [{ containerPort: 8080 }] } }),
+        readerLike('host-network-false', s, { pod: { hostNetwork: false } }),
+        // A StatefulSet that takes a port and a Deployment that doesn't, one name.
+        readerLike('twin', s, { kind: 'StatefulSet', pod: { hostNetwork: true } }),
+        readerLike('twin', s, {}),
+        // Takes a port, reads none of these Secrets: not restarted, not moved.
+        readerLike('reads-another', 'carbon-autoscaler-config', { pod: { hostNetwork: true } }),
+      ];
+      await apply(PROVIDERS.digitalocean);
+      const PATCH = '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}';
+      expect(strategyPatches()).toEqual(
+        ['host-net', 'host-net-rolling', 'host-port', 'init-host-port'].map((w) => [
+          'kubectl',
+          '-n',
+          'kube-system',
+          'patch',
+          `deployment/${w}`,
+          '--type=merge',
+          '-p',
+          PATCH,
+        ]),
+      );
+      // Before the restart: on a rolling update its rollout would never finish.
+      const lastPatchAt = calls.findLastIndex(({ argv }) => argv[3] === 'patch');
+      const restartAt = calls.findIndex(({ argv }) => argv[4] === 'restart');
+      expect(lastPatchAt).toBeLessThan(restartAt);
+      const strategy = (name: string) =>
+        workloads['kube-system'].find((w) => w.metadata.name === name)?.spec.strategy;
+      expect(strategy('host-net')).toEqual({ type: 'Recreate' });
+      expect(strategy('host-net-rolling')).toEqual({ type: 'Recreate' });
+      // Every reader restarts and is waited for, moved or not.
+      expect(restarts()).toEqual([
+        [
+          'kubectl',
+          '-n',
+          'kube-system',
+          'rollout',
+          'restart',
+          'daemonset/host-net-ds',
+          'deployment/container-port',
+          'deployment/host-net',
+          'deployment/host-net-recreate',
+          'deployment/host-net-rolling',
+          'deployment/host-network-false',
+          'deployment/host-port',
+          'deployment/init-host-port',
+          'deployment/twin',
+          'statefulset/host-net-sts',
+          'statefulset/twin',
+        ],
+      ]);
+      expect(waits()).toHaveLength(11);
+    });
+
+    it('says why it moves one to Recreate, in the line after the restart line', async () => {
+      holdAll(PROVIDERS.digitalocean, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        readerLike('digitalocean-cloud-controller-manager', 'digitalocean', {
+          pod: { hostNetwork: true },
+        }),
+        readerLike('csi-do-controller', 'digitalocean', { kind: 'StatefulSet' }),
+      ];
+      await apply(PROVIDERS.digitalocean);
+      expect(logged).toEqual([
+        'Handing your DigitalOcean API token to the cluster (kube-system/digitalocean).',
+        'Restarting deployment/digitalocean-cloud-controller-manager and statefulset/csi-do-controller ' +
+          'so they pick up the new kube-system/digitalocean: they read it only when they start.',
+        'Moving deployment/digitalocean-cloud-controller-manager to the Recreate strategy first: ' +
+          "its pod takes a port on its node, so a new pod can't start beside the old one, and a " +
+          'rolling update would keep the old one running with the old value.',
+      ]);
+      // The next rotation finds it on Recreate: no second move.
+      logged = [];
+      calls.length = 0;
+      cluster.set('kube-system/digitalocean', { 'access-token': 'vc-sentinel-token-older' });
+      await apply(PROVIDERS.digitalocean);
+      expect(strategyPatches()).toEqual([]);
+      expect(restarts()).toHaveLength(1);
+    });
+
+    it('a strategy patch that fails restarts nothing and says what to run, since the next deploy will not', async () => {
+      holdAll(PROVIDERS.digitalocean, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        readerLike('digitalocean-cloud-controller-manager', 'digitalocean', {
+          pod: { hostNetwork: true },
+        }),
+        readerLike('csi-do-controller', 'digitalocean', { kind: 'StatefulSet' }),
+      ];
+      failWhen = /^-n kube-system patch deployment\//;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl patch'), {
+        status: 1,
+        stderr: 'error: deployments.apps "digitalocean-cloud-controller-manager" is forbidden\n',
+      });
+      const err = await apply(PROVIDERS.digitalocean).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      const kc = `KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system`;
+      expect(err.message).toBe(
+        'kube-system/digitalocean changed, but moving deployment/digitalocean-cloud-controller-manager ' +
+          "to the Recreate strategy didn't go through, so this deploy restarted nothing and " +
+          'deployment/digitalocean-cloud-controller-manager and statefulset/csi-do-controller still ' +
+          "run with the old value. The next deploy won't restart them: the Secret already matches. " +
+          `Run \`${kc} patch deployment/digitalocean-cloud-controller-manager --type=merge -p ` +
+          `'{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'\`, then \`${kc} rollout ` +
+          'restart deployment/digitalocean-cloud-controller-manager statefulset/csi-do-controller`.\n' +
+          'move deployment/digitalocean-cloud-controller-manager to the Recreate strategy failed ' +
+          'with exit 1: error: deployments.apps "digitalocean-cloud-controller-manager" is forbidden',
+      );
+      expect(restarts()).toEqual([]);
+      expect(waits()).toEqual([]);
+      expect(logged.join('\n')).not.toContain(MARK);
+    });
+
+    it('a reader that does not finish restarting fails the deploy, by name, and says not to revoke the old token yet', async () => {
+      holdAll(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        envReader('hcloud-cloud-controller-manager', 'hcloud'),
+        envReader('hcloud-csi-controller', 'hcloud'),
+      ];
+      failWhen = /^-n kube-system rollout status deployment\/hcloud-csi-controller /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout status'), {
+        status: 1,
+        stderr: 'error: timed out waiting for the condition\n',
+      });
+      const err = await apply(PROVIDERS.hetzner).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe(
+        "deployment/hcloud-csi-controller in kube-system didn't finish restarting within 300 s, " +
+          "so it may still run with the old kube-system/hcloud, and the next deploy won't restart " +
+          "it again: the Secret already matches. Don't revoke your old token until it has. See " +
+          `where it stands with \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout status ` +
+          'deployment/hcloud-csi-controller`.\nwait for deployment/hcloud-csi-controller to restart ' +
+          'failed with exit 1: error: timed out waiting for the condition',
+      );
+      // Each was waited for, the one that finished too: one stuck reader
+      // never hides another.
+      expect(waits().map((argv) => argv[5])).toEqual([
+        'deployment/hcloud-cloud-controller-manager',
+        'deployment/hcloud-csi-controller',
+      ]);
+      // Not a retry: a rollout that did not finish in 300 s is not a blip.
+      expect(
+        calls.filter(
+          ({ argv }) => argv.includes('deployment/hcloud-csi-controller') && argv[4] === 'status',
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('two readers that do not finish: both named, in one error', async () => {
+      holdAll(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        envReader('hcloud-cloud-controller-manager', 'hcloud'),
+        envReader('hcloud-csi-controller', 'hcloud'),
+      ];
+      failWhen = /^-n kube-system rollout status /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout status'), {
+        status: 1,
+        stderr: 'error: timed out waiting for the condition\n',
+      });
+      const err = await apply(PROVIDERS.hetzner).catch((e: Error) => e);
+      expect(err.message.split('\n')[0]).toBe(
+        'deployment/hcloud-cloud-controller-manager and deployment/hcloud-csi-controller in ' +
+          "kube-system didn't finish restarting within 300 s, so they may still run with the old " +
+          "kube-system/hcloud, and the next deploy won't restart them again: the Secret already " +
+          "matches. Don't revoke your old token until they have. See where they stand with " +
+          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout status ` +
+          'deployment/hcloud-cloud-controller-manager deployment/hcloud-csi-controller`.',
+      );
+    });
+
+    it('wait: false restarts and leaves the wait to its caller', async () => {
+      const found = {
+        namespace: 'kube-system',
+        readers: ['deployment/cluster-autoscaler'],
+        read: ['carbon-autoscaler-config'],
+        recreate: [],
+      };
+      await restartSecretReaders({ env: { KUBECONFIG }, ...found, wait: false });
+      expect(restarts()).toHaveLength(1);
+      expect(waits()).toEqual([]);
+      await restartSecretReaders({ env: { KUBECONFIG }, ...found });
+      expect(waits()).toHaveLength(1);
+    });
   });
 
   describe('removes what an earlier vibecarbon wrote and nothing reads', () => {
@@ -970,6 +1267,34 @@ describe('applyCloudSecrets', () => {
       expect(absent).toBeNull();
       expect(secretDataChanged(absent, { token: TOKEN })).toBe(false);
     });
+  });
+});
+
+describe('takesHostPorts', () => {
+  const of = (spec: Record<string, unknown>) => ({ spec: { template: { spec } } });
+
+  it('hostNetwork, or a hostPort on any container, init ones too', () => {
+    expect(takesHostPorts(of({ hostNetwork: true }))).toBe(true);
+    expect(
+      takesHostPorts(of({ containers: [{ ports: [{ containerPort: 80, hostPort: 80 }] }] })),
+    ).toBe(true);
+    expect(
+      takesHostPorts(of({ containers: [{}], initContainers: [{ ports: [{ hostPort: 9 }] }] })),
+    ).toBe(true);
+  });
+
+  it('nothing else: a container port alone, hostPort 0, no ports, no template', () => {
+    for (const spec of [
+      {},
+      { hostNetwork: false },
+      { containers: [{ ports: [{ containerPort: 80 }] }] },
+      { containers: [{ ports: [{ containerPort: 80, hostPort: 0 }] }] },
+      { containers: [{}] },
+    ]) {
+      expect(takesHostPorts(of(spec)), JSON.stringify(spec)).toBe(false);
+    }
+    expect(takesHostPorts({})).toBe(false);
+    expect(takesHostPorts(undefined as never)).toBe(false);
   });
 });
 

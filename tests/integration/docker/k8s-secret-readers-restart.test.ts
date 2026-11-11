@@ -17,6 +17,15 @@
  *   The CLI restarts nothing, so each starts once. (A restart there started a
  *   StatefulSet's pod twice, and ran a Deployment's waiting pod beside its
  *   replacement.)
+ * - A rotated token: the CLI restarts what reads it and waits for each
+ *   rollout. A Deployment whose pods take a port on their node (hostNetwork,
+ *   or a hostPort) cannot run its new pod beside the old one there: the new
+ *   one cannot bind or is never scheduled, the default rolling update keeps
+ *   the old one, and that one holds the old token. So the CLI moves such a
+ *   reader to the Recreate strategy first, and each ends with its new pod
+ *   alone. The DigitalOcean CCM is one (hostNetwork, upstream's default
+ *   strategy, `--leader-elect=false`): a stand-in built from upstream's own
+ *   manifest, holding the port the CCM serves on, is rotated the same way.
  *
  * Needs Docker and kubectl. Images are loaded into the node from this
  * machine's Docker (pulled once if missing), so nothing is pulled in the
@@ -27,10 +36,13 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { loadAll } from 'js-yaml';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyCloudSecrets } from '../../../src/lib/deploy/k8s/k3s.js';
 import { k3sVersion } from '../../../src/lib/images.js';
 import { BaseProvider } from '../../../src/lib/providers/base.js';
+import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { CLOUD_SECRET_READERS } from '../../_shared/cloud-secret-readers.js';
 
 const SKIPPED =
   process.env.DOCKER_INTEGRATION === 'true'
@@ -50,6 +62,9 @@ const BUSYBOX = 'busybox:1.38';
 /** Where the stand-in readers live; the Secrets they read are in it too. */
 const NS = 'vctest-readers';
 const TOKEN_A = 'vc-sentinel-token-readers-a';
+const TOKEN_B = 'vc-sentinel-token-readers-b';
+/** cloud-controller-manager's default secure port, which the DigitalOcean CCM serves on. */
+const CCM_PORT = '10258';
 const LONG = 240_000;
 
 const run = (cmd: string, args: string[], input?: string | Buffer, env?: NodeJS.ProcessEnv) =>
@@ -100,16 +115,38 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
   let kubeconfig: string;
   const kube = (args: string[], input?: string) =>
     must('kubectl', args, input, { ...process.env, KUBECONFIG: kubeconfig });
-  const pods = (app: string): Pod[] =>
-    JSON.parse(kube(['-n', NS, 'get', 'pods', '-l', `app=${app}`, '-o', 'json'])).items;
-  const template = (workload: string) =>
-    JSON.parse(kube(['-n', NS, 'get', workload, '-o', 'json'])).spec.template;
-  const hand = (secret: string, token: string) =>
-    applyCloudSecrets({
-      env: { ...process.env, KUBECONFIG: kubeconfig },
-      ProviderClass: providerFor(secret),
-      token,
-    });
+  const pods = (app: string, ns = NS): Pod[] =>
+    JSON.parse(kube(['-n', ns, 'get', 'pods', '-l', `app=${app}`, '-o', 'json'])).items;
+  const workload = (id: string, ns = NS) => JSON.parse(kube(['-n', ns, 'get', id, '-o', 'json']));
+  const template = (id: string) => workload(id).spec.template;
+  const handTo = (ProviderClass: typeof BaseProvider, token: string) =>
+    applyCloudSecrets({ env: { ...process.env, KUBECONFIG: kubeconfig }, ProviderClass, token });
+  const hand = (secret: string, token: string) => handTo(providerFor(secret), token);
+
+  /**
+   * After a rotation: each app's one pod is a new one, running and ready,
+   * never restarted (a second pod that could not bind would have been), and
+   * the old one is gone.
+   */
+  const onlyNewPods = (before: Record<string, string>, ns = NS) => {
+    waitFor(
+      'the old pods to go',
+      () => Object.keys(before).every((app) => pods(app, ns).length === 1),
+      60_000,
+    );
+    for (const [app, oldUid] of Object.entries(before)) {
+      const [pod] = pods(app, ns);
+      expect(pod.metadata.uid, `${app}: a new pod`).not.toBe(oldUid);
+      expect(pod.status.phase, app).toBe('Running');
+      expect(pod.status.containerStatuses?.[0]?.ready, app).toBe(true);
+      expect(pod.status.containerStatuses?.[0]?.restartCount, app).toBe(0);
+    }
+  };
+  const uidOf = (app: string, ns = NS) => {
+    const all = pods(app, ns);
+    expect(all, app).toHaveLength(1);
+    return all[0].metadata.uid;
+  };
 
   /**
    * A stand-in reader of `secret`'s token: busybox running `command`, one
@@ -347,5 +384,113 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
       }
     },
     LONG,
+  );
+
+  it(
+    'a rotated token: a reader that takes a port on its node ends with its new pod alone',
+    async () => {
+      const secret = 'vctest-rotated';
+      await hand(secret, TOKEN_A);
+      // hostNetwork with no port declared, as the DigitalOcean CCM: the
+      // scheduler cannot see the port, so a second pod lands beside the first
+      // and cannot bind. And a declared hostPort: the scheduler sees it, so a
+      // second pod is never scheduled.
+      applyJson([
+        reader({
+          kind: 'Deployment',
+          name: 'host-net',
+          secret,
+          command: ['httpd', '-f', '-p', '18258'],
+          pod: { hostNetwork: true },
+        }),
+        reader({
+          kind: 'Deployment',
+          name: 'host-port',
+          secret,
+          command: ['httpd', '-f', '-p', '18259'],
+          container: { ports: [{ containerPort: 18259, hostPort: 18259 }] },
+        }),
+      ]);
+      kube([
+        '-n',
+        NS,
+        'rollout',
+        'status',
+        'deployment/host-net',
+        'deployment/host-port',
+        '--timeout=120s',
+      ]);
+      const before = { 'host-net': uidOf('host-net'), 'host-port': uidOf('host-port') };
+
+      await hand(secret, TOKEN_B);
+
+      onlyNewPods(before);
+      for (const id of ['deployment/host-net', 'deployment/host-port']) {
+        expect(workload(id).spec.strategy, id).toEqual({ type: 'Recreate' });
+      }
+    },
+    LONG * 2,
+  );
+
+  it(
+    "a rotated token: the DigitalOcean CCM's shape, from upstream's manifest, ends with its new pod alone",
+    async () => {
+      const [url] = CLOUD_SECRET_READERS.digitalocean.manifests;
+      const response = await fetch(url);
+      expect(response.ok, url).toBe(true);
+      // biome-ignore lint/suspicious/noExplicitAny: upstream's whole manifest, read field by field below
+      const ccm = (loadAll(await response.text()) as Record<string, any>[]).find(
+        (doc) => doc?.kind === 'Deployment' && doc.metadata.name.includes('cloud-controller'),
+      );
+      expect(ccm, 'the CCM Deployment').toBeTruthy();
+      const pod = ccm?.spec.template.spec;
+      // The shape this case is about, as upstream ships it.
+      expect(pod.hostNetwork).toBe(true);
+      expect(ccm?.spec.strategy).toBeUndefined();
+      expect(ccm?.spec.replicas).toBe(1);
+      expect(JSON.stringify(pod.containers)).toContain('--leader-elect=false');
+      // Upstream's Deployment with a stand-in in each container: busybox
+      // holding the port the CCM serves on, reading the same Secret key.
+      const standIn = {
+        apiVersion: 'apps/v1',
+        kind: 'Deployment',
+        metadata: { name: ccm?.metadata.name, namespace: ccm?.metadata.namespace },
+        spec: {
+          replicas: ccm?.spec.replicas,
+          selector: ccm?.spec.selector,
+          template: {
+            metadata: { labels: ccm?.spec.template.metadata.labels },
+            spec: {
+              hostNetwork: pod.hostNetwork,
+              dnsPolicy: pod.dnsPolicy,
+              tolerations: pod.tolerations,
+              terminationGracePeriodSeconds: 2,
+              containers: pod.containers.map((c: Record<string, unknown>) => ({
+                name: c.name,
+                image: BUSYBOX,
+                imagePullPolicy: 'Never',
+                command: ['httpd', '-f', '-p', CCM_PORT],
+                env: c.env,
+                ...(c.ports ? { ports: c.ports } : {}),
+              })),
+            },
+          },
+        },
+      };
+      const DigitalOcean = PROVIDERS.digitalocean;
+      await handTo(DigitalOcean, TOKEN_A);
+      applyJson([standIn]);
+      const ns = ccm?.metadata.namespace;
+      const app = ccm?.spec.template.metadata.labels.app;
+      const id = `deployment/${ccm?.metadata.name}`;
+      kube(['-n', ns, 'rollout', 'status', id, '--timeout=120s']);
+      const before = { [app]: uidOf(app, ns) };
+
+      await handTo(DigitalOcean, TOKEN_B);
+
+      onlyNewPods(before, ns);
+      expect(workload(id, ns).spec.strategy).toEqual({ type: 'Recreate' });
+    },
+    LONG * 2,
   );
 });
