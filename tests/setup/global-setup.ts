@@ -55,15 +55,20 @@ globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
     : realFetch(input, init)) as typeof fetch;
 
 // A test that reaches the real updateProjectConfig without its own cwd writes
-// the repo's own .vibecarbon.json (and its lock or temp file). Record what is
-// there now; a file that appears during this test file's run (or a parallel
-// one's) fails it, and is removed so it cannot hide the next occurrence.
+// the repo's own .vibecarbon.json (and its lock or temp file). One that
+// reaches the real ensureStatePassphrase (any getOrCreateStack caller) also
+// writes a generated VIBECARBON_STATE_PASSPHRASE into the repo's .env.local.
+// Record what is there now; a file that appears during this test file's run
+// (or a parallel one's) fails it, and is removed so it cannot hide the next
+// occurrence.
 const REPO_ROOT = join(import.meta.dirname, '..', '..');
 const CONFIG_RESIDUE = [
   '.vibecarbon.json',
   '.vibecarbon.json.lock',
   '.vibecarbon.json.lock.break',
   '.vibecarbon.json.tmp',
+  '.env.local',
+  '.env',
 ];
 const residueAtStart = new Set(CONFIG_RESIDUE.filter((f) => existsSync(join(REPO_ROOT, f))));
 
@@ -122,7 +127,8 @@ afterAll(async () => {
   if (appeared.length > 0) {
     problems.push(
       `a test wrote ${appeared.join(', ')} at the repo root (removed now): stub ` +
-        'updateProjectConfig or point the test at a temp dir (vi.spyOn(process, "cwd"))',
+        'updateProjectConfig and ensureStatePassphrase, or point the test at a temp dir ' +
+        '(vi.spyOn(process, "cwd"))',
     );
   }
   if (cleanupProblem) problems.push(cleanupProblem);

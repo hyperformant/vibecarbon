@@ -32,6 +32,14 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
 vi.mock('../../../src/lib/cli/progress.js', () => ({
   progressLog: (...args: unknown[]) => progressLogMock(...args),
 }));
+// upStack opens the stack through getOrCreateStack, whose real passphrase
+// check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json (the repo root here), so it is stubbed;
+// state-passphrase-census.test.ts covers the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
 
 const { dropStackResources } = await import('../../../src/lib/iac/retired-resources.js');
 const { dropRetiredStackResources, upStack } = await import('../../../src/lib/iac/index.js');
