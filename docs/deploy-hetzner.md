@@ -442,9 +442,10 @@ You can give an environment's app a key of its own:
    secret key. They go to `.env.local` only and never ship to a server.
 3. Run `vibecarbon deploy prod`. The app gets the pasted key, and the deploy
    puts a deny policy on every other bucket vibecarbon manages in the project
-   (the Pulumi state, the backups and each other environment's bucket). It
-   waits until Hetzner enforces it before it reports success. Status then
-   shows `storage access: fenced`.
+   (the Pulumi state, every backups bucket, each other environment's bucket,
+   and the buckets a destroyed environment kept). It waits until Hetzner
+   enforces it before it reports success. Status then shows
+   `storage access: fenced`.
 
 Skipping the paste is fine; the environment simply stays `shared`.
 

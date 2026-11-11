@@ -100,7 +100,7 @@ describe('backupsHoldings and backupsBucketHolders', () => {
   it('counts every live record, and leaves out the excepted environment', () => {
     const config = project({ prod: live('nbg1', BASE), staging: live('fsn1', FSN1) });
     expect(backupsHoldings(config, { except: 'staging' })).toEqual([
-      { env: 'prod', bucket: BASE, region: 'nbg1' },
+      { env: 'prod', bucket: BASE, region: 'nbg1', regionRecorded: true, live: true },
     ]);
   });
 
@@ -115,7 +115,9 @@ describe('backupsHoldings and backupsBucketHolders', () => {
         },
       },
     );
-    expect(backupsHoldings(config, {})).toEqual([{ env: 'old', bucket: BASE, region: 'nbg1' }]);
+    expect(backupsHoldings(config, {})).toEqual([
+      { env: 'old', bucket: BASE, region: 'nbg1', regionRecorded: true, live: false },
+    ]);
   });
 
   it('a live sibling deployed by an older CLI, with no record, holds the base name in its uploads region', () => {
@@ -123,7 +125,19 @@ describe('backupsHoldings and backupsBucketHolders', () => {
     // A skeleton that never finished holds nothing.
     const skeleton = { status: 'deploying', s3: { region: 'nbg1' } };
     const config = project({ legacy, skeleton });
-    expect(backupsHoldings(config, {})).toEqual([{ env: 'legacy', bucket: BASE, region: 'hel1' }]);
+    // Its region is a stand-in: no record names one.
+    expect(backupsHoldings(config, {})).toEqual([
+      { env: 'legacy', bucket: BASE, region: 'hel1', regionRecorded: false, live: true },
+    ]);
+  });
+
+  it('a record without a region holds its bucket in its uploads region, marked as a stand-in', () => {
+    const veryOld = { s3: { region: 'fsn1', endpoint: EP('fsn1') }, backupS3: { bucket: FSN1 } };
+    const config = project({ veryOld }, { gone: veryOld });
+    expect(backupsHoldings(config, {})).toEqual([
+      { env: 'veryOld', bucket: FSN1, region: 'fsn1', regionRecorded: false, live: true },
+      { env: 'gone', bucket: FSN1, region: 'fsn1', regionRecorded: false, live: false },
+    ]);
   });
 
   it('names each environment holding exactly that bucket, once', () => {

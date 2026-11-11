@@ -6,8 +6,9 @@
  * `arn:aws:iam:::user/<ownerId>:<accessKeyId>`, and a Deny bucket policy on
  * that principal is enforced (real-account spike, 2026-10-20). So when the
  * operator pastes an environment's app key, the deploy puts a policy on every
- * bucket vibecarbon manages for the project (the Pulumi state bucket, the
- * backups bucket and each environment's app bucket) that denies every OTHER
+ * bucket vibecarbon manages for the project (the Pulumi state bucket, every
+ * backups bucket that holds backups, each environment's app bucket, and the
+ * app bucket a destroyed environment kept) that denies every OTHER
  * environment's pasted key. An env's own bucket never denies its own key.
  * A pasted key that was replaced, or whose env was destroyed, is retired
  * (`projectConfig.retiredAppKeys`) and stays denied everywhere: the CLI
@@ -28,7 +29,7 @@
  * FENCE_PROBE_BUDGET_MS. Any allowed probe resets the streak. It is never a
  * retry of the write; an exhausted budget fails the deploy naming the bucket.
  */
-import { backupsTargetOf } from '../backups-bucket.js';
+import { backupsHoldings } from '../backups-bucket.js';
 
 /** Denied probes in a row that count as the fence holding. */
 export const FENCE_PROBE_STREAK = 3;
@@ -39,10 +40,11 @@ export const FENCE_PROBE_INTERVAL_MS = 5_000;
 
 /**
  * The infra key's store, as the fence uses it. `forRegion` gives the same
- * keys at another region (S3CompatibleProvider.forRegion).
+ * keys at another region (S3CompatibleProvider.forRegion); `region` is where
+ * it asks, for a NoSuchBucket message about a target with no region.
  * @typedef {{ getBucketPolicy: Function, putBucketPolicy: Function,
  *   deleteBucketPolicy: Function, bucketExists?: (b: string) => Promise<boolean>,
- *   forRegion?: (region: string) => FenceStore }} FenceStore
+ *   region?: string, forRegion?: (region: string) => FenceStore }} FenceStore
  */
 
 /**
@@ -96,86 +98,163 @@ function pastedKeys(projectConfig) {
 }
 
 /**
+ * One bucket's fence, as fenceTargets computes it.
+ *   - `region`: where the bucket lives (null when no record names one).
+ *   - `regionFrom`: whose record gave that region (`env`, `live` false for
+ *     a destroyed environment's), whether the record states it or it stands
+ *     in from that environment's uploads region (`recorded`), and which
+ *     environment's deploy would record it (`redeploy`: that one if live,
+ *     else the first live one using the bucket, else null). Null for a
+ *     target built by hand. The NoSuchBucket message names them.
+ *   - `mayBeAbsent`: no live environment that names the bucket has finished a
+ *     deploy into it, so a confirmed absence may be skipped.
+ *   - `live`: a live environment names it. A bucket only destroyed
+ *     environments name and that is gone has nothing left to fence.
+ * @typedef {{ bucket: string, region: string|null, deniedAccessKeyIds: string[],
+ *   mayBeAbsent: boolean, live: boolean,
+ *   regionFrom: { env: string, live: boolean, recorded: boolean,
+ *     redeploy: string|null } | null }} FenceTarget
+ */
+
+/**
  * Which buckets get which fence. Every bucket vibecarbon manages for the
- * project (each env's recorded state, backups and app bucket) denies every
- * environment's pasted app key, except that an env's own app bucket never
- * denies that env's key. Every RETIRED pasted key (`projectConfig.
- * retiredAppKeys`: replaced, or its env destroyed) is denied everywhere: the
- * CLI cannot revoke a pasted key, so it stays fenced until the operator
- * deletes it in the console and forgets it (`configure storage -forget`).
- * A bucket with nothing to deny is still listed, with an empty list, so a
- * fence nothing needs any more is removed.
+ * project denies every environment's pasted app key, except that an env's
+ * own app bucket never denies that env's key:
+ *   - each live environment's state bucket and app bucket;
+ *   - every backups bucket that holds backups (backupsHoldings): a live
+ *     environment's, one a destroyed environment kept for recovery, and the
+ *     base bucket an older CLI's environment archives into with no record;
+ *   - every app bucket a destroyed environment's record names. A plain
+ *     destroy keeps it with its uploads, and -purge keeps a pinned or shared
+ *     one; the record does not say which, so each is fenced, and one found
+ *     gone is passed over (applyHetznerFences' `gone`).
+ * Every RETIRED pasted key (`projectConfig.retiredAppKeys`: replaced, or its
+ * env destroyed) is denied everywhere: the CLI cannot revoke a pasted key,
+ * so it stays fenced until the operator deletes it in the console and
+ * forgets it (`configure storage -forget`). A bucket with nothing to deny is
+ * still listed, with an empty list, so a fence nothing needs any more is
+ * removed.
  *
  * `leaving: true` computes the fences as they must be once `environment` is
- * gone (destroy): its own bucket is left alone. Its key leaves the fences
+ * gone (destroy): its own buckets are left alone. Its key leaves the fences
  * only if the caller did not retire it (destroy does retire it).
  *
- * `mayBeAbsent` marks a bucket no env that references it has finished a
- * deploy into (no `deployed` status, no recorded `bucketCreatedAt`), and that
- * the env being deployed (`environment`, unless `leaving`) does not use: only
- * such a bucket may be skipped when the provider says it does not exist.
- *
- * `region` is where the bucket lives, from the record that names it: an app
- * bucket's `s3.region`, the state bucket's `s3.stateBucketRegion` (else
- * `s3.region`), a backups bucket's region from backupsTargetOf. A bucket
- * named by several records keeps the first region on record. Null when no
- * record names one (an older CLI's): applyHetznerFences then asks the client
- * it was given.
+ * `region` comes from the records that name the bucket: an app bucket's
+ * `s3.region`, the state bucket's `s3.stateBucketRegion`, a backups bucket's
+ * record region. A record that states none stands its uploads region in. A
+ * stated region beats a stand-in, whichever record is listed first; between
+ * two of a kind the first stays. Null when no record names one (an older
+ * CLI's): applyHetznerFences then asks the client it was given.
  *
  * @param {{ projectConfig: object, environment: string, leaving?: boolean }} args
- * @returns {{ bucket: string, region: string|null, deniedAccessKeyIds: string[], mayBeAbsent: boolean }[]}
+ * @returns {FenceTarget[]}
  */
 export function fenceTargets({ projectConfig, environment, leaving = false }) {
-  const envs = Object.entries(projectConfig.environments ?? {}).filter(
-    ([name]) => !(leaving && name === environment),
-  );
-  const keys = pastedKeys(projectConfig).filter((k) => !(leaving && k.env === environment));
+  const gone = (name) => leaving && name === environment;
+  const envs = Object.entries(projectConfig.environments ?? {}).filter(([name]) => !gone(name));
+  const keys = pastedKeys(projectConfig).filter((k) => !gone(k.env));
   const retired = (projectConfig.retiredAppKeys ?? []).filter(
     (id) => typeof id === 'string' && id && !keys.some((k) => k.id === id),
   );
   // The env being deployed counts as complete: s3-setup created or verified
   // every bucket it references this very run, so a NoSuchBucket from one of
-  // them is Hetzner's young-bucket noise, never a reason to skip its fence.
+  // them is never a reason to skip its fence.
   const completed = (name, e) =>
     (!leaving && name === environment) ||
     e?.status === 'deployed' ||
     Object.hasOwn(e?.s3 ?? {}, 'bucketCreatedAt');
-  /** @type {Map<string, { owner: string|null, completed: boolean, region: string|null }>} */
+  /**
+   * @type {Map<string, { owner: string|null, completed: boolean, live: boolean,
+   *   user: string|null, region: string|null, recorded: boolean, env: string,
+   *   envLive: boolean }>}
+   */
   const buckets = new Map();
-  const note = (bucket, region, owner, name, e) => {
+  /**
+   * @param {string} bucket
+   * @param {{ owner: string|null, done: boolean, live: boolean,
+   *   region: string|null|undefined, recorded: boolean, env: string }} seen
+   */
+  const note = (bucket, seen) => {
     const prev = buckets.get(bucket);
+    const takes = Boolean(seen.region) && (!prev?.region || (seen.recorded && !prev.recorded));
+    const from = takes || !prev;
     buckets.set(bucket, {
-      owner: prev ? prev.owner : owner,
-      completed: (prev?.completed ?? false) || completed(name, e),
-      region: prev?.region ?? region ?? null,
+      owner: prev ? prev.owner : seen.owner,
+      completed: (prev?.completed ?? false) || seen.done,
+      live: (prev?.live ?? false) || seen.live,
+      user: prev?.user ?? (seen.live ? seen.env : null),
+      region: takes ? seen.region : (prev?.region ?? null),
+      recorded: takes ? seen.recorded : (prev?.recorded ?? false),
+      env: from ? seen.env : prev.env,
+      envLive: from ? seen.live : prev.envLive,
     });
   };
   for (const [name, e] of envs) {
-    const backups = backupsTargetOf(e);
-    const shared = [
-      [e?.s3?.stateBucket, e?.s3?.stateBucketRegion ?? e?.s3?.region],
-      [backups?.bucket, backups?.region],
-    ];
-    for (const [bucket, region] of shared) {
-      if (bucket) note(bucket, region, null, name, e);
-    }
+    const state = e?.s3?.stateBucket;
+    if (!state) continue;
+    const stated = e.s3.stateBucketRegion;
+    note(state, {
+      owner: null,
+      done: completed(name, e),
+      live: true,
+      region: stated ?? e.s3.region,
+      recorded: Boolean(stated),
+      env: name,
+    });
+  }
+  for (const h of backupsHoldings(projectConfig, { except: leaving ? environment : undefined })) {
+    note(h.bucket, {
+      owner: null,
+      done: h.live && completed(h.env, projectConfig.environments?.[h.env]),
+      live: h.live,
+      region: h.region,
+      recorded: h.regionRecorded,
+      env: h.env,
+    });
   }
   for (const [name, e] of envs) {
     const own = e?.s3?.bucket;
     // A pinned bucket may be one several envs share; it is not this env's
     // own, so it denies every pasted key like the state and backups buckets.
     if (!own) continue;
-    if (buckets.has(own)) note(own, e.s3.region, null, name, e);
-    else note(own, e.s3.region, e.s3.bucketPin ? null : name, name, e);
+    const seen = {
+      done: completed(name, e),
+      live: true,
+      region: e.s3.region,
+      recorded: true,
+      env: name,
+    };
+    note(own, { ...seen, owner: buckets.has(own) || e.s3.bucketPin ? null : name });
+  }
+  // Noted after the live ones: a rebuild's live record of the same bucket
+  // keeps it its own.
+  for (const [name, entry] of Object.entries(projectConfig.destroyedEnvironments ?? {})) {
+    const own = entry?.s3?.bucket;
+    if (!own || gone(name)) continue;
+    note(own, {
+      owner: null,
+      done: false,
+      live: false,
+      region: entry.s3.region,
+      recorded: true,
+      env: name,
+    });
   }
   return [...buckets.entries()]
-    .map(([bucket, { owner, completed: done, region }]) => ({
+    .map(([bucket, b]) => ({
       bucket,
-      region,
+      region: b.region,
       deniedAccessKeyIds: [
-        ...new Set([...keys.filter((k) => k.env !== owner).map((k) => k.id), ...retired]),
+        ...new Set([...keys.filter((k) => k.env !== b.owner).map((k) => k.id), ...retired]),
       ].sort(),
-      mayBeAbsent: !done,
+      mayBeAbsent: !b.completed,
+      live: b.live,
+      regionFrom: {
+        env: b.env,
+        live: b.envLive,
+        recorded: b.recorded,
+        redeploy: b.envLive ? b.env : b.user,
+      },
     }))
     .sort((a, b) => a.bucket.localeCompare(b.bucket));
 }
@@ -255,6 +334,48 @@ function isNoSuchBucket(err) {
 }
 
 /**
+ * The error for a NoSuchBucket the fence cannot pass over. It says which
+ * region was asked and where that region came from: a region on record that
+ * is wrong answers exactly like a bucket Hetzner has not caught up on yet.
+ * @param {{ bucket: string, err: Error, asked: string|undefined,
+ *   region: string|null|undefined, regionFrom: FenceTarget['regionFrom'] | undefined,
+ *   mayBeAbsent: boolean, found: boolean|null }} args
+ *   `asked`: the region the store was asked in; `found`: what HeadBucket
+ *   there said (null when it was not asked).
+ * @returns {Error}
+ */
+function noSuchBucketError({ bucket, err, asked, region, regionFrom, mayBeAbsent, found }) {
+  const from = regionFrom ?? null;
+  const whose = from && (from.live ? `${from.env}'s` : `destroyed ${from.env}'s`);
+  const where = asked ? ` in ${asked}` : '';
+  const why = !from
+    ? ''
+    : !region
+      ? ' (no record names a region for this bucket, so the store was asked in its own)'
+      : from.recorded
+        ? `, the region ${whose} record names for it,`
+        : `, ${whose} uploads region (no record names a region for this bucket),`;
+  const head = `bucket ${bucket} answered NoSuchBucket${where}${why} while its app key fence was read (${err.message})`;
+  if (found) {
+    return new Error(
+      `${head}, but HeadBucket${where} finds it, so it was not skipped: the store is answering two ways. Deploy again in a few minutes.`,
+    );
+  }
+  const notSkipped = mayBeAbsent
+    ? 'This store cannot confirm the bucket is gone, so it was not skipped.'
+    : 'A deployed environment uses it, so it was not skipped.';
+  const caughtUp =
+    'If this deploy made it moments ago, Hetzner has not caught up yet: deploy again in a few minutes.';
+  let hint;
+  if (!from) hint = caughtUp;
+  else if (!from.redeploy) hint = 'Deploy again in a few minutes.';
+  else if (region && from.recorded) {
+    hint = `${caughtUp} Otherwise ${whose} record names the wrong region: deploy ${from.redeploy} again, which records where the bucket is.`;
+  } else hint = `Deploy ${from.redeploy} again: its deploy records where the bucket is.`;
+  return new Error(`${head}. ${notSkipped} ${hint}`);
+}
+
+/**
  * Write the fences that changed and verify every fence that denies anything.
  *
  * For each target the current policy is read first. When it already denies
@@ -272,11 +393,15 @@ function isNoSuchBucket(err) {
  * unchanged policy. A bucket none of the probes is fenced from is reported
  * as `unverified`.
  *
- * A bucket the provider says does not exist is skipped and reported as
- * `skipped` only when `mayBeAbsent` (its env never finished a deploy) and a
- * HeadBucket confirms it is gone; otherwise the NoSuchBucket fails the run
- * with its cause, because a young Hetzner bucket answers NoSuchBucket
- * transiently and a skip there would leave it unfenced.
+ * A bucket the provider says does not exist is passed over only when
+ * `mayBeAbsent` (no live env that uses it finished a deploy into it) and a
+ * HeadBucket in the same region confirms it is gone. One a live env names is
+ * reported as `skipped`, which the deploy warns about and status marks; one
+ * only destroyed envs named (`live: false`, say an app bucket -purge
+ * deleted) as `gone`, since nothing is left there to fence. Otherwise the
+ * NoSuchBucket fails the run, naming the region asked and whose record gave
+ * it: a bucket Hetzner has not caught up on and a region on record that is
+ * wrong answer the same way, and a skip there would leave it unfenced.
  *
  * Every call for a target, its policy read and write, its HeadBucket and
  * each probe, goes to the target's `region` (`forRegion` on the client and on
@@ -286,11 +411,12 @@ function isNoSuchBucket(err) {
  * @param {object} args
  * @param {FenceStore} args.s3 - the infra key's client
  * @param {string} args.ownerId
- * @param {{ bucket: string, region?: string|null, deniedAccessKeyIds: string[], mayBeAbsent?: boolean }[]} args.targets
+ * @param {(Pick<FenceTarget, 'bucket' | 'deniedAccessKeyIds'> & Partial<FenceTarget>)[]} args.targets
+ *   as fenceTargets gives them; `live` defaults to true and `mayBeAbsent` to false.
  * @param {Record<string, FenceProbe>} [args.probes]
  * @param {(ms: number) => Promise<void>} [args.sleep]
  * @param {() => number} [args.now]
- * @returns {Promise<{ written: string[], removed: string[], unverified: string[], skipped: string[] }>}
+ * @returns {Promise<{ written: string[], removed: string[], unverified: string[], skipped: string[], gone: string[] }>}
  */
 export async function applyHetznerFences({
   s3,
@@ -304,30 +430,32 @@ export async function applyHetznerFences({
   const removed = [];
   const unverified = [];
   const skipped = [];
+  const gone = [];
   // Every write lands first; the verifications then run side by side, since
   // each waits on its own bucket's consistency.
   const verifications = [];
-  for (const { bucket, region, deniedAccessKeyIds, mayBeAbsent = false } of targets) {
+  for (const target of targets) {
+    const { bucket, region, deniedAccessKeyIds, mayBeAbsent = false, live = true } = target;
     const store = atRegion(s3, region);
     let current;
     try {
       current = await store.getBucketPolicy(bucket);
     } catch (err) {
-      if (
-        isNoSuchBucket(err) &&
-        mayBeAbsent &&
-        store.bucketExists &&
-        !(await store.bucketExists(bucket))
-      ) {
-        skipped.push(bucket);
+      if (!isNoSuchBucket(err)) throw err;
+      const found = mayBeAbsent && store.bucketExists ? await store.bucketExists(bucket) : null;
+      if (found === false) {
+        (live ? skipped : gone).push(bucket);
         continue;
       }
-      if (isNoSuchBucket(err)) {
-        throw new Error(
-          `bucket ${bucket} answered NoSuchBucket while its app key fence was read, but a deployed environment uses it, so it was not skipped (${err.message}). Deploy again; a young Hetzner bucket answers this way for a while.`,
-        );
-      }
-      throw err;
+      throw noSuchBucketError({
+        bucket,
+        err,
+        asked: region ?? store.region,
+        region,
+        regionFrom: target.regionFrom,
+        mayBeAbsent,
+        found,
+      });
     }
     const currentIds = current ? fencedIdsOf(current, bucket, ownerId) : [];
     if (currentIds === null) {
@@ -374,5 +502,5 @@ export async function applyHetznerFences({
   );
   if (failed.length === 1) throw failed[0].reason;
   if (failed.length > 1) throw new Error(failed.map((r) => r.reason.message).join('\n'));
-  return { written, removed, unverified, skipped };
+  return { written, removed, unverified, skipped, gone };
 }

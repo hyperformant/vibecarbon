@@ -180,13 +180,30 @@ const REGISTRY = [
       'src/lib/destroy/s3-credential-check.js', // the pre-teardown credential check
       'src/configure.js', // the GitOps TLS snapshot prefix
       'src/lib/deploy/app-storage-credential.js', // unfenced-bucket marks
-      'src/lib/deploy/hetzner-app-key-fence.js', // the fence's targets
       'src/lib/deploy/orchestrator.js', // the deploy's skeleton record
       'tests/e2e/checks/backup-evidence.ts', // the e2e backup checks
     ],
     deepTests: [
       'tests/unit/deploy/backups-bucket-choice.test.ts',
       'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts',
+    ],
+  },
+  {
+    // The Hetzner app key fence built its backups targets from the live
+    // records alone, so once the last environment in a region was destroyed,
+    // the backups bucket it kept there dropped out of the fence and a key
+    // pasted later was never denied on it. Every backups bucket that holds
+    // backups, a destroyed environment's and an older CLI's base bucket
+    // included, now comes from the one list destroy -purge and the backups
+    // bucket choice already count holders with.
+    helper: 'backupsHoldings',
+    definition: 'src/lib/backups-bucket.js',
+    consumers: [
+      'src/lib/deploy/hetzner-app-key-fence.js', // the fence's backups targets
+    ],
+    deepTests: [
+      'tests/unit/deploy/backups-bucket-choice.test.ts',
+      'tests/unit/deploy/hetzner-app-key-fence.test.ts',
     ],
   },
 ] as const;

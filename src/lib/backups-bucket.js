@@ -24,8 +24,11 @@ import { deriveProjectBucketName, deriveRegionBackupsBucketName } from './provid
  */
 
 /**
- * One environment keeping backups in one bucket.
- * @typedef {{ env: string, bucket: string, region: string | null }} BackupsHolding
+ * One environment keeping backups in one bucket. `regionRecorded` is false
+ * when the region is a stand-in (the uploads region of a record that names
+ * none); `live` is false for a destroyed environment's record.
+ * @typedef {{ env: string, bucket: string, region: string | null,
+ *   regionRecorded: boolean, live: boolean }} BackupsHolding
  */
 
 /**
@@ -81,21 +84,38 @@ export function backupsHoldings(projectConfig, { except } = {}) {
     if (env === except) continue;
     const target = backupsTargetOf(envConfig);
     if (target) {
-      out.push({ env, bucket: target.bucket, region: target.region });
+      out.push({ env, ...holdingOf(envConfig, target), live: true });
     } else if (envConfig?.deployedAt) {
       out.push({
         env,
         bucket: deriveProjectBucketName(projectConfig, 'backups'),
         region: envConfig.s3?.region ?? null,
+        regionRecorded: false,
+        live: true,
       });
     }
   }
   for (const [env, entry] of Object.entries(projectConfig?.destroyedEnvironments ?? {})) {
     if (env === except || entry?.backupsPurged) continue;
     const target = backupsTargetOf(entry);
-    if (target) out.push({ env, bucket: target.bucket, region: target.region });
+    if (target) out.push({ env, ...holdingOf(entry, target), live: false });
   }
   return out;
+}
+
+/**
+ * The bucket and region of one record's target, and whether the record itself
+ * names that region (backupsTargetOf stands the uploads region in for one
+ * that does not).
+ * @param {{ backupS3?: { region?: string } }} envConfig
+ * @param {BackupsTarget} target
+ */
+function holdingOf(envConfig, target) {
+  return {
+    bucket: target.bucket,
+    region: target.region,
+    regionRecorded: Boolean(envConfig.backupS3?.region),
+  };
 }
 
 /**
