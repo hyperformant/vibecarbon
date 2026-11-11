@@ -64,7 +64,12 @@ const baseArgs = {
   serverIp: '10.0.0.1', // primary (servers[0])
   sshKeyPath: '/tmp/key',
   // The post-reseed proof and the config writes (I2), inert by default.
-  readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
+  readStandbyState: async (ip: string) => ({
+    inRecovery: ip !== '10.0.0.1',
+    systemIdentifier: '7412345678901234567',
+    receiverStatus: ip !== '10.0.0.1' ? 'streaming' : null,
+  }),
+  verifySleep: async () => {},
   markStandbyUnproven: () => {},
   markStandbyProven: () => {},
   assertWritable: async () => 'writable',
@@ -383,6 +388,32 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
     expect(markStandbyProven).not.toHaveBeenCalled();
   });
 
+  it('a standby in recovery but not streaming (startup, catchup) is not proven', async () => {
+    for (const receiverStatus of ['startup', 'catchup']) {
+      const { markStandbyUnproven, markStandbyProven } = await run({
+        readStandbyState: async (ip: string) => ({
+          inRecovery: ip !== '10.0.0.1',
+          systemIdentifier: '7412345678901234567',
+          receiverStatus: ip !== '10.0.0.1' ? receiverStatus : null,
+        }),
+      });
+      expect(markStandbyProven).not.toHaveBeenCalled();
+      expect(markStandbyUnproven).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('a standby holding a different database than the primary is not proven', async () => {
+    const { markStandbyUnproven, markStandbyProven } = await run({
+      readStandbyState: async (ip: string) => ({
+        inRecovery: ip !== '10.0.0.1',
+        systemIdentifier: ip === '10.0.0.1' ? '1' : '2',
+        receiverStatus: ip !== '10.0.0.1' ? 'streaming' : null,
+      }),
+    });
+    expect(markStandbyProven).not.toHaveBeenCalled();
+    expect(markStandbyUnproven).toHaveBeenCalledOnce();
+  });
+
   it('a skipped reseed (failed-over pair) marks it unproven', async () => {
     const { markStandbyUnproven } = await run({
       envConfig: {
@@ -680,7 +711,11 @@ describe('runComposeRestore: a verified HA restore clears the degraded flag', ()
       },
       restoreCompose: vi.fn().mockResolvedValue(undefined),
       configureStandbyReplication: vi.fn().mockResolvedValue(true),
-      readStandbyState: async () => ({ inRecovery: false, systemIdentifier: '1' }),
+      readStandbyState: async (ip: string) => ({
+        inRecovery: ip !== '10.0.0.1',
+        systemIdentifier: '7412345678901234567',
+        receiverStatus: ip !== '10.0.0.1' ? 'startup' : null,
+      }),
     });
     warn.mockRestore();
     const env = readEnv();

@@ -50,6 +50,7 @@ import {
 } from './lib/deploy/db-workload.js';
 import {
   assertNoFailoverInFlight,
+  proveStandbyStreaming,
   readReplicaState,
   markStandbyProven as realMarkStandbyProven,
   markStandbyUnproven as realMarkStandbyUnproven,
@@ -913,6 +914,7 @@ export async function runComposeRestore({
   markStandbyProven = realMarkStandbyProven,
   markStandbyUnproven = realMarkStandbyUnproven,
   pushBaseBackup = pushBaseBackupAfterPromote,
+  verifySleep = undefined,
   readStandbyState = (ip) =>
     readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
   assertWritable = () =>
@@ -1015,13 +1017,16 @@ export async function runComposeRestore({
             stackIdentity: composeHaStackOf(primary, projectName, envName) ?? 'primary',
           }),
         });
-        // Re-seeded is proven only by a reading in recovery with an identifier:
-        // that is what the next failover's replica proof compares against.
-        const seeded = await readStandbyState(standby.ip);
-        if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
-          throw new Error('the re-seeded standby did not read back as a replica');
-        }
-        markStandbyProven({ environment: envName }, seeded.systemIdentifier);
+        // Proven only by the shared proof (the scale rejoin's): the primary's
+        // identifier matches the standby's and its walreceiver is streaming.
+        // That identifier is what the next failover's replica proof compares.
+        const sysid = await proveStandbyStreaming({
+          readState: readStandbyState,
+          primaryIp: serverIp,
+          standbyIp: standby.ip,
+          verify: (o) => verifyStreaming({ ...o, sleep: verifySleep }),
+        });
+        markStandbyProven({ environment: envName }, sysid);
         s.stop('Standby re-seeded from restored primary');
       } catch (err) {
         s.stop('Standby re-seed failed');

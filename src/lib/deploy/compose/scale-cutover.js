@@ -43,6 +43,7 @@ import { composeWriterServices } from '../../services/standby-policy.js';
 import {
   markStandbyProven,
   markStandbyUnproven,
+  proveStandbyStreaming,
   readReplicaState,
   swappedSinceLastDeploy,
 } from '../failover-guard.js';
@@ -433,20 +434,12 @@ export async function rejoinComposeStandby({
     await reseed(standby.ip, primary.ip, sshKeyPath, projectName, {
       primaryHost: wgIpOf({ stackIdentity: primaryStack }),
     });
-    const primaryState = await readState(primary.ip);
-    const sysid = primaryState?.inRecovery === false ? primaryState.systemIdentifier : null;
-    if (!sysid) throw new Error(`the primary ${primary.ip} did not read back as a primary`);
-    const proof = await verify({
-      readState: async () => {
-        const st = await readState(standby.ip);
-        return st?.inRecovery === true && st.systemIdentifier === sysid
-          ? (st.receiverStatus ?? '')
-          : '';
-      },
+    const sysid = await proveStandbyStreaming({
+      readState,
+      primaryIp: primary.ip,
+      standbyIp: standby.ip,
+      verify,
     });
-    if (!proof.streaming) {
-      throw new Error(`it is not streaming (last state: ${proof.lastState || 'none'})`);
-    }
     record({ environment }, sysid);
     return 'streaming';
   } catch (err) {
