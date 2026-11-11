@@ -76,6 +76,58 @@ function recordedFingerprint(dir) {
   return readProjectConfigFile(dir)?.stateEncryption?.fingerprint ?? null;
 }
 
+/** @param {string} expected the recorded fingerprint */
+function missingError(expected) {
+  return new StatePassphraseError(
+    'missing',
+    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again.`,
+  );
+}
+
+/**
+ * @param {string} expected the recorded fingerprint
+ * @param {string} actual the value's fingerprint
+ */
+function mismatchError(expected, actual) {
+  const source = describeCredentialSource([STATE_PASSPHRASE_KEY]);
+  const wins = source.source === 'shell' ? ', which wins over .env.local' : '';
+  return new StatePassphraseError(
+    'mismatch',
+    `Your ${STATE_PASSPHRASE_KEY} (from ${source.where}${wins}) doesn't match this project. .vibecarbon.json expects ${expected} and yours is ${actual}. Fix the value, then run this again.`,
+  );
+}
+
+/**
+ * What is wrong with this project's passphrase, without fixing anything: the
+ * StatePassphraseError ensureStatePassphrase would throw, returned instead of
+ * thrown, or null when the value matches the recorded fingerprint or nothing
+ * is recorded yet (a project the next stack-opening command sets up).
+ *
+ * Read-only: it generates nothing, records nothing and leaves process.env
+ * alone, reading `.env.local` directly the way ensureStatePassphrase's own
+ * second look does. For `destroy`, which can tear down without the
+ * passphrase and only needs to say why it is going around the state.
+ *
+ * @param {string} projectDir
+ * @returns {StatePassphraseError | null}
+ */
+export function findStatePassphraseProblem(projectDir) {
+  const dir = resolve(projectDir);
+  let value;
+  try {
+    value = resolveStatePassphrase();
+  } catch (err) {
+    if (err instanceof StatePassphraseError) return err;
+    throw err;
+  }
+  const expected = recordedFingerprint(dir);
+  if (!expected) return null;
+  const candidate = value || loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
+  if (!candidate) return missingError(expected);
+  const actual = statePassphraseFingerprint(candidate);
+  return actual === expected ? null : mismatchError(expected, actual);
+}
+
 /**
  * Check the project's passphrase against its recorded fingerprint, creating
  * both on a project that has neither. Memoized per process per project.
@@ -93,14 +145,7 @@ export async function ensureStatePassphrase(projectDir) {
 
   if (value) {
     const actual = statePassphraseFingerprint(value);
-    if (expected && expected !== actual) {
-      const source = describeCredentialSource([STATE_PASSPHRASE_KEY]);
-      const wins = source.source === 'shell' ? ', which wins over .env.local' : '';
-      throw new StatePassphraseError(
-        'mismatch',
-        `Your ${STATE_PASSPHRASE_KEY} (from ${source.where}${wins}) doesn't match this project. .vibecarbon.json expects ${expected} and yours is ${actual}. Fix the value, then run this again.`,
-      );
-    }
+    if (expected && expected !== actual) throw mismatchError(expected, actual);
     if (!expected) {
       // Case 2: an existing value (e.g. copied in from a password manager).
       updateProjectConfig((manifest) => {
@@ -121,10 +166,7 @@ export async function ensureStatePassphrase(projectDir) {
       process.env[STATE_PASSPHRASE_KEY] = onDisk;
       return ensureStatePassphrase(dir);
     }
-    throw new StatePassphraseError(
-      'missing',
-      `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again.`,
-    );
+    throw missingError(expected);
   }
 
   // Neither exists: make both, all under the config lock (the mutator is

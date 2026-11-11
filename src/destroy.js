@@ -67,6 +67,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
+import { isStatePassphraseFailure } from './lib/iac/state-error.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
@@ -82,6 +83,7 @@ import {
 import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
 import { sshKeyPathFor } from './lib/ssh.js';
+import { findStatePassphraseProblem, STATE_PASSPHRASE_KEY } from './lib/state-passphrase.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';
@@ -3193,6 +3195,89 @@ export function recordPulumiDestroyFailure({
 }
 
 /**
+ * Why this project's passphrase cannot open a stack's state, as a short
+ * clause. A StatePassphraseError (refused before Pulumi ran) names its own
+ * reason; anything else is Pulumi refusing the passphrase it was given.
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function unreadableStateReason(error) {
+  switch (/** @type {{ name?: string, reason?: string }} */ (error)?.reason) {
+    case 'missing':
+      return `${STATE_PASSPHRASE_KEY} isn't set`;
+    case 'mismatch':
+      return `your ${STATE_PASSPHRASE_KEY} doesn't match the fingerprint in .vibecarbon.json`;
+    case 'invalid':
+      return `your ${STATE_PASSPHRASE_KEY} is too weak to be this project's`;
+    default:
+      return "this project's passphrase doesn't decrypt it";
+  }
+}
+
+/**
+ * Record a k8s stack whose Pulumi state this project's passphrase cannot
+ * open (isStatePassphraseFailure), in place of recordPulumiDestroyFailure:
+ * `pulumi destroy` never ran, so "run it again" is no advice. The teardown
+ * falls to the API sweeps that follow in destroyK8sTier (every server
+ * labelled for the environment, and on a K8S_DESTROY_BACKSTOP provider the
+ * firewall, SSH key, reserved IP and network by name), and the warning says
+ * so before they run.
+ *
+ * UNVERIFIED, with `pulumiDestroyFailed` set, so the stack record and the
+ * environment entry are kept: the record is the only list of what the sweeps
+ * cannot reach. A passphrase refused before Pulumi ran (missing, mismatched,
+ * invalid) still exists somewhere, so the hint is to put it back and run
+ * destroy again; a passphrase Pulumi itself refuses points at the console.
+ *
+ * Exported for unit testing.
+ *
+ * @param {object} params
+ * @param {unknown} params.error
+ * @param {string} params.stackEnv
+ * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
+ * @param {string} params.environment - the user-facing environment name.
+ * @param {string} params.projectName
+ * @param {object} params.results - the shared destroy `results` accumulator (mutated).
+ * @param {string} params.providerName - `Provider.NAME`.
+ * @param {boolean} params.backstop - `Provider.K8S_DESTROY_BACKSTOP === true`.
+ */
+export function recordUnreadableStackState({
+  error,
+  stackEnv,
+  dirLabel,
+  environment,
+  projectName,
+  results,
+  providerName,
+  backstop,
+}) {
+  results.pulumiDestroyFailed = true;
+  const why = unreadableStateReason(error);
+  const byName = backstop
+    ? ", and the stack's firewall, network, SSH key and reserved IP by name"
+    : '';
+  p.log.warn(
+    `vibecarbon can't read the Pulumi state for ${stackEnv} (${why}), so Pulumi can't remove that stack. ` +
+      `Your servers are still removed through the ${providerName} API${byName}.`,
+  );
+  const precheck = /** @type {{ name?: string }} */ (error)?.name === 'StatePassphraseError';
+  let hint;
+  if (precheck) {
+    hint = `Put this project's ${STATE_PASSPHRASE_KEY} back in .env.local, then run \`vibecarbon destroy ${environment}\` again: Pulumi then removes whatever is left of ${stackEnv}.`;
+  } else if (backstop) {
+    hint = `This state can't be read with this project's passphrase, so no destroy retry reaches it through Pulumi. Anything the sweeps could not remove is listed in this report; delete it in the ${providerName} console.`;
+  } else {
+    hint = `This state can't be read with this project's passphrase, so no destroy retry reaches it through Pulumi. Delete the stack's firewall, network, floating IP, SSH key and placement group in the ${providerName} console; their names start with ${projectName}-${stackEnv}.`;
+  }
+  results.leaks.unverified({
+    resourceClass: 'pulumi-stack',
+    resource: `${stackEnv}${dirLabel}`,
+    reason: `its Pulumi state can't be read (${why}), so \`pulumi destroy\` did not run; its servers are removed through the ${providerName} API instead${byName}`,
+    hint,
+  });
+}
+
+/**
  * Decide what one stackEnv's `destroyK8s` (Pulumi) result means and record
  * it into `results` — either the "(all via Pulumi)" success shorthand, or a
  * loud, non-zero-exit issue (M3 Task 9f fix round 1).
@@ -4299,6 +4384,22 @@ async function destroyK8sTier({
               : `  Pulumi destroy for "${stackEnv}"${dirLabel} looks unverified — see the destroy summary's issues`,
           );
         } catch (error) {
+          // The passphrase cannot open this stack's state: Pulumi never ran a
+          // destroy, and the server sweep and backstop below are what remove
+          // it. Recorded with its own warning and a way back.
+          if (isStatePassphraseFailure(error)) {
+            recordUnreadableStackState({
+              error,
+              stackEnv,
+              dirLabel,
+              environment,
+              projectName: projectConfig.projectName,
+              results,
+              providerName: Provider.NAME,
+              backstop: Provider.K8S_DESTROY_BACKSTOP === true && !!providerToken,
+            });
+            return;
+          }
           console.log(`  Pulumi destroy failed${dirLabel}: ${error.message}`);
           p.log.warn(
             `You may need to manually clean up resources${dirLabel} in the ${Provider.NAME} console.`,
@@ -4708,6 +4809,20 @@ async function removePulumiStackStateEffect(ctx) {
       });
     }
     return;
+  }
+
+  // Removing the record decrypts nothing (`stack rm --force`, with
+  // removeStackState's `decrypts: false`), so a passphrase that cannot open
+  // the state does not stop it. Said once, so the operator knows why the
+  // destroy went around the state and that their next deploy will need it.
+  const passphraseProblem = findStatePassphraseProblem(ctx.cwd ?? process.cwd());
+  if (passphraseProblem) {
+    p.log.warn(
+      `vibecarbon can't read the Pulumi state for ${plan.stackEnvs.join(', ')} ` +
+        `(${unreadableStateReason(passphraseProblem)}). This destroy doesn't need to: your ` +
+        `servers were removed through the ${Provider.NAME} API, and the stack record is ` +
+        'removed without being read.',
+    );
   }
 
   const { removeStackState } = await import('./lib/iac/index.js');

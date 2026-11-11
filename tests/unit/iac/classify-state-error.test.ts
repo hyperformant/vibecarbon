@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
-import { classifyStateError } from '../../../src/lib/iac/state-error.js';
+import {
+  asStateUndecryptableError,
+  classifyStateError,
+  isStatePassphraseFailure,
+  StateUndecryptableError,
+} from '../../../src/lib/iac/state-error.js';
+import { StatePassphraseError } from '../../../src/lib/state-passphrase.js';
 import {
   STATE_ERROR_CORPUS,
   STATE_ERROR_NEGATIVES,
@@ -116,5 +122,104 @@ describe('classifyStateError — the properties the corpus exists to protect', (
         expect(['fail', 'retry-in-place'], `${c.id}`).toContain(got.recovery);
       }
     }
+  });
+});
+
+describe('the state passphrase class', () => {
+  const passphraseCases = STATE_ERROR_CORPUS.filter((c) => c.expect.cause === 'passphrase');
+
+  it("covers both of Pulumi's refusals: a wrong passphrase and none at all", () => {
+    expect(passphraseCases.some((c) => c.message.includes('incorrect passphrase'))).toBe(true);
+    expect(passphraseCases.some((c) => c.message.includes('passphrase must be set'))).toBe(true);
+  });
+
+  it('is never retried, even when the same output carries retryable wording', () => {
+    // A held lock or a SlowDown in the same output must not turn a key that
+    // cannot open the state into a retry: the same key gives the same answer
+    // on every attempt.
+    for (const c of passphraseCases) {
+      for (const noise of [
+        'error: the stack is currently locked by 1 lock(s). Either wait for the other process to finish or delete the lock file',
+        'error: 503 SlowDown: Please reduce your request rate',
+      ]) {
+        const got = classifyStateError({
+          message: `${c.message}\n${noise}`,
+          operation: c.operation,
+        });
+        expect(got.cause, c.id).toBe('passphrase');
+        expect(got.recovery, c.id).toBe('fail');
+      }
+    }
+  });
+});
+
+describe('isStatePassphraseFailure', () => {
+  it('recognises every passphrase corpus entry, raw or wrapped by a caller', () => {
+    for (const c of STATE_ERROR_CORPUS.filter((e) => e.expect.cause === 'passphrase')) {
+      const raw = new Error(c.message);
+      expect(isStatePassphraseFailure(raw), c.id).toBe(true);
+      // destroyStack wraps a failed destroy with `{ cause }`.
+      const wrapped = new Error('pulumi destroy for stack "e1" failed', { cause: raw });
+      expect(isStatePassphraseFailure(wrapped), `${c.id} wrapped`).toBe(true);
+    }
+  });
+
+  it('recognises the passphrase check that runs before Pulumi does', () => {
+    const err = new StatePassphraseError('missing', "This project's state passphrase isn't set.");
+    expect(isStatePassphraseFailure(err)).toBe(true);
+    expect(isStatePassphraseFailure(new StateUndecryptableError('e1'))).toBe(true);
+  });
+
+  it('is false for every other state failure and for nothing at all', () => {
+    for (const c of [...STATE_ERROR_CORPUS, ...STATE_ERROR_NEGATIVES]) {
+      if (c.expect.cause === 'passphrase') continue;
+      expect(isStatePassphraseFailure(new Error(c.message)), c.id).toBe(false);
+    }
+    expect(isStatePassphraseFailure(undefined)).toBe(false);
+    expect(isStatePassphraseFailure(null)).toBe(false);
+  });
+
+  it('survives a cause cycle', () => {
+    const a = new Error('outer') as Error & { cause?: unknown };
+    const b = new Error('inner', { cause: a });
+    a.cause = b;
+    expect(isStatePassphraseFailure(a)).toBe(false);
+  });
+});
+
+describe('StateUndecryptableError', () => {
+  it('says what happened, what it means, and what still works', () => {
+    const err = new StateUndecryptableError('prod');
+    expect(err.message).toBe(
+      "vibecarbon can't decrypt the Pulumi state for prod with this project's passphrase. If it was written with a passphrase you no longer have, that state can't be recovered. You can still remove the servers with `vibecarbon destroy prod` and deploy again.",
+    );
+    expect(err.message).not.toContain('—');
+    expect(err.stackName).toBe('prod');
+  });
+
+  it('names the environment, not the HA stack, in the destroy command', () => {
+    expect(new StateUndecryptableError('prod-primary').message).toContain(
+      'Pulumi state for prod-primary',
+    );
+    expect(new StateUndecryptableError('prod-standby').message).toContain(
+      '`vibecarbon destroy prod`',
+    );
+  });
+
+  it('asStateUndecryptableError wraps only a raw Pulumi refusal', () => {
+    const raw = new Error(
+      STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-outputs')?.message,
+    );
+    const typed = asStateUndecryptableError(raw, 'e1');
+    expect(typed).toBeInstanceOf(StateUndecryptableError);
+    expect(typed.stackName).toBe('e1');
+    expect(typed.cause).toBe(raw);
+
+    // Already typed, or not about the passphrase: handed back untouched.
+    const precheck = new StatePassphraseError('mismatch', 'mismatch');
+    expect(asStateUndecryptableError(precheck, 'e1')).toBe(precheck);
+    expect(asStateUndecryptableError(typed, 'e2')).toBe(typed);
+    const other = new Error("error: no stack named 'e1' found");
+    expect(asStateUndecryptableError(other, 'e1')).toBe(other);
   });
 });

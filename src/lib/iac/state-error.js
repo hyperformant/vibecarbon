@@ -55,6 +55,12 @@ export const STATE_CAUSE = {
   STACK_FILE_MISSING: 'stack-file-missing',
   /** The cosmetic `.pulumi/history/` write failed after a completed update. */
   HISTORY_WRITE: 'history-write',
+  /**
+   * The state's secrets could not be opened: a passphrase that does not
+   * decrypt them, or none at all. The same key gives the same answer every
+   * time, so nothing about it is retryable.
+   */
+  PASSPHRASE: 'passphrase',
   /** Not a signature we recognise. */
   UNKNOWN: 'unknown',
 };
@@ -151,6 +157,15 @@ const STACK_FILE_MISSING_PATTERN = /no stack named/i;
 // only top-level CLI errors start flush left.
 export const HISTORY_WRITE_PATTERN = /^error:\s*saving update info:[^\n]*\.pulumi\/history\//im;
 
+// Pulumi's passphrase secrets manager, in both of its refusals: a passphrase
+// that does not decrypt the state's salt, and no passphrase variable at all.
+// Matched on Pulumi's own wording, which each verb wraps in its own prefix
+// (`getting snapshot:`, `could not deserialize deployment:`, `getting stack
+// configuration: get stack secrets manager:`); the corpus holds every
+// spelling captured on CLI 3.259.0 (2026-11-11).
+const PASSPHRASE_PATTERN =
+  /failed to decrypt: incorrect passphrase|passphrase must be set with PULUMI_CONFIG_PASSPHRASE/i;
+
 /**
  * The same root cause reaching us as a panic instead of an error: pulumi's DIY
  * backend nil-dereferences on the stale checkpoint read.
@@ -216,6 +231,18 @@ export function classifyStateError({ message } = {}) {
   // gate — destroy and deploy now get the identical, maximally-conservative
   // answer. THROTTLE and LOCK_CONTENTION stay retryable everywhere:
   // backpressure and a held lock are never "already gone" answers.
+
+  // A passphrase that cannot open the state. First, so that no retryable
+  // wording elsewhere in the same output can claim it: the same key gives
+  // the same answer on every attempt. Pre-mutation: Pulumi builds the
+  // secrets manager and decrypts the snapshot before the engine runs, and
+  // the 2026-11-11 captures (outputs, export, refresh, up, preview and
+  // destroy on CLI 3.259.0) left the checkpoint byte-identical. The
+  // post-update `stack output` read cannot reach it either: it runs with the
+  // passphrase the update itself just decrypted with.
+  if (PASSPHRASE_PATTERN.test(msg)) {
+    return decide(STATE_CAUSE.PASSPHRASE, STATE_PHASE.PRE_MUTATION, STATE_RECOVERY.FAIL);
+  }
 
   // Post-mutation and cosmetic. Checked first because the message also carries
   // an AccessDenied that later rules would otherwise read as a storage fault.
@@ -301,4 +328,76 @@ export function classifyStateError({ message } = {}) {
   }
 
   return decide(STATE_CAUSE.UNKNOWN, STATE_PHASE.UNKNOWN, STATE_RECOVERY.FAIL);
+}
+
+/**
+ * A stack whose Pulumi state this project's passphrase cannot decrypt. The
+ * message is the whole story for the operator: what failed, what it means,
+ * and that `destroy` still works without the state.
+ *
+ * Carries the raw Pulumi failure as `cause`. Pulumi's own text advises
+ * setting PULUMI_CONFIG_PASSPHRASE, which vibecarbon overrides with the
+ * project's value, so it belongs in the log, not in front of the operator.
+ */
+export class StateUndecryptableError extends Error {
+  /**
+   * @param {string} stackName
+   * @param {{ cause?: unknown }} [options]
+   */
+  constructor(stackName, options) {
+    super(
+      `vibecarbon can't decrypt the Pulumi state for ${stackName} with this project's passphrase. ` +
+        "If it was written with a passphrase you no longer have, that state can't be recovered. " +
+        `You can still remove the servers with \`vibecarbon destroy ${environmentOfStack(stackName)}\` and deploy again.`,
+      options,
+    );
+    this.name = 'StateUndecryptableError';
+    this.stackName = stackName;
+  }
+}
+
+/**
+ * The environment a stack belongs to: HA tiers run `<env>-primary` and
+ * `<env>-standby` (tier-registry.js pulumiStackEnvs), and `destroy` takes the
+ * environment.
+ * @param {string} stackName
+ */
+function environmentOfStack(stackName) {
+  return String(stackName).replace(/-(?:primary|standby)$/, '');
+}
+
+/**
+ * Is this failure about the state passphrase? True for a raw Pulumi refusal
+ * (classified PASSPHRASE) anywhere in the `cause` chain, for this module's
+ * StateUndecryptableError, and for state-passphrase.js's StatePassphraseError
+ * (a missing, mismatched or invalid value, refused before Pulumi runs).
+ * Matched by name rather than instanceof so this module keeps no imports.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isStatePassphraseFailure(err) {
+  const seen = new Set();
+  for (let e = err; e != null && typeof e === 'object' && !seen.has(e); e = e.cause) {
+    seen.add(e);
+    if (e.name === 'StatePassphraseError' || e.name === 'StateUndecryptableError') return true;
+    if (classifyStateError({ message: e.message }).cause === STATE_CAUSE.PASSPHRASE) return true;
+  }
+  return false;
+}
+
+/**
+ * The error to surface for a failure on `stackName`: a StateUndecryptableError
+ * when it is a raw Pulumi passphrase refusal, else the failure itself (an
+ * already-typed passphrase error included).
+ *
+ * @param {unknown} err
+ * @param {string} stackName
+ * @returns {unknown}
+ */
+export function asStateUndecryptableError(err, stackName) {
+  const name = /** @type {{ name?: string }} */ (err)?.name;
+  if (name === 'StatePassphraseError' || name === 'StateUndecryptableError') return err;
+  if (!isStatePassphraseFailure(err)) return err;
+  return new StateUndecryptableError(stackName, { cause: err });
 }

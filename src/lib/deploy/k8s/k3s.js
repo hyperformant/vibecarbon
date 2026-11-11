@@ -4977,13 +4977,19 @@ export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegi
  *
  * Returns the stack's stored `k3sToken`, or undefined when the stack is
  * fresh/unreadable — the program then mints one exactly as before (cold
- * deploy path). Errors never propagate: an unreachable backend degrades to
- * cold behavior on a stack that, being unreachable, upStack will fail on
- * anyway with its own clearer error. So undefined does NOT mean the cluster
- * is new: a live stack whose read fails or whose outputs lack the token gets
- * a minted one too. See the call-site comment in deployK3s's k3s-infra block
- * for why replay is load-bearing (a minted token on a live stack leaves new
- * nodes unable to join).
+ * deploy path). Errors degrade the same way: an unreachable backend falls
+ * back to cold behavior on a stack that, being unreachable, upStack will fail
+ * on anyway with its own clearer error. So undefined does NOT mean the
+ * cluster is new: a live stack whose read fails or whose outputs lack the
+ * token gets a minted one too. See the call-site comment in deployK3s's
+ * k3s-infra block for why replay is load-bearing (a minted token on a live
+ * stack leaves new nodes unable to join).
+ *
+ * The one error that propagates is a passphrase failure:
+ * classifyK3sTokenProbe rethrows it. Unlike an unreachable backend, the up
+ * that follows may read this state after all (the one-time legacy migration
+ * re-encrypts it on first open), so a token minted here would reach a live
+ * cluster.
  *
  * @param {any} Provider  provider class (getK8sProgram static)
  * @param {Record<string, unknown>} programConfig  same config the real program uses
@@ -5006,6 +5012,7 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
     });
     probe = classifyK3sTokenProbe({ outputs });
   } catch (err) {
+    // Rethrows a passphrase failure instead of classifying it (see above).
     probe = classifyK3sTokenProbe({ error: err instanceof Error ? err : new Error(String(err)) });
   }
   if (probe.status !== 'recovered') {

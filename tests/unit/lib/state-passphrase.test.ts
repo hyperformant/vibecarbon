@@ -21,6 +21,7 @@ import { bootstrapOperatorEnv } from '../../../src/lib/project.js';
 import {
   __resetStatePassphraseForTests,
   ensureStatePassphrase,
+  findStatePassphraseProblem,
   generateStatePassphrase,
   resolveStatePassphrase,
   STATE_PASSPHRASE_KEY,
@@ -238,6 +239,72 @@ console.log('RESULT ' + v);
     it('a blank value counts as not set', () => {
       process.env[KEY] = '';
       expect(resolveStatePassphrase()).toBeNull();
+    });
+  });
+
+  // destroy asks this instead of ensureStatePassphrase: it can tear down
+  // without the passphrase, so it only needs to say what is wrong, and it
+  // must never generate one or record a fingerprint on the way.
+  describe('findStatePassphraseProblem: the same verdict, read-only', () => {
+    const files = () => ({
+      manifest: existsSync(join(dir, '.vibecarbon.json'))
+        ? readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')
+        : null,
+      envLocal: existsSync(join(dir, '.env.local'))
+        ? readFileSync(join(dir, '.env.local'), 'utf-8')
+        : null,
+    });
+
+    it('null for a fresh project, and it makes nothing', () => {
+      expect(findStatePassphraseProblem(dir)).toBeNull();
+      expect(files()).toEqual({ manifest: null, envLocal: null });
+      expect(process.env[KEY]).toBeUndefined();
+    });
+
+    it('null for a value without a fingerprint, and it records nothing', () => {
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}');
+      process.env[KEY] = generateStatePassphrase();
+      expect(findStatePassphraseProblem(dir)).toBeNull();
+      expect(manifest()).toEqual({});
+    });
+
+    it('null when the value matches, from the shell or only from .env.local', () => {
+      const v = generateStatePassphrase();
+      writeManifest(statePassphraseFingerprint(v));
+      process.env[KEY] = v;
+      expect(findStatePassphraseProblem(dir)).toBeNull();
+      delete process.env[KEY];
+      writeFileSync(join(dir, '.env.local'), `${KEY}=${v}\n`);
+      expect(findStatePassphraseProblem(dir)).toBeNull();
+      // Read, not loaded into the environment.
+      expect(process.env[KEY]).toBeUndefined();
+    });
+
+    it.each([
+      ['missing', () => writeManifest('sha256:abcdabcdabcdabcd')],
+      [
+        'mismatch',
+        () => {
+          writeManifest('sha256:0000000000000000');
+          process.env[KEY] = generateStatePassphrase();
+        },
+      ],
+      [
+        'invalid',
+        () => {
+          writeManifest('sha256:0000000000000000');
+          process.env[KEY] = 'short-but-urlsafe';
+        },
+      ],
+    ])('%s: the error ensureStatePassphrase throws, returned not thrown', async (reason, setup) => {
+      setup();
+      const before = files();
+      const found = findStatePassphraseProblem(dir);
+      expect(files()).toEqual(before);
+      const thrown = await ensureStatePassphrase(dir).catch((e) => e);
+      expect(found).toBeInstanceOf(StatePassphraseError);
+      expect(found?.reason).toBe(reason);
+      expect(found?.message).toBe(thrown.message);
     });
   });
 });

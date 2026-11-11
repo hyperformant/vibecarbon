@@ -35,10 +35,12 @@ import { dropStackResources } from './retired-resources.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
 import { runPastStaleLock, StackHeldError } from './stack-lock.js';
 import {
+  asStateUndecryptableError,
   classifyStateError,
   failingPulumiCommandVerb,
   HISTORY_WRITE_PATTERN,
   isHistoryWriteOnlyFailure,
+  isStatePassphraseFailure,
 } from './state-error.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
 
@@ -981,6 +983,10 @@ export async function destroyStack(stackName, program, options = {}) {
     );
   } catch (err) {
     if (err instanceof StackHeldError) throw err;
+    // A passphrase that cannot open the state refuses every later step the
+    // same way (exportStack, destroy, the read-back of what is left), so stop
+    // here with the error that says what still works. The stack record stays.
+    if (isStatePassphraseFailure(err)) throw asStateUndecryptableError(err, stackName);
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
   // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
@@ -1016,6 +1022,7 @@ export async function destroyStack(stackName, program, options = {}) {
     );
   } catch (err) {
     if (err instanceof StackHeldError) throw err;
+    if (isStatePassphraseFailure(err)) throw asStateUndecryptableError(err, stackName);
     throw await describeDestroyFailure(stack, stackName, err);
   }
 
@@ -1278,7 +1285,12 @@ export async function getStackOutputs(stackName, program, options = {}) {
   // cluster", which is how failover minted a new k3sToken and planned to
   // re-create a live standby (2026-08-06 RCA).
   const stack = await getOrCreateStack(stackName, program, { ...options, requireExisting: true });
-  const raw = await stack.outputs();
+  let raw;
+  try {
+    raw = await stack.outputs();
+  } catch (err) {
+    throw asStateUndecryptableError(err, stackName);
+  }
   const outputs = {};
   for (const [key, { value }] of Object.entries(raw)) {
     outputs[key] = value;
@@ -1304,13 +1316,22 @@ export async function getStackOutputs(stackName, program, options = {}) {
  *   - `errored`:   the probe call itself threw — backend unreachable,
  *                  expired creds, etc. Caller should surface loudly.
  *
- * Pure function; the Pulumi state read happens upstream.
+ * A passphrase failure (isStatePassphraseFailure) is none of the three: it is
+ * rethrown. A state this project's passphrase cannot read still holds the
+ * cluster's token, so treating it as "no token" would have the caller mint
+ * one, and a later call in the same run that CAN read the state (the
+ * one-time legacy migration re-encrypts it on first open) would carry that
+ * token onto a live cluster whose new nodes then cannot join.
+ *
+ * No I/O; the Pulumi state read happens upstream.
  *
  * @param {{ outputs?: Record<string, unknown> | null, error?: Error | null }} probe
  * @returns {{ status: 'recovered' | 'empty' | 'errored', priorK3sToken?: string, reason: string }}
+ * @throws the probe's own error when it is a passphrase failure
  */
 export function classifyK3sTokenProbe({ outputs, error } = {}) {
   if (error) {
+    if (isStatePassphraseFailure(error)) throw error;
     // The probe reads Pulumi state, so its failures carry the same
     // `code: N\nstdout:…` envelope — first-line-only would report `code: -2`
     // as the reason a k3s-token recovery was refused.

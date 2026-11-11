@@ -14,6 +14,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const getStackOutputs = vi.fn();
+const { StateUndecryptableError } = await import('../../../src/lib/iac/state-error.js');
+const { StatePassphraseError } = await import('../../../src/lib/state-passphrase.js');
 
 vi.mock('../../../src/lib/iac/index.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../src/lib/iac/index.js')>();
@@ -67,6 +69,39 @@ describe('resolveStackK3sToken', () => {
     const token = await resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log });
     expect(token).toBeUndefined();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('errored'));
+  });
+
+  // A state the project's passphrase cannot read still holds the cluster's
+  // token. Minting one here would put it into the program's user data; if
+  // the up that follows can read the state (the one-time legacy migration
+  // re-encrypts it on first open), the minted token reaches a live cluster
+  // and its new nodes cannot join. So a passphrase failure propagates.
+  describe('never mints a token when the passphrase cannot open the state', () => {
+    const passphraseFailures: Array<[string, () => Error]> = [
+      [
+        'Pulumi refuses the passphrase (raw)',
+        () =>
+          new Error(
+            'code: -2\n stdout: \n stderr: Command failed with exit code 1: pulumi stack output --json --show-secrets --stack e4-primary --non-interactive\nerror: failed to decrypt: incorrect passphrase, please set PULUMI_CONFIG_PASSPHRASE to the correct passphrase or set PULUMI_CONFIG_PASSPHRASE_FILE to a file containing the passphrase\n',
+          ),
+      ],
+      ['an undecryptable stack (typed)', () => new StateUndecryptableError('e4-primary')],
+      [
+        'the passphrase is missing before Pulumi runs',
+        () => new StatePassphraseError('missing', "This project's state passphrase isn't set."),
+      ],
+    ];
+
+    it.each(passphraseFailures)('%s: the probe error propagates', async (_label, make) => {
+      const failure = make();
+      getStackOutputs.mockRejectedValueOnce(failure);
+      const log = vi.fn();
+      const resolveStackK3sToken = await load();
+      await expect(
+        resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log }),
+      ).rejects.toBe(failure);
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+    });
   });
 
   // M3 Task 9a (DO k8s 401 RCA): buildEnv now throws when a providerToken is

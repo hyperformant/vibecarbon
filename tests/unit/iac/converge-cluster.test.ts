@@ -445,3 +445,28 @@ describe('scale and failover converge through this seam', () => {
     expect(src).not.toMatch(/\bupStack\(|\.preview\(|\.up\(\{/);
   });
 });
+
+describe('convergeClusterInfra — a state the passphrase cannot read', () => {
+  // The real probe classifier, not the mock: it is the seam that decides.
+  // A passphrase failure must stop the converge before the real program is
+  // built, because building it without a recovered token mints a fresh one
+  // into every new node's user data.
+  it('stops before the real program: no fresh k3s token, no preview, no up', async () => {
+    const real = await vi.importActual<typeof import('../../../src/lib/iac/index.js')>(
+      '../../../src/lib/iac/index.js',
+    );
+    const { StateUndecryptableError } = await import('../../../src/lib/iac/state-error.js');
+    classifyK3sTokenProbeMock.mockImplementation(real.classifyK3sTokenProbe);
+    const failure = new StateUndecryptableError('unit-cluster-xyz');
+    getStackOutputsMock.mockRejectedValue(failure);
+    const { Provider, programCalls } = makeProvider();
+
+    await expect(convergeClusterInfra({ ...baseArgs(), Provider })).rejects.toBe(failure);
+
+    // [0] is the probe program; a second call would be the real program,
+    // built with a minted token.
+    expect(programCalls).toHaveLength(1);
+    expect(getOrCreateStackMock).not.toHaveBeenCalled();
+    expect(upStackMock).not.toHaveBeenCalled();
+  });
+});

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { classifyK3sTokenProbe } from '../../../src/lib/iac/index.js';
+import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { StatePassphraseError } from '../../../src/lib/state-passphrase.js';
+import { STATE_ERROR_CORPUS } from './fixtures/state-error-corpus.js';
 
 // classifyK3sTokenProbe is the seam that decides what `vibecarbon scale`
 // (k8s mode) does after probing the prior stack outputs for a recoverable
@@ -91,5 +94,45 @@ describe('classifyK3sTokenProbe', () => {
     });
     expect(probe.status).toBe('errored');
     expect(probe.priorK3sToken).toBeUndefined();
+  });
+
+  // A state this project's passphrase cannot read still holds the cluster's
+  // token: "errored" would let the caller mint a fresh one, and a later call
+  // in the same run that CAN read the state (the one-time legacy migration
+  // re-encrypts it on first open) would carry that token onto a live cluster
+  // whose nodes then cannot join. The probe rethrows instead.
+  describe('a passphrase failure is rethrown, never classified', () => {
+    const passphraseMessages = STATE_ERROR_CORPUS.filter(
+      (c) => c.expect.cause === 'passphrase',
+    ).map((c) => c.message);
+
+    it('rethrows every raw Pulumi passphrase refusal from the corpus, as the same object', () => {
+      expect(passphraseMessages.length).toBeGreaterThanOrEqual(2);
+      for (const message of passphraseMessages) {
+        const error = new Error(message);
+        let thrown: unknown;
+        try {
+          classifyK3sTokenProbe({ error });
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown, message).toBe(error);
+      }
+    });
+
+    it('rethrows the typed errors: the pre-Pulumi check and an undecryptable stack', () => {
+      const missing = new StatePassphraseError(
+        'missing',
+        "This project's state passphrase isn't set.",
+      );
+      expect(() => classifyK3sTokenProbe({ error: missing })).toThrow(missing);
+      const undecryptable = new StateUndecryptableError('e4-primary');
+      expect(() => classifyK3sTokenProbe({ error: undecryptable })).toThrow(undecryptable);
+    });
+
+    it('rethrows even when outputs came back alongside the error', () => {
+      const error = new StateUndecryptableError('e4-primary');
+      expect(() => classifyK3sTokenProbe({ outputs: { k3sToken: 'abc' }, error })).toThrow(error);
+    });
   });
 });

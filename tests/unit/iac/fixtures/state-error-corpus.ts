@@ -38,6 +38,7 @@ export type StateCause =
   | 'checkpoint-stale'
   | 'stack-file-missing'
   | 'history-write'
+  | 'passphrase'
   | 'unknown';
 
 export interface StateErrorCase {
@@ -59,6 +60,28 @@ export interface StateErrorCase {
 /** execa builds `[shortMessage, stderr, stdout].join('\n')`. */
 const envelope = (verb: string, args: string, body: string) =>
   `Command failed with exit code 1: pulumi ${verb} ${args}\n${body}`;
+
+/**
+ * The Automation API's CommandError, as its `message` reaches us: execa's
+ * text (argv line, then stderr) appears twice, once as stderr and once as
+ * the wrapped error. Captured verbatim from @pulumi/pulumi 3.274.1 driving
+ * CLI 3.259.0 (2026-11-11).
+ */
+const commandError = (argv: string, body: string) => {
+  const execa = `Command failed with exit code 1: pulumi ${argv}\n${body}`;
+  return `code: -2\n stdout: \n stderr: ${execa}\n err?: Error: ${execa}\n`;
+};
+
+/**
+ * Pulumi's passphrase secrets manager, refusing a passphrase that does not
+ * decrypt the state. Every verb wraps it with its own prefix.
+ */
+const INCORRECT_PASSPHRASE =
+  'failed to decrypt: incorrect passphrase, please set PULUMI_CONFIG_PASSPHRASE to the correct passphrase or set PULUMI_CONFIG_PASSPHRASE_FILE to a file containing the passphrase';
+
+/** The same secrets manager when neither variable reaches the CLI at all. */
+const NO_PASSPHRASE =
+  'passphrase must be set with PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE environment variables';
 
 export const STATE_ERROR_CORPUS: StateErrorCase[] = [
   {
@@ -201,6 +224,96 @@ export const STATE_ERROR_CORPUS: StateErrorCase[] = [
     message:
       'error: could not list bucket: blob (code=Unknown): AccessDenied: status code: 403, request id: tx0003-hel1-prod1-ceph3',
     expect: { cause: 'bucket-auth-lag', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  // The state passphrase, 2026-11-11 (CLI 3.259.0, SDK 3.274.1, file://
+  // backend): a stack encrypted under one passphrase, opened with another
+  // (E1e-h in the state-passphrase plan) or with none. Every one failed
+  // before any change and left the checkpoint byte-identical, so each is
+  // pre-mutation, and none may be retried: the same key gives the same
+  // answer every time.
+  {
+    id: 'passphrase-incorrect-on-outputs',
+    incident: '2026-11-11 — E1e, `stack output` under the wrong passphrase, CLI 3.259.0',
+    operation: 'outputs',
+    message: commandError(
+      'stack output --json --show-secrets --stack exp1 --non-interactive',
+      `error: ${INCORRECT_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    id: 'passphrase-incorrect-on-export',
+    incident: '2026-11-11 — E1f, `stack export` under the wrong passphrase, CLI 3.259.0',
+    operation: 'export',
+    message: commandError(
+      'stack export --show-secrets --stack exp1 --non-interactive',
+      `error: could not deserialize deployment: ${INCORRECT_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    id: 'passphrase-incorrect-on-refresh',
+    incident: '2026-11-11 — E1g, `refresh` under the wrong passphrase, CLI 3.259.0',
+    operation: 'pre-up refresh',
+    message: commandError(
+      'refresh --skip-preview --yes --color never --client=127.0.0.1:34075 --exec-kind auto.inline --stack exp1 --non-interactive',
+      `error: getting snapshot: ${INCORRECT_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    id: 'passphrase-incorrect-on-up',
+    incident: '2026-11-11 — E1g, `up` under the wrong passphrase, CLI 3.259.0',
+    operation: 'up',
+    message: commandError(
+      'up --yes --skip-preview --color never --client=127.0.0.1:36345 --exec-kind auto.inline --stack exp1 --non-interactive',
+      `error: ${INCORRECT_PASSPHRASE}\nUpdating (exp1):`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    id: 'passphrase-incorrect-on-destroy',
+    incident: '2026-11-11 — `destroy` under the wrong passphrase, CLI 3.259.0',
+    operation: 'destroy',
+    message: commandError(
+      'destroy --yes --skip-preview --color never --client=127.0.0.1:39581 --exec-kind auto.inline --stack exp1 --non-interactive',
+      `error: ${INCORRECT_PASSPHRASE}\nDestroying (exp1):`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    // PLAN.md recorded E1h's body with Pulumi's fixed suffix elided ("...")
+    // and without its argv; both are filled in from the capture above, same
+    // CLI, same day. The `getting stack configuration` prefix is the shape a
+    // workspace that already holds the stack's settings produces.
+    id: 'passphrase-incorrect-on-destroy-stack-config',
+    incident: '2026-11-11 — E1h, `destroy` under the wrong passphrase, CLI 3.259.0',
+    operation: 'destroy',
+    message: commandError(
+      'destroy --yes --skip-preview --color never --client=127.0.0.1:39581 --exec-kind auto.inline --stack exp1 --non-interactive',
+      `error: getting stack configuration: get stack secrets manager: ${INCORRECT_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    id: 'passphrase-unset-on-outputs',
+    incident: '2026-11-11 — `stack output` with no passphrase variable at all, CLI 3.259.0',
+    operation: 'outputs',
+    message: commandError(
+      'stack output --json --show-secrets --stack exp1 --non-interactive',
+      `error: constructing secrets manager of type "passphrase": constructing secrets manager: ${NO_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    id: 'passphrase-unset-on-destroy',
+    incident: '2026-11-11 — `destroy` with no passphrase variable at all, CLI 3.259.0',
+    operation: 'destroy',
+    message: commandError(
+      'destroy --yes --skip-preview --color never --client=127.0.0.1:33573 --exec-kind auto.inline --stack exp1 --non-interactive',
+      `error: getting stack configuration: get stack secrets manager: constructing secrets manager of type "passphrase": constructing secrets manager: ${NO_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
   },
 ];
 
