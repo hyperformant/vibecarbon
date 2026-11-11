@@ -149,7 +149,7 @@ describe('github-environments', () => {
       ]);
       expect(runCommandAsyncMock.mock.calls[0]).toEqual([
         ['gh', 'variable', 'list', '--env', 'prod-primary', '--json', 'name', '-q', '.[].name'],
-        { silent: true, timeout: 5000 },
+        { cleanEnv: true, silent: true, timeout: 5000 },
       ]);
     });
 

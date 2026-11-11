@@ -17,7 +17,11 @@ import { buildGitAddArgv } from '../project.js';
  */
 export function checkGitHubAuth() {
   try {
-    const result = runCommand('gh auth status', { silent: true, ignoreError: true });
+    const result = runCommand('gh auth status', {
+      cleanEnv: true,
+      silent: true,
+      ignoreError: true,
+    });
     return result !== null && result !== false;
   } catch {
     return false;
@@ -30,7 +34,11 @@ export function checkGitHubAuth() {
  */
 export function getGitHubUsername() {
   try {
-    const result = runCommand('gh api user -q .login', { silent: true, ignoreError: true });
+    const result = runCommand('gh api user -q .login', {
+      cleanEnv: true,
+      silent: true,
+      ignoreError: true,
+    });
     return result?.trim() || null;
   } catch {
     return null;
@@ -44,6 +52,7 @@ export function getGitHubUsername() {
 export function checkExistingRepo() {
   try {
     const result = runCommand('gh repo view --json nameWithOwner -q .nameWithOwner', {
+      cleanEnv: true,
       silent: true,
       ignoreError: true,
     });
@@ -107,13 +116,17 @@ export async function createGitHubRepository(projectName, options = {}) {
   try {
     // Create repo with source and remote in one command
     runCommand(['gh', 'repo', 'create', projectName, visibility, '--source=.', '--remote=origin'], {
+      cleanEnv: true,
       silent: true,
       timeout: 60000,
     });
     s.stop('GitHub repository created');
 
     // Get the repo URL
-    const repoUrl = runCommand('gh repo view --json url -q .url', { silent: true })?.trim();
+    const repoUrl = runCommand('gh repo view --json url -q .url', {
+      cleanEnv: true,
+      silent: true,
+    })?.trim();
     return { success: true, url: repoUrl, name: projectName };
   } catch (error) {
     s.stop('Failed to create GitHub repository');
@@ -187,6 +200,7 @@ export async function monitorDeployment(_repoName, timeout = 600000) {
   while (Date.now() - startTime < timeout) {
     try {
       const result = runCommand('gh run list --limit 1 --json status,conclusion,name,url', {
+        cleanEnv: true,
         silent: true,
         ignoreError: true,
       });
@@ -322,11 +336,13 @@ export async function setupGitHubEnvironment(_projectName, envName, secrets) {
 
   try {
     const repoInfo = runCommand('gh repo view --json nameWithOwner -q .nameWithOwner', {
+      cleanEnv: true,
       silent: true,
     }).trim();
 
     // Create environment
     runCommand(['gh', 'api', `repos/${repoInfo}/environments/${envName}`, '-X', 'PUT'], {
+      cleanEnv: true,
       silent: true,
       ignoreError: true,
     });
@@ -335,6 +351,7 @@ export async function setupGitHubEnvironment(_projectName, envName, secrets) {
     for (const [key, value] of Object.entries(secrets)) {
       if (value && typeof value === 'string' && value.length > 0) {
         runCommand(['gh', 'secret', 'set', key, '--env', envName, '--body', value], {
+          cleanEnv: true,
           silent: true,
           ignoreError: true,
         });

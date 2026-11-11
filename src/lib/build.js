@@ -17,8 +17,8 @@ import { runCommand } from './command.js';
  */
 export async function getGHCRCredentials() {
   try {
-    const token = runCommand('gh auth token', { silent: true })?.trim();
-    const username = runCommand('gh api user -q .login', { silent: true })?.trim();
+    const token = runCommand('gh auth token', { cleanEnv: true, silent: true })?.trim();
+    const username = runCommand('gh api user -q .login', { cleanEnv: true, silent: true })?.trim();
 
     if (!token || !username) {
       throw new Error('Could not get GitHub credentials');

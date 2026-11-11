@@ -15,6 +15,11 @@
  * The walk finds invocations by CALL SHAPE (a balanced-paren scan over every
  * .js/.ts file), not by a hand list, so a new call site is covered the moment it is
  * written:
+ *   - gh counts too: it resolves the repo by running git internally (`gh repo
+ *     view`, `gh run list`, `gh secret set`, `gh repo create --source=.`), so
+ *     an inherited GIT_DIR makes it answer about, or push to, the host repo.
+ *     Every gh call is scrubbed, including API-only ones: it is free, and a
+ *     list of "which gh calls touch the local repo" would drift.
  *   - a spawner (runCommand, runCommandAsync, execFileSync, execSync, spawn,
  *     spawnSync, execFile, exec, execa...) whose first argument is the string
  *     'git', a string/template starting with "git ", an array starting with
@@ -112,8 +117,8 @@ function balancedCall(src: string, open: number): string {
 function isGitInvocation(callText: string): boolean {
   const args = callText.slice(1).trimStart();
   return (
-    /^(['"`])git(\s|\1)/.test(args) || // 'git' / 'git init' / `git ${x}`
-    /^\[\s*['"]git['"]/.test(args) || // ['git', ...]
+    /^(['"`])(?:git|gh)(\s|\1)/.test(args) || // 'git' / 'git init' / `git ${x}` / 'gh repo view'
+    /^\[\s*['"](?:git|gh)['"]/.test(args) || // ['git', ...] / ['gh', ...]
     /^buildGitAddArgv\(/.test(args)
   );
 }
@@ -138,8 +143,12 @@ function scrubs(callText: string, fileSrc: string): boolean {
 
 /** tests/: only calls with a cwd that is not this checkout are temp-repo work. */
 function targetsTempRepo(callText: string): boolean {
-  const m = callText.match(/\bcwd:\s*([^,}\n]+)/);
-  return !!m && !HOST_REPO_CWD.has(m[1].trim());
+  // `-C <dir>` points git at another directory whatever the cwd is.
+  if (/['"`]-C['"`]/.test(callText)) return true;
+  const m = callText.match(/\bcwd(?::\s*([^,}\n]+)|\s*(?=[,}]))/);
+  if (!m) return false;
+  // Shorthand `{ cwd, ... }` carries a variable named cwd: a temp dir, not a host-repo constant.
+  return !HOST_REPO_CWD.has((m[1] ?? 'cwd').trim());
 }
 
 interface Site {
@@ -236,7 +245,23 @@ describe('every git invocation scrubs the inherited git context', () => {
     expect(check('runCommand(`git commit -m ${msg}`, { cleanEnv: false })')).toEqual([false]);
     expect(check('runCommand(buildGitAddArgv(), { silent: true })')).toEqual([false]);
     expect(check("spawnSync('git', ['ls-files'], { cwd: dir })")).toEqual([false]);
-    expect(check("runCommand('gh repo view')")).toEqual([]);
+    expect(check("runCommand('gh repo view')")).toEqual([false]);
+    expect(check("runCommand(['gh', 'repo', 'view'], { cleanEnv: true })")).toEqual([true]);
     expect(check("// runCommand('git init')\nfoo()")).toEqual([]);
+  });
+
+  it('in tests/, a temp repo is recognised by cwd (any spelling) or -C, a host-repo constant is not', () => {
+    const check = (code: string) => collectFromSource('t.ts', code, true).map((x) => x.scrubbed);
+    expect(check("spawnSync('git', ['add'], { cwd: dir })")).toEqual([false]);
+    expect(check("spawnSync('git', ['add'], { cwd, stdio: 'pipe' })")).toEqual([false]);
+    expect(check("spawnSync('git', ['add'], { stdio: 'pipe', cwd })")).toEqual([false]);
+    expect(check("execFileSync('git', ['-C', dir, 'add', '-A'])")).toEqual([false]);
+    expect(check("execFileSync('git', ['-C', dir, 'add'], { env: gitScrubbedEnv() })")).toEqual([
+      true,
+    ]);
+    expect(check("spawnSync('git', ['add'], { cwd, env: gitScrubbedEnv() })")).toEqual([true]);
+    // a read-only probe of this checkout is out of scope
+    expect(check("spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT })")).toEqual([]);
+    expect(check("spawnSync('git', ['rev-parse', 'HEAD'])")).toEqual([]);
   });
 });

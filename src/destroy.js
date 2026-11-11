@@ -1183,13 +1183,11 @@ function deleteGitHubEnvironment(envName) {
   try {
     const repoInfo = runCommand(
       ['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-      {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
+      { cleanEnv: true, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
     ).trim();
 
     runCommand(['gh', 'api', `repos/${repoInfo}/environments/${envName}`, '-X', 'DELETE'], {
+      cleanEnv: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

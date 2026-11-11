@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
-import { checkDependency, runCommand, runCommandAsync } from './command.js';
+import { checkDependency, gitSafeEnv, runCommand, runCommandAsync } from './command.js';
 import { loadProjectConfig } from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -160,6 +160,7 @@ export function getImageTag(cwd = process.cwd()) {
 export function getGitHubRepo(cwd = process.cwd()) {
   try {
     const out = runCommand(['gh', 'repo', 'view', '--json', 'owner,name'], {
+      cleanEnv: true,
       silent: true,
       returnOutput: true,
       cwd,
@@ -178,6 +179,7 @@ export function getGitHubRepo(cwd = process.cwd()) {
 function getGHCRToken() {
   try {
     const token = runCommand(['gh', 'auth', 'token'], {
+      cleanEnv: true,
       silent: true,
       returnOutput: true,
     })
@@ -208,7 +210,7 @@ export async function ghcrTagExists(owner, repo, tag) {
         '--jq',
         `.[].metadata.container.tags[] | select(. == "${tag}")`,
       ],
-      { silent: true, returnOutput: true },
+      { cleanEnv: true, silent: true, returnOutput: true },
     );
     return Boolean(out?.toString().trim());
   } catch (err) {
@@ -493,7 +495,13 @@ export function updateImageReferences(projectName, githubOwner, cwd = process.cw
  * gh is not installed/authenticated or the API call fails.
  */
 export function detectGitHubUsername() {
-  return runCommand('gh api user -q .login', { silent: true, ignoreError: true })?.trim() || null;
+  return (
+    runCommand('gh api user -q .login', {
+      cleanEnv: true,
+      silent: true,
+      ignoreError: true,
+    })?.trim() || null
+  );
 }
 
 /**
@@ -548,7 +556,7 @@ export async function ensureCIImageReady(options = {}) {
   if (!_ghAuthChecked) {
     // `gh auth status` prints to stderr even on success; return code is the signal.
     try {
-      runCommand(['gh', 'auth', 'status'], { silent: true });
+      runCommand(['gh', 'auth', 'status'], { cleanEnv: true, silent: true });
       _ghAuthChecked = true;
     } catch {
       throw new Error('`gh` is not authenticated. Run `gh auth login` and re-run deploy.');
@@ -621,6 +629,7 @@ export async function ensureCIImageReady(options = {}) {
     for (let attempt = 0; attempt < 9; attempt++) {
       try {
         execFileSync('gh', ['workflow', 'run', 'vibecarbon-build.yml', '--ref', 'main'], {
+          env: gitSafeEnv(),
           cwd,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
@@ -649,6 +658,7 @@ export async function ensureCIImageReady(options = {}) {
       const safeGhJson = (argv) => {
         try {
           const out = execFileSync('gh', argv, {
+            env: gitSafeEnv(),
             cwd,
             encoding: 'utf-8',
             stdio: ['ignore', 'pipe', 'ignore'],
@@ -698,7 +708,7 @@ export async function ensureCIImageReady(options = {}) {
               const out = execFileSync(
                 'gh',
                 ['run', 'view', String(run.databaseId), '--log-failed'],
-                { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
+                { env: gitSafeEnv(), cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
               );
               return { ok: true, value: out };
             } catch (err) {
