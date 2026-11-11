@@ -7,7 +7,9 @@
  * derives a backups name. That only holds while:
  *   (a) nothing under src/ or tests/e2e/ but backups-bucket.js reads the
  *       record field itself (`.backupS3`, `['backupS3']`, or a destructuring
- *       `const { backupS3 } = envConfig`): restore, backup, status, destroy,
+ *       `const { backupS3 } = envConfig`, at any depth of an object or array
+ *       pattern, assigned or bound by a for-of or for-in head such as
+ *       `for (const [name, { backupS3 }] of envs)`): restore, backup, status, destroy,
  *       failover, scale, configure and the e2e checks all take the bucket, its
  *       region and its endpoint from backupsTargetOf, so an old record without
  *       a region or endpoint means one thing everywhere. Writers use the
@@ -111,29 +113,33 @@ function codeLines(text: string): string {
     .join('\n');
 }
 
-/** The text from the `{` at `open` through its matching `}`. */
-function balancedBraces(text: string, open: number): string {
+/** The text from the `{` or `[` at `open` through its matching close, both kinds balanced. */
+function balancedBrackets(text: string, open: number): string {
   let depth = 0;
   let end = open;
   for (; end < text.length; end++) {
-    if (text[end] === '{') depth++;
-    else if (text[end] === '}' && --depth === 0) break;
+    if (text[end] === '{' || text[end] === '[') depth++;
+    else if ((text[end] === '}' || text[end] === ']') && --depth === 0) break;
   }
   return text.slice(open, end + 1);
 }
 
 /**
- * Every object destructuring pattern in `code` that is assigned from
- * something: `const|let|var { … } = …` and `({ … } = …)`, braces balanced.
- * A call's object argument and an arrow's parameter are followed by `)`, so
- * neither counts.
+ * Every object or array destructuring pattern in `code` that binds from
+ * something: `const|let|var { … } = …` and `({ … } = …)`, and a loop head's
+ * `for (const { … } of …)` or `for (const [k, { … }] in …)` (also a bare
+ * `for ({ … } of …)`), brackets balanced. A call's object argument and an
+ * arrow's parameter are followed by `)`, so neither counts.
  */
 function destructuringPatterns(code: string): string[] {
   const out: string[] = [];
-  for (const m of code.matchAll(/(?:\b(?:const|let|var)\s*|\(\s*)\{/g)) {
+  for (const m of code.matchAll(/(?:\b(const|let|var)\s*|\(\s*)[{[]/g)) {
     const open = (m.index ?? 0) + m[0].length - 1;
-    const pattern = balancedBraces(code, open);
-    if (/^\s*=(?![=>])/.test(code.slice(open + pattern.length))) out.push(pattern);
+    const pattern = balancedBrackets(code, open);
+    const after = code.slice(open + pattern.length);
+    const assigned = /^\s*=(?![=>])/.test(after);
+    const looped = /^\s+of\b/.test(after) || (m[1] !== undefined && /^\s+in\b/.test(after));
+    if (assigned || looped) out.push(pattern);
   }
   return out;
 }
@@ -472,6 +478,15 @@ describe('backups bucket single resolver census', () => {
       plant('src/lib/c.js', 'let record;\n({ backupS3: record } = cfg);\n');
       plant('src/lib/d.js', 'const { s3: { region }, backupS3 } = env;\n');
       plant('tests/e2e/checks/e.ts', 'let { backupS3 = null } = env;\n');
+      // A loop head binds from each element just as an assignment does.
+      plant('src/lib/i.js', 'for (const { backupS3 } of envs) use(backupS3);\n');
+      plant(
+        'src/lib/j.js',
+        'for (const [name, { backupS3: b }] of Object.entries(environments)) {}\n',
+      );
+      plant('src/lib/k.js', 'for (let [, { s3, backupS3 }] in all) {}\n');
+      plant('src/lib/l.js', 'let e;\nfor ({ backupS3: e } of envs) {}\n');
+      plant('src/lib/m.js', 'const [first, { backupS3 }] = list;\n');
       // env-identity drops the field from a purged seed by name; a writer, a
       // look-alike name, an arrow's parameter and tests/unit are fine.
       plant('src/lib/env-identity.js', 'const { backupS3: _purged, ...kept } = identity;\n');
@@ -479,11 +494,20 @@ describe('backups bucket single resolver census', () => {
       plant('src/lib/g.js', 'const { backupS3Config } = ctx;\n');
       plant('src/lib/h.js', 'const pick = ({ backupS3 }) => backupS3;\n');
       plant('tests/unit/a.test.ts', 'const { backupS3 } = env;\n');
+      plant('src/lib/n.js', 'for (const [name, e] of envs) use(name, e);\n');
+      plant('src/lib/o.js', 'for (const backupS3Config of configs) {}\n');
+      // An array argument and an `in` test outside a loop head bind nothing.
+      plant('src/lib/p.js', 'run([{ backupS3 }]);\nconst seen = ([{ backupS3 }] in index);\n');
       expect(rawRecordReaders(tmp)).toEqual([
         'src/lib/a.js',
         'src/lib/b.js',
         'src/lib/c.js',
         'src/lib/d.js',
+        'src/lib/i.js',
+        'src/lib/j.js',
+        'src/lib/k.js',
+        'src/lib/l.js',
+        'src/lib/m.js',
         'tests/e2e/checks/e.ts',
       ]);
       // The allowance is that one drop, not the file.
