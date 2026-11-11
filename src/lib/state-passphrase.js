@@ -30,11 +30,17 @@ export function __resetStatePassphraseForTests() {
 }
 
 export class StatePassphraseError extends Error {
-  /** @param {'missing' | 'mismatch' | 'invalid'} reason @param {string} message */
-  constructor(reason, message) {
+  /**
+   * @param {'missing' | 'mismatch' | 'invalid'} reason
+   * @param {string} message
+   * @param {'shell' | 'env-local'} [source] where the refused value came from
+   *   (none for 'missing'), so a caller can say which store to fix
+   */
+  constructor(reason, message, source) {
     super(message);
     this.name = 'StatePassphraseError';
     this.reason = reason;
+    this.source = source;
   }
 }
 
@@ -62,13 +68,7 @@ export function statePassphraseFingerprint(passphrase) {
  */
 export function resolveStatePassphrase() {
   const { value, problem } = readOperatorVar(STATE_PASSPHRASE_KEY);
-  if (value && problem) {
-    const source = describeCredentialSource([STATE_PASSPHRASE_KEY]);
-    throw new StatePassphraseError(
-      'invalid',
-      `Your ${STATE_PASSPHRASE_KEY} (from ${source.where}) is too weak to protect your Pulumi state: it needs at least 43 letters, digits, dashes or underscores. Use the value vibecarbon generated for this project. If this project has no deployed state yet, delete the line and run this again to make a new one.`,
-    );
-  }
+  if (value && problem) throw invalidError(sourceOf('environment'));
   return value;
 }
 
@@ -76,25 +76,84 @@ function recordedFingerprint(dir) {
   return readProjectConfigFile(dir)?.stateEncryption?.fingerprint ?? null;
 }
 
+/**
+ * Where a value came from. One already in process.env is the shell's unless
+ * the CLI loaded it from .env.local at startup (describeCredentialSource); one
+ * read from the file just now is .env.local's, whatever that function says.
+ * @param {'environment' | 'disk'} read
+ * @returns {{ source: 'shell' | 'env-local', where: string }}
+ */
+function sourceOf(read) {
+  if (read === 'disk') return { source: 'env-local', where: "your project's .env.local" };
+  const { source, where } = describeCredentialSource([STATE_PASSPHRASE_KEY]);
+  return { source, where };
+}
+
+/** @param {{ source: 'shell' | 'env-local', where: string }} from */
+function invalidError(from) {
+  return new StatePassphraseError(
+    'invalid',
+    `Your ${STATE_PASSPHRASE_KEY} (from ${from.where}) is too weak to protect your Pulumi state: it needs at least 43 letters, digits, dashes or underscores. Use the value vibecarbon generated for this project. If this project has no deployed state yet, delete the line and run this again to make a new one.`,
+    from.source,
+  );
+}
+
 /** @param {string} expected the recorded fingerprint */
 function missingError(expected) {
   return new StatePassphraseError(
     'missing',
-    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again.`,
+    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again. If it's lost for good, delete the \`stateEncryption\` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one. Then run \`vibecarbon destroy\` and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.`,
   );
 }
 
 /**
  * @param {string} expected the recorded fingerprint
  * @param {string} actual the value's fingerprint
+ * @param {{ source: 'shell' | 'env-local', where: string }} from
  */
-function mismatchError(expected, actual) {
-  const source = describeCredentialSource([STATE_PASSPHRASE_KEY]);
-  const wins = source.source === 'shell' ? ', which wins over .env.local' : '';
+function mismatchError(expected, actual, from) {
+  const wins = from.source === 'shell' ? ', which wins over .env.local' : '';
   return new StatePassphraseError(
     'mismatch',
-    `Your ${STATE_PASSPHRASE_KEY} (from ${source.where}${wins}) doesn't match this project. .vibecarbon.json expects ${expected} and yours is ${actual}. Fix the value, then run this again.`,
+    `Your ${STATE_PASSPHRASE_KEY} (from ${from.where}${wins}) doesn't match this project. .vibecarbon.json expects ${expected} and yours is ${actual}. Fix the value, then run this again.`,
+    from.source,
   );
+}
+
+/**
+ * The passphrase this project would use and what is wrong with it, changing
+ * nothing. The one verdict both ensureStatePassphrase and
+ * findStatePassphraseProblem act on, so they cannot disagree.
+ *
+ * A value in the environment wins. Without one, and only when a fingerprint
+ * is recorded, `.env.local` is read from disk: the CLI folds it into the
+ * environment once at startup, and a process that started while another was
+ * still generating can have missed the file. Either value gets the same
+ * shape check before its fingerprint is compared.
+ *
+ * @param {string} dir absolute project dir
+ * @param {string | null} expected the recorded fingerprint
+ * @returns {{ value: string | null, fromDisk: boolean, problem: StatePassphraseError | null }}
+ */
+function inspectStatePassphrase(dir, expected) {
+  let read = 'environment';
+  let found = readOperatorVar(STATE_PASSPHRASE_KEY);
+  if (!found.value && expected) {
+    read = 'disk';
+    found = readOperatorVar(STATE_PASSPHRASE_KEY, {
+      env: { [STATE_PASSPHRASE_KEY]: loadEnvVariables(dir)[STATE_PASSPHRASE_KEY] },
+    });
+  }
+  const fromDisk = read === 'disk';
+  if (!found.value) {
+    return { value: null, fromDisk, problem: expected ? missingError(expected) : null };
+  }
+  if (found.problem) return { value: null, fromDisk, problem: invalidError(sourceOf(read)) };
+  const actual = statePassphraseFingerprint(found.value);
+  if (expected && actual !== expected) {
+    return { value: null, fromDisk, problem: mismatchError(expected, actual, sourceOf(read)) };
+  }
+  return { value: found.value, fromDisk, problem: null };
 }
 
 /**
@@ -104,28 +163,15 @@ function mismatchError(expected, actual) {
  * is recorded yet (a project the next stack-opening command sets up).
  *
  * Read-only: it generates nothing, records nothing and leaves process.env
- * alone, reading `.env.local` directly the way ensureStatePassphrase's own
- * second look does. For `destroy`, which can tear down without the
- * passphrase and only needs to say why it is going around the state.
+ * alone. For `destroy`, which can tear down without the passphrase and only
+ * needs to say why it is going around the state.
  *
  * @param {string} projectDir
  * @returns {StatePassphraseError | null}
  */
 export function findStatePassphraseProblem(projectDir) {
   const dir = resolve(projectDir);
-  let value;
-  try {
-    value = resolveStatePassphrase();
-  } catch (err) {
-    if (err instanceof StatePassphraseError) return err;
-    throw err;
-  }
-  const expected = recordedFingerprint(dir);
-  if (!expected) return null;
-  const candidate = value || loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
-  if (!candidate) return missingError(expected);
-  const actual = statePassphraseFingerprint(candidate);
-  return actual === expected ? null : mismatchError(expected, actual);
+  return inspectStatePassphrase(dir, recordedFingerprint(dir)).problem;
 }
 
 /**
@@ -134,20 +180,23 @@ export function findStatePassphraseProblem(projectDir) {
  *
  * @param {string} projectDir
  * @returns {Promise<string>} the passphrase
- * @throws {StatePassphraseError} 'missing' or 'mismatch'
+ * @throws {StatePassphraseError} 'missing', 'mismatch' or 'invalid'
  */
 export async function ensureStatePassphrase(projectDir) {
   const dir = resolve(projectDir);
   if (verified.has(dir)) return verified.get(dir);
 
-  const value = resolveStatePassphrase();
   const expected = recordedFingerprint(dir);
+  const { value, fromDisk, problem } = inspectStatePassphrase(dir, expected);
+  if (problem) throw problem;
 
   if (value) {
-    const actual = statePassphraseFingerprint(value);
-    if (expected && expected !== actual) throw mismatchError(expected, actual);
+    // Read from .env.local just now: later Pulumi calls in this process read
+    // the environment.
+    if (fromDisk) process.env[STATE_PASSPHRASE_KEY] = value;
     if (!expected) {
       // Case 2: an existing value (e.g. copied in from a password manager).
+      const actual = statePassphraseFingerprint(value);
       updateProjectConfig((manifest) => {
         if (manifest.stateEncryption?.fingerprint) return;
         manifest.stateEncryption = { ...manifest.stateEncryption, fingerprint: actual };
@@ -155,18 +204,6 @@ export async function ensureStatePassphrase(projectDir) {
     }
     verified.set(dir, value);
     return value;
-  }
-
-  if (expected) {
-    // The CLI folds .env.local into the environment once at startup. A
-    // process that started while another was still generating can have
-    // missed the file, so look at it once more before calling it missing.
-    const onDisk = loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
-    if (onDisk) {
-      process.env[STATE_PASSPHRASE_KEY] = onDisk;
-      return ensureStatePassphrase(dir);
-    }
-    throw missingError(expected);
   }
 
   // Neither exists: make both, all under the config lock (the mutator is
@@ -186,11 +223,9 @@ export async function ensureStatePassphrase(projectDir) {
     generated = true;
   }, dir);
 
-  if (!generated) {
-    const theirs = loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
-    if (theirs) process.env[STATE_PASSPHRASE_KEY] = theirs;
-    return ensureStatePassphrase(dir);
-  }
+  // Lost the race: the winner's fingerprint is recorded and its value is in
+  // .env.local, which the next look reads from disk.
+  if (!generated) return ensureStatePassphrase(dir);
 
   process.env[STATE_PASSPHRASE_KEY] = fresh;
   p.log.info(

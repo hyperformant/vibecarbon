@@ -460,13 +460,27 @@ describe('convergeClusterInfra — a state the passphrase cannot read', () => {
     const failure = new StateUndecryptableError('unit-cluster-xyz');
     getStackOutputsMock.mockRejectedValue(failure);
     const { Provider, programCalls } = makeProvider();
+    // The plain spinner, whose lines land in p.log.
+    vi.stubEnv('VIBECARBON_PLAIN', '1');
+    const p = await import('@clack/prompts');
+    const success = vi.spyOn(p.log, 'success').mockImplementation(() => {});
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
 
-    await expect(convergeClusterInfra({ ...baseArgs(), Provider })).rejects.toBe(failure);
+    try {
+      await expect(convergeClusterInfra({ ...baseArgs(), Provider })).rejects.toBe(failure);
 
-    // [0] is the probe program; a second call would be the real program,
-    // built with a minted token.
-    expect(programCalls).toHaveLength(1);
-    expect(getOrCreateStackMock).not.toHaveBeenCalled();
-    expect(upStackMock).not.toHaveBeenCalled();
+      // [0] is the probe program; a second call would be the real program,
+      // built with a minted token.
+      expect(programCalls).toHaveLength(1);
+      expect(getOrCreateStackMock).not.toHaveBeenCalled();
+      expect(upStackMock).not.toHaveBeenCalled();
+      // The spinner says what happened, never that the state was read.
+      expect(success.mock.calls.flat().join('\n')).not.toContain('Prior cluster state read');
+      expect(error).toHaveBeenCalledWith("Prior cluster state can't be read (unit-cluster-xyz)");
+    } finally {
+      success.mockRestore();
+      error.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 });

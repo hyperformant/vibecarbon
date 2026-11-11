@@ -39,6 +39,8 @@ import {
   waitForWorkersReady,
 } from '../../../src/failover.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
+import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
 /** `kubectl get nodes --no-headers` output with `n` Ready worker rows (+ master). */
 function readyLines(n: number): string {
@@ -1121,6 +1123,47 @@ describe('preflightPilotFailover exit branches', () => {
       }),
     ).rejects.toThrow('__exit__');
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  // The backend answered, so "unreachable or missing" would be the wrong
+  // fault: a state the passphrase cannot open says so in its own words.
+  it.each([
+    ['typed', () => new StateUndecryptableError('e4-standby')],
+    [
+      'raw',
+      () =>
+        new Error(
+          STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-outputs')?.message,
+        ),
+    ],
+  ])('a %s passphrase refusal exits(1) with its own message', async (_kind, refusal) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const envConfig = {
+      ha: {
+        standbyWorkerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
+        standby: { stack: 'e4-standby' },
+      },
+    };
+    await expect(
+      preflightPilotFailover('e4', envConfig, {
+        resolveCreds: async () => ({ apiToken: 't', s3Creds: null }),
+        readStackOutputs: async () => {
+          throw refusal();
+        },
+      }),
+    ).rejects.toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const said = error.mock.calls.flat().join('\n');
+    expect(said).toContain("vibecarbon can't decrypt the Pulumi state for e4-standby");
+    expect(said).toContain('`vibecarbon destroy e4`');
+    expect(said).toContain('Nothing was changed.');
+    expect(said).not.toContain('unreachable');
+    expect(said).not.toContain('PULUMI_CONFIG_PASSPHRASE');
   });
 
   it('returns the persisted pieces + resolved creds on a reachable backend', async () => {

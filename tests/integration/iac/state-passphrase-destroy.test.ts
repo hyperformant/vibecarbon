@@ -3,8 +3,9 @@
  * cannot open, on the real Pulumi engine (file:// backend): Pulumi refuses
  * every read, so `pulumi destroy` cannot run and the checkpoint is left as it
  * was; `pulumi stack rm --force` needs no passphrase at all, which is what
- * lets a compose destroy clear the record after the provider API removed the
- * servers.
+ * lets destroy clear the record of a state it cannot read once the provider
+ * API has removed the servers (compose always; k8s when no value this
+ * project has could read it again).
  *
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.

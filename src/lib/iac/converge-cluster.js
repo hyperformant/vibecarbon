@@ -329,12 +329,22 @@ export async function convergeClusterInfra({
   } catch (err) {
     probeError = err instanceof Error ? err : new Error(String(err));
   }
-  probeSpinner.stop(`Prior cluster state read (${label})`);
   // Throws on a passphrase failure rather than returning `errored`: a state
   // this project's passphrase cannot read still holds the cluster's token, and
   // building the real program below without it would mint a fresh one into
-  // every new node's user data.
-  const probe = classifyK3sTokenProbe({ outputs: probeOutputs, error: probeError });
+  // every new node's user data. The spinner line follows the verdict.
+  let probe;
+  try {
+    probe = classifyK3sTokenProbe({ outputs: probeOutputs, error: probeError });
+  } catch (err) {
+    probeSpinner.stop(`Prior cluster state can't be read (${label})`, 1);
+    throw err;
+  }
+  probeSpinner.stop(
+    probe.status === 'errored'
+      ? `Prior cluster state not read (${label})`
+      : `Prior cluster state read (${label})`,
+  );
   const priorK3sToken = probe.priorK3sToken;
   switch (probe.status) {
     case 'recovered':

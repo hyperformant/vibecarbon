@@ -128,9 +128,29 @@ describe('classifyStateError — the properties the corpus exists to protect', (
 describe('the state passphrase class', () => {
   const passphraseCases = STATE_ERROR_CORPUS.filter((c) => c.expect.cause === 'passphrase');
 
-  it("covers both of Pulumi's refusals: a wrong passphrase and none at all", () => {
-    expect(passphraseCases.some((c) => c.message.includes('incorrect passphrase'))).toBe(true);
+  it("covers each of Pulumi's refusals: on decrypt, on encrypt, and none at all", () => {
+    expect(passphraseCases.some((c) => c.message.includes('failed to decrypt'))).toBe(true);
+    expect(passphraseCases.some((c) => c.message.includes('failed to encrypt'))).toBe(true);
     expect(passphraseCases.some((c) => c.message.includes('passphrase must be set'))).toBe(true);
+  });
+
+  it('a retryable failure that merely mentions a passphrase is still retried', () => {
+    // STATE_ERROR_NEGATIVES holds the fatal near misses; these two keep
+    // their retry, so they live here. The word alone claims nothing.
+    const throttled = classifyStateError({
+      message:
+        'Command failed with exit code 1: pulumi up --stack e1 --non-interactive\nerror: blob (key ".pulumi/stacks/passphrase-demo/e1.json") (code=Unknown): 503 SlowDown: Please reduce your request rate',
+      operation: 'up',
+    });
+    expect(throttled.cause).toBe('throttle');
+    expect(throttled.recovery).toBe('retry-in-place');
+    const locked = classifyStateError({
+      message:
+        'Command failed with exit code 1: pulumi up --stack passphrase-e1 --non-interactive\nerror: the stack is currently locked by 1 lock(s). Either wait for the other process to finish or delete the lock file',
+      operation: 'up',
+    });
+    expect(locked.cause).toBe('lock-contention');
+    expect(locked.recovery).toBe('retry-in-place');
   });
 
   it('is never retried, even when the same output carries retryable wording', () => {

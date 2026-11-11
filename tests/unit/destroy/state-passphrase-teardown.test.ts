@@ -9,15 +9,19 @@
  *   k8s:     `pulumi destroy` cannot run, so the teardown falls to the API
  *            sweeps after it: every server labelled for the environment, and
  *            on a K8S_DESTROY_BACKSTOP provider the firewall, network, SSH key
- *            and reserved IP by name.
+ *            and reserved IP by name. The record then goes too when it holds
+ *            nothing usable: always when Pulumi itself refused the
+ *            passphrase, and for a passphrase refused before Pulumi ran only
+ *            when the by-name sweeps covered the stack and left nothing.
  *
  * Both say so in a warning. Driven through the destroy effect registry with
- * the real iac layer over a mocked LocalWorkspace, the real passphrase check
- * against a temp project, and a recording fake provider.
+ * the real iac layer over the shared fake Pulumi workspace, the real
+ * passphrase check against a temp project, and a recording fake provider.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fakePulumi } from '../../_shared/fake-pulumi-workspace.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
@@ -25,6 +29,7 @@ const PASSPHRASE = 'Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5';
 const OTHER_PASSPHRASE = 'b3RoZXJvdGhlcm90aGVyb3RoZXJvdGhlcm90aGVyb3Ro';
 
 const warnings: string[] = [];
+const infos: string[] = [];
 vi.mock('@clack/prompts', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   const noop = () => {};
@@ -33,7 +38,7 @@ vi.mock('@clack/prompts', async (orig) => {
     log: {
       warn: (m: string) => warnings.push(m),
       error: noop,
-      info: noop,
+      info: (m: string) => infos.push(m),
       success: noop,
       message: noop,
       step: noop,
@@ -41,58 +46,31 @@ vi.mock('@clack/prompts', async (orig) => {
   };
 });
 
-// ── Pulumi: a workspace whose stack refuses the passphrase when told to ──
-const pulumiCalls: string[] = [];
-const workspaceEnvs: Record<string, string | undefined>[] = [];
-let refusePassphrase = false;
+vi.mock('@pulumi/pulumi/automation/index.js', async () =>
+  (await import('../../_shared/fake-pulumi-workspace.js')).fakeAutomationModule(),
+);
+
 const passphraseRefusal = () =>
   new Error(
     STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-refresh')?.message ?? '',
   );
-const fakeStack = (name: string) => {
-  const op =
-    (verb: string, result: () => unknown) =>
-    async (...args: unknown[]) => {
-      pulumiCalls.push(
-        verb === 'removeStack' ? `${verb}:${args[0]}:${JSON.stringify(args[1])}` : verb,
-      );
-      if (refusePassphrase && verb !== 'removeStack' && verb !== 'cancel') {
-        throw passphraseRefusal();
-      }
-      return result();
-    };
-  return {
-    name,
-    refresh: op('refresh', () => undefined),
-    exportStack: op('exportStack', () => ({ deployment: { resources: [] } })),
-    destroy: op('destroy', () => ({
-      summary: { result: 'succeeded', resourceChanges: { delete: 3 } },
-    })),
-    outputs: op('outputs', () => ({})),
-    cancel: op('cancel', () => undefined),
-    workspace: { removeStack: op('removeStack', () => undefined) },
-  };
-};
-vi.mock('@pulumi/pulumi/automation/index.js', () => ({
-  LocalWorkspace: {
-    selectStack: async (
-      args: { stackName: string },
-      ws: { envVars: Record<string, string | undefined> },
-    ) => {
-      pulumiCalls.push(`select:${args.stackName}`);
-      workspaceEnvs.push(ws.envVars);
-      return fakeStack(args.stackName);
-    },
-    createStack: async () => {
-      throw new Error('createStack must not be called by destroy');
-    },
-    create: async () => ({ listStacks: async () => [], whoAmI: async () => 'me' }),
-  },
+
+// A live cluster answers the PersistentVolume capture; nothing to collect.
+vi.mock('../../../src/lib/csi-volumes.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  captureClusterCsiVolumes: () => ({
+    ok: true,
+    volumes: [],
+    volumeIds: [],
+    regions: [],
+    skippedDrivers: [],
+  }),
 }));
 
 // ── The cloud: a recording provider that owns one labelled server ──
 const cloudCalls: string[] = [];
 let backstop = true;
+let firewallDeleteFails = false;
 const LABELLED_SERVER = {
   id: 21,
   name: 'proj-e1-master',
@@ -100,6 +78,7 @@ const LABELLED_SERVER = {
 };
 const SPECIFIC: Record<string, (...args: unknown[]) => unknown> = {
   listServersDetailed: async () => ({ items: [LABELLED_SERVER], complete: true }),
+  listVolumesDetailed: async () => ({ items: [], complete: true }),
   serverLabels: (sv: unknown) => (sv as { labels?: Record<string, string> }).labels ?? {},
   labelValue: (_k: unknown, v: unknown) => v,
   serverRegion: () => 'nbg1',
@@ -111,7 +90,9 @@ const SPECIFIC: Record<string, (...args: unknown[]) => unknown> = {
   },
   deleteFirewallByName: async (name: unknown) => {
     cloudCalls.push(`deleteFirewallByName:${name}`);
-    return { deleted: true, apiError: null };
+    return firewallDeleteFails
+      ? { deleted: false, apiError: new Error('firewall is in use') }
+      : { deleted: true, apiError: null };
   },
   deleteSSHKeyByName: async (name: unknown) => {
     cloudCalls.push(`deleteSSHKeyByName:${name}`);
@@ -156,7 +137,9 @@ const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.
 const { __resetStatePassphraseForTests, statePassphraseFingerprint } = await import(
   '../../../src/lib/state-passphrase.js'
 );
-const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+const { DESTROY_EFFECTS, passphraseRecoveryHint, settleUnreadableStacks } = await import(
+  '../../../src/destroy.js'
+);
 
 const spinner = { start: () => {}, stop: () => {}, message: () => {} };
 const S3 = {
@@ -165,14 +148,16 @@ const S3 = {
   endpoint: 'https://fsn1.your-objectstorage.com',
   stateBucket: 'proj-state',
 };
+const REMOVE = (stackEnv: string) => `removeStack:${stackEnv}:{"force":true}`;
 
-function makeCtx(tier: 'compose' | 'k8s', dir: string) {
+function makeCtx(tier: 'compose' | 'k8s' | 'k8s-ha', dir: string) {
+  const stackEnvs = tier === 'k8s-ha' ? ['e1-primary', 'e1-standby'] : ['e1'];
   return {
     plan: {
       tier,
-      stackEnvs: ['e1'],
-      hasPulumiStack: tier === 'k8s',
-      clusterNames: ['proj-e1'],
+      stackEnvs,
+      hasPulumiStack: tier !== 'compose',
+      clusterNames: stackEnvs.map((e) => `proj-${e}`),
       ownedIps: ['203.0.113.1'],
     },
     envConfig: {
@@ -214,11 +199,12 @@ type Ctx = ReturnType<typeof makeCtx>;
 const run = (effect: string, ctx: Ctx) =>
   (DESTROY_EFFECTS as Record<string, (c: unknown, a: unknown) => Promise<void>>)[effect](ctx, {});
 
-/** What the stack entry in the leak report says, if anything. */
+/** What the stack entries in the leak report say, if anything. */
 const stackEntries = (ctx: Ctx) =>
   ctx.results.leaks.entries.filter(
     (e: { resourceClass: string }) => e.resourceClass === 'pulumi-stack',
   );
+const removals = () => fakePulumi.calls.filter((c) => c.startsWith('removeStack:'));
 
 let dir: string;
 
@@ -240,11 +226,11 @@ function project({ value }: { value?: string }) {
 
 beforeEach(() => {
   warnings.length = 0;
-  pulumiCalls.length = 0;
-  workspaceEnvs.length = 0;
+  infos.length = 0;
+  fakePulumi.reset();
   cloudCalls.length = 0;
-  refusePassphrase = false;
   backstop = true;
+  firewallDeleteFails = false;
   __resetStatePassphraseForTests();
   vi.stubEnv('HETZNER_ACCESS_KEY', 'AK');
   vi.stubEnv('HETZNER_SECRET_KEY', 'SK');
@@ -270,15 +256,15 @@ describe('compose: provider API plus `stack rm --force`, whatever the passphrase
 
       expect(cloudCalls).toContain('deleteServer:11');
       expect(cloudCalls).toContain('deleteFirewallByName:proj-e1-firewall');
-      expect(pulumiCalls).toContain('removeStack:e1:{"force":true}');
+      expect(fakePulumi.calls).toContain(REMOVE('e1'));
       // Nothing decrypting ran, and the workspace saw only the operator's own
       // value or none: never an invented or empty one. (`stack rm --force`
       // works under a wrong passphrase, so a mismatched value is harmless.)
-      expect(pulumiCalls.filter((c) => /^(refresh|destroy|exportStack|outputs)$/.test(c))).toEqual(
-        [],
-      );
-      expect(workspaceEnvs.length).toBeGreaterThan(0);
-      for (const env of workspaceEnvs)
+      expect(
+        fakePulumi.calls.filter((c) => /^(refresh|destroy|exportStack|outputs)$/.test(c)),
+      ).toEqual([]);
+      expect(fakePulumi.workspaceEnvs.length).toBeGreaterThan(0);
+      for (const env of fakePulumi.workspaceEnvs)
         expect([undefined, value]).toContain(env.PULUMI_CONFIG_PASSPHRASE);
       expect(ctx.results.leaks.isClean()).toBe(true);
 
@@ -303,34 +289,29 @@ describe('compose: provider API plus `stack rm --force`, whatever the passphrase
     await run('destroyComposeServices', ctx);
     await run('removePulumiStackState', ctx);
 
-    expect(pulumiCalls).toContain('removeStack:e1:{"force":true}');
+    expect(fakePulumi.calls).toContain(REMOVE('e1'));
     expect(warnings.join('\n')).not.toContain('Pulumi state');
   });
 });
 
-describe('k8s: the API sweeps still run when Pulumi cannot read the state', () => {
-  it('passphrase missing: servers and the backstop resources go, the stack is kept as UNVERIFIED with a way back', async () => {
+describe('k8s, refused before Pulumi ran: the record goes only when the backstop covered everything', () => {
+  it('backstop sweeps left nothing: servers and by-name resources go, and so does the record', async () => {
     project({ value: undefined });
     const ctx = makeCtx('k8s', dir);
 
     await run('destroyK8sInfra', ctx);
 
-    // The check refused before Pulumi was ever asked.
-    expect(pulumiCalls).toEqual([]);
-    // The server sweep and the by-name backstop ran.
+    // The check refused before Pulumi was asked to read anything; the record
+    // was removed without being read.
+    expect(fakePulumi.calls).toEqual(['select:e1', REMOVE('e1')]);
     expect(cloudCalls).toContain('deleteServer:21');
     expect(cloudCalls).toContain('deleteFirewallByName:proj-e1-firewall');
     expect(cloudCalls).toContain('deleteNetworkByName:proj-e1-network');
-
-    const [entry, ...rest] = stackEntries(ctx);
-    expect(rest).toEqual([]);
-    expect(entry.severity).toBe('unverified');
-    expect(entry.resource).toBe('e1');
-    expect(entry.reason).toContain("VIBECARBON_STATE_PASSPHRASE isn't set");
-    expect(entry.hint).toContain('VIBECARBON_STATE_PASSPHRASE back in .env.local');
-    expect(entry.hint).toContain('`vibecarbon destroy e1`');
-    // The env entry and the stack record are kept for the run that can read it.
-    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+    // Nothing left: no stack line, the environment entry goes as on any
+    // destroy, and the exit code says clean.
+    expect(stackEntries(ctx)).toEqual([]);
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    expect(ctx.results.leaks.exitCode()).toBe(0);
 
     const warning = warnings.join('\n');
     expect(warning).toContain("can't read the Pulumi state for e1");
@@ -338,28 +319,272 @@ describe('k8s: the API sweeps still run when Pulumi cannot read the state', () =
     expect(warning).not.toContain('—');
   });
 
-  it('Pulumi refuses the passphrase: no retry, no destroy, servers still swept, leftovers named for the console', async () => {
-    project({ value: PASSPHRASE });
-    refusePassphrase = true;
+  it('a backstop sweep left something: the record is kept, with how to put the value back', async () => {
+    project({ value: undefined });
+    firewallDeleteFails = true;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(removals()).toEqual([]);
+    expect(cloudCalls).toContain('deleteServer:21');
+    const [entry, ...rest] = stackEntries(ctx);
+    expect(rest).toEqual([]);
+    expect(entry.severity).toBe('unverified');
+    expect(entry.resource).toBe('e1');
+    expect(entry.reason).toContain("VIBECARBON_STATE_PASSPHRASE isn't set");
+    expect(entry.reason).toContain('stack record was kept');
+    expect(entry.hint).toContain(
+      "Copy this project's VIBECARBON_STATE_PASSPHRASE into .env.local from where you saved it, then run `vibecarbon destroy e1` again",
+    );
+    expect(entry.hint).toContain(
+      "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json, then run `vibecarbon destroy e1` again",
+    );
+    expect(entry.hint).not.toContain('—');
+    // Kept for the retry that can read it.
+    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+  });
+
+  it('no backstop: the record is kept, whatever the sweeps did', async () => {
+    project({ value: OTHER_PASSPHRASE });
     backstop = false;
     const ctx = makeCtx('k8s', dir);
 
     await run('destroyK8sInfra', ctx);
 
-    // One refresh, refused; the destroy itself never ran, nothing was removed.
-    expect(pulumiCalls).toEqual(['select:e1', 'refresh']);
+    expect(fakePulumi.calls).toEqual([]);
     expect(cloudCalls).toContain('deleteServer:21');
-    // No by-name backstop on this provider.
+    expect(cloudCalls.some((c) => c.startsWith('deleteNetworkByName'))).toBe(false);
+    const [entry] = stackEntries(ctx);
+    expect(entry.reason).toContain("doesn't match the fingerprint");
+    // Set in the test's environment, which a shell export stands for.
+    expect(entry.hint).toContain('in your shell environment wins over .env.local');
+    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+  });
+});
+
+describe('k8s, Pulumi refused the passphrase: the record goes on every provider', () => {
+  it('no backstop: one refused refresh, servers swept, record removed, leftovers named for the console', async () => {
+    project({ value: PASSPHRASE });
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    // One refresh, refused: no destroy, no retry. Then the record goes
+    // without being read.
+    expect(fakePulumi.calls).toEqual(['select:e1', 'refresh', 'select:e1', REMOVE('e1')]);
+    expect(cloudCalls).toContain('deleteServer:21');
     expect(cloudCalls.some((c) => c.startsWith('deleteNetworkByName'))).toBe(false);
 
     const [entry, ...rest] = stackEntries(ctx);
     expect(rest).toEqual([]);
     expect(entry.severity).toBe('unverified');
     expect(entry.reason).toContain("this project's passphrase doesn't decrypt it");
+    expect(entry.reason).toContain('record was removed without being read');
     expect(entry.hint).toContain('Hetzner console');
-    expect(entry.hint).toContain('proj-e1');
-    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+    expect(entry.hint).toContain('their names start with proj-e1');
+    // No record left to retry against, so no retry is promised.
+    expect(entry.hint).not.toContain('vibecarbon destroy');
+    // The environment entry goes; the exit code still says something may be left.
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    expect(ctx.results.leaks.exitCode()).not.toBe(0);
 
-    expect(warnings.join('\n')).toContain("can't read the Pulumi state for e1");
+    // Pulumi's own line is logged once for diagnosis; the passphrase never is.
+    const logged = [...infos, ...warnings].join('\n');
+    expect(logged.match(/refused the state passphrase/g)).toHaveLength(1);
+    expect(logged).toContain('failed to decrypt: incorrect passphrase');
+    expect(logged).not.toContain(PASSPHRASE);
+  });
+
+  it('backstop sweeps left nothing: the record goes and the destroy is clean', async () => {
+    project({ value: PASSPHRASE });
+    fakePulumi.refuseReads(passphraseRefusal);
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(removals()).toEqual([REMOVE('e1')]);
+    expect(cloudCalls).toContain('deleteFirewallByName:proj-e1-firewall');
+    expect(stackEntries(ctx)).toEqual([]);
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    expect(ctx.results.leaks.exitCode()).toBe(0);
+  });
+
+  it('backstop sweeps left something: the record still goes, and the line points at the report', async () => {
+    project({ value: PASSPHRASE });
+    fakePulumi.refuseReads(passphraseRefusal);
+    firewallDeleteFails = true;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(removals()).toEqual([REMOVE('e1')]);
+    const [entry] = stackEntries(ctx);
+    expect(entry.hint).toContain('listed in this report');
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    expect(ctx.results.leaks.exitCode()).not.toBe(0);
+  });
+});
+
+describe('k8s-ha: each stack of the pair is settled, under its own name', () => {
+  it('Pulumi refused both: both records go, each leftover line names its own stack', async () => {
+    project({ value: PASSPHRASE });
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+    const ctx = makeCtx('k8s-ha', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(removals().sort()).toEqual([REMOVE('e1-primary'), REMOVE('e1-standby')]);
+    const entries = stackEntries(ctx);
+    expect(entries.map((e: { resource: string }) => e.resource).sort()).toEqual([
+      'e1-primary (e1-primary)',
+      'e1-standby (e1-standby)',
+    ]);
+    for (const e of entries) {
+      const stackEnv = e.resource.split(' ')[0];
+      expect(e.hint).toContain(`their names start with proj-${stackEnv}`);
+    }
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+  });
+
+  it('refused before Pulumi ran, backstop clean: both records go, judged against the same sweeps', async () => {
+    project({ value: undefined });
+    const ctx = makeCtx('k8s-ha', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(removals().sort()).toEqual([REMOVE('e1-primary'), REMOVE('e1-standby')]);
+    expect(cloudCalls).toContain('deleteSSHKeyByName:proj-e1-ha-key');
+    expect(stackEntries(ctx)).toEqual([]);
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+  });
+});
+
+describe('the way back names what to fix, for each reason and each store', () => {
+  const KEY = 'VIBECARBON_STATE_PASSPHRASE';
+  const LOST =
+    "this state can't be read without it, so destroy removes the record, and this project gets a new passphrase.";
+  it.each([
+    [
+      'missing',
+      undefined,
+      `Copy this project's ${KEY} into .env.local from where you saved it, then run \`vibecarbon destroy e1\` again`,
+      "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json, then",
+    ],
+    [
+      'mismatch',
+      'shell',
+      `The ${KEY} in your shell environment wins over .env.local and isn't this project's. Unset it so vibecarbon reads .env.local, or set it to this project's value`,
+      "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json, then",
+    ],
+    [
+      'mismatch',
+      'env-local',
+      `The ${KEY} in .env.local isn't this project's. Replace it with the value you saved for this project`,
+      "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json, then",
+    ],
+    [
+      'invalid',
+      'shell',
+      `The ${KEY} in your shell environment is too weak to be this project's. Unset it so vibecarbon reads .env.local`,
+      "If it's lost for good, delete that value and the `stateEncryption` entry from .vibecarbon.json, then",
+    ],
+    [
+      'invalid',
+      'env-local',
+      `The ${KEY} in .env.local is too weak to be this project's. Replace it with the value you saved for this project`,
+      "If it's lost for good, delete that value and the `stateEncryption` entry from .vibecarbon.json, then",
+    ],
+  ])('%s from %s', (reason, source, fix, lost) => {
+    const hint = passphraseRecoveryHint({ reason, source }, 'e1');
+    expect(hint).toContain(fix);
+    expect(hint).toContain(lost);
+    expect(hint.endsWith(LOST)).toBe(true);
+    expect(hint).toContain('Pulumi then removes whatever is left of this stack');
+    // A file fix is never offered for a value the shell overrides, and the
+    // reverse.
+    if (source === 'shell') expect(hint).not.toContain('Replace it');
+    if (source === 'env-local') expect(hint).not.toContain('shell');
+    expect(hint).not.toContain('—');
+  });
+});
+
+describe('settleUnreadableStacks: a record it cannot remove is kept for the retry', () => {
+  const settle = (over: Record<string, unknown>) => {
+    const results = { leaks: createLeakLedger(), pulumiDestroyFailed: false };
+    const removed: string[] = [];
+    const done = settleUnreadableStacks({
+      stacks: [{ stackEnv: 'e1', dirLabel: '', error: passphraseRefusal() }],
+      environment: 'e1',
+      projectName: 'proj',
+      results,
+      providerName: 'DigitalOcean',
+      backstop: true,
+      backendResolved: true,
+      removeRecord: async (stackEnv: string) => {
+        removed.push(stackEnv);
+      },
+      s: spinner,
+      ...over,
+    });
+    return { results, removed, done };
+  };
+
+  it('state-backend credentials unresolved: nothing is removed against the local fallback', async () => {
+    const { results, removed, done } = settle({ backendResolved: false });
+    await done;
+    expect(removed).toEqual([]);
+    expect(results.pulumiDestroyFailed).toBe(true);
+    const [entry] = results.leaks.entries;
+    expect(entry.reason).toContain('stack record was kept');
+    expect(entry.hint).toContain('with object-storage credentials available');
+  });
+
+  it("a pair is judged against the sweeps, not against the first stack's own line", async () => {
+    const precheck = Object.assign(new Error("This project's state passphrase isn't set."), {
+      name: 'StatePassphraseError',
+      reason: 'missing',
+    });
+    const removed: string[] = [];
+    const results = { leaks: createLeakLedger(), pulumiDestroyFailed: false };
+    await settleUnreadableStacks({
+      stacks: [
+        { stackEnv: 'e1-primary', dirLabel: ' (e1-primary)', error: precheck },
+        { stackEnv: 'e1-standby', dirLabel: ' (e1-standby)', error: precheck },
+      ],
+      environment: 'e1',
+      projectName: 'proj',
+      results,
+      providerName: 'DigitalOcean',
+      backstop: true,
+      backendResolved: true,
+      removeRecord: async (stackEnv: string) => {
+        if (stackEnv === 'e1-primary') throw new Error('SlowDown');
+        removed.push(stackEnv);
+      },
+      s: spinner,
+    });
+    // The primary's failed removal is its own line; the standby's sweeps were
+    // clean, so its record still goes.
+    expect(removed).toEqual(['e1-standby']);
+    expect(results.leaks.entries.map((e: { resource: string }) => e.resource)).toEqual([
+      'e1-primary (e1-primary)',
+    ]);
+  });
+
+  it('the removal fails: kept, with the error, and the retry named', async () => {
+    const { results, done } = settle({
+      removeRecord: async () => {
+        throw new Error('SlowDown: please reduce your request rate');
+      },
+    });
+    await done;
+    expect(results.pulumiDestroyFailed).toBe(true);
+    const [entry] = results.leaks.entries;
+    expect(entry.reason).toContain('removing its stack record failed: SlowDown');
+    expect(entry.hint).toContain('`vibecarbon destroy e1` again');
   });
 });

@@ -116,6 +116,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
+import { asStateUndecryptableError, isStatePassphraseFailure } from './lib/iac/state-error.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfTimer } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -1403,6 +1404,16 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
     });
     s.stop(`Standby stack state reachable (${standbyStack})`);
   } catch (err) {
+    // The backend answered: this project's passphrase cannot open the
+    // state. That error says what it means and what still works, and
+    // "unreachable or missing" would send the operator after the wrong fault.
+    if (isStatePassphraseFailure(err)) {
+      s.stop(`Standby stack state can't be read (${standbyStack})`);
+      p.log.error(
+        `${/** @type {Error} */ (asStateUndecryptableError(err, standbyStack)).message} Nothing was changed.`,
+      );
+      process.exit(1);
+    }
     s.stop('Standby stack state unreachable');
     p.log.error(
       `Could not read standby stack '${standbyStack}' from the state backend ` +

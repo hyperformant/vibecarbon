@@ -97,6 +97,7 @@ describe('state passphrase', () => {
     expect(err.message).toContain('sha256:0000000000000000');
     expect(err.message).toContain(statePassphraseFingerprint(v));
     expect(err.message).toContain('your shell environment');
+    expect(err.source).toBe('shell');
     expect(err.message).not.toContain(v);
   });
 
@@ -107,6 +108,20 @@ describe('state passphrase', () => {
     expect(err.reason).toBe('missing');
     expect(err.message).toContain('sha256:abcdabcdabcdabcd');
     expect(err.message).toContain(STATE_PASSPHRASE_KEY);
+  });
+
+  it('case 4: missing also says what to do when the passphrase is lost for good', async () => {
+    writeManifest('sha256:abcdabcdabcdabcd');
+    const err = await ensureStatePassphrase(dir).catch((e) => e);
+    // Delete the fingerprint, then destroy and redeploy what the old value
+    // deployed: destroy removes a record it can't read.
+    expect(err.message).toContain(
+      "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one.",
+    );
+    expect(err.message).toContain(
+      "Then run `vibecarbon destroy` and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.",
+    );
+    expect(err.message).not.toContain('—');
   });
 
   it('case 5: neither generates, saves to .env.local only, records the fingerprint, logs once', async () => {
@@ -305,6 +320,30 @@ console.log('RESULT ' + v);
       expect(found).toBeInstanceOf(StatePassphraseError);
       expect(found?.reason).toBe(reason);
       expect(found?.message).toBe(thrown.message);
+    });
+
+    // A value only in .env.local (this process started before it was
+    // written) gets the same shape check as one in the environment, and the
+    // message names the file it came from, not the shell.
+    it.each([
+      ['mismatch', () => generateStatePassphrase()],
+      ['invalid', () => 'short-but-urlsafe'],
+    ])('%s only in .env.local: the same verdict and words as ensure', async (reason, make) => {
+      writeManifest('sha256:0000000000000000');
+      // This process started before .env.local had the value: its startup
+      // bootstrap loaded nothing (and forgets an earlier test's provenance).
+      bootstrapOperatorEnv(dir);
+      writeFileSync(join(dir, '.env.local'), `${KEY}=${make()}\n`);
+      const found = findStatePassphraseProblem(dir);
+      const thrown = await ensureStatePassphrase(dir).catch((e) => e);
+      expect(found?.reason).toBe(reason);
+      expect(thrown.reason).toBe(reason);
+      expect(found?.message).toBe(thrown.message);
+      expect(found?.source).toBe('env-local');
+      expect(found?.message).toContain("your project's .env.local");
+      expect(found?.message).not.toContain('shell');
+      // A refused value is never folded into the environment.
+      expect(process.env[KEY]).toBeUndefined();
     });
   });
 });

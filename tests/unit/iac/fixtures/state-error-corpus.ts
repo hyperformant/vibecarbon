@@ -79,6 +79,10 @@ const commandError = (argv: string, body: string) => {
 const INCORRECT_PASSPHRASE =
   'failed to decrypt: incorrect passphrase, please set PULUMI_CONFIG_PASSPHRASE to the correct passphrase or set PULUMI_CONFIG_PASSPHRASE_FILE to a file containing the passphrase';
 
+/** The same refusal when Pulumi encrypts secrets on their way into the state. */
+const INCORRECT_PASSPHRASE_ON_ENCRYPT =
+  'failed to encrypt: incorrect passphrase, please set PULUMI_CONFIG_PASSPHRASE to the correct passphrase or set PULUMI_CONFIG_PASSPHRASE_FILE to a file containing the passphrase';
+
 /** The same secrets manager when neither variable reaches the CLI at all. */
 const NO_PASSPHRASE =
   'passphrase must be set with PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE environment variables';
@@ -296,6 +300,32 @@ export const STATE_ERROR_CORPUS: StateErrorCase[] = [
     expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
   },
   {
+    // Importing the state's own checkpoint (ciphertexts) under another
+    // passphrase: the deployment is decrypted first and refused there.
+    id: 'passphrase-incorrect-on-import',
+    incident: '2026-11-11 — `stack import` of a checkpoint under the wrong passphrase, CLI 3.259.0',
+    operation: 'import',
+    message: commandError(
+      'stack import --file /tmp/automation-237261 --stack exp1 --non-interactive',
+      `error: could not deserialize deployment: ${INCORRECT_PASSPHRASE}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
+    // PLAN.md M2, recaptured in full: a deployment exported with its secrets
+    // in plaintext under one passphrase, imported under another. Pulumi
+    // refuses while re-encrypting them, before the upload.
+    id: 'passphrase-incorrect-on-import-encrypt',
+    incident:
+      '2026-11-11 — M2, `stack import` of a plaintext-secrets export under another passphrase, CLI 3.259.0',
+    operation: 'import',
+    message: commandError(
+      'stack import --file /tmp/automation-799510 --stack exp2 --non-interactive',
+      `error: constructing deployment for upload: ${INCORRECT_PASSPHRASE_ON_ENCRYPT}`,
+    ),
+    expect: { cause: 'passphrase', phase: 'pre-mutation', recovery: 'fail' },
+  },
+  {
     id: 'passphrase-unset-on-outputs',
     incident: '2026-11-11 — `stack output` with no passphrase variable at all, CLI 3.259.0',
     operation: 'outputs',
@@ -402,6 +432,42 @@ export const STATE_ERROR_NEGATIVES: StateErrorCase[] = [
       "error: no stack named 'e1' found",
     ].join('\n'),
     expect: { cause: 'stack-file-missing', phase: 'unknown', recovery: 'fail' },
+  },
+  // Near misses for the passphrase rule: the word "passphrase" in a failure
+  // that is not the state's secrets manager refusing a key. Each keeps the
+  // class it would have without the word.
+  {
+    id: 'passphrase-named-config-key-is-not-the-state',
+    incident: 'Near miss: a missing config value whose key is named for a passphrase',
+    operation: 'up',
+    message: envelope(
+      'up',
+      '--stack e1 --non-interactive',
+      "error: Missing required configuration variable 'proj:dbPassphrase'\n    please set a value using the command `pulumi config set --secret proj:dbPassphrase <value>`",
+    ),
+    expect: { cause: 'unknown', phase: 'unknown', recovery: 'fail' },
+  },
+  {
+    id: 'ssh-key-passphrase-is-not-the-state',
+    incident: 'Near miss: a provider refusing a passphrase-protected SSH private key',
+    operation: 'up',
+    message: envelope(
+      'up',
+      '--stack e1 --non-interactive',
+      'error: ssh: this private key is passphrase protected; incorrect passphrase supplied to decrypt private key',
+    ),
+    expect: { cause: 'unknown', phase: 'unknown', recovery: 'fail' },
+  },
+  {
+    id: 'destroy-lock-blob-404-in-a-passphrase-named-project',
+    incident: 'Near miss: a destroy lock-blob 404 under a project named for a passphrase',
+    operation: 'destroy',
+    message: envelope(
+      'destroy',
+      '--stack e1 --non-interactive',
+      'error: blob (key ".pulumi/locks/organization/passphrase-must-be-set/e1/9bba65d9.json") (code=NotFound): NoSuchKey: status code: 404',
+    ),
+    expect: { cause: 'lock-blob-missing', phase: 'pre-mutation', recovery: 'fail' },
   },
   {
     id: 'ordinary-provider-error',

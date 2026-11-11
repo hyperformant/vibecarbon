@@ -157,14 +157,16 @@ const STACK_FILE_MISSING_PATTERN = /no stack named/i;
 // only top-level CLI errors start flush left.
 export const HISTORY_WRITE_PATTERN = /^error:\s*saving update info:[^\n]*\.pulumi\/history\//im;
 
-// Pulumi's passphrase secrets manager, in both of its refusals: a passphrase
-// that does not decrypt the state's salt, and no passphrase variable at all.
+// Pulumi's passphrase secrets manager, in each of its refusals: a passphrase
+// that does not match the state's salt (on decrypt, or on encrypt when a
+// `stack import` writes secrets back), and no passphrase variable at all.
 // Matched on Pulumi's own wording, which each verb wraps in its own prefix
-// (`getting snapshot:`, `could not deserialize deployment:`, `getting stack
-// configuration: get stack secrets manager:`); the corpus holds every
-// spelling captured on CLI 3.259.0 (2026-11-11).
+// (`getting snapshot:`, `could not deserialize deployment:`, `constructing
+// deployment for upload:`, `getting stack configuration: get stack secrets
+// manager:`); the corpus holds every spelling captured on CLI 3.259.0
+// (2026-11-11).
 const PASSPHRASE_PATTERN =
-  /failed to decrypt: incorrect passphrase|passphrase must be set with PULUMI_CONFIG_PASSPHRASE/i;
+  /failed to (?:de|en)crypt: incorrect passphrase|passphrase must be set with PULUMI_CONFIG_PASSPHRASE/i;
 
 /**
  * The same root cause reaching us as a panic instead of an error: pulumi's DIY
@@ -236,8 +238,8 @@ export function classifyStateError({ message } = {}) {
   // wording elsewhere in the same output can claim it: the same key gives
   // the same answer on every attempt. Pre-mutation: Pulumi builds the
   // secrets manager and decrypts the snapshot before the engine runs, and
-  // the 2026-11-11 captures (outputs, export, refresh, up, preview and
-  // destroy on CLI 3.259.0) left the checkpoint byte-identical. The
+  // every 2026-11-11 capture in the corpus (outputs, export, refresh, up,
+  // destroy and import on CLI 3.259.0) left the checkpoint byte-identical. The
   // post-update `stack output` read cannot reach it either: it runs with the
   // passphrase the update itself just decrypted with.
   if (PASSPHRASE_PATTERN.test(msg)) {

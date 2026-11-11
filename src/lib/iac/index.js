@@ -903,6 +903,21 @@ function flattenOutputs(rawOutputs) {
 }
 
 /**
+ * The error destroyStack throws for a passphrase refusal, after logging
+ * Pulumi's own one-line text once. The typed error is what the operator
+ * acts on; the raw line is what shows a misclassified failure for what it
+ * was. Pulumi's output never carries the passphrase (it travels in the
+ * workspace environment, never in argv).
+ * @param {unknown} err
+ * @param {string} stackName
+ * @param {string} step
+ */
+function passphraseRefusal(err, stackName, step) {
+  progressLog(`[pulumi] ${step} refused the state passphrase: ${summarizePulumiError(err)}`);
+  return asStateUndecryptableError(err, stackName);
+}
+
+/**
  * Run `pulumi destroy` and remove the stack. Idempotent — if the stack
  * doesn't exist the function resolves without error.
  *
@@ -986,7 +1001,8 @@ export async function destroyStack(stackName, program, options = {}) {
     // A passphrase that cannot open the state refuses every later step the
     // same way (exportStack, destroy, the read-back of what is left), so stop
     // here with the error that says what still works. The stack record stays.
-    if (isStatePassphraseFailure(err)) throw asStateUndecryptableError(err, stackName);
+    if (isStatePassphraseFailure(err))
+      throw passphraseRefusal(err, stackName, 'pre-destroy refresh');
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
   // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
@@ -1022,7 +1038,7 @@ export async function destroyStack(stackName, program, options = {}) {
     );
   } catch (err) {
     if (err instanceof StackHeldError) throw err;
-    if (isStatePassphraseFailure(err)) throw asStateUndecryptableError(err, stackName);
+    if (isStatePassphraseFailure(err)) throw passphraseRefusal(err, stackName, 'destroy');
     throw await describeDestroyFailure(stack, stackName, err);
   }
 
