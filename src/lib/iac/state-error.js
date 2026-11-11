@@ -389,6 +389,24 @@ export function isStatePassphraseFailure(err) {
 }
 
 /**
+ * The StatePassphraseError (state-passphrase.js: missing, mismatched or
+ * invalid, refused before Pulumi runs) anywhere in `err`'s cause chain, or
+ * null. Matched by name, like isStatePassphraseFailure, so a wrapper cannot
+ * hide that the value may come back.
+ *
+ * @param {unknown} err
+ * @returns {{ name: string, reason?: string, source?: string, message: string } | null}
+ */
+export function findStatePassphraseError(err) {
+  const seen = new Set();
+  for (let e = err; e != null && typeof e === 'object' && !seen.has(e); e = e.cause) {
+    seen.add(e);
+    if (e.name === 'StatePassphraseError') return e;
+  }
+  return null;
+}
+
+/**
  * The error to surface for a failure on `stackName`: a StateUndecryptableError
  * when it is a raw Pulumi passphrase refusal, else the failure itself (an
  * already-typed passphrase error included).

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   asStateUndecryptableError,
   classifyStateError,
+  findStatePassphraseError,
   isStatePassphraseFailure,
   StateUndecryptableError,
 } from '../../../src/lib/iac/state-error.js';
@@ -241,5 +242,34 @@ describe('StateUndecryptableError', () => {
     expect(asStateUndecryptableError(typed, 'e2')).toBe(typed);
     const other = new Error("error: no stack named 'e1' found");
     expect(asStateUndecryptableError(other, 'e1')).toBe(other);
+  });
+});
+
+describe('findStatePassphraseError', () => {
+  const precheck = () =>
+    new StatePassphraseError('missing', "This project's state passphrase isn't set.");
+
+  it('finds the precheck error at the top or anywhere down the cause chain', () => {
+    const top = precheck();
+    expect(findStatePassphraseError(top)).toBe(top);
+    const deep = precheck();
+    const wrapped = new Error('outer', { cause: new Error('middle', { cause: deep }) });
+    expect(findStatePassphraseError(wrapped)).toBe(deep);
+  });
+
+  it("is null for Pulumi's own refusal, plain errors and non-errors", () => {
+    expect(
+      findStatePassphraseError(new StateUndecryptableError('e1', { cause: new Error('x') })),
+    ).toBeNull();
+    expect(findStatePassphraseError(new Error('boom'))).toBeNull();
+    expect(findStatePassphraseError(undefined)).toBeNull();
+    expect(findStatePassphraseError('StatePassphraseError')).toBeNull();
+  });
+
+  it('stops on a cause cycle', () => {
+    const a: Error & { cause?: unknown } = new Error('a');
+    const b = new Error('b', { cause: a });
+    a.cause = b;
+    expect(findStatePassphraseError(a)).toBeNull();
   });
 });

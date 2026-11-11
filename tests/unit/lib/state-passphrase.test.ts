@@ -27,6 +27,7 @@ import {
   STATE_PASSPHRASE_KEY,
   StatePassphraseError,
   statePassphraseFingerprint,
+  statePassphraseGeneratedThisRun,
 } from '../../../src/lib/state-passphrase.js';
 
 const KEY = 'VIBECARBON_STATE_PASSPHRASE';
@@ -119,7 +120,7 @@ describe('state passphrase', () => {
       "If it's lost for good, delete the `stateEncryption` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one.",
     );
     expect(err.message).toContain(
-      "Then run `vibecarbon destroy` and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.",
+      "Then run `vibecarbon destroy` (once more if it asks) and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.",
     );
     expect(err.message).not.toContain('—');
   });
@@ -197,6 +198,42 @@ describe('state passphrase', () => {
     expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(`${KEY}=${winner}\n`);
     expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(winner));
     expect(p.log.info).not.toHaveBeenCalled();
+    // It adopted the winner's passphrase: this process made none.
+    expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+  });
+
+  describe('statePassphraseGeneratedThisRun', () => {
+    it('is true once this process made the passphrase, for that project only', async () => {
+      expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+      await ensureStatePassphrase(dir);
+      expect(statePassphraseGeneratedThisRun(dir)).toBe(true);
+      // The same project named another way is still the same project.
+      expect(statePassphraseGeneratedThisRun(join(dir, '.'))).toBe(true);
+      const other = mkdtempSync(join(tmpdir(), 'vc-state-pass-'));
+      try {
+        expect(statePassphraseGeneratedThisRun(other)).toBe(false);
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
+
+    it('is false when the value already existed, with or without its fingerprint', async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      await ensureStatePassphrase(dir); // case 2: records the fingerprint
+      expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+      __resetStatePassphraseForTests();
+      await ensureStatePassphrase(dir); // case 1
+      expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+    });
+
+    it('is false in the next process, which reads the saved value back', async () => {
+      await ensureStatePassphrase(dir);
+      __resetStatePassphraseForTests();
+      expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+      await ensureStatePassphrase(dir);
+      expect(statePassphraseGeneratedThisRun(dir)).toBe(false);
+    });
   });
 
   it('separate processes racing on one project end with one value and one fingerprint', async () => {

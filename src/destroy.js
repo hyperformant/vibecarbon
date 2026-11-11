@@ -67,7 +67,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
-import { isStatePassphraseFailure } from './lib/iac/state-error.js';
+import { findStatePassphraseError, isStatePassphraseFailure } from './lib/iac/state-error.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
@@ -83,7 +83,11 @@ import {
 import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
 import { sshKeyPathFor } from './lib/ssh.js';
-import { findStatePassphraseProblem, STATE_PASSPHRASE_KEY } from './lib/state-passphrase.js';
+import {
+  findStatePassphraseProblem,
+  STATE_PASSPHRASE_KEY,
+  statePassphraseGeneratedThisRun,
+} from './lib/state-passphrase.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';
@@ -3196,13 +3200,14 @@ export function recordPulumiDestroyFailure({
 
 /**
  * Why this project's passphrase cannot open a stack's state, as a short
- * clause. A StatePassphraseError (refused before Pulumi ran) names its own
- * reason; anything else is Pulumi refusing the passphrase it was given.
+ * clause. A StatePassphraseError (refused before Pulumi ran) anywhere in the
+ * cause chain names its own reason; anything else is Pulumi refusing the
+ * passphrase it was given.
  * @param {unknown} error
  * @returns {string}
  */
 export function unreadableStateReason(error) {
-  switch (/** @type {{ name?: string, reason?: string }} */ (error)?.reason) {
+  switch (findStatePassphraseError(error)?.reason) {
     case 'missing':
       return `${STATE_PASSPHRASE_KEY} isn't set`;
     case 'mismatch':
@@ -3230,22 +3235,59 @@ export function passphraseRecoveryHint(error, environment) {
   const again = `run \`vibecarbon destroy ${environment}\` again`;
   const then = `then ${again}: Pulumi then removes whatever is left of this stack`;
   const inShell = error?.source === 'shell';
+  const entry = 'the `stateEncryption` entry from .vibecarbon.json';
+  // What to clear when the right value is gone for good. A value still in
+  // the shell would be adopted as this project's passphrase by the next run
+  // (and lives nowhere else), and a weak one is refused whatever is recorded,
+  // so those go too, from where they live.
+  const unsetShell = `unset ${STATE_PASSPHRASE_KEY} in your shell and delete ${entry}`;
   let fix;
-  let lost = 'the `stateEncryption` entry from .vibecarbon.json';
+  let lost = `delete ${entry}`;
   if (error?.reason === 'mismatch') {
     fix = inShell
       ? `The ${STATE_PASSPHRASE_KEY} in your shell environment wins over .env.local and isn't this project's. Unset it so vibecarbon reads .env.local, or set it to this project's value, ${then}.`
       : `The ${STATE_PASSPHRASE_KEY} in .env.local isn't this project's. Replace it with the value you saved for this project, ${then}.`;
+    if (inShell) lost = unsetShell;
   } else if (error?.reason === 'invalid') {
     fix = inShell
       ? `The ${STATE_PASSPHRASE_KEY} in your shell environment is too weak to be this project's. Unset it so vibecarbon reads .env.local, or set it to the value you saved for this project, ${then}.`
       : `The ${STATE_PASSPHRASE_KEY} in .env.local is too weak to be this project's. Replace it with the value you saved for this project, ${then}.`;
-    // vibecarbon refuses a weak value whatever is recorded, so it goes too.
-    lost = `that value and ${lost}`;
+    lost = inShell
+      ? unsetShell
+      : `delete the ${STATE_PASSPHRASE_KEY} line from .env.local and ${entry}`;
   } else {
     fix = `Copy this project's ${STATE_PASSPHRASE_KEY} into .env.local from where you saved it, ${then}.`;
   }
-  return `${fix} If it's lost for good, delete ${lost}, then ${again}: this state can't be read without it, so destroy removes the record, and this project gets a new passphrase.`;
+  return `${fix} If it's lost for good, ${lost}, then ${again}, and once more if it asks: this state can't be read without the old passphrase, so destroy removes the record.`;
+}
+
+/**
+ * What to do when Pulumi refused a passphrase this run made (ensure found
+ * neither a value nor a fingerprint): the project's real passphrase most
+ * likely exists, just not in this clone.
+ *
+ * Exported for unit testing.
+ *
+ * @param {string} environment
+ * @returns {string}
+ */
+export function passphraseMadeThisRunHint(environment) {
+  const again = `run \`vibecarbon destroy ${environment}\` again`;
+  return (
+    "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read this state. " +
+    `If the project has one, pull the latest .vibecarbon.json (dropping the \`stateEncryption\` entry this run wrote) and copy the project's ${STATE_PASSPHRASE_KEY} into .env.local in place of the new one, then ${again}. ` +
+    `If it's lost for good, ${again} as it is: that run removes the record.`
+  );
+}
+
+/**
+ * The sentence for a record left alone because the environment's
+ * object-storage credentials did not resolve.
+ * @param {string} environment
+ * @returns {string}
+ */
+function stateCredentialsHint(environment) {
+  return `This environment's object-storage credentials couldn't be resolved, so the record was left where it is; have them available when you run \`vibecarbon destroy ${environment}\` again.`;
 }
 
 /**
@@ -3277,15 +3319,20 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  *       value this project has can read that state, so no destroy will ever
  *       reach what it lists. Removed on every provider, so the next deploy
  *       starts clean; what the sweeps could not cover is reported.
- *   (b) Refused before Pulumi ran (StatePassphraseError: missing, mismatched
- *       or invalid): the right value may come back, and the record is what
- *       Pulumi would then destroy. Removed only when a K8S_DESTROY_BACKSTOP
- *       provider's by-name sweeps cover the stack and the ledger is clean;
- *       otherwise kept, with how to put the value back.
+ *   (b) Refused before Pulumi ran (a StatePassphraseError anywhere in the
+ *       cause chain: missing, mismatched or invalid), or refused by Pulumi
+ *       when this run made the passphrase (statePassphraseGeneratedThisRun:
+ *       the clone had neither the value nor its fingerprint, so the real one
+ *       likely exists elsewhere). The right value may come back, and the
+ *       record is what Pulumi would then destroy. Removed only when a
+ *       K8S_DESTROY_BACKSTOP provider's by-name sweeps cover the stack and
+ *       the ledger is clean; otherwise kept, with how to get the value back.
  *
- * A removed record leaves `pulumiDestroyFailed` alone, so the environment
- * entry goes as on any destroy; a kept one sets it, so the entry stays for
- * the retry. Leftovers stay in the ledger either way, so the exit code says
+ * The environment entry stays (`pulumiDestroyFailed`) whenever the record is
+ * kept, and under (a) whenever the sweeps left anything: they alone removed
+ * the servers, and a destroy retry re-runs them (it finds no record, which
+ * destroyStack answers with `{destroyed: false}`). Otherwise it goes as on
+ * any destroy. Leftovers stay in the ledger either way, so the exit code says
  * something was left whenever it was.
  *
  * Exported for unit testing.
@@ -3300,6 +3347,7 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  * @param {boolean} params.backendResolved - false when the environment has an S3
  *   backend whose credentials could not be resolved: a removal would reach the
  *   local fallback backend and miss the real stack.
+ * @param {boolean} params.passphraseMadeThisRun - statePassphraseGeneratedThisRun.
  * @param {(stackEnv: string) => Promise<unknown>} params.removeRecord
  * @param {{ start: Function, stop: Function }} params.s
  */
@@ -3311,6 +3359,7 @@ export async function settleUnreadableStacks({
   providerName,
   backstop,
   backendResolved,
+  passphraseMadeThisRun,
   removeRecord,
   s,
 }) {
@@ -3320,17 +3369,22 @@ export async function settleUnreadableStacks({
   const sweptClean = counts.leak + counts.unverified === 0;
   for (const { stackEnv, dirLabel, error } of stacks) {
     const resource = `${stackEnv}${dirLabel}`;
-    const why = unreadableStateReason(error);
-    const precheck = /** @type {{ name?: string }} */ (error)?.name === 'StatePassphraseError';
-    if (!backendResolved || (precheck && !(backstop && sweptClean))) {
+    const precheck = findStatePassphraseError(error);
+    const madeNow = !precheck && passphraseMadeThisRun === true;
+    const why = madeNow
+      ? "the passphrase this run made doesn't decrypt it"
+      : unreadableStateReason(error);
+    if (!backendResolved || ((precheck || madeNow) && !(backstop && sweptClean))) {
       results.pulumiDestroyFailed = true;
+      const hints = [];
+      if (precheck) hints.push(passphraseRecoveryHint(precheck, environment));
+      else if (madeNow) hints.push(passphraseMadeThisRunHint(environment));
+      if (!backendResolved) hints.push(stateCredentialsHint(environment));
       results.leaks.unverified({
         resourceClass: 'pulumi-stack',
         resource,
         reason: `its Pulumi state can't be read (${why}), so \`pulumi destroy\` did not run and its stack record was kept; the ${providerName} API sweeps ran in its place`,
-        hint: precheck
-          ? passphraseRecoveryHint(error, environment)
-          : `Run \`vibecarbon destroy ${environment}\` again with object-storage credentials available: it removes the record without reading it.`,
+        hint: hints.join(' '),
       });
       continue;
     }
@@ -3349,8 +3403,13 @@ export async function settleUnreadableStacks({
       continue;
     }
     s.stop(`Pulumi stack record removed: ${stackEnv}`);
-    // The by-name sweeps cover everything this provider's k8s program makes,
-    // and they left nothing behind.
+    // Under (a) the sweeps alone removed the servers: when they left
+    // anything, keep the environment entry so a destroy retry re-runs them.
+    if (!sweptClean) results.pulumiDestroyFailed = true;
+    // The label and by-name sweeps cover what this provider's k8s program
+    // makes that bills or blocks a redeploy (DigitalOcean's Tag does neither:
+    // it is free and creating it again is a no-op, so nothing sweeps it), and
+    // they left nothing behind.
     if (backstop && sweptClean) continue;
     results.leaks.unverified({
       resourceClass: 'pulumi-stack',
@@ -4643,6 +4702,8 @@ async function destroyK8sTier({
         providerName: Provider.NAME,
         backstop,
         backendResolved: !(envConfig.s3 && !destroyS3Config),
+        // The project dir getOrCreateStack checked the passphrase in.
+        passphraseMadeThisRun: statePassphraseGeneratedThisRun(process.cwd()),
         removeRecord: (stackEnv) =>
           removeStackState(stackEnv, {
             projectName: projectConfig.projectName,

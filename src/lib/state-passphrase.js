@@ -24,9 +24,26 @@ export const STATE_PASSPHRASE_KEY = 'VIBECARBON_STATE_PASSPHRASE';
 /** Per-process memo of verified passphrases, keyed by absolute project dir. */
 const verified = new Map();
 
+/** Project dirs whose passphrase this process generated (case 5). */
+const generatedHere = new Set();
+
 /** Test-only: forget which projects were already verified this process. */
 export function __resetStatePassphraseForTests() {
   verified.clear();
+  generatedHere.clear();
+}
+
+/**
+ * Whether this process generated the project's passphrase: it found neither
+ * a value nor a recorded fingerprint, and made both. A state Pulumi then
+ * refuses was written by a passphrase this clone never had (a teammate's,
+ * from a .vibecarbon.json not yet pulled), not by one that is lost, which
+ * is why destroy keeps that stack's record.
+ * @param {string} projectDir
+ * @returns {boolean}
+ */
+export function statePassphraseGeneratedThisRun(projectDir) {
+  return generatedHere.has(resolve(projectDir));
 }
 
 export class StatePassphraseError extends Error {
@@ -102,7 +119,7 @@ function invalidError(from) {
 function missingError(expected) {
   return new StatePassphraseError(
     'missing',
-    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again. If it's lost for good, delete the \`stateEncryption\` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one. Then run \`vibecarbon destroy\` and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.`,
+    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again. If it's lost for good, delete the \`stateEncryption\` entry from .vibecarbon.json and vibecarbon makes a new passphrase the next time it needs one. Then run \`vibecarbon destroy\` (once more if it asks) and deploy again for each environment you deployed with the old one: its state can't be read any more, so destroy removes the record.`,
   );
 }
 
@@ -228,6 +245,7 @@ export async function ensureStatePassphrase(projectDir) {
   if (!generated) return ensureStatePassphrase(dir);
 
   process.env[STATE_PASSPHRASE_KEY] = fresh;
+  generatedHere.add(dir);
   p.log.info(
     `Made a state passphrase for this project and saved it to .env.local as ${STATE_PASSPHRASE_KEY}. Commit .vibecarbon.json (it records only the passphrase's fingerprint) and keep a copy of the passphrase in your password manager.`,
   );
