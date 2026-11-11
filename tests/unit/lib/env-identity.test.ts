@@ -178,6 +178,24 @@ describe('resolveEnvSeed (deploy-side read)', () => {
     expect(r.envConfig).toEqual({ s3: { bucket: 'proj-abc-staging', region: 'fsn1' } });
   });
 
+  it('a record the app key fence marked not found: the seed keeps the bucket name, never the mark', async () => {
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            s3: { bucket: 'proj-abc-staging', region: 'fsn1' },
+            appBucketNotFound: '2026-11-10T00:00:00.000Z',
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ s3: { bucket: 'proj-abc-staging', region: 'fsn1' } });
+  });
+
   it('a plain destroy kept the backups: the seed keeps their record', async () => {
     const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
     const r = resolveEnvSeed(

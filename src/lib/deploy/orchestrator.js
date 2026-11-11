@@ -361,11 +361,11 @@ function sameOrigins(a, b) {
  * @returns {{
  *   done: Promise<void>,
  *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null,
- *     fenceSkipped?: string[], fenceGone?: string[] }>,
+ *     fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[] }>,
  * }}
  *   `bucketCreatedAt` (ISO string, or null when unknown) is present only on a
- *   provider that fences a pasted app key. `fenceSkipped` and `fenceGone` are
- *   present only when the fence ran, for recordFenceOutcome.
+ *   provider that fences a pasted app key. `fenceSkipped`, `fenceGone` and
+ *   `fenceFound` are present only when the fence ran, for recordFenceOutcome.
  */
 export function startAppBucketFinalize({
   providerId,
@@ -427,9 +427,13 @@ export function startAppBucketFinalize({
       }
       for (const line of fenceInfoLines(fence)) log.info(line);
       // Present only when the fence ran, so the caller can persist (or clear)
-      // the unfenced marker status shows.
+      // the unfenced marker status shows and the not-found marks.
       const fenceOut = fence
-        ? { fenceSkipped: fence.skipped ?? [], fenceGone: fence.gone ?? [] }
+        ? {
+            fenceSkipped: fence.skipped ?? [],
+            fenceGone: fence.gone ?? [],
+            fenceFound: (fence.found ?? []).map((f) => f.bucket),
+          }
         : {};
       const { recorded, createdAt, warning } = await fenceRecord;
       if (warning) log.warn(warning);
@@ -2966,8 +2970,9 @@ export async function executeDeployment(args, gatheredConfig) {
   // A fence target the sync skipped (an absent bucket of an env that never
   // finished a deploy) is marked on that env, for `status`; a sync that
   // fenced everything clears the marks. A destroyed environment's app bucket
-  // no region has is marked deleted, so its line prints once
-  // (recordFenceOutcome).
+  // no region has is marked not found, so its line prints once, and the mark
+  // is cleared when the fence reads the bucket again (recordFenceOutcome).
+  // The fence keeps looking for it either way.
   if (appBucketFinal.fenceSkipped) {
     updateProjectConfig((onDisk) => {
       recordFenceOutcome(onDisk, appBucketFinal);

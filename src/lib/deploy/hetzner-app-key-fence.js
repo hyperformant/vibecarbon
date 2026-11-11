@@ -119,8 +119,13 @@ function pastedKeys(projectConfig) {
  *     storage step just made or found it where its record says. It is never
  *     looked for elsewhere: HEADs on a bucket made moments ago can start
  *     Hetzner's NoSuchBucket window.
+ *   - `notFoundMarks`: how many of the destroyed records that name it as
+ *     their app bucket carry `appBucketNotFound` (an earlier run found it in
+ *     no region): `all`, `some` or `none`. The mark never takes a bucket out
+ *     of the targets; it only quiets the report while the bucket stays gone.
  * @typedef {{ bucket: string, region: string|null, deniedAccessKeyIds: string[],
  *   mayBeAbsent: boolean, live: boolean, deploying: boolean,
+ *   notFoundMarks: 'all' | 'some' | 'none',
  *   regionFrom: { env: string, live: boolean, recorded: boolean,
  *     redeploy: string|null } | null }} FenceTarget
  */
@@ -134,11 +139,16 @@ function pastedKeys(projectConfig) {
  *     environment's, one a destroyed environment kept for recovery, and the
  *     base bucket an older CLI's environment archives into with no record;
  *   - every app bucket a destroyed environment's record names, unless that
- *     destroy's -purge deleted it (`appBucketPurged`). A plain destroy keeps
- *     it with its uploads, and -purge keeps a pinned or shared one. A record
- *     from before the mark reads as kept; one found in no region is passed
- *     over and reported (applyHetznerFences' `gone`), and the caller's save
- *     marks it (markGoneAppBuckets), so that happens once.
+ *     destroy's -purge confirmed it deleted it (`appBucketPurged`, written
+ *     nowhere else). A plain destroy keeps it with its uploads, and -purge
+ *     keeps a pinned or shared one, or an emptied shell it could not delete
+ *     yet. A record from before the mark reads as kept. One found in no
+ *     region is passed over and reported (applyHetznerFences' `gone`), and
+ *     the caller's save marks the record `appBucketNotFound`
+ *     (markAppBucketsNotFound). A marked record stays a target: every
+ *     fenced run looks for its bucket again, quietly while no region has
+ *     it, and fences it wherever it turns up (`found`, which clears the
+ *     mark). A missed region or a wrong NoSuchBucket never ends its fence.
  * Every RETIRED pasted key (`projectConfig.retiredAppKeys`: replaced, or its
  * env destroyed) is denied everywhere: the CLI cannot revoke a pasted key,
  * so it stays fenced until the operator deletes it in the console and
@@ -177,13 +187,16 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
   /**
    * @type {Map<string, { owner: string|null, completed: boolean, live: boolean,
    *   deploying: boolean, user: string|null, region: string|null, recorded: boolean,
-   *   env: string, envLive: boolean }>}
+   *   env: string, envLive: boolean, destroyedApp: number, notFound: number }>}
    */
   const buckets = new Map();
   /**
+   * `notFound` is set only for a destroyed record's app bucket: whether that
+   * record carries `appBucketNotFound`.
    * @param {string} bucket
    * @param {{ owner: string|null, done: boolean, live: boolean,
-   *   region: string|null|undefined, recorded: boolean, env: string }} seen
+   *   region: string|null|undefined, recorded: boolean, env: string,
+   *   notFound?: boolean }} seen
    */
   const note = (bucket, seen) => {
     const prev = buckets.get(bucket);
@@ -199,6 +212,8 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
       recorded: takes ? seen.recorded : (prev?.recorded ?? false),
       env: from ? seen.env : prev.env,
       envLive: from ? seen.live : prev.envLive,
+      destroyedApp: (prev?.destroyedApp ?? 0) + (seen.notFound === undefined ? 0 : 1),
+      notFound: (prev?.notFound ?? 0) + (seen.notFound ? 1 : 0),
     });
   };
   for (const [name, e] of envs) {
@@ -250,6 +265,7 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
       region: entry.s3.region,
       recorded: true,
       env: name,
+      notFound: Boolean(entry.appBucketNotFound),
     });
   }
   return [...buckets.entries()]
@@ -262,6 +278,9 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
       mayBeAbsent: !b.completed,
       live: b.live,
       deploying: b.deploying,
+      notFoundMarks: /** @type {'all'|'some'|'none'} */ (
+        b.notFound === 0 ? 'none' : b.notFound === b.destroyedApp ? 'all' : 'some'
+      ),
       regionFrom: {
         env: b.env,
         live: b.envLive,
@@ -400,11 +419,15 @@ function noSuchBucketError({ bucket, err, asked, target, how }) {
 
 /**
  * The lines a deploy or destroy prints about what the fence found: a bucket
- * fenced in another region than its record gives (`located`), and a bucket
- * only destroyed environments named that no region has any more (`gone`).
- * Never silent: a wrong record and a vanished bucket are both worth knowing.
+ * fenced in another region than its record gives (`located`), a bucket only
+ * destroyed environments named that no region has any more (`gone`), and a
+ * bucket an earlier run found in no region that is back where its record
+ * says (`found`; one back elsewhere already has its `located` line). Never
+ * silent: a wrong record, a vanished bucket and a returned one are all worth
+ * knowing. A bucket still gone after an earlier run said so is not repeated.
  * @param {{ located?: { bucket: string, region: string, onRecord: string|null,
- *   regionFrom?: FenceTarget['regionFrom'] }[], gone?: string[] } | null | undefined} out
+ *   regionFrom?: FenceTarget['regionFrom'] }[], gone?: string[],
+ *   found?: { bucket: string, region: string|null }[] } | null | undefined} out
  * @returns {string[]}
  */
 export function fenceInfoLines(out) {
@@ -422,6 +445,13 @@ export function fenceInfoLines(out) {
   for (const bucket of out?.gone ?? []) {
     lines.push(
       `app key fence: nothing to fence on ${bucket}: only a destroyed environment's record names it, and no region has it now`,
+    );
+  }
+  for (const { bucket, region } of out?.found ?? []) {
+    if ((out?.located ?? []).some((l) => l.bucket === bucket)) continue;
+    const where = region ? ` in ${region}` : '';
+    lines.push(
+      `app key fence: ${bucket} is back${where}, though an earlier run found it in no region; fenced it there`,
     );
   }
   return lines;
@@ -453,8 +483,13 @@ export function fenceInfoLines(out) {
  * the run fails. In no region: passed over only when `mayBeAbsent` (no live
  * env that uses it finished a deploy into it), as `skipped` when a live env
  * names it (the deploy warns, status marks it) or `gone` when only destroyed
- * envs do (nothing is left to fence; fenceInfoLines prints it). Otherwise
- * the run fails, naming the region asked and whose record gave it.
+ * envs do (nothing is left to fence; fenceInfoLines prints it). A bucket
+ * every naming record already marks `appBucketNotFound` is passed over
+ * quietly instead, in no list: an earlier run reported it, and its save
+ * marked it. Otherwise the run fails, naming the region asked and whose
+ * record gave it. A bucket some record marks not found that this run reads,
+ * where its record says or where it was located, is fenced as usual and
+ * reported in `found`, so the caller's save clears the marks.
  *
  * Every call for a target, its policy read and write and each probe, goes
  * to the target's `region` (`forRegion` on the client and on each probe),
@@ -472,8 +507,10 @@ export function fenceInfoLines(out) {
  * @param {() => number} [args.now]
  * @returns {Promise<{ written: string[], removed: string[], unverified: string[],
  *   skipped: string[], gone: string[], located: { bucket: string, region: string,
- *   onRecord: string|null, regionFrom: FenceTarget['regionFrom'] }[] }>}
+ *   onRecord: string|null, regionFrom: FenceTarget['regionFrom'] }[],
+ *   found: { bucket: string, region: string|null }[] }>}
  *   `located[].onRecord` is the target's region (null when no record names one).
+ *   `found[].region` is where it was read.
  */
 export async function applyHetznerFences({
   s3,
@@ -489,11 +526,18 @@ export async function applyHetznerFences({
   const skipped = [];
   const gone = [];
   const located = [];
+  const found = [];
   // Every write lands first; the verifications then run side by side, since
   // each waits on its own bucket's consistency.
   const verifications = [];
   for (const target of targets) {
-    const { bucket, deniedAccessKeyIds, mayBeAbsent = false, live = true } = target;
+    const {
+      bucket,
+      deniedAccessKeyIds,
+      mayBeAbsent = false,
+      live = true,
+      notFoundMarks = 'none',
+    } = target;
     let region = target.region;
     let store = atRegion(s3, region);
     let current;
@@ -505,18 +549,20 @@ export async function applyHetznerFences({
       const fail = (how) => noSuchBucketError({ bucket, err, asked, target, how });
       if (target.deploying) throw fail('deploying');
       if (typeof store.locateBucket !== 'function') throw fail('unlocatable');
-      const found = await store.locateBucket(bucket);
-      if (found === null) {
+      const at = await store.locateBucket(bucket);
+      if (at === null) {
         if (!mayBeAbsent) throw fail('nowhere');
-        (live ? skipped : gone).push(bucket);
+        if (live) skipped.push(bucket);
+        // Still gone, and already reported and marked by an earlier run.
+        else if (notFoundMarks !== 'all') gone.push(bucket);
         continue;
       }
-      if (found === asked) throw fail('two-ways');
-      region = found;
-      store = atRegion(s3, found);
+      if (at === asked) throw fail('two-ways');
+      region = at;
+      store = atRegion(s3, at);
       located.push({
         bucket,
-        region: found,
+        region: at,
         onRecord: target.region ?? null,
         regionFrom: target.regionFrom ?? null,
       });
@@ -524,9 +570,12 @@ export async function applyHetznerFences({
         current = await store.getBucketPolicy(bucket);
       } catch (again) {
         if (!isNoSuchBucket(again)) throw again;
-        throw noSuchBucketError({ bucket, err: again, asked: found, target: {}, how: 'two-ways' });
+        throw noSuchBucketError({ bucket, err: again, asked: at, target: {}, how: 'two-ways' });
       }
     }
+    // Read where it is: an earlier run's "no region has it" was wrong or is
+    // over, and the save clears the mark.
+    if (notFoundMarks !== 'none') found.push({ bucket, region: region ?? store.region ?? null });
     const currentIds = current ? fencedIdsOf(current, bucket, ownerId) : [];
     if (currentIds === null) {
       throw new Error(
@@ -572,5 +621,5 @@ export async function applyHetznerFences({
   );
   if (failed.length === 1) throw failed[0].reason;
   if (failed.length > 1) throw new Error(failed.map((r) => r.reason.message).join('\n'));
-  return { written, removed, unverified, skipped, gone, located };
+  return { written, removed, unverified, skipped, gone, located, found };
 }

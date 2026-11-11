@@ -36,7 +36,7 @@ import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js'
 import {
   appStorageSecretKeys,
   localAppStorageSecrets,
-  markGoneAppBuckets,
+  markAppBucketsNotFound,
   revokeAppStorageCredential,
   syncHetznerFences,
 } from './lib/deploy/app-storage-credential.js';
@@ -1697,8 +1697,9 @@ async function deleteAppBucketEffect(ctx) {
         if (result.deleted) {
           results.s3Bucket = s3BucketName;
           // The destroyed record says so, and the app key fence never asks
-          // about this bucket again. "Not found" below does not count: the
-          // record's region may be wrong, so the fence still looks for it.
+          // about this bucket again. Only a delete confirmed here counts:
+          // "not found" may be a wrong region on record, and an emptied
+          // shell still exists, so the fence keeps both.
           results.appBucketPurged = true;
           spinner.stop(
             result.objectsRemoved > 0
@@ -1707,7 +1708,6 @@ async function deleteAppBucketEffect(ctx) {
           );
         } else if (result.shellDeferred) {
           results.s3Bucket = s3BucketName;
-          results.appBucketPurged = true;
           spinner.stop(
             `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
           );
@@ -1815,8 +1815,10 @@ async function revokeAppStorageKeyEffect(ctx) {
       });
       spinner.stop(`App storage key ${record.id} retired; it stays denied in every bucket fence`);
       for (const line of fenceInfoLines(fenced)) p.log.info(line);
-      // Marked in this destroy's config write, so the line prints once.
+      // Marked (or cleared) in this destroy's config write, so the line
+      // prints once.
       results.fenceGone = fenced.gone ?? [];
+      results.fenceFound = (fenced.found ?? []).map((f) => f.bucket);
     } else {
       spinner.stop(
         `App storage key ${record.id} retired; the bucket fences were not updated (no object storage keys here), and they still deny it`,
@@ -2227,8 +2229,13 @@ async function updateProjectConfigEffect(ctx) {
   updateProjectConfig((updatedConfig) => {
     writeProjectLevelFields(updatedConfig, results);
     // A destroyed environment's app bucket the fence found in no region is
-    // marked deleted, as -purge marks one it deletes (markGoneAppBuckets).
-    markGoneAppBuckets(updatedConfig, results.fenceGone ?? []);
+    // marked not found, and one it read again is cleared
+    // (markAppBucketsNotFound). Never appBucketPurged: that is only for a
+    // delete this destroy confirmed, below.
+    markAppBucketsNotFound(updatedConfig, {
+      gone: results.fenceGone ?? [],
+      found: results.fenceFound ?? [],
+    });
     if (updatedConfig.environments) {
       // Keep what the environment WAS (placement, domain, DNS, backup bucket,
       // sizing) under a sibling key `deploy` reads when this name is deployed
@@ -2247,8 +2254,8 @@ async function updateProjectConfigEffect(ctx) {
             // backup bucket (backupsHoldings), and a rebuild's seed carries
             // no backups record (resolveEnvSeed).
             ...(results.backupsPurged && { backupsPurged: true }),
-            // This env's app bucket is deleted (or emptied for the orphan
-            // sweep): nothing left there for the app key fence to guard.
+            // This env's app bucket is deleted, as this destroy's -purge
+            // confirmed: nothing left there for the app key fence to guard.
             ...(results.appBucketPurged && { appBucketPurged: true }),
             destroyedAt: new Date().toISOString(),
           },

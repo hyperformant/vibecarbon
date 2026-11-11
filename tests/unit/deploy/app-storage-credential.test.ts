@@ -400,7 +400,7 @@ describe('revoke on destroy', () => {
     }
   });
 
-  it('a destroy says when a bucket only a destroyed environment kept is in no region, and marks it so it says so once', async () => {
+  it('a destroy says when a bucket only a destroyed environment kept is in no region, and marks it not found (never purged) so it says so once', async () => {
     const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
     const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
     const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
@@ -455,12 +455,83 @@ describe('revoke on destroy', () => {
       expect(info).toHaveBeenCalledWith(
         "app key fence: nothing to fence on proj-abc-old: only a destroyed environment's record names it, and no region has it now",
       );
-      // The destroy's own config write marks it, as -purge marks a bucket it
-      // deletes, so the next fence never asks again.
+      // The destroy's own config write marks it not found, so the line is
+      // not repeated. Never purged: the fence keeps looking for it.
       await DESTROY_EFFECTS.updateProjectConfig(ctx);
       const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
-      expect(saved.destroyedEnvironments.old).toMatchObject({ appBucketPurged: true });
+      expect(saved.destroyedEnvironments.old.appBucketNotFound).toEqual(
+        expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+      );
+      expect(saved.destroyedEnvironments.old).not.toHaveProperty('appBucketPurged');
       expect(saved.environments).not.toHaveProperty('staging');
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a destroy that finds a bucket marked not found fences it and clears the mark', async () => {
+    const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const { HetznerS3Provider } = await import('../../../src/lib/providers/hetzner-s3.js');
+    const { S3CompatibleProvider } = await import('../../../src/lib/providers/s3-base.js');
+    const prompts = await import('@clack/prompts');
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
+      accessKey: 'SENTINEL_INFRA_AK',
+      secretKey: 'SENTINEL_INFRA_SK',
+    });
+    vi.spyOn(HetznerS3Provider.prototype, 'ownerId').mockResolvedValue('OWNER');
+    // It is back where its record says: readable, with no policy yet.
+    vi.spyOn(S3CompatibleProvider.prototype, 'getBucketPolicy').mockResolvedValue(null);
+    const put = vi
+      .spyOn(S3CompatibleProvider.prototype, 'putBucketPolicy')
+      .mockResolvedValue(undefined as never);
+    const info = vi.spyOn(prompts.log, 'info').mockImplementation(() => {});
+    vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-back-'));
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      const projectConfig = {
+        projectName: 'proj',
+        environments: {
+          staging: {
+            provider: 'hetzner',
+            s3: {
+              bucket: 'proj-abc-staging',
+              region: 'fsn1',
+              appKey: { id: 'AK_S', scoping: 'paste-fence', tier: 'fenced' },
+            },
+          },
+        },
+        destroyedEnvironments: {
+          old: {
+            s3: { bucket: 'proj-abc-old', region: 'fsn1' },
+            appBucketNotFound: '2026-11-10T00:00:00.000Z',
+            destroyedAt: 'x',
+          },
+        },
+      };
+      writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(projectConfig));
+      const ctx = {
+        envConfig: projectConfig.environments.staging,
+        projectConfig,
+        environment: 'staging',
+        args: {},
+        results: { leaks: createLeakLedger() } as Record<string, unknown>,
+        cwd: dir,
+        spinner: { start: vi.fn(), stop: vi.fn() },
+      };
+      await DESTROY_EFFECTS.revokeAppStorageKey(ctx);
+      expect(put).toHaveBeenCalledWith('proj-abc-old', expect.anything());
+      expect(info).toHaveBeenCalledWith(
+        'app key fence: proj-abc-old is back in fsn1, though an earlier run found it in no region; fenced it there',
+      );
+      await DESTROY_EFFECTS.updateProjectConfig(ctx);
+      const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
+      expect(saved.destroyedEnvironments.old).not.toHaveProperty('appBucketNotFound');
+      expect(saved.destroyedEnvironments.old).not.toHaveProperty('appBucketPurged');
     } finally {
       process.chdir(cwd);
       rmSync(dir, { recursive: true, force: true });

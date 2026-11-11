@@ -269,16 +269,16 @@ describe('the destroyed record says when -purge deleted the app bucket', () => {
     });
   });
 
-  it('a bucket emptied for the orphan sweep is marked too: no data is left in it', async () => {
+  it('a bucket emptied but left as a shell for the orphan sweep is not marked: it still exists, so the fence keeps it', async () => {
     s3.emptyAndDeleteBucket.mockResolvedValueOnce({
       deleted: false,
       shellDeferred: true,
       objectsRemoved: 4,
       warnings: [],
     } as never);
-    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).toMatchObject({
-      appBucketPurged: true,
-    });
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).not.toHaveProperty(
+      'appBucketPurged',
+    );
   });
 
   it('a bucket not found where the record says is not marked: the record may name the wrong region', async () => {
