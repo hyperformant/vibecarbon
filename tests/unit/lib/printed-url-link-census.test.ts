@@ -76,7 +76,7 @@ const ALLOW: { why: string; sites: string[] }[] = [
     sites: [
       'src/configure.js base https://{*}',
       'src/create.js generateEnvLocal https://plausible.io/js/script.js',
-      'src/lib/deploy/bundle.js renderBundle https://{*}',
+      'src/lib/deploy/bundle.js writeBundle https://{*}',
       'src/lib/deploy/compose/build-args.js collectComposeBuildArgs https://{*}',
       'src/lib/deploy/k8s/k3s.js buildK3sBuildInputs https://{*}',
       'src/lib/deploy/k8s/k3s.js configYaml https://{*}',

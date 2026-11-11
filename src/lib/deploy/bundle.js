@@ -1,15 +1,17 @@
 /**
  * Local-First Bundle Rendering
- * Stages all deployment artifacts (Compose files, .env, scripts) into a local temp directory
- * before any infrastructure is provisioned or network calls are made.
+ * Stages all deployment artifacts (Compose files, .env, scripts) into a private
+ * temp directory before the compose plan provisions anything. The .env and
+ * app.env in it carry every secret the servers get, so it lives only while
+ * the work that uploads it runs (withBundle).
  */
 
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine, parseDotenv } from '../dotenv.js';
 import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from '../images.js';
+import { perfTimer } from '../perf.js';
 import {
   ADDON_JOB_SCRIPT,
   ADDON_SERVICES_SCRIPT,
@@ -19,6 +21,7 @@ import {
   renderAddonServicesScript,
 } from '../services/addon-start.js';
 import { composeStandbyScaledServices, enabledAddonNames } from '../services/standby-policy.js';
+import { makeTempDir, removeTempDir } from '../temp-dir.js';
 import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
 import { renderComposeCommand, VC_COMPOSE, VC_COMPOSE_SCRIPT } from './compose/command.js';
 import { COMPOSE_WALG_ROLE_HOST_DIR, walgRoleReadFragment } from './walg-role.js';
@@ -300,14 +303,56 @@ ${lines.join('\n')}
 }
 
 /**
- * Render the deployment bundle to a local temp directory
+ * Render the bundle, run `fn` with its path, and remove it once `fn` settles,
+ * whatever the outcome. The bundle holds the rendered .env and app.env, every
+ * secret the servers get, so this is how src/ renders one: it never outlives
+ * the work that reads it (a Ctrl-C mid-work leaves it to the exit sweep,
+ * temp-dir.js).
+ *
+ * @template T
+ * @param {string} projectName
+ * @param {object} options - renderBundle's
+ * @param {(bundlePath: string) => Promise<T> | T} fn
+ * @returns {Promise<T>}
+ */
+export async function withBundle(projectName, options, fn) {
+  const renderTimer = perfTimer('deploy.bundle.pack');
+  const bundlePath = renderBundle(projectName, options);
+  renderTimer.end();
+  try {
+    return await fn(bundlePath);
+  } finally {
+    removeTempDir(bundlePath);
+  }
+}
+
+/**
+ * Render the deployment bundle to a private temp dir. The caller owns the dir
+ * and must remove it (removeTempDir); src/ goes through withBundle, which
+ * does. A render that throws removes its own dir.
  * @param {string} projectName
  * @param {object} options
  * @returns {string} The path to the staged bundle directory
  */
 export function renderBundle(projectName, options = {}) {
+  const stageDir = makeTempDir('vc-deploy-bundle-');
+  try {
+    writeBundle(stageDir, projectName, options);
+  } catch (err) {
+    removeTempDir(stageDir);
+    throw err;
+  }
+  return stageDir;
+}
+
+/**
+ * Write the bundle's files into `stageDir`.
+ * @param {string} stageDir
+ * @param {string} projectName
+ * @param {object} options - renderBundle's
+ */
+function writeBundle(stageDir, projectName, options) {
   const cwd = process.cwd();
-  const stageDir = mkdtempSync(join(tmpdir(), 'vc-deploy-bundle-'));
 
   // Core Docker files
   const rootFiles = [
@@ -526,6 +571,4 @@ export function renderBundle(projectName, options = {}) {
       copyDirIfExist(`volumes/${subdir}`, `volumes/${subdir}`);
     }
   }
-
-  return stageDir;
 }

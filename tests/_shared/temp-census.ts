@@ -22,12 +22,6 @@ export const TEMP_CENSUS_EXEMPT: ReadonlyArray<{ name: RegExp; why: string }> = 
     name: /^tsx-\d+$/,
     why: "tsx's per-user transform cache, kept across runs",
   },
-  {
-    name: /^vc-deploy-bundle-/,
-    why:
-      'executeDeployment (src/lib/deploy/orchestrator.js) never removes the bundle it ' +
-      'renders, one dir per deploy: a production leak, still open',
-  },
 ];
 
 /**

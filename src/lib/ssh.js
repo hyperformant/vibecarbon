@@ -19,8 +19,7 @@
  * or recycled IP. The operator's ~/.ssh/known_hosts is never touched.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { progressLog } from './cli/progress.js';
 import { runCommandAsync } from './command.js';
@@ -29,6 +28,7 @@ import { buildHostKeyOpts, knownHostsPath, SSH_CONNECTION_OPTS } from './host-ke
 import { assertOperatorIpUnchanged } from './operator-ip-guard.js';
 import { runWithRetry } from './retry.js';
 import { shJoin } from './shell.js';
+import { makeTempDir, removeTempDir } from './temp-dir.js';
 
 // k3s writes its kubeconfig here; kubectl doesn't find it by default in SSH sessions.
 const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
@@ -405,7 +405,7 @@ export async function sshRun(ip, sshKeyPath, argv, options = {}) {
  * features; never interpolate untrusted values into the script string.
  */
 export async function sshRunScript(ip, sshKeyPath, bashScript, options = {}) {
-  const localTmp = mkdtempSync(join(tmpdir(), 'vb-sshscript-'));
+  const localTmp = makeTempDir('vb-sshscript-');
   const localPath = join(localTmp, 'script.sh');
   const remotePath = `/tmp/vb-script-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.sh`;
   try {
@@ -422,7 +422,7 @@ export async function sshRunScript(ip, sshKeyPath, bashScript, options = {}) {
     } catch {
       // best-effort cleanup
     }
-    rmSync(localTmp, { recursive: true, force: true });
+    removeTempDir(localTmp);
   }
 }
 

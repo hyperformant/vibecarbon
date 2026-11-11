@@ -47,6 +47,8 @@ describe('the temp-dir census', () => {
     ]);
     expect(tempLeftovers(tmp)).toEqual([
       'stray.pem',
+      // A deploy bundle holds the app's .env: never allowed to stay.
+      'vc-deploy-bundle-x1',
       'vc-k8s-ha-dns-Ab12Cd',
       'vibecarbon-1000/delta-1',
       'vibecarbon-1002',

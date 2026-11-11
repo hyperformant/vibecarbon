@@ -747,13 +747,19 @@ async function haSetupServerFiles(ctx) {
   const provider = apiToken ? new (providerFor(ctx.envConfig))(apiToken) : null;
   ctx.onProgress('Copying project files...');
   const serviceOpts = haServiceOpts(ctx);
-  const setupTasks = [
+  // Both read the one rendered bundle, which the deploy removes once the plan
+  // settles (orchestrator, withBundle): awaited below even when another task
+  // fails first, so no upload is still packing it then.
+  const bundleUploads = [
     perfAsync('deploy.ha.compose.setupFiles.primary', () =>
       setupServerFiles(primary.ip, sshKeyPath, projectName, serviceOpts),
     ),
     perfAsync('deploy.ha.compose.setupFiles.standby', () =>
       setupServerFiles(standby.ip, sshKeyPath, projectName, serviceOpts),
     ),
+  ];
+  const setupTasks = [
+    ...bundleUploads,
     perfAsync('deploy.ha.compose.openWgPortUfw.primary', () =>
       openWireguardPortUfw(primary.ip, standby.ip, sshKeyPath),
     ),
@@ -800,7 +806,11 @@ async function haSetupServerFiles(ctx) {
       ),
     );
   }
-  await perfAsync('deploy.ha.compose.setupFan', () => Promise.all(setupTasks));
+  try {
+    await perfAsync('deploy.ha.compose.setupFan', () => Promise.all(setupTasks));
+  } finally {
+    await Promise.allSettled(bundleUploads);
+  }
 
   // The WireGuard ports are open on both nodes, so the tunnel can come up now,
   // in the background, while the pulls and the stack start run. It is apt work

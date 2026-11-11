@@ -52,7 +52,7 @@ import {
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { recordDeployedLineage } from './backup-lineage.js';
-import { renderBundle } from './bundle.js';
+import { withBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
 import { imageBuildRecord } from './compose/app-image.js';
@@ -1919,15 +1919,18 @@ export async function executeDeployment(args, gatheredConfig) {
     ? ciReady.imageTag
     : buildImageRef(ciReady.githubOwner, ciReady.repoName, ciReady.imageTag);
 
-  // --- STEP 3: Local Bundle Rendering (Unified) ---
-  // renderBundle is sync (cp + writeFile fan-out); perfTimer captures total
-  // wall-clock time for the staging-dir build. Typical ~50-300ms.
-  const bundleRenderTimer = perfTimer('deploy.bundle.pack');
+  // --- STEP 3: The deploy bundle (compose tiers) ---
+  // What a compose server gets (bundle.js): the compose files and scripts, and
+  // the .env and app.env with every secret the app runs on. Its one reader is
+  // the compose plan's setup-server-files step, and k8s never reads it, so
+  // withBundle renders it (sync, ~50-300 ms, `deploy.bundle.pack`) right
+  // before the compose plan's first step provisions anything, and removes it
+  // when that plan settles, whatever the outcome (STEP 5).
   // verbose=false: per-file `[bundle] Copying X` lines bypass the clack
   // gutter and print flush-left, breaking the visual flow. Bundle content
   // is reproducible from the project tree; debug it by re-running with
   // VIBECARBON_PERF=1 + VIBECARBON_BUNDLE_VERBOSE=1 if needed.
-  const bundlePath = renderBundle(projectConfig.projectName, {
+  const bundleOptions = {
     domain,
     environment,
     image: imageRef,
@@ -1949,8 +1952,7 @@ export async function executeDeployment(args, gatheredConfig) {
         })
       : '',
     verbose: process.env.VIBECARBON_BUNDLE_VERBOSE === '1',
-  });
-  bundleRenderTimer.end();
+  };
 
   // --- STEP 4: DNS Warm-up (parallel with VM provisioning) ---
   // Kick off the placeholder-DNS write in the background so TTL starts
@@ -2077,7 +2079,6 @@ export async function executeDeployment(args, gatheredConfig) {
     // restore-tls / snapshot-tls read it.
     backupS3Config,
     imageRef,
-    bundlePath,
     ciReady,
     s3Config,
     state,
@@ -2186,7 +2187,10 @@ export async function executeDeployment(args, gatheredConfig) {
       // which also loads dockerHub creds in the orchestrator).
       dockerHubCreds: resolveDockerHubCreds(),
     };
-    await runPlan(planDeploy('compose', config), composeCtx, EFFECTS);
+    await withBundle(projectConfig.projectName, bundleOptions, (bundlePath) => {
+      composeCtx.bundlePath = bundlePath;
+      return runPlan(planDeploy('compose', config), composeCtx, EFFECTS);
+    });
     deployResult = {
       masterIp: composeCtx.serverIp,
       serverId: composeCtx.providerServerId || 'manual',
@@ -2237,9 +2241,14 @@ export async function executeDeployment(args, gatheredConfig) {
     };
     // Wrap the entire pipeline so the perf trace shows the headline cost
     // (which contains the deploy.ha.compose.* sub-stages from the effects).
-    await perfAsync('deploy.ha.compose.full', () =>
-      runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
-    );
+    // The bundle is removed once the plan settles: the setup fan uploads it to
+    // both nodes and settles only after both uploads have (haSetupServerFiles).
+    await withBundle(projectConfig.projectName, bundleOptions, (bundlePath) => {
+      composeHaCtx.bundlePath = bundlePath;
+      return perfAsync('deploy.ha.compose.full', () =>
+        runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
+      );
+    });
     s.stop('Compose HA deployment complete');
     // A reconverge that did not verify streaming and record the identifier
     // stays degraded and keeps its last deployedAt (haFinalizeConfig), so the

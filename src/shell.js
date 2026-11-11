@@ -32,6 +32,7 @@ import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { sshKeyPathFor } from './lib/ssh.js';
+import { makeTempDir, removeTempDir } from './lib/temp-dir.js';
 
 /**
  * Trailing "Try:" hint in the welcome banner (R9). `hcloud server list`
@@ -199,10 +200,10 @@ export async function run(args) {
   ];
   const rcContent = rcLines.join('\n');
 
-  // Write rc to a tmpfile that's deleted when the shell closes.
-  const { writeFileSync, unlinkSync, mkdtempSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const tmpDir = mkdtempSync(join(tmpdir(), 'vibecarbon-shell-'));
+  // Write rc to a temp dir that's removed when the shell closes (and by the
+  // exit sweep on any other way out, temp-dir.js).
+  const { writeFileSync } = await import('node:fs');
+  const tmpDir = makeTempDir('vibecarbon-shell-');
   const rcPath = join(tmpDir, 'bashrc');
   writeFileSync(rcPath, rcContent, { mode: 0o600 });
 
@@ -214,11 +215,7 @@ export async function run(args) {
 
   await new Promise((resolve) => {
     child.on('exit', (code) => {
-      try {
-        unlinkSync(rcPath);
-      } catch {
-        // best-effort cleanup
-      }
+      removeTempDir(tmpDir);
       process.exit(code ?? 0);
       resolve();
     });

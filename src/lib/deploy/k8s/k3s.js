@@ -39,14 +39,11 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { isIPv4 } from 'node:net';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -93,6 +90,7 @@ import {
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry, sshKeyPathFor, sshKubectl, sshRun } from '../../ssh.js';
+import { makeTempDir, removeTempDir } from '../../temp-dir.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
   BACKUP_NAME_RE,
@@ -2723,7 +2721,7 @@ function renderK8sPlaceholders(dir, values, label) {
   // rendered path stays recognizable in `kubectl` error output/logs, and so
   // any argv/log matching on the addon name (e.g. tests asserting the
   // observability apply ran) still finds it after the path swap.
-  const tmpDir = mkdtempSync(join(tmpdir(), `vibecarbon-k8s-${label}-${basename(dir)}-`));
+  const tmpDir = makeTempDir(`vibecarbon-k8s-${label}-${basename(dir)}-`);
   const entries = Object.entries(values);
   const copyInto = (srcDir, destDir) => {
     for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
@@ -2742,7 +2740,12 @@ function renderK8sPlaceholders(dir, values, label) {
       writeFileSync(destPath, content);
     }
   };
-  copyInto(dir, tmpDir);
+  try {
+    copyInto(dir, tmpDir);
+  } catch (err) {
+    removeTempDir(tmpDir);
+    throw err;
+  }
   return tmpDir;
 }
 
@@ -2943,6 +2946,24 @@ export function renderK8sBase(
   // The image tokens are the deploy's version set (images.js), never the
   // caller's: there is one set per deploy.
   const rendered = renderK8sPlaceholders(dir, { ...values, ...manifestImageValues() }, 'base');
+  try {
+    completeK8sBase(rendered, { backupConfig, tls, replicationHostPort, hasRegistry });
+  } catch (err) {
+    removeTempDir(rendered);
+    throw err;
+  }
+  return rendered;
+}
+
+/**
+ * renderK8sBase's work on its fresh copy: the backup schedule, the replication
+ * hostPort, the TLS Certificate, then the leftover-placeholder checks. Throws
+ * on a placeholder it would otherwise apply; renderK8sBase removes the copy.
+ *
+ * @param {string} rendered
+ * @param {{ backupConfig?: object, tls: object, replicationHostPort: boolean, hasRegistry: boolean }} opts
+ */
+function completeK8sBase(rendered, { backupConfig, tls, replicationHostPort, hasRegistry }) {
   // The backup CronJob's schedule is per environment (deploy-owned, Flux does
   // not build it): filled in by the renderer deploy.yml also runs.
   const cronjob = join(rendered, 'backup', 'cronjob.yaml');
@@ -2952,14 +2973,7 @@ export function renderK8sBase(
       renderBackupCronJob(readFileSync(cronjob, 'utf-8'), resolveBackupSettings(backupConfig)),
     );
   }
-  if (replicationHostPort) {
-    try {
-      addDbReplicationHostPort(rendered);
-    } catch (err) {
-      rmSync(rendered, { recursive: true, force: true });
-      throw err;
-    }
-  }
+  if (replicationHostPort) addDbReplicationHostPort(rendered);
   // The TLS Certificate is deploy-owned (Flux does not build it): rendered
   // with this deploy's names and issuer, so cert-manager never sees the
   // base's app.example.com placeholder, and a Secret restored before this
@@ -2982,14 +2996,12 @@ export function renderK8sBase(
   for (const [file, what, pattern = /\{\{[A-Z0-9_]+\}\}/g] of checks) {
     const leftover = readFileSync(join(rendered, file), 'utf-8').match(pattern);
     if (leftover) {
-      rmSync(rendered, { recursive: true, force: true });
       throw new Error(
         `renderK8sBase: ${file} still carries ${[...new Set(leftover)].join(', ')} after rendering; ` +
           `refusing to apply ${what}.`,
       );
     }
   }
-  return rendered;
 }
 
 /**
@@ -3880,7 +3892,7 @@ export async function applyK3sManifests({
   //    admits public :6443 from operator CIDRs only, so an apiserver-dependent
   //    pod scheduled onto any other node times out on 10.43.0.1 forever (RCA
   //    2026-07-17 e4 rig: cainjector CrashLoopBackOff, webhook readiness 500).
-  const certManagerDir = mkdtempSync(join(tmpdir(), 'vibecarbon-cert-manager-'));
+  const certManagerDir = makeTempDir('vibecarbon-cert-manager-');
   try {
     writeCertManagerKustomization(certManagerDir);
     await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
@@ -3891,7 +3903,7 @@ export async function applyK3sManifests({
       }),
     );
   } finally {
-    rmSync(certManagerDir, { recursive: true, force: true });
+    removeTempDir(certManagerDir);
   }
   // 2. Wait for cert-manager to be ready before applying ClusterIssuers.
   // Fan out the three deploys in parallel: kubectl wait blocks per-arg
@@ -4001,7 +4013,7 @@ export async function applyK3sManifests({
       }),
     );
   } finally {
-    rmSync(traefikCrdsDir, { recursive: true, force: true });
+    removeTempDir(traefikCrdsDir);
   }
   // 4. Create the app and infra Secrets BEFORE base/ — base/'s Deployment
   //    and StatefulSet reference them; without them kubelet fails container
@@ -4090,19 +4102,22 @@ export async function applyK3sManifests({
     // never patched (and so restarted) to gain it later.
     { replicationHostPort: rendersReplicationHostPort(role) },
   );
-  // The cert-manager controller is SETTLED before the restored Secret and the
-  // Certificate land: its rollout complete and the leader lease held by a pod
-  // of the current ReplicaSet. A handoff in that window can miss the Secret in
-  // the new leader's cache and issue a new certificate. On a warm deploy the
-  // controller did not roll (step 1), so this returns on its first read; on a
-  // cold one it waits out the first leader election. One bounded wait.
-  await perfAsync(`deploy.${perfPrefix}.certManager.leader`, () => awaitCertManagerLeader({ env }));
   // When this deploy's restore wrote Secret/vibecarbon-tls (operator clock),
   // returned so the TLS phase can tell a re-issue after it.
   let tlsRestoredAt = null;
   // Its reads are records, never gates: a short bound each.
   const timingKubectl = quietKubectl(env, { timeoutMs: 10_000 });
+  // From here the rendered copy is removed whatever happens (finally below).
   try {
+    // The cert-manager controller is SETTLED before the restored Secret and the
+    // Certificate land: its rollout complete and the leader lease held by a pod
+    // of the current ReplicaSet. A handoff in that window can miss the Secret in
+    // the new leader's cache and issue a new certificate. On a warm deploy the
+    // controller did not roll (step 1), so this returns on its first read; on a
+    // cold one it waits out the first leader election. One bounded wait.
+    await perfAsync(`deploy.${perfPrefix}.certManager.leader`, () =>
+      awaitCertManagerLeader({ env }),
+    );
     // The last issued certificate goes back into Secret/vibecarbon-tls before
     // this apply creates the Certificate, so cert-manager finds a Secret that
     // matches it and does not issue (tls-restore.js holds the overwrite rule).
@@ -4144,7 +4159,7 @@ export async function applyK3sManifests({
   } finally {
     // The rendered copy carries the bucket + endpoint wiring; it served its
     // one apply.
-    rmSync(baseDir, { recursive: true, force: true });
+    removeTempDir(baseDir);
   }
   // The per-environment retention the backup CronJob reads (in no manifest
   // tree, so no Flux reconcile can touch it).
@@ -4352,7 +4367,7 @@ export async function applyK3sManifests({
     } finally {
       // Same cleanup contract as the rendered k8s/base copy — deploys must
       // not leak a temp dir per run (T4 review).
-      rmSync(renderedObservabilityDir, { recursive: true, force: true });
+      removeTempDir(renderedObservabilityDir);
     }
   }
   // One certificate per name: Grafana's IngressRoute takes vibecarbon-tls
