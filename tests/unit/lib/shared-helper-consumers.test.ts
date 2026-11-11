@@ -163,6 +163,32 @@ const REGISTRY = [
       'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts',
     ],
   },
+  {
+    // Every command read `environments.<env>.backupS3` its own way: restore
+    // through a raw config loader, destroy with an `'fsn1'` guess for a missing
+    // region, the credential check and the e2e checks each with their own
+    // fallbacks. One reader now gives the bucket, its region (the uploads
+    // region for a record an old CLI wrote without one) and its endpoint (the
+    // uploads endpoint only when the regions match); census (a) in the deep
+    // test catches a raw read coming back anywhere.
+    helper: 'backupsTargetOf',
+    definition: 'src/lib/backups-bucket.js',
+    consumers: [
+      'src/lib/walg/restore-base.js', // restore, backup, status, failover, scale, compose TLS restore
+      'src/destroy.js', // -purge and its holders, the preview facts
+      'src/lib/destroy/preview.js', // the preview's backups line
+      'src/lib/destroy/s3-credential-check.js', // the pre-teardown credential check
+      'src/configure.js', // the GitOps TLS snapshot prefix
+      'src/lib/deploy/app-storage-credential.js', // unfenced-bucket marks
+      'src/lib/deploy/hetzner-app-key-fence.js', // the fence's targets
+      'src/lib/deploy/orchestrator.js', // the deploy's skeleton record
+      'tests/e2e/checks/backup-evidence.ts', // the e2e backup checks
+    ],
+    deepTests: [
+      'tests/unit/deploy/backups-bucket-choice.test.ts',
+      'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts',
+    ],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');

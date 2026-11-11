@@ -15,8 +15,26 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { renderBundle } from '../../../src/lib/deploy/bundle.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Every temp dir made through node:fs, so a case can tell whether renderBundle
+// staged anything (os.tmpdir() ignores a TMPDIR set in a test: the global
+// setup replaces process.env with a plain object).
+const made = vi.hoisted(() => [] as string[]);
+vi.mock('node:fs', async (orig) => {
+  const real = await orig<typeof import('node:fs')>();
+  return {
+    ...real,
+    mkdtempSync: (...args: Parameters<typeof real.mkdtempSync>) => {
+      const dir = real.mkdtempSync(...args);
+      made.push(String(dir));
+      return dir;
+    },
+  };
+});
+
+const { renderBundle } = await import('../../../src/lib/deploy/bundle.js');
+
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 
 const EP = (region: string) => `https://${region}.your-objectstorage.com`;
@@ -134,5 +152,45 @@ describe('renderBundle: the backups target', () => {
     expect(env.S3_ENDPOINT).toBe(EP('fsn1'));
     expect(env.S3_REGION).toBe('fsn1');
     expect(env).not.toHaveProperty('S3_BACKUP_BUCKET');
+  });
+
+  it('a backups target with no uploads config and no replay is refused before anything is staged', () => {
+    // app.env would be built from the server .env, whose S3_ENDPOINT and
+    // S3_REGION are the backups bucket's: the app would be handed them.
+    writeFileSync(join(projectDir, '.env'), 'FOO=bar\n');
+    made.length = 0;
+    let thrown: unknown;
+    try {
+      stages.push(
+        renderBundle('myapp', {
+          environment: 'staging',
+          backupTarget: backups('myapp-abc123-backups', 'nbg1'),
+        }),
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    // A stage dir made before the refusal is removed with the case.
+    stages.push(...made);
+    expect(String(thrown)).toContain(
+      'renderBundle: a backupTarget needs options.s3 or options.appEnvReplay, so app.env keeps the uploads bucket instead of the backups one',
+    );
+    expect(made).toEqual([]);
+  });
+
+  it("a backups target with a replayed app.env keeps the app's own storage", () => {
+    const { env, app } = render('FOO=bar\n', {
+      backupTarget: backups('myapp-abc123-backups', 'nbg1'),
+      appEnvReplay: {
+        S3_ACCESS_KEY: APP_KEY.accessKey,
+        S3_SECRET_KEY: APP_KEY.secretKey,
+        S3_BUCKET: 'myapp-abc123-staging-storage',
+        S3_ENDPOINT: EP('fsn1'),
+        S3_REGION: 'fsn1',
+      },
+    });
+    expect(env.S3_ENDPOINT).toBe(EP('nbg1'));
+    expect(app.S3_ENDPOINT).toBe(EP('fsn1'));
+    expect(app.S3_REGION).toBe('fsn1');
   });
 });

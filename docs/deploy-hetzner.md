@@ -245,10 +245,11 @@ vibecarbon destroy <env>                          # type "<project>-<env>" when 
 vibecarbon destroy <env> -y -confirm <project>-<env>   # scripted
 ```
 
-A plain destroy preserves the environment's backups. The backup bucket is
-shared by the project: `-purge` deletes this environment's folder in it
-(`backups/<project>/<env>/`), and the bucket itself only when no other
-environment keeps backups there. Each environment has its own app storage
+A plain destroy preserves the environment's backups. Each storage region of a
+project has one backups bucket, shared by the project's environments in that
+region: `-purge` deletes this environment's folder in it
+(`backups/<project>/<env>/`), and the bucket itself when no other environment
+keeps backups in it. Each environment has its own app storage
 bucket (`<project>-<salt>-<env>-storage`), and a plain destroy keeps it with its
 uploads, so a redeploy of the same environment finds them again. `-purge`
 deletes this environment's app bucket and its backup folder together. A bucket

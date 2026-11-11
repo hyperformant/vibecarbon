@@ -2908,14 +2908,15 @@ export async function executeDeployment(args, gatheredConfig) {
   // deploy's Changes summary so "same commit as live" can be qualified.
   const deployedDirty = workingTreeDirty();
 
-  // Persist backupS3 alongside the storage-s3 block. The backup + restore
-  // commands both read it via loadBackupS3Config() from .vibecarbon.json
-  // — without it here, `vibecarbon restore` against a destroyed-then-redeployed
-  // environment falls through to server-side `ls /opt/*/backups/*` on a
-  // fresh VM with no files, so DR from a populated backup bucket is broken.
-  // Keep the shape in sync with loadBackupS3Config (bucket/region/endpoint,
-  // no credentials — those are resolved from HETZNER_ACCESS_KEY/HETZNER_SECRET_KEY
-  // at read time, never persisted to .vibecarbon.json).
+  // Persist backupS3 alongside the storage-s3 block. restore, backup, status,
+  // destroy, failover and scale all read it through backupsTargetOf from
+  // .vibecarbon.json — without it here, `vibecarbon restore` against a
+  // destroyed-then-redeployed environment falls through to server-side
+  // `ls /opt/*/backups/*` on a fresh VM with no files, so DR from a populated
+  // backup bucket is broken. Keep the shape backupsTargetOf reads
+  // (bucket/region/endpoint, no credentials — those are resolved from the
+  // provider's object-storage env vars at read time, never persisted to
+  // .vibecarbon.json).
   const backupS3Persist = backupS3Config
     ? {
         bucket: backupS3Config.bucket,

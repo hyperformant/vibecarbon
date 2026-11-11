@@ -33,6 +33,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { backupsTargetOf } from '../backups-bucket.js';
 import { parseDotenv } from '../dotenv.js';
 import { APP_STORAGE_SECRET_PREFIX, setEnvVar } from '../project.js';
 import { getProviderClass, resolveProviderToken } from '../providers/index.js';
@@ -374,7 +375,7 @@ export function markUnfencedBuckets(projectConfig, skipped) {
   const missing = new Set(skipped);
   for (const e of Object.values(projectConfig.environments ?? {})) {
     if (!e?.s3) continue;
-    const hits = [e.s3.bucket, e.s3.stateBucket, e.backupS3?.bucket].filter(
+    const hits = [e.s3.bucket, e.s3.stateBucket, backupsTargetOf(e)?.bucket].filter(
       (b, i, all) => b && missing.has(b) && all.indexOf(b) === i,
     );
     if (hits.length > 0) e.s3.unfencedBuckets = hits;

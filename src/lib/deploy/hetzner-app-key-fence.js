@@ -24,6 +24,7 @@
  * FENCE_PROBE_BUDGET_MS. Any allowed probe resets the streak. It is never a
  * retry of the write; an exhausted budget fails the deploy naming the bucket.
  */
+import { backupsTargetOf } from '../backups-bucket.js';
 
 /** Denied probes in a row that count as the fence holding. */
 export const FENCE_PROBE_STREAK = 3;
@@ -124,7 +125,7 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
     });
   };
   for (const [name, e] of envs) {
-    for (const shared of [e?.s3?.stateBucket, e?.backupS3?.bucket]) {
+    for (const shared of [e?.s3?.stateBucket, backupsTargetOf(e)?.bucket]) {
       if (shared) note(shared, null, name, e);
     }
   }

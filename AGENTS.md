@@ -85,7 +85,8 @@ is; the next clean `-purge` deletes the bucket. A line a re-run cannot act on
 by-hand step. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see
 `lib/env-identity.js`) under `destroyedEnvironments.<env>`; `deploy` seeds a
-same-named environment from it and clears it once the env is live. A sibling
+same-named environment from it (without its backups record after a `-purge`,
+which left it no backups to keep) and clears it once the env is live. A sibling
 key, not a stub in `environments`: every other command treats presence there
 as "deployed".
 

@@ -21,6 +21,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { backupsTargetOf } from './lib/backups-bucket.js';
 import { formatAmount, listStripePrices } from './lib/billing/stripe-catalog.js';
 import { writeBillingCatalog } from './lib/billing/write-catalog.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
@@ -1659,7 +1660,7 @@ export async function runConfigureCicd(envName) {
   // for both HA clusters: the standby never writes (its Secret is the
   // self-signed one).
   const { caSlug, tlsSnapshotS3Prefix } = await import('./lib/deploy/tls-snapshot.js');
-  const backupBucket = envConfig.backupS3?.bucket;
+  const backupBucket = backupsTargetOf(envConfig)?.bucket;
   const tlsSnapshotPrefix = backupBucket
     ? tlsSnapshotS3Prefix({
         backupBucket,

@@ -245,6 +245,27 @@ describe('resolveBackupS3Target', () => {
     expect(resolveBackupS3Target(dir, 'd3')?.region).toBe('nyc3');
   });
 
+  it("reads through the product's resolver: a record without a region sits beside the uploads", () => {
+    write({
+      environments: {
+        e3: {
+          s3: { region: 'fsn1', endpoint: 'https://fsn1.your-objectstorage.com' },
+          backupS3: { bucket: 'myapp-backups' },
+        },
+      },
+    });
+    expect(resolveBackupS3Target(dir, 'e3')).toEqual({
+      bucket: 'myapp-backups',
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+    });
+  });
+
+  it('returns null when neither the record nor the uploads name a region', () => {
+    write({ environments: { e3: { backupS3: { bucket: 'myapp-backups' } } } });
+    expect(resolveBackupS3Target(dir, 'e3')).toBeNull();
+  });
+
   it('returns null when the env records no backup bucket', () => {
     write({ environments: { e3: {} } });
     expect(resolveBackupS3Target(dir, 'e3')).toBeNull();

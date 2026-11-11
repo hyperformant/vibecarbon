@@ -82,15 +82,27 @@ export function envIdentityOf(envConfig) {
  *   record, so the caller can say so; `destroyedAt` and `backupsPurged` are
  *   bookkeeping and are kept OUT of `envConfig` so they never land in the
  *   persisted env block.
+ *
+ * A record marked `backupsPurged` also seeds no `backupS3`. That destroy's
+ * -purge deleted the environment's backups folder, and the bucket too when no
+ * other environment kept backups in it, so the record names a bucket the
+ * environment has nothing in, and maybe a bucket that no longer exists. A
+ * recorded bucket is never moved so earlier backups stay where restore looks
+ * for them; with none left, the rebuild chooses its backups bucket as a new
+ * environment would (chooseBackupsBucket): its storage region's bucket, never
+ * a re-made purged one in a region it no longer uses. backupsHoldings already
+ * counts such an entry as holding nothing.
  */
 export function resolveEnvSeed(projectConfig, envName) {
   const live = projectConfig?.environments?.[envName];
   if (live) return { envConfig: live, fromDestroyed: null };
   const recorded = projectConfig?.destroyedEnvironments?.[envName];
   if (!recorded) return { envConfig: {}, fromDestroyed: null };
-  // backupsPurged is destroy's bookkeeping too (preservedBackupHolders).
-  const { destroyedAt, backupsPurged: _purged, ...identity } = recorded;
-  return { envConfig: identity, fromDestroyed: { destroyedAt } };
+  // backupsPurged is destroy's bookkeeping too (backupsHoldings).
+  const { destroyedAt, backupsPurged, ...identity } = recorded;
+  if (!backupsPurged) return { envConfig: identity, fromDestroyed: { destroyedAt } };
+  const { backupS3: _purged, ...kept } = identity;
+  return { envConfig: kept, fromDestroyed: { destroyedAt } };
 }
 
 /**

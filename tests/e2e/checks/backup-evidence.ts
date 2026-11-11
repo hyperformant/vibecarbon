@@ -67,6 +67,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { backupsTargetOf } from '../../../src/lib/backups-bucket.js';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { getObjectStorageProvider, getProviderClass } from '../../../src/lib/providers/index.js';
 import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
@@ -139,11 +140,13 @@ export interface BackupS3Target {
 }
 
 /**
- * Read `environments.<env>.backupS3` out of the project's `.vibecarbon.json`.
- * That block is written by the deploy orchestrator and is the same record
- * `destroy`/`backup` read, so the check can never drift onto a different
- * bucket than the product uses. Credentials are deliberately NOT persisted
- * there — they come from the environment (see `resolveObjectStorageCreds`).
+ * Read `environments.<env>.backupS3` out of the project's `.vibecarbon.json`
+ * through the product's one reader (backupsTargetOf). That block is written by
+ * the deploy orchestrator and is the record `restore`/`backup`/`destroy` read
+ * the same way, so the check can never drift onto a different bucket, region
+ * or endpoint than the product uses. Credentials are deliberately NOT
+ * persisted there — they come from the environment (see
+ * `resolveObjectStorageCreds`). Null when no bucket or no region is known.
  *
  * Pure fs-in/value-out so the resolution matrix is unit-testable.
  */
@@ -155,11 +158,15 @@ export function resolveBackupS3Target(
     const configPath = join(projectDir, '.vibecarbon.json');
     if (!existsSync(configPath)) return null;
     const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
-      environments?: Record<string, { backupS3?: Partial<BackupS3Target> }>;
+      environments?: Record<string, Parameters<typeof backupsTargetOf>[0]>;
     };
-    const backupS3 = config.environments?.[envPrefix]?.backupS3;
-    if (!backupS3?.bucket || !backupS3.region) return null;
-    return { bucket: backupS3.bucket, region: backupS3.region, endpoint: backupS3.endpoint };
+    const target = backupsTargetOf(config.environments?.[envPrefix]);
+    if (!target?.region) return null;
+    return {
+      bucket: target.bucket,
+      region: target.region,
+      ...(target.endpoint && { endpoint: target.endpoint }),
+    };
   } catch {
     return null;
   }

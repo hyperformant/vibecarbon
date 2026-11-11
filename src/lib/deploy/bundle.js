@@ -336,6 +336,17 @@ export async function withBundle(projectName, options, fn) {
  * @returns {string} The path to the staged bundle directory
  */
 export function renderBundle(projectName, options = {}) {
+  // app.env is built from options.s3, else from options.appEnvReplay, else
+  // from the server .env below, whose S3_ENDPOINT / S3_REGION a backupTarget
+  // sets to the backups bucket's. A backupTarget with neither would hand the
+  // app the backups bucket's host. The deploy always passes s3 with a target
+  // and a scale replay passes no target; refuse the third shape before the
+  // stage dir is made.
+  if (options.backupTarget && !options.s3 && !options.appEnvReplay) {
+    throw new Error(
+      'renderBundle: a backupTarget needs options.s3 or options.appEnvReplay, so app.env keeps the uploads bucket instead of the backups one',
+    );
+  }
   const stageDir = makeTempDir('vc-deploy-bundle-');
   try {
     writeBundle(stageDir, projectName, options);

@@ -118,6 +118,32 @@ describe('checkS3CredentialMismatch', () => {
     expect(risks[0].resource).toContain('acme-prod-backups');
   });
 
+  it("labels each bucket with its own region: the backups target's, not the uploads'", () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: {
+        s3: { bucket: 'acme-staging', region: 'fsn1' },
+        backupS3: { bucket: 'acme-backups', region: 'nbg1' },
+      },
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+    });
+    expect(risks.map((r) => r.resource)).toEqual(['acme-staging (fsn1)', 'acme-backups (nbg1)']);
+  });
+
+  it('a backups record without a region sits beside the uploads (backupsTargetOf)', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: {
+        s3: { bucket: 'acme-prod', region: 'fsn1' },
+        backupS3: { bucket: 'acme-backups' },
+      },
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+    });
+    expect(risks.map((r) => r.resource)).toEqual(['acme-prod (fsn1)', 'acme-backups (fsn1)']);
+  });
+
   it('softens the wording when an interactive prompt can still supply the keys', () => {
     const [offTty] = checkS3CredentialMismatch({
       envConfig: { s3: { bucket: 'acme-prod' } },

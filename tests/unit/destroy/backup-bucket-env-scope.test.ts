@@ -1,14 +1,17 @@
 /**
  * Each environment archives WAL-G under its own `backups/<project>/<env>/`
- * prefix in the project's backup bucket. `-purge` on one environment removes
- * only that prefix; the bucket itself goes only with the last live environment.
- * Plain destroy keeps everything for recovery.
+ * prefix in its storage region's backups bucket (one per project and region).
+ * `-purge` on one environment removes only that prefix; the bucket itself
+ * goes when no other environment, live or destroyed with its backups kept,
+ * keeps backups in it (backupsBucketHolders). Plain destroy keeps everything
+ * for recovery.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const BACKUPS = 'myapp-cd9ecc-backups';
+const FSN1_BACKUPS = 'myapp-cd9ecc-fsn1-backups';
 
 const s3 = {
   deletePrefix: vi.fn(async (_b: string, _p: string) => ({ objectsRemoved: 5 })),
@@ -27,9 +30,14 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
       NAME: 'Hetzner Cloud',
       promptObjectStorageCredentials: async () => ({ accessKey: 'ak', secretKey: 'sk' }),
     }),
-    getObjectStorageProvider: async () => s3,
+    getObjectStorageProvider: async (...args: unknown[]) => {
+      storageClients.push(args[3] as string);
+      return s3;
+    },
   };
 });
+/** The region of every storage client the destroy built, in order. */
+const storageClients: string[] = [];
 
 const store = projectConfigStore();
 const saved = { configs: store.state.writes };
@@ -44,22 +52,44 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
 
 const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
 
-function env(name: string) {
+function env(
+  name: string,
+  backupS3: Record<string, unknown> = { bucket: BACKUPS, region: 'fsn1' },
+) {
   return {
     provider: 'hetzner',
     envName: name,
     deployMode: 'compose',
     status: 'deployed',
-    backupS3: { bucket: BACKUPS, region: 'fsn1' },
+    backupS3,
   };
 }
+
+/** An environment block: env()'s shape, or an older CLI's with no backups record. */
+type EnvBlock = Record<string, unknown>;
 
 const project = (names: string[], destroyedEnvironments?: Record<string, unknown>) => ({
   projectName: 'myapp',
   bucketSalt: 'cd9ecc',
-  environments: Object.fromEntries(names.map((n) => [n, env(n)])),
+  environments: Object.fromEntries(names.map((n) => [n, env(n)])) as Record<string, EnvBlock>,
   ...(destroyedEnvironments ? { destroyedEnvironments } : {}),
 });
+
+/**
+ * Two storage regions: prod's backups in the project's base bucket in nbg1,
+ * staging's in fsn1's own bucket. A third live environment can be added.
+ */
+function twoRegions(extra: Record<string, unknown> = {}) {
+  return {
+    projectName: 'myapp',
+    bucketSalt: 'cd9ecc',
+    environments: {
+      prod: env('prod', { bucket: BACKUPS, region: 'nbg1' }),
+      staging: env('staging', { bucket: FSN1_BACKUPS, region: 'fsn1' }),
+      ...extra,
+    } as Record<string, EnvBlock>,
+  };
+}
 
 async function destroy(
   projectConfig: ReturnType<typeof project>,
@@ -95,6 +125,7 @@ async function destroy(
 describe('handleBackupBucket is scoped to one environment', () => {
   beforeEach(() => {
     for (const fn of Object.values(s3)) fn.mockClear();
+    storageClients.length = 0;
   });
 
   it('-purge on staging while prod is live removes backups/myapp/staging/ and keeps the bucket', async () => {
@@ -125,7 +156,9 @@ describe('handleBackupBucket is scoped to one environment', () => {
     );
     expect(s3.deletePrefix).toHaveBeenCalledWith(BACKUPS, 'backups/myapp/prod/');
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
-    expect(messages.join('\n')).toMatch(/bucket kept/);
+    expect(messages.join('\n')).toContain(
+      'Backups under backups/myapp/prod/ purged (5 objects removed); bucket kept for staging, which keeps backups there',
+    );
   });
 
   it('a destroyed environment recorded against a different bucket does not hold this one', async () => {
@@ -158,7 +191,7 @@ describe('handleBackupBucket is scoped to one environment', () => {
     const { messages } = await destroy(afterStaging, 'prod', { purgeBackups: true }, true);
     expect(s3.deletePrefix).toHaveBeenLastCalledWith(BACKUPS, 'backups/myapp/prod/');
     expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
-    expect(messages.join('\n')).not.toContain('preserved backups of staging');
+    expect(messages.join('\n')).not.toContain('kept for staging');
   });
 
   it('a -purge that could not purge keeps the environment a holder', async () => {
@@ -180,5 +213,78 @@ describe('handleBackupBucket is scoped to one environment', () => {
     await destroy(project(['prod', 'staging']), 'staging');
     expect(s3.deletePrefix).not.toHaveBeenCalled();
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleBackupBucket with a backups bucket per storage region', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+    storageClients.length = 0;
+  });
+
+  it("-purge on staging deletes fsn1's bucket while prod keeps the base bucket in nbg1", async () => {
+    const { results, messages } = await destroy(twoRegions(), 'staging', { purgeBackups: true });
+    expect(storageClients).toEqual(['fsn1']);
+    expect(s3.deletePrefix).toHaveBeenCalledWith(FSN1_BACKUPS, 'backups/myapp/staging/');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(FSN1_BACKUPS);
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalledWith(BACKUPS);
+    expect(messages.join('\n')).not.toContain('bucket kept');
+    expect(results.leaks.counts()).toMatchObject({ leak: 0, unverified: 0 });
+  });
+
+  it("-purge on prod deletes the base bucket while staging keeps fsn1's", async () => {
+    await destroy(twoRegions(), 'prod', { purgeBackups: true });
+    expect(storageClients).toEqual(['nbg1']);
+    expect(s3.deletePrefix).toHaveBeenCalledWith(BACKUPS, 'backups/myapp/prod/');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalledWith(FSN1_BACKUPS);
+  });
+
+  it('a live environment an older CLI deployed (no record) keeps the base bucket, and the kept line names it', async () => {
+    // `old` archives into the base name in its uploads region: it has no
+    // backups record, only `deployedAt`.
+    const config = twoRegions({
+      old: {
+        provider: 'hetzner',
+        envName: 'old',
+        deployMode: 'compose',
+        status: 'deployed',
+        deployedAt: '2026-01-01T00:00:00.000Z',
+        s3: { bucket: 'myapp-cd9ecc-storage', region: 'nbg1' },
+      },
+    });
+    const { messages } = await destroy(config, 'prod', { purgeBackups: true });
+    expect(s3.deletePrefix).toHaveBeenCalledWith(BACKUPS, 'backups/myapp/prod/');
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(messages.join('\n')).toContain(
+      'Backups under backups/myapp/prod/ purged (5 objects removed); bucket kept for old, which keeps backups there',
+    );
+  });
+
+  it('the kept line names every holder, live and destroyed with its backups kept', async () => {
+    const config = {
+      ...project(['prod', 'staging', 'preview']),
+      destroyedEnvironments: {
+        qa: { backupS3: { bucket: BACKUPS, region: 'fsn1' }, destroyedAt: 'x' },
+      },
+    };
+    const { messages } = await destroy(config, 'staging', { purgeBackups: true });
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(messages.join('\n')).toContain(
+      'bucket kept for prod, preview, qa, which keep backups there',
+    );
+  });
+
+  it('a backups record with no region anywhere is refused into the leak ledger, never guessed', async () => {
+    const config = project([]);
+    config.environments.prod = env('prod', { bucket: BACKUPS });
+    const { results } = await destroy(config, 'prod', { purgeBackups: true });
+    expect(storageClients).toEqual([]);
+    expect(s3.deletePrefix).not.toHaveBeenCalled();
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(results.backupsPurged).toBeUndefined();
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({ resourceClass: 'bucket', resource: BACKUPS });
+    expect(entry.reason).toContain('no region on record');
   });
 });

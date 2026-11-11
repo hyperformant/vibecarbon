@@ -23,6 +23,7 @@
  * credential resolution would see it.
  */
 
+import { backupsTargetOf } from '../backups-bucket.js';
 import { readOperatorVar } from '../operator-env.js';
 
 /**
@@ -56,7 +57,10 @@ export function checkS3CredentialMismatch({
   );
   if (missing.length === 0) return [];
 
-  const region = envConfig?.s3?.region || envConfig?.backupS3?.region || null;
+  // The backups bucket as every reader takes it: its own region (the uploads
+  // region for a record an old CLI wrote without one).
+  const backups = backupsTargetOf(envConfig);
+  const region = envConfig?.s3?.region || backups?.region || null;
   const label = (name, bucketRegion) => (bucketRegion ? `${name} (${bucketRegion})` : name);
 
   /**
@@ -69,9 +73,8 @@ export function checkS3CredentialMismatch({
   const targets = [];
   const appBucket = envConfig?.s3?.bucket;
   if (appBucket) targets.push(label(appBucket, region));
-  const backupBucket = envConfig?.backupS3?.bucket;
-  if (purgeBackups && backupBucket) {
-    targets.push(label(backupBucket, envConfig?.backupS3?.region || region));
+  if (purgeBackups && backups) {
+    targets.push(label(backups.bucket, backups.region || region));
   }
   if (targets.length === 0) return [];
 

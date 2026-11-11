@@ -1,12 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backupStorageConfig } from '../../../src/lib/backups-bucket.js';
 import {
   listBaseBackups,
   NoRestorePointError,
   resolveDeployRestorePoint,
   resolveRestoreBase,
+  resolveS3Config,
 } from '../../../src/lib/walg/restore-base.js';
 
 /**
@@ -236,5 +239,86 @@ describe('resolveDeployRestorePoint reads the backups bucket at its own endpoint
       }),
     ).rejects.toThrow(/no backup bucket on record/);
     expect(makeClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveS3Config reads the backups bucket through its one resolver', () => {
+  // restore, backup, status, failover, scale and the compose failover TLS
+  // restore all take the backups bucket from here. An environment an older
+  // CLI put in another region's bucket keeps it (its uploads in fsn1, its
+  // backups recorded in nbg1), and every one of them must ask nbg1.
+  const UPLOADS = {
+    bucket: 'myapp-abc123-prod-storage',
+    region: 'fsn1',
+    endpoint: 'https://fsn1.your-objectstorage.com',
+  };
+  const BACKUPS = {
+    bucket: 'myapp-abc123-backups',
+    region: 'nbg1',
+    endpoint: 'https://nbg1.your-objectstorage.com',
+  };
+  let dir = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-resolve-s3-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    vi.stubEnv('HETZNER_ACCESS_KEY', 'ABCDEFGHIJ0123456789');
+    vi.stubEnv('HETZNER_SECRET_KEY', 'x'.repeat(40));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Write `.vibecarbon.json` with one environment, and resolve it. */
+  async function resolve(prod: Record<string, unknown>, isCompose: boolean) {
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({ projectName: 'myapp', environments: { prod } }),
+    );
+    return resolveS3Config({
+      isCompose,
+      envName: 'prod',
+      projectName: 'myapp',
+      envConfig: { provider: 'hetzner' },
+      skipPrompts: true,
+    });
+  }
+
+  it.each([
+    ['compose', true],
+    ['k8s', false],
+  ])(
+    "%s: the backups bucket's own region and endpoint, not the uploads bucket's",
+    async (_mode, isCompose) => {
+      const cfg = await resolve({ provider: 'hetzner', s3: UPLOADS, backupS3: BACKUPS }, isCompose);
+      expect(cfg).toEqual({
+        ...BACKUPS,
+        accessKey: 'ABCDEFGHIJ0123456789',
+        secretKey: 'x'.repeat(40),
+      });
+    },
+  );
+
+  it('a record an old CLI wrote without a region sits beside the uploads (backupsTargetOf)', async () => {
+    const cfg = await resolve(
+      { provider: 'hetzner', s3: UPLOADS, backupS3: { bucket: BACKUPS.bucket } },
+      true,
+    );
+    expect(cfg).toMatchObject({
+      bucket: BACKUPS.bucket,
+      region: 'fsn1',
+      endpoint: UPLOADS.endpoint,
+    });
+  });
+
+  it('compose with no backups record has nothing to read', async () => {
+    expect(await resolve({ provider: 'hetzner', s3: UPLOADS }, true)).toBeNull();
+  });
+
+  it("k8s with no backups record falls back to the app record, where its db pod's wal-g writes", async () => {
+    const cfg = await resolve({ provider: 'hetzner', s3: UPLOADS }, false);
+    expect(cfg).toMatchObject({ ...UPLOADS, accessKey: 'ABCDEFGHIJ0123456789' });
   });
 });

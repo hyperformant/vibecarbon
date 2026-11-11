@@ -21,6 +21,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { backupsTargetOf } from '../backups-bucket.js';
 import { c } from '../colors.js';
 import { DNS_PROVIDERS, hasAutomatedDns } from '../dns-provider.js';
 
@@ -56,6 +57,8 @@ export function readS3SetupCompleted(cwd, envName) {
  *   (destroyPreviewBucketFacts); a legacy shared bucket is never deleted.
  * @param {boolean} [opts.backupBucketHeld]  Another environment still keeps
  *   backups in the bucket, so -purge removes only this env's folder.
+ * @param {string[]} [opts.backupBucketHolders]  Those environments, named
+ *   (destroyPreviewBucketFacts).
  * @returns {string} the note body
  */
 export function destroyPreviewBody({
@@ -66,6 +69,7 @@ export function destroyPreviewBody({
   s3SetupCompleted = false,
   appBucketOwned = true,
   backupBucketHeld = false,
+  backupBucketHolders = [],
 }) {
   const finished = envConfig.status === 'deployed';
   const servers = envConfig.servers ?? [];
@@ -126,17 +130,20 @@ export function destroyPreviewBody({
 `
     : '';
 
-  // The backup bucket is per project: -purge deletes this env's folder, and
-  // the bucket only with the last environment that keeps backups in it
-  // (handleBackupBucket).
-  const backupBlock = envConfig.backupS3?.bucket
+  // One backups bucket per project and storage region: -purge deletes this
+  // env's folder, and the bucket only when no other environment keeps backups
+  // in it (handleBackupBucket), named here as the teardown names them.
+  const backupBucket = backupsTargetOf(envConfig)?.bucket;
+  const keepers =
+    backupBucketHolders.length > 0 ? backupBucketHolders.join(', ') : 'the other environments';
+  const backupBlock = backupBucket
     ? `${c.bold('S3 Backups:')}
     ${
       !purgeBackups
-        ? `${c.success('•')} Bucket: ${envConfig.backupS3.bucket} (PRESERVED for recovery)`
+        ? `${c.success('•')} Bucket: ${backupBucket} (PRESERVED for recovery)`
         : backupBucketHeld
-          ? `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (backups/${projectName}/${envName}/ WILL BE DELETED, because you passed -purge; the bucket stays for the other environments)`
-          : `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (WILL BE DELETED, because you passed -purge)`
+          ? `${c.error('•')} Bucket: ${backupBucket} (backups/${projectName}/${envName}/ WILL BE DELETED, because you passed -purge; the bucket stays for ${keepers})`
+          : `${c.error('•')} Bucket: ${backupBucket} (WILL BE DELETED, because you passed -purge)`
     }${mark(bucketsKnown)}
 `
     : '';

@@ -32,8 +32,9 @@ import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { formatInstant } from '../backup-format.js';
 import { formatBytes } from '../backup-s3.js';
+import { backupsTargetOf } from '../backups-bucket.js';
 import { c } from '../colors.js';
-import { loadBackupS3Config, loadS3Config } from '../config.js';
+import { loadProjectConfig, loadS3Config } from '../config.js';
 import { providerFor } from '../providers/index.js';
 import { S3_HTTP_TIMEOUTS } from '../s3-timeouts.js';
 import { buildRecoveryConfig, RESTORE_PITR_RE, renderRecoveryConf } from './recovery-config.js';
@@ -110,14 +111,19 @@ export async function createS3Client(s3Config, clientOptions = {}) {
 }
 
 /**
- * Resolve the backup bucket's S3 config, credentials included. Compose reads
- * the dedicated backup bucket; k8s prefers it and falls back to the storage
- * bucket (where its db pod's wal-g writes when there is no backup bucket).
- * Credentials are topped up from the provider's object-storage env vars, then
- * the prompt unless `skipPrompts`. Null when no bucket or no credentials.
+ * Resolve the backup bucket's S3 config, credentials included: the one place
+ * restore, backup, status, failover, scale and the compose failover TLS
+ * restore take it from. The bucket, its region and its endpoint come from the
+ * environment's record in `.vibecarbon.json` through backupsTargetOf, so an
+ * environment whose backups sit in another region than its uploads (one an
+ * older CLI put there, which keeps them) is read at that bucket's own host.
+ * Compose stops there; k8s falls back to the uploads bucket (where its db
+ * pod's wal-g writes when there is no backup bucket). Credentials are topped
+ * up from the provider's object-storage env vars, then the prompt unless
+ * `skipPrompts`. Null when no bucket or no credentials.
  *
  * @param {{ isCompose: boolean, envName: string, projectName: string, envConfig: object, skipPrompts?: boolean }} args
- * @returns {Promise<{ bucket: string, endpoint: string, region: string, accessKey: string, secretKey: string } | null>}
+ * @returns {Promise<{ bucket: string, endpoint: string | null, region: string | null, accessKey: string, secretKey: string } | null>}
  */
 export async function resolveS3Config({
   isCompose,
@@ -127,8 +133,8 @@ export async function resolveS3Config({
   skipPrompts = false,
 }) {
   const Provider = providerFor(envConfig);
-  const backupS3 = loadBackupS3Config(envName);
-  const s3Config = isCompose ? backupS3 : backupS3 || loadS3Config(envName);
+  const backups = backupsTargetOf(loadProjectConfig()?.environments?.[envName]);
+  const s3Config = isCompose ? backups : (backups ?? loadS3Config(envName));
   if (!s3Config?.bucket) return null;
   if (s3Config.accessKey && s3Config.secretKey) return s3Config;
   const creds = await Provider.promptObjectStorageCredentials(projectName, {

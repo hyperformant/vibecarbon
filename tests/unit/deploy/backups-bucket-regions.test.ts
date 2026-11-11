@@ -16,7 +16,8 @@
  * `<project>-<salt>-<region>-backups` (src/lib/backups-bucket.js), and an
  * environment that already has a record keeps it.
  */
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
@@ -53,6 +54,20 @@ const clackMock = vi.hoisted(() => ({
   },
 }));
 vi.mock('@clack/prompts', () => clackMock);
+
+// Every bundle the deploy stages, removed after its case.
+const bundles = vi.hoisted(() => [] as string[]);
+vi.mock('../../../src/lib/deploy/bundle.js', async (orig) => {
+  const real = (await orig()) as typeof import('../../../src/lib/deploy/bundle.js');
+  return {
+    ...real,
+    renderBundle: (...args: Parameters<typeof real.renderBundle>) => {
+      const dir = real.renderBundle(...args);
+      bundles.push(dir);
+      return dir;
+    },
+  };
+});
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof projectConfigStore> | null }));
 vi.mock('../../../src/lib/config.js', async (orig) => ({
@@ -234,14 +249,10 @@ async function deployToPlan(g: ReturnType<typeof gathered>) {
   return run.ctx as { s3Config: Record<string, unknown>; bundlePath: string };
 }
 
-/** The compose bundle's server `.env` and `app.env`, read, then removed. */
+/** The compose bundle's server `.env` and `app.env` (the bundle is removed after the case). */
 function bundleEnvs(bundlePath: string) {
-  try {
-    const read = (file: string) => parseDotenv(readFileSync(join(bundlePath, file), 'utf-8'));
-    return { env: read('.env'), app: read('app.env') };
-  } finally {
-    rmSync(bundlePath, { recursive: true, force: true });
-  }
+  const read = (file: string) => parseDotenv(readFileSync(join(bundlePath, file), 'utf-8'));
+  return { env: read('.env'), app: read('app.env') };
 }
 
 const env = (name: string) => loadProjectConfig()?.environments?.[name];
@@ -260,7 +271,13 @@ describe('a second storage region never moves another bucket region', () => {
     HetznerS3Provider.bucketQuietMs = quiet;
   });
 
+  // Each case runs in a scratch project dir (the deploy's command log goes to
+  // <cwd>/.vibecarbon/logs), removed after the case with every bundle the
+  // deploy staged, whether it reached the plan or died first.
+  let scratch = '';
   beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'vc-backups-regions-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(scratch);
     s3.reset();
     run.ctx = null;
     run.skipStorageSetup = false;
@@ -271,7 +288,11 @@ describe('a second storage region never moves another bucket region', () => {
       throw new Error(`exit ${code}`);
     }) as never);
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const dir of [scratch, ...bundles.splice(0)])
+      rmSync(dir, { recursive: true, force: true });
+  });
 
   it('staging in fsn1 keeps fsn1 for its uploads while its recorded backups stay in nbg1', async () => {
     s3.seed(BACKUPS, 'nbg1');
@@ -729,6 +750,73 @@ describe('a second storage region never moves another bucket region', () => {
         region: 'nbg1',
         endpoint: ENDPOINT.nbg1,
       });
+      expect(infoLines().filter((l) => l.includes('where its earlier backups are'))).toEqual([]);
+    });
+
+    it('a rebuild after -purge deleted its bucket joins its region instead of re-making the purged bucket', async () => {
+      // staging's backups were alone in fsn1's bucket; destroy -purge deleted
+      // the folder and the bucket (no other holder) and recorded
+      // backupsPurged. staging comes back in nbg1, where prod's backups are.
+      s3.seed(BACKUPS, 'nbg1');
+      s3.seed(PROD_APP, 'nbg1');
+      s3.seed(STATE, 'nbg1');
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
+        destroyedEnvironments: {
+          staging: {
+            envName: 'staging',
+            backupS3: { bucket: FSN1_BACKUPS, region: 'fsn1', endpoint: ENDPOINT.fsn1 },
+            backupsPurged: true,
+            destroyedAt: '2026-11-02T00:00:00.000Z',
+          },
+        },
+      });
+      const { envConfig } = resolveEnvSeed(loadProjectConfig(), 'staging');
+
+      await deployToPlan(gathered('staging', { compute: 'nbg1', storage: 'nbg1', envConfig }));
+
+      expect(env('staging').backupS3).toEqual({
+        bucket: BACKUPS,
+        region: 'nbg1',
+        endpoint: ENDPOINT.nbg1,
+      });
+      expect(s3.regionOf(FSN1_BACKUPS)).toBeUndefined();
+      expect(sent('CreateBucket').map((c) => c.bucket)).not.toContain(FSN1_BACKUPS);
+    });
+
+    it('a rebuild after -purge kept a shared bucket in another region gets its own region bucket', async () => {
+      // What the old bug left: staging (uploads in fsn1) archived into the
+      // project's nbg1 bucket. -purge removed staging's folder and kept the
+      // bucket for prod. Nothing of staging's is left there, so the rebuild
+      // puts its backups beside its uploads.
+      s3.seed(BACKUPS, 'nbg1');
+      s3.seed(PROD_APP, 'nbg1');
+      s3.seed(STATE, 'nbg1');
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
+        destroyedEnvironments: {
+          staging: {
+            envName: 'staging',
+            backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
+            backupsPurged: true,
+            destroyedAt: '2026-11-02T00:00:00.000Z',
+          },
+        },
+      });
+      const { envConfig } = resolveEnvSeed(loadProjectConfig(), 'staging');
+
+      await deployToPlan(gathered('staging', { compute: 'fsn1', storage: 'fsn1', envConfig }));
+
+      expect(env('staging').backupS3).toEqual({
+        bucket: FSN1_BACKUPS,
+        region: 'fsn1',
+        endpoint: ENDPOINT.fsn1,
+      });
+      expect(s3.regionOf(FSN1_BACKUPS)).toBe('fsn1');
       expect(infoLines().filter((l) => l.includes('where its earlier backups are'))).toEqual([]);
     });
 
