@@ -478,6 +478,218 @@ describe('absent fence targets on a deploy (round 2)', () => {
   });
 });
 
+describe('each bucket is fenced in its own region (Task 5)', () => {
+  const BASE = 'proj-abc-backups';
+  const FSN1 = 'proj-abc-fsn1-backups';
+  /** Where each bucket lives: a store asked anywhere else answers NoSuchBucket. */
+  const WHERE: Record<string, string> = {
+    'proj-abc-state': 'nbg1',
+    [BASE]: 'nbg1',
+    'proj-abc-prod': 'nbg1',
+    [FSN1]: 'fsn1',
+    'proj-abc-staging': 'fsn1',
+  };
+
+  /**
+   * Two storage regions: prod in nbg1 with the base backups bucket, staging
+   * in fsn1 with fsn1's own, and the one state bucket in nbg1. Staging is
+   * listed first, so the state bucket's region must come from
+   * stateBucketRegion, not from staging's uploads region.
+   */
+  function twoRegions() {
+    const env = (name: string, id: string, region: string, backups: string) => ({
+      provider: 'hetzner',
+      status: 'deployed',
+      s3: {
+        bucket: `proj-abc-${name}`,
+        region,
+        stateBucket: 'proj-abc-state',
+        stateBucketRegion: 'nbg1',
+        appKey: { id, scoping: 'paste-fence', tier: 'fenced' },
+      },
+      backupS3: { bucket: backups, region, endpoint: `https://${region}.your-objectstorage.com` },
+    });
+    return {
+      projectName: 'proj',
+      environments: {
+        staging: env('staging', 'AK_S', 'fsn1', FSN1),
+        prod: env('prod', 'AK_P', 'nbg1', BASE),
+      },
+    } as {
+      projectName: string;
+      environments: Record<string, ReturnType<typeof env> | Record<string, unknown>>;
+      retiredAppKeys?: string[];
+    };
+  }
+
+  const noSuchBucket = () =>
+    Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' });
+
+  /**
+   * The infra key's store at `region`, as Hetzner answers it: a bucket of
+   * another region is not there. Every call is logged as `<op> <bucket>@<region>`.
+   */
+  function storeAt(region: string, world: { calls: string[]; policies: Map<string, object> }) {
+    const here = (bucket: string) => {
+      if (WHERE[bucket] !== region) throw noSuchBucket();
+    };
+    return {
+      region,
+      forRegion: (r: string) => storeAt(r, world),
+      ownerId: async () => OWNER,
+      getBucketPolicy: vi.fn(async (bucket: string) => {
+        world.calls.push(`get ${bucket}@${region}`);
+        here(bucket);
+        return world.policies.get(bucket) ?? null;
+      }),
+      bucketExists: vi.fn(async (bucket: string) => {
+        world.calls.push(`head ${bucket}@${region}`);
+        return WHERE[bucket] === region;
+      }),
+      putBucketPolicy: vi.fn(async (bucket: string, policy: object) => {
+        world.calls.push(`put ${bucket}@${region}`);
+        here(bucket);
+        world.policies.set(bucket, policy);
+      }),
+      deleteBucketPolicy: vi.fn(async (bucket: string) => {
+        world.calls.push(`delete ${bucket}@${region}`);
+        here(bucket);
+        world.policies.delete(bucket);
+      }),
+    };
+  }
+
+  /**
+   * A fenced key's probe at `region`. Asked about a bucket of another region it
+   * gets a 404, which is no denial (isDeniedOn counts only a 403).
+   */
+  function probeAt(region: string, asked: string[]) {
+    return {
+      forRegion: (r: string) => probeAt(r, asked),
+      isDeniedOn: vi.fn(async (bucket: string) => {
+        asked.push(`${bucket}@${region}`);
+        return WHERE[bucket] === region;
+      }),
+    };
+  }
+
+  /** Both pasted keys stored on this machine, as `configure storage` saves them. */
+  function bothKeys() {
+    const store: Record<string, string> = {};
+    for (const [env, id] of [
+      ['prod', 'AK_P'],
+      ['staging', 'AK_S'],
+    ]) {
+      const names = appStorageSecretKeys(env);
+      store[names.accessKey] = id;
+      store[names.secretKey] = `SENTINEL_${id}_SK`;
+    }
+    return { get: (k: string) => store[k] };
+  }
+
+  /** Each logged `<what> <bucket>@<region>` names its bucket's own region. */
+  const inOwnRegion = (entries: string[]) =>
+    entries.filter((e) => {
+      const [bucket, region] = (e.split(' ').at(-1) ?? '').split('@');
+      return WHERE[bucket] !== region;
+    });
+
+  it('fenceTargets names each bucket with its own region', () => {
+    const regions = Object.fromEntries(
+      fenceTargets({ projectConfig: twoRegions(), environment: 'staging' }).map((t) => [
+        t.bucket,
+        t.region,
+      ]),
+    );
+    expect(regions).toEqual(WHERE);
+  });
+
+  it('a deploy in fsn1 reads, writes and probes every fence at its bucket’s own region', async () => {
+    const world = { calls: [] as string[], policies: new Map<string, object>() };
+    const asked: string[] = [];
+    // The deploy builds both clients at its own storage region (fsn1).
+    const out = await syncHetznerFences({
+      projectConfig: twoRegions(),
+      environment: 'staging',
+      s3: storeAt('fsn1', world),
+      secrets: bothKeys(),
+      createProbe: async () => probeAt('fsn1', asked),
+      ...fakeClock(),
+    });
+    expect(out.written.sort()).toEqual(Object.keys(WHERE).sort());
+    expect(world.calls.length).toBeGreaterThan(0);
+    expect(inOwnRegion(world.calls)).toEqual([]);
+    // Every bucket was probed, each at its own region.
+    expect(new Set(asked.map((e) => e.split('@')[0]))).toEqual(new Set(Object.keys(WHERE)));
+    expect(inOwnRegion(asked)).toEqual([]);
+  });
+
+  it('a destroy of staging (its client in fsn1) fences prod’s nbg1 buckets in nbg1', async () => {
+    const world = { calls: [] as string[], policies: new Map<string, object>() };
+    const asked: string[] = [];
+    const cfg = { ...twoRegions(), retiredAppKeys: ['AK_S'] };
+    const out = await syncHetznerFences({
+      projectConfig: cfg,
+      environment: 'staging',
+      leaving: true,
+      s3: storeAt('fsn1', world),
+      secrets: bothKeys(),
+      createProbe: async () => probeAt('fsn1', asked),
+      ...fakeClock(),
+    });
+    expect(out.written.sort()).toEqual([BASE, 'proj-abc-prod', 'proj-abc-state']);
+    expect(inOwnRegion(world.calls)).toEqual([]);
+    expect(inOwnRegion(asked)).toEqual([]);
+  });
+
+  it('a target an older CLI recorded without a region goes to the client it was given', async () => {
+    // No region anywhere in the record: the target says so with null.
+    const old = {
+      projectName: 'proj',
+      environments: {
+        prod: {
+          s3: {
+            bucket: 'proj-abc-prod',
+            stateBucket: 'proj-abc-state',
+            appKey: { id: 'AK_P', scoping: 'paste-fence', tier: 'fenced' },
+          },
+          backupS3: { bucket: BASE },
+        },
+      },
+    };
+    const targets = fenceTargets({ projectConfig: old, environment: 'prod' });
+    expect(targets.map((t) => t.region)).toEqual([null, null, null]);
+
+    const s3 = { ...makeS3(), forRegion: vi.fn() };
+    const probe = { ...scriptedProbe([true]), forRegion: vi.fn() };
+    await applyHetznerFences({
+      s3,
+      ownerId: OWNER,
+      targets,
+      probes: { AK_P: probe },
+      ...fakeClock(),
+    });
+    expect(s3.forRegion).not.toHaveBeenCalled();
+    expect(probe.forRegion).not.toHaveBeenCalled();
+    expect(s3.puts.sort()).toEqual([BASE, 'proj-abc-state']);
+    expect(probe.calls()).toBeGreaterThan(0);
+  });
+
+  it('a bucket noted twice keeps the first region on record', () => {
+    // An older env with no regions shares the base backups bucket with prod,
+    // whose record knows it lives in nbg1.
+    const cfg = twoRegions();
+    cfg.environments = {
+      old: { s3: { bucket: 'proj-abc-old' }, backupS3: { bucket: BASE } },
+      ...cfg.environments,
+    };
+    const target = fenceTargets({ projectConfig: cfg, environment: 'prod' }).find(
+      (t) => t.bucket === BASE,
+    );
+    expect(target?.region).toBe('nbg1');
+  });
+});
+
 describe('(b) a fenced env whose key is not on this machine', () => {
   it('refuses the deploy rather than downgrade to shared', async () => {
     await expect(

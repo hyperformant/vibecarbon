@@ -18,6 +18,10 @@
  * create buckets, use any bucket made outside vibecarbon, and delete an empty
  * fenced bucket.
  *
+ * Each bucket is read, written and probed at its own region: a project with a
+ * second storage region has buckets in two, and a Hetzner store asked about a
+ * bucket of another region answers NoSuchBucket.
+ *
  * Policy changes reach Hetzner's gateways unevenly over 30 to 60 s, so each
  * fence is written once per change and then verified by a consistency gate:
  * FENCE_PROBE_STREAK denied probes in a row with a fenced key, inside a fixed
@@ -32,6 +36,20 @@ export const FENCE_PROBE_STREAK = 3;
 export const FENCE_PROBE_BUDGET_MS = 120_000;
 /** Time between probes. */
 export const FENCE_PROBE_INTERVAL_MS = 5_000;
+
+/**
+ * The infra key's store, as the fence uses it. `forRegion` gives the same
+ * keys at another region (S3CompatibleProvider.forRegion).
+ * @typedef {{ getBucketPolicy: Function, putBucketPolicy: Function,
+ *   deleteBucketPolicy: Function, bucketExists?: (b: string) => Promise<boolean>,
+ *   forRegion?: (region: string) => FenceStore }} FenceStore
+ */
+
+/**
+ * A fenced app key's client: is it refused on a bucket? `forRegion` as above.
+ * @typedef {{ isDeniedOn(bucket: string): Promise<boolean>,
+ *   forRegion?: (region: string) => FenceProbe }} FenceProbe
+ */
 
 /**
  * The fence principal for one key.
@@ -97,8 +115,15 @@ function pastedKeys(projectConfig) {
  * the env being deployed (`environment`, unless `leaving`) does not use: only
  * such a bucket may be skipped when the provider says it does not exist.
  *
+ * `region` is where the bucket lives, from the record that names it: an app
+ * bucket's `s3.region`, the state bucket's `s3.stateBucketRegion` (else
+ * `s3.region`), a backups bucket's region from backupsTargetOf. A bucket
+ * named by several records keeps the first region on record. Null when no
+ * record names one (an older CLI's): applyHetznerFences then asks the client
+ * it was given.
+ *
  * @param {{ projectConfig: object, environment: string, leaving?: boolean }} args
- * @returns {{ bucket: string, deniedAccessKeyIds: string[], mayBeAbsent: boolean }[]}
+ * @returns {{ bucket: string, region: string|null, deniedAccessKeyIds: string[], mayBeAbsent: boolean }[]}
  */
 export function fenceTargets({ projectConfig, environment, leaving = false }) {
   const envs = Object.entries(projectConfig.environments ?? {}).filter(
@@ -115,18 +140,24 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
     (!leaving && name === environment) ||
     e?.status === 'deployed' ||
     Object.hasOwn(e?.s3 ?? {}, 'bucketCreatedAt');
-  /** @type {Map<string, { owner: string|null, completed: boolean }>} */
+  /** @type {Map<string, { owner: string|null, completed: boolean, region: string|null }>} */
   const buckets = new Map();
-  const note = (bucket, owner, name, e) => {
+  const note = (bucket, region, owner, name, e) => {
     const prev = buckets.get(bucket);
     buckets.set(bucket, {
       owner: prev ? prev.owner : owner,
       completed: (prev?.completed ?? false) || completed(name, e),
+      region: prev?.region ?? region ?? null,
     });
   };
   for (const [name, e] of envs) {
-    for (const shared of [e?.s3?.stateBucket, backupsTargetOf(e)?.bucket]) {
-      if (shared) note(shared, null, name, e);
+    const backups = backupsTargetOf(e);
+    const shared = [
+      [e?.s3?.stateBucket, e?.s3?.stateBucketRegion ?? e?.s3?.region],
+      [backups?.bucket, backups?.region],
+    ];
+    for (const [bucket, region] of shared) {
+      if (bucket) note(bucket, region, null, name, e);
     }
   }
   for (const [name, e] of envs) {
@@ -134,12 +165,13 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
     // A pinned bucket may be one several envs share; it is not this env's
     // own, so it denies every pasted key like the state and backups buckets.
     if (!own) continue;
-    if (buckets.has(own)) note(own, null, name, e);
-    else note(own, e.s3.bucketPin ? null : name, name, e);
+    if (buckets.has(own)) note(own, e.s3.region, null, name, e);
+    else note(own, e.s3.region, e.s3.bucketPin ? null : name, name, e);
   }
   return [...buckets.entries()]
-    .map(([bucket, { owner, completed: done }]) => ({
+    .map(([bucket, { owner, completed: done, region }]) => ({
       bucket,
+      region,
       deniedAccessKeyIds: [
         ...new Set([...keys.filter((k) => k.env !== owner).map((k) => k.id), ...retired]),
       ].sort(),
@@ -176,15 +208,37 @@ function fencedIdsOf(policy, bucket, ownerId) {
 }
 
 /**
- * Wait until `probe` refuses FENCE_PROBE_STREAK times in a row, inside the
- * budget. A consistency gate, not a retry: it never writes anything.
- * @param {{ bucket: string, probe: { isDeniedOn(bucket: string): Promise<boolean> }, sleep: (ms: number) => Promise<void>, now: () => number }} args
+ * `client` at `region`, through its forRegion; the client itself for a
+ * target with no region on record, or one that cannot move.
+ * @template T
+ * @param {T & { forRegion?: (region: string) => T }} client
+ * @param {string|null|undefined} region
+ * @returns {T}
  */
-async function waitForFence({ bucket, probe, sleep, now, streakNeeded = FENCE_PROBE_STREAK }) {
+function atRegion(client, region) {
+  return region && typeof client.forRegion === 'function' ? client.forRegion(region) : client;
+}
+
+/**
+ * Wait until `probe` refuses FENCE_PROBE_STREAK times in a row, inside the
+ * budget. A consistency gate, not a retry: it never writes anything. The probe
+ * asks at the bucket's own region: anywhere else the bucket answers 404,
+ * which is never a denial, so the fence could never be seen to hold.
+ * @param {{ bucket: string, region?: string|null, probe: FenceProbe, sleep: (ms: number) => Promise<void>, now: () => number, streakNeeded?: number }} args
+ */
+async function waitForFence({
+  bucket,
+  region,
+  probe,
+  sleep,
+  now,
+  streakNeeded = FENCE_PROBE_STREAK,
+}) {
+  const asker = atRegion(probe, region);
   const deadline = now() + FENCE_PROBE_BUDGET_MS;
   let streak = 0;
   while (true) {
-    streak = (await probe.isDeniedOn(bucket)) ? streak + 1 : 0;
+    streak = (await asker.isDeniedOn(bucket)) ? streak + 1 : 0;
     if (streak >= streakNeeded) return;
     if (now() + FENCE_PROBE_INTERVAL_MS > deadline) {
       throw new Error(
@@ -224,11 +278,16 @@ function isNoSuchBucket(err) {
  * with its cause, because a young Hetzner bucket answers NoSuchBucket
  * transiently and a skip there would leave it unfenced.
  *
+ * Every call for a target, its policy read and write, its HeadBucket and
+ * each probe, goes to the target's `region` (`forRegion` on the client and on
+ * each probe), whatever region the caller built them at. A target without a
+ * region uses them as given.
+ *
  * @param {object} args
- * @param {{ getBucketPolicy: Function, putBucketPolicy: Function, deleteBucketPolicy: Function, bucketExists?: (b: string) => Promise<boolean> }} args.s3 - the infra key's client
+ * @param {FenceStore} args.s3 - the infra key's client
  * @param {string} args.ownerId
- * @param {{ bucket: string, deniedAccessKeyIds: string[], mayBeAbsent?: boolean }[]} args.targets
- * @param {Record<string, { isDeniedOn(bucket: string): Promise<boolean> }>} [args.probes]
+ * @param {{ bucket: string, region?: string|null, deniedAccessKeyIds: string[], mayBeAbsent?: boolean }[]} args.targets
+ * @param {Record<string, FenceProbe>} [args.probes]
  * @param {(ms: number) => Promise<void>} [args.sleep]
  * @param {() => number} [args.now]
  * @returns {Promise<{ written: string[], removed: string[], unverified: string[], skipped: string[] }>}
@@ -248,16 +307,17 @@ export async function applyHetznerFences({
   // Every write lands first; the verifications then run side by side, since
   // each waits on its own bucket's consistency.
   const verifications = [];
-  for (const { bucket, deniedAccessKeyIds, mayBeAbsent = false } of targets) {
+  for (const { bucket, region, deniedAccessKeyIds, mayBeAbsent = false } of targets) {
+    const store = atRegion(s3, region);
     let current;
     try {
-      current = await s3.getBucketPolicy(bucket);
+      current = await store.getBucketPolicy(bucket);
     } catch (err) {
       if (
         isNoSuchBucket(err) &&
         mayBeAbsent &&
-        s3.bucketExists &&
-        !(await s3.bucketExists(bucket))
+        store.bucketExists &&
+        !(await store.bucketExists(bucket))
       ) {
         skipped.push(bucket);
         continue;
@@ -279,13 +339,13 @@ export async function applyHetznerFences({
     const unchanged = JSON.stringify(currentIds) === JSON.stringify(wanted);
     if (wanted.length === 0) {
       if (!unchanged) {
-        await s3.deleteBucketPolicy(bucket);
+        await store.deleteBucketPolicy(bucket);
         removed.push(bucket);
       }
       continue;
     }
     if (!unchanged) {
-      await s3.putBucketPolicy(
+      await store.putBucketPolicy(
         bucket,
         renderHetznerFencePolicy({ bucket, ownerId, deniedAccessKeyIds: wanted }),
       );
@@ -300,6 +360,7 @@ export async function applyHetznerFences({
       verifications.push(() =>
         waitForFence({
           bucket,
+          region,
           probe,
           sleep,
           now,

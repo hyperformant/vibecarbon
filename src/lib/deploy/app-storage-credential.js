@@ -431,13 +431,16 @@ export async function waitForAppKeyReady({
  * (deploy) or for its removal (`leaving: true`, destroy), and verify each
  * written fence with every pasted key stored on this machine.
  *
+ * `s3` and each probe may be built at any one region: the fence reaches each
+ * bucket at its own region through their `forRegion` (applyHetznerFences).
+ *
  * @param {object} args
  * @param {object} args.projectConfig - with the env's current `s3.appKey` record
  * @param {string} args.environment
  * @param {boolean} [args.leaving]
  * @param {object} args.s3 - the infra key's HetznerS3Provider
  * @param {{ get(key: string): string|undefined }} args.secrets
- * @param {(accessKey: string, secretKey: string) => Promise<{ isDeniedOn(b: string): Promise<boolean> }>} args.createProbe
+ * @param {(accessKey: string, secretKey: string) => Promise<{ isDeniedOn(b: string): Promise<boolean>, forRegion?: (region: string) => object }>} args.createProbe
  * @param {(ms: number) => Promise<void>} [args.sleep]
  * @param {() => number} [args.now]
  */
