@@ -14,7 +14,7 @@
  * (getObjectStorageProviderClass()), so registering a compute provider
  * automatically drafts its object-storage class into every invariant here.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { S3CompatibleProvider } from '../../../src/lib/providers/s3-base.js';
 
@@ -86,6 +86,118 @@ describe.each(ENTRIES)('S3 provider contract: %s', (_id, S3Class) => {
 
   it('getRegions() returns the subclass REGIONS map (polymorphic static intact)', () => {
     expect(S3Class.getRegions()).toBe(S3Class.REGIONS);
+  });
+});
+
+/**
+ * An instance never changes region. createBucket used to move the instance
+ * to wherever an existing bucket of that name lived, so one bucket's answer
+ * moved every later call on the same client: a second environment in fsn1
+ * recorded its fsn1 uploads bucket as nbg1 because the project's backups
+ * bucket lived in nbg1. A bucket elsewhere is now reached through
+ * forRegion(), and each create reports its own bucket's region.
+ */
+describe.each(ENTRIES)('S3 provider region is fixed at construction: %s', (_id, S3Class) => {
+  const [own, other] = Object.keys(S3Class.ENDPOINTS);
+  type Internals = S3CompatibleProvider & {
+    bucketExists: (b: string) => Promise<boolean>;
+    _send: (c: unknown, o?: unknown) => Promise<unknown>;
+    findBucketRegion: (b: string) => Promise<string | null>;
+    waitForBucketVisible: (b: string) => Promise<boolean>;
+  };
+  const make = () => new S3Class('AKCONTRACT', 'SKCONTRACT', own) as Internals;
+  const s3Error = (name: string, status: number) =>
+    Object.assign(new Error(name), { name, $metadata: { httpStatusCode: status } });
+
+  it('has at least two regions, so forRegion has another to reach', () => {
+    expect(other).toBeDefined();
+  });
+
+  it('forRegion(other) is a new instance of the same class at that region, same keys', () => {
+    const store = make();
+    const there = store.forRegion(other);
+    expect(there).not.toBe(store);
+    expect(there.constructor).toBe(S3Class);
+    expect(there.region).toBe(other);
+    expect(there.getEndpoint()).toBe(S3Class.ENDPOINTS[other]);
+    expect(there.accessKeyId).toBe('AKCONTRACT');
+    expect(there.secretAccessKey).toBe('SKCONTRACT');
+    // The original is untouched.
+    expect(store.region).toBe(own);
+  });
+
+  it('forRegion(own region) is the same instance', () => {
+    const store = make();
+    expect(store.forRegion(own)).toBe(store);
+  });
+
+  it('a bucket found in another region is reported there and the instance stays put', async () => {
+    const store = make();
+    const clientBefore = store.getClient();
+    store.bucketExists = vi.fn(async () => false);
+    store._send = vi.fn(async () => {
+      throw s3Error('BucketAlreadyExists', 409);
+    });
+    store.findBucketRegion = vi.fn(async () => other);
+
+    const result = await store.createBucket('elsewhere-bucket');
+
+    expect(result).toEqual({
+      name: 'elsewhere-bucket',
+      created: false,
+      ready: true,
+      region: other,
+      endpoint: S3Class.ENDPOINTS[other],
+      message: 'Bucket already exists',
+    });
+    expect(store.region).toBe(own);
+    expect(store.getEndpoint()).toBe(S3Class.ENDPOINTS[own]);
+    expect(store.getClient()).toBe(clientBefore);
+  });
+
+  it('a bucket that already answers HEAD here reports this region', async () => {
+    const store = make();
+    store.bucketExists = vi.fn(async () => true);
+    await expect(store.createBucket('here-bucket')).resolves.toMatchObject({
+      created: false,
+      ready: true,
+      region: own,
+      endpoint: S3Class.ENDPOINTS[own],
+    });
+  });
+
+  it('a bucket we already own here (BucketAlreadyOwnedByYou) reports this region', async () => {
+    const store = make();
+    store.bucketExists = vi.fn(async () => false);
+    store._send = vi.fn(async () => {
+      throw s3Error('BucketAlreadyOwnedByYou', 409);
+    });
+    await expect(store.createBucket('mine-bucket')).resolves.toMatchObject({
+      created: false,
+      ready: true,
+      region: own,
+      endpoint: S3Class.ENDPOINTS[own],
+    });
+  });
+
+  it('a bucket this call created reports this region', async () => {
+    const quiet = S3Class.bucketQuietMs;
+    S3Class.bucketQuietMs = 0;
+    try {
+      const store = make();
+      store.bucketExists = vi.fn(async () => false);
+      store._send = vi.fn(async () => ({}));
+      store.waitForBucketVisible = vi.fn(async () => true);
+      await expect(store.createBucket('new-bucket')).resolves.toEqual({
+        name: 'new-bucket',
+        created: true,
+        ready: true,
+        region: own,
+        endpoint: S3Class.ENDPOINTS[own],
+      });
+    } finally {
+      S3Class.bucketQuietMs = quiet;
+    }
   });
 });
 

@@ -113,12 +113,22 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
     region: 'hel1',
     endpoint: 'https://hel1.your-objectstorage.com',
     getEndpoint: () => 'https://hel1.your-objectstorage.com',
+    // One region here: every bucket is in hel1.
+    forRegion() {
+      return this;
+    },
     createBucket: async (name: string) => {
       run.buckets.push(name);
       // The app and backup buckets are always new here, so only the state
       // bucket's own answer can decide.
       const created = name.includes('pulumi-state') ? run.stateBucketCreated : true;
-      return { name, created, ready: true };
+      return {
+        name,
+        created,
+        ready: true,
+        region: 'hel1',
+        endpoint: 'https://hel1.your-objectstorage.com',
+      };
     },
     hasObjectsWithPrefix: async () => false,
     bucketExists: async () => true,

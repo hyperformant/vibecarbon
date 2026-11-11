@@ -488,6 +488,9 @@ export class S3CompatibleProvider {
    * deliberately don't retry transients here because findBucketRegion is
    * itself a fallback called from createBucket's BucketAlreadyExists branch
    * — a per-region blip just means "try the next region", not "give up".
+   * The answer only names where the bucket is: this instance stays at its
+   * own region, createBucket reports the found one in its result, and a
+   * caller reaches that bucket through `forRegion(found)`.
    * @param {string} bucketName
    * @returns {Promise<string|null>} The region where the bucket was found, or null
    */
@@ -579,11 +582,23 @@ export class S3CompatibleProvider {
    *   9 minutes, 20 to 30% of them, while a read-back of the rule looked right;
    *   written first, none of about 700 were. So a setting a new bucket needs
    *   goes on here, never after.
-   * @returns {Promise<{name: string, created: boolean, ready: boolean, message?: string}>}
+   * @returns {Promise<{name: string, created: boolean, ready: boolean, region: string,
+   *   endpoint: string, message?: string}>} `region` and `endpoint` are where
+   *   THIS bucket lives: this instance's own, except when the name already
+   *   exists in another region of this store, where they name that region.
+   *   The instance itself never moves (see forRegion); a caller takes each
+   *   bucket's region from that bucket's own result.
    */
   async createBucket(bucketName, { beforeFirstRead } = {}) {
+    const here = { region: this.region, endpoint: this.endpoint };
     if (await this.bucketExists(bucketName)) {
-      return { name: bucketName, created: false, ready: true, message: 'Bucket already exists' };
+      return {
+        name: bucketName,
+        created: false,
+        ready: true,
+        ...here,
+        message: 'Bucket already exists',
+      };
     }
 
     const command = new CreateBucketCommand({ Bucket: bucketName });
@@ -600,13 +615,14 @@ export class S3CompatibleProvider {
         }
         await beforeFirstRead?.();
         const ready = await this.waitForBucketVisible(bucketName);
-        return { name: bucketName, created: true, ready };
+        return { name: bucketName, created: true, ready, ...here };
       } catch (error) {
         if (error.name === 'BucketAlreadyOwnedByYou') {
           return {
             name: bucketName,
             created: false,
             ready: true,
+            ...here,
             message: 'Bucket already exists',
           };
         }
@@ -621,13 +637,17 @@ export class S3CompatibleProvider {
           // assuming another account owns it.
           const foundRegion = await this.findBucketRegion(bucketName);
           if (foundRegion) {
-            this.region = foundRegion;
-            this.endpoint = this.constructor.ENDPOINTS[foundRegion];
-            this._client = null;
+            // Reported, never adopted: this instance used to move itself to
+            // foundRegion, and the deploy shares one instance across its
+            // buckets, so the backups bucket's region became the app
+            // bucket's recorded region (a second env in fsn1, after one in
+            // nbg1, recorded its fsn1 uploads as nbg1).
             return {
               name: bucketName,
               created: false,
               ready: true,
+              region: foundRegion,
+              endpoint: this.constructor.ENDPOINTS[foundRegion],
               message: 'Bucket already exists',
             };
           }
@@ -1201,6 +1221,18 @@ export class S3CompatibleProvider {
    */
   getEndpoint() {
     return this.endpoint;
+  }
+
+  /**
+   * This store at another region, same keys. An instance never changes
+   * region: a bucket that lives elsewhere is addressed through its own
+   * instance, so one bucket's answer can never move another's client.
+   * @param {string} region
+   * @returns {S3CompatibleProvider}
+   */
+  forRegion(region) {
+    if (region === this.region) return this;
+    return new this.constructor(this.accessKeyId, this.secretAccessKey, region);
   }
 
   /**

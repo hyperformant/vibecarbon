@@ -126,7 +126,17 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
     region: 'hel1',
     endpoint: 'https://hel1.your-objectstorage.com',
     getEndpoint: () => 'https://hel1.your-objectstorage.com',
-    createBucket: async (name: string) => ({ name, created: false, ready: true }),
+    // One region here: every bucket is in hel1.
+    forRegion() {
+      return this;
+    },
+    createBucket: async (name: string) => ({
+      name,
+      created: false,
+      ready: true,
+      region: 'hel1',
+      endpoint: 'https://hel1.your-objectstorage.com',
+    }),
     hasObjectsWithPrefix: async () => false,
     bucketExists: async () => true,
     setBucketCors: async () => {},

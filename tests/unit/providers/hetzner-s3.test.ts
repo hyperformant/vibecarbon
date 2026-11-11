@@ -345,12 +345,17 @@ describe('HetznerS3Provider', () => {
         mockSend.mockRejectedValueOnce({ name: 'NotFound' });
         // Second call: CreateBucket - already exists
         mockSend.mockRejectedValueOnce({ name: 'BucketAlreadyExists' });
-        // findBucketRegion finds it in another region
-        vi.spyOn(provider, 'findBucketRegion').mockResolvedValueOnce('fsn1');
+        // findBucketRegion finds it in another region (the provider is fsn1's)
+        vi.spyOn(provider, 'findBucketRegion').mockResolvedValueOnce('nbg1');
 
         const result = await provider.createBucket('existing-bucket');
         expect(result.created).toBe(false);
         expect(result.message).toContain('already exists');
+        // The result names where the bucket lives; the provider stays put.
+        expect(result.region).toBe('nbg1');
+        expect(result.endpoint).toBe('https://nbg1.your-objectstorage.com');
+        expect(provider.region).toBe('fsn1');
+        expect(provider.getEndpoint()).toBe('https://fsn1.your-objectstorage.com');
       });
 
       it('throws friendly error for BucketAlreadyExists when not found in any region', async () => {

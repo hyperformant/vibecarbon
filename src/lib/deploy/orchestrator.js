@@ -1318,13 +1318,21 @@ export async function executeDeployment(args, gatheredConfig) {
   // and `dns-setup` — are left on the plain hash check to keep this change
   // focused; s3-setup is the highest-value one because the state backend lives
   // here.
+  // Each bucket is asked in the region the step recorded for it: HeadBucket
+  // answers 404 for a bucket that lives in another region, so asking all
+  // three at the requested region re-ran this step on every deploy of an env
+  // whose backups or state bucket lives elsewhere. No recorded result (or one
+  // without a region) means nothing to check against: run the step.
   const verifyBucketsExist = async () => {
+    const r = state.getStepResult('s3-setup');
+    if (!r?.region) return false;
+    const at = (region) => s3Provider.forRegion(region);
     const [app, backup, stateB] = await Promise.all([
-      s3Provider.bucketExists(s3Config.bucket),
+      at(r.region).bucketExists(s3Config.bucket),
       backupS3Config?.bucket
-        ? s3Provider.bucketExists(backupS3Config.bucket)
+        ? at(r.backups?.region ?? r.region).bucketExists(backupS3Config.bucket)
         : Promise.resolve(true),
-      s3Provider.bucketExists(stateBucket),
+      at(r.stateBucketRegion ?? r.region).bucketExists(stateBucket),
     ]);
     return app && backup && stateB;
   };
@@ -1457,38 +1465,37 @@ export async function executeDeployment(args, gatheredConfig) {
         s3Provider
           .setBucketCors(s3Config.bucket, envCorsOrigins(domain), { untilVisibleMs: 15_000 })
           .catch(() => {});
-      const bucket = await s3Provider.createBucket(s3Config.bucket, { beforeFirstRead });
-      assertBucketReady(bucket, 'App storage');
+      const app = await s3Provider.createBucket(s3Config.bucket, { beforeFirstRead });
+      assertBucketReady(app, 'App storage');
       s3Spinner.stop(
-        bucket.created
+        app.created
           ? `S3 bucket created: ${s3Config.bucket}`
           : `S3 bucket exists: ${s3Config.bucket}`,
       );
+      // Each bucket's region comes from its own create, never from the shared
+      // client, which never moves (S3CompatibleProvider.forRegion).
+      if (app.region !== s3Config.region) {
+        // An env an older CLI recorded under another bucket's region is
+        // repaired here: its uploads follow where its bucket really is.
+        p.log.info(
+          `${s3Config.bucket} lives in ${app.region}, not ${s3Config.region}, so ${environment} now records ${app.region} for its uploads`,
+        );
+      }
 
       // No try/catch here: a backup bucket that failed to create used to be
       // logged and skipped, and the deploy then died at wal-g's audit after
       // the VPS existed. The step's catch below reports and exits before
       // anything is provisioned.
       s3Spinner.start(`Creating backup bucket: ${backupS3Config.bucket}`);
-      const backupBucket = await s3Provider.createBucket(backupS3Config.bucket);
+      const backupBucket = await s3Provider
+        .forRegion(app.region)
+        .createBucket(backupS3Config.bucket);
       assertBucketReady(backupBucket, 'Backup');
       s3Spinner.stop(
         backupBucket.created
           ? `Backup bucket created: ${backupS3Config.bucket}`
           : `Backup bucket exists: ${backupS3Config.bucket}`,
       );
-
-      // Capture the region/endpoint the APP and BACKUP buckets were actually
-      // created under, BEFORE the state-bucket create below. createBucket's
-      // exists-elsewhere recovery can flip s3Provider.region/endpoint to
-      // wherever a retained state bucket already lives — and the persist block
-      // at the bottom of this step used to read the flipped values and record
-      // the app/backup buckets under a region where they do not exist, so the
-      // deployed storage config and wal-g both 404'd (review finding,
-      // 2026-08-15). The state bucket may legitimately live in a different
-      // region; the app/backup config must never follow it there.
-      const appBucketRegion = s3Provider.region;
-      const appBucketEndpoint = s3Provider.getEndpoint();
 
       // Dedicated Pulumi-state bucket. Created imperatively (like the app +
       // backup buckets) BEFORE any Pulumi stack op. NOT
@@ -1523,6 +1530,11 @@ export async function executeDeployment(args, gatheredConfig) {
       // Legacy state in the OLD app bucket predates project scoping and lives
       // under the historical constant project name.
       const LEGACY_STATE_PREFIX = '.pulumi/';
+      // Each bucket is read in its own region: a LIST of a bucket from another
+      // region answers NoSuchBucket, which reads as "no state" and would send
+      // a seeded state bucket down the migration below.
+      const stateStore = s3Provider.forRegion(stateBucketResult.region);
+      const appStore = s3Provider.forRegion(app.region);
       // Determine whether there is GENUINE legacy state to migrate. The check
       // lists the just-created state bucket, which can race S3 list-after-create
       // consistency and throw — that is NOT the orphan-risk case (a fresh deploy
@@ -1535,13 +1547,13 @@ export async function executeDeployment(args, gatheredConfig) {
       let checkOk = false;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const stateSeeded = await s3Provider.hasObjectsWithPrefix(
+          const stateSeeded = await stateStore.hasObjectsWithPrefix(
             stateBucket,
             PULUMI_STATE_PREFIX,
           );
           legacyState = stateSeeded
             ? false
-            : await s3Provider.hasObjectsWithPrefix(s3Config.bucket, LEGACY_STATE_PREFIX);
+            : await appStore.hasObjectsWithPrefix(s3Config.bucket, LEGACY_STATE_PREFIX);
           checkOk = true;
           break;
         } catch (checkError) {
@@ -1566,7 +1578,7 @@ export async function executeDeployment(args, gatheredConfig) {
         // backend against live infra would orphan the running servers.
         try {
           s3Spinner.start(`Migrating Pulumi state ${s3Config.bucket} → ${stateBucket}`);
-          const { copied } = await s3Provider.copyPrefix(
+          const { copied } = await stateStore.copyPrefix(
             s3Config.bucket,
             stateBucket,
             PULUMI_STATE_PREFIX,
@@ -1593,26 +1605,30 @@ export async function executeDeployment(args, gatheredConfig) {
       stateSeedTimer.end();
 
       const result = {
-        // Deliberately the PRE-state-bucket capture, not the provider's current
-        // values — see the comment above appBucketRegion.
-        region: appBucketRegion,
-        endpoint: appBucketEndpoint,
+        // Where the app (uploads) bucket lives, from its own create.
+        region: app.region,
+        endpoint: app.endpoint,
         stateBucket,
-        // Where the STATE bucket actually lives — the provider's post-create
-        // region, which createBucket's exists-elsewhere recovery may have
-        // flipped. The Pulumi backend URL must follow the state bucket even
-        // when it differs from the app buckets' region; that redirect was the
-        // one legitimate job the old flip-through-persist was doing.
-        stateBucketRegion: s3Provider.region,
+        // Where the STATE bucket lives, from its own create: a retained state
+        // bucket can live in another region, and the Pulumi backend URL must
+        // follow it there.
+        stateBucketRegion: stateBucketResult.region,
         // The matching HOST — region-scoped stores only serve a bucket at
         // its own region's endpoint, so the backend URL needs this, not
         // just the region param (2026-08-28: cross-region e4 404'd on it).
-        stateEndpoint: s3Provider.endpoint,
+        stateEndpoint: stateBucketResult.endpoint,
+        // Where the backups bucket lives, from its own create: an existing
+        // backups bucket can live in another region than the uploads bucket.
+        backups: {
+          bucket: backupS3Config.bucket,
+          region: backupBucket.region,
+          endpoint: backupBucket.endpoint,
+        },
       };
-      if (s3Provider.region !== appBucketRegion) {
+      if (stateBucketResult.region !== app.region) {
         p.log.warn(
-          `Pulumi state bucket ${stateBucket} lives in ${s3Provider.region}; app/backup ` +
-            `buckets stay in ${appBucketRegion}. State ops will target ${s3Provider.region}.`,
+          `Pulumi state bucket ${stateBucket} lives in ${stateBucketResult.region}; the app ` +
+            `bucket stays in ${app.region}. State ops will target ${stateBucketResult.region}.`,
         );
       }
       state.completeStep('s3-setup', result);
@@ -1644,8 +1660,10 @@ export async function executeDeployment(args, gatheredConfig) {
     // Absent on step-state cached before the field existed — resolveBackendUrl
     // then derives the host from stateBucketRegion.
     s3Config.stateEndpoint = s3Result.stateEndpoint;
-    backupS3Config.region = s3Config.region;
-    backupS3Config.endpoint = s3Config.endpoint;
+    // The backups bucket's own region and endpoint. A step result recorded
+    // before the field existed has none: the uploads bucket's, as before.
+    backupS3Config.region = s3Result.backups?.region ?? s3Config.region;
+    backupS3Config.endpoint = s3Result.backups?.endpoint ?? s3Config.endpoint;
   }
   // Always resolve stateBucket (deterministic derivation) so the Pulumi
   // backend targets the dedicated bucket, whether s3-setup ran or was skipped.
