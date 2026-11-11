@@ -69,6 +69,32 @@ describe('state passphrase census: structure', () => {
     expect(stray).toEqual([]);
   });
 
+  it('(b) `decrypts` is set only by the openers that decrypt nothing', () => {
+    const text = code(join(SRC, 'lib/iac/index.js'));
+    const lines = text.split('\n');
+    const where: { fn: string; value: string }[] = [];
+    let fn = '';
+    for (const line of lines) {
+      const decl = line.match(/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/);
+      if (decl) fn = decl[1];
+      for (const m of line.matchAll(/\bdecrypts\s*:\s*([^,}\s]+)/g)) {
+        where.push({ fn, value: m[1] });
+      }
+    }
+    expect(where.length).toBeGreaterThanOrEqual(3);
+    expect(where.every((w) => w.value === 'false')).toBe(true);
+    expect(where.map((w) => w.fn).sort()).toEqual([
+      'listStacks',
+      'openStateBackend',
+      'removeStackState',
+    ]);
+    // No other file may pass it either.
+    for (const file of srcFiles) {
+      if (file === join(SRC, 'lib/iac/index.js')) continue;
+      expect(code(file), file).not.toMatch(/\bdecrypts\s*:/);
+    }
+  });
+
   it('(b) getOrCreateStack awaits the passphrase check before any workspace call', () => {
     const text = code(join(SRC, 'lib/iac/index.js'));
     const start = text.indexOf('export async function getOrCreateStack');
@@ -130,6 +156,13 @@ const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-clu
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 const { __resetStatePassphraseForTests } = await import('../../../src/lib/state-passphrase.js');
 
+/**
+ * What the pulumi child receives: the Automation SDK spawns it with
+ * {...process.env, ...envVars}, so an inherited value survives unless the
+ * workspace env overrides it with undefined. Node drops undefined at spawn.
+ */
+const childEnv = (env: Record<string, string | undefined>) => ({ ...process.env, ...env });
+
 const S3 = {
   bucket: 'b',
   stateBucket: 'b-pulumi-state',
@@ -163,8 +196,9 @@ describe('state passphrase census: every decrypting entry point carries the pass
   function expectPassphraseEverywhere() {
     expect(seenEnvs.length).toBeGreaterThan(0);
     for (const env of seenEnvs) {
-      expect(env.PULUMI_CONFIG_PASSPHRASE).toBe(PASSPHRASE);
-      expect(env.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
+      const child = childEnv(env);
+      expect(child.PULUMI_CONFIG_PASSPHRASE).toBe(PASSPHRASE);
+      expect(child.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
     }
     // The check ran: the project recorded its fingerprint.
     const manifest = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf8'));
@@ -228,8 +262,9 @@ describe('state passphrase census: every decrypting entry point carries the pass
       await removeStackState('prod', BASE);
       expect(seenEnvs).toHaveLength(3);
       for (const env of seenEnvs) {
-        expect(env.PULUMI_CONFIG_PASSPHRASE).toBeUndefined();
-        expect(env.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
+        const child = childEnv(env);
+        expect(child.PULUMI_CONFIG_PASSPHRASE).toBeUndefined();
+        expect(child.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
       }
       // Nothing was generated or recorded.
       expect(existsSync(join(dir, '.env.local'))).toBe(false);

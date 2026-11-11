@@ -43,7 +43,6 @@ const open = async (provider: string | undefined, stackName = 'production') => {
   await getOrCreateStack(stackName, async () => ({}), {
     provider,
     projectName: 'acme',
-    configPassphrase: 'x',
   });
   return selectStackMock.mock.calls[0]?.[1] ?? createStackMock.mock.calls[0]?.[1];
 };
@@ -75,7 +74,6 @@ describe('provider stack config', () => {
     await getOrCreateStack('production', async () => ({}), {
       provider: 'hetzner',
       projectName: 'acme',
-      configPassphrase: 'x',
     });
     const [, wsOpts] = createStackMock.mock.calls[0];
     expect(wsOpts.stackSettings.production.config).toEqual({

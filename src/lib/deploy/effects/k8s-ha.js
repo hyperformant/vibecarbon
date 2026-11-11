@@ -21,7 +21,7 @@
  *               server types, serverType, min/maxWorkers, apiToken,
  *               dnsToken, dnsZoneId, domain,
  *               s3Config, operatorCidrs, allowDegraded, restore, dnsProvider,
- *               tracker, configPassphrase, imageTag, githubOwner, repoName,
+ *               tracker, imageTag, githubOwner, repoName,
  *               services). Each HA effect reads `ctx.options.*` verbatim.
  *   Filled in by the effects:
  *     s                                        // shared @clack spinner

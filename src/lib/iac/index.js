@@ -170,6 +170,8 @@ export function resolveBackendUrl(s3Config, provider) {
  * @param {string} [options.providerToken] - The provider's API token. Value
  *   for whatever env var name the provider class declares.
  * @param {object} [options.s3Config]
+ * @param {string} [options.statePassphrase] - The passphrase getOrCreateStack
+ *   already verified; used instead of re-reading the environment.
  * @param {boolean} [options.decrypts=true] - false for a caller that decrypts
  *   nothing (stack ls, whoami, stack rm --force): a malformed
  *   VIBECARBON_STATE_PASSPHRASE then does not stop it.
@@ -227,22 +229,29 @@ export function buildEnv(options) {
   // Unknown env vars are ignored by the CLI, so this is inert on a version
   // that predates the flag rather than an error.
   env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS = 'true';
-  // The project's state passphrase encrypts the secrets provider, so what the
-  // state holds (the k8s programs' `k3sToken` output among it) is unreadable
-  // without it. SECURITY: never default to '' (that is the empty passphrase
-  // every legacy stack was made with) and never let an inherited
-  // PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE (a shell export
-  // for another project) win over the project's own value. With no project
-  // passphrase both stay unset, so a decrypting call fails loudly instead of
-  // using the wrong key; getOrCreateStack awaits ensureStatePassphrase first,
-  // so every decrypting path has one by the time it gets here.
-  delete env.PULUMI_CONFIG_PASSPHRASE;
-  delete env.PULUMI_CONFIG_PASSPHRASE_FILE;
-  let passphrase = null;
-  try {
-    passphrase = resolveStatePassphrase();
-  } catch (err) {
-    if (options.decrypts !== false) throw err;
+  // The project's state passphrase encrypts the values Pulumi marks secret in
+  // the state. It is NOT a blanket seal: a plain output (the k8s programs'
+  // `k3sToken`) and user data stay readable until a later change wraps them in
+  // pulumi.secret and re-seals existing state. SECURITY: never default to ''
+  // (the empty passphrase every legacy stack was made with) and never let an
+  // inherited PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE (a
+  // shell export for another project) win over the project's own value.
+  // Both are set to `undefined`, not deleted: the Automation SDK spawns pulumi
+  // with {...process.env, ...envVars}, so a deleted key comes straight back
+  // from process.env, while an undefined one overrides it and Node drops it at
+  // spawn. With no project passphrase pulumi then sees neither variable and a
+  // decrypting call is refused by pulumi; getOrCreateStack awaits
+  // ensureStatePassphrase first and hands its verified value in as
+  // `options.statePassphrase`, so every decrypting path carries one.
+  env.PULUMI_CONFIG_PASSPHRASE = undefined;
+  env.PULUMI_CONFIG_PASSPHRASE_FILE = undefined;
+  let passphrase = options.statePassphrase ?? null;
+  if (!passphrase) {
+    try {
+      passphrase = resolveStatePassphrase();
+    } catch (err) {
+      if (options.decrypts !== false) throw err;
+    }
   }
   if (passphrase) env.PULUMI_CONFIG_PASSPHRASE = passphrase;
   return env;
@@ -316,13 +325,14 @@ export async function getOrCreateStack(stackName, program, options = {}) {
   // exists. A caller that decrypts nothing (`stack rm --force`) opts out with
   // `decrypts: false`. A one-time migration of legacy empty-passphrase stacks
   // belongs right after this check.
+  let statePassphrase;
   if (options.decrypts !== false) {
-    await ensureStatePassphrase(options.projectDir ?? process.cwd());
+    statePassphrase = await ensureStatePassphrase(options.projectDir ?? process.cwd());
   }
   recordStateOp('stack-select');
   const pulumiProject = requirePulumiProject(options);
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
-  const envVars = buildEnv(options);
+  const envVars = buildEnv({ ...options, statePassphrase });
   const stackArgs = { stackName, projectName: pulumiProject, program };
   const stackConfig = options.provider ? getProviderClass(options.provider).IAC_STACK_CONFIG : {};
   const wsOpts = {

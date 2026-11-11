@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
 import { buildEnv } from '../../../src/lib/iac/index.js';
@@ -108,6 +109,27 @@ describe('buildEnv', () => {
       const own = buildEnv({ provider });
       expect(own.PULUMI_CONFIG_PASSPHRASE).toBe(PASSPHRASE);
       expect(own.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
+    });
+
+    it('the spawned pulumi child sees no inherited passphrase var (the SDK spreads process.env under envVars)', () => {
+      vi.stubEnv('PULUMI_CONFIG_PASSPHRASE', 'from-another-project');
+      vi.stubEnv('PULUMI_CONFIG_PASSPHRASE_FILE', '/tmp/other-project-passphrase');
+      const probe = (env: Record<string, string | undefined>) =>
+        JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              '-e',
+              'console.log(JSON.stringify([process.env.PULUMI_CONFIG_PASSPHRASE ?? null, process.env.PULUMI_CONFIG_PASSPHRASE_FILE ?? null]))',
+            ],
+            // Same merge the Automation SDK's execa call performs.
+            { env: { ...process.env, ...env }, encoding: 'utf8' },
+          ),
+        );
+      expect(probe(buildEnv({ provider }))).toEqual([null, null]);
+      vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', PASSPHRASE);
+      expect(probe(buildEnv({ provider }))).toEqual([PASSPHRASE, null]);
+      expect(probe(buildEnv({ provider, decrypts: false }))).toEqual([PASSPHRASE, null]);
     });
 
     it('refuses a malformed project passphrase, unless the caller decrypts nothing', () => {
