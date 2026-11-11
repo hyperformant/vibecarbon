@@ -557,9 +557,11 @@ environment uses, and GitHub environment secrets.
 > scripts supply the value with `-confirm <project>-<env>`; without it, and
 > with no terminal to type in, the command exits instead of waiting.
 
-Each storage region of a project has one backups bucket, shared by the
-project's environments in that region; `-purge` deletes this environment's
-folder in it, and the bucket when no other environment keeps backups in it.
+Each storage region of a project normally has one backups bucket, shared by
+the project's environments in that region. An environment that already keeps
+backups in a bucket, even one in another region, stays with it, so its backups
+are never split. `-purge` deletes this environment's folder in its bucket, and
+the bucket when no other environment keeps backups in it.
 
 The Pulumi state bucket is kept and recorded as `retainedStateBucket` in
 `.vibecarbon.json` so a redeploy resumes the same warm state backend; `-purge`
