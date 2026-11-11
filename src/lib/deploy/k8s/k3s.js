@@ -14,6 +14,8 @@
  *   5. Wait for SSH on master + `/tmp/k3s-ready` marker (onInfraReady fires:
  *      single k8s starts its DNS A record write here).
  *   6. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
+ *   6b. Hand the provider API token to the cluster: the CCM/CSI Secrets
+ *      (applyCloudSecrets), on every deploy, warm ones too.
  *   7. Finish the build and retag it `<masterPrivateIp>:5000/<project>:<tag>`
  *      (deliverAppImage).
  *   8. applyK3sManifests: the image's layer delta into the master's
@@ -1853,17 +1855,76 @@ export async function readAppSecretVersions({ env }) {
 }
 
 /** A Secret manifest for `kubectl apply -f -`, values JSON-quoted, never on argv. */
-function secretManifest(name, stringData) {
+function secretManifest(name, stringData, namespace = 'vibecarbon') {
   return [
     'apiVersion: v1',
     'kind: Secret',
     'metadata:',
     `  name: ${name}`,
-    '  namespace: vibecarbon',
+    `  namespace: ${namespace}`,
     'type: Opaque',
     'stringData:',
     ...Object.entries(stringData).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
   ].join('\n');
+}
+
+/**
+ * kubectl's argv for the cloud Secrets: a server-side apply the CLI owns, read
+ * from stdin.
+ */
+export const CLOUD_SECRETS_APPLY_ARGV = Object.freeze([
+  'apply',
+  '--server-side',
+  '--force-conflicts',
+  '--field-manager=vibecarbon-cli',
+  '-f',
+  '-',
+]);
+
+/**
+ * Hand the provider API token to the cluster: the Secrets its cloud
+ * controller and CSI driver read it from (ProviderClass.k8sCloudSecrets), in
+ * one server-side apply from this machine. deployK3s runs it on every deploy
+ * once the apiserver serves, outside the k3s-apply skip gate, so a first
+ * deploy, a warm redeploy, `deploy -restore` and the k8s-ha standby all hand
+ * it over, and a token changed in the operator's credentials reaches the
+ * Secrets on the next deploy. The controllers read it when they start.
+ *
+ * Server-side, owned by the field manager vibecarbon-cli, with
+ * --force-conflicts: the master's boot script creates the same Secrets with a
+ * client-side `kubectl apply`, and this apply takes them over without a
+ * conflict, their data as it set it; an unchanged apply leaves the Secret
+ * alone, resourceVersion included
+ * (tests/integration/docker/k8s-cloud-secrets-takeover.test.ts).
+ *
+ * The token travels on kubectl's stdin only: never argv, which a process
+ * listing and a failed command's message show, never a log line, never a
+ * file. A Secret without a value refuses before kubectl runs: applying an
+ * empty token would take a working one away from the controllers.
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, networkId?: string|number}} args
+ */
+export async function applyCloudSecrets({ env, ProviderClass, token, networkId }) {
+  const secrets = ProviderClass.k8sCloudSecrets({ token, networkId });
+  if (secrets.length === 0) return;
+  for (const { namespace, name, stringData } of secrets) {
+    for (const [key, value] of Object.entries(stringData)) {
+      if (typeof value !== 'string' || value === '') {
+        throw new Error(
+          `Can't hand your ${ProviderClass.NAME} API token to the cluster: this deploy has no ${key} for Secret ${namespace}/${name}.`,
+        );
+      }
+    }
+  }
+  const names = secrets.map(({ namespace, name }) => `${namespace}/${name}`);
+  progressLog(`Handing your ${ProviderClass.NAME} API token to the cluster (${names.join(', ')}).`);
+  await runKubectlWithRetry([...CLOUD_SECRETS_APPLY_ARGV], {
+    env,
+    input: secrets
+      .map(({ namespace, name, stringData }) => secretManifest(name, stringData, namespace))
+      .join('\n---\n'),
+    description: `applyCloudSecrets: kubectl apply --server-side ${names.join(' ')}`,
+  });
 }
 
 /**
@@ -5466,10 +5527,10 @@ async function deployK3sSteps(options, inFlight) {
   //     k3s-apply must not skip it. Before the image is recorded or
   //     delivered, so a refusal changes nothing on the cluster.
   //     The control-plane gate is the deploy's only one: it proves the
-  //     apiserver serves (discovery and admission) for the marker read and
-  //     for everything applyK3sManifests does next, since nothing between
-  //     here and that apply touches k3s (the image wait is local or over the
-  //     peer; the apply gate's registry probe is ssh).
+  //     apiserver serves (discovery and admission) for the marker read, the
+  //     cloud Secrets and everything applyK3sManifests does next, since
+  //     nothing else between here and that apply touches k3s (the image wait
+  //     is local or over the peer; the apply gate's registry probe is ssh).
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
     // Beside the gate, which makes the same kind of call to the same apiserver,
@@ -5485,6 +5546,20 @@ async function deployK3sSteps(options, inFlight) {
         env: kubeEnv,
         restore: options.restore ?? null,
         operatorEnv: options.operatorEnv ?? options.environment,
+      }),
+    );
+    // 5c. The provider API token, handed to this cluster's cloud controller
+    //     and CSI driver as their Secrets (applyCloudSecrets). On every
+    //     deploy, under no step gate and no role or restore condition: a
+    //     skipped k3s-apply, `deploy -restore` and the k8s-ha standby hand it
+    //     over too. After the marker read, so a refused deploy changes
+    //     nothing on the cluster.
+    await perfAsync(`deploy.${perfPrefix}.cloudSecrets`, () =>
+      applyCloudSecrets({
+        env: kubeEnv,
+        ProviderClass: Provider,
+        token: options.apiToken,
+        networkId,
       }),
     );
   }

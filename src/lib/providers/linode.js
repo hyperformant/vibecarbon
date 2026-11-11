@@ -458,6 +458,16 @@ export class LinodeProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'linode-block-storage-vibecarbon';
 
   /**
+   * The `linode` Secret (key `token`) the CSI driver reads, as
+   * linode-master-init.sh creates it. See BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [{ namespace: 'kube-system', name: 'linode', stringData: { token } }];
+  }
+
+  /**
    * The VPC subnet the k8s Pulumi program (iac/programs/linode-k8s.js)
    * creates for the cluster's nodes.
    * @type {string}

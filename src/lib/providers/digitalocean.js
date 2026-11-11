@@ -398,6 +398,19 @@ export class DigitalOceanProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'do-block-storage';
 
   /**
+   * The one `digitalocean` Secret (key `access-token`) both the CCM and the
+   * CSI driver read, as do-master-init.sh creates it. See
+   * BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [
+      { namespace: 'kube-system', name: 'digitalocean', stringData: { 'access-token': token } },
+    ];
+  }
+
+  /**
    * The FIXED-ERA VPC range — the literal every DO k8s stack provisioned
    * before the d4 lift (2026-08-28) actually holds. Used ONLY as
    * `deployK3s`'s (deploy/k8s/k3s.js) resume-compat fallback for a

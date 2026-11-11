@@ -465,6 +465,24 @@ export class HetznerProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'hcloud-volumes';
 
   /**
+   * The Hetzner Cloud token and the cluster's network id, as master-init.sh
+   * creates them: `hcloud` (token, network) and `hcloud-csi` (token). See
+   * BaseProvider.k8sCloudSecrets.
+   * @param {{token: string, networkId?: string|number}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token, networkId }) {
+    return [
+      {
+        namespace: 'kube-system',
+        name: 'hcloud',
+        stringData: { token, network: networkId == null ? '' : String(networkId) },
+      },
+      { namespace: 'kube-system', name: 'hcloud-csi', stringData: { token } },
+    ];
+  }
+
+  /**
    * Matches hetzner-k8s.js's `image: 'ubuntu-26.04'` literal (the master,
    * db, and worker `hcloud.Server` resources all use the same slug —
    * lib/iac/programs/hetzner-k8s.js:243,283,318) exactly.

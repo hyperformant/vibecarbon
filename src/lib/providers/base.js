@@ -326,6 +326,24 @@ export class BaseProvider {
   static RESERVED_IP_NAME = 'reserved IP';
 
   /**
+   * The Secrets this provider's cloud controller and CSI driver read the
+   * provider API token from, with their values: deployK3s hands them to the
+   * cluster after boot, on every deploy (applyCloudSecrets,
+   * deploy/k8s/k3s.js), so the token need not live in a node's user data.
+   * Namespaces, names and keys are the ones the master-init script's
+   * `kubectl create secret generic` lines use
+   * (tests/unit/deploy/k8s-cloud-secrets.test.ts reads them). None on a
+   * provider without a k8s tier.
+   * @param {{token: string, networkId?: string|number}} _values - the
+   *   operator's provider API token and the cluster's private network id
+   *   (the k8s stack's `networkId` output).
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets(_values) {
+    return [];
+  }
+
+  /**
    * Resources this provider's programs once declared and no longer do, which
    * every `up` and preview takes out of the stack's state first
    * (lib/iac/retired-resources.js, `dropRetiredStackResources`) so Pulumi
