@@ -52,6 +52,7 @@ import {
   StateMigrationError,
 } from './state-error.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
+import { makeWorkspaceDir } from './workspace-dir.js';
 
 // Re-exported so this module stays the iac layer's public surface while the
 // verb extractor lives with the classifier that depends on it — one
@@ -346,13 +347,16 @@ export async function getOrCreateStack(stackName, program, options = {}) {
   const envVars = buildEnv({ ...options, statePassphrase });
   const stackArgs = { stackName, projectName: pulumiProject, program };
   const stackConfig = options.provider ? getProviderClass(options.provider).IAC_STACK_CONFIG : {};
-  const wsOpts = {
+  // Each attempt below gets a directory of its own (workspace-dir.js), as
+  // the SDK's own mkdtemp gave it, but one this process removes at exit.
+  const wsOpts = () => ({
     projectSettings: { name: pulumiProject, runtime: 'nodejs', backend: { url: backendUrl } },
     envVars,
     ...(Object.keys(stackConfig).length > 0 && {
       stackSettings: { [stackName]: { config: stackConfig } },
     }),
-  };
+    workDir: makeWorkspaceDir(),
+  });
   const requireExisting = options.requireExisting === true;
 
   // `pulumi stack select` reads the stack file from the S3 backend. On a
@@ -372,7 +376,7 @@ export async function getOrCreateStack(stackName, program, options = {}) {
   let created = false;
   try {
     stack = await withStateBackendRetry(
-      () => LocalWorkspace.selectStack(stackArgs, wsOpts),
+      () => LocalWorkspace.selectStack(stackArgs, wsOpts()),
       `stack-select ${stackName}`,
     );
   } catch (err) {
@@ -421,7 +425,7 @@ export async function getOrCreateStack(stackName, program, options = {}) {
       );
     }
     stack = await withStateBackendRetry(
-      () => LocalWorkspace.createStack(stackArgs, wsOpts),
+      () => LocalWorkspace.createStack(stackArgs, wsOpts()),
       `stack-create ${stackName}`,
     );
     created = true;
@@ -782,9 +786,9 @@ async function changeSecretsProvider(stack, passphrase) {
  * `change-secrets-provider` writes a new `encryptionsalt` there before it
  * touches the state, and a failed run leaves it behind: seen on CLI 3.259.0
  * (2026-11-11) for a held lock and for a refused passphrase alike. The file
- * lives in the workspace's own directory, which the SDK makes per workspace
- * (mkdtemp under the OS temp dir, never removed, never reused by a later
- * workspace) and which every later command on this Stack object runs in:
+ * lives in the workspace's own directory, which getOrCreateStack makes per
+ * workspace (workspace-dir.js: removed at process exit, never reused by a
+ * later workspace) and which every later command on this Stack object runs in:
  * the stale-lock retry, the read after a refusal, and the caller's refresh,
  * up or destroy. A salt left there no longer matches the state; with a
  * secret value in the stack's config (vibecarbon sets none today), a second
@@ -1831,6 +1835,7 @@ export async function listStacks(options = {}) {
         backend: { url: backendUrl },
       },
       envVars,
+      workDir: makeWorkspaceDir(),
     });
     const stacks = await workspace.listStacks();
     return stacks.map((s) => s.name);
@@ -1866,6 +1871,7 @@ export async function openStateBackend(options) {
       backend: { url: resolveBackendUrl(options.s3Config, options.provider) },
     },
     envVars: buildEnv({ ...options, decrypts: false }),
+    workDir: makeWorkspaceDir(),
   });
   await workspace.whoAmI();
 }

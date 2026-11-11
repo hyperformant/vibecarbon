@@ -50,6 +50,7 @@ import {
   releaseRetiredReservedIps,
 } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
+import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 
 // The fake cloud as a provider, for the deploy's own drop: its retired
 // resources are the fake cloud's reserved IP and assignment, as DigitalOcean's
@@ -178,6 +179,8 @@ async function stackFor(name: string, program: () => Promise<Record<string, unkn
   return LocalWorkspace.createOrSelectStack(
     { stackName: name, projectName: 'vcretired', program },
     {
+      // Removed after this file by the test setup, as the CLI's are at exit.
+      workDir: makeWorkspaceDir(),
       projectSettings: {
         name: 'vcretired',
         runtime: 'nodejs',

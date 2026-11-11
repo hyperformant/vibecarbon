@@ -42,6 +42,7 @@ process.env.VIBECARBON_FINGERPRINT_KEY_DIR = join(fileRoot, 'fpkey');
 mkdirSync(process.env.VIBECARBON_FINGERPRINT_KEY_DIR, { mode: 0o700 });
 
 import { afterAll, afterEach, beforeAll } from 'vitest';
+import { removeWorkspaceDirs } from '../../src/lib/iac/workspace-dir.js';
 import { closeTempRoot } from '../_shared/temp-census.js';
 import { cleanupAllTempDirs } from '../_shared/temp-dir.js';
 
@@ -95,6 +96,9 @@ afterAll(async () => {
   let cleanupProblem: string | null = null;
   try {
     await cleanupAllTempDirs();
+    // The Pulumi workspace directories this file's stack opens made, before
+    // the census looks: a worker's exit hook would remove them only after it.
+    removeWorkspaceDirs();
   } catch (err) {
     cleanupProblem = `the temp dirs this file's tests made could not all be removed (${(err as Error).message})`;
   }

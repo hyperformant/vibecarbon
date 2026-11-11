@@ -45,6 +45,7 @@ import {
 } from '../../../src/lib/iac/index.js';
 import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
@@ -99,8 +100,12 @@ const program =
     };
   };
 
-/** A raw workspace under `passphrase`, as the CLI opened stacks before (with ''). */
+/**
+ * A raw workspace under `passphrase`, as the CLI opened stacks before (with
+ * ''), in a directory the test setup removes after this file.
+ */
 const rawWorkspace = (passphrase: string) => ({
+  workDir: makeWorkspaceDir(),
   projectSettings: {
     name: PROJECT,
     runtime: 'nodejs' as const,
