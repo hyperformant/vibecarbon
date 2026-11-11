@@ -21,9 +21,18 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDeployDropRetired } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { getOrCreateStack, upStack } from '../../../src/lib/iac/index.js';
+
+// The surgery's progress line ([pulumi] took ... out of ...'s state) and the
+// state telemetry ([state] ...) go to the progress log: kept here, where the
+// first test reads the surgery's line, and off the test output.
+const progress: string[] = [];
+vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/cli/progress.js')>()),
+  progressLog: (line: string) => progress.push(line),
+}));
 
 const hasPulumi = (() => {
   try {
@@ -152,6 +161,9 @@ describe.runIf(hasPulumi || process.env.CI)("the deploy's dropRetired on the rea
     expect(types).not.toContain('digitalocean:index/reservedIpAssignment:ReservedIpAssignment');
     expect(types).toContain('pulumi:providers:digitalocean');
     expect(config.environments.prod).toEqual({ ingressIp: '198.51.100.7', floatingIp: ADDRESS });
+    expect(progress).toContainEqual(
+      expect.stringContaining("took ingress and ingress-assignment out of prod's state"),
+    );
 
     // A second run finds nothing to take out, and changes nothing.
     await dropRetired('prod');

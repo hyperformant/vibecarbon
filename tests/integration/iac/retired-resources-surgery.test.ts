@@ -22,9 +22,11 @@
  *   - a child parented to the removed IP moves to the IP's parent and the
  *     import accepts that too;
  *   - k8s-ha with the address on the environment's own record, which names
- *     both side stacks: one side lets go of it and the other cannot (its
- *     state is locked by another run). Nothing is released, the address
- *     stays on record and assigned, and both stacks still destroy;
+ *     both side stacks, through the deploy's own drop
+ *     (createDeployDropRetired): one side lets go of it and the other cannot
+ *     (its state is locked by another run, which the drop's lock handling
+ *     refuses). Nothing is released, the address stays on record and
+ *     assigned, and both stacks still destroy;
  *   - a warm redeploy (no up, so the stack still lists the IP and its
  *     assignment): the deploy's release takes them out of the stack before
  *     it releases the address, and destroy then succeeds. The control
@@ -36,18 +38,46 @@
  * CLI there fails this test instead of skipping it.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
-  createDropRetired,
+  createDeployDropRetired,
   releaseRetiredReservedIps,
 } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
+
+// The fake cloud as a provider, for the deploy's own drop: its retired
+// resources are the fake cloud's reserved IP and assignment, as DigitalOcean's
+// are its own (RETIRED_STACK_RESOURCES). Every other id is the real provider.
+vi.mock('../../../src/lib/providers/index.js', async (orig) => {
+  const real = await orig<typeof import('../../../src/lib/providers/index.js')>();
+  const FakeCloud = {
+    NAME: 'FakeCloud',
+    IAC_STACK_CONFIG: {},
+    RETIRED_STACK_RESOURCES: [
+      { type: 'fakecloud:index:ReservedIp', name: 'ingress' },
+      { type: 'fakecloud:index:ReservedIpAssignment', name: 'ingress-assignment' },
+    ],
+  };
+  return {
+    ...real,
+    getProviderClass: (id: string) =>
+      id === 'fakecloud' ? FakeCloud : real.getProviderClass(id as never),
+  };
+});
+
+// The surgery's progress line ([pulumi] took ... out of ...'s state) and the
+// state telemetry go to the progress log; kept here, off the test output.
+const progress: string[] = [];
+vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/cli/progress.js')>()),
+  progressLog: (line: string) => progress.push(line),
+}));
 
 const hasPulumi = (() => {
   try {
@@ -350,21 +380,17 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
         }),
       );
 
-      const dropRetired = createDropRetired({
+      // The deploy's own drop (createDeployDropRetired): the stack opened
+      // through getOrCreateStack (requireExisting) on this backend, and the
+      // surgery and lock handling every up runs (dropRetiredStackResources),
+      // on the fake cloud's retired types (the providers mock above).
+      process.env.PULUMI_BACKEND_URL = `file://${backend}`;
+      const dropRetired = createDeployDropRetired({
         environment: 'mix',
-        openStack: (stackName) => stackFor(stackName, newProgram(address)),
-        // The surgery every up runs, as dropRetiredStackResources runs it:
-        // record what it takes out, then import.
-        drop: async (stack, { recordAddresses }) => {
-          const s = stack as Awaited<ReturnType<typeof stackFor>>;
-          const { deployment, removed, addresses } = dropStackResources(
-            await s.exportStack(),
-            RETIRED,
-          );
-          if (removed.length === 0) return;
-          await recordAddresses(addresses);
-          await s.importStack(deployment);
-        },
+        providerId: 'fakecloud',
+        providerToken: '',
+        s3Config: null,
+        projectName: 'vcretired',
         updateConfig: updateConfig as never,
       });
       const deletes: string[] = [];
@@ -391,6 +417,19 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
       // Nothing released: no DELETE, the address on record and still assigned.
       expect(out.released).toEqual([]);
       expect(out.kept).toEqual([{ address, reason: expect.stringContaining('stack mix-standby') }]);
+      // The production lock handling refused it as held by the other run
+      // (StackHeldError), and left that run's lock where it was.
+      expect(out.kept[0].reason).toMatch(/is in use by another run: someone@another-laptop/);
+      expect(readdirSync(standbyLocks)).toHaveLength(1);
+      // The primary's surgery recorded the address on its own side, and said
+      // what it took out.
+      expect(config.environments.mix.ha.primary).toEqual({
+        stack: 'mix-primary',
+        floatingIp: address,
+      });
+      expect(progress).toContainEqual(
+        expect.stringContaining("took ingress and ingress-assignment out of mix-primary's state"),
+      );
       expect(deletes).toEqual([]);
       expect(config.environments.mix.floatingIp).toBe(address);
       expect(readCloud().things?.['fakecloud:index:ReservedIp'][address]?.assignedTo).toBe(
