@@ -270,6 +270,12 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
 }
 
 /**
+ * A record delete the DNS API refused: the record still exists. A 404 is a
+ * record already gone, never one of these. destroy reports each as a leak.
+ * @typedef {{name: string, target: string, reason: string}} DnsDeleteFailure
+ */
+
+/**
  * Ownership-filtered delete core. Takes the already-resolved `zoneName` for
  * the same reason as putRecord. Reads the whole zone or throws: past the
  * page guard a partial read would miss the record and answer `total: 0`,
@@ -282,21 +288,23 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
  * @param {string} name - FQDN
  * @param {string[]} ownedIps
  * @param {string} type
- * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[]}>}
+ * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 async function removeRecords(apiToken, zoneId, zoneName, name, ownedIps, type) {
   const relativeName = fqdnToRelative(name, zoneName);
   const all = await getRecords(apiToken, zoneId, { whole: true });
-  const records = matching(all, relativeName, String(name).replace(/\.$/, ''), type);
+  const fqdn = String(name).replace(/\.$/, '');
+  const records = matching(all, relativeName, fqdn, type);
   const total = records.length;
 
   if (total === 0) {
-    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [] };
+    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] };
   }
 
   const owned = new Set(ownedIps || []);
   let deleted = 0;
   const skippedTargets = [];
+  const failed = [];
 
   for (const record of records) {
     if (!owned.has(record.target)) {
@@ -308,9 +316,12 @@ async function removeRecords(apiToken, zoneId, zoneName, name, ownedIps, type) {
       headers: { Authorization: `Bearer ${apiToken}` },
     });
     if (response.ok) deleted++;
+    else if (response.status !== 404) {
+      failed.push({ name: fqdn, target: record.target, reason: `HTTP ${response.status}` });
+    }
   }
 
-  return { deleted, skipped: skippedTargets.length, total, skippedTargets };
+  return { deleted, skipped: skippedTargets.length, total, skippedTargets, failed };
 }
 
 // ============================================================================
@@ -410,7 +421,7 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * @param {string} name - Record name (FQDN)
  * @param {string[]} ownedIps - IPs that belong to this caller's stack
  * @param {string} [type='A'] - Record type
- * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[]}>}
+ * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = 'A') {
   const zoneName = await getZoneName(apiToken, zoneId);
@@ -431,7 +442,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
  * @param {string} zoneId - Numeric Linode domain id
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string[]} ownedIps - IPs that belong to this caller's stack
- * @returns {Promise<{deletedAny: boolean, preservedTargets: string[]}>}
+ * @returns {Promise<{deletedAny: boolean, preservedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) {
   const zoneName = await getZoneName(apiToken, zoneId);
@@ -442,6 +453,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
   return {
     deletedAny: root.deleted > 0 || wildcard.deleted > 0,
     preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
+    failed: [...root.failed, ...wildcard.failed],
   };
 }
 

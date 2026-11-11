@@ -2098,6 +2098,27 @@ function recordPreservedDnsRecords(leaks, preservedTargets, domain, dnsProviderN
 }
 
 /**
+ * DNS records whose delete the API refused: each still points at an address
+ * this destroy releases, so each is our leak, named by record. A 404 never
+ * lands here (the backends read it as already gone).
+ *
+ * @param {ReturnType<typeof createLeakLedger>} leaks
+ * @param {Array<{name: string, target: string, reason: string}>} failed
+ * @param {string} dnsProviderName
+ * @param {string} zoneId
+ */
+function recordFailedDnsDeletes(leaks, failed, dnsProviderName, zoneId) {
+  for (const { name, target, reason } of failed) {
+    leaks.leak({
+      resourceClass: 'dns-record',
+      resource: `${name} → ${target} (${dnsProviderName} zone ${zoneId})`,
+      reason: `delete refused: ${reason}`,
+      hint: `Remove it by hand in ${dnsProviderName}, or re-run destroy; it points at an address this destroy released, and a stale record shadows the next deploy.`,
+    });
+  }
+}
+
+/**
  * compose-ha: hand the whole teardown (both nodes, firewalls, DNS) to the
  * compose HA helper. The shared tail handles buckets/config afterwards.
  */
@@ -2173,18 +2194,24 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
 
   s.start(`Deleting DNS records: ${envConfig.domain}`);
   try {
-    const { deletedAny, preservedTargets } = await dns.deleteApexAndWildcard(
+    const { deletedAny, preservedTargets, failed } = await dns.deleteApexAndWildcard(
       token,
       zoneId,
       envConfig.domain,
       ownedWithSentinel,
     );
     if (deletedAny) results.dns.push(envConfig.domain);
-    if (preservedTargets.length > 0) {
-      s.stop(`DNS records preserved (unowned target(s): ${preservedTargets.join(', ')})`);
-    } else {
-      s.stop(deletedAny ? 'DNS records deleted' : 'DNS records not found');
-    }
+    // A refused delete leaves the record in place: say so first, never
+    // "not found" (the backends count it in `failed`, a 404 excluded).
+    const outcome = [
+      failed.length > 0 &&
+        `DNS record delete refused: ${failed.map((f) => `${f.name} (${f.reason})`).join(', ')}`,
+      preservedTargets.length > 0 &&
+        `DNS records preserved (unowned target(s): ${preservedTargets.join(', ')})`,
+    ].filter(Boolean);
+    if (outcome.length > 0) s.stop(outcome.join('; '));
+    else s.stop(deletedAny ? 'DNS records deleted' : 'DNS records not found');
+    recordFailedDnsDeletes(results.leaks, failed, row.name, zoneId);
     recordPreservedDnsRecords(results.leaks, preservedTargets, envConfig.domain, row.name);
   } catch (error) {
     s.stop(`DNS deletion failed: ${error.message}`);

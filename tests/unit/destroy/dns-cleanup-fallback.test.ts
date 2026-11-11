@@ -195,3 +195,86 @@ describe('cleanupDnsRecords — flat-binding fallback (deploy died pre-persist)'
     expect(fetchWithRetryMock.mock.calls).toEqual([]);
   });
 });
+
+/**
+ * A record delete the DNS API refuses (R7b): the backend counts it in
+ * `failed`, and the cleanup reports each as a leak by its name. It used to be
+ * counted nowhere, so a refused delete printed "DNS records not found" over a
+ * record still pointing at an address this destroy releases.
+ */
+describe('cleanupDnsRecords: a refused record delete', () => {
+  function refuse(names: string[]) {
+    fetchWithRetryMock.mockImplementation((url: string, options?: { method?: string }) => {
+      const method = options?.method ?? 'GET';
+      const u = String(url);
+      if (method === 'DELETE') {
+        const id = u.split('/dns_records/')[1];
+        return Promise.resolve(
+          names.includes(id)
+            ? resp({ success: false, errors: [{ message: 'forbidden' }] }, 403)
+            : resp({ success: true }),
+        );
+      }
+      if (u.includes('/dns_records?')) {
+        const name = decodeURIComponent(u.match(/[?&]name=([^&]+)/)?.[1] || '');
+        const id = name.startsWith('*.') ? 'wc' : 'root';
+        return Promise.resolve(resp({ result: [{ id, name, type: 'A', content: '1.2.3.4' }] }));
+      }
+      if (u.includes('/healthchecks')) return Promise.resolve(resp({ result: [] }));
+      throw new Error(`Unexpected fetchWithRetry call: ${method} ${u}`);
+    });
+  }
+
+  async function cleanup() {
+    const stops: string[] = [];
+    const leaks: Array<{ resource: string; reason: string; hint?: string }> = [];
+    const foreign: unknown[] = [];
+    const results = {
+      dns: [] as string[],
+      healthChecks: [] as string[],
+      leaks: {
+        leak: (e: { resource: string; reason: string }) => leaks.push(e),
+        foreign: (e: unknown) => foreign.push(e),
+      },
+    };
+    vi.stubEnv('CLOUDFLARE_API_TOKEN', 'cf-token');
+    await cleanupDnsRecords({
+      envConfig: {
+        domain: 'e1.example.com',
+        provider: 'hetzner',
+        dns: { provider: 'cloudflare', zoneId: 'zone-1' },
+        servers: [],
+      },
+      ownedIps: ['1.2.3.4'],
+      providerToken: 'hz-token',
+      s: { start: () => {}, stop: (m?: string) => stops.push(m ?? ''), message: () => {} },
+      results,
+    });
+    return { stops, leaks, foreign, results };
+  }
+
+  it('the refused wildcard is a leak by its name, and the apex still counts as deleted', async () => {
+    refuse(['wc']);
+    const { stops, leaks, foreign, results } = await cleanup();
+    expect(results.dns).toEqual(['e1.example.com']);
+    expect(foreign).toEqual([]);
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0].resource).toContain('*.e1.example.com');
+    expect(leaks[0].resource).toContain('1.2.3.4');
+    expect(leaks[0].reason).toMatch(/403/);
+    expect(stops[0]).toMatch(/\*\.e1\.example\.com/);
+    expect(stops[0]).not.toMatch(/not found/);
+  });
+
+  it('both refused: never "not found", both named', async () => {
+    refuse(['root', 'wc']);
+    const { stops, leaks, results } = await cleanup();
+    expect(results.dns).toEqual([]);
+    expect(leaks.map((l) => l.resource.split(' ')[0]).sort()).toEqual([
+      '*.e1.example.com',
+      'e1.example.com',
+    ]);
+    expect(stops[0]).not.toMatch(/not found/);
+    expect(stops[0]).not.toMatch(/—/);
+  });
+});

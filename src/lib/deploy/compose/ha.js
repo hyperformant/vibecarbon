@@ -1037,8 +1037,8 @@ export async function destroyComposeHA(options) {
 
   /** @type {Array<{ resourceClass: string, resource: string, reason: string }>} */
   const leaks = [];
-  const noteLeak = (resourceClass, resource, reason) =>
-    leaks.push({ resourceClass, resource, reason });
+  const noteLeak = (resourceClass, resource, reason, hint) =>
+    leaks.push({ resourceClass, resource, reason, ...(hint && { hint }) });
 
   // Stop compose services on both servers in parallel
   onProgress('Stopping services on all servers...');
@@ -1215,10 +1215,20 @@ export async function destroyComposeHA(options) {
           }
           // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
           // that died pre-provision leaves records no server ever "owned".
-          await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [
+          const { failed } = await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [
             ...ownedIps,
             '0.0.0.0',
           ]);
+          // A refused delete leaves the record in place, at an address this
+          // teardown releases: a leak, by record (a 404 is never one).
+          for (const { name, target, reason } of failed) {
+            noteLeak(
+              'dns-record',
+              `${name} → ${target} (${row.name} zone ${zoneId})`,
+              `delete refused: ${reason}`,
+              `Remove it by hand in ${row.name}, or re-run destroy; it points at an address this destroy released, and a stale record shadows the next deploy.`,
+            );
+          }
           if (typeof dns.deleteHealthCheck === 'function') {
             await Promise.allSettled(
               (envConfig.servers || []).map((server) =>
