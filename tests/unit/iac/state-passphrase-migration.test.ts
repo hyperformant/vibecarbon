@@ -14,7 +14,8 @@
  * migration child routed to its fake spawn. The real engine's answer is
  * tests/integration/iac/state-passphrase.test.ts.
  */
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -65,7 +66,10 @@ const { destroyStack, getOrCreateStack, getStackOutputs, removeStackState, upSta
   '../../../src/lib/iac/index.js'
 );
 const { __resetStateProbesForTests } = await import('../../../src/lib/iac/index.js');
-const { StateUndecryptableError } = await import('../../../src/lib/iac/state-error.js');
+const { isStatePassphraseFailure, StateUndecryptableError } = await import(
+  '../../../src/lib/iac/state-error.js'
+);
+const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
 const { __resetStatePassphraseForTests } = await import('../../../src/lib/state-passphrase.js');
 
 const S3 = {
@@ -227,7 +231,9 @@ describe('first open of a stack: a full export, and a migration only on a passph
     expect((err as Error).message).toContain('`vibecarbon destroy e1`');
     // The refusal of the project's own passphrase is what the error is about.
     expect((err as Error & { cause?: unknown }).cause).toBe(raw);
-    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1']);
+    // Read, '' refused, and read once more in case another run re-encrypted
+    // it in between: still refused.
+    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1', 'exportStack']);
     expect(logged.filter((l) => l.includes('refused the state passphrase'))).toHaveLength(1);
     expect(logged.join('\n')).toContain('could not deserialize deployment');
     expect(logged.join('\n')).not.toContain(PASSPHRASE);
@@ -282,6 +288,210 @@ describe('first open of a stack: a full export, and a migration only on a passph
   });
 });
 
+/**
+ * `change-secrets-provider` writes the state, so it takes the stack's lock
+ * (`stack export` does not), and it writes through the same store as every
+ * other state call. CLI 3.259.0's lock refusal, for a holder this machine
+ * cannot see.
+ */
+const lockRefusal = (holder: { host: string; pid: number; at: string }) =>
+  'error: the stack is currently locked by 1 lock(s). Either wait for the other process(es) ' +
+  'to end or delete the lock file with `pulumi cancel`.\n' +
+  `  s3://proj-state/.pulumi/locks/organization/proj/e1/0b1c2d3e.json: created by someone@${holder.host} (pid ${holder.pid}) at ${holder.at}\n`;
+// Past the two-hour expiry: gone, whoever held it.
+const STALE = { host: 'ci-runner-long-gone', pid: 4321, at: '2026-01-01T00:00:00Z' };
+// This very process, just now: alive.
+const live = () => ({ host: hostname(), pid: process.pid, at: new Date().toISOString() });
+const THROTTLED =
+  'error: could not import deployment: 503 SlowDown: Please reduce your request rate\n';
+const STORE_FAULT =
+  'error: could not import deployment: write s3://proj-state/.pulumi/stacks/proj/e1.json: ' +
+  'RequestError: send request failed\ncaused by: connection reset by peer\n';
+// What change-secrets-provider prints for a wrong old passphrase.
+const MIGRATION_REFUSAL =
+  'error: could not deserialize deployment: failed to decrypt: incorrect passphrase, please set ' +
+  'PULUMI_CONFIG_PASSPHRASE to the correct passphrase or set PULUMI_CONFIG_PASSPHRASE_FILE to a ' +
+  'file containing the passphrase\n';
+
+/**
+ * A legacy stack whose first migration runs end with `failures`, in order;
+ * the run after them re-encrypts it.
+ */
+function legacyMigratingAfter(...failures: string[]) {
+  fakePulumi.legacy('e1', exportRefusal);
+  let run = 0;
+  fakePulumi.behaviour.migrate = (name) => {
+    const stderr = failures[run++];
+    if (stderr !== undefined) return { code: 1, stderr };
+    fakePulumi.legacyStacks.delete(name);
+    return { code: 0 };
+  };
+}
+
+describe('a migration that fails for any reason but the passphrase is never ruled unreadable', () => {
+  it('a lock a dead run left: cleared, migrated on the next run, then read', async () => {
+    legacyMigratingAfter(lockRefusal(STALE));
+
+    await expect(getStackOutputs('e1', async () => ({}), BASE)).resolves.toEqual({});
+
+    expect(fakePulumi.calls).toEqual([
+      'select:e1',
+      'exportStack',
+      'migrate:e1',
+      'cancel',
+      'migrate:e1',
+      'exportStack',
+      'outputs',
+    ]);
+    expect(infos).toEqual([MIGRATED]);
+  });
+
+  it('a lock a live run holds: StackHeldError, the lock left alone, and the next open tries again', async () => {
+    legacyMigratingAfter(lockRefusal(live()));
+
+    const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StackHeldError);
+    expect(err).not.toBeInstanceOf(StateUndecryptableError);
+    expect((err as Error).message).toContain('Stack "e1" is in use by another run');
+    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1']);
+    expect(infos).toEqual([]);
+
+    fakePulumi.calls.length = 0;
+    await getStackOutputs('e1', async () => ({}), BASE);
+    expect(fakePulumi.calls).toEqual([
+      'select:e1',
+      'exportStack',
+      'migrate:e1',
+      'exportStack',
+      'outputs',
+    ]);
+  });
+
+  it("the store pushing back: retried on the state backend's backoff, then migrated", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      legacyMigratingAfter(THROTTLED);
+
+      const open = getStackOutputs('e1', async () => ({}), BASE);
+      // The backoff starts once the first run has exited and been logged.
+      await vi.waitFor(() => expect(logged.join('\n')).toContain('attempt 1/5'));
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(open).resolves.toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(fakePulumi.calls.filter((c) => c === 'migrate:e1')).toHaveLength(2);
+    expect(fakePulumi.calls).not.toContain('cancel');
+    expect(logged.join('\n')).toContain(
+      're-encrypting the Pulumi state for e1: state backend throttle (attempt 1/5)',
+    );
+    expect(infos).toEqual([MIGRATED]);
+  });
+
+  it("anything else: a plain error naming the step with Pulumi's line, never the typed one", async () => {
+    legacyMigratingAfter(STORE_FAULT);
+
+    const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(StateUndecryptableError);
+    expect(err).not.toBeInstanceOf(StackHeldError);
+    expect(isStatePassphraseFailure(err)).toBe(false);
+    expect((err as Error).message).toBe(
+      'Stopped while re-encrypting the Pulumi state for e1: error: could not import deployment: ' +
+        'write s3://proj-state/.pulumi/stacks/proj/e1.json: RequestError: send request failed. ' +
+        'Running this again is safe.',
+    );
+    // One run, not retried, and no read after it: '' was never refused.
+    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1']);
+    expect(logged.join('\n')).not.toContain('refused the state passphrase');
+    expect(infos).toEqual([]);
+  });
+
+  it("another run re-encrypted it first: '' is refused, the project's passphrase reads it now, and the open goes on", async () => {
+    let reads = 0;
+    fakePulumi.behaviour.exportStack = () => {
+      reads += 1;
+      if (reads === 1) throw exportRefusal();
+      return structuredClone(POPULATED);
+    };
+    // Not marked legacy: the fake child refuses '', as the CLI does once the
+    // other run has re-encrypted it.
+
+    await expect(
+      upStack('e1', async () => ({}), { ...BASE, provider: 'hetzner', providerToken: 't' }),
+    ).resolves.toBeDefined();
+
+    // The read after the refusal is what the up path reads: no third export
+    // before the refresh.
+    const beforeRefresh = fakePulumi.calls.slice(0, fakePulumi.calls.indexOf('refresh'));
+    expect(beforeRefresh).toEqual(['select:e1', 'exportStack', 'migrate:e1', 'exportStack']);
+    expect(fakePulumi.calls).toContain('up');
+    expect(logged.join('\n')).not.toContain('refused the state passphrase');
+    // The run that re-encrypted it said so; this one has nothing to add.
+    expect(infos).toEqual([]);
+  });
+});
+
+describe("a failed run never leaves a new salt in the stack's workspace", () => {
+  const SALTED = 'encryptionsalt: v1:bmV3c2FsdA==:v1:written-by-the-failed-run\n';
+  let settings: string;
+
+  beforeEach(() => {
+    fakePulumi.workDirRoot = createTempDir('fake-pulumi-workdirs-');
+    settings = join(fakeWorkDir('e1'), 'Pulumi.e1.yaml');
+  });
+
+  /**
+   * As the CLI does: a new salt in Pulumi.e1.yaml before it touches the
+   * state, whatever comes after. Records what each run found there.
+   */
+  function migrateWritingSalt(endings: Array<{ code: number; stderr?: string }>) {
+    const found: Array<string | null> = [];
+    fakePulumi.behaviour.migrate = (name, child) => {
+      const file = join(child.cwd ?? '', 'Pulumi.e1.yaml');
+      found.push(existsSync(file) ? readFileSync(file, 'utf8') : null);
+      writeFileSync(file, SALTED);
+      const ending = endings[found.length - 1] ?? { code: 0 };
+      if (ending.code === 0) fakePulumi.legacyStacks.delete(name);
+      return ending;
+    };
+    return found;
+  }
+
+  it("put back before the stale lock's retry, and kept once a run succeeds", async () => {
+    // Hetzner's workspace has a settings file of its own (IAC_STACK_CONFIG).
+    const original = 'config:\n  hcloud:pollInterval: 1s\n';
+    mkdirSync(fakeWorkDir('e1'), { recursive: true });
+    writeFileSync(settings, original);
+    fakePulumi.legacy('e1', exportRefusal);
+    const found = migrateWritingSalt([{ code: 1, stderr: lockRefusal(STALE) }]);
+
+    await getStackOutputs('e1', async () => ({}), BASE);
+
+    expect(found).toEqual([original, original]);
+    // The successful run's salt is the one the state now has.
+    expect(readFileSync(settings, 'utf8')).toBe(SALTED);
+  });
+
+  it.each([
+    ["'' refused (the typed error)", MIGRATION_REFUSAL, StateUndecryptableError],
+    ['a live lock (StackHeldError)', null, StackHeldError],
+    ['a store fault (a plain error)', STORE_FAULT, Error],
+  ])('put back when the migration ends on %s', async (_label, stderr, kind) => {
+    fakePulumi.legacy('e1', exportRefusal);
+    migrateWritingSalt([{ code: 1, stderr: stderr ?? lockRefusal(live()) }]);
+
+    const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(kind);
+    // Absent before the run, absent after it.
+    expect(existsSync(settings)).toBe(false);
+  });
+});
+
 describe('destroy of a legacy stack: migrated, then destroyed through Pulumi', () => {
   it('the record goes with the destroy, never through the unreadable path', async () => {
     fakePulumi.legacy('e1', refusal('passphrase-incorrect-on-refresh'));
@@ -311,7 +521,7 @@ describe('upStack and prepareStackForUp: a refused passphrase is the typed error
     const err = await upStack('e1', async () => ({}), BASE).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(StateUndecryptableError);
-    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1']);
+    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1', 'exportStack']);
   });
 
   it('a refresh that refuses it stops the up with the typed error', async () => {

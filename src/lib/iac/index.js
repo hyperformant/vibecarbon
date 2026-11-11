@@ -20,7 +20,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
@@ -528,8 +528,11 @@ function exportForProbe(stack) {
 
 /**
  * The probe's export, migrating a legacy stack first when the project's
- * passphrase is refused. Throws the StateUndecryptableError when neither
- * passphrase opens it, the probe's own error for anything else.
+ * passphrase is refused. Throws the StateUndecryptableError only when
+ * neither passphrase opens it; the probe's own error for any other read
+ * failure, and migrateFromEmptyPassphrase's for a migration that failed for
+ * any other reason (a held lock, the store), so a stack '' still reads is
+ * never ruled unreadable.
  *
  * The migration is one-time, not a retry: it runs only on a refusal, once,
  * and its result is checked by reading the state again.
@@ -554,6 +557,15 @@ async function readOrMigrateState(stack, passphrase) {
     migrateFromEmptyPassphrase(stack, passphrase),
   );
   if (!migration.ok) {
+    // '' was refused too. Another process may have re-encrypted the stack
+    // between this one's read and its migration: then the project's
+    // passphrase reads it now and '' no longer does. One more read tells
+    // that apart from a state neither opens.
+    try {
+      return await exportForProbe(stack);
+    } catch (err) {
+      if (!isStatePassphraseFailure(err)) throw err;
+    }
     const typed = passphraseRefusal(refused, stack.name, 'state read');
     progressLog(
       `[pulumi] the empty passphrase older vibecarbon versions used doesn't open it either: ${migration.detail}`,
@@ -583,8 +595,21 @@ async function readOrMigrateState(stack, passphrase) {
  * (3.274.1) has no changeSecretsProvider and its PulumiCommand.run takes no
  * stdin, so this spawns the binary itself. Measured on CLI 3.259.0 (M1,
  * 2026-11-11): about 0.5 s on a file:// backend; the new passphrase reads it
- * and '' no longer does; on a state '' cannot open it exits 1 and changes
- * nothing.
+ * and '' no longer does; on a state '' cannot open it exits 1 and leaves the
+ * state as it was.
+ *
+ * Unlike `stack export`, it writes the state, so it takes the stack's lock,
+ * and the child's failures are sorted the way every other state write's are
+ * (classifyStateError on its whole stderr):
+ *
+ *   - '' refused: resolves `{ ok: false, detail }` with Pulumi's line, for
+ *     the caller to rule on;
+ *   - a held lock: runPastStaleLock clears one whose holder is gone and runs
+ *     the migration once more, and a live holder is StackHeldError;
+ *   - backpressure: withStateBackendRetry's retries;
+ *   - anything else, or what is left when those run out: a plain Error that
+ *     names this step, never the typed error, so the open fails as it would
+ *     for any other state fault and destroy keeps the stack's record.
  *
  * SECURITY: the new passphrase goes on stdin only. argv is readable by every
  * local user in a process listing, so it never carries it, and the child's
@@ -592,19 +617,51 @@ async function readOrMigrateState(stack, passphrase) {
  * inherited PULUMI_CONFIG_PASSPHRASE_FILE (which would otherwise win) are
  * both dropped.
  *
- * Never throws: resolves `ok` with Pulumi's own error line as `detail`.
- *
  * REMOVE AFTER 2027-02-11 (see readOrMigrateState).
  *
  * @param {object} stack
  * @param {string} passphrase
  * @returns {Promise<{ ok: boolean, detail: string }>}
+ * @throws {StackHeldError} when a live run holds the stack's lock
  */
-function migrateFromEmptyPassphrase(stack, passphrase) {
-  return new Promise((resolve) => {
+async function migrateFromEmptyPassphrase(stack, passphrase) {
+  const step = `re-encrypting the Pulumi state for ${stack.name}`;
+  try {
+    await withStateBackendRetry(
+      () => runPastStaleLock(stack, () => changeSecretsProvider(stack, passphrase)),
+      step,
+    );
+    return { ok: true, detail: '' };
+  } catch (err) {
+    if (err instanceof StackHeldError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    if (isStatePassphraseFailure(err)) {
+      return { ok: false, detail: summarizeCommandError(message) };
+    }
+    // Whether the child got as far as the import or not, the next open reads
+    // the state with one passphrase or the other.
+    throw new Error(
+      `Stopped while ${step}: ${summarizeCommandError(message).replace(/\.$/, '')}. Running this again is safe.`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * One `change-secrets-provider` run. Rejects with the child's whole stderr
+ * as the message, so the classifier and lockHolders read every line, after
+ * putting the stack's settings file back (snapshotStackSettings).
+ *
+ * @param {object} stack
+ * @param {string} passphrase
+ * @returns {Promise<void>}
+ */
+async function changeSecretsProvider(stack, passphrase) {
+  const { workspace } = stack;
+  const restoreSettings = snapshotStackSettings(workspace.workDir, stack.name);
+  const result = await new Promise((resolve) => {
     let child;
     try {
-      const { workspace } = stack;
       const env = { ...process.env, ...workspace.envVars, PULUMI_CONFIG_PASSPHRASE: '' };
       delete env.PULUMI_CONFIG_PASSPHRASE_FILE;
       delete env[STATE_PASSPHRASE_KEY];
@@ -621,22 +678,63 @@ function migrateFromEmptyPassphrase(stack, passphrase) {
         { cwd: workspace.workDir, env, stdio: ['pipe', 'ignore', 'pipe'] },
       );
     } catch (err) {
-      resolve({ ok: false, detail: err instanceof Error ? err.message : String(err) });
+      resolve({ error: err });
       return;
     }
     let stderr = '';
     child.stderr?.on('data', (chunk) => {
       stderr += chunk;
     });
-    child.on('error', (err) => resolve({ ok: false, detail: err.message }));
-    child.on('close', (code) =>
-      resolve({ ok: code === 0, detail: summarizeCommandError(stderr) || `exit code ${code}` }),
-    );
+    child.on('error', (err) => resolve({ error: err }));
+    child.on('close', (code) => resolve({ code, stderr }));
     // A child that exits before reading stdin closes the pipe (EPIPE); its
     // exit code already says what happened.
     child.stdin?.on('error', () => {});
     child.stdin?.end(passphrase);
   });
+  if (result.code === 0) return;
+  restoreSettings();
+  if (result.error) throw result.error;
+  throw new Error(result.stderr.trim() || `exited with code ${result.code}`);
+}
+
+/**
+ * The stack's settings file in its workspace (Pulumi.<stack>.yaml, or the
+ * .yml or .json the SDK also reads), and a function that puts it back as it
+ * was, absent included.
+ *
+ * `change-secrets-provider` writes a new `encryptionsalt` there before it
+ * touches the state, and a failed run leaves it behind: seen on CLI 3.259.0
+ * (2026-11-11) for a held lock and for a refused passphrase alike. The file
+ * lives in the workspace's own directory, which the SDK makes per workspace
+ * (mkdtemp under the OS temp dir, never removed, never reused by a later
+ * workspace) and which every later command on this Stack object runs in:
+ * the stale-lock retry, the read after a refusal, and the caller's refresh,
+ * up or destroy. A salt left there no longer matches the state; with a
+ * secret value in the stack's config (vibecarbon sets none today), a second
+ * run in that workspace was refused outright (review, 2026-11-11).
+ *
+ * @param {string} workDir
+ * @param {string} stackName
+ * @returns {() => void}
+ */
+function snapshotStackSettings(workDir, stackName) {
+  const name = stackName.split('/').pop();
+  const saved = ['.yaml', '.yml', '.json'].map((ext) => {
+    const path = join(workDir, `Pulumi.${name}${ext}`);
+    try {
+      return { path, content: readFileSync(path) };
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+      return { path, content: null };
+    }
+  });
+  return () => {
+    for (const { path, content } of saved) {
+      if (content === null) rmSync(path, { force: true });
+      else writeFileSync(path, content);
+    }
+  };
 }
 
 // The throttle recogniser that used to live here

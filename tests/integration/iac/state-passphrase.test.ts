@@ -16,7 +16,12 @@
  *       never reaches destroy's path for a state it cannot read;
  *   (e) a stack whose only secret sits in a resource input answers `stack
  *       output` under the wrong passphrase (E7), so only the export finds it;
- *       an up migrates it on the open and goes ahead.
+ *       an up migrates it on the open and goes ahead;
+ *   (f) `change-secrets-provider` takes the stack's lock (`stack export` does
+ *       not): behind a lock a dead run left, the lock is cleared and the
+ *       stack migrated;
+ *   (g) behind a live run's lock: StackHeldError, the state untouched and
+ *       still readable with '', never the typed error.
  *
  * Remove with the migration after 2027-02-11.
  *
@@ -25,7 +30,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
@@ -38,6 +43,7 @@ import {
   getStackOutputs,
   upStack,
 } from '../../../src/lib/iac/index.js';
+import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
 import { __resetStatePassphraseForTests } from '../../../src/lib/state-passphrase.js';
 
@@ -125,6 +131,26 @@ async function exportWith(stackName: string, passphrase: string) {
 }
 
 const servers = () => Object.keys(JSON.parse(readFileSync(cloudFile, 'utf8')).servers);
+
+/**
+ * A lock on `stackName` in the backend, as a run that took it and never let
+ * go leaves it (the DIY backend's lock file and its fields).
+ */
+function lockStack(stackName: string, holder: { host: string; pid: number; at: string }) {
+  const dir = join(backend, '.pulumi/locks/organization', PROJECT, stackName);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, '6f1d2c3b-0000-4000-8000-000000000001.json');
+  writeFileSync(
+    file,
+    JSON.stringify({
+      pid: holder.pid,
+      username: 'someone',
+      hostname: holder.host,
+      timestamp: holder.at,
+    }),
+  );
+  return file;
+}
 
 describe.runIf(hasPulumi || process.env.CI)('legacy empty-passphrase stacks (real engine)', () => {
   let infos: string[];
@@ -249,5 +275,49 @@ describe.runIf(hasPulumi || process.env.CI)('legacy empty-passphrase stacks (rea
     // wrapper. Bridged providers compare the values.)
     expect(servers().length).toBe(serversBefore);
     await expect(exportWith('legacy-e', '')).rejects.toThrow(/incorrect passphrase/);
+  });
+
+  it('(f) behind a lock a dead run left: the lock is cleared and the stack migrated, and the empty passphrase no longer opens it', async () => {
+    await writeStack('legacy-f', '', true);
+    // Past the two-hour expiry, from a machine this one cannot see.
+    const lock = lockStack('legacy-f', {
+      host: 'ci-runner-long-gone',
+      pid: 4321,
+      at: '2026-01-01T00:00:00Z',
+    });
+
+    const outputs = await getStackOutputs('legacy-f', async () => ({}), opts);
+
+    expect(outputs.token).toBe(SENTINEL);
+    expect(infos).toEqual([migratedLine('legacy-f')]);
+    expect(existsSync(lock)).toBe(false);
+    await expect(exportWith('legacy-f', '')).rejects.toThrow(/incorrect passphrase/);
+    await expect(exportWith('legacy-f', PASSPHRASE)).resolves.toBeDefined();
+  });
+
+  it("(g) behind a live run's lock: StackHeldError, the state untouched and still the empty passphrase's; once the run is gone it migrates", async () => {
+    await writeStack('legacy-g', '', true);
+    const before = readFileSync(checkpoint('legacy-g'));
+    // This very process, just now.
+    const lock = lockStack('legacy-g', {
+      host: hostname(),
+      pid: process.pid,
+      at: new Date().toISOString(),
+    });
+
+    const err = await getStackOutputs('legacy-g', async () => ({}), opts).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StackHeldError);
+    expect(err).not.toBeInstanceOf(StateUndecryptableError);
+    expect(existsSync(lock)).toBe(true);
+    expect(readFileSync(checkpoint('legacy-g')).equals(before)).toBe(true);
+    await expect(exportWith('legacy-g', '')).resolves.toBeDefined();
+    expect(infos).toEqual([]);
+
+    // The run finishes and lets go: the next open migrates it.
+    rmSync(lock);
+    const outputs = await getStackOutputs('legacy-g', async () => ({}), opts);
+    expect(outputs.token).toBe(SENTINEL);
+    expect(infos).toEqual([migratedLine('legacy-g')]);
   });
 });

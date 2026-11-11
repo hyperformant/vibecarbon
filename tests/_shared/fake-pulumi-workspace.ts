@@ -34,11 +34,16 @@
  * as the CLI does: a stack marked `fakePulumi.legacy(...)` (written with the
  * empty passphrase, so its reads refuse the project's) is re-encrypted and
  * reads from then on; any other stack fails with Pulumi's refusal.
- * `fakePulumi.behaviour.migrate` overrides that. Without the module mock the
- * fake workspace's command does not exist, so the child fails to start.
+ * `fakePulumi.behaviour.migrate` overrides that, run by run (a lock, the
+ * store pushing back, any other stderr). Without the module mock the fake
+ * workspace's command does not exist, so the child fails to start. A test
+ * that sets `fakePulumi.workDirRoot` gets real workspace directories, to see
+ * what a run leaves in the stack's settings file.
  */
 
 import { EventEmitter } from 'node:events';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 export type StackVerb =
@@ -54,8 +59,15 @@ export type StackVerb =
 /** The fake workspace's pulumi binary: absent, so only the mocked spawn runs it. */
 export const FAKE_PULUMI_COMMAND = '/nonexistent/fake-pulumi';
 
-/** The working directory of a fake workspace for `stackName`. */
-export const fakeWorkDir = (stackName: string) => `/fake/pulumi-workdir/${stackName}`;
+/**
+ * The working directory of a fake workspace for `stackName`: a path that does
+ * not exist, or a real directory under `fakePulumi.workDirRoot` when a test
+ * sets one (to see what the migration leaves in it).
+ */
+export const fakeWorkDir = (stackName: string) =>
+  fakePulumi.workDirRoot
+    ? join(fakePulumi.workDirRoot, stackName)
+    : `/fake/pulumi-workdir/${stackName}`;
 
 /** One migration child, as spawned. */
 export interface FakeMigration {
@@ -86,9 +98,14 @@ export const fakePulumi = {
   removed: null as Set<string> | null,
   /** Stacks still under the empty passphrase, with the refusal their reads throw. */
   legacyStacks: new Map<string, () => Error>(),
-  /** Per-verb override; throw from it to make the verb fail. */
+  /** Where real workspace directories go; null for paths that do not exist. */
+  workDirRoot: null as string | null,
+  /**
+   * Per-verb override; throw from it to make the verb fail. `migrate` gets the
+   * child as spawned (its cwd is the stack's workspace) and answers for it.
+   */
   behaviour: {} as Partial<Record<StackVerb, (stackName: string) => unknown>> & {
-    migrate?: (stackName: string) => MigrationAnswer;
+    migrate?: (stackName: string, child: FakeMigration) => MigrationAnswer;
   },
   reset() {
     this.calls.length = 0;
@@ -97,6 +114,7 @@ export const fakePulumi = {
     this.behaviour = {};
     this.legacyStacks.clear();
     this.removed?.clear();
+    this.workDirRoot = null;
   },
   trackRemovals() {
     this.removed = new Set();
@@ -138,6 +156,8 @@ const DEFAULTS: Record<StackVerb, () => unknown> = {
 };
 
 function fakeStack(name: string, envVars: Record<string, string | undefined>) {
+  const workDir = fakeWorkDir(name);
+  if (fakePulumi.workDirRoot) mkdirSync(workDir, { recursive: true });
   const op =
     (verb: StackVerb) =>
     async (...args: unknown[]) => {
@@ -162,7 +182,7 @@ function fakeStack(name: string, envVars: Record<string, string | undefined>) {
     workspace: {
       removeStack: op('removeStack'),
       pulumiCommand: { command: FAKE_PULUMI_COMMAND },
-      workDir: fakeWorkDir(name),
+      workDir,
       envVars,
     },
   };
@@ -192,8 +212,8 @@ export function fakeAutomationModule() {
 }
 
 /** The default answer: re-encrypts a legacy stack, refuses any other. */
-function migrate(stackName: string): MigrationAnswer {
-  if (fakePulumi.behaviour.migrate) return fakePulumi.behaviour.migrate(stackName);
+function migrate(stackName: string, child: FakeMigration): MigrationAnswer {
+  if (fakePulumi.behaviour.migrate) return fakePulumi.behaviour.migrate(stackName, child);
   if (fakePulumi.legacyStacks.delete(stackName)) return { code: 0 };
   return { code: 255, stderr: MIGRATION_REFUSAL };
 }
@@ -219,14 +239,15 @@ function fakeMigrationChild(
   child.stdin.on('data', (chunk: Buffer) => chunks.push(chunk));
   child.stdin.on('finish', () => {
     fakePulumi.calls.push(`migrate:${stackName}`);
-    fakePulumi.migrations.push({
+    const spawned = {
       command,
       args: [...args],
       cwd: options.cwd,
       env: { ...(options.env ?? {}) },
       stdin: Buffer.concat(chunks).toString('utf8'),
-    });
-    const { code, stderr = '' } = migrate(stackName);
+    };
+    fakePulumi.migrations.push(spawned);
+    const { code, stderr = '' } = migrate(stackName, spawned);
     setImmediate(() => {
       child.stderr.end(stderr);
       child.stdout.end();

@@ -19,6 +19,7 @@
  * passphrase check against a temp project, and a recording fake provider.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakePulumi } from '../../_shared/fake-pulumi-workspace.js';
@@ -409,7 +410,7 @@ describe('k8s, refused before Pulumi ran: the record goes only when the backstop
 });
 
 describe('k8s, Pulumi refused the passphrase: the record goes on every provider', () => {
-  it('no backstop: one refused read, servers swept, record removed, leftovers named for the console', async () => {
+  it("no backstop: the open's reads refused, servers swept, record removed, leftovers named for the console", async () => {
     project({ value: PASSPHRASE });
     fakePulumi.refuseReads(passphraseRefusal);
     backstop = false;
@@ -417,13 +418,15 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
 
     await run('destroyK8sInfra', ctx);
 
-    // The open's one read, refused, and the empty passphrase of a legacy
-    // stack refused too: no refresh, no destroy, no retry. Then the record
-    // goes without being read.
+    // The open's read, refused; the empty passphrase of a legacy stack,
+    // refused too; and one more read in case another run re-encrypted it in
+    // between, still refused. No refresh, no destroy, no retry. Then the
+    // record goes without being read.
     expect(fakePulumi.calls).toEqual([
       'select:e1',
       'exportStack',
       'migrate:e1',
+      'exportStack',
       'select:e1',
       REMOVE('e1'),
     ]);
@@ -607,6 +610,82 @@ describe('k8s, a legacy stack (written with the empty passphrase): migrated, the
       expect(ctx.results.pulumiDestroyFailed).toBe(false);
     },
   );
+});
+
+describe('k8s, a legacy stack behind a lock: the migration takes the lock, and the record is never ruled unreadable', () => {
+  /** CLI 3.259.0's refusal when `change-secrets-provider` meets a held lock. */
+  const lockRefusal = (holder: { host: string; pid: number; at: string }) =>
+    'error: the stack is currently locked by 1 lock(s). Either wait for the other process(es) ' +
+    'to end or delete the lock file with `pulumi cancel`.\n' +
+    `  s3://proj-state/.pulumi/locks/organization/proj/e1/0b1c2d3e.json: created by someone@${holder.host} (pid ${holder.pid}) at ${holder.at}\n`;
+
+  /** A legacy stack whose first migration meets `holder`'s lock. */
+  function legacyBehindLock(holder: { host: string; pid: number; at: string }) {
+    fakePulumi.legacy('e1', passphraseRefusal);
+    fakePulumi.behaviour.exportStack = () => ({
+      deployment: {
+        resources: [
+          { type: 'pulumi:pulumi:Stack' },
+          { type: 'hcloud:index/server:Server', id: '21', outputs: { name: 'proj-e1-master' } },
+        ],
+      },
+    });
+    let runs = 0;
+    fakePulumi.behaviour.migrate = (name) => {
+      runs += 1;
+      if (runs === 1) return { code: 1, stderr: lockRefusal(holder) };
+      fakePulumi.legacyStacks.delete(name);
+      return { code: 0 };
+    };
+  }
+
+  it('a lock a dead run left: cleared, re-encrypted, and `pulumi destroy` removes the stack itself', async () => {
+    project({ value: PASSPHRASE });
+    // Past the two-hour expiry.
+    legacyBehindLock({ host: 'ci-runner-long-gone', pid: 4321, at: '2026-01-01T00:00:00Z' });
+    backstop = false;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(fakePulumi.calls).toEqual([
+      'select:e1',
+      'exportStack',
+      'migrate:e1',
+      'cancel',
+      'migrate:e1',
+      'exportStack',
+      'refresh',
+      'exportStack',
+      'destroy',
+      'removeStack:e1:undefined',
+    ]);
+    // Pulumi's own removal of a destroyed stack, never the unread `--force` one.
+    expect(removals()).toEqual(['removeStack:e1:undefined']);
+    expect(warnings.join('\n')).not.toContain("can't read the Pulumi state");
+    expect(stackEntries(ctx)).toEqual([]);
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+  });
+
+  it('a lock a live run holds: the destroy stops for this stack, and its record stays', async () => {
+    project({ value: PASSPHRASE });
+    legacyBehindLock({ host: hostname(), pid: process.pid, at: new Date().toISOString() });
+    backstop = false;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(fakePulumi.calls.slice(0, 3)).toEqual(['select:e1', 'exportStack', 'migrate:e1']);
+    expect(fakePulumi.calls).not.toContain('cancel');
+    expect(fakePulumi.calls).not.toContain('destroy');
+    expect(removals()).toEqual([]);
+    expect(warnings.join('\n')).not.toContain("can't read the Pulumi state");
+    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+    const [entry, ...rest] = stackEntries(ctx);
+    expect(rest).toEqual([]);
+    expect(entry.reason).toContain('Stack "e1" is in use by another run');
+    expect(entry.hint).toContain('Pulumi state was preserved for this stack');
+  });
 });
 
 describe('k8s-ha: each stack of the pair is settled, under its own name', () => {
