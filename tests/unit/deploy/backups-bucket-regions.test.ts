@@ -10,6 +10,11 @@
  * backups bucket lives in nbg1, so staging's fsn1 uploads bucket was recorded
  * as nbg1, the app was handed the wrong region, and every later deploy kept
  * it. Each bucket's region now comes from its own create.
+ *
+ * And the backups bucket is one per project and storage region: the first
+ * region keeps `<project>-<salt>-backups`, a further region gets
+ * `<project>-<salt>-<region>-backups` (src/lib/backups-bucket.js), and an
+ * environment that already has a record keeps it.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
@@ -142,11 +147,17 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
 const { executeDeployment } = await import('../../../src/lib/deploy/orchestrator.js');
 const { loadProjectConfig } = await import('../../../src/lib/config.js');
 const { HetznerS3Provider } = await import('../../../src/lib/providers/hetzner-s3.js');
+const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+const { resolveAppStorageCredential } = await import(
+  '../../../src/lib/deploy/app-storage-credential.js'
+);
 
 const ENDPOINT = HetznerS3Provider.ENDPOINTS as Record<string, string>;
 const BACKUPS = 'myapp-abc123-backups';
+const FSN1_BACKUPS = 'myapp-abc123-fsn1-backups';
 const PROD_APP = 'myapp-abc123-prod-storage';
 const STAGING_APP = 'myapp-abc123-staging-storage';
+const PREVIEW_APP = 'myapp-abc123-preview-storage';
 const STATE = 'myapp-abc123-storage-pulumi-state';
 const KEYS = { accessKey: 'ABCDEFGHIJ0123456789', secretKey: 'x'.repeat(40) };
 
@@ -208,7 +219,6 @@ function gathered(
       region: storage,
       endpoint: ENDPOINT[storage],
     },
-    backupS3Config: { bucket: BACKUPS, region: storage, endpoint: ENDPOINT[storage] },
     backupConfig: {},
     services: {},
     branchName: 'main',
@@ -254,14 +264,26 @@ describe('a second storage region never moves another bucket region', () => {
     s3.seed(BACKUPS, 'nbg1');
     s3.seed(PROD_APP, 'nbg1');
     s3.seed(STATE, 'nbg1');
+    // staging archived into the project's nbg1 bucket before it was destroyed,
+    // and its record kept that: a rebuild in fsn1 keeps it (`recorded`).
     store.current = projectConfigStore({
       projectName: 'myapp',
       bucketSalt: 'abc123',
       environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
+      destroyedEnvironments: {
+        staging: {
+          envName: 'staging',
+          backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
+          destroyedAt: '2026-11-02T00:00:00.000Z',
+        },
+      },
     });
     const before = new Set(s3.buckets.keys());
+    const { envConfig } = resolveEnvSeed(loadProjectConfig(), 'staging');
 
-    const ctx = await deployToPlan(gathered('staging', { compute: 'fsn1', storage: 'fsn1' }));
+    const ctx = await deployToPlan(
+      gathered('staging', { compute: 'fsn1', storage: 'fsn1', envConfig }),
+    );
 
     const staging = env('staging');
     expect(staging.s3.region).toBe('fsn1');
@@ -276,9 +298,13 @@ describe('a second storage region never moves another bucket region', () => {
     const added = [...s3.buckets.keys()].filter((b) => !before.has(b));
     expect(added).toEqual([STAGING_APP]);
     expect(s3.regionOf(STAGING_APP)).toBe('fsn1');
-    // prod is untouched, and nothing moved, so there is nothing to say.
+    // prod is untouched, and nothing moved, so there is nothing to say about
+    // the uploads; the backups line says where they stay and why.
     expect(env('prod')).toEqual(envRecord('prod', { app: 'nbg1', backups: 'nbg1' }));
     expect(infoLines().filter((l) => l.includes('for its uploads'))).toEqual([]);
+    expect(infoLines()).toContain(
+      `staging's backups stay in ${BACKUPS} (nbg1), where its earlier backups are; its uploads are in fsn1`,
+    );
   });
 
   it('an environment recorded under the wrong region is repaired from where its bucket is', async () => {
@@ -312,7 +338,7 @@ describe('a second storage region never moves another bucket region', () => {
     expect([...s3.buckets.keys()].sort()).toEqual([BACKUPS, STAGING_APP, STATE].sort());
   });
 
-  it('a backups bucket made during that repair goes where the uploads bucket is', async () => {
+  it('a recorded backups bucket that is gone is made again where the record says, never moved', async () => {
     s3.seed(STAGING_APP, 'fsn1');
     s3.seed(STATE, 'nbg1');
     const broken = envRecord('staging', { app: 'nbg1', backups: 'nbg1' });
@@ -327,11 +353,14 @@ describe('a second storage region never moves another bucket region', () => {
       gathered('staging', { compute: 'fsn1', storage: 'nbg1', envConfig: broken }),
     );
 
-    expect(s3.regionOf(BACKUPS)).toBe('fsn1');
+    // The uploads are repaired to fsn1; the backups record is the environment's
+    // own (`recorded`), so it keeps its bucket and region.
+    expect(env('staging').s3.region).toBe('fsn1');
+    expect(s3.regionOf(BACKUPS)).toBe('nbg1');
     expect(env('staging').backupS3).toEqual({
       bucket: BACKUPS,
-      region: 'fsn1',
-      endpoint: ENDPOINT.fsn1,
+      region: 'nbg1',
+      endpoint: ENDPOINT.nbg1,
     });
   });
 
@@ -437,5 +466,162 @@ describe('a second storage region never moves another bucket region', () => {
     expect(ctx.s3Config.stateBucketRegion).toBe('fsn1');
     expect(env('staging').s3.stateBucketRegion).toBe('fsn1');
     expect(sent('CreateBucket')).toEqual([]);
+  });
+
+  it('a warm deploy whose recorded storage result names no backups bucket runs the storage step', async () => {
+    s3.seed(STAGING_APP, 'fsn1');
+    s3.seed(BACKUPS, 'fsn1');
+    s3.seed(STATE, 'fsn1');
+    // An environment from before the backups record, on a result from then.
+    const { backupS3: _none, ...staging } = envRecord('staging', { app: 'fsn1', backups: 'fsn1' });
+    store.current = projectConfigStore({
+      projectName: 'myapp',
+      bucketSalt: 'abc123',
+      environments: { staging },
+    });
+    run.skipStorageSetup = true;
+    run.priorResults = {
+      's3-setup': { region: 'fsn1', endpoint: ENDPOINT.fsn1, stateBucket: STATE },
+    };
+
+    await deployToPlan(
+      gathered('staging', { compute: 'fsn1', storage: 'fsn1', envConfig: staging }),
+    );
+
+    // The step ran (a skip would leave no target to record) and found the
+    // project's bucket where it is.
+    expect(env('staging').backupS3).toEqual({
+      bucket: BACKUPS,
+      region: 'fsn1',
+      endpoint: ENDPOINT.fsn1,
+    });
+    expect(sent('CreateBucket')).toEqual([]);
+  });
+
+  describe('one backups bucket per storage region', () => {
+    const FIRST_LINE = 'staging is the first environment with storage in fsn1';
+
+    /** An empty project; prod deploys in nbg1, then staging in fsn1. */
+    async function prodThenStaging() {
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: {},
+      });
+      await deployToPlan(gathered('prod', { compute: 'nbg1', storage: 'nbg1' }));
+      const prod = env('prod');
+      clackMock.log.info.mockClear();
+      await deployToPlan(gathered('staging', { compute: 'fsn1', storage: 'fsn1' }));
+      return prod;
+    }
+
+    it('a second storage region gets its own backups bucket, and prod keeps the first', async () => {
+      const prod = await prodThenStaging();
+
+      expect(s3.regionOf(BACKUPS)).toBe('nbg1');
+      expect(s3.regionOf(FSN1_BACKUPS)).toBe('fsn1');
+      expect(prod.backupS3).toEqual({ bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 });
+      const staging = env('staging');
+      expect(staging.backupS3).toEqual({
+        bucket: FSN1_BACKUPS,
+        region: 'fsn1',
+        endpoint: ENDPOINT.fsn1,
+      });
+      expect(staging.s3.region).toBe('fsn1');
+      expect(env('prod')).toEqual(prod);
+      expect(infoLines()).toContain(
+        `${FIRST_LINE}, so its backups get their own bucket there: ${FSN1_BACKUPS}`,
+      );
+      // Its backups and uploads share fsn1: nothing else to say.
+      expect(infoLines().filter((l) => l.includes('backups stay in'))).toEqual([]);
+    });
+
+    it('a redeploy creates no bucket', async () => {
+      await prodThenStaging();
+      const buckets = [...s3.buckets.keys()].sort();
+      s3.calls.length = 0;
+      clackMock.log.info.mockClear();
+
+      await deployToPlan(
+        gathered('staging', { compute: 'fsn1', storage: 'fsn1', envConfig: env('staging') }),
+      );
+
+      // The project's state bucket lives in nbg1, and its create still asks
+      // from fsn1 first (that answer reports nbg1 and creates nothing); the
+      // uploads and backups buckets are found where they are.
+      expect(sent('CreateBucket').filter((c) => c.bucket !== STATE)).toEqual([]);
+      expect([...s3.buckets.keys()].sort()).toEqual(buckets);
+      expect(env('staging').backupS3).toEqual({
+        bucket: FSN1_BACKUPS,
+        region: 'fsn1',
+        endpoint: ENDPOINT.fsn1,
+      });
+      expect(infoLines().filter((l) => l.includes(FIRST_LINE))).toEqual([]);
+    });
+
+    it('a third environment joins the bucket of its region', async () => {
+      await prodThenStaging();
+      s3.calls.length = 0;
+      clackMock.log.info.mockClear();
+
+      await deployToPlan(gathered('preview', { compute: 'nbg1', storage: 'nbg1' }));
+
+      expect(env('preview').backupS3).toEqual({
+        bucket: BACKUPS,
+        region: 'nbg1',
+        endpoint: ENDPOINT.nbg1,
+      });
+      // Its own uploads bucket is the only new one.
+      expect(sent('CreateBucket').map((c) => c.bucket)).toEqual([PREVIEW_APP]);
+      expect(infoLines().filter((l) => l.includes('first environment with storage'))).toEqual([]);
+    });
+
+    it('a base name that exists elsewhere with nothing on record sends this region to its own name', async () => {
+      // A concurrent first deploy, or a crash before the record.
+      s3.seed(BACKUPS, 'nbg1');
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: {},
+      });
+
+      await deployToPlan(gathered('staging', { compute: 'fsn1', storage: 'fsn1' }));
+
+      expect(env('staging').backupS3).toEqual({
+        bucket: FSN1_BACKUPS,
+        region: 'fsn1',
+        endpoint: ENDPOINT.fsn1,
+      });
+      expect(s3.regionOf(FSN1_BACKUPS)).toBe('fsn1');
+      expect(s3.regionOf(BACKUPS)).toBe('nbg1');
+      expect(infoLines()).toContain(
+        `${BACKUPS} already lives in nbg1, so staging's backups in fsn1 go to ${FSN1_BACKUPS}`,
+      );
+      // One line per event: the switch said it.
+      expect(infoLines().filter((l) => l.includes(FIRST_LINE))).toEqual([]);
+    });
+
+    it('the backups record is saved before the app key is minted', async () => {
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: {},
+      });
+      await deployToPlan(gathered('prod', { compute: 'nbg1', storage: 'nbg1' }));
+      vi.mocked(resolveAppStorageCredential).mockRejectedValueOnce(new Error('mint refused'));
+
+      await expect(
+        executeDeployment(
+          { yes: true },
+          gathered('staging', { compute: 'fsn1', storage: 'fsn1' }) as never,
+        ),
+      ).rejects.toThrow('exit 1');
+
+      expect(env('staging').backupS3).toEqual({
+        bucket: FSN1_BACKUPS,
+        region: 'fsn1',
+        endpoint: ENDPOINT.fsn1,
+      });
+    });
   });
 });

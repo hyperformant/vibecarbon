@@ -114,11 +114,6 @@ function gathered(deployMode: string, ha: boolean, sizes: Record<string, string 
     dnsZoneId: null,
     dnsToken: null,
     s3Config: S3,
-    backupS3Config: {
-      bucket: 'sizeapp-abc123-prod-backups',
-      region: 'hel1',
-      endpoint: S3.endpoint,
-    },
     backupConfig: {},
     services: {},
     branchName: 'main',

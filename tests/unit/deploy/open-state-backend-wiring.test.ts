@@ -177,11 +177,6 @@ function gathered(deployMode: string) {
     dnsZoneId: null,
     dnsToken: null,
     s3Config: S3,
-    backupS3Config: {
-      bucket: 'wireapp-abc123-prod-backups',
-      region: 'hel1',
-      endpoint: S3.endpoint,
-    },
     backupConfig: {},
     services: {},
     branchName: 'main',

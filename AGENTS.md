@@ -65,7 +65,12 @@ deploy never derives a fresh bucket and orphans the kept one);
 `resolveStateBucketName` reads it after the operator pin and before
 derivation. The app uploads bucket is separate: one per environment
 (`deriveEnvAppBucketName`, read only through `resolveEnvStorage`), kept on
-plain destroy and deleted by `-purge`. The derived state bucket is project-level, so `-purge` deletes it
+plain destroy and deleted by `-purge`. Backups are one bucket per project and
+storage region (`<project>-<salt>-backups` for the first region,
+`<project>-<salt>-<region>-backups` after), chosen only by
+`chooseBackupsBucket` and read only through `backupsTargetOf`
+(`src/lib/backups-bucket.js`); destroy keeps it, `-purge` deletes it with its
+last holder. The derived state bucket is project-level, so `-purge` deletes it
 only with the last live environment, then clears the record and rotates
 `stateBucketGeneration` so the next deploy derives a fresh name instead of
 recreating the deleted one. A destroy that keeps the environment's entry

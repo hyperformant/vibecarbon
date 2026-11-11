@@ -1442,7 +1442,43 @@ export function projectStateBucketBase(projectConfig) {
 }
 
 const APP_BUCKET_SUFFIX = 'storage';
+const BACKUPS_BUCKET_SUFFIX = 'backups';
 const MAX_BUCKET_NAME = 63;
+
+/**
+ * `<project>-<salt>-<segment>-<suffix>`, the shape of every bucket name that
+ * carries a segment (an environment, a storage region) besides the project.
+ *
+ * When that does not fit in 63 characters, the project part is clipped and an
+ * 8-hex hash of sha256(`hashKey`) goes before `-<suffix>`. The salt and the
+ * segment are never clipped, so two segments never collide; the hash form is
+ * also used when the segment itself needed sanitizing, because sanitizing
+ * could fold two segments together.
+ *
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @param {string} segment
+ * @param {string} suffix
+ * @param {string} hashKey - what the hash covers; part of the name's identity
+ * @param {(fixed: string) => Error} tooLong - the error when even the
+ *   unclippable part does not fit
+ * @returns {string}
+ */
+function segmentBucketName(projectConfig, segment, suffix, hashKey, tooLong) {
+  const { projectName, bucketSalt } = projectConfig;
+  const clean = sanitizeBucketName(segment, '');
+  const salt = bucketSalt ? sanitizeBucketName(bucketSalt, '') : '';
+  const tail = [salt, clean].filter(Boolean).join('-');
+  const full = sanitizeBucketName(`${projectName}-${tail}`, '');
+  if (clean === segment && full.length + 1 + suffix.length <= MAX_BUCKET_NAME) {
+    return `${full}-${suffix}`;
+  }
+  const hash = createHash('sha256').update(hashKey).digest('hex').slice(0, 8);
+  const fixed = `${tail}-${hash}-${suffix}`;
+  const room = MAX_BUCKET_NAME - fixed.length - 1;
+  if (room < 0) throw tooLong(fixed);
+  const project = sanitizeBucketName(projectName, '').slice(0, room).replace(/-+$/, '');
+  return project ? `${project}-${fixed}` : fixed;
+}
 
 /**
  * The app uploads bucket of one environment: `<project>-<salt>-<env>-storage`
@@ -1452,10 +1488,9 @@ const MAX_BUCKET_NAME = 63;
  * resolves the same bucket on every deploy, including after a plain destroy.
  *
  * When that does not fit in 63 characters, the project part is clipped and an
- * 8-hex hash of sha256(projectName \0 salt \0 env) goes before `-storage`.
- * The env segment is never clipped, so two environments never collide; the
- * hash form is also used when the env itself needed sanitizing, because
- * sanitizing could fold two env names together.
+ * 8-hex hash of sha256(projectName \0 salt \0 env) goes before `-storage`
+ * (segmentBucketName). The env segment is never clipped, so two environments
+ * never collide.
  *
  * @param {{ projectName: string, bucketSalt?: string }} projectConfig
  * @param {string} envName
@@ -1463,26 +1498,54 @@ const MAX_BUCKET_NAME = 63;
  */
 export function deriveEnvAppBucketName(projectConfig, envName) {
   const { projectName, bucketSalt } = projectConfig;
-  const env = sanitizeBucketName(envName, '');
-  const salt = bucketSalt ? sanitizeBucketName(bucketSalt, '') : '';
-  const tail = [salt, env].filter(Boolean).join('-');
-  const full = sanitizeBucketName(`${projectName}-${tail}`, '');
-  if (env === envName && full.length + 1 + APP_BUCKET_SUFFIX.length <= MAX_BUCKET_NAME) {
-    return `${full}-${APP_BUCKET_SUFFIX}`;
-  }
-  const hash = createHash('sha256')
-    .update(`${projectName}\0${bucketSalt ?? ''}\0${envName}`)
-    .digest('hex')
-    .slice(0, 8);
-  const fixed = `${tail}-${hash}-${APP_BUCKET_SUFFIX}`;
-  const room = MAX_BUCKET_NAME - fixed.length - 1;
-  if (room < 0) {
-    throw new Error(
-      `Environment name "${envName}" is too long for an app bucket name: ` +
-        `"${fixed}" alone is ${fixed.length} characters and bucket names allow ${MAX_BUCKET_NAME}. ` +
-        'Use a shorter environment name.',
-    );
-  }
-  const project = sanitizeBucketName(projectName, '').slice(0, room).replace(/-+$/, '');
-  return project ? `${project}-${fixed}` : fixed;
+  return segmentBucketName(
+    projectConfig,
+    envName,
+    APP_BUCKET_SUFFIX,
+    `${projectName}\0${bucketSalt ?? ''}\0${envName}`,
+    (fixed) =>
+      new Error(
+        `Environment name "${envName}" is too long for an app bucket name: ` +
+          `"${fixed}" alone is ${fixed.length} characters and bucket names allow ${MAX_BUCKET_NAME}. ` +
+          'Use a shorter environment name.',
+      ),
+  );
+}
+
+/**
+ * The backups bucket of a project's further storage region:
+ * `<project>-<salt>-<region>-backups` (`<project>-<region>-backups` before the
+ * salt existed). The project's first storage region keeps
+ * `deriveProjectBucketName(projectConfig, 'backups')`, so a single-region
+ * project keeps the one bucket it has always had; which name an environment
+ * gets is decided only by chooseBackupsBucket (src/lib/backups-bucket.js).
+ *
+ * `region` is the STORAGE region slug (an ENDPOINTS key of the store), never
+ * the compute region: two compute regions that store in one region share one
+ * bucket. The salt separates customers, the region a project's regions, and
+ * the `-backups` tail stays last so `*-backups` globs and the e2e sweeps'
+ * patterns still match.
+ *
+ * When that does not fit in 63 characters, the project part is clipped and an
+ * 8-hex hash of sha256(projectName \0 salt \0 region \0 backups) goes before
+ * `-backups`; the salt and the region are never clipped. The longest slug
+ * today, Linode's `us-southeast-1`, leaves 24 characters for the project.
+ *
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @param {string} region
+ * @returns {string}
+ */
+export function deriveRegionBackupsBucketName(projectConfig, region) {
+  const { projectName, bucketSalt } = projectConfig;
+  return segmentBucketName(
+    projectConfig,
+    region,
+    BACKUPS_BUCKET_SUFFIX,
+    `${projectName}\0${bucketSalt ?? ''}\0${region}\0${BACKUPS_BUCKET_SUFFIX}`,
+    (fixed) =>
+      new Error(
+        `Storage region "${region}" is too long for a backups bucket name: ` +
+          `"${fixed}" alone is ${fixed.length} characters and bucket names allow ${MAX_BUCKET_NAME}.`,
+      ),
+  );
 }

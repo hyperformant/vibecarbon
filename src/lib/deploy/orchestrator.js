@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { backupsTargetOf, chooseBackupsBucket, settleBackupsBucket } from '../backups-bucket.js';
 import { formatCommandNote } from '../cli/help.js';
 import { progressLog, spinner } from '../cli/progress.js';
 import { resolvePrimary } from '../cli/resolve-primary.js';
@@ -1082,10 +1083,14 @@ export async function executeDeployment(args, gatheredConfig) {
     dnsZoneId,
     dnsToken,
     s3Config,
-    backupS3Config,
     backupConfig,
     services,
   } = gatheredConfig;
+  // The backups bucket this deploy settled on, `{ bucket, region, endpoint }`:
+  // chosen and created in s3-setup below (src/lib/backups-bucket.js), never
+  // gathered, so a name is never recorded before its bucket exists.
+  /** @type {{ bucket: string, region: string, endpoint: string } | null} */
+  let backupS3Config = null;
 
   const { deployMode } = config;
   const tier = resolveTier({ deployMode, ha: config.ha });
@@ -1299,14 +1304,28 @@ export async function executeDeployment(args, gatheredConfig) {
     generation: projectConfig.stateBucketGeneration,
   });
 
+  // The backups bucket for this storage region (one per project and region).
+  // A fresh read of the file: an environment another deploy recorded since
+  // this run started counts as a sibling.
+  const backupsPlan = chooseBackupsBucket({
+    environment,
+    envConfig,
+    projectConfig: loadProjectConfig() ?? projectConfig,
+    region: s3Config.region,
+  });
+
   // --- STEP 1: S3 Setup (Idempotent) ---
   // `stateBucket` is part of the inputs hash so an upgraded CLI (whose prior
   // deploy-state predates the dedicated state bucket) re-runs this step once to
   // create + migrate the state bucket. Combined with the StateTracker version
   // bump, no stale hash can skip the migration.
+  // `backupsBucket` (was `backupBucket`) is renamed on purpose: every env's
+  // hash changes once, so each env re-runs this step once after upgrading and
+  // its step result gains the settled backups target the apply below reads.
+  // That run only HEADs buckets that already exist.
   const s3Inputs = {
     bucket: s3Config.bucket,
-    backupBucket: backupS3Config.bucket,
+    backupsBucket: backupsPlan.bucket,
     stateBucket,
     region: s3Config.region,
   };
@@ -1322,16 +1341,15 @@ export async function executeDeployment(args, gatheredConfig) {
   // answers 404 for a bucket that lives in another region, so asking all
   // three at the requested region re-ran this step on every deploy of an env
   // whose backups or state bucket lives elsewhere. No recorded result (or one
-  // without a region) means nothing to check against: run the step.
+  // without a region or a backups target) means nothing to check against:
+  // run the step. The backups bucket is the one the step settled on.
   const verifyBucketsExist = async () => {
     const r = state.getStepResult('s3-setup');
-    if (!r?.region) return false;
+    if (!r?.region || !r.backups?.bucket) return false;
     const at = (region) => s3Provider.forRegion(region);
     const [app, backup, stateB] = await Promise.all([
       at(r.region).bucketExists(s3Config.bucket),
-      backupS3Config?.bucket
-        ? at(r.backups?.region ?? r.region).bucketExists(backupS3Config.bucket)
-        : Promise.resolve(true),
+      at(r.backups.region).bucketExists(r.backups.bucket),
       at(r.stateBucketRegion ?? r.region).bucketExists(stateBucket),
     ]);
     return app && backup && stateB;
@@ -1384,13 +1402,15 @@ export async function executeDeployment(args, gatheredConfig) {
         ...(domain ? { domain } : {}),
         ...(dnsProvider ? { dnsProvider } : {}),
         s3: envS3Record(s3Config, existingEnv.s3),
-        backupS3: backupS3Config?.bucket
+        // The settled backups target once s3-setup ran; before that, the
+        // record on disk carried unchanged (none for a new environment).
+        backupS3: backupS3Config
           ? {
               bucket: backupS3Config.bucket,
               region: backupS3Config.region,
               endpoint: backupS3Config.endpoint,
             }
-          : existingEnv.backupS3,
+          : (backupsTargetOf(existingEnv) ?? undefined),
         ...(deployMode === 'compose-ha' || (deployMode === 'kubernetes' && secondaryRegion)
           ? {
               ha: {
@@ -1486,16 +1506,42 @@ export async function executeDeployment(args, gatheredConfig) {
       // logged and skipped, and the deploy then died at wal-g's audit after
       // the VPS existed. The step's catch below reports and exits before
       // anything is provisioned.
-      s3Spinner.start(`Creating backup bucket: ${backupS3Config.bucket}`);
-      const backupBucket = await s3Provider
-        .forRegion(app.region)
-        .createBucket(backupS3Config.bucket);
-      assertBucketReady(backupBucket, 'Backup');
-      s3Spinner.stop(
-        backupBucket.created
-          ? `Backup bucket created: ${backupS3Config.bucket}`
-          : `Backup bucket exists: ${backupS3Config.bucket}`,
-      );
+      // Each create runs under its own spinner lines, naming the bucket it
+      // creates, so the settle's one line (a switch to the region's own name)
+      // never lands on a running spinner.
+      const settled = await settleBackupsBucket({
+        plan: backupsPlan,
+        appRegion: app.region,
+        environment,
+        projectConfig: loadProjectConfig() ?? projectConfig,
+        rechoose: (region) =>
+          chooseBackupsBucket({
+            environment,
+            envConfig,
+            projectConfig: loadProjectConfig() ?? projectConfig,
+            region,
+          }),
+        create: async (bucket, region) => {
+          s3Spinner.start(`Creating backup bucket: ${bucket}`);
+          const res = await s3Provider.forRegion(region).createBucket(bucket);
+          assertBucketReady(res, 'Backup');
+          s3Spinner.stop(
+            res.created ? `Backup bucket created: ${bucket}` : `Backup bucket exists: ${bucket}`,
+          );
+          return res;
+        },
+        log: (line) => p.log.info(line),
+      });
+      if (settled.created && settled.source === 'region') {
+        p.log.info(
+          `${environment} is the first environment with storage in ${settled.target.region}, so its backups get their own bucket there: ${settled.target.bucket}`,
+        );
+      }
+      if (settled.target.region !== app.region) {
+        p.log.info(
+          `${environment}'s backups stay in ${settled.target.bucket} (${settled.target.region}), where its earlier backups are; its uploads are in ${app.region}`,
+        );
+      }
 
       // Dedicated Pulumi-state bucket. Created imperatively (like the app +
       // backup buckets) BEFORE any Pulumi stack op. NOT
@@ -1617,13 +1663,10 @@ export async function executeDeployment(args, gatheredConfig) {
         // its own region's endpoint, so the backend URL needs this, not
         // just the region param (2026-08-28: cross-region e4 404'd on it).
         stateEndpoint: stateBucketResult.endpoint,
-        // Where the backups bucket lives, from its own create: an existing
-        // backups bucket can live in another region than the uploads bucket.
-        backups: {
-          bucket: backupS3Config.bucket,
-          region: backupBucket.region,
-          endpoint: backupBucket.endpoint,
-        },
+        // The backups bucket this step settled on, its region and endpoint
+        // from its own create: a recorded backups bucket can live in another
+        // region than the uploads bucket.
+        backups: settled.target,
       };
       if (stateBucketResult.region !== app.region) {
         p.log.warn(
@@ -1660,16 +1703,20 @@ export async function executeDeployment(args, gatheredConfig) {
     // Absent on step-state cached before the field existed — resolveBackendUrl
     // then derives the host from stateBucketRegion.
     s3Config.stateEndpoint = s3Result.stateEndpoint;
-    // The backups bucket's own region and endpoint. A step result recorded
-    // before the field existed has none: the uploads bucket's, as before.
-    backupS3Config.region = s3Result.backups?.region ?? s3Config.region;
-    backupS3Config.endpoint = s3Result.backups?.endpoint ?? s3Config.endpoint;
+    // The backups bucket the step settled on. Always present: the inputs
+    // key rename re-runs the step for a result recorded without it, and the
+    // verify probe refuses to skip one.
+    backupS3Config = s3Result.backups ?? null;
   }
   // Always resolve stateBucket (deterministic derivation) so the Pulumi
   // backend targets the dedicated bucket, whether s3-setup ran or was skipped.
   // Every downstream iac call reads it via s3Config, and it's persisted into
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
+  // Record the settled buckets now, before anything below can exit (the
+  // `deploy -restore` resolution, the app key mint): the backups record then
+  // names a bucket that exists, and the next deploy keeps it.
+  saveSkeletonEnv();
   // The HA plans open a backend this run brought into being, once, before the
   // pair starts (open-state-backend). Any other deploy has nothing to open.
   const newStateBackend = stateBucketCreated

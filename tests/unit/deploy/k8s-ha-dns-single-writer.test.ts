@@ -328,7 +328,6 @@ function gathered(ha: boolean) {
     dnsZoneId: 'zone-1',
     dnsToken: 'dns-token',
     s3Config: S3,
-    backupS3Config: { bucket: 'dnsapp-abc123-prod-backups', region: 'hel1', endpoint: S3.endpoint },
     backupConfig: {},
     services: {},
     branchName: 'main',

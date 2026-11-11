@@ -15,7 +15,8 @@
  *   destroy's updateProjectConfig effect (drops environments.<env>, records
  *   the identity, which names the bucket a plain destroy keeps)
  *   -> resolveEnvSeed (deploy's seed for a destroyed name)
- *   -> resolveEnvStorage (gatheredConfig.s3Config.bucket)
+ *   -> resolveEnvStorage (gatheredConfig.s3Config.bucket), and the deploy's
+ *      chooseBackupsBucket for the backups bucket the record keeps
  *   -> renderBundle (the server .env's S3_BUCKET)
  *   -> applyAppBucketCors (the bucket the browser-upload rule lands on)
  *
@@ -44,6 +45,7 @@ const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
 const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
 const { resolveEnvSeed, ENV_IDENTITY_FIELDS } = await import('../../../src/lib/env-identity.js');
 const { resolveEnvStorage } = await import('../../../src/lib/deploy/prompts.js');
+const { chooseBackupsBucket } = await import('../../../src/lib/backups-bucket.js');
 const { renderBundle } = await import('../../../src/lib/deploy/bundle.js');
 const { applyAppBucketCors } = await import('../../../src/lib/deploy/orchestrator.js');
 const { parseDotenv } = await import('../../../src/lib/dotenv.js');
@@ -130,14 +132,18 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     const afterDestroy = await destroyE1(deployedProject());
 
     const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
-    const { bucket: bucketName, backupBucket: backupBucketName } = resolveEnvStorage(
-      'e1',
-      envConfig,
-      afterDestroy,
-    );
+    const { bucket: bucketName } = resolveEnvStorage('e1', envConfig, afterDestroy);
     expect(bucketName).toBe(BUCKET);
-    // Restore depends on the backups bucket keeping its name.
-    expect(backupBucketName).toBe(BACKUPS);
+    // Restore depends on the backups bucket keeping its name: the seed's
+    // record is the environment's own, in any storage region.
+    const backups = chooseBackupsBucket({
+      environment: 'e1',
+      envConfig,
+      projectConfig: afterDestroy,
+      region: 'fsn1',
+    });
+    expect(backups).toEqual({ bucket: BACKUPS, region: 'nbg1', source: 'recorded' });
+    const backupBucketName = backups.bucket;
 
     // The project-local .env still names some other bucket (dev's `-local`,
     // or a stale copy of the deleted one); the deploy override must win.
