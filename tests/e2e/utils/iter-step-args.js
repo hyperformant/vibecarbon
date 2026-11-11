@@ -6,6 +6,7 @@
 
 import { COMMANDS } from '../../../src/lib/cli/command-registry.js';
 import { parseFlags } from '../../../src/lib/cli/parse-flags.js';
+import { selectE2EDbImage } from './db-image-select.js';
 
 /** The steps iter-step can run, each a vibecarbon command of the same name. */
 export const ITER_STEPS = [
@@ -64,4 +65,28 @@ export async function isPurgeDestroy(step, extraArgs) {
   if (!entry) throw new Error('no vibecarbon command named "destroy"');
   const { values } = parseFlags(extraArgs, await entry.loadSpec());
   return values.purge === true;
+}
+
+/**
+ * Steps that never pull the db image: destroy removes infra, status and
+ * diagnose only read it. Every other step can start a node or container that
+ * pulls it (deploy, scale, failover, restore) or runs next to one (backup),
+ * so those keep the check.
+ */
+export const STEPS_WITHOUT_IMAGE_PULL = ['destroy', 'status', 'diagnose'];
+
+/**
+ * Choose the e2e db image for a step that may pull it; do nothing for one
+ * that never does. A rig being torn down should not need ghcr.io reachable.
+ * Throws E2EDbImageError when the image cannot be chosen (including an
+ * unreachable registry).
+ *
+ * @param {string} step - one of ITER_STEPS
+ * @param {{ select?: typeof selectE2EDbImage }} [deps]
+ * @returns {Promise<boolean>} true when the check ran
+ */
+export async function ensureStepDbImage(step, { select = selectE2EDbImage } = {}) {
+  if (STEPS_WITHOUT_IMAGE_PULL.includes(step)) return false;
+  await select();
+  return true;
 }

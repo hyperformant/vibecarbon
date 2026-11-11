@@ -82,6 +82,20 @@ const MANIFEST_ACCEPT = [
   'application/vnd.docker.distribution.manifest.v2+json',
 ].join(', ');
 
+// A network failure rejects fetch with a bare TypeError ("fetch failed"), which
+// callers that only catch E2EDbImageError rethrow as a stack-trace crash. Name
+// the registry and the underlying cause instead.
+async function fetchOrExplain(fetchImpl, url, init) {
+  try {
+    return await fetchImpl(url, init);
+  } catch (err) {
+    const cause = err?.cause?.code ?? err?.cause?.message ?? err?.message ?? String(err);
+    throw new E2EDbImageError(
+      `could not reach ghcr.io to check the db image (${cause}). Check your network, or set ${DB_IMAGE_OVERRIDE_ENV} to skip the check.`,
+    );
+  }
+}
+
 /**
  * Can this run pull `ghcr.io/<repo>:<tag>`? Anonymous token, then a manifest
  * HEAD: 200 yes, 404 no. A token DENIED (no such package, or a private one)
@@ -96,7 +110,10 @@ export async function ghcrManifestExists(ref, fetchImpl = fetch) {
   const m = /^ghcr\.io\/([^:@]+):([^:@/]+)$/.exec(ref);
   if (!m) throw new E2EDbImageError(`not a ghcr.io repo:tag ref: ${ref}`);
   const [, repo, tag] = m;
-  const tokenRes = await fetchImpl(`https://ghcr.io/token?scope=repository:${repo}:pull`);
+  const tokenRes = await fetchOrExplain(
+    fetchImpl,
+    `https://ghcr.io/token?scope=repository:${repo}:pull`,
+  );
   // ghcr answers DENIED alike for a package that does not exist yet and for a
   // private one: both mean "nothing this run can pull", so both are false.
   if (tokenRes.status === 403) return false;
@@ -104,7 +121,7 @@ export async function ghcrManifestExists(ref, fetchImpl = fetch) {
     throw new E2EDbImageError(`ghcr refused an anonymous pull token for ${repo} (HTTP ${tokenRes.status})`);
   }
   const { token } = /** @type {{ token: string }} */ (await tokenRes.json());
-  const res = await fetchImpl(`https://ghcr.io/v2/${repo}/manifests/${tag}`, {
+  const res = await fetchOrExplain(fetchImpl, `https://ghcr.io/v2/${repo}/manifests/${tag}`, {
     method: 'HEAD',
     headers: { Authorization: `Bearer ${token}`, Accept: MANIFEST_ACCEPT },
   });

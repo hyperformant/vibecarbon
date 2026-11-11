@@ -46,8 +46,8 @@ import {
   resolveE2EAcmeCa,
   setupE2EEnv,
 } from '../tests/e2e/utils/e2e-env.js';
-import { E2EDbImageError, selectE2EDbImage } from '../tests/e2e/utils/db-image-select.js';
-import { ITER_STEPS, isPurgeDestroy, iterStepCliArgs } from '../tests/e2e/utils/iter-step-args.js';
+import { E2EDbImageError } from '../tests/e2e/utils/db-image-select.js';
+import { ensureStepDbImage, ITER_STEPS, isPurgeDestroy, iterStepCliArgs } from '../tests/e2e/utils/iter-step-args.js';
 
 const VALID_STEPS = new Set(ITER_STEPS);
 
@@ -188,9 +188,11 @@ const { envFileKeys, tls: tlsSetup } = setupE2EEnv();
 // ...and the same db image choice as the runner: the release tag, or this
 // branch's dev channel build when the release is not published yet (sets
 // VIBECARBON_DB_IMAGE, which e2eCliEnv hands to the child). Fails before the
-// step runs rather than deploying an image the tree does not match.
+// step runs rather than deploying an image the tree does not match. Steps that
+// never pull it (destroy, status, diagnose) skip the check, so tearing a rig
+// down works with ghcr.io unreachable.
 try {
-  await selectE2EDbImage();
+  await ensureStepDbImage(step);
 } catch (err) {
   if (!(err instanceof E2EDbImageError)) throw err;
   console.error(`[iter] e2e db image: ${err.message}`);
