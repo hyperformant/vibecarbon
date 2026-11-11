@@ -465,22 +465,27 @@ export class HetznerProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'hcloud-volumes';
 
   /**
-   * The Hetzner Cloud token and the cluster's network id, as master-init.sh
-   * creates them: `hcloud` (token, network) and `hcloud-csi` (token). See
-   * BaseProvider.k8sCloudSecrets.
-   * @param {{token: string, networkId?: string|number}} values
+   * The `hcloud` Secret (key `token`) both the cloud controller and the CSI
+   * controller read. See BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
    * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
    */
-  static k8sCloudSecrets({ token, networkId }) {
-    return [
-      {
-        namespace: 'kube-system',
-        name: 'hcloud',
-        stringData: { token, network: networkId == null ? '' : String(networkId) },
-      },
-      { namespace: 'kube-system', name: 'hcloud-csi', stringData: { token } },
-    ];
+  static k8sCloudSecrets({ token }) {
+    return [{ namespace: 'kube-system', name: 'hcloud', stringData: { token } }];
   }
+
+  /**
+   * What master-init.sh created beside the `hcloud` token and nothing has
+   * read since the initial public release (CCM v1.20.0 and CSI v2.18.1
+   * onward read `hcloud`/`token` only, and ccm.yaml, unlike
+   * ccm-networks.yaml, reads no network): the `hcloud-csi` Secret, a second
+   * copy of the token, and the `network` key of `hcloud`. See
+   * BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    { namespace: 'kube-system', name: 'hcloud-csi' },
+    { namespace: 'kube-system', name: 'hcloud', keys: ['network'] },
+  ]);
 
   /**
    * Matches hetzner-k8s.js's `image: 'ubuntu-26.04'` literal (the master,

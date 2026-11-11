@@ -1,11 +1,14 @@
 /**
- * The CLI's server-side apply takes over the cloud Secrets a master's boot
- * script made, on a real apiserver, and restarts what reads a changed one.
+ * The CLI's server-side apply takes over the cloud Secrets an earlier
+ * vibecarbon's boot script made, on a real apiserver, removes what nothing
+ * reads any more, and restarts what reads a new or changed one.
  *
  * deployK3s hands the provider API token to the cluster on every deploy
- * (applyCloudSecrets), while the master boot scripts still create the same
- * Secrets with `kubectl create secret generic ... | kubectl apply -f -`, a
- * client-side apply. Whether a server-side apply owned by vibecarbon-cli takes
+ * (applyCloudSecrets). Masters an earlier vibecarbon booted hold the same
+ * Secrets from their boot script's `kubectl create secret generic ... |
+ * kubectl apply -f -`, a client-side apply, and Hetzner's hold two things
+ * nothing reads: a second copy of the token in hcloud-csi, and hcloud's
+ * network key. Whether a server-side apply owned by vibecarbon-cli takes
  * those over without a conflict, and what it leaves in them, is the
  * apiserver's and kubectl's business, so this asks a real one: the k3s
  * release the CLI installs (or VC_K3S_VERSION, the release the version
@@ -14,16 +17,18 @@
  *
  * For every provider with a k8s tier, the cloud controller and CSI driver
  * manifests its boot script applies are applied here from the same URLs, so
- * the workloads that read the token are upstream's own. Then each test starts
- * from what a fresh master has: the boot script's own Secret commands (read
- * out of it, tests/_shared/master-init-secrets.ts) run on the node, and no
- * workload carries a restart. applyCloudSecrets runs from here. It must take
- * the Secrets over with their data as it set it, and without the boot
- * script's last-applied annotation, a copy of the token it applied, whatever
- * the kubectl (run it with an older one first on PATH to check one). It must
- * leave an unchanged Secret alone, resourceVersion included, since it runs
- * on every deploy, and replace a rotated token, restarting exactly the
- * workloads that read it: no pod reads a Secret again once it has started.
+ * the workloads that read the token are upstream's own, and what they read
+ * is held to the census's record of it (tests/_shared/cloud-secret-readers.ts).
+ * Then each test starts from what an old master has: the old boot script's
+ * Secret commands (tests/_shared/legacy-master-init-secrets.ts) run on the
+ * node, and no workload carries a restart. applyCloudSecrets runs from here.
+ * It must take the Secrets over with exactly the keys it writes, delete the
+ * Secrets it no longer writes, and leave no last-applied annotation, a copy
+ * of the token the boot script applied, whatever the kubectl (run it with an
+ * older one first on PATH to check one). It must leave an unchanged Secret
+ * alone, resourceVersion included, since it runs on every deploy, replace a
+ * rotated token, and restart exactly the workloads that read a new or
+ * changed one: no pod reads a Secret again once it has started.
  *
  * Needs Docker, kubectl and GitHub (the upstream manifests). The version
  * channel's k3s smoke runs it too (.github/workflows/version-channel.yml).
@@ -34,10 +39,16 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyCloudSecrets } from '../../../src/lib/deploy/k8s/k3s.js';
+import { applyCloudSecrets, CLOUD_SECRETS_APPLY_ARGV } from '../../../src/lib/deploy/k8s/k3s.js';
 import { renderScript } from '../../../src/lib/iac/cloud-init.js';
 import { k3sVersion } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import {
+  CLOUD_SECRET_READERS,
+  manifestUrls,
+  type SecretRef,
+} from '../../_shared/cloud-secret-readers.js';
+import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 
 const SKIPPED =
@@ -60,24 +71,17 @@ const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt';
 const LAST_APPLIED = 'kubectl.kubernetes.io/last-applied-configuration';
 
 /**
- * The workloads that read each provider's token, from the manifests its boot
- * script applies, all through an env var from a secretKeyRef:
- *   hcloud ccm.yaml v1.39.2 L149-153 (HCLOUD_TOKEN from hcloud/token),
- *   hcloud-csi.yml v2.24.1 L331-335 (HCLOUD_TOKEN from hcloud/token),
- *   DO CCM v0.1.72.yml L48-52 (DO_ACCESS_TOKEN from digitalocean/access-token),
- *   DO csi driver.yaml v4.19.0 L177-181 (DIGITALOCEAN_ACCESS_TOKEN, same key),
- *   Linode csi v1.1.5 L357-361 (LINODE_TOKEN from linode/token).
- * Nothing reads hcloud-csi or hcloud's network key. Written out, not read
- * from the code under test: this is what its discovery must find.
+ * The workloads that read each provider's token, as the census records them
+ * from upstream's manifests (each test below checks the record against the
+ * manifests it applies). Not read from the code under test: this is what its
+ * discovery must find.
  */
-const READERS: Record<string, string[]> = {
-  hetzner: ['deployment/hcloud-cloud-controller-manager', 'deployment/hcloud-csi-controller'],
-  digitalocean: [
-    'deployment/digitalocean-cloud-controller-manager',
-    'statefulset/csi-do-controller',
-  ],
-  linode: ['statefulset/csi-linode-controller'],
-};
+const READERS: Record<string, string[]> = Object.fromEntries(
+  Object.entries(CLOUD_SECRET_READERS).map(([id, { refs }]) => [
+    id,
+    [...new Set(refs.filter(({ optional }) => !optional).map(({ workload }) => workload))].sort(),
+  ]),
+);
 
 const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
   P.SUPPORTED_TIERS.includes('k8s'),
@@ -94,13 +98,9 @@ const must = (cmd: string, args: string[], input?: string, env?: NodeJS.ProcessE
 };
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** The boot script's value for a template variable, by the naming the scripts use. */
+/** The old boot script's value for a template variable, by the naming the scripts used. */
 const bootValue = (variable: string) =>
   variable === 'network_id' ? NETWORK : variable.endsWith('_token') ? BOOT_TOKEN : undefined;
-
-/** The manifests a boot script applies by URL, in its order. */
-const manifestUrls = (script: string) =>
-  [...script.matchAll(/kubectl apply -f (https:\/\/[^\s;]+)/g)].map(([, url]) => url);
 
 describe.skipIf(SKIPPED)(
   `the CLI takes over the boot script's cloud Secrets (k3s ${VERSION})`,
@@ -132,8 +132,22 @@ describe.skipIf(SKIPPED)(
 
     type Workload = {
       kind: string;
-      metadata: { name: string };
-      spec: { template: { metadata?: { annotations?: Record<string, string> } } };
+      metadata: { name: string; namespace: string };
+      spec: {
+        template: {
+          metadata?: { annotations?: Record<string, string> };
+          spec: {
+            containers?: {
+              env?: {
+                valueFrom?: { secretKeyRef?: { name: string; key: string; optional?: boolean } };
+              }[];
+              envFrom?: { secretRef?: { name: string } }[];
+            }[];
+            initContainers?: Workload['spec']['template']['spec']['containers'];
+            volumes?: { secret?: { secretName: string }; projected?: unknown }[];
+          };
+        };
+      };
     };
     const workloads = (): Workload[] =>
       JSON.parse(
@@ -203,8 +217,59 @@ describe.skipIf(SKIPPED)(
       vi.restoreAllMocks();
     });
 
+    /**
+     * Every Secret reference in these workloads' pod templates, as the
+     * census records them. A reference it has no field for (envFrom, a
+     * volume) is recorded as such, so a new kind of reader fails the match.
+     */
+    const secretRefs = (items: Workload[]): SecretRef[] =>
+      items
+        .flatMap((w) => {
+          const pod = w.spec.template.spec;
+          const workload = id(w);
+          const namespace = w.metadata.namespace;
+          return [
+            ...[...(pod.containers ?? []), ...(pod.initContainers ?? [])].flatMap((c) => [
+              ...(c.env ?? []).flatMap(({ valueFrom }) => {
+                const ref = valueFrom?.secretKeyRef;
+                if (!ref) return [];
+                return [
+                  {
+                    workload,
+                    namespace,
+                    secret: ref.name,
+                    key: ref.key,
+                    ...(ref.optional && { optional: true }),
+                  },
+                ];
+              }),
+              ...(c.envFrom ?? [])
+                .filter(({ secretRef }) => secretRef)
+                .map(({ secretRef }) => ({
+                  workload,
+                  namespace,
+                  secret: secretRef?.name ?? '',
+                  key: '(envFrom)',
+                })),
+            ]),
+            ...(pod.volumes ?? [])
+              .filter((v) => v.secret || v.projected)
+              .map((v) => ({
+                workload,
+                namespace,
+                secret: v.secret?.secretName ?? '(projected)',
+                key: '(volume)',
+              })),
+          ];
+        })
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const byJson = (refs: SecretRef[]) =>
+      [...refs].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
     describe.each(K8S_PROVIDERS)('%s', (providerId, Provider) => {
       let script: string;
+      let installed: Workload[];
+      const legacy = masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[providerId]);
 
       // What the boot script installs besides the Secrets: upstream's cloud
       // controller and CSI driver, from the URLs it applies them from.
@@ -212,6 +277,7 @@ describe.skipIf(SKIPPED)(
         script = await Provider.getK8sMasterUserData({});
         const urls = manifestUrls(script);
         expect(urls.length, 'the boot script applies upstream manifests').toBeGreaterThan(0);
+        const before = new Set(workloads().map(id));
         for (const url of urls) {
           kube(['apply', '-f', url]);
           // A later manifest may hold objects of a CRD this one created. By
@@ -222,6 +288,7 @@ describe.skipIf(SKIPPED)(
             kube(['wait', '--for=condition=established', ...crds, '--timeout=60s']);
           }
         }
+        installed = workloads().filter((w) => !before.has(id(w)));
       }, LONG);
 
       const hand = (token: string) =>
@@ -229,18 +296,27 @@ describe.skipIf(SKIPPED)(
           env: { ...process.env, KUBECONFIG: kubeconfig },
           ProviderClass: Provider,
           token,
-          networkId: NETWORK,
-          stack: 'vctest',
-          operatorEnv: 'vctest',
         });
-      const expected = (token: string) => Provider.k8sCloudSecrets({ token, networkId: NETWORK });
+      const expected = (token: string) => Provider.k8sCloudSecrets({ token });
+      /** Whether the cluster holds a Secret. */
+      const holds = (namespace: string, name: string) =>
+        kube([
+          '-n',
+          namespace,
+          'get',
+          'secret',
+          name,
+          '--ignore-not-found',
+          '-o',
+          'name',
+        ]).trim() !== '';
 
       /**
-       * A fresh master: the boot script's Secrets as it creates them and no
-       * restart stamped on any workload, whatever the test before left.
+       * An old master: the old boot script's Secrets as it created them and
+       * no restart stamped on any workload, whatever the test before left.
        */
-      const freshMaster = () => {
-        for (const { namespace, name } of expected(BOOT_TOKEN)) {
+      const oldMaster = () => {
+        for (const { namespace, name } of [...legacy, ...expected(BOOT_TOKEN)]) {
           kube(['-n', namespace, 'delete', 'secret', name, '--ignore-not-found']);
         }
         for (const w of workloads()) {
@@ -260,7 +336,7 @@ describe.skipIf(SKIPPED)(
             ]),
           ]);
         }
-        for (const { namespace, name, keys, command } of masterInitSecrets(script)) {
+        for (const { namespace, name, keys, command } of legacy) {
           const vars = Object.fromEntries(Object.values(keys).map((v) => [v, bootValue(v)]));
           must('docker', ['exec', '-i', NODE, 'sh', '-eu'], renderScript(command, vars));
           expect(read(namespace, name).managers).toEqual(['kubectl-client-side-apply:Update']);
@@ -268,14 +344,27 @@ describe.skipIf(SKIPPED)(
         expect(restarted()).toEqual([]);
       };
 
+      it('what upstream reads is what the census records', () => {
+        expect(manifestUrls(script)).toEqual(CLOUD_SECRET_READERS[providerId].manifests);
+        expect(secretRefs(installed)).toEqual(byJson(CLOUD_SECRET_READERS[providerId].refs));
+      });
+
       it(
-        'takes over what the boot script made, with no conflict, its data as it set it, and restarts nothing',
+        'takes over what the old boot script made, with no conflict, keeps only what it writes, and restarts nothing',
         async () => {
-          freshMaster();
+          oldMaster();
           for (const { namespace, name } of expected(BOOT_TOKEN)) {
             expect(read(namespace, name).annotations).toHaveProperty([LAST_APPLIED]);
           }
           await hand(BOOT_TOKEN);
+          // A Secret it no longer writes is gone, and one it does holds only
+          // the keys it writes: nothing reads the rest.
+          for (const { namespace, name } of legacy) {
+            const kept = expected(BOOT_TOKEN).some(
+              (w) => w.namespace === namespace && w.name === name,
+            );
+            expect(holds(namespace, name), `${namespace}/${name}`).toBe(kept);
+          }
           for (const { namespace, name, stringData } of expected(BOOT_TOKEN)) {
             const secret = read(namespace, name);
             expect(secret.data).toEqual(stringData);
@@ -295,7 +384,7 @@ describe.skipIf(SKIPPED)(
       it(
         'leaves an unchanged Secret alone, resourceVersion included, and restarts nothing',
         async () => {
-          freshMaster();
+          oldMaster();
           await hand(BOOT_TOKEN);
           const before = expected(BOOT_TOKEN).map(({ namespace, name }) => read(namespace, name));
           await hand(BOOT_TOKEN);
@@ -309,7 +398,7 @@ describe.skipIf(SKIPPED)(
       it(
         'replaces a rotated token, with no conflict, and restarts exactly what reads it',
         async () => {
-          freshMaster();
+          oldMaster();
           await hand(ROTATED_TOKEN);
           for (const { namespace, name, stringData } of expected(ROTATED_TOKEN)) {
             expect(read(namespace, name).data).toEqual(stringData);
@@ -324,14 +413,65 @@ describe.skipIf(SKIPPED)(
       );
 
       it(
-        'creates Secrets a master lacks, and restarts nothing',
+        'creates the Secrets a new master lacks, and restarts what reads them',
         async () => {
-          freshMaster();
-          for (const { namespace, name } of expected(BOOT_TOKEN)) {
+          // A master the current boot script booted: no cloud Secret at all.
+          oldMaster();
+          for (const { namespace, name } of legacy) {
             kube(['-n', namespace, 'delete', 'secret', name]);
           }
           await hand(ROTATED_TOKEN);
           for (const { namespace, name, stringData } of expected(ROTATED_TOKEN)) {
+            expect(read(namespace, name).data).toEqual(stringData);
+          }
+          expect(restarted()).toEqual(READERS[providerId]);
+        },
+        LONG,
+      );
+
+      it.runIf(Provider.K8S_RETIRED_CLOUD_SECRETS.length > 0)(
+        'removes what the apply alone leaves: a Secret it stopped sending, a key an earlier apply set',
+        async () => {
+          // The cluster as an earlier CLI left it: its server-side apply sent
+          // every key the old boot script set, through stringData.
+          oldMaster();
+          const ssa = (docs: { namespace: string; name: string; stringData: object }[]) =>
+            kube(
+              [...CLOUD_SECRETS_APPLY_ARGV],
+              docs
+                .map(({ namespace, name, stringData }) =>
+                  [
+                    'apiVersion: v1',
+                    'kind: Secret',
+                    `metadata: {name: ${name}, namespace: ${namespace}}`,
+                    `stringData: ${JSON.stringify(stringData)}`,
+                  ].join('\n'),
+                )
+                .join('\n---\n'),
+            );
+          ssa(
+            legacy.map(({ namespace, name, keys }) => ({
+              namespace,
+              name,
+              stringData: Object.fromEntries(
+                Object.entries(keys).map(([key, variable]) => [key, bootValue(variable)]),
+              ),
+            })),
+          );
+          // The premise: an apply of only what the CLI writes now leaves both.
+          ssa(expected(BOOT_TOKEN));
+          const retired = Provider.K8S_RETIRED_CLOUD_SECRETS;
+          for (const { namespace, name, keys } of retired) {
+            if (!keys) expect(holds(namespace, name), `${namespace}/${name}`).toBe(true);
+            else
+              expect(Object.keys(read(namespace, name).data)).toEqual(expect.arrayContaining(keys));
+          }
+          // A deploy removes them.
+          await hand(BOOT_TOKEN);
+          for (const { namespace, name, keys } of retired) {
+            if (!keys) expect(holds(namespace, name), `${namespace}/${name}`).toBe(false);
+          }
+          for (const { namespace, name, stringData } of expected(BOOT_TOKEN)) {
             expect(read(namespace, name).data).toEqual(stringData);
           }
           expect(restarted()).toEqual([]);
@@ -342,7 +482,7 @@ describe.skipIf(SKIPPED)(
       it(
         'wins over another server-side owner of the same keys (--force-conflicts)',
         async () => {
-          freshMaster();
+          oldMaster();
           // Someone else's server-side apply, say an operator's own tooling,
           // took the keys over with another value. Without --force-conflicts
           // the deploy's apply would stop on the conflict.

@@ -16,7 +16,7 @@
  *   6. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
  *   6b. Hand the provider API token to the cluster: the CCM/CSI Secrets
  *      (applyCloudSecrets), on every deploy, warm ones too, restarting what
- *      reads one that changed.
+ *      reads one that is new or changed.
  *   7. Finish the build and retag it `<masterPrivateIp>:5000/<project>:<tag>`
  *      (deliverAppImage).
  *   8. applyK3sManifests: the image's layer delta into the master's
@@ -2083,20 +2083,24 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
 }
 
 /**
- * Restart the workloads that read Secrets this deploy just changed, as
- * findSecretReaders found them before the apply: they read them when they
- * start (env from secretKeyRef, the upstream CCM/CSI manifests and the
- * cluster autoscaler), so a new value reaches them only through a new pod.
- * `kubectl rollout restart` and no wait: the rollout runs on its own.
+ * Restart the workloads that read Secrets this deploy just changed or
+ * created, as findSecretReaders found them before the apply: they read them
+ * when they start (env from secretKeyRef, the upstream CCM/CSI manifests and
+ * the cluster autoscaler), so a new value reaches them only through a new
+ * pod. `kubectl rollout restart` and no wait: the rollout runs on its own.
  *
- * A restart that fails leaves them on the old value, and the next deploy
- * finds the Secret already matching and restarts nothing, so the error says
- * how to restart them by hand.
+ * A restart that fails after a change leaves them on the old value, and the
+ * next deploy finds the Secret already matching and restarts nothing, so the
+ * error says how to restart them by hand. After `created` Secrets, every one
+ * of `read` new to the cluster, it only warns: the readers were waiting for
+ * them, and Kubernetes retries a pod that waits for a Secret on its own,
+ * within about ten seconds (kubelet's 10 s pod-sync backoff); the restart
+ * only starts them now.
  *
- * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal}} args
+ * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal, created?: boolean}} args
  * @returns {Promise<string[]>} what it restarted, as `kind/name`
  */
-export async function restartSecretReaders({ env, namespace, readers, read, signal }) {
+export async function restartSecretReaders({ env, namespace, readers, read, signal, created }) {
   if (readers.length === 0) return readers;
   const secrets = listing(read.map((name) => `${namespace}/${name}`));
   const one = readers.length === 1;
@@ -2106,6 +2110,9 @@ export async function restartSecretReaders({ env, namespace, readers, read, sign
       `${one ? 'it starts' : 'they start'}.`,
   );
   const argv = ['-n', namespace, 'rollout', 'restart', ...readers];
+  const byHand =
+    `\`KUBECONFIG=${env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>'} kubectl -n ` +
+    `${namespace} rollout restart ${readers.join(' ')}\``;
   try {
     await runKubectlWithRetry(argv, {
       env,
@@ -2114,16 +2121,88 @@ export async function restartSecretReaders({ env, namespace, readers, read, sign
       description: `restart ${readers.join(' ')}`,
     });
   } catch (err) {
+    if (created) {
+      progressLog(
+        `Couldn't restart ${listing(readers)}, so Kubernetes starts ${one ? 'it' : 'them'} with ` +
+          `the new ${secrets} on its own retry, within about ten seconds. To start ` +
+          `${one ? 'it' : 'them'} now, run ${byHand}.\n${err.message}`,
+      );
+      return [];
+    }
     throw new Error(
       `${secrets} changed, but restarting ${listing(readers)} didn't go through, so ` +
         `${one ? 'it still runs' : 'they still run'} with the old value, and the next deploy ` +
-        `won't restart ${one ? 'it' : 'them'}: the Secret already matches. ` +
-        `Run \`KUBECONFIG=${env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>'} kubectl -n ` +
-        `${namespace} rollout restart ${readers.join(' ')}\`.\n${err.message}`,
+        `won't restart ${one ? 'it' : 'them'}: the Secret already matches. Run ${byHand}.\n` +
+        err.message,
       { cause: err },
     );
   }
   return readers;
+}
+
+/**
+ * Delete a cloud Secret an earlier vibecarbon wrote that nothing reads any
+ * more (ProviderClass.K8S_RETIRED_CLOUD_SECRETS), one more copy of the
+ * token. `--ignore-not-found`, so a cluster without it is one quiet call;
+ * kubectl prints a line only when it deleted one, and only then does this
+ * say so. A failure warns and the deploy goes on: nothing reads it, and the
+ * next deploy tries again.
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, namespace: string, name: string}} args
+ */
+async function deleteRetiredSecret({ env, ProviderClass, namespace, name }) {
+  const what = `${namespace}/${name}, an extra copy of your ${ProviderClass.NAME} API token that nothing reads`;
+  let out;
+  try {
+    out = await runKubectlWithRetry(
+      ['-n', namespace, 'delete', 'secret', name, '--ignore-not-found'],
+      { env, captureStdout: true, description: `delete Secret ${namespace}/${name}` },
+    );
+  } catch (err) {
+    progressLog(
+      `Couldn't remove ${what}; the next deploy tries again. To remove it now, run ` +
+        `\`KUBECONFIG=${env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>'} ` +
+        `kubectl -n ${namespace} delete secret ${name}\`.\n${err.message}`,
+    );
+    return;
+  }
+  if (String(out ?? '').trim() !== '') progressLog(`Removed ${what}.`);
+}
+
+/**
+ * Remove data keys an earlier vibecarbon wrote into a cloud Secret this
+ * deploy still applies, and nothing reads any more
+ * (ProviderClass.K8S_RETIRED_CLOUD_SECRETS), with a JSON merge patch that
+ * sets each to null. The apply alone does not: kubectl 1.24 and 1.25 leave
+ * a key the boot script set where it is (1.26 and later hand its fields to
+ * this apply's manager, which then drops what it no longer sends), and a key
+ * an earlier server-side apply set through stringData stays whatever a later
+ * one sends (measured against k3s 1.37, 2026-11-11;
+ * tests/integration/docker/k8s-cloud-secrets-takeover.test.ts). A failure
+ * warns and the deploy goes on: nothing reads them, and the next deploy
+ * tries again.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace: string, name: string, keys: string[]}} args
+ */
+async function removeRetiredKeys({ env, namespace, name, keys }) {
+  const patch = JSON.stringify({ data: Object.fromEntries(keys.map((key) => [key, null])) });
+  const these = `the ${listing(keys)} ${keys.length === 1 ? 'key' : 'keys'}`;
+  const them = keys.length === 1 ? 'it' : 'them';
+  try {
+    await runKubectlWithRetry(
+      ['-n', namespace, 'patch', 'secret', name, '--type=merge', '-p', patch],
+      { env, captureStdout: true, description: `remove ${these} from Secret ${namespace}/${name}` },
+    );
+  } catch (err) {
+    progressLog(
+      `Couldn't remove ${these} from ${namespace}/${name}, which nothing reads any more; the next ` +
+        `deploy tries again. To remove ${them} now, run ` +
+        `\`KUBECONFIG=${env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>'} ` +
+        `kubectl -n ${namespace} patch secret ${name} --type=merge -p '${patch}'\`.\n${err.message}`,
+    );
+    return;
+  }
+  progressLog(`Removed ${these} from ${namespace}/${name}: nothing reads ${them} any more.`);
 }
 
 /**
@@ -2136,18 +2215,27 @@ export async function restartSecretReaders({ env, namespace, readers, read, sign
  * Secrets on the next deploy.
  *
  * Server-side, owned by the field manager vibecarbon-cli, with
- * --force-conflicts: the master's boot script creates the same Secrets with a
- * client-side `kubectl apply`, and this apply takes them over without a
- * conflict, their data as it set it; an unchanged apply leaves the Secret
+ * --force-conflicts: a master an earlier vibecarbon booted holds the same
+ * Secrets from its boot script's client-side `kubectl apply`, and this apply
+ * takes them over without a conflict; an unchanged apply leaves the Secret
  * alone, resourceVersion included
  * (tests/integration/docker/k8s-cloud-secrets-takeover.test.ts).
  *
  * The controllers read the token when they start. So each Secret is read
- * first (readSecretFingerprints), and when one that existed now gets other
+ * first (readSecretFingerprints), and when one is new or now gets other
  * values, the workloads that read it are found before the apply
  * (findSecretReaders) and restarted after it (restartSecretReaders). An
- * unchanged Secret restarts nothing, and neither does a new one: its readers
- * could not start without it, and they pick it up as soon as it exists.
+ * unchanged Secret restarts nothing. A new one restarts its readers too: they
+ * have waited for it since the master booted, and a restart starts them in
+ * about a second where Kubernetes' own retry takes up to ten. On Hetzner and
+ * DigitalOcean one of them is the CCM, which keeps every node tainted
+ * uninitialized until it runs, so cert-manager and the registry wait on it.
+ *
+ * What an earlier vibecarbon wrote and nothing reads any more
+ * (ProviderClass.K8S_RETIRED_CLOUD_SECRETS) goes too: a whole Secret is
+ * deleted alongside the reads (deleteRetiredSecret), and a retired key the
+ * read found is patched out after the apply (removeRetiredKeys). Either
+ * failure warns, and the next deploy tries again.
  *
  * The boot script's client-side apply left kubectl's last-applied annotation
  * on its Secrets, a copy of what it applied, token included. kubectl 1.26 and
@@ -2159,56 +2247,55 @@ export async function restartSecretReaders({ env, namespace, readers, read, sign
  *
  * The token travels on kubectl's stdin only: never argv, which a process
  * listing and a failed command's message show, never a log line, never a
- * file. A Secret without a value refuses before kubectl runs: applying an
- * empty token would take a working one away from the controllers.
+ * file. No token refuses before kubectl runs: applying an empty one would
+ * take a working one away from the controllers.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, networkId?: string|number, stack: string, operatorEnv: string}} args
- *   `stack` names this cluster's deploy-state file and `operatorEnv` the
- *   environment the operator deploys, for the refusal's next step.
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string}} args
  */
-export async function applyCloudSecrets({
-  env,
-  ProviderClass,
-  token,
-  networkId,
-  stack,
-  operatorEnv,
-}) {
-  const secrets = ProviderClass.k8sCloudSecrets({ token, networkId });
+export async function applyCloudSecrets({ env, ProviderClass, token }) {
+  const secrets = ProviderClass.k8sCloudSecrets({ token });
   if (secrets.length === 0) return;
-  const refusal = `Can't hand your ${ProviderClass.NAME} API token to the cluster`;
   if (typeof token !== 'string' || token === '') {
     throw new Error(
-      `${refusal}: this deploy has none. Set ${ProviderClass.TOKEN_ENV} ` +
-        '(in .env.local or your shell), then deploy again.',
+      `Can't hand your ${ProviderClass.NAME} API token to the cluster: this deploy has none. ` +
+        `Set ${ProviderClass.TOKEN_ENV} (in .env.local or your shell), then deploy again.`,
     );
   }
-  for (const { namespace, name, stringData } of secrets) {
-    for (const [key, value] of Object.entries(stringData)) {
-      if (typeof value !== 'string' || value === '') {
-        throw new Error(
-          `${refusal}: the cluster outputs this deploy saved have no ${key} for Secret ` +
-            `${namespace}/${name}. Delete .vibecarbon/deploy-state-${stack}.json and run ` +
-            `\`vibecarbon deploy ${operatorEnv}\` again, so it reads them from the cluster's stack again.`,
-        );
-      }
-    }
-  }
+  const retired = ProviderClass.K8S_RETIRED_CLOUD_SECRETS;
+  /** The retired keys of a Secret this deploy applies. */
+  const retiredKeys = (namespace, name) =>
+    retired
+      .filter((r) => r.keys && r.namespace === namespace && r.name === name)
+      .flatMap((r) => r.keys);
   const names = secrets.map(({ namespace, name }) => `${namespace}/${name}`);
   progressLog(`Handing your ${ProviderClass.NAME} API token to the cluster (${names.join(', ')}).`);
-  const live = await Promise.all(
-    secrets.map(({ namespace, name, stringData }) =>
-      readSecretFingerprints({ env, namespace, name, keys: Object.keys(stringData) }),
+  const [live] = await Promise.all([
+    Promise.all(
+      secrets.map(({ namespace, name, stringData }) =>
+        readSecretFingerprints({
+          env,
+          namespace,
+          name,
+          keys: [...Object.keys(stringData), ...retiredKeys(namespace, name)],
+        }),
+      ),
     ),
-  );
-  const changed = new Map();
+    ...retired
+      .filter((r) => !r.keys)
+      .map(({ namespace, name }) => deleteRetiredSecret({ env, ProviderClass, namespace, name })),
+  ]);
+  /** Per namespace, the Secrets this deploy creates or changes, and whether it creates them all. */
+  const handOver = new Map();
   secrets.forEach(({ namespace, name, stringData }, i) => {
-    if (!secretDataChanged(live[i], stringData)) return;
-    changed.set(namespace, [...(changed.get(namespace) ?? []), name]);
+    if (live[i] && !secretDataChanged(live[i], stringData)) return;
+    const entry = handOver.get(namespace) ?? { secretNames: [], created: true };
+    entry.secretNames.push(name);
+    if (live[i]) entry.created = false;
+    handOver.set(namespace, entry);
   });
   const readers = [];
-  for (const [namespace, secretNames] of changed) {
-    readers.push(await findSecretReaders({ env, namespace, secretNames }));
+  for (const [namespace, { secretNames, created }] of handOver) {
+    readers.push({ ...(await findSecretReaders({ env, namespace, secretNames })), created });
   }
   await runKubectlWithRetry([...CLOUD_SECRETS_APPLY_ARGV], {
     env,
@@ -2218,6 +2305,8 @@ export async function applyCloudSecrets({
     description: `applyCloudSecrets: kubectl apply --server-side ${names.join(' ')}`,
   });
   for (const [i, { namespace, name }] of secrets.entries()) {
+    const present = retiredKeys(namespace, name).filter((key) => live[i]?.fingerprints[key]);
+    if (present.length > 0) await removeRetiredKeys({ env, namespace, name, keys: present });
     if (live[i]?.lastApplied) await dropLastApplied({ env, namespace, name });
   }
   for (const found of readers) await restartSecretReaders({ env, ...found });
@@ -5874,18 +5963,12 @@ async function deployK3sSteps(options, inFlight) {
     //     and CSI driver as their Secrets (applyCloudSecrets). On every
     //     deploy, under no step gate and no role or restore condition: a
     //     skipped k3s-apply, `deploy -restore` and the k8s-ha standby hand it
-    //     over too. A changed token restarts the controllers that read it.
+    //     over too. A new or changed token restarts the controllers that
+    //     read it.
     //     After the marker read, so a refused deploy changes nothing on the
     //     cluster.
     await perfAsync(`deploy.${perfPrefix}.cloudSecrets`, () =>
-      applyCloudSecrets({
-        env: kubeEnv,
-        ProviderClass: Provider,
-        token: options.apiToken,
-        networkId,
-        stack: options.environment,
-        operatorEnv: options.operatorEnv ?? options.environment,
-      }),
+      applyCloudSecrets({ env: kubeEnv, ProviderClass: Provider, token: options.apiToken }),
     );
   }
 

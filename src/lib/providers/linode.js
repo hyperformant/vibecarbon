@@ -458,8 +458,8 @@ export class LinodeProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'linode-block-storage-vibecarbon';
 
   /**
-   * The `linode` Secret (key `token`) the CSI driver reads, as
-   * linode-master-init.sh creates it. See BaseProvider.k8sCloudSecrets.
+   * The `linode` Secret (key `token`) the CSI driver reads. See
+   * BaseProvider.k8sCloudSecrets.
    * @param {{token: string}} values
    * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
    */

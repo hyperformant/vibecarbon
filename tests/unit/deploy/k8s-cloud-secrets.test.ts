@@ -9,18 +9,29 @@
  * the boot script can stop carrying the token.
  *
  * What this file proves:
- *   - census: each k8s provider's k8sCloudSecrets names the namespaces,
- *     Secrets and keys its master boot script creates, read from the script;
- *     the token goes where a `*_token` variable went, the network id where
- *     `network_id` went; a provider without a k8s tier hands over nothing;
+ *   - census: each k8s provider's k8sCloudSecrets names exactly the Secrets
+ *     and keys the upstream manifests its master boot script applies
+ *     require (a record of their secretKeyRefs,
+ *     tests/_shared/cloud-secret-readers.ts, held to the URLs the script
+ *     applies), each holding the token, and every reference reads one of
+ *     them; K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts made
+ *     (tests/_shared/legacy-master-init-secrets.ts) less that, and nothing
+ *     reads it; the cluster autoscaler reads only its own Secret; a provider
+ *     without a k8s tier hands over nothing;
  *   - applyCloudSecrets: one `kubectl apply --server-side --force-conflicts
  *     --field-manager=vibecarbon-cli -f -`, with every Secret on stdin; the
- *     token never on argv, never in a log line or the error; a missing value
+ *     token never on argv, never in a log line or the error; no token
  *     refuses before kubectl runs, saying what to do next;
  *   - restarts: each Secret is read before the apply, its values kept as
- *     keyed digests and never printed; a Secret that existed and changed
- *     restarts exactly the workloads that read it (found from their pod
- *     templates, secretReaders), an unchanged or a new one restarts nothing;
+ *     keyed digests and never printed; a Secret this deploy creates or
+ *     changes restarts exactly the workloads that read it (found from their
+ *     pod templates, secretReaders), an unchanged one restarts nothing; a
+ *     failed restart after a change fails the deploy with the command to run,
+ *     after a creation only warns;
+ *   - the retired ones: a master an earlier vibecarbon booted ends with
+ *     exactly the CLI's Secrets and keys, a whole Secret deleted alongside the
+ *     reads, a key patched out after the apply, each said once, and a failure
+ *     warns with the command and goes on;
  *   - the boot script's last-applied annotation: a Secret the read found it
  *     on has it removed after the apply, a deploy that finds none makes no
  *     call, and a failed removal warns with the command and goes on;
@@ -32,15 +43,17 @@
  *     Pulumi, ssh and a cluster to run. Biome's formatter is part of `pnpm
  *     lint`, so indentation is nesting here.
  *
- * That a server-side apply takes over Secrets the boot script made with a
- * client-side `kubectl apply`, without a conflict and with their data as it
- * set it, needs a real apiserver:
+ * That a server-side apply takes over Secrets an old boot script made with a
+ * client-side `kubectl apply` without a conflict, and what the apply alone
+ * leaves of the retired ones, needs a real apiserver:
  * tests/integration/docker/k8s-cloud-secrets-takeover.test.ts.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-readers.js';
+import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 
 type Call = { argv: string[]; input?: string; env?: NodeJS.ProcessEnv };
@@ -115,6 +128,26 @@ function fakeKubectl(args: string[], input?: string): string {
       .map((r) => `${r} restarted\n`)
       .join('');
   }
+  if (args[0] === '-n' && args[2] === 'delete' && args[3] === 'secret') {
+    const key = `${args[1]}/${args[4]}`;
+    if (!cluster.has(key)) return '';
+    cluster.delete(key);
+    lastApplied.delete(key);
+    return `secret "${args[4]}" deleted\n`;
+  }
+  if (
+    args[0] === '-n' &&
+    args[2] === 'patch' &&
+    args[3] === 'secret' &&
+    args[5] === '--type=merge'
+  ) {
+    const key = `${args[1]}/${args[4]}`;
+    const data = cluster.get(key);
+    if (!data) throw new Error(`Error from server (NotFound): secrets "${args[4]}" not found`);
+    const { data: patch } = JSON.parse(args[7]) as { data: Record<string, null> };
+    for (const [k, v] of Object.entries(patch)) if (v === null) delete data[k];
+    return `secret/${args[4]} patched\n`;
+  }
   if (
     args[0] === '-n' &&
     args[2] === 'annotate' &&
@@ -151,7 +184,7 @@ const { BaseProvider } = await import('../../../src/lib/providers/base.js');
 /** Marks every place the token could leak; the rest makes it YAML-hostile. */
 const MARK = 'vc-sentinel-token-7f3a';
 const TOKEN = `${MARK}: "dq" 'sq' #hash \\bs {x}`;
-const NETWORK = 4_210_337;
+const NETWORK = '4210337';
 const KUBECONFIG = '/tmp/vc-test-kubeconfig';
 
 const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
@@ -161,41 +194,134 @@ const OTHER_PROVIDERS = Object.entries(PROVIDERS).filter(
   ([, P]) => !P.SUPPORTED_TIERS.includes('k8s'),
 );
 
-/** What a template variable's value is, by the naming the boot scripts use. */
-function valueFor(variable: string): string {
-  if (variable === 'network_id') return String(NETWORK);
-  if (variable.endsWith('_token') && variable !== 'k3s_token') return TOKEN;
+/** What an old boot script rendered for a template variable, by the naming they used. */
+function legacyValue(variable: string, token: string): string {
+  if (variable === 'network_id') return NETWORK;
+  if (variable.endsWith('_token') && variable !== 'k3s_token') return token;
   throw new Error(
-    `a master boot script fills a Secret from \${${variable}}, which this census does not know`,
+    `an old master boot script filled a Secret from \${${variable}}, which this census does not know`,
   );
 }
 
-describe('k8sCloudSecrets matches what the master boot script creates', () => {
-  it('there are k8s providers to check', () => {
+/** A Secret key as one string, for set comparisons. */
+const keyAt = (namespace: string, secret: string, key: string) => `${namespace}/${secret}:${key}`;
+const byName = (a: { namespace: string; name: string }, b: { namespace: string; name: string }) =>
+  `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`);
+
+describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
+  it('there are k8s providers to check, each with a record of its readers', () => {
     expect(K8S_PROVIDERS.length).toBeGreaterThan(0);
+    expect(Object.keys(CLOUD_SECRET_READERS).sort()).toEqual(
+      K8S_PROVIDERS.map(([id]) => id).sort(),
+    );
   });
 
-  it.each(K8S_PROVIDERS)('%s: same namespaces, names, keys and values', async (_id, Provider) => {
-    const script = await Provider.getK8sMasterUserData({});
-    const created = masterInitSecrets(script);
-    expect(created.length).toBeGreaterThan(0);
-    const fromScript = created.map(({ namespace, name, keys }) => ({
-      namespace,
-      name,
-      stringData: Object.fromEntries(
-        Object.entries(keys).map(([key, variable]) => [key, valueFor(variable)]),
-      ),
-    }));
-    expect(Provider.k8sCloudSecrets({ token: TOKEN, networkId: NETWORK })).toEqual(fromScript);
-  });
+  it.each(K8S_PROVIDERS)(
+    '%s: the record is of the manifests its master boot script applies',
+    async (id, Provider) => {
+      const script = await Provider.getK8sMasterUserData({});
+      expect(manifestUrls(script)).toEqual(CLOUD_SECRET_READERS[id].manifests);
+    },
+  );
+
+  it.each(K8S_PROVIDERS)(
+    '%s: every key a reader requires and no other, each holding the token',
+    (id, Provider) => {
+      const secrets = Provider.k8sCloudSecrets({ token: TOKEN });
+      const written = secrets.flatMap(({ namespace, name, stringData }) =>
+        Object.keys(stringData).map((key) => keyAt(namespace, name, key)),
+      );
+      const required = CLOUD_SECRET_READERS[id].refs
+        .filter(({ optional }) => !optional)
+        .map(({ namespace, secret, key }) => keyAt(namespace, secret, key));
+      expect(written.sort()).toEqual([...new Set(required)].sort());
+      for (const { stringData } of secrets) {
+        for (const value of Object.values(stringData)) expect(value).toBe(TOKEN);
+      }
+      // An optional key reads one of these Secrets too, so nothing reads a
+      // Secret the CLI does not write.
+      const names = new Set(secrets.map(({ namespace, name }) => `${namespace}/${name}`));
+      for (const { namespace, secret } of CLOUD_SECRET_READERS[id].refs) {
+        expect(names).toContain(`${namespace}/${secret}`);
+      }
+    },
+  );
 
   it.each(OTHER_PROVIDERS)('%s has no k8s tier, so no cloud Secrets', (_id, Provider) => {
-    expect(Provider.k8sCloudSecrets({ token: TOKEN, networkId: NETWORK })).toEqual([]);
+    expect(Provider.k8sCloudSecrets({ token: TOKEN })).toEqual([]);
+    expect(Provider.K8S_RETIRED_CLOUD_SECRETS).toEqual([]);
   });
 
   it('the base class has none', () => {
     expect(BaseProvider.k8sCloudSecrets({ token: TOKEN })).toEqual([]);
+    expect(BaseProvider.K8S_RETIRED_CLOUD_SECRETS).toEqual([]);
   });
+
+  it('the cluster autoscaler reads only its own Secret, none of these', () => {
+    const docs = loadAll(
+      readFileSync(
+        join(__dirname, '../../../carbon/k8s/base/cluster-autoscaler/deployment.yaml'),
+        'utf-8',
+      ),
+    ) as { spec?: { template?: { spec?: Record<string, never> } } }[];
+    const read = new Set<string>();
+    for (const doc of docs) {
+      const pod = (doc?.spec?.template?.spec ?? {}) as {
+        containers?: { env?: { valueFrom?: { secretKeyRef?: { name: string } } }[] }[];
+        volumes?: { secret?: { secretName: string } }[];
+      };
+      for (const c of pod.containers ?? []) {
+        for (const e of c.env ?? []) {
+          if (e.valueFrom?.secretKeyRef) read.add(e.valueFrom.secretKeyRef.name);
+        }
+      }
+      for (const v of pod.volumes ?? []) if (v.secret) read.add(v.secret.secretName);
+    }
+    expect([...read]).toEqual(['carbon-autoscaler-config']);
+  });
+});
+
+describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts made and the CLI no longer writes', () => {
+  it('there is a record for every k8s provider', () => {
+    expect(Object.keys(LEGACY_MASTER_INIT_SECRETS).sort()).toEqual(
+      K8S_PROVIDERS.map(([id]) => id).sort(),
+    );
+  });
+
+  it.each(K8S_PROVIDERS)('%s: the old Secrets and keys less the current ones', (id, Provider) => {
+    const written = Provider.k8sCloudSecrets({ token: TOKEN });
+    const expected: { namespace: string; name: string; keys?: string[] }[] = [];
+    for (const { namespace, name, keys } of masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id])) {
+      const kept = written.find((w) => w.namespace === namespace && w.name === name);
+      if (!kept) {
+        expected.push({ namespace, name });
+        continue;
+      }
+      const gone = Object.keys(keys).filter((key) => !(key in kept.stringData));
+      if (gone.length > 0) expected.push({ namespace, name, keys: gone });
+    }
+    expect([...Provider.K8S_RETIRED_CLOUD_SECRETS].sort(byName)).toEqual(expected.sort(byName));
+  });
+
+  it.each(K8S_PROVIDERS)('%s: nothing upstream reads a retired one', (id, Provider) => {
+    for (const { namespace, secret, key } of CLOUD_SECRET_READERS[id].refs) {
+      for (const retired of Provider.K8S_RETIRED_CLOUD_SECRETS) {
+        const reads =
+          retired.namespace === namespace &&
+          retired.name === secret &&
+          (!retired.keys || retired.keys.includes(key));
+        expect(reads, `${namespace}/${secret}:${key}`).toBe(false);
+      }
+    }
+  });
+
+  it.each(K8S_PROVIDERS)(
+    '%s: the record is what the boot script runs, while it still does',
+    async (id, Provider) => {
+      const script = await Provider.getK8sMasterUserData({});
+      expect(masterInitSecrets(script)).toEqual(masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]));
+    },
+  );
 });
 
 describe('applyCloudSecrets', () => {
@@ -229,13 +355,12 @@ describe('applyCloudSecrets', () => {
     vi.restoreAllMocks();
   });
 
-  const apply = (Provider: typeof BaseProvider, values = { token: TOKEN, networkId: NETWORK }) =>
+  /** applyCloudSecrets with TOKEN, or with the token given, undefined included. */
+  const apply = (Provider: typeof BaseProvider, ...token: [string?]) =>
     applyCloudSecrets({
       env: { ...process.env, KUBECONFIG },
       ProviderClass: Provider,
-      stack: 'prod-primary',
-      operatorEnv: 'prod',
-      ...values,
+      token: token.length > 0 ? token[0] : TOKEN,
     });
   const kubectl = (verb: string) =>
     calls.filter(({ argv }) => argv.includes(verb)).map(({ argv }) => argv);
@@ -247,10 +372,7 @@ describe('applyCloudSecrets', () => {
    * script left them, with kubectl's last-applied record of `token`.
    */
   const holdAll = (Provider: typeof BaseProvider, token: string, { boot = false } = {}) => {
-    for (const { namespace, name, stringData } of Provider.k8sCloudSecrets({
-      token,
-      networkId: NETWORK,
-    })) {
+    for (const { namespace, name, stringData } of Provider.k8sCloudSecrets({ token })) {
       cluster.set(`${namespace}/${name}`, { ...stringData });
       if (boot) lastApplied.set(`${namespace}/${name}`, { ...stringData });
     }
@@ -287,6 +409,31 @@ describe('applyCloudSecrets', () => {
     }
     for (const ns of Object.keys(workloads)) workloads[ns].push(...nonReaders);
   };
+  /**
+   * What a master an earlier vibecarbon booted holds: its boot script's
+   * Secrets with `token`, and their last-applied record.
+   */
+  const holdLegacy = (Provider: typeof BaseProvider, token: string) => {
+    const id = Object.entries(PROVIDERS).find(([, P]) => P === Provider)?.[0] ?? '';
+    for (const { namespace, name, keys } of masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id])) {
+      const data = Object.fromEntries(
+        Object.entries(keys).map(([key, variable]) => [key, legacyValue(variable, token)]),
+      );
+      cluster.set(`${namespace}/${name}`, data);
+      lastApplied.set(`${namespace}/${name}`, { ...data });
+    }
+  };
+  /** A provider whose token goes into two Secrets in one namespace. */
+  class TwoSecrets extends BaseProvider {
+    static NAME = 'Two Secrets Cloud';
+    static TOKEN_ENV = 'TWO_SECRETS_TOKEN';
+    static k8sCloudSecrets({ token }: { token: string }) {
+      return [
+        { namespace: 'kube-system', name: 'one', stringData: { token } },
+        { namespace: 'kube-system', name: 'two', stringData: { token } },
+      ];
+    }
+  }
 
   it.each(K8S_PROVIDERS)(
     '%s: one server-side apply, owned by the CLI, every Secret on stdin',
@@ -306,15 +453,13 @@ describe('applyCloudSecrets', () => {
       expect(env?.KUBECONFIG).toBe(KUBECONFIG);
       const docs = loadAll(String(input));
       expect(docs).toEqual(
-        Provider.k8sCloudSecrets({ token: TOKEN, networkId: NETWORK }).map(
-          ({ namespace, name, stringData }) => ({
-            apiVersion: 'v1',
-            kind: 'Secret',
-            metadata: { name, namespace },
-            type: 'Opaque',
-            stringData,
-          }),
-        ),
+        Provider.k8sCloudSecrets({ token: TOKEN }).map(({ namespace, name, stringData }) => ({
+          apiVersion: 'v1',
+          kind: 'Secret',
+          metadata: { name, namespace },
+          type: 'Opaque',
+          stringData,
+        })),
       );
     },
   );
@@ -322,7 +467,8 @@ describe('applyCloudSecrets', () => {
   it.each(K8S_PROVIDERS)(
     '%s: the token rides stdin only, never argv or a log line',
     async (_id, Provider) => {
-      holdAll(Provider, 'vc-sentinel-token-old');
+      // An old master's Secrets, so the cleanup's calls are checked too.
+      holdLegacy(Provider, 'vc-sentinel-token-old');
       readerPerSecret(Provider);
       await apply(Provider);
       expect(restarts()).toHaveLength(1);
@@ -340,8 +486,7 @@ describe('applyCloudSecrets', () => {
       lines[id] = logged.join('');
     }
     expect(lines).toEqual({
-      hetzner:
-        'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud, kube-system/hcloud-csi).',
+      hetzner: 'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud).',
       digitalocean:
         'Handing your DigitalOcean API token to the cluster (kube-system/digitalocean).',
       linode: 'Handing your Linode API token to the cluster (kube-system/linode).',
@@ -365,7 +510,7 @@ describe('applyCloudSecrets', () => {
     '%s: no token, no kubectl, and where to set one',
     async (_id, Provider) => {
       for (const token of ['', undefined]) {
-        await expect(apply(Provider, { token, networkId: NETWORK } as never)).rejects.toThrow(
+        await expect(apply(Provider, token)).rejects.toThrow(
           `Can't hand your ${Provider.NAME} API token to the cluster: this deploy has none. ` +
             `Set ${Provider.TOKEN_ENV} (in .env.local or your shell), then deploy again.`,
         );
@@ -375,25 +520,13 @@ describe('applyCloudSecrets', () => {
     },
   );
 
-  it("Hetzner without the cluster's network id refuses before kubectl runs, and says how to refresh it", async () => {
-    await expect(
-      apply(PROVIDERS.hetzner, { token: TOKEN, networkId: undefined } as never),
-    ).rejects.toThrow(
-      "Can't hand your Hetzner Cloud API token to the cluster: the cluster outputs this deploy " +
-        'saved have no network for Secret kube-system/hcloud. Delete ' +
-        '.vibecarbon/deploy-state-prod-primary.json and run `vibecarbon deploy prod` again, ' +
-        "so it reads them from the cluster's stack again.",
-    );
-    expect(calls).toHaveLength(0);
-  });
-
   it.each(OTHER_PROVIDERS)('%s: nothing to hand over, nothing runs', async (_id, Provider) => {
     await apply(Provider);
     expect(calls).toHaveLength(0);
     expect(logged).toEqual([]);
   });
 
-  describe('restarts what reads a changed Secret, and nothing else', () => {
+  describe('restarts what reads a new or changed Secret, and nothing else', () => {
     it.each(K8S_PROVIDERS)('%s: unchanged Secrets restart nothing', async (_id, Provider) => {
       holdAll(Provider, TOKEN);
       readerPerSecret(Provider);
@@ -459,23 +592,63 @@ describe('applyCloudSecrets', () => {
     });
 
     it.each(K8S_PROVIDERS)(
-      '%s: Secrets this deploy creates restart nothing',
+      '%s: Secrets this deploy creates restart exactly what reads them, after the apply',
       async (_id, Provider) => {
+        // Waiting since the master booted; Kubernetes' own retry would take
+        // up to ten seconds more.
         readerPerSecret(Provider);
         await apply(Provider);
         expect(applies()).toHaveLength(1);
-        expect(restarts()).toEqual([]);
+        const secrets = Provider.k8sCloudSecrets({ token: TOKEN });
+        expect(restarts().map((argv) => argv.slice(5))).toEqual([
+          secrets.map(({ name }) => `deployment/reads-${name}`).sort(),
+        ]);
+        const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
+        expect(calls.findIndex(({ argv }) => argv[3] === 'rollout')).toBeGreaterThan(applyAt);
       },
     );
 
+    it('a restart after creating that fails only warns: Kubernetes starts them on its own', async () => {
+      readerPerSecret(PROVIDERS.linode);
+      failWhen = /^-n kube-system rollout restart /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout restart'), {
+        status: 1,
+        stderr: 'error: deployments.apps "reads-linode" is forbidden\n',
+      });
+      await apply(PROVIDERS.linode);
+      expect(cluster.get('kube-system/linode')).toEqual({ token: TOKEN });
+      expect(logged.at(-1)).toBe(
+        "Couldn't restart deployment/reads-linode, so Kubernetes starts it with the new " +
+          'kube-system/linode on its own retry, within about ten seconds. To start it now, run ' +
+          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout restart ` +
+          'deployment/reads-linode`.\nrestart deployment/reads-linode failed with exit 1: ' +
+          'error: deployments.apps "reads-linode" is forbidden',
+      );
+      expect(logged.join('\n')).not.toContain(MARK);
+    });
+
+    it('one Secret new and one changed in a namespace: a failed restart fails as a change does', async () => {
+      cluster.set('kube-system/one', { token: 'vc-sentinel-token-old' });
+      workloads['kube-system'] = [envReader('reads-one', 'one'), envReader('reads-two', 'two')];
+      failWhen = /^-n kube-system rollout restart /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout restart'), {
+        status: 1,
+        stderr: 'error: forbidden\n',
+      });
+      const err = await apply(TwoSecrets).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(
+        /^kube-system\/one and kube-system\/two changed, but restarting deployment\/reads-one and deployment\/reads-two didn't go through/,
+      );
+    });
+
     it('only the Secret that changed: its readers restart, the other one’s do not', async () => {
-      // hcloud already holds this token; hcloud-csi still the boot script's.
-      holdAll(PROVIDERS.hetzner, TOKEN);
-      cluster.set('kube-system/hcloud-csi', { token: 'vc-sentinel-token-old' });
-      readerPerSecret(PROVIDERS.hetzner);
-      await apply(PROVIDERS.hetzner);
+      cluster.set('kube-system/one', { token: TOKEN });
+      cluster.set('kube-system/two', { token: 'vc-sentinel-token-old' });
+      workloads['kube-system'] = [envReader('reads-one', 'one'), envReader('reads-two', 'two')];
+      await apply(TwoSecrets);
       expect(restarts()).toEqual([
-        ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/reads-hcloud-csi'],
+        ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/reads-two'],
       ]);
     });
 
@@ -495,9 +668,8 @@ describe('applyCloudSecrets', () => {
         ...nonReaders,
       ];
       await apply(PROVIDERS.hetzner);
-      // Both Secrets changed; only kube-system/hcloud has readers, as upstream.
       expect(logged).toEqual([
-        'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud, kube-system/hcloud-csi).',
+        'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud).',
         'Restarting deployment/hcloud-cloud-controller-manager and deployment/hcloud-csi-controller ' +
           'so they pick up the new kube-system/hcloud: they read it only when they start.',
       ]);
@@ -510,15 +682,12 @@ describe('applyCloudSecrets', () => {
           'it reads it only when it starts.',
       );
       logged = [];
-      holdAll(PROVIDERS.hetzner, 'vc-sentinel-token-old');
-      workloads['kube-system'] = [
-        envReader('reads-hcloud', 'hcloud'),
-        envReader('reads-hcloud-csi', 'hcloud-csi'),
-      ];
-      await apply(PROVIDERS.hetzner);
+      holdAll(TwoSecrets, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [envReader('reads-one', 'one'), envReader('reads-two', 'two')];
+      await apply(TwoSecrets);
       expect(logged.at(-1)).toBe(
-        'Restarting deployment/reads-hcloud and deployment/reads-hcloud-csi so they pick up the ' +
-          'new kube-system/hcloud and kube-system/hcloud-csi: they read them only when they start.',
+        'Restarting deployment/reads-one and deployment/reads-two so they pick up the ' +
+          'new kube-system/one and kube-system/two: they read them only when they start.',
       );
     });
 
@@ -540,6 +709,114 @@ describe('applyCloudSecrets', () => {
           'error: deployments.apps "reads-linode" is forbidden',
       );
       expect(logged.join('\n')).not.toContain(MARK);
+    });
+  });
+
+  describe('removes what an earlier vibecarbon wrote and nothing reads', () => {
+    it.each(K8S_PROVIDERS)(
+      '%s: an old master ends with exactly the Secrets and keys the CLI writes',
+      async (id, Provider) => {
+        holdLegacy(Provider, 'vc-sentinel-token-old');
+        readerPerSecret(Provider);
+        await apply(Provider);
+        const legacy = masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]);
+        const written = Provider.k8sCloudSecrets({ token: TOKEN });
+        for (const { namespace, name } of legacy) {
+          const kept = written.find((w) => w.namespace === namespace && w.name === name);
+          expect(cluster.get(`${namespace}/${name}`), `${namespace}/${name}`).toEqual(
+            kept?.stringData,
+          );
+        }
+        for (const { argv } of calls) expect(argv.join(' ')).not.toContain('vc-sentinel-token');
+        expect(logged.join('\n')).not.toContain('vc-sentinel-token');
+      },
+    );
+
+    it('hetzner: says what it removed, once', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      await apply(PROVIDERS.hetzner);
+      expect(logged).toEqual([
+        'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud).',
+        'Removed kube-system/hcloud-csi, an extra copy of your Hetzner Cloud API token that ' +
+          'nothing reads.',
+        'Removed the network key from kube-system/hcloud: nothing reads it any more.',
+      ]);
+      expect(kubectl('patch')).toEqual([
+        [
+          'kubectl',
+          '-n',
+          'kube-system',
+          'patch',
+          'secret',
+          'hcloud',
+          '--type=merge',
+          '-p',
+          '{"data":{"network":null}}',
+        ],
+      ]);
+      // The next deploy finds nothing to remove: a quiet delete, no patch.
+      calls.length = 0;
+      logged = [];
+      await apply(PROVIDERS.hetzner);
+      expect(logged).toEqual([
+        'Handing your Hetzner Cloud API token to the cluster (kube-system/hcloud).',
+      ]);
+      expect(kubectl('patch')).toEqual([]);
+      expect(kubectl('delete')).toEqual([
+        ['kubectl', '-n', 'kube-system', 'delete', 'secret', 'hcloud-csi', '--ignore-not-found'],
+      ]);
+    });
+
+    it('hetzner: the delete goes alongside the reads, before the apply', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      await apply(PROVIDERS.hetzner);
+      const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
+      const deleteAt = calls.findIndex(({ argv }) => argv[3] === 'delete');
+      expect(deleteAt).toBeGreaterThan(-1);
+      expect(deleteAt).toBeLessThan(applyAt);
+    });
+
+    it('a failed delete warns with the command to run, and the deploy goes on', async () => {
+      holdLegacy(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      readerPerSecret(PROVIDERS.hetzner);
+      failWhen = /^-n kube-system delete secret hcloud-csi /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl delete'), {
+        status: 1,
+        stderr: 'error: secrets "hcloud-csi" is forbidden\n',
+      });
+      await apply(PROVIDERS.hetzner);
+      expect(logged).toContain(
+        "Couldn't remove kube-system/hcloud-csi, an extra copy of your Hetzner Cloud API token " +
+          'that nothing reads; the next deploy tries again. To remove it now, run ' +
+          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system delete secret hcloud-csi\`.\n` +
+          'delete Secret kube-system/hcloud-csi failed with exit 1: ' +
+          'error: secrets "hcloud-csi" is forbidden',
+      );
+      expect(cluster.get('kube-system/hcloud')).toEqual({ token: TOKEN });
+      expect(restarts()).toHaveLength(1);
+      expect(logged.join('\n')).not.toContain('vc-sentinel-token');
+    });
+
+    it('a failed key removal warns with the command to run, and the deploy goes on', async () => {
+      holdLegacy(PROVIDERS.hetzner, 'vc-sentinel-token-old');
+      readerPerSecret(PROVIDERS.hetzner);
+      failWhen = /^-n kube-system patch secret hcloud /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl patch'), {
+        status: 1,
+        stderr: 'error: secrets "hcloud" is forbidden\n',
+      });
+      await apply(PROVIDERS.hetzner);
+      expect(logged).toContain(
+        "Couldn't remove the network key from kube-system/hcloud, which nothing reads any more; " +
+          'the next deploy tries again. To remove it now, run ' +
+          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system patch secret hcloud --type=merge ` +
+          `-p '{"data":{"network":null}}'\`.\n` +
+          'remove the network key from Secret kube-system/hcloud failed with exit 1: ' +
+          'error: secrets "hcloud" is forbidden',
+      );
+      expect(cluster.get('kube-system/hcloud')?.token).toBe(TOKEN);
+      expect(restarts()).toHaveLength(1);
+      expect(logged.join('\n')).not.toContain('vc-sentinel-token');
     });
   });
 
@@ -584,15 +861,20 @@ describe('applyCloudSecrets', () => {
         holdAll(Provider, TOKEN);
         await apply(Provider);
         const reads = Provider.k8sCloudSecrets({ token: TOKEN }).map(() => 'get');
-        expect(verbs()).toEqual([...reads, 'apply']);
+        // A retired Secret's delete finds nothing and says nothing.
+        const deletes = Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys).map(
+          () => 'delete',
+        );
+        expect(verbs()).toEqual([...reads, ...deletes, 'apply']);
+        expect(logged).toHaveLength(1);
       },
     );
 
     it('only the Secret that carries it', async () => {
-      holdAll(PROVIDERS.hetzner, TOKEN);
-      lastApplied.set('kube-system/hcloud-csi', { token: TOKEN });
-      await apply(PROVIDERS.hetzner);
-      expect(annotates().map((argv) => argv[5])).toEqual(['hcloud-csi']);
+      holdAll(TwoSecrets, TOKEN);
+      lastApplied.set('kube-system/two', { token: TOKEN });
+      await apply(TwoSecrets);
+      expect(annotates().map((argv) => argv[5])).toEqual(['two']);
     });
 
     it('a Secret this deploy creates gets no call', async () => {
@@ -633,7 +915,7 @@ describe('applyCloudSecrets', () => {
         // and in the boot script's last-applied annotation (plain).
         holdAll(Provider, TOKEN, { boot: true });
         readerPerSecret(Provider);
-        await apply(Provider, { token: 'vc-sentinel-token-new', networkId: NETWORK });
+        await apply(Provider, 'vc-sentinel-token-new');
         const reads = kubectl('secret').filter((argv) => argv[3] === 'get');
         expect(reads.length).toBe(Provider.k8sCloudSecrets({ token: TOKEN }).length);
         const out = logged.join('\n');
@@ -675,7 +957,7 @@ describe('applyCloudSecrets', () => {
       expect(live?.fingerprints.network).toBe('');
       expect(secretDataChanged(live, { token: TOKEN })).toBe(false);
       expect(secretDataChanged(live, { token: `${TOKEN}x` })).toBe(true);
-      expect(secretDataChanged(live, { token: TOKEN, network: String(NETWORK) })).toBe(true);
+      expect(secretDataChanged(live, { token: TOKEN, network: NETWORK })).toBe(true);
       lastApplied.clear();
       const taken = await readSecretFingerprints({
         env,
@@ -821,15 +1103,9 @@ describe('deployK3s hands the token over on every deploy', () => {
 
   it('applyCloudSecrets runs in its own span with the deploy token and this cluster', () => {
     const { text } = span('cloudSecrets');
-    expect(text).toContain('applyCloudSecrets({');
-    expect(text).toContain('env: kubeEnv');
-    expect(text).toContain('ProviderClass: Provider');
-    expect(text).toContain('token: options.apiToken');
-    expect(text).toMatch(/\bnetworkId\b/);
-    // The refusal's next step names this cluster's state file and the
-    // environment the operator deploys.
-    expect(text).toContain('stack: options.environment');
-    expect(text).toContain('operatorEnv: options.operatorEnv ?? options.environment');
+    expect(text).toContain(
+      'applyCloudSecrets({ env: kubeEnv, ProviderClass: Provider, token: options.apiToken })',
+    );
   });
 
   it('after the control-plane gate and the marker read, before the k3s-apply gate', () => {
@@ -858,11 +1134,5 @@ describe('deployK3s hands the token over on every deploy', () => {
     // The marker read ends; the next statement is this one.
     const between = BODY.slice(span('restoreMarker').end, cloud.at).replace(/\/\/.*$/gm, '');
     expect(between.replace(/\s+/g, '')).toBe(';await');
-  });
-
-  it('networkId is this cluster’s own k3s-infra output', () => {
-    const infra = BODY.indexOf("const infraOutputs = state.getStepResult('k3s-infra');");
-    const destructure = BODY.slice(infra, BODY.indexOf('} = infraOutputs;', infra));
-    expect(destructure).toMatch(/^\s+networkId,$/m);
   });
 });

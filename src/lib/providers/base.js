@@ -330,18 +330,30 @@ export class BaseProvider {
    * provider API token from, with their values: deployK3s hands them to the
    * cluster after boot, on every deploy (applyCloudSecrets,
    * deploy/k8s/k3s.js), so the token need not live in a node's user data.
-   * Namespaces, names and keys are the ones the master-init script's
-   * `kubectl create secret generic` lines use
-   * (tests/unit/deploy/k8s-cloud-secrets.test.ts reads them). None on a
-   * provider without a k8s tier.
-   * @param {{token: string, networkId?: string|number}} _values - the
-   *   operator's provider API token and the cluster's private network id
-   *   (the k8s stack's `networkId` output).
+   * Exactly the Secrets and keys the upstream manifests the master's boot
+   * script installs read (their secretKeyRefs), no more: every key is
+   * another copy of the token
+   * (tests/unit/deploy/k8s-cloud-secrets.test.ts holds them to a record of
+   * those manifests). None on a provider without a k8s tier.
+   * @param {{token: string}} _values - the operator's provider API token
    * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
    */
   static k8sCloudSecrets(_values) {
     return [];
   }
+
+  /**
+   * Cloud Secrets, and keys of them, that an earlier vibecarbon wrote and
+   * nothing reads any more. A deploy removes them (applyCloudSecrets): a
+   * server-side apply never deletes an object it stops sending, and never
+   * removes a data key first set through stringData, so without this every
+   * existing cluster would keep the copy for good. An entry with `keys`
+   * names keys of a Secret the deploy still applies; one without names the
+   * whole Secret. Drop an entry once no cluster made before its removal is
+   * left.
+   * @type {ReadonlyArray<{namespace: string, name: string, keys?: string[]}>}
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([]);
 
   /**
    * Resources this provider's programs once declared and no longer do, which

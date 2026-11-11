@@ -399,8 +399,7 @@ export class DigitalOceanProvider extends BaseProvider {
 
   /**
    * The one `digitalocean` Secret (key `access-token`) both the CCM and the
-   * CSI driver read, as do-master-init.sh creates it. See
-   * BaseProvider.k8sCloudSecrets.
+   * CSI driver read. See BaseProvider.k8sCloudSecrets.
    * @param {{token: string}} values
    * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
    */
