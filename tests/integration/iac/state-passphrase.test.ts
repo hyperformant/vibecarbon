@@ -45,7 +45,10 @@ import {
 } from '../../../src/lib/iac/index.js';
 import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
-import { __resetStatePassphraseForTests } from '../../../src/lib/state-passphrase.js';
+import {
+  __resetStatePassphraseForTests,
+  statePassphraseFingerprint,
+} from '../../../src/lib/state-passphrase.js';
 
 const hasPulumi = (() => {
   try {
@@ -158,7 +161,12 @@ describe.runIf(hasPulumi || process.env.CI)('legacy empty-passphrase stacks (rea
   beforeAll(() => {
     mkdirSync(backend);
     mkdirSync(projectDir);
-    writeFileSync(join(projectDir, '.vibecarbon.json'), '{}\n');
+    // A project that already records its passphrase's fingerprint: the only
+    // thing a first open has to say is the migration.
+    writeFileSync(
+      join(projectDir, '.vibecarbon.json'),
+      `${JSON.stringify({ stateEncryption: { fingerprint: statePassphraseFingerprint(PASSPHRASE) } })}\n`,
+    );
     writeFileSync(cloudFile, JSON.stringify({ next: 1, servers: {} }));
   });
   afterAll(() => {

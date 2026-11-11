@@ -35,6 +35,18 @@ vi.mock('node:child_process', async (orig) =>
   ),
 );
 
+// A test can hand getOrCreateStack a passphrase ensure would never return
+// (an empty one), to reach the migration's own guard.
+const ensureOverride = vi.hoisted(() => ({ value: null as string | null }));
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) => {
+  const actual = await orig<typeof import('../../../src/lib/state-passphrase.js')>();
+  return {
+    ...actual,
+    ensureStatePassphrase: async (dir: string) =>
+      ensureOverride.value ?? actual.ensureStatePassphrase(dir),
+  };
+});
+
 const infos: string[] = [];
 vi.mock('@clack/prompts', async (orig) => {
   const actual = await orig<typeof import('@clack/prompts')>();
@@ -72,7 +84,9 @@ const { isStatePassphraseFailure, StateMigrationError, StateUndecryptableError }
   '../../../src/lib/iac/state-error.js'
 );
 const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
-const { __resetStatePassphraseForTests } = await import('../../../src/lib/state-passphrase.js');
+const { __resetStatePassphraseForTests, statePassphraseFingerprint } = await import(
+  '../../../src/lib/state-passphrase.js'
+);
 
 const S3 = {
   bucket: 'proj-storage',
@@ -104,12 +118,18 @@ let logged: string[];
 
 beforeEach(() => {
   fakePulumi.reset();
+  ensureOverride.value = null;
   infos.length = 0;
   spans.length = 0;
   __resetStatePassphraseForTests();
   __resetStateProbesForTests();
   const dir = createTempDir('state-passphrase-migration-');
-  writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+  // A project that already records its passphrase's fingerprint: opening a
+  // stack has nothing to record and nothing to say about it.
+  writeFileSync(
+    join(dir, '.vibecarbon.json'),
+    `${JSON.stringify({ stateEncryption: { fingerprint: statePassphraseFingerprint(PASSPHRASE) } })}\n`,
+  );
   vi.spyOn(process, 'cwd').mockReturnValue(dir);
   vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', PASSPHRASE);
   // A shell export for another project: the migration child must see neither.
@@ -250,6 +270,8 @@ describe('first open of a stack: a full export, and a migration only on a passph
   it("a passphrase this open made, refused and '' refused too: the typed error says how to bring in the project's", async () => {
     vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', undefined);
     delete process.env.VIBECARBON_STATE_PASSPHRASE;
+    // A clone with neither the passphrase nor its fingerprint.
+    writeFileSync(join(process.cwd(), '.vibecarbon.json'), '{}\n');
     fakePulumi.behaviour.exportStack = () => {
       throw exportRefusal();
     };
@@ -263,7 +285,11 @@ describe('first open of a stack: a full export, and a migration only on a passph
     expect((err as Error).message).not.toContain('If a teammate deployed this project');
   });
 
-  it('a migration that reports success but leaves the state unreadable is the typed error', async () => {
+  // An exit-0 re-encryption proves '' read the state. If the project's
+  // passphrase still can't, the re-encryption didn't produce it (on CLI
+  // 3.259.0 an empty stdin migrates '' to ''): nothing says the state is
+  // lost, so this is never the typed error destroy would remove a record on.
+  it('a migration that reports success but leaves the state unreadable is a StateMigrationError, never the typed one', async () => {
     fakePulumi.behaviour.exportStack = () => {
       throw exportRefusal();
     };
@@ -271,10 +297,36 @@ describe('first open of a stack: a full export, and a migration only on a passph
 
     const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(StateUndecryptableError);
+    expect(err).toBeInstanceOf(StateMigrationError);
+    expect(err).not.toBeInstanceOf(StateUndecryptableError);
+    expect(isStatePassphraseFailure(err)).toBe(false);
+    expect(() => classifyK3sTokenProbe({ error: err as Error })).toThrow(err as Error);
+    expect((err as Error).message).toBe(
+      "Stopped after re-encrypting the Pulumi state for e1: Pulumi finished without an error, but this project's passphrase still can't read the state. " +
+        'The empty passphrase older vibecarbon versions used probably still opens it, so vibecarbon stopped here rather than treat the state as lost. ' +
+        "Your Pulumi CLI may take the new passphrase in a way vibecarbon doesn't expect: run `pulumi version` and report it with this message.",
+    );
+    // Pulumi's own line goes to the log, not the message.
+    expect((err as Error).message).not.toContain('incorrect passphrase');
+    expect(logged.join('\n')).toContain('failed to decrypt: incorrect passphrase');
     // The second probe is what found out.
     expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack', 'migrate:e1', 'exportStack']);
     expect(infos).toEqual([]);
+  });
+
+  it('never re-encrypts with an empty passphrase: stopped before the child runs', async () => {
+    ensureOverride.value = '   ';
+    fakePulumi.legacy('e1', exportRefusal);
+
+    const err = await getStackOutputs('e1', async () => ({}), BASE).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StateMigrationError);
+    expect(isStatePassphraseFailure(err)).toBe(false);
+    expect((err as Error).message).toContain(
+      'Stopped before re-encrypting the Pulumi state for e1',
+    );
+    expect(fakePulumi.migrations).toEqual([]);
+    expect(fakePulumi.calls).toEqual(['select:e1', 'exportStack']);
   });
 
   it('any other read failure is not a passphrase question: no migration, thrown as it is', async () => {

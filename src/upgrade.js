@@ -183,7 +183,7 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
  * only (never .env, which ships to servers) and its fingerprint into
  * .vibecarbon.json. A project that already has both is left alone, so a
  * second run changes nothing. Wraps ensureStatePassphrase, which logs the
- * "made one" line itself.
+ * "made one" and "recorded" lines itself.
  *
  * A recorded fingerprint whose value is missing or does not match is a
  * warning here, not a stop: upgrade never opens the state, and the commands
@@ -222,11 +222,9 @@ export async function ensureStatePassphraseForUpgrade(cwd, { dryRun = false } = 
   }
   if (hadFingerprint) return null;
   if (statePassphraseGeneratedThisRun(cwd)) return 'generated';
-  p.log.info(
-    loadEnvVariables(cwd)[STATE_PASSPHRASE_KEY]
-      ? "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it."
-      : "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it. The passphrase itself is only in your shell: add it to .env.local too.",
-  );
+  // ensureStatePassphrase said what it recorded (and, for a value only the
+  // shell has, to add it to .env.local), reading .env.local the way the
+  // dry run above does.
   return 'recorded';
 }
 

@@ -551,7 +551,8 @@ function exportForProbe(stack) {
  * neither passphrase opens it; the probe's own error for any other read
  * failure, and migrateFromEmptyPassphrase's for a migration that failed for
  * any other reason (a held lock, the store), so a stack '' still reads is
- * never ruled unreadable.
+ * never ruled unreadable. A refusal right after a migration that exited 0 is
+ * a StateMigrationError too (migratedButRefused).
  *
  * The migration is one-time, not a retry: it runs only on a refusal, once,
  * and its result is checked by reading the state again.
@@ -606,13 +607,36 @@ async function readOrMigrateState(stack, passphrase, key, projectDir) {
   try {
     deployment = await exportForProbe(stack);
   } catch (err) {
-    if (isStatePassphraseFailure(err)) {
-      throw passphraseRefusal(err, stack.name, 'state read after re-encrypting', projectDir);
-    }
+    if (isStatePassphraseFailure(err)) throw migratedButRefused(err, stack.name);
     throw err;
   }
   p.log.info(MIGRATED_NOTICE(stack.name));
   return deployment;
+}
+
+/**
+ * The project's passphrase refused right after a re-encryption that exited
+ * 0. That exit proves '' read the state, so it is not lost: the
+ * re-encryption just didn't produce this passphrase (on CLI 3.259.0 an
+ * empty stdin migrates '' to ''). Never the typed StateUndecryptableError,
+ * which destroy removes a record on: a StateMigrationError naming the step,
+ * with Pulumi's own line in the log only.
+ *
+ * @param {unknown} err the refused read
+ * @param {string} stackName
+ * @returns {StateMigrationError}
+ */
+function migratedButRefused(err, stackName) {
+  const message = err instanceof Error ? err.message : String(err);
+  progressLog(
+    `[pulumi] state read after re-encrypting ${stackName}: ${summarizeCommandError(message)}`,
+  );
+  return new StateMigrationError(
+    `Stopped after re-encrypting the Pulumi state for ${stackName}: Pulumi finished without an error, but this project's passphrase still can't read the state. ` +
+      'The empty passphrase older vibecarbon versions used probably still opens it, so vibecarbon stopped here rather than treat the state as lost. ' +
+      "Your Pulumi CLI may take the new passphrase in a way vibecarbon doesn't expect: run `pulumi version` and report it with this message.",
+    { cause: err },
+  );
 }
 
 /**
@@ -659,6 +683,16 @@ async function readOrMigrateState(stack, passphrase, key, projectDir) {
  */
 async function migrateFromEmptyPassphrase(stack, passphrase, key) {
   const step = `re-encrypting the Pulumi state for ${stack.name}`;
+  // An empty stdin makes Pulumi re-encrypt '' with '' (CLI 3.259.0): the
+  // state would stay as open as it was, under a migration that "worked".
+  // ensureStatePassphrase never returns one; this holds the line anyway,
+  // before the child, so nothing is written and nothing counts as attempted.
+  if (typeof passphrase !== 'string' || passphrase.trim() === '') {
+    throw new StateMigrationError(
+      `Stopped before ${step}: this project's state passphrase is empty, and re-encrypting with it would leave the state as open as before. ` +
+        "Put the project's passphrase in VIBECARBON_STATE_PASSPHRASE in .env.local, then run this again.",
+    );
+  }
   let attempted = false;
   try {
     await withStateBackendRetry(

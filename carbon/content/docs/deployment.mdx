@@ -175,6 +175,10 @@ Production requires these environment variables in your project's `.env` file â€
 | `VITE_PLAUSIBLE_SCRIPT_URL` | No | Plausible script URL (default: Plausible Cloud) |
 | `REDIS_URL` | No | Redis connection URL (for distributed rate limiting) |
 
+### Your state passphrase
+
+`VIBECARBON_STATE_PASSPHRASE` in `.env.local` encrypts the secrets in your Pulumi state, the record vibecarbon keeps of your servers so it can scale, fail over and destroy them. `vibecarbon create` makes it (an older project gets one on its first deploy), and `.vibecarbon.json` records only its fingerprint. Keep a copy in your password manager: without it, vibecarbon can't read that state. Teammates who deploy this project pull `.vibecarbon.json` and copy the same value into their own `.env.local`. If the passphrase is ever lost, run `vibecarbon backup <env>` for each environment before you destroy anything, so you keep a copy of its database.
+
 ## SMTP Configuration
 
 The app uses the SMTP credentials for auth emails (email confirmation, password reset, magic links) and for its other emails (welcome emails, team invitations, billing notifications).

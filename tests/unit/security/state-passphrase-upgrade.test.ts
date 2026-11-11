@@ -76,11 +76,32 @@ describe('upgrade backfills the state passphrase', () => {
     expect(await ensureStatePassphraseForUpgrade(dir)).toBe('recorded');
 
     expect(valueIn('.env.local')).toBe(mine);
-    // The user is told to commit the changed .vibecarbon.json.
-    expect(info).toHaveBeenCalledWith(expect.stringContaining('Commit it'));
+    // The user is told to commit the changed .vibecarbon.json, once.
+    expect(info.mock.calls.map((c) => String(c[0]))).toEqual([
+      "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it.",
+    ]);
     expect(JSON.parse(read('.vibecarbon.json')).stateEncryption.fingerprint).toBe(
       statePassphraseFingerprint(mine),
     );
+  });
+
+  it('a valid shell value beside a spaces-only .env.local line: recorded, and told to add it there', async () => {
+    const mine = 'b'.repeat(43);
+    writeFileSync(
+      join(dir, '.env.local'),
+      'PROJECT_NAME=demo\nVIBECARBON_STATE_PASSPHRASE="   "\n',
+    );
+    vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', mine);
+
+    expect(await ensureStatePassphraseForUpgrade(dir, { dryRun: true })).toBe('recorded');
+    expect(await ensureStatePassphraseForUpgrade(dir)).toBe('recorded');
+
+    // Said once, with the hint, and never the value.
+    const said = info.mock.calls.map((c) => String(c[0]));
+    expect(said).toEqual([
+      "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it. The passphrase itself is only in your shell: add it to .env.local too.",
+    ]);
+    expect(said.join('\n')).not.toContain(mine);
   });
 
   it('-dry writes nothing and says what it would do', async () => {

@@ -102,6 +102,88 @@ describe('state passphrase', () => {
     expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(v));
   });
 
+  describe('case 2 says what it recorded, and never the value', () => {
+    const RECORDED = "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it.";
+    const SHELL_ONLY = `${RECORDED} The passphrase itself is only in your shell: add it to .env.local too.`;
+    const said = () => vi.mocked(p.log.info).mock.calls.map((c) => String(c[0]));
+
+    it('a value only the shell has: add it to .env.local too', async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      await ensureStatePassphrase(dir);
+      expect(said()).toEqual([SHELL_ONLY]);
+      expect(said().join('\n')).not.toContain(v);
+    });
+
+    it('a value .env.local holds: commit the fingerprint, nothing more', async () => {
+      const v = generateStatePassphrase();
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      writeFileSync(join(dir, '.env.local'), `${KEY}=${v}\n`);
+      // The shell has it too, as the CLI's startup fold puts it there.
+      process.env[KEY] = v;
+      await ensureStatePassphrase(dir);
+      expect(said()).toEqual([RECORDED]);
+    });
+
+    it('.env.local holding only spaces beside a valid shell value is still shell only', async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      writeFileSync(join(dir, '.env.local'), `${KEY}="   "\n`);
+      await ensureStatePassphrase(dir);
+      expect(said()).toEqual([SHELL_ONLY]);
+    });
+
+    it('.env.local holding the value with stray spaces is read the way the look reads it: it holds it', async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      writeFileSync(join(dir, '.env.local'), `${KEY}="  ${v}  "\n`);
+      await ensureStatePassphrase(dir);
+      expect(said()).toEqual([RECORDED]);
+    });
+  });
+
+  describe('case 2 trusts the record the config lock found, not its own look', () => {
+    /** Another process records `fp` between this one's look and its lock. */
+    const racedBy = (fp: string) => {
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      const real = vi.mocked(configModule.updateProjectConfig).getMockImplementation();
+      vi.mocked(configModule.updateProjectConfig).mockImplementationOnce((...args) => {
+        writeManifest(fp);
+        return (real as typeof configModule.updateProjectConfig)(...args);
+      });
+    };
+
+    it("another value's fingerprint landed first: a mismatch, never this value used and memoized", async () => {
+      const mine = generateStatePassphrase();
+      const theirs = generateStatePassphrase();
+      process.env[KEY] = mine;
+      racedBy(statePassphraseFingerprint(theirs));
+
+      const err = await ensureStatePassphrase(dir).catch((e) => e);
+      expect(err).toBeInstanceOf(StatePassphraseError);
+      expect(err.reason).toBe('mismatch');
+      expect(err.message).toContain(statePassphraseFingerprint(theirs));
+      expect(err.message).toContain(statePassphraseFingerprint(mine));
+      expect(err.message).not.toContain(mine);
+      // The record keeps the winner's fingerprint, and nothing was memoized:
+      // the next look refuses this value the same way.
+      expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(theirs));
+      await expect(ensureStatePassphrase(dir)).rejects.toMatchObject({ reason: 'mismatch' });
+      expect(p.log.info).not.toHaveBeenCalled();
+    });
+
+    it("the same value's fingerprint landed first: adopted, and it says nothing it didn't do", async () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      racedBy(statePassphraseFingerprint(v));
+      await expect(ensureStatePassphrase(dir)).resolves.toBe(v);
+      expect(p.log.info).not.toHaveBeenCalled();
+    });
+  });
+
   it('case 3: a mismatch throws, naming both fingerprints and the source', async () => {
     const v = generateStatePassphrase();
     process.env[KEY] = v;
@@ -171,7 +253,11 @@ describe('state passphrase', () => {
       await expect(ensureStatePassphrase(dir)).resolves.toBe(stored);
       expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(`${KEY}=${stored}\n`);
       expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(stored));
-      expect(p.log.info).not.toHaveBeenCalled();
+      // It made nothing; it says it recorded the stored value's fingerprint.
+      expect(p.log.info).toHaveBeenCalledWith(
+        "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it.",
+      );
+      expect(p.log.info).toHaveBeenCalledTimes(1);
     });
 
     it('find reads the same value ensure would use', () => {

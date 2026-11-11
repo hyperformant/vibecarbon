@@ -23,10 +23,114 @@ const srcFiles = readdirSync(SRC, { recursive: true, withFileTypes: true })
 
 /** Source with comments blanked out, so prose cannot count as a call. */
 function code(file: string): string {
-  return readFileSync(file, 'utf8')
+  return blankComments(readFileSync(file, 'utf8'));
+}
+
+function blankComments(source: string): string {
+  return source
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
     .replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 }
+
+/**
+ * Each way a file can drive Pulumi: the Automation SDK imported statically
+ * or dynamically, the binary spawned by name, or the SDK's own binary path
+ * (`workspace.pulumiCommand.command`) spawned by hand, as the migration does.
+ */
+const PULUMI_DRIVERS: Record<string, RegExp> = {
+  staticImport: /from\s+['"]@pulumi\/pulumi\/automation/,
+  dynamicImport: /(?:\bimport|\brequire)\s*\(\s*['"`]@pulumi\/pulumi\/automation/,
+  binaryByName:
+    /\[\s*['"]pulumi['"]\s*,|(spawn|spawnSync|exec|execSync|execFile|execFileSync|run)\w*\(\s*['"]pulumi['"]/,
+  sdkBinary: /\bpulumiCommand\b/,
+};
+
+/** The PULUMI_DRIVERS arms `source` (comments blanked) matches. */
+function pulumiDrivers(source: string): string[] {
+  return Object.entries(PULUMI_DRIVERS)
+    .filter(([, re]) => re.test(source))
+    .map(([arm]) => arm);
+}
+
+/** A top-level declaration's first line, and the name it declares. */
+const TOP_LEVEL_DECL =
+  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+(\w+)|(?:const|let|var|class)\s+(\w+))/;
+
+/**
+ * Each match of `pattern` (global) in `source`, with the top-level
+ * declaration it sits in: a function, a const/let/var (an arrow function
+ * included) or a class, by its name; '<top level>' for a statement outside
+ * any. A line that starts in column 0 with anything but a closing bracket
+ * starts the next top-level statement (biome formats the source, so a body
+ * is always indented).
+ */
+function matchesByDeclaration(source: string, pattern: RegExp) {
+  const found: { fn: string; match: RegExpMatchArray }[] = [];
+  let fn = '<top level>';
+  for (const line of source.split('\n')) {
+    if (/^[^\s})\]]/.test(line)) {
+      const decl = line.match(TOP_LEVEL_DECL);
+      fn = decl ? (decl[1] ?? decl[2]) : '<top level>';
+    }
+    for (const match of line.matchAll(pattern)) found.push({ fn, match });
+  }
+  return found;
+}
+
+const WORKSPACE_CALL = /LocalWorkspace\.(\w+)\(/g;
+const DECRYPTS_KEY = /\bdecrypts\s*:\s*([^,}\s]+)/g;
+
+describe('state passphrase census: each check finds what it is for', () => {
+  it.each([
+    [
+      'a static import',
+      "import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';",
+      'staticImport',
+    ],
+    [
+      'a dynamic import',
+      "const sdk = await import('@pulumi/pulumi/automation/index.js');",
+      'dynamicImport',
+    ],
+    ['the binary spawned by name', "spawn('pulumi', ['stack', 'ls']);", 'binaryByName'],
+    [
+      "the SDK's binary spawned by hand",
+      'spawn(stack.workspace.pulumiCommand.command, args, { cwd });',
+      'sdkBinary',
+    ],
+  ])('(a) %s drives Pulumi', (_, source, arm) => {
+    expect(pulumiDrivers(source)).toEqual([arm]);
+  });
+
+  it('(a) prose about Pulumi drives nothing', () => {
+    const source = blankComments(
+      "// import('@pulumi/pulumi/automation') and pulumiCommand.command\nconst x = 1;\n",
+    );
+    expect(pulumiDrivers(source)).toEqual([]);
+  });
+
+  it("(b) a call in a top-level arrow function is the arrow's, never the function above it", () => {
+    const source = [
+      'export async function getOrCreateStack(name) {',
+      '  return LocalWorkspace.selectStack(name, ws);',
+      '}',
+      'const openAround = async (name) => {',
+      '  const opts = { decrypts: false };',
+      '  return LocalWorkspace.selectStack(name, opts);',
+      '};',
+      'export const openAgain = (name) => LocalWorkspace.createStack(name, {});',
+      "mkdirSync('x', { recursive: true });",
+      'await LocalWorkspace.create({});',
+    ].join('\n');
+    expect(matchesByDeclaration(source, WORKSPACE_CALL).map((c) => [c.fn, c.match[1]])).toEqual([
+      ['getOrCreateStack', 'selectStack'],
+      ['openAround', 'selectStack'],
+      ['openAgain', 'createStack'],
+      ['<top level>', 'create'],
+    ]);
+    expect(matchesByDeclaration(source, DECRYPTS_KEY).map((c) => c.fn)).toEqual(['openAround']);
+  });
+});
 
 describe('state passphrase census: structure', () => {
   it('(a) only iac/index.js drives Pulumi under src/', () => {
@@ -34,13 +138,7 @@ describe('state passphrase census: structure', () => {
     const allowed = new Set(['lib/iac/index.js', 'lib/deploy/preflight.js']);
     const drivers: string[] = [];
     for (const file of srcFiles) {
-      const text = code(file);
-      const imports = /from\s+['"]@pulumi\/pulumi\/automation/.test(text);
-      const spawns =
-        /\[\s*['"]pulumi['"]\s*,|(spawn|spawnSync|exec|execSync|execFile|execFileSync|run)\w*\(\s*['"]pulumi['"]/.test(
-          text,
-        );
-      if (imports || spawns) drivers.push(file.slice(SRC.length + 1));
+      if (pulumiDrivers(code(file)).length > 0) drivers.push(file.slice(SRC.length + 1));
     }
     expect(drivers.length).toBeGreaterThan(0);
     expect(drivers.filter((f) => !allowed.has(f))).toEqual([]);
@@ -48,39 +146,26 @@ describe('state passphrase census: structure', () => {
   });
 
   it('(b) every LocalWorkspace call in iac/index.js sits in getOrCreateStack or a non-decrypting opener', () => {
-    const lines = code(join(SRC, 'lib/iac/index.js')).split('\n');
+    const text = code(join(SRC, 'lib/iac/index.js'));
     // Openers that decrypt nothing: `stack ls` and `whoami` read no secret.
     const allowed: Record<string, string[]> = {
       getOrCreateStack: ['selectStack', 'createStack'],
       listStacks: ['create'],
       openStateBackend: ['create'],
     };
-    const calls: { fn: string; method: string }[] = [];
-    let fn = '';
-    for (const line of lines) {
-      const decl = line.match(/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/);
-      if (decl) fn = decl[1];
-      for (const m of line.matchAll(/LocalWorkspace\.(\w+)\(/g)) {
-        calls.push({ fn, method: m[1] });
-      }
-    }
+    const calls = matchesByDeclaration(text, WORKSPACE_CALL).map((c) => ({
+      fn: c.fn,
+      method: c.match[1],
+    }));
     expect(calls.length).toBeGreaterThanOrEqual(4);
     const stray = calls.filter((c) => !allowed[c.fn]?.includes(c.method));
     expect(stray).toEqual([]);
   });
 
   it('(b) `decrypts` is set only by the openers that decrypt nothing', () => {
-    const text = code(join(SRC, 'lib/iac/index.js'));
-    const lines = text.split('\n');
-    const where: { fn: string; value: string }[] = [];
-    let fn = '';
-    for (const line of lines) {
-      const decl = line.match(/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/);
-      if (decl) fn = decl[1];
-      for (const m of line.matchAll(/\bdecrypts\s*:\s*([^,}\s]+)/g)) {
-        where.push({ fn, value: m[1] });
-      }
-    }
+    const where = matchesByDeclaration(code(join(SRC, 'lib/iac/index.js')), DECRYPTS_KEY).map(
+      (c) => ({ fn: c.fn, value: c.match[1] }),
+    );
     expect(where.length).toBeGreaterThanOrEqual(3);
     expect(where.every((w) => w.value === 'false')).toBe(true);
     expect(where.map((w) => w.fn).sort()).toEqual([

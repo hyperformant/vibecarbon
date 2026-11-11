@@ -197,6 +197,25 @@ function mismatchError(expected, actual, from) {
 }
 
 /**
+ * What case 2 says once it recorded a value's fingerprint: commit it, and,
+ * when .env.local (read trimmed and unquoted, as the look reads it) doesn't
+ * hold the value, that the shell is the only place it lives. A later shell
+ * without the export would otherwise meet the 'missing' error for a value
+ * nobody saved for this project. Never the value itself.
+ * @param {string} dir
+ * @param {string} value
+ */
+function recordedLine(dir, value) {
+  const stored = readOperatorVar(STATE_PASSPHRASE_KEY, {
+    env: { [STATE_PASSPHRASE_KEY]: loadEnvVariables(dir)[STATE_PASSPHRASE_KEY] },
+  }).value;
+  const line = "Recorded your state passphrase's fingerprint in .vibecarbon.json. Commit it.";
+  return stored === value
+    ? line
+    : `${line} The passphrase itself is only in your shell: add it to .env.local too.`;
+}
+
+/**
  * The passphrase this project would use and what is wrong with it, changing
  * nothing. The one verdict both ensureStatePassphrase and
  * findStatePassphraseProblem act on, so they cannot disagree.
@@ -270,17 +289,33 @@ export async function ensureStatePassphrase(projectDir) {
   if (problem) throw problem;
 
   if (value) {
-    // Read from .env.local just now: later Pulumi calls in this process read
-    // the environment.
-    if (fromDisk) process.env[STATE_PASSPHRASE_KEY] = value;
     if (!expected) {
-      // Case 2: an existing value (e.g. copied in from a password manager).
+      // Case 2: an existing value (copied in from a password manager, or
+      // exported in the shell) and no fingerprint yet.
       const actual = statePassphraseFingerprint(value);
+      let recorded = false;
       updateProjectConfig((manifest) => {
         if (manifest.stateEncryption?.fingerprint) return;
         manifest.stateEncryption = { ...manifest.stateEncryption, fingerprint: actual };
+        recorded = true;
       }, dir);
+      // The lock may have found another process's fingerprint, recorded
+      // since the look above. Then that value is the project's, not this
+      // one: using this one would re-encrypt legacy stacks under a
+      // passphrase the record doesn't hold.
+      const now = recordedFingerprint(dir);
+      if (now !== actual) {
+        throw mismatchError(
+          now ?? 'no fingerprint',
+          actual,
+          sourceOf(fromDisk ? 'disk' : 'environment'),
+        );
+      }
+      if (recorded) p.log.info(recordedLine(dir, value));
     }
+    // Read from .env.local just now: later Pulumi calls in this process read
+    // the environment.
+    if (fromDisk) process.env[STATE_PASSPHRASE_KEY] = value;
     verified.set(dir, value);
     return value;
   }
