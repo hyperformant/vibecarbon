@@ -1,9 +1,10 @@
 /**
  * Local-First Bundle Rendering
  * Stages all deployment artifacts (Compose files, .env, scripts) into a private
- * temp directory before the compose plan provisions anything. The .env and
- * app.env in it carry every secret the servers get, so it lives only while
- * the work that uploads it runs (withBundle).
+ * temp directory before the deploy touches anything outside this machine. The
+ * .env and app.env in it carry every secret the servers get, so it lives only
+ * while the work that uploads it runs: the deploy removes it once its
+ * dispatch settles (orchestrator), and scale goes through withBundle.
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -305,9 +306,8 @@ ${lines.join('\n')}
 /**
  * Render the bundle, run `fn` with its path, and remove it once `fn` settles,
  * whatever the outcome. The bundle holds the rendered .env and app.env, every
- * secret the servers get, so this is how src/ renders one: it never outlives
- * the work that reads it (a Ctrl-C mid-work leaves it to the exit sweep,
- * temp-dir.js).
+ * secret the servers get, so it never outlives the work that reads it (a
+ * Ctrl-C mid-work leaves it to the exit sweep, temp-dir.js).
  *
  * @template T
  * @param {string} projectName
@@ -328,8 +328,8 @@ export async function withBundle(projectName, options, fn) {
 
 /**
  * Render the deployment bundle to a private temp dir. The caller owns the dir
- * and must remove it (removeTempDir); src/ goes through withBundle, which
- * does. A render that throws removes its own dir.
+ * and must remove it (removeTempDir), as withBundle and the deploy's dispatch
+ * do. A render that throws removes its own dir.
  * @param {string} projectName
  * @param {object} options
  * @returns {string} The path to the staged bundle directory

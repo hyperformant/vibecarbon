@@ -7,7 +7,7 @@
  * plus an empty vc-deploy- dir it made and never used, and the tarball
  * whenever the pack or the upload failed. Now everything it makes is gone
  * when it returns or throws, and a bundle the caller passed in is the
- * caller's to remove (the deploy's withBundle).
+ * caller's to remove (the deploy removes it after its dispatch).
  */
 import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

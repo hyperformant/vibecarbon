@@ -6,11 +6,12 @@
  * readable later by anything that can read the operator's /tmp.
  *
  * Its one reader is the compose plan's setup-server-files step (each arm of
- * compose-ha's setup fan); k8s never reads it. So it lives only while the
- * compose plan runs: rendered before the plan's first step provisions
- * anything, removed when the plan settles, whatever the outcome. A Ctrl-C
- * exits the process mid-plan without running a finally; the exit sweep
- * (src/lib/temp-dir.js) removes it then.
+ * compose-ha's setup fan); k8s never reads it. It is rendered before the DNS
+ * warm-up and the pending-server repair, so a render that fails stops the
+ * deploy before anything outside the operator's machine changes (the warm-up
+ * points the domain at 0.0.0.0), and it is removed once the dispatch settles,
+ * whatever the outcome. A Ctrl-C exits the process mid-plan without running a
+ * finally; the exit sweep (src/lib/temp-dir.js) removes it then.
  *
  * Drives the REAL executeDeployment with the REAL plans; the plan's effects
  * are stubs that record what the bundle looked like while they ran. Each
@@ -32,6 +33,25 @@ const run = vi.hoisted(() => ({
   bundlePath: null as string | null,
   /** Whether the bundle dir existed when the first statement after the plan ran. */
   bundleAfterPlan: null as boolean | null,
+  /** What each progress spinner started with. */
+  spinnerStarts: [] as string[],
+}));
+
+// What reaches outside the machine before the plan: the DNS warm-up (the
+// provider's setupSimple, pointing the domain at 0.0.0.0) and the repair of a
+// server a compose scale replaced (Pulumi state).
+const outside = vi.hoisted(() => ({
+  getDnsProvider: vi.fn(),
+  setupSimple: vi.fn(),
+  repairPendingServerState: vi.fn(),
+}));
+vi.mock('../../../src/lib/dns-provider.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  getDnsProvider: outside.getDnsProvider,
+}));
+vi.mock('../../../src/lib/deploy/compose/server-state-sync.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  repairPendingServerState: outside.repairPendingServerState,
 }));
 
 vi.mock('../../../src/lib/deploy/plan/runner.js', async (orig) => {
@@ -92,7 +112,13 @@ const clackMock = vi.hoisted(() => ({
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
-  spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
+  spinner: () => ({
+    start: (msg?: string) => {
+      run.spinnerStarts.push(msg ?? '');
+    },
+    stop: () => {},
+    message: () => {},
+  }),
 }));
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof projectConfigStore> | null }));
@@ -257,6 +283,12 @@ beforeEach(() => {
   run.seen = [];
   run.bundlePath = null;
   run.bundleAfterPlan = null;
+  run.spinnerStarts = [];
+  outside.setupSimple.mockReset().mockResolvedValue({ success: true });
+  outside.getDnsProvider.mockReset().mockResolvedValue({ setupSimple: outside.setupSimple });
+  outside.repairPendingServerState.mockReset().mockResolvedValue(1);
+  // The real runPlan logs each step a when-predicate skips on stderr.
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   // The project the bundle is rendered from: its .env is what lands on servers.
   project = createTempDir('vc-bundle-project-');
   writeFileSync(join(project, '.env'), 'BETTER_AUTH_SECRET=not-a-real-secret\n');
@@ -335,6 +367,60 @@ describe.each(['compose', 'compose-ha'] as const)('a %s deploy', (tier) => {
     expect(run.bundleAfterPlan).toBe(false);
   });
 });
+
+describe.each(['compose', 'compose-ha'] as const)(
+  'a %s deploy with managed DNS and a server scale replaced',
+  (tier) => {
+    /** A first deploy (nothing to skip) whose warm-up and repair both run. */
+    const withDnsAndRepair = (secretKey = S3.secretKey) => ({
+      ...gathered(tier),
+      domain: 'app.example.test',
+      dnsProvider: 'cloudflare',
+      dnsZoneId: 'zone-1',
+      dnsToken: 'cf-token',
+      envConfig: {
+        pendingServerState: [{ stack: 'prod', serverId: '42', ip: '203.0.113.9', old: null }],
+      },
+      s3Config: { ...S3, secretKey },
+    });
+
+    beforeEach(() => {
+      run.effects[PROVISION_EFFECT[tier]] = PROVISION[tier];
+    });
+
+    it('warms DNS up and repairs the server state when the bundle renders', async () => {
+      await expect(executeDeployment({ yes: true }, withDnsAndRepair() as never)).rejects.toThrow(
+        'STOP_AFTER_PLAN',
+      );
+      expect(outside.setupSimple).toHaveBeenCalledWith(
+        'cf-token',
+        'zone-1',
+        'app.example.test',
+        '0.0.0.0',
+        expect.anything(),
+      );
+      expect(outside.repairPendingServerState).toHaveBeenCalledTimes(1);
+      // The spinner the failing case looks for, so its absence there means something.
+      if (tier === 'compose-ha') expect(run.spinnerStarts).toContain('Starting HA deployment...');
+    });
+
+    it('a render that fails stops the deploy before DNS or the server state is touched', async () => {
+      // A storage key no .env can hold: the render refuses it.
+      await expect(
+        executeDeployment({ yes: true }, withDnsAndRepair('x\ty') as never),
+      ).rejects.toThrow(/S3_SECRET_KEY cannot be stored in a \.env file/);
+      // The warm-up is a background task: give anything already started a turn.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(outside.getDnsProvider).not.toHaveBeenCalled();
+      expect(outside.setupSimple).not.toHaveBeenCalled();
+      expect(outside.repairPendingServerState).not.toHaveBeenCalled();
+      expect(run.seen).toEqual([]);
+      // compose-ha's "Starting HA deployment..." spinner comes after the render.
+      expect(run.spinnerStarts).not.toContain('Starting HA deployment...');
+      expect(bundleDirs()).toEqual([]);
+    });
+  },
+);
 
 describe('a k8s deploy', () => {
   it('renders no bundle at all: nothing on a cluster reads it', async () => {

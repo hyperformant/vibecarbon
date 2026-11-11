@@ -747,8 +747,8 @@ async function haSetupServerFiles(ctx) {
   const provider = apiToken ? new (providerFor(ctx.envConfig))(apiToken) : null;
   ctx.onProgress('Copying project files...');
   const serviceOpts = haServiceOpts(ctx);
-  // Both read the one rendered bundle, which the deploy removes once the plan
-  // settles (orchestrator, withBundle): awaited below even when another task
+  // Both read the one rendered bundle, which the deploy removes once its
+  // dispatch settles (orchestrator): awaited below even when another task
   // fails first, so no upload is still packing it then.
   const bundleUploads = [
     perfAsync('deploy.ha.compose.setupFiles.primary', () =>

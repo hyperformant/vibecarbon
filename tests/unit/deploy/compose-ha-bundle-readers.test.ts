@@ -1,9 +1,9 @@
 /**
  * compose-ha's setup fan uploads the one rendered bundle to both nodes at
- * once, and the deploy removes that bundle when the plan settles
- * (orchestrator, withBundle). A fan that rejected on the first failure while
- * the other node's upload was still packing the bundle would let the removal
- * pull the dir out from under it. So the fan settles only once both uploads
+ * once, and the deploy removes that bundle once its dispatch settles
+ * (orchestrator). A fan that rejected on the first failure while the other
+ * node's upload was still packing the bundle would let the removal pull the
+ * dir out from under it. So the fan settles only once both uploads
  * have, and its rejection is the first failure's.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

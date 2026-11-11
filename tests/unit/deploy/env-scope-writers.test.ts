@@ -64,7 +64,7 @@ describe('compose and compose-ha server .env', () => {
     const body = options.slice(0, options.indexOf('\n  };'));
     expect(body).toMatch(/\benvironment,/);
     expect(body).toMatch(/s3: s3Config,/);
-    expect(orch).toMatch(/withBundle\(projectConfig\.projectName, bundleOptions,/);
+    expect(orch).toMatch(/renderBundle\(projectConfig\.projectName, bundleOptions\)/);
   });
 
   it('compose-ha ships that same rendered bundle, not a second .env writer', () => {

@@ -337,7 +337,7 @@ describe('the snapshot prefix and apex reach the servers as data', () => {
     const src = read('src/lib/deploy/orchestrator.js');
     const options = src.slice(src.indexOf('const bundleOptions = {'));
     expect(options.slice(0, options.indexOf('\n  };'))).toMatch(/tlsSnapshotPrefix/);
-    expect(src).toMatch(/withBundle\(projectConfig\.projectName, bundleOptions,/);
+    expect(src).toMatch(/renderBundle\(projectConfig\.projectName, bundleOptions\)/);
     expect(src).toMatch(
       /backupS3Config\?\.bucket\s*\?\s*tlsSnapshotS3Prefix\(\{\s*backupBucket: backupS3Config\.bucket/,
     );

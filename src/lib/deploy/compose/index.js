@@ -596,9 +596,9 @@ fi
  * Pack the rendered bundle and sync it to the server.
  *
  * The deploy passes the bundle it rendered (`options.bundlePath`) and removes
- * it itself (orchestrator, withBundle). Scale passes none, so this renders its
- * own for the one upload and removes it before returning or throwing. The
- * tarball, which holds the same .env, goes either way.
+ * it itself once its dispatch settles (orchestrator). Scale passes none, so
+ * this renders its own for the one upload and removes it before returning or
+ * throwing. The tarball, which holds the same .env, goes either way.
  */
 export async function setupServerFiles(ip, sshKeyPath, projectName, options = {}) {
   if (!options.bundlePath) {
