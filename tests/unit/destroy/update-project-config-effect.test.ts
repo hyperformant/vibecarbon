@@ -33,7 +33,8 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   };
 });
 
-const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+const { DESTROY_EFFECTS, sweepTaggedReservedIps } = await import('../../../src/destroy.js');
+const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
 
 function fakeSpinner() {
@@ -229,7 +230,9 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
 
   it('names each unreleased address once: "X, Y and Z"', async () => {
     // k8s-ha: both side stacks can name one environment-level address.
-    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    const ctx = Object.assign(makeCtx({ pulumiDestroyFailed: false }), {
+      envConfig: { provider: 'digitalocean' },
+    });
     (ctx.results as Record<string, unknown>).unreleasedReservedIps = [
       '203.0.113.7',
       '203.0.113.8',
@@ -314,5 +317,76 @@ describe('storageBucketGeneration', () => {
 
     const savedConfig = store.state.writes[0];
     expect(savedConfig.storageBucketGeneration).toBe('aaaaaa');
+  });
+});
+
+/**
+ * The kept-config line names the IPs in the provider's own word (its
+ * RESERVED_IP_NAME), the word the backstop's leak line above it uses too.
+ */
+describe("the kept-config line uses the provider's own word for the IP", () => {
+  const WORD: Record<string, string> = {
+    hetzner: 'Floating IP',
+    scaleway: 'flexible IP',
+    digitalocean: 'reserved IP',
+    linode: 'reserved IP',
+    vultr: 'reserved IP',
+  };
+
+  it('covers every provider', () => {
+    expect(Object.keys(WORD).sort()).toEqual(Object.keys(PROVIDERS).sort());
+  });
+
+  it.each(Object.entries(WORD))('%s: %s', async (provider, word) => {
+    const ctx = Object.assign(makeCtx({ pulumiDestroyFailed: false }), {
+      envConfig: { provider },
+    });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = ['203.0.113.7', '203.0.113.8'];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain(`the ${word}s 203.0.113.7 and 203.0.113.8 are not released yet`);
+  });
+});
+
+/**
+ * A label listing that cannot be read leaves an IP no record names possibly
+ * billing. The sweep records it unverified, and the entry stays, so
+ * `vibecarbon destroy <env>` can run the sweep again.
+ */
+describe('an unreadable label listing keeps the entry', () => {
+  function unreadable() {
+    function Hetzner() {}
+    Object.assign(Hetzner, { NAME: 'Hetzner Cloud', RESERVED_IP_NAME: 'Floating IP' });
+    Hetzner.prototype.deleteReservedIpsByLabels = async () => {
+      throw new Error('GET /floating_ips failed: HTTP 503');
+    };
+    return new (Hetzner as unknown as new () => object)();
+  }
+
+  it('the next destroy can run the sweep again', async () => {
+    const ctx = Object.assign(makeCtx({ pulumiDestroyFailed: false }), {
+      envConfig: { provider: 'hetzner' },
+    });
+    await sweepTaggedReservedIps({
+      provider: unreadable(),
+      projectName: 'proj',
+      stackEnv: 'prod-primary',
+      results: ctx.results,
+      s: fakeSpinner(),
+      environment: 'prod',
+    });
+    const [entry] = ctx.results.leaks.entries;
+    expect(entry).toMatchObject({ severity: 'unverified', resourceClass: 'reserved-ip' });
+    expect(entry.hint).toContain('`vibecarbon destroy prod`');
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    expect(store.state.writes).toEqual([]);
+    expect(ctx.projectConfig.environments).toHaveProperty('prod');
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain('the Floating IPs labelled for prod-primary could not be listed');
+    expect(message).toContain('`vibecarbon destroy prod`');
   });
 });

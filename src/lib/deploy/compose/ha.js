@@ -18,6 +18,7 @@ import { environmentServerNames } from '../../destroy/server-naming.js';
 import { waitForDNSPropagation } from '../../dns-propagation.js';
 import {
   DNS_PROVIDERS,
+  dnsRefusedHint,
   findZoneForDomain,
   getDnsProvider,
   hasAutomatedDns,
@@ -1226,7 +1227,7 @@ export async function destroyComposeHA(options) {
               'dns-record',
               `${name} → ${target} (${row.name} zone ${zoneId})`,
               `delete refused: ${reason}`,
-              `Remove it by hand in ${row.name}, or re-run destroy; it points at an address this destroy released, and a stale record shadows the next deploy.`,
+              dnsRefusedHint(name, row.name),
             );
           }
           if (typeof dns.deleteHealthCheck === 'function') {

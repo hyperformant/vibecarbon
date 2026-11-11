@@ -239,16 +239,50 @@ for (const [id, Provider] of sweepers) {
       expect(deletes(calls, LANDSCAPE)).toEqual([]);
     });
 
-    it('empty labels match nothing, and read nothing', async () => {
+    it.each([
+      ['no labels', {}],
+      ['an undefined value', { project: 'proj', environment: undefined }],
+      ['an empty value', { project: '', environment: 'prod' }],
+      ['a blank value', { project: 'proj', environment: '  ' }],
+    ])('a scope with %s is refused, and reads nothing', async (_, labels) => {
       row.serve(LANDSCAPE);
-      await expect(make().deleteReservedIpsByLabels({})).resolves.toEqual({
-        deleted: [],
-        failed: [],
-      });
+      await expect(
+        make().deleteReservedIpsByLabels(labels as Record<string, string>),
+      ).rejects.toThrow(/refusing to sweep by labels/);
       expect(fetchWithRetryMock).not.toHaveBeenCalled();
     });
   });
 }
+
+describe('linode: an address assigned to any entity is left alone', () => {
+  it('assigned_entity without linode_id still holds it', async () => {
+    const calls = api(() =>
+      json({
+        page: 1,
+        pages: 1,
+        data: [
+          {
+            address: '203.0.113.1',
+            linode_id: null,
+            assigned_entity: { id: 31, label: 'edge-lb', type: 'nodebalancer' },
+            tags: Object.entries(OURS).map(([k, v]) => linodeLabel(k, v)),
+          },
+        ],
+      }),
+    );
+    const Linode = PROVIDERS.linode as unknown as new (t: string) => Sweeper;
+    const out = await new Linode('token').deleteReservedIpsByLabels(OURS);
+    expect(out.deleted).toEqual([]);
+    expect(out.failed).toEqual([
+      {
+        address: '203.0.113.1',
+        held: true,
+        reason: 'it is still assigned to nodebalancer edge-lb, which was not deleted',
+      },
+    ]);
+    expect(calls.filter((c) => c.method === 'DELETE')).toEqual([]);
+  });
+});
 
 describe('hetzner: the label selector on the wire', () => {
   it('asks for both labels, so the listing holds only this stack', async () => {

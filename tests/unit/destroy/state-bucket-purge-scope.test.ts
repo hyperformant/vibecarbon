@@ -41,7 +41,11 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
   return {
     ...real,
-    providerFor: () => ({ NAME: 'Hetzner Cloud', promptObjectStorageCredentials: promptCreds }),
+    providerFor: () => ({
+      NAME: 'Hetzner Cloud',
+      RESERVED_IP_NAME: 'Floating IP',
+      promptObjectStorageCredentials: promptCreds,
+    }),
     getObjectStorageProvider: async () => s3,
   };
 });
@@ -70,7 +74,11 @@ function project(names: string[]) {
   };
 }
 
-type Outcome = { pulumiDestroyFailed?: boolean; unreleasedReservedIps?: string[] };
+type Outcome = {
+  pulumiDestroyFailed?: boolean;
+  unreleasedReservedIps?: string[];
+  unsweptReservedIpScopes?: string[];
+};
 
 async function destroy(
   projectConfig: ReturnType<typeof project>,
@@ -141,9 +149,15 @@ describe('the last environment under -purge, when its entry is kept', () => {
   const kept: Array<[string, Outcome, RegExp]> = [
     ['its Pulumi destroy was not verified', { pulumiDestroyFailed: true }, /not verified/],
     [
-      'a reserved IP of ours is not released yet',
+      'a Floating IP of ours is not released yet',
       { unreleasedReservedIps: ['203.0.113.9', '203.0.113.9'] },
-      /reserved IP 203\.0\.113\.9 is not released/,
+      // In the provider's own word.
+      /the Floating IP 203\.0\.113\.9 is not released/,
+    ],
+    [
+      'a label listing could not be read',
+      { unsweptReservedIpScopes: ['prod'] },
+      /the Floating IPs labelled for prod could not be listed/,
     ],
   ];
 

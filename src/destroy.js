@@ -55,6 +55,7 @@ import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js'
 import { sweepEnvironmentServers } from './lib/destroy/server-sweep.js';
 import {
   DNS_PROVIDERS,
+  dnsRefusedHint,
   findZoneForDomain,
   getDnsProvider,
   hasAutomatedDns,
@@ -1829,7 +1830,7 @@ async function retainStateBucketEffect(ctx) {
     spinner,
     results.leaks,
     environment,
-    entryKeptReason(results),
+    entryKeptReason(results, envConfig),
   );
   if (outcome?.purged) results.stateBucketPurged = true;
   // What this destroy decided about retainedStateBucket, for the config write
@@ -1891,24 +1892,37 @@ function joinAddresses(addresses) {
  *
  *   - `unverified`: the Pulumi destroy could not be verified
  *     (recordPulumiDestroyOutcome, or destroyK8sTier's catch).
- *   - `unreleased`: a recorded reserved IP of ours the backstop could not
- *     prove released (keepUnreleased), each address once: on k8s-ha both side
+ *   - `unreleased`: a reserved IP of ours the backstop could not prove
+ *     released (keepUnreleased), each address once: on k8s-ha both side
  *     stacks can name one environment-level address.
+ *   - `unswept`: the stacks whose label listing could not be read
+ *     (sweepTaggedReservedIps), so an IP no record names may be left. The
+ *     entry is what lets `vibecarbon destroy <env>` run that sweep again.
  *
- * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[]}} results
- * @returns {{unverified: true, because: string} | {unreleased: string[], because: string} | null}
+ * `because` names the IPs in the provider's own word (`RESERVED_IP_NAME`:
+ * Floating IP on Hetzner, flexible IP on Scaleway, reserved IP elsewhere).
+ *
+ * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[], unsweptReservedIpScopes?: string[]}} results
+ * @param {object} envConfig - the environment, for its provider's word
+ * @returns {{unverified: true, because: string} | {unreleased: string[], unswept: string[], because: string} | null}
  */
-function entryKeptReason(results) {
+function entryKeptReason(results, envConfig) {
   if (results.pulumiDestroyFailed) {
     return { unverified: true, because: 'its Pulumi destroy was not verified' };
   }
   const unreleased = [...new Set(results.unreleasedReservedIps ?? [])];
-  if (unreleased.length === 0) return null;
-  const named =
-    unreleased.length === 1
-      ? `the reserved IP ${unreleased[0]} is`
-      : `the reserved IPs ${joinAddresses(unreleased)} are`;
-  return { unreleased, because: `${named} not released yet` };
+  const unswept = [...new Set(results.unsweptReservedIpScopes ?? [])];
+  if (unreleased.length === 0 && unswept.length === 0) return null;
+  const noun = providerFor(envConfig).RESERVED_IP_NAME ?? 'reserved IP';
+  const reasons = [];
+  if (unreleased.length === 1) reasons.push(`the ${noun} ${unreleased[0]} is not released yet`);
+  if (unreleased.length > 1) {
+    reasons.push(`the ${noun}s ${joinAddresses(unreleased)} are not released yet`);
+  }
+  if (unswept.length > 0) {
+    reasons.push(`the ${noun}s labelled for ${joinAddresses(unswept)} could not be listed`);
+  }
+  return { unreleased, unswept, because: reasons.join(', and ') };
 }
 
 /**
@@ -1964,7 +1978,7 @@ async function updateProjectConfigEffect(ctx) {
   // right past the state bucket the round-1 fix just preserved. Never runs
   // for compose tiers — they don't touch Pulumi in destroy.js's sense, so
   // this flag is never set there.
-  const kept = entryKeptReason(results);
+  const kept = entryKeptReason(results, ctx.envConfig);
   if (kept?.unverified) {
     spinner.start('Updating project configuration');
     writeProjectLevelOnly();
@@ -1978,11 +1992,12 @@ async function updateProjectConfigEffect(ctx) {
     });
     return;
   }
-  // A recorded reserved IP of ours that the backstop could not prove released
-  // (sweepK8sBackstopTargets) is named nowhere but this entry: kept, as
-  // above, so the next destroy retries it. The backstop's own leak line says
-  // so; this adds none.
-  if (kept?.unreleased) {
+  // A reserved IP of ours that the backstop could not prove released
+  // (sweepK8sBackstopTargets, sweepTaggedReservedIps) is named nowhere but
+  // this entry, and a label listing that could not be read is retried only
+  // through it: kept, as above, so the next destroy retries. The backstop's
+  // own leak line says so; this adds none.
+  if (kept) {
     spinner.start('Updating project configuration');
     writeProjectLevelOnly();
     spinner.stop(
@@ -2113,7 +2128,7 @@ function recordFailedDnsDeletes(leaks, failed, dnsProviderName, zoneId) {
       resourceClass: 'dns-record',
       resource: `${name} → ${target} (${dnsProviderName} zone ${zoneId})`,
       reason: `delete refused: ${reason}`,
-      hint: `Remove it by hand in ${dnsProviderName}, or re-run destroy; it points at an address this destroy released, and a stale record shadows the next deploy.`,
+      hint: dnsRefusedHint(name, dnsProviderName),
     });
   }
 }
@@ -2309,10 +2324,11 @@ async function destroyComposeHATier({
   // this sweep is what turns anything either of them still misses into a LEAK
   // or UNVERIFIED line instead of silence.
   if (!providerToken) return;
+  const provider = new Provider(providerToken);
   const s3 = tracker.spinner();
   s3.start('Checking for surviving environment servers');
   const { deleted: sweptServers, scanned } = await sweepEnvironmentServers({
-    provider: new Provider(providerToken),
+    provider,
     leaks: results.leaks,
     projectName: projectConfig.projectName,
     environment,
@@ -2330,6 +2346,31 @@ async function destroyComposeHATier({
         ? 'No surviving environment servers'
         : 'Surviving-server check inconclusive (see the leak report)',
   );
+
+  // A flexible IP either side's compose program made before its server
+  // (Scaleway, COMPOSE_FLOATING_IP): each side is its own stack
+  // (`<env>-primary`, `<env>-standby`, effects/compose-ha.js) and labels its
+  // IP with that stack's environment. The servers are deleted by API, which
+  // frees only an IP attached to one, and remove-stack-state then drops the
+  // stack, the IP's last record; so one a failed or killed deploy left
+  // attached to nothing is found here by each side's labels, after the
+  // server deletes above.
+  if (
+    Provider.COMPOSE_FLOATING_IP === true &&
+    projectConfig.projectName &&
+    typeof provider.deleteReservedIpsByLabels === 'function'
+  ) {
+    for (const side of ['primary', 'standby']) {
+      await sweepTaggedReservedIps({
+        provider,
+        projectName: projectConfig.projectName,
+        stackEnv: `${environment}-${side}`,
+        results,
+        s: tracker.spinner(),
+        environment,
+      });
+    }
+  }
 }
 
 /**
@@ -3120,11 +3161,18 @@ export async function sweepTaggedReservedIps({
     }
   } catch (error) {
     s.stop(`${noun} label check failed: ${error.message}`);
+    // Kept on record by stack (entryKeptReason): the entry is the only way
+    // the next `vibecarbon destroy` can run this sweep again.
+    results.unsweptReservedIpScopes ??= [];
+    results.unsweptReservedIpScopes.push(stackEnv);
     results.leaks.unverified({
       resourceClass: 'reserved-ip',
       resource: `${noun}s labelled ${scope}`,
       reason: `the listing failed: ${error.message}, so vibecarbon could not confirm none is left`,
-      hint: `Check the ${Provider.NAME} console for a ${noun} labelled ${scope}; it keeps billing until it is released.`,
+      hint:
+        `Run \`vibecarbon destroy ${environment}\` again to retry the check: the environment ` +
+        `stays in .vibecarbon.json until it runs clean. Or look in the ${Provider.NAME} console ` +
+        `for a ${noun} labelled ${scope}; it keeps billing until it is released.`,
     });
   }
 }

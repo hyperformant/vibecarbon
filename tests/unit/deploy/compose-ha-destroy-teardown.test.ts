@@ -314,7 +314,9 @@ describe('destroyComposeHA — Cloudflare DNS root+wildcard pair (M3 Task 9i fix
     expect(dns[0].resource).toContain('*.e2.example.com');
     expect(dns[0].resource).toContain('1.1.1.1');
     expect(dns[0].reason).toMatch(/403/);
-    // Named for the DNS provider, not the compute console the fallback names.
-    expect(dns[0].hint).toMatch(/by hand in Cloudflare/);
+    // A step that works: named for the DNS provider, not the compute console
+    // the fallback names, and no re-run (the environment's entry is gone).
+    expect(dns[0].hint).toMatch(/^Delete \*\.e2\.example\.com in your Cloudflare DNS settings\./);
+    expect(dns[0].hint).toMatch(/will not retry it/);
   });
 });

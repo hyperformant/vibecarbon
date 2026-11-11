@@ -9,7 +9,10 @@
  *   - k8s and k8s-ha: once per stack, on every provider that has the method,
  *     with or without the name sweeps (K8S_DESTROY_BACKSTOP);
  *   - compose: once, where the provider's compose program makes an IP
- *     (COMPOSE_FLOATING_IP), and never where it makes none.
+ *     (COMPOSE_FLOATING_IP), and never where it makes none;
+ *   - compose-ha: the same gate, once per side, by that side's stack
+ *     environment (`<env>-primary`, `<env>-standby`): each side's compose
+ *     program labels its IP with its own stack's environment.
  *
  * Each tier's real destroy effect runs against a fake provider that records
  * the calls (the same driving as dns-after-compute-census.test.ts).
@@ -59,6 +62,13 @@ vi.mock('../../../src/lib/deploy/k8s/index.js', async (orig) => {
     ...real,
     destroyK8s: async () => ({ destroyed: true, resourcesDeleted: 1, summary: { delete: 1 } }),
   };
+});
+
+// compose-ha's own teardown deletes by name and is covered on its own
+// (compose-ha-destroy-teardown.test.ts); here it finds nothing.
+vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
+  const real = (await orig()) as Record<string, unknown>;
+  return { ...real, destroyComposeHA: async () => ({ leaks: [], handledServerIds: [] }) };
 });
 
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
@@ -142,6 +152,23 @@ describe('compose: asked only where the compose program makes an IP', () => {
   it('no compose IP (Hetzner, Linode): never asked, even with the method', async () => {
     holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: false }, true);
     await run('destroyComposeServices', makeCtx('compose', ['prod']));
+    expect(labelCalls).toEqual([]);
+  });
+});
+
+describe('compose-ha: each side asked by its own stack, where compose makes an IP', () => {
+  it('COMPOSE_FLOATING_IP (Scaleway): asked once per side, primary then standby', async () => {
+    holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: true }, true);
+    await run('destroyComposeHa', makeCtx('compose-ha', ['prod']));
+    expect(labelCalls).toEqual([
+      { project: 'proj', environment: 'prod-primary' },
+      { project: 'proj', environment: 'prod-standby' },
+    ]);
+  });
+
+  it('no compose IP (Hetzner, Linode): never asked, even with the method', async () => {
+    holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: false }, true);
+    await run('destroyComposeHa', makeCtx('compose-ha', ['prod']));
     expect(labelCalls).toEqual([]);
   });
 });

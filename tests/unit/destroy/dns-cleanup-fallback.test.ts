@@ -227,13 +227,13 @@ describe('cleanupDnsRecords: a refused record delete', () => {
 
   async function cleanup() {
     const stops: string[] = [];
-    const leaks: Array<{ resource: string; reason: string; hint?: string }> = [];
+    const leaks: Array<{ resource: string; reason: string; hint: string }> = [];
     const foreign: unknown[] = [];
     const results = {
       dns: [] as string[],
       healthChecks: [] as string[],
       leaks: {
-        leak: (e: { resource: string; reason: string }) => leaks.push(e),
+        leak: (e: { resource: string; reason: string; hint: string }) => leaks.push(e),
         foreign: (e: unknown) => foreign.push(e),
       },
     };
@@ -262,6 +262,9 @@ describe('cleanupDnsRecords: a refused record delete', () => {
     expect(leaks[0].resource).toContain('*.e1.example.com');
     expect(leaks[0].resource).toContain('1.2.3.4');
     expect(leaks[0].reason).toMatch(/403/);
+    // The step that works: destroy removes the entry, so a re-run cannot retry it.
+    expect(leaks[0].hint).toMatch(/^Delete \*\.e1\.example\.com in your Cloudflare DNS settings\./);
+    expect(leaks[0].hint).toMatch(/will not retry it/);
     expect(stops[0]).toMatch(/\*\.e1\.example\.com/);
     expect(stops[0]).not.toMatch(/not found/);
   });

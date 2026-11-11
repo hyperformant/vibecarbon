@@ -17,7 +17,13 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, deleteFailure, deleteRefused, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  replaceWireguardPeerRules,
+  sweepLabels,
+} from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
 // HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
@@ -1597,7 +1603,7 @@ export class LinodeProvider extends BaseProvider {
    * GET /networking/reserved/ips). An account past the guard is not read in
    * full, and a partial listing must not pass for the whole: destroy reads an
    * address missing from it as already released (reservedIpLabelMatch).
-   * @returns {Promise<Array<{ address: string, tags?: string[], linode_id?: number|null }>>}
+   * @returns {Promise<Array<{ address: string, tags?: string[], linode_id?: number|null, assigned_entity?: {id: number, label?: string, type?: string}|null }>>}
    * @throws when a page cannot be read, or there are more pages than the guard reads
    */
   async _listReservedIps() {
@@ -1650,18 +1656,18 @@ export class LinodeProvider extends BaseProvider {
    * (same encodeLabel encoding the k8s Pulumi program tags with). Lists
    * GET /networking/reserved/ips and filters client-side, the way
    * listServersDetailed does, so no server-side filter syntax is relied on.
-   * Empty labels match nothing: it never sweeps the whole account. One still
-   * assigned to a Linode (`linode_id`) is left alone: destroy runs after the
-   * teardown, so the Linode holding it is one the teardown did not delete,
-   * and an address is never taken off a running server.
+   * A label without a value is refused (sweepLabels): it never sweeps the
+   * whole account. One still assigned (`linode_id`, or `assigned_entity` for
+   * any entity) is left alone: destroy runs after the teardown, so whatever
+   * holds it is something the teardown did not delete, and an address is
+   * never taken off a running server.
    * @param {Object<string,string>} labels
    * @param {{except?: string[]}} [options] - addresses the caller already handled
    * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
    * @throws when the listing cannot be read
    */
   async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
-    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
-    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const wanted = sweepLabels(labels).map(([k, v]) => encodeLabel(k, v));
     const skip = new Set(except);
     const matches = (await this._listReservedIps()).filter(
       (ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)) && !skip.has(ip.address),
@@ -1669,11 +1675,18 @@ export class LinodeProvider extends BaseProvider {
     const deleted = [];
     const failed = [];
     for (const ip of matches) {
-      if (ip.linode_id != null) {
+      // Either field means assigned: `linode_id` names a Linode, and
+      // `assigned_entity` any entity the address is assigned to, so an
+      // address held by something other than a Linode is left alone too.
+      if (ip.linode_id != null || ip.assigned_entity != null) {
+        const holder =
+          ip.linode_id != null
+            ? `Linode ${ip.linode_id}`
+            : `${ip.assigned_entity.type ?? 'entity'} ${ip.assigned_entity.label ?? ip.assigned_entity.id}`;
         failed.push({
           address: ip.address,
           held: true,
-          reason: `it is still assigned to Linode ${ip.linode_id}, which was not deleted`,
+          reason: `it is still assigned to ${holder}, which was not deleted`,
         });
         continue;
       }

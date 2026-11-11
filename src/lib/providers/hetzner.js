@@ -10,7 +10,13 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, deleteFailure, deleteRefused, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  replaceWireguardPeerRules,
+  sweepLabels,
+} from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
 // C9 — operator firewall access. Verbatim value-move of operator-ip.js's old
@@ -1654,8 +1660,9 @@ export class HetznerProvider extends BaseProvider {
    *
    * The listing asks for the labels (`label_selector`) and the result is
    * filtered again here, so a selector the API reads more loosely can never
-   * widen what is deleted. Empty labels match nothing. Hetzner refuses to
-   * delete an assigned Floating IP (`must_be_unassigned`, since 2026-05), and
+   * widen what is deleted. A label without a value is refused (sweepLabels).
+   * Hetzner refuses to delete an assigned Floating IP (`must_be_unassigned`,
+   * since 2026-05), and
    * an address is never taken off a running server, so one still assigned is
    * left alone: the server holding it is one the teardown did not delete.
    * @param {Object<string,string>} labels
@@ -1664,8 +1671,7 @@ export class HetznerProvider extends BaseProvider {
    * @throws when the listing cannot be read whole
    */
   async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
-    const wanted = Object.entries(labels ?? {});
-    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const wanted = sweepLabels(labels);
     const selector = wanted.map(([k, v]) => `${k}=${v}`).join(',');
     const { items, complete, status } = await listHetznerPages({
       path: '/floating_ips',

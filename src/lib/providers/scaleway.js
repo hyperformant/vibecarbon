@@ -56,7 +56,13 @@ import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, deleteFailure, deleteRefused, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  replaceWireguardPeerRules,
+  sweepLabels,
+} from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -1834,8 +1840,8 @@ export class ScalewayProvider extends BaseProvider {
    * program creates the IP before the server, and destroy deletes the server
    * by its API, which releases only an IP attached to it: a deploy killed in
    * between leaves the IP attached to nothing and named nowhere but here.
-   * Filters client-side over every zone's listing. Empty labels match
-   * nothing. One still attached to a server is left alone: destroy runs
+   * Filters client-side over every zone's listing. A label without a value
+   * is refused (sweepLabels). One still attached to a server is left alone: destroy runs
    * after the server deletes, so that server is one they did not delete.
    * @param {Object<string,string>} labels
    * @param {{except?: string[]}} [options] - addresses the caller already handled
@@ -1843,8 +1849,7 @@ export class ScalewayProvider extends BaseProvider {
    * @throws when the listing cannot be read whole
    */
   async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
-    const wanted = encodeLabels(labels ?? {});
-    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const wanted = encodeLabels(Object.fromEntries(sweepLabels(labels)));
     const { items, complete, status } = await this.listFlexibleIPsDetailed();
     if (!complete) {
       throw new Error(

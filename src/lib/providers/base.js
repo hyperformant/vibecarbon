@@ -51,12 +51,37 @@ export function deleteFailure(providerName, status) {
  * floating or reserved IPs carrying ALL of `labels` that it released, and the
  * ones it did not, each with `held` (still on the account: assigned to a
  * server, which it never takes an address off, or a refused delete) or null
- * (nothing proves it either way), and a `reason` clause. Empty labels match
- * nothing, and an address in `except` is skipped (the caller handled it).
- * The method throws when the listing cannot be read whole: a partial one
- * would read as "nothing left".
+ * (nothing proves it either way), and a `reason` clause. An address in
+ * `except` is skipped (the caller handled it). The method throws when the
+ * listing cannot be read whole (a partial one would read as "nothing left"),
+ * and before any read when a label is missing (sweepLabels).
  * @typedef {{deleted: string[], failed: Array<{address: string, held: true|null, reason: string}>}} TaggedReservedIpSweep
  */
+
+/**
+ * The labels a `deleteReservedIpsByLabels` sweep is scoped by, refused unless
+ * there is at least one and every one has a value. A sweep without its full
+ * scope never runs: an undefined value would read as the literal tag
+ * `environment:undefined` on one provider and as a bare key on another, and
+ * no sweep may widen past this project's and this stack's labels. It throws
+ * rather than answer "nothing found", which would read as a clean sweep.
+ * @param {Object<string, string|undefined|null>|undefined|null} labels
+ * @returns {Array<[string, string]>}
+ */
+export function sweepLabels(labels) {
+  const entries = Object.entries(labels ?? {});
+  const missing = entries.filter(([, v]) => typeof v !== 'string' || v.trim() === '');
+  if (entries.length === 0 || missing.length > 0) {
+    throw new Error(
+      `refusing to sweep by labels without a value for each (${
+        entries.length === 0
+          ? 'no labels given'
+          : `no value for ${missing.map(([k]) => k).join(', ')}`
+      }), so nothing was listed or released`,
+    );
+  }
+  return entries;
+}
 
 export class BaseProvider {
   /**
