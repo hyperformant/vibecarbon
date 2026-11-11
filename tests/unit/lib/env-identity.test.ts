@@ -158,6 +158,26 @@ describe('resolveEnvSeed (deploy-side read)', () => {
     expect(r.envConfig).toEqual({ region: 'nbg1' });
   });
 
+  it('a -purge that deleted the app bucket: the seed keeps its name, never the mark', async () => {
+    // The rebuild lands on the same name (and makes the bucket again); the
+    // mark is the destroy's bookkeeping for the app key fence.
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            s3: { bucket: 'proj-abc-staging', region: 'fsn1' },
+            appBucketPurged: true,
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ s3: { bucket: 'proj-abc-staging', region: 'fsn1' } });
+  });
+
   it('a plain destroy kept the backups: the seed keeps their record', async () => {
     const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
     const r = resolveEnvSeed(

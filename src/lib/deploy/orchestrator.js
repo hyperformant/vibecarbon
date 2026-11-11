@@ -68,6 +68,7 @@ import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { DEGRADED_CAUSE, preserveSafetyFields } from './env-safety-fields.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
+import { fenceInfoLines } from './hetzner-app-key-fence.js';
 import {
   checkReissueAfterRestore,
   createAcmeIssuanceWatchdog,
@@ -354,7 +355,8 @@ function sameOrigins(a, b) {
  * @param {string} [opts.domain]
  * @param {() => Promise<{ canHeadBucket(bucket: string): Promise<boolean> }>} [opts.createAppProvider]
  *   - a client on the env's own app key; absent on the shared tier
- * @param {() => Promise<{ unverified?: string[], skipped?: string[] }>} [opts.fence] - the Hetzner fence sync
+ * @param {() => Promise<{ unverified?: string[], skipped?: string[], gone?: string[], located?: object[] }>} [opts.fence]
+ *   - the Hetzner fence sync; its `located` and `gone` print as info lines (fenceInfoLines)
  * @param {(ms: number) => Promise<void>} [opts.sleep] - test seam for the readiness poll
  * @returns {{
  *   done: Promise<void>,
@@ -421,6 +423,7 @@ export function startAppBucketFinalize({
           `app key fence written on ${fence.unverified.join(', ')}, not probed: no fenced key for it is stored on this machine`,
         );
       }
+      for (const line of fenceInfoLines(fence)) log.info(line);
       // Present only when the fence ran, so the caller can persist (or clear)
       // the unfenced marker status shows.
       const fenceOut = fence ? { fenceSkipped: fence.skipped ?? [] } : {};

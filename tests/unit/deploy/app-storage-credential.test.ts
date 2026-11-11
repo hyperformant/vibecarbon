@@ -400,6 +400,65 @@ describe('revoke on destroy', () => {
     }
   });
 
+  it('a destroy says when a bucket only a destroyed environment kept is in no region, never passing it over silently', async () => {
+    const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const { HetznerS3Provider } = await import('../../../src/lib/providers/hetzner-s3.js');
+    const { S3CompatibleProvider } = await import('../../../src/lib/providers/s3-base.js');
+    const prompts = await import('@clack/prompts');
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
+      accessKey: 'SENTINEL_INFRA_AK',
+      secretKey: 'SENTINEL_INFRA_SK',
+    });
+    vi.spyOn(HetznerS3Provider.prototype, 'ownerId').mockResolvedValue('OWNER');
+    vi.spyOn(S3CompatibleProvider.prototype, 'getBucketPolicy').mockRejectedValue(
+      Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' }),
+    );
+    const locate = vi.spyOn(S3CompatibleProvider.prototype, 'locateBucket').mockResolvedValue(null);
+    const info = vi.spyOn(prompts.log, 'info').mockImplementation(() => {});
+    vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-gone-'));
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      // old was destroyed with -purge by a CLI from before the mark, so its
+      // record still names an app bucket that may or may not be there.
+      const projectConfig = {
+        projectName: 'proj',
+        environments: {
+          staging: {
+            provider: 'hetzner',
+            s3: {
+              bucket: 'proj-abc-staging',
+              region: 'fsn1',
+              appKey: { id: 'AK_S', scoping: 'paste-fence', tier: 'fenced' },
+            },
+          },
+        },
+        destroyedEnvironments: {
+          old: { s3: { bucket: 'proj-abc-old', region: 'fsn1' }, destroyedAt: 'x' },
+        },
+      };
+      await DESTROY_EFFECTS.revokeAppStorageKey({
+        envConfig: projectConfig.environments.staging,
+        projectConfig,
+        environment: 'staging',
+        args: {},
+        results: { leaks: createLeakLedger() },
+        cwd: dir,
+        spinner: { start: vi.fn(), stop: vi.fn() },
+      });
+      expect(locate).toHaveBeenCalledWith('proj-abc-old');
+      expect(info).toHaveBeenCalledWith(
+        "app key fence: nothing to fence on proj-abc-old: only a destroyed environment's record names it, and no region has it now",
+      );
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('the destroy preview names the key it will revoke', async () => {
     const { destroyPreviewBody } = await import('../../../src/lib/destroy/preview.js');
     const body = destroyPreviewBody({

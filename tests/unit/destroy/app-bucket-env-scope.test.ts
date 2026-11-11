@@ -11,6 +11,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const PROD_BUCKET = 'myapp-cd9ecc-prod-storage';
 const STAGING_BUCKET = 'myapp-cd9ecc-staging-storage';
@@ -37,6 +38,16 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
       promptObjectStorageCredentials: async () => ({ accessKey: 'ak', secretKey: 'sk' }),
     }),
     getObjectStorageProvider: async () => s3,
+  };
+});
+
+const store = projectConfigStore();
+vi.mock('../../../src/lib/config.js', async (orig) => {
+  const real = (await orig()) as Record<string, unknown>;
+  return {
+    ...real,
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+      store.updateProjectConfig(fn),
   };
 });
 
@@ -72,13 +83,15 @@ async function destroy(
   projectConfig: ReturnType<typeof project>,
   environment: string,
   args: Record<string, unknown> = {},
-  steps: Array<'deleteAppBucket' | 'retainStateBucket' | 'handleBackupBucket'> = [
-    'deleteAppBucket',
-  ],
+  steps: Array<
+    'deleteAppBucket' | 'retainStateBucket' | 'handleBackupBucket' | 'updateProjectConfig'
+  > = ['deleteAppBucket'],
   isK8s = false,
 ) {
   const messages: string[] = [];
   const results: Record<string, unknown> = { leaks: createLeakLedger(), s3Bucket: null };
+  // The file as the destroy loaded it, for the record the last step writes.
+  store.reset(structuredClone(projectConfig));
   const ctx = {
     envConfig: projectConfig.environments[environment],
     projectConfig,
@@ -231,6 +244,59 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
     expect(text).toBe('');
     noSurvivors(results);
+  });
+});
+
+describe('the destroyed record says when -purge deleted the app bucket', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+  });
+  const recordAfter = async (
+    names: Array<'prod' | 'staging'>,
+    args: Record<string, unknown>,
+    tweak: (cfg: ReturnType<typeof project>) => void = () => {},
+  ) => {
+    const cfg = project(names);
+    tweak(cfg);
+    await destroy(cfg, 'staging', args, ['deleteAppBucket', 'updateProjectConfig']);
+    return store.lastWrite()?.destroyedEnvironments?.staging;
+  };
+
+  it('a deleted bucket is marked, so the app key fence never asks about it again', async () => {
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).toMatchObject({
+      s3: { bucket: STAGING_BUCKET },
+      appBucketPurged: true,
+    });
+  });
+
+  it('a bucket emptied for the orphan sweep is marked too: no data is left in it', async () => {
+    s3.emptyAndDeleteBucket.mockResolvedValueOnce({
+      deleted: false,
+      shellDeferred: true,
+      objectsRemoved: 4,
+      warnings: [],
+    } as never);
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).toMatchObject({
+      appBucketPurged: true,
+    });
+  });
+
+  it('a bucket not found where the record says is not marked: the record may name the wrong region', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(
+      Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' }),
+    );
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).not.toHaveProperty(
+      'appBucketPurged',
+    );
+  });
+
+  it('a plain destroy, and a -purge that keeps a pinned bucket, are not marked', async () => {
+    expect(await recordAfter(['prod', 'staging'], {})).not.toHaveProperty('appBucketPurged');
+    expect(
+      await recordAfter(['prod', 'staging'], { purgeBackups: true }, (cfg) => {
+        Object.assign(cfg.environments.staging.s3, { bucketPin: true });
+      }),
+    ).not.toHaveProperty('appBucketPurged');
   });
 });
 

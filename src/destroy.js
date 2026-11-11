@@ -39,6 +39,7 @@ import {
   revokeAppStorageCredential,
   syncHetznerFences,
 } from './lib/deploy/app-storage-credential.js';
+import { fenceInfoLines } from './lib/deploy/hetzner-app-key-fence.js';
 import { haSshKeyName as haSshKeyNameFor } from './lib/deploy/k8s/ha-ssh-key.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
@@ -1694,6 +1695,10 @@ async function deleteAppBucketEffect(ctx) {
         const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
         if (result.deleted) {
           results.s3Bucket = s3BucketName;
+          // The destroyed record says so, and the app key fence never asks
+          // about this bucket again. "Not found" below does not count: the
+          // record's region may be wrong, so the fence still looks for it.
+          results.appBucketPurged = true;
           spinner.stop(
             result.objectsRemoved > 0
               ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
@@ -1701,6 +1706,7 @@ async function deleteAppBucketEffect(ctx) {
           );
         } else if (result.shellDeferred) {
           results.s3Bucket = s3BucketName;
+          results.appBucketPurged = true;
           spinner.stop(
             `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
           );
@@ -1797,7 +1803,7 @@ async function revokeAppStorageKeyEffect(ctx) {
         s3Creds.secretKey,
         s3Region,
       );
-      await syncHetznerFences({
+      const fenced = await syncHetznerFences({
         projectConfig,
         environment,
         leaving: true,
@@ -1807,6 +1813,7 @@ async function revokeAppStorageKeyEffect(ctx) {
           getObjectStorageProvider(providerId, accessKey, secretKey, s3Region),
       });
       spinner.stop(`App storage key ${record.id} retired; it stays denied in every bucket fence`);
+      for (const line of fenceInfoLines(fenced)) p.log.info(line);
     } else {
       spinner.stop(
         `App storage key ${record.id} retired; the bucket fences were not updated (no object storage keys here), and they still deny it`,
@@ -2234,6 +2241,9 @@ async function updateProjectConfigEffect(ctx) {
             // backup bucket (backupsHoldings), and a rebuild's seed carries
             // no backups record (resolveEnvSeed).
             ...(results.backupsPurged && { backupsPurged: true }),
+            // This env's app bucket is deleted (or emptied for the orphan
+            // sweep): nothing left there for the app key fence to guard.
+            ...(results.appBucketPurged && { appBucketPurged: true }),
             destroyedAt: new Date().toISOString(),
           },
         };

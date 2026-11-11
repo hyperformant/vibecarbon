@@ -15,6 +15,7 @@ import {
   applyHetznerFences,
   FENCE_PROBE_BUDGET_MS,
   FENCE_PROBE_STREAK,
+  fenceInfoLines,
   fenceTargets,
   renderHetznerFencePolicy,
 } from '../../../src/lib/deploy/hetzner-app-key-fence.js';
@@ -356,7 +357,8 @@ describe('applyHetznerFences', () => {
       getBucketPolicy: vi.fn(async () => {
         throw noSuch;
       }),
-      bucketExists: vi.fn(async () => false),
+      // No region has it.
+      locateBucket: vi.fn(async () => null),
     };
     const out = await applyHetznerFences({
       s3,
@@ -402,7 +404,7 @@ describe('absent fence targets on a deploy (round 2)', () => {
   const noSuch = () =>
     Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' });
 
-  it('a first deploy whose own bucket answers NoSuchBucket and HeadBucket 404 is not skipped: it fails with the cause', async () => {
+  it('a first deploy whose own bucket answers NoSuchBucket is not skipped, nor looked for elsewhere: it fails with the cause', async () => {
     // prod is mid first deploy: no status, no bucketCreatedAt.
     const cfg = project({ staging: false });
     const targets = fenceTargets({ projectConfig: cfg, environment: 'prod' });
@@ -413,7 +415,7 @@ describe('absent fence targets on a deploy (round 2)', () => {
         if (b === 'proj-abc-state') throw noSuch();
         return null;
       }),
-      bucketExists: vi.fn(async () => false),
+      locateBucket: vi.fn(async () => null),
     };
     await expect(
       applyHetznerFences({
@@ -424,6 +426,9 @@ describe('absent fence targets on a deploy (round 2)', () => {
         ...fakeClock(),
       }),
     ).rejects.toThrow(/proj-abc-state answered NoSuchBucket/);
+    // Its storage step just made it: HEADs in other regions could start
+    // Hetzner's NoSuchBucket window on a bucket that young.
+    expect(s3.locateBucket).not.toHaveBeenCalled();
   });
 
   it("a never-deployed other env's absent bucket is skipped, warned about, and marked for status", async () => {
@@ -437,7 +442,7 @@ describe('absent fence targets on a deploy (round 2)', () => {
         if (b === 'proj-abc-staging') throw noSuch();
         return null;
       }),
-      bucketExists: vi.fn(async (b: string) => b !== 'proj-abc-staging'),
+      locateBucket: vi.fn(async () => null),
     };
     const out = await syncHetznerFences({
       projectConfig: cfg,
@@ -476,6 +481,41 @@ describe('absent fence targets on a deploy (round 2)', () => {
     // A later sync that fences everything clears the mark.
     markUnfencedBuckets(cfg, []);
     expect(unfencedBucketsLine(cfg.environments.staging)).toBeNull();
+  });
+
+  it('the deploy prints what the fence found: a bucket fenced in another region, and one no region has', async () => {
+    const { startAppBucketFinalize } = await import('../../../src/lib/deploy/orchestrator.js');
+    const finalize = startAppBucketFinalize({
+      providerId: 'digitalocean',
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => ['https://prod.dev'],
+        setBucketCors: async () => {},
+      }),
+      bucket: 'proj-abc-prod',
+      domain: 'prod.dev',
+      fence: async () => ({
+        written: [],
+        removed: [],
+        unverified: [],
+        skipped: [],
+        gone: ['proj-abc-old'],
+        located: [
+          {
+            bucket: 'proj-abc-staging',
+            region: 'fsn1',
+            onRecord: 'nbg1',
+            regionFrom: { env: 'staging', live: false, recorded: true, redeploy: null },
+          },
+        ],
+      }),
+    });
+    const log = { warn: vi.fn(), info: vi.fn() };
+    await finalize.finish(log);
+    expect(log.info.mock.calls.map((c) => c[0])).toEqual([
+      "app key fence: proj-abc-staging is in fsn1, not nbg1 as destroyed staging's record says; fenced it there",
+      "app key fence: nothing to fence on proj-abc-old: only a destroyed environment's record names it, and no region has it now",
+    ]);
+    expect(log.warn).not.toHaveBeenCalled();
   });
 });
 
@@ -542,9 +582,11 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
   /**
    * What `vibecarbon destroy <env>` leaves in the project file: the key
    * retired, and the environment's identity under destroyedEnvironments
-   * (with `backupsPurged` after a -purge that removed its backups).
+   * (with `backupsPurged` and `appBucketPurged` after a -purge that removed
+   * its backups and deleted its app bucket). `marked: false` is a -purge by
+   * a CLI from before `appBucketPurged`.
    */
-  function destroyed(cfg: Project, env: string, { purge = false } = {}) {
+  function destroyed(cfg: Project, env: string, { purge = false, marked = purge } = {}) {
     const live = cfg.environments[env] as ReturnType<typeof fencedEnv>;
     cfg.retiredAppKeys = [...(cfg.retiredAppKeys ?? []), live.s3.appKey.id];
     cfg.destroyedEnvironments = {
@@ -552,6 +594,7 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
       [env]: {
         ...envIdentityOf(live),
         ...(purge && { backupsPurged: true }),
+        ...(marked && { appBucketPurged: true }),
         destroyedAt: '2026-11-11T00:00:00.000Z',
       },
     };
@@ -595,9 +638,11 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
         if (world.flaky?.has(bucket)) throw noSuchBucket();
         return world.policies.get(bucket) ?? null;
       }),
-      bucketExists: vi.fn(async (bucket: string) => {
-        world.calls.push(`head ${bucket}@${region}`);
-        return there(bucket);
+      // Every region is asked (S3CompatibleProvider.locateBucket), whatever
+      // region this store is at.
+      locateBucket: vi.fn(async (bucket: string) => {
+        world.calls.push(`locate ${bucket}`);
+        return PLACES[bucket] && !world.gone?.has(bucket) ? PLACES[bucket] : null;
       }),
       putBucketPolicy: vi.fn(async (bucket: string, policy: object) => {
         world.calls.push(`put ${bucket}@${region}`);
@@ -643,8 +688,10 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
   }
 
   /** Each logged `<what> <bucket>@<region>` names its bucket's own region. */
+  /** Calls made outside the bucket's own region (a locate asks every region, so it never is). */
   const inOwnRegion = (entries: string[]) =>
     entries.filter((e) => {
+      if (e.startsWith('locate ')) return false;
       const [bucket, region] = (e.split(' ').at(-1) ?? '').split('@');
       return PLACES[bucket] !== region;
     });
@@ -754,8 +801,8 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
       .sort();
 
   /** prod and a new qa deploy their pasted keys in nbg1 after `destroy staging`. */
-  function afterStagingDestroyed({ purge = false } = {}) {
-    const cfg = destroyed(twoRegions(), 'staging', { purge });
+  function afterStagingDestroyed({ purge = false, marked = purge } = {}) {
+    const cfg = destroyed(twoRegions(), 'staging', { purge, marked });
     cfg.environments.qa = fencedEnv('qa', 'AK_Q', 'nbg1', BASE);
     return cfg;
   }
@@ -801,7 +848,7 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     expect(deniedOn(world, 'proj-abc-staging')).toEqual(['AK_P', 'AK_Q', 'AK_S']);
   });
 
-  it('after a -purge, the purged backups bucket is no target, and a deleted app bucket is passed over quietly', async () => {
+  it('after a -purge, the purged backups bucket and the deleted app bucket are never read again', async () => {
     const world = newWorld({ gone: new Set([FSN1, 'proj-abc-staging']) });
     const out = await syncHetznerFences({
       projectConfig: afterStagingDestroyed({ purge: true }),
@@ -811,12 +858,67 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
       createProbe: async () => probeAt('nbg1', []),
       ...fakeClock(),
     });
-    expect(world.calls.some((c) => c.includes(FSN1))).toBe(false);
-    // Asked where its record says, found gone there, and nothing to fence:
-    // not a skip to warn about (that is for a live environment's bucket).
-    expect(world.calls).toContain('head proj-abc-staging@fsn1');
+    // The record says -purge deleted both: no read, no locate, nothing to say.
+    expect(world.calls.filter((c) => c.includes(FSN1) || c.includes('proj-abc-staging'))).toEqual(
+      [],
+    );
+    expect(out.gone).toEqual([]);
+    expect(out.skipped).toEqual([]);
+    expect(fenceInfoLines(out)).toEqual([]);
+  });
+
+  it('a -purge from before the mark: the app bucket is looked for in every region, and one in none is reported', async () => {
+    const world = newWorld({ gone: new Set([FSN1, 'proj-abc-staging']) });
+    const out = await syncHetznerFences({
+      projectConfig: afterStagingDestroyed({ purge: true, marked: false }),
+      environment: 'qa',
+      s3: storeAt('nbg1', world),
+      secrets: qaKeys(),
+      createProbe: async () => probeAt('nbg1', []),
+      ...fakeClock(),
+    });
+    expect(world.calls).toEqual(
+      expect.arrayContaining(['get proj-abc-staging@fsn1', 'locate proj-abc-staging']),
+    );
+    // Nothing to fence, and not a skip to warn about (that is for a live
+    // environment's bucket), but never silent.
     expect(out.gone).toEqual(['proj-abc-staging']);
     expect(out.skipped).toEqual([]);
+    expect(fenceInfoLines(out)).toEqual([
+      "app key fence: nothing to fence on proj-abc-staging: only a destroyed environment's record names it, and no region has it now",
+    ]);
+  });
+
+  it('N1: a kept app bucket whose destroyed record names the wrong region (the old bug) is fenced where it is', async () => {
+    // staging was destroyed before a deploy repaired its record: the record
+    // says nbg1, the bucket and its uploads are in fsn1.
+    const cfg = twoRegions();
+    (cfg.environments.staging as ReturnType<typeof fencedEnv>).s3.region = 'nbg1';
+    destroyed(cfg, 'staging');
+    cfg.environments.qa = fencedEnv('qa', 'AK_Q', 'nbg1', BASE);
+    const world = newWorld();
+    const asked: string[] = [];
+    const out = await syncHetznerFences({
+      projectConfig: cfg,
+      environment: 'qa',
+      s3: storeAt('nbg1', world),
+      secrets: qaKeys(),
+      createProbe: async () => probeAt('nbg1', asked),
+      ...fakeClock(),
+    });
+    expect(world.calls).toEqual(
+      expect.arrayContaining([
+        'get proj-abc-staging@nbg1',
+        'locate proj-abc-staging',
+        'put proj-abc-staging@fsn1',
+      ]),
+    );
+    expect(deniedOn(world, 'proj-abc-staging')).toEqual(['AK_P', 'AK_Q', 'AK_S']);
+    expect(asked).toContain('proj-abc-staging@fsn1');
+    expect(out.gone).toEqual([]);
+    expect(fenceInfoLines(out)).toEqual([
+      "app key fence: proj-abc-staging is in fsn1, not nbg1 as destroyed staging's record says; fenced it there",
+    ]);
   });
 
   it('an older CLI’s environment with no backups record keeps the base bucket fenced in its uploads region', () => {
@@ -856,9 +958,9 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     expect(regions).toMatchObject({ 'proj-abc-state': 'nbg1', [BASE]: 'nbg1' });
   });
 
-  it('M1: the HeadBucket after a NoSuchBucket goes to the bucket’s own region', async () => {
-    // nbg1 answers the policy read with NoSuchBucket, and HeadBucket there
-    // finds the bucket: the store is answering two ways, so it is no skip.
+  it('M1: a bucket found where it answered NoSuchBucket is the store answering two ways, never a skip', async () => {
+    // nbg1 answers the policy read with NoSuchBucket, and the locate's
+    // HeadBucket finds the bucket in nbg1.
     const world = newWorld({ flaky: new Set([BASE]) });
     await expect(
       applyHetznerFences({
@@ -872,7 +974,7 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     ).rejects.toThrow(
       /proj-abc-backups answered NoSuchBucket in nbg1.*HeadBucket in nbg1 finds it/,
     );
-    expect(world.calls).toEqual([`get ${BASE}@nbg1`, `head ${BASE}@nbg1`]);
+    expect(world.calls).toEqual([`get ${BASE}@nbg1`, `locate ${BASE}`]);
   });
 
   it('M1: a fence nothing needs any more is removed in the bucket’s own region', async () => {
@@ -891,55 +993,137 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     expect(world.calls).toEqual([`get ${BASE}@nbg1`, `delete ${BASE}@nbg1`]);
   });
 
-  it('M2: NoSuchBucket at a region a record names says whose record, and how to correct it', async () => {
-    // The old bug: staging's record still names nbg1 for its fsn1 bucket.
+  it('M2: a live environment’s record that names the wrong region (the old bug) does not fail another deploy: the bucket is fenced where it is', async () => {
+    // staging's record still names nbg1 for its fsn1 bucket; prod deploys.
     const cfg = twoRegions();
     (cfg.environments.staging as ReturnType<typeof fencedEnv>).s3.region = 'nbg1';
-    const err = await syncHetznerFences({
+    const world = newWorld();
+    const out = await syncHetznerFences({
       projectConfig: cfg,
       environment: 'prod',
-      s3: storeAt('nbg1', newWorld()),
+      s3: storeAt('nbg1', world),
+      secrets: { get: () => undefined },
+      createProbe: async () => probeAt('nbg1', []),
+      ...fakeClock(),
+    });
+    expect(world.calls).toContain('put proj-abc-staging@fsn1');
+    // staging's own key is still let through on its own bucket.
+    expect(deniedOn(world, 'proj-abc-staging')).toEqual(['AK_P']);
+    expect(fenceInfoLines(out)).toEqual([
+      "app key fence: proj-abc-staging is in fsn1, not nbg1 as staging's record says; fenced it there",
+    ]);
+  });
+
+  it('N2: only the deploying environment’s own bucket is offered the caught-up reading, and it is never looked for elsewhere', async () => {
+    // prod deploys, and its own bucket answers NoSuchBucket where its
+    // storage step just made or found it.
+    const world = newWorld({ gone: new Set(['proj-abc-prod']) });
+    const err = await syncHetznerFences({
+      projectConfig: twoRegions(),
+      environment: 'prod',
+      s3: storeAt('nbg1', world),
       secrets: { get: () => undefined },
       createProbe: async () => probeAt('nbg1', []),
       ...fakeClock(),
     }).catch((e: Error) => e);
     expect((err as Error).message).toBe(
-      "bucket proj-abc-staging answered NoSuchBucket in nbg1, the region staging's record names for it, while its app key fence was read (The specified bucket does not exist). A deployed environment uses it, so it was not skipped. If this deploy made it moments ago, Hetzner has not caught up yet: deploy again in a few minutes. Otherwise staging's record names the wrong region: deploy staging again, which records where the bucket is.",
+      "bucket proj-abc-prod answered NoSuchBucket in nbg1, the region prod's record names for it, while its app key fence was read (The specified bucket does not exist). This deploy's storage step made or found it there just now, so it was not skipped: Hetzner most likely has not caught up with it yet. Deploy again in a few minutes.",
     );
-  });
+    expect(world.calls.filter((c) => c.startsWith('locate'))).toEqual([]);
 
-  it('M2: NoSuchBucket at a region inferred from an uploads region says so', async () => {
-    // `old` keeps backups in the base name with no record; it really lives in nbg1.
-    const cfg: Project = {
-      projectName: 'proj',
-      bucketSalt: 'abc',
-      environments: {
-        old: {
-          status: 'deployed',
-          deployedAt: '2026-01-01T00:00:00.000Z',
-          s3: { bucket: 'proj-abc-old', region: 'fsn1' },
-        },
-        qa: fencedEnv('qa', 'AK_Q', 'nbg1', 'proj-abc-nbg1-backups'),
-      },
-    };
-    const err = await syncHetznerFences({
-      projectConfig: cfg,
-      environment: 'qa',
-      s3: storeAt('nbg1', newWorld()),
+    // staging's bucket, gone from every region while staging is deployed:
+    // nothing this deploy made, so no caught-up reading.
+    const other = await syncHetznerFences({
+      projectConfig: twoRegions(),
+      environment: 'prod',
+      s3: storeAt('nbg1', newWorld({ gone: new Set(['proj-abc-staging']) })),
       secrets: { get: () => undefined },
       createProbe: async () => probeAt('nbg1', []),
       ...fakeClock(),
     }).catch((e: Error) => e);
-    expect((err as Error).message).toContain(
-      "bucket proj-abc-backups answered NoSuchBucket in fsn1, old's uploads region (no record names a region for this bucket), while its app key fence was read",
+    expect((other as Error).message).toBe(
+      "bucket proj-abc-staging answered NoSuchBucket in fsn1, the region staging's record names for it, while its app key fence was read (The specified bucket does not exist), and no region has it. A deployed environment uses it, so it was not skipped. Deploy staging again: its deploy records the bucket it uses from now on, making it if needed.",
     );
-    expect((err as Error).message).toContain(
-      'Deploy old again: its deploy records where the bucket is.',
-    );
-    expect((err as Error).message).not.toMatch(/young/);
+    expect((other as Error).message).not.toMatch(/moments ago|caught up|young/);
   });
 
-  it('M2: when a destroyed environment’s record gave the wrong region, the fix names the live environment that uses the bucket', async () => {
+  /** `old` predates backups records: it archives into the base bucket, its region a stand-in. */
+  const withOlderCliEnv = (): Project => ({
+    projectName: 'proj',
+    bucketSalt: 'abc',
+    environments: {
+      old: {
+        status: 'deployed',
+        deployedAt: '2026-01-01T00:00:00.000Z',
+        s3: { bucket: 'proj-abc-old', region: 'fsn1' },
+      },
+      qa: fencedEnv('qa', 'AK_Q', 'nbg1', 'proj-abc-nbg1-backups'),
+    },
+  });
+
+  it('N3: an older CLI’s base bucket outside its stand-in region stays fenced, where it is', async () => {
+    // The base bucket holds old's earlier backups in nbg1, not old's uploads
+    // region fsn1.
+    const world = newWorld();
+    const out = await syncHetznerFences({
+      projectConfig: withOlderCliEnv(),
+      environment: 'qa',
+      s3: storeAt('nbg1', world),
+      secrets: keysFor([['qa', 'AK_Q']]),
+      createProbe: async () => probeAt('nbg1', []),
+      ...fakeClock(),
+    });
+    expect(world.calls).toEqual(
+      expect.arrayContaining([`get ${BASE}@fsn1`, `locate ${BASE}`, `put ${BASE}@nbg1`]),
+    );
+    expect(deniedOn(world, BASE)).toEqual(['AK_Q']);
+    expect(fenceInfoLines(out)).toEqual([
+      "app key fence: proj-abc-backups is in nbg1, not old's uploads region fsn1; fenced it there",
+    ]);
+  });
+
+  it('a bucket no record names a region for is looked for from the client’s own region, and fenced where it is', async () => {
+    const world = newWorld();
+    const out = await applyHetznerFences({
+      s3: storeAt('fsn1', world),
+      ownerId: OWNER,
+      targets: [
+        {
+          bucket: BASE,
+          region: null,
+          deniedAccessKeyIds: ['AK_P'],
+          regionFrom: { env: 'old', live: true, recorded: false, redeploy: 'old' },
+        },
+      ],
+      ...fakeClock(),
+    });
+    expect(world.calls).toEqual([
+      `get ${BASE}@fsn1`,
+      `locate ${BASE}`,
+      `get ${BASE}@nbg1`,
+      `put ${BASE}@nbg1`,
+    ]);
+    expect(fenceInfoLines(out)).toEqual([
+      'app key fence: proj-abc-backups is in nbg1, and no record names its region; fenced it there',
+    ]);
+  });
+
+  it('N3: an older CLI’s base bucket in no region fails with what its deploy will do, not a promise to find it', async () => {
+    const err = await syncHetznerFences({
+      projectConfig: withOlderCliEnv(),
+      environment: 'qa',
+      s3: storeAt('nbg1', newWorld({ gone: new Set([BASE]) })),
+      secrets: { get: () => undefined },
+      createProbe: async () => probeAt('nbg1', []),
+      ...fakeClock(),
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(
+      "bucket proj-abc-backups answered NoSuchBucket in fsn1, old's uploads region (no record names a region for this bucket), while its app key fence was read (The specified bucket does not exist), and no region has it. A deployed environment uses it, so it was not skipped. Deploy old again: its deploy records the bucket it uses from now on, making it if needed.",
+    );
+    expect((err as Error).message).not.toMatch(/young|moments ago|caught up/);
+  });
+
+  it('M2: when a destroyed environment’s record gave the wrong region, the bucket is fenced where it is, and a fix names the live environment that uses it', async () => {
     // `old` uses the base bucket with no record (a stand-in region); destroyed
     // staging's record states hel1 for it, which wins as a stated region but
     // is wrong. Deploying staging again would make a new environment, so the
@@ -951,7 +1135,7 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
         old: {
           status: 'deployed',
           deployedAt: '2026-01-01T00:00:00.000Z',
-          s3: { bucket: 'proj-abc-old', region: 'nbg1' },
+          s3: { bucket: 'proj-abc-old', region: 'fsn1' },
         },
       },
       destroyedEnvironments: {
@@ -970,16 +1154,26 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
       live: true,
       regionFrom: { env: 'staging', live: false, recorded: true, redeploy: 'old' },
     });
-    const err = await syncHetznerFences({
-      projectConfig: cfg,
-      environment: 'old',
-      s3: storeAt('nbg1', newWorld()),
-      secrets: { get: () => undefined },
-      createProbe: async () => probeAt('nbg1', []),
-      ...fakeClock(),
-    }).catch((e: Error) => e);
+    // A deploy of qa, not old: old's buckets are not this deploy's.
+    cfg.environments.qa = fencedEnv('qa', 'AK_Q', 'nbg1', 'proj-abc-nbg1-backups');
+    const sync = (world: World) =>
+      syncHetznerFences({
+        projectConfig: cfg,
+        environment: 'qa',
+        s3: storeAt('nbg1', world),
+        secrets: { get: () => undefined },
+        createProbe: async () => probeAt('nbg1', []),
+        ...fakeClock(),
+      });
+    // In nbg1 after all: fenced there, and the wrong record is reported.
+    const out = await sync(newWorld());
+    expect(fenceInfoLines(out)).toEqual([
+      "app key fence: proj-abc-backups is in nbg1, not hel1 as destroyed staging's record says; fenced it there",
+    ]);
+    // In no region: the fix names old.
+    const err = await sync(newWorld({ gone: new Set([BASE]) })).catch((e: Error) => e);
     expect((err as Error).message).toBe(
-      "bucket proj-abc-backups answered NoSuchBucket in hel1, the region destroyed staging's record names for it, while its app key fence was read (The specified bucket does not exist). A deployed environment uses it, so it was not skipped. If this deploy made it moments ago, Hetzner has not caught up yet: deploy again in a few minutes. Otherwise destroyed staging's record names the wrong region: deploy old again, which records where the bucket is.",
+      "bucket proj-abc-backups answered NoSuchBucket in hel1, the region destroyed staging's record names for it, while its app key fence was read (The specified bucket does not exist), and no region has it. A deployed environment uses it, so it was not skipped. Deploy old again: its deploy records the bucket it uses from now on, making it if needed.",
     );
   });
 });
