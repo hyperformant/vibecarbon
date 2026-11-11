@@ -89,12 +89,9 @@ export function networkZoneFor(location) {
  * @property {Record<string,string>} labels
  * @property {string[]} [allowedSshIps]       CIDR list, defaults to 0.0.0.0/0
  * @property {string[]} [allowedK8sApiIps]    CIDR list, REQUIRED (no default since the H-2 closeout; public 6443 is operator-only — in-cluster + agent-tunnel traffic rides the private advertise-address)
- * @property {string} apiToken                Hetzner Cloud API token. Baked into
- *                                            the master cloud-init so the node
- *                                            can write the `hcloud` and
- *                                            `hcloud-csi` kube-system Secrets
- *                                            that hcloud-cloud-controller-manager
- *                                            and hcloud-csi-driver read on boot.
+ *
+ * No API token: no node's user data carries it. deployK3s hands it to the
+ * cluster's `hcloud` kube-system Secret itself (applyCloudSecrets).
  */
 
 /**
@@ -267,20 +264,17 @@ export function buildHetznerK8sProgram(config) {
       labels,
     });
 
-    // Master server — cloud-init script is rendered with floating IP, network
-    // id, and the Hetzner API token. The token + network id flow into
-    // `hcloud` and `hcloud-csi` kube-system Secrets; hcloud-cloud-controller-
-    // manager and hcloud-csi-driver fail to authenticate without them,
-    // which leaves PVCs Pending and the whole database install hanging on
-    // wait-for-db.
-    const masterUserData = pulumi.all([floatingIp.ipAddress, network.id]).apply(([ip, netId]) =>
+    // Master server — cloud-init script is rendered with the floating IP. No
+    // API token: user data sits in this stack's state in plain text, and the
+    // provider hands it to anything on the box. The cloud controller and CSI
+    // driver read the token from the `hcloud` kube-system Secret, which
+    // deployK3s applies from the operator's machine (applyCloudSecrets).
+    const masterUserData = floatingIp.ipAddress.apply((ip) =>
       renderScript(masterInitTemplate, {
         k3s_version: config.k3sVersion,
         k3s_token: k3sToken,
         cluster_name: clusterName,
         disable_traefik: 'true',
-        hcloud_token: config.apiToken ?? '',
-        network_id: netId,
         floating_ip: ip,
         // Stamped onto every CSI-created volume (HCLOUD_VOLUME_EXTRA_LABELS)
         // so shared-project enumeration (e2e sweeps) can attribute pvc-*

@@ -3,24 +3,26 @@
  * repo. Used by Phase 4.3b of the GitOps refactor — the deploy workflow
  * (.github/workflows/deploy.yml) reads per-environment `${{ secrets.X }}`
  * + `${{ vars.Y }}` to apply the vibecarbon-app-secrets and
- * vibecarbon-infra-secrets Secrets and the kube-system/hcloud Secret into the
- * cluster.
+ * vibecarbon-infra-secrets Secrets into the cluster. No cloud provider token
+ * goes to GitHub: `vibecarbon deploy` hands it to the cluster itself
+ * (applyCloudSecrets in src/lib/deploy/k8s/k3s.js).
  *
  * All calls go through the `gh` CLI (argv form, no shell interpolation) so
  * secret values never leak through ps/logs/shell history. Secret upload
  * pipes the value through stdin — `gh secret set NAME` (no --body) reads
  * stdin — to keep the value off argv.
  *
- * Decision: secret scope (1=org/repo-level, 2=per-environment) matches
- * the session 2026-04-20 discussion:
- *   Org-level:       HETZNER_API_TOKEN
+ * Every secret is per environment. The last repo-level one, the Hetzner
+ * Cloud API token deploy.yml once wrote into kube-system/hcloud, went with
+ * that step.
  *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, APP_DB_PASSWORD, BETTER_AUTH_SECRET,
  *                    S3_ACCESS_KEY / S3_SECRET_KEY (the env app's own storage
  *                    key, from appStorageCredential's resolution; never the
  *                    infra pair on a provider that scopes keys),
  *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*, and the add-ons'
  *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD / N8N_ENCRYPTION_KEY when installed
- *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL
+ *   Per-env vars:    SITE_URL, the backup and TLS certificate settings,
+ *                    KUBECTL_IMAGE and TRAEFIK_VERSION (deployK8sGitOps)
  */
 
 import { runCommandAsync } from './command.js';
@@ -108,28 +110,6 @@ async function setVariable(key, value, env, { timeout } = {}) {
   if (env) args.push('--env', env);
   await runCommandAsync(args, { silent: true, timeout });
   return true;
-}
-
-/**
- * Seed the org-level (repo-level) secrets. Called once per repo — values
- * are shared across all environments. If any are already set, they're
- * overwritten (rotation path).
- *
- * @param {object} [providerCreds] - Flat operator-secret values, resolved
- *   from process.env by the caller (configure.js) — see config-registry.js's
- *   operator-secret class.
- * @param {string} [providerCreds.hetznerApiToken]
- *
- * No object-storage pair here: the app's S3 pair is per environment (the
- * env's own key where the provider scopes one, security plan R2), so
- * deployK8sGitOps seeds it with the env's secrets. A repo-level pair would
- * be the infra key, and the app Secret would pick it up.
- */
-export async function seedOrgSecrets(providerCreds = {}) {
-  const applied = [];
-  if (await setSecretFromBodyFile('HETZNER_API_TOKEN', providerCreds.hetznerApiToken ?? ''))
-    applied.push('HETZNER_API_TOKEN');
-  return applied;
 }
 
 /**

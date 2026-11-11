@@ -316,10 +316,10 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts made and the CL
   });
 
   it.each(K8S_PROVIDERS)(
-    '%s: the record is what the boot script runs, while it still does',
+    '%s: the record is of the past: the boot script creates no Secret now',
     async (id, Provider) => {
-      const script = await Provider.getK8sMasterUserData({});
-      expect(masterInitSecrets(script)).toEqual(masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]));
+      expect(masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]).length).toBeGreaterThan(0);
+      expect(masterInitSecrets(await Provider.getK8sMasterUserData({}))).toEqual([]);
     },
   );
 });

@@ -498,11 +498,14 @@ function diagnoseNetwork(report, env, kubeconfig, Provider) {
 function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provider) {
   report.section('EGRESS (DNS + pod-network battery)');
 
-  // CCM env vars. For a provider whose CCM discovers network identity from an
-  // injected env var (Hetzner's HCLOUD_NETWORK via secretKeyRef:hcloud/network
-  // — if empty here the route-controller is silently disabled, see
-  // hcloud-cloud-controller-manager #115/#630), the subsection label names
-  // that var so its presence is easy to eyeball in the dump. A provider with
+  // CCM env vars. For a provider whose CCM can discover network identity from
+  // an injected env var (Hetzner's HCLOUD_NETWORK: if empty the
+  // route-controller is silently disabled, see hcloud-cloud-controller-manager
+  // #115/#630), the subsection label names that var so its presence is easy
+  // to eyeball in the dump. vibecarbon's Hetzner CCM runs without it (the
+  // manifest without networks support, and kube-system/hcloud holds the token
+  // alone; carbon/k8s/base/traefik/network-policy.yaml says why), so absent is
+  // the expected answer there. A provider with
   // no such var (networkEnvVar === '' — e.g. DO, which discovers VPC
   // membership from droplet metadata instead) gets a generic label; the probe
   // runs either way, since dumping ALL of the CCM container's env vars is

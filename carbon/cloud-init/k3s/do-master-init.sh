@@ -101,7 +101,13 @@ mirrors:
 # @include _k3s-system-image-mirror.yaml
 REGEOF
 
-# Install k3s master with pre-shared token.
+# Install the k3s master.
+# The k3s token joins agents only: --agent-token, and no --token. It sits in
+# every node's user data and in the stack's state, so it must not be the
+# server token, which lets a machine join as another server and read the
+# datastore, CA keys included. k3s makes that one itself, at random, on this
+# box, and no second server ever joins
+# (tests/integration/docker/k3s-agent-token.test.ts).
 # --node-ip is this node's PRIVATE (VPC) IP and --node-external-ip is its
 # PUBLIC IP. The DigitalOcean Cloud Controller Manager discovers/matches
 # nodes by provider-id (pre-seeded below via --kubelet-arg=provider-id),
@@ -140,7 +146,7 @@ for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server \
       --disable-default-registry-endpoint \
       --cluster-init \
-      --token "${k3s_token}" \
+      --agent-token "${k3s_token}" \
       --tls-san "$PUBLIC_IP" \
       --tls-san "$PRIVATE_IP" \
       --node-ip "$PRIVATE_IP" \
@@ -187,22 +193,19 @@ fi
 
 _m x
 
-# Marker for vibecarbon's deployK3s waiter -- set AFTER the digitalocean
-# Secret + CCM/CSI install below complete (see end of script). Keeps the
-# early-readiness signal distinct from "fully provisioned and ready for
-# app install." Every node boots tainted
-# node.cloudprovider.kubernetes.io/uninitialized until the CCM reconciles
-# it (M3 dossier SS1), so the STRICT order below -- secret, then CCM, then
-# CSI, then this marker -- matters: nothing downstream should wait on
-# scheduling before the CCM is authenticated and running.
-
-# Create the single DigitalOcean API-token secret. Serves BOTH the CCM
-# (below) and the CSI driver: unlike a two-secret split, DigitalOcean's
-# self-managed docs specify ONE `digitalocean`/`access-token` secret
-# consumed by both the CCM and the CSI driver.
-kubectl -n kube-system create secret generic digitalocean \
-  --from-literal=access-token="${do_token}" \
-  --dry-run=client -o yaml | kubectl apply -f -
+# Marker for vibecarbon's deployK3s waiter -- set AFTER the CCM/CSI
+# install below completes (see end of script). Keeps the early-readiness
+# signal distinct from "fully provisioned and ready for app install."
+#
+# No Secret here: the CCM and the CSI driver both read the DigitalOcean API
+# token from ONE `digitalocean`/`access-token` Secret (DigitalOcean's
+# self-managed docs), which deployK3s applies from the operator's machine
+# once the apiserver serves (applyCloudSecrets), so the token never rides in
+# this user data. Every node boots tainted
+# node.cloudprovider.kubernetes.io/uninitialized until the CCM reconciles it
+# (M3 dossier SS1), and the CCM waits for that Secret, so deployK3s restarts
+# it the moment the Secret exists instead of leaving it to Kubernetes' own
+# retry.
 
 # Install the DigitalOcean Cloud Controller Manager, pinned to v0.1.72. The URL
 # is the git tag, so neither the version nor the path can move underneath us.
@@ -306,8 +309,8 @@ echo "k3s master installation complete!"
 
 # Final marker: vibecarbon's deployK3s waiter polls for /tmp/k3s-ready
 # before fetching kubeconfig + applying app manifests. Written here so the
-# marker only fires after k3s + the digitalocean secret + CCM + CSI are
-# all in place -- i.e., the cluster is ready for real workloads, not just
-# "k3s daemon is up."
+# marker only fires after k3s + CCM + CSI are all in place -- i.e., the
+# cluster is ready for the token and real workloads, not just "k3s daemon
+# is up."
 _m e
 touch /tmp/k3s-ready

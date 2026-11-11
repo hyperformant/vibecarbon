@@ -14,7 +14,6 @@ import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 const masterVars = {
   k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
-  linode_token: 'linode_test_token_1234',
   project_tag: 'project:quorum',
 };
 const agentVars = {
@@ -130,10 +129,14 @@ describe('LinodeProvider k8s user-data statics', () => {
     });
   });
 
-  it('master: creates the linode Secret, applies the pinned CSI asset and the tagged StorageClass', async () => {
+  it('master: applies the pinned CSI asset and the tagged StorageClass, and creates no Secret', async () => {
     const rendered = await LinodeProvider.getK8sMasterUserData(masterVars);
-    expect(rendered).toContain('create secret generic linode');
-    expect(rendered).toContain('--from-literal=token="linode_test_token_1234"');
+    // The CLI hands the Linode token to the cluster (applyCloudSecrets).
+    expect(rendered).not.toContain('create secret');
+    expect(rendered).toContain('--agent-token "deadbeefcafe1234567890abcdef"');
+    // Commands only: the comment above the install says why there is no --token.
+    const commands = rendered.split('\n').filter((line) => !line.trimStart().startsWith('#'));
+    expect(commands.join('\n')).not.toMatch(/--token\b/);
     expect(rendered).toContain(`kubectl apply -f ${CSI_URL}`);
     expect(rendered).toContain('name: linode-block-storage-vibecarbon');
     expect(rendered).toContain('provisioner: linodebs.csi.linode.com');

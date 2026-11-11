@@ -55,47 +55,20 @@ describe('github-environments', () => {
     });
   });
 
-  describe('seedOrgSecrets', () => {
-    it('only sets non-empty secrets and feeds values via stdin (never --body)', async () => {
-      const { seedOrgSecrets } = await freshImport();
-      const applied = await seedOrgSecrets({
-        hetznerApiToken: 'hcloud-abc',
-      });
-      expect(applied).toEqual(['HETZNER_API_TOKEN']);
-
-      const secretSetCalls = runCommandAsyncMock.mock.calls.filter(
-        (c) => c[0][0] === 'gh' && c[0][1] === 'secret' && c[0][2] === 'set',
+  describe('repo-level secrets', () => {
+    it('there is no repo-level secret seeder: every secret is per environment', async () => {
+      // The last one wrote the Hetzner Cloud API token for deploy.yml's
+      // kube-system/hcloud step, which is gone with it
+      // (tests/unit/deploy/gitops-provider-token.test.ts).
+      const mod = await freshImport();
+      expect(Object.keys(mod)).not.toContain('seedOrgSecrets');
+      // `gh secret set` without --env is repo-level: every call names one.
+      const src = readFileSync(join(process.cwd(), 'src/lib/github-environments.js'), 'utf-8');
+      const calls = [...src.matchAll(/(?<!function )setSecretFromBodyFile\(([^)]*)\)/g)].map(
+        ([, args]) => args.split(',').map((a) => a.trim()),
       );
-      expect(secretSetCalls).toHaveLength(1);
-
-      // Every secret-set call: value on stdin (options.input), never on argv.
-      for (const [argv, opts] of secretSetCalls) {
-        expect(argv).not.toContain('--body');
-        expect(argv).not.toContain('--body-file');
-        // Env-level should NOT appear (org-level secrets).
-        expect(argv).not.toContain('--env');
-        // Value flows via stdin.
-        expect(typeof opts?.input).toBe('string');
-        expect(opts.input.length).toBeGreaterThan(0);
-      }
-    });
-
-    it('never seeds a repo-level object storage pair: the app gets its own per environment', async () => {
-      const { seedOrgSecrets } = await freshImport();
-      // A stray pair from an older caller is ignored, never uploaded.
-      const applied = await seedOrgSecrets({
-        s3AccessKey: 'SENTINEL_INFRA_AK',
-        s3SecretKey: 'SENTINEL_INFRA_SK',
-      } as Record<string, string>);
-      expect(applied).toEqual([]);
-      const uploaded = runCommandAsyncMock.mock.calls.map((c) => c[1]?.input).filter(Boolean);
-      expect(uploaded).not.toContain('SENTINEL_INFRA_AK');
-    });
-
-    it('defaults to an empty object and applies nothing when called with no args', async () => {
-      const { seedOrgSecrets } = await freshImport();
-      const applied = await seedOrgSecrets();
-      expect(applied).toEqual([]);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const args of calls) expect(args[2], args.join(', ')).toBe('envName');
     });
   });
 
@@ -105,7 +78,7 @@ describe('github-environments', () => {
       const result = await seedEnvironmentSecrets(
         'dev',
         { DB_PASSWORD: 'pw', JWT_SECRET: '' /* skipped */ },
-        { SITE_URL: 'https://dev.example.com', HCLOUD_NETWORK_ID: '' /* skipped */ },
+        { SITE_URL: 'https://dev.example.com', TLS_SNAPSHOT_S3_PREFIX: '' /* skipped */ },
       );
       expect(result.secrets).toEqual(['DB_PASSWORD']);
       expect(result.vars).toEqual(['SITE_URL']);

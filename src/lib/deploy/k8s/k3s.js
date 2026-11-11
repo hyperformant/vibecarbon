@@ -5679,7 +5679,6 @@ async function deployK3sSteps(options, inFlight) {
       minWorkers,
       maxWorkers,
       k3sVersion: k3sVersion(),
-      apiToken: options.apiToken,
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
       allowedSshIps: allowedCidrs,
       allowedK8sApiIps: allowedCidrs,

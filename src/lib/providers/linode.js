@@ -484,13 +484,13 @@ export class LinodeProvider extends BaseProvider {
   // ── k8s boot user-data (carbon/cloud-init/k3s/linode-*-init.sh) ─────────
 
   /**
-   * Render the k3s master boot script. The Linode API token is the CSI
-   * driver's credential; project_tag is the project tag on every volume the
-   * CSI driver creates, `encodeLabel('project', projectName)`.
+   * Render the k3s master boot script. project_tag is the project tag on
+   * every volume the CSI driver creates, `encodeLabel('project',
+   * projectName)`. No API token: deployK3s hands the CSI driver's
+   * credential to the cluster itself (applyCloudSecrets).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   *   linode_token: string,
    *   project_tag: string,
    * }} vars - The template's complete var set.
    * @returns {Promise<string>}

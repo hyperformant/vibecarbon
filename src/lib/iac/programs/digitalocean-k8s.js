@@ -163,11 +163,9 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  * @property {string[]} [allowedSshIps]       CIDR list, REQUIRED (no default — H-2 guard)
  * @property {string[]} [allowedK8sApiIps]    CIDR list, REQUIRED (no default — H-2 guard;
  *                                             public 6443 is operator-only)
- * @property {string} apiToken         DigitalOcean API token. Baked into the
- *                                     master cloud-init as `do_token` so the
- *                                     node can write the single `digitalocean`
- *                                     kube-system Secret that the DO CCM and
- *                                     CSI driver both read on boot.
+ *
+ * No API token: no node's user data carries it. deployK3s hands it to the
+ * cluster's `digitalocean` kube-system Secret itself (applyCloudSecrets).
  */
 
 /**
@@ -330,11 +328,11 @@ export function buildDigitalOceanK8sProgram(config) {
     // needs the floating IP + network id as template vars), the master
     // user-data here needs neither its own private IP (unknowable
     // pre-create) nor an ingress IP (the cluster has none besides its own
-    // address) — its var set is exactly {k3s_version, k3s_token, do_token}.
+    // address) — its var set is exactly {k3s_version, k3s_token}. No API
+    // token: deployK3s hands it to the cluster itself (applyCloudSecrets).
     const masterUserDataRaw = await DigitalOceanProvider.getK8sMasterUserData({
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
-      do_token: config.apiToken ?? '',
     });
     const master = new digitalocean.Droplet(
       'master',

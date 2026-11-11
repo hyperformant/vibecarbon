@@ -129,14 +129,15 @@ jobs:
       - name: Load wireguard
         run: sudo modprobe wireguard
 
-      # And the CLI's takeover of the cloud Secrets master-init.sh creates, on
-      # the same release's apiserver.
+      # And the CLI's takeover of the cloud Secrets an older master-init.sh
+      # created, on the same release's apiserver, and that the k3s token in
+      # user data joins agents only.
       - name: k3s from master-init.sh's flags, pulling only from our mirror
         env:
           DOCKER_INTEGRATION: 'true'
           VC_K3S_VERSION: ${{ needs.plan.outputs.k3s }}
           VC_TRAEFIK_IMAGE: ${{ needs.plan.outputs.traefik_image }}
-        run: pnpm exec vitest run --project integration-docker tests/integration/docker/k3s-recorded-flags.test.ts tests/integration/docker/k8s-cloud-secrets-takeover.test.ts
+        run: pnpm exec vitest run --project integration-docker tests/integration/docker/k3s-recorded-flags.test.ts tests/integration/docker/k8s-cloud-secrets-takeover.test.ts tests/integration/docker/k3s-agent-token.test.ts
 
   publish:
     name: Publish the list

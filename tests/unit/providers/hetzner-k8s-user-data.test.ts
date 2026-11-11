@@ -47,6 +47,11 @@
  * RE-CAPTURED 2026-11-05 (Kubernetes 1.37): the k3s, CCM and CSI versions and
  * the comments naming the old driver ceiling. The diff is confined to those
  * lines.
+ * RE-CAPTURED 2026-11-11 (no provider token in user data): the master no
+ * longer creates the hcloud and hcloud-csi Secrets (the CLI applies hcloud
+ * itself, applyCloudSecrets), installs k3s with `--agent-token` instead of
+ * `--token`, and the comments around both say so. The worker and db fixtures
+ * are unchanged. The diff is confined to those lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -59,8 +64,6 @@ const masterVars = {
   k3s_token: 'deadbeefcafe1234567890abcdef',
   cluster_name: 'acme-prod',
   disable_traefik: 'true',
-  hcloud_token: 'htk_test_token_1234',
-  network_id: 12345,
   floating_ip: '203.0.113.10',
   project_name: 'acme',
 };

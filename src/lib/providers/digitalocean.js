@@ -466,11 +466,11 @@ export class DigitalOceanProvider extends BaseProvider {
    * assigned to the master after it already exists), no network-id var
    * (the DO CCM discovers VPC membership from metadata, not an injected
    * id), no project-name var (DO's CSI has no label-injection env to
-   * stamp it onto — see the template's own note).
+   * stamp it onto — see the template's own note), and no API token
+   * (deployK3s hands it to the cluster itself, applyCloudSecrets).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   *   do_token: string,
    * }} vars - Substituted into do-master-init.sh's `${...}` placeholders —
    *   this is the template's COMPLETE var set (unlike
    *   HetznerProvider.getK8sMasterUserData, every key here is actually

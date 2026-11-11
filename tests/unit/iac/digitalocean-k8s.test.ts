@@ -355,12 +355,14 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     ]);
   });
 
-  it('renders master user-data through DigitalOceanProvider.getK8sMasterUserData + transliterateToAscii (do_token embedded, no placeholders)', () => {
+  it('renders master user-data through DigitalOceanProvider.getK8sMasterUserData + transliterateToAscii (no token, no placeholders)', () => {
     const master = byType('digitalocean:index/droplet:Droplet').find(
       (d) => d.inputs.name === `${CLUSTER_NAME}-master`,
     );
     const userData = unsealMockInput<string>(master?.inputs.userData);
-    expect(userData).toContain('--from-literal=access-token="dop_v1_test_token_1234"');
+    // The CLI hands the token to the cluster (applyCloudSecrets).
+    expect(userData).not.toContain('dop_v1_test_token_1234');
+    expect(userData).toContain('--agent-token "');
     expect(userData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     expect([...userData].every((ch) => (ch.codePointAt(0) ?? 0) <= 0x7f)).toBe(true);
   });

@@ -106,7 +106,10 @@ function assertLabelsFit(labels) {
  * @property {Record<string,string>} [labels]
  * @property {string[]} allowedSshIps    CIDR list, required
  * @property {string[]} allowedK8sApiIps CIDR list, required
- * @property {string} apiToken           Linode API token (the CSI driver's credential)
+ *
+ * No API token: no node's user data carries it. deployK3s hands it to the
+ * cluster's `linode` kube-system Secret, the CSI driver's credential, itself
+ * (applyCloudSecrets).
  */
 
 // Pulumi's rule properties are the plural `ipv4s`/`ipv6s`; splitCidrsByFamily
@@ -252,7 +255,6 @@ export function buildLinodeK8sProgram(config) {
     const masterUserData = await LinodeProvider.getK8sMasterUserData({
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
-      linode_token: config.apiToken ?? '',
       project_tag: encodeLabel('project', config.projectName),
     });
     const master = new linode.Instance(

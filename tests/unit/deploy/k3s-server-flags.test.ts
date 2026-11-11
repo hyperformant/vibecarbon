@@ -16,7 +16,7 @@ describe('k3sServerFlags', () => {
     expect(flags.slice(0, 3)).toEqual([
       '--disable-default-registry-endpoint',
       '--cluster-init',
-      '--token',
+      '--agent-token',
     ]);
     expect(flags.at(-1)).toBe('--write-kubeconfig-mode=600');
     expect(flags).toEqual(expect.arrayContaining(['--flannel-backend=wireguard-native']));
@@ -73,6 +73,53 @@ describe('k3sServerFlags', () => {
         const agent = k3sServerFlags(linode(role), LINODE_VARS, 'agent');
         expect(agent).not.toContain('--advertise-address');
       }
+    });
+  });
+
+  describe('the k3s token joins agents and nothing else', () => {
+    // `--agent-token` lets a node join as an agent only. The server token,
+    // which would let a machine join as another server and read the
+    // datastore, CA keys included, is left to k3s: it makes a random one on
+    // the master, and no second server ever joins. The Docker tier runs it:
+    // tests/integration/docker/k3s-agent-token.test.ts.
+    const read = (file: string) => readFileSync(`carbon/cloud-init/k3s/${file}`, 'utf8');
+    /** Every variable a script names, filled with its own name, so any line reads. */
+    const named = (text: string) =>
+      Object.fromEntries(
+        [...text.matchAll(/\$\{(\w+)\}|\$(\w+)/g)].map(([, braced, bare]) => [
+          braced ?? bare,
+          `<${braced ?? bare}>`,
+        ]),
+      );
+    /** The line a script installs k3s with, the env before `sh -s -` included. */
+    const installLine = (text: string, role: 'server' | 'agent') =>
+      text.split('\n').find((line) => new RegExp(`\\bsh -s - ${role} \\\\$`).test(line)) ?? '';
+
+    it.each(['master-init.sh', 'do-master-init.sh', 'linode-master-init.sh'])(
+      '%s: --agent-token is the k3s token, and no server token is set',
+      (file) => {
+        const text = read(file);
+        const flags = k3sServerFlags(text, named(text));
+        expect(flags[flags.indexOf('--agent-token') + 1]).toBe('<k3s_token>');
+        expect(flags.filter((f) => /^--(token|agent-token)(=|$)/.test(f))).toEqual([
+          '--agent-token',
+        ]);
+        expect(flags.some((f) => /^--token-file|^-t$/.test(f))).toBe(false);
+        expect(installLine(text, 'server')).not.toMatch(/K3S_(AGENT_)?TOKEN/);
+      },
+    );
+
+    it.each([
+      'worker-init.sh',
+      'db-init.sh',
+      'do-worker-init.sh',
+      'do-db-init.sh',
+      'linode-worker-init.sh',
+      'linode-db-init.sh',
+    ])('%s: joins with K3S_TOKEN set to the k3s token', (file) => {
+      const line = installLine(read(file), 'agent');
+      expect(line).toContain(`K3S_TOKEN="\${k3s_token}"`);
+      expect(line).not.toContain('K3S_AGENT_TOKEN');
     });
   });
 

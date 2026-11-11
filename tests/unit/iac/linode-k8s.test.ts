@@ -81,6 +81,9 @@ const baseConfig = {
   workerServerType: 'g6-standard-2',
   minWorkers: 2,
   k3sVersion: 'v1.37.2+k3s1',
+  // Programs no longer read it: the census
+  // (tests/unit/deploy/k8s-user-data-secret-census.test.ts) passes it to
+  // prove no resource gets it.
   apiToken: 'linode_test_token_1234',
   allowedSshIps: ['203.0.113.5/32', '2001:db8::1/128'],
   allowedK8sApiIps: ['203.0.113.6/32'],
@@ -253,7 +256,9 @@ describe('buildLinodeK8sProgram resource graph', () => {
       unsealMockInput<Array<{ userData: string }>>(master.inputs.metadatas)[0].userData,
       'base64',
     ).toString();
-    expect(userData).toContain('linode_test_token_1234');
+    // The CLI hands the token to the cluster (applyCloudSecrets).
+    expect(userData).not.toContain('linode_test_token_1234');
+    expect(userData).toContain('--agent-token');
     expect(userData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
   });
 

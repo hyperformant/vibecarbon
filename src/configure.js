@@ -919,10 +919,11 @@ async function promptPlausible(env, ctx = {}) {
  * purely additive: it adds the git-push deploy path for compose, and lays
  * down GHA workflow files in the repo for teams that want them.
  *
- * Org-level secret seeding (Hetzner/Cloudflare/S3 tokens) is NOT done here —
- * the first push-mode compose deploy (or first `-mode k8s` deploy) still runs
- * `seedOrgSecrets` via `deployK8sGitOps`. Kept that way so secrets only land
- * in GitHub when the user actually deploys, not when they merely configure.
+ * No secret is seeded here: a k8s environment's GitHub Environment is seeded
+ * by `deployK8sGitOps`, so secrets only land in GitHub when the user layers
+ * GitOps onto a running cluster, not when they merely configure. The cloud
+ * provider token never goes to GitHub at all (`vibecarbon deploy` hands it to
+ * the cluster itself).
  */
 async function promptCicd() {
   p.log.info(c.bold('CI/CD (GitHub Actions)'));
@@ -1622,9 +1623,6 @@ export async function runConfigureCicd(envName) {
   p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
   const { deployK8sGitOps, gitopsTargets } = await import('./lib/deploy/k8s/gitops-deploy.js');
   const { getImageTag } = await import('./lib/ci-setup.js');
-  const providerCreds = {
-    hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
-  };
   const imageTag = getImageTag(cwd);
   // The app pod's object-storage pair, per environment: the env's own key
   // where the provider scopes one (security plan R2), never the infra pair
@@ -1693,8 +1691,6 @@ export async function runConfigureCicd(envName) {
       domain: subEnvConfig.domain || envConfig.domain,
       projectName: projectConfig.projectName,
       kubeconfigPath: targetKubeconfig,
-      networkId: subEnvConfig.networkId || envConfig.networkId,
-      providerCreds,
       appStorage,
       imageTag,
       backupConfig: subEnvConfig.backup || envConfig.backup,

@@ -28,7 +28,6 @@ import {
 } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
-  seedOrgSecrets: vi.fn(async () => {}),
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
   triggerDeployWorkflow: vi.fn(async () => {}),
@@ -179,9 +178,7 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
       domain: 'app.example.test',
       projectName: 'proj',
       kubeconfigPath: join(project, 'kubeconfig'),
-      networkId: '',
       dnsProvider: 'hetzner',
-      providerCreds: {},
       appStorage: { accessKey: 'a', secretKey: 'b' },
       githubOwner: 'acme',
       ...extra,

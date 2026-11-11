@@ -19,7 +19,6 @@ import { gitSafeEnv } from '../../../src/lib/command.js';
 import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
-  seedOrgSecrets: vi.fn(async () => {}),
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
   triggerDeployWorkflow: vi.fn(async () => {}),
@@ -58,9 +57,7 @@ async function deployWith(
     domain: 'app.example.test',
     projectName: 'proj',
     kubeconfigPath: join(project, 'kubeconfig'),
-    networkId: '',
     dnsProvider: 'manual',
-    providerCreds: {},
     appStorage: { accessKey: 'a', secretKey: 'b' },
     githubOwner: 'acme',
     backupConfig,

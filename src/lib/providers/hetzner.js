@@ -439,8 +439,7 @@ export class HetznerProvider extends BaseProvider {
   // shell.js (network env export + banner). See base.js K8S_ASSETS for
   // the field-by-consumer breakdown. `cloudSecretName` was in the original
   // plan sketch but dropped — no call site in these three consumers reads
-  // a k8s Secret name (that literal lives in carbon/cloud-init/k3s/master-init.sh,
-  // templated by iac/programs/hetzner-k8s.js, out of scope until Phase B).
+  // a k8s Secret name (k8sCloudSecrets below names the one deployK3s writes).
   static K8S_ASSETS = {
     csiNodeDaemonSet: 'daemonset/hcloud-csi-node',
     csiControllerSelector:
@@ -508,17 +507,16 @@ export class HetznerProvider extends BaseProvider {
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   *   hcloud_token: string,
-   *   network_id: string|number,
    *   floating_ip: string,
    *   project_name: string,
    *   cluster_name?: string,
    *   disable_traefik?: string,
    * }} vars - Passed straight through to renderScript; must match
    *   hetzner-k8s.js's own masterUserData renderScript call vars EXACTLY
-   *   for byte-identical output. Only k3s_version, k3s_token,
-   *   hcloud_token, network_id, floating_ip, and project_name are actually
-   *   substituted into master-init.sh's `${...}` placeholders —
+   *   for byte-identical output. Only k3s_version, k3s_token, floating_ip,
+   *   and project_name are actually substituted into master-init.sh's
+   *   `${...}` placeholders — no API token: deployK3s hands it to the
+   *   cluster itself (applyCloudSecrets);
    *   cluster_name/disable_traefik are accepted for call-site parity with
    *   hetzner-k8s.js but are unused by the template (same as today).
    * @returns {Promise<string>}

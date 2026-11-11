@@ -10,8 +10,9 @@
  *   4. Trigger .github/workflows/deploy.yml + wait for completion.
  *
  * The workflow (Phase 4.3b.C) installs Flux + root Kustomization + applies
- * vibecarbon-app-secrets / vibecarbon-infra-secrets / cert-manager `hetzner` /
- * kube-system/hcloud Secrets.
+ * the vibecarbon-app-secrets / vibecarbon-infra-secrets Secrets. It writes no
+ * cloud provider Secret: `vibecarbon deploy` hands the provider API token to
+ * the cluster itself (applyCloudSecrets in ./k3s.js), so GitHub keeps no copy.
  * Flux reconciles the rest from the committed k8s/ tree.
  *
  * Callers: `vibecarbon configure cicd <env>` (PR 7) layers this onto an
@@ -33,7 +34,6 @@ import { parseDotenv } from '../../dotenv.js';
 import {
   listEnvironmentVariables,
   seedEnvironmentSecrets,
-  seedOrgSecrets,
   triggerDeployWorkflow,
   uploadKubeconfig,
   waitForLatestWorkflowRun,
@@ -192,6 +192,45 @@ function commitAndPushManifests(cwd, message) {
 }
 
 /**
+ * Every deploy.yml before this one wrote kube-system/hcloud from the repo's
+ * HETZNER_API_TOKEN secret, which deployK8sGitOps seeded on every run. The
+ * CLI no longer seeds it (deployK3s hands the token to the cluster itself),
+ * so in such a project that copy only goes stale: after a token rotation, the
+ * workflow this deploy triggers would write the revoked token back over the
+ * one the deploy applied, and the cloud controller and CSI driver would read
+ * it at their next start. Refused, with the way out, before anything is
+ * committed, pushed or seeded. Both the committed deploy.yml (what the push
+ * sends to main, the workflow GitHub runs) and the working tree's are read.
+ *
+ * @param {string} projectDir
+ */
+function refuseLegacyProviderTokenStep(projectDir) {
+  const path = join(projectDir, '.github', 'workflows', 'deploy.yml');
+  const working = existsSync(path) ? readFileSync(path, 'utf-8') : '';
+  let committed = '';
+  try {
+    committed = execFileSync('git', ['show', 'HEAD:.github/workflows/deploy.yml'], {
+      cwd: projectDir,
+      env: gitSafeEnv(),
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    // Not committed (or no commit yet): the working tree's is all there is.
+  }
+  if (![working, committed].some((yml) => yml.includes('secrets.HETZNER_API_TOKEN'))) return;
+  throw new Error(
+    'Your .github/workflows/deploy.yml still writes your Hetzner Cloud API token into the cluster ' +
+      'from a GitHub copy of it (secrets.HETZNER_API_TOKEN). `vibecarbon deploy` hands the token ' +
+      'to the cluster itself now and no longer updates that copy, so after you rotate the token, ' +
+      'a run of this workflow would write the old one back. Run `vibecarbon upgrade` for a ' +
+      'deploy.yml without that step, or delete every step that reads secrets.HETZNER_API_TOKEN ' +
+      'yourself; commit the change and run this again. Then remove the copy: ' +
+      '`gh secret delete HETZNER_API_TOKEN`.',
+  );
+}
+
+/**
  * Full GitOps deploy: render manifests, commit + push, seed GitHub
  * Environment, trigger workflow, wait for Flux reconciliation.
  *
@@ -201,10 +240,6 @@ function commitAndPushManifests(cwd, message) {
  * @param {string} args.domain - deployed domain
  * @param {string} args.projectName
  * @param {string} args.kubeconfigPath - path to kubeconfig fetched from the cluster
- * @param {string} args.networkId - Hetzner private network ID (Pulumi output)
- * @param {object} args.providerCreds - operator-secret values read from
- *   process.env by the caller (see config-registry.js's operator-secret
- *   class): { hetznerApiToken }
  * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
  *   app's own storage pair (storedAppStoragePair), seeded per environment
  * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
@@ -230,8 +265,6 @@ export async function deployK8sGitOps(args) {
     domain,
     projectName,
     kubeconfigPath,
-    networkId,
-    providerCreds,
     appStorage,
     imageTag,
     backupConfig,
@@ -248,7 +281,9 @@ export async function deployK8sGitOps(args) {
     p.log.warn(obsWarning);
   }
 
-  // Before anything is committed or seeded: a malformed backup config fails here.
+  // Before anything is committed or seeded: a deploy.yml that would write a
+  // stale provider token, and a malformed backup config, fail here.
+  refuseLegacyProviderTokenStep(projectDir);
   const backupSettings = resolveBackupSettings(backupConfig);
   // The Certificate deploy.yml renders, validated before anything is seeded.
   const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
@@ -293,17 +328,15 @@ export async function deployK8sGitOps(args) {
   const pushed = commitAndPushManifests(projectDir, commitMsg);
   s.stop(pushed ? 'Pushed new deploy commit' : 'Tree already clean, no new commit');
 
-  // 3. Seed GitHub Environment secrets + upload kubeconfig. Repo-level
-  // secrets (Hetzner token, Cloudflare token, S3 creds) are idempotent; env
-  // secrets + KUBECONFIG_B64 get written fresh every deploy (rotation path).
+  // 3. Seed GitHub Environment secrets + upload kubeconfig. Env secrets +
+  // KUBECONFIG_B64 get written fresh every deploy (rotation path). No
+  // repo-level secret: the provider token never goes to GitHub.
   s.start(`Seeding GitHub Environment '${environment}'`);
-  await seedOrgSecrets(providerCreds);
 
   const envLocal = parseEnvLocal(projectDir);
   const perEnvSecrets = buildPerEnvSecrets(envLocal, { appStorage });
   const perEnvVars = {
     SITE_URL: domain ? `https://${domain}` : '',
-    HCLOUD_NETWORK_ID: networkId || '',
     // Per environment, never in the committed k8s/base every environment
     // shares: deploy.yml renders the backup CronJob and its settings from
     // these (scripts/render-backup-settings.mjs).

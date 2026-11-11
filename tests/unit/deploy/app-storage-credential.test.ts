@@ -860,7 +860,7 @@ describe('GitOps gets the app pair, never the infra pair on a scoping provider',
     ).rejects.toThrow(/not stored on this machine/);
   });
 
-  it('seedOrgSecrets no longer seeds a repo-level S3 pair; the per-env secrets carry the app pair', async () => {
+  it('no repo-level S3 pair is seeded; the per-env secrets carry the app pair', async () => {
     const src = readFileSync(join(process.cwd(), 'src/lib/github-environments.js'), 'utf-8');
     expect(src).not.toMatch(/setSecretFromBodyFile\('S3_(ACCESS|SECRET)_KEY'/);
     const { buildPerEnvSecrets } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');

@@ -118,7 +118,7 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 
 | Secret | Location | Rotation |
 |---|---|---|
-| `HETZNER_API_TOKEN` | `HCLOUD_TOKEN` env at deploy time (read by the Pulumi hcloud provider); also stored in the project's `.env.local` | Quarterly |
+| `HETZNER_API_TOKEN` (and `DIGITALOCEAN_API_TOKEN`, `LINODE_API_TOKEN`) | `HCLOUD_TOKEN` env at deploy time (read by the Pulumi hcloud provider); also stored in the project's `.env.local`. On Kubernetes, `vibecarbon deploy` also writes it into the cluster for the cloud controller, CSI driver and autoscaler (kube-system `hcloud`, `digitalocean` or `linode`, and `carbon-autoscaler-config`). Never in a node's user data, and never at GitHub | Quarterly |
 | `CLOUDFLARE_API_TOKEN` | Project `.env.local`; passed to Pulumi as plain config at deploy time | Quarterly |
 | `REDIS_PASSWORD` | `.env.local`, K8s secret | Yearly |
 | `VIBECARBON_STATE_PASSPHRASE` | Your `.env.local` only, never `.env`, never uploaded or shipped to a server. Encrypts the secret values in your Pulumi state. Made by `create`, or by the first `upgrade`, `deploy`, `scale`, `failover` or Kubernetes `destroy` on a project without one. See [State encryption](#state-encryption) | Not rotated. Keep a copy in your password manager |
@@ -165,8 +165,14 @@ Each add-on's role has its own password, so a leaked add-on credential is that r
 1. Create a new token in the Hetzner Cloud Console.
 2. Test: `curl -H "Authorization: Bearer NEW" https://api.hetzner.cloud/v1/servers`.
 3. Update the token in the project's `.env.local` (or export `HCLOUD_TOKEN` for the deploy session).
-4. `vibecarbon deploy <env>`: Pulumi `preview` runs first; expect no drift on the resource graph.
+4. `vibecarbon deploy <env>`: Pulumi `preview` runs first; expect no drift on the resource graph. On Kubernetes the deploy also hands the new token to the cluster and restarts the cloud controller and CSI driver, which read it only when they start, so nothing on the cluster holds the old one afterwards.
 5. Revoke the old token in the console.
+
+The same steps rotate `DIGITALOCEAN_API_TOKEN` and `LINODE_API_TOKEN`, in their own consoles.
+
+**Kubernetes clusters made by an earlier vibecarbon**: the master's boot script wrote the token into the master's own user data, which the provider keeps for the server's life and Pulumi keeps in the stack's state. Neither changes until the master is replaced: no deploy rewrites a running server's user data. A deploy removes the extra Secrets that boot script made, but not that copy, so rotate the token once after upgrading; what is left behind is then a revoked token. Those masters also still run k3s with `--token`, so the k3s join token in their user data can join a server, not only an agent; a new master runs `--agent-token`. `grep -c -- --agent-token /etc/systemd/system/k3s.service` on the master prints 1 for a new one and 0 for an old one, without printing the token.
+
+**GitOps** (`vibecarbon configure cicd`): GitHub keeps no copy of the token. A `.github/workflows/deploy.yml` from an earlier vibecarbon wrote one into the cluster from the repo's `HETZNER_API_TOKEN` secret; `configure cicd` refuses to run while it still does and tells you how to remove the step and that secret (`gh secret delete HETZNER_API_TOKEN`).
 
 #### `REDIS_PASSWORD`
 

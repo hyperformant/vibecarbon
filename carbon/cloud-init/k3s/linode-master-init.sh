@@ -120,6 +120,13 @@ mirrors:
 # @include _k3s-system-image-mirror.yaml
 REGEOF
 
+# Install the k3s master.
+# The k3s token joins agents only: --agent-token, and no --token. It sits in
+# every node's user data and in the stack's state, so it must not be the
+# server token, which lets a machine join as another server and read the
+# datastore, CA keys included. k3s makes that one itself, at random, on this
+# box, and no second server ever joins
+# (tests/integration/docker/k3s-agent-token.test.ts).
 # --node-ip is this node's PRIVATE (VPC) IP and --node-external-ip its
 # PUBLIC IP. --kubelet-arg=provider-id=linode://<id> is what the Linode CSI
 # driver and k3s's embedded cloud controller read to identify the node. There
@@ -143,7 +150,7 @@ for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server \
       --disable-default-registry-endpoint \
       --cluster-init \
-      --token "${k3s_token}" \
+      --agent-token "${k3s_token}" \
       --tls-san "$PUBLIC_IP" \
       --tls-san "$PRIVATE_IP" \
       --node-ip "$PRIVATE_IP" \
@@ -188,15 +195,12 @@ fi
 
 _m x
 
-# The ready marker (end of script) is written AFTER the linode Secret, the
-# CSI driver and the StorageClass are in place, so deployK3s's waiter never
-# proceeds to the app install before volumes can be provisioned.
-
-# The Linode API token, read by the CSI driver (Secret kube-system/linode,
-# key `token`).
-kubectl -n kube-system create secret generic linode \
-  --from-literal=token="${linode_token}" \
-  --dry-run=client -o yaml | kubectl apply -f -
+# The ready marker (end of script) is written AFTER the CSI driver and the
+# StorageClass are in place. The CSI controller reads the Linode API token
+# from Secret kube-system/linode (key `token`), which deployK3s applies from
+# the operator's machine once the apiserver serves (applyCloudSecrets),
+# before the app install, so the token never rides in this user data and no
+# volume is asked for before the driver can make one.
 
 # Install the Linode Block Storage CSI driver from its pinned release asset
 # (v1.1.5; its images are pinned inside the asset). Its node plugin tolerates
