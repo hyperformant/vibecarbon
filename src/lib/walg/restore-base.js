@@ -118,7 +118,9 @@ export async function createS3Client(s3Config, clientOptions = {}) {
  * environment whose backups sit in another region than its uploads (one an
  * older CLI put there, which keeps them) is read at that bucket's own host.
  * Compose stops there; k8s falls back to the uploads bucket (where its db
- * pod's wal-g writes when there is no backup bucket). Credentials are topped
+ * pod's wal-g writes when there is no backup bucket). A record with no
+ * endpoint is read at its region's endpoint, and one whose region has none
+ * is refused by name (endpointOfRecord). Credentials are topped
  * up from the provider's object-storage env vars, then the prompt unless
  * `skipPrompts`. Null when no bucket or no credentials.
  *
@@ -134,8 +136,17 @@ export async function resolveS3Config({
 }) {
   const Provider = providerFor(envConfig);
   const backups = backupsTargetOf(loadProjectConfig()?.environments?.[envName]);
-  const s3Config = isCompose ? backups : (backups ?? loadS3Config(envName));
-  if (!s3Config?.bucket) return null;
+  const record = isCompose ? backups : (backups ?? loadS3Config(envName));
+  if (!record?.bucket) return null;
+  const s3Config = record.endpoint
+    ? record
+    : {
+        ...record,
+        endpoint: await endpointOfRecord(Provider, record, {
+          envName,
+          what: backups ? 'backups bucket' : 'storage bucket',
+        }),
+      };
   if (s3Config.accessKey && s3Config.secretKey) return s3Config;
   const creds = await Provider.promptObjectStorageCredentials(projectName, {
     save: false,
@@ -143,6 +154,34 @@ export async function resolveS3Config({
   });
   if (!creds) return null;
   return { ...s3Config, accessKey: creds.accessKey, secretKey: creds.secretKey };
+}
+
+/**
+ * The host of a bucket whose record names no endpoint: its region's endpoint
+ * on the provider's object storage. No CLI writes such a record (a backups
+ * record in another region than the uploads always carries its endpoint),
+ * but a hand edit can, and a client with no endpoint signs for the AWS
+ * default host and fails with an auth error that names neither the bucket
+ * nor the cause. With no region, or a region the provider has no endpoint
+ * for, it refuses with a line that names the bucket, the region and the way
+ * out.
+ *
+ * @param {any} Provider - the environment's compute provider class
+ * @param {{ bucket: string, region?: string | null }} record
+ * @param {{ envName: string, what: string }} opts
+ * @returns {Promise<string>}
+ */
+async function endpointOfRecord(Provider, record, { envName, what }) {
+  const S3Class = await Provider.getObjectStorageProviderClass();
+  const endpoint = record.region ? S3Class.getEndpointForRegion(record.region) : null;
+  if (endpoint) return endpoint;
+  const where = record.region
+    ? `in ${record.region}, a region with no known object-storage endpoint,`
+    : 'with no region';
+  throw new Error(
+    `${envName}'s ${what} ${record.bucket} is on record ${where} and no endpoint, so the CLI cannot tell which host holds it. ` +
+      `Deploy ${envName} again to record it, or add its endpoint to the ${envName} entry in .vibecarbon.json.`,
+  );
 }
 
 /** The env vars a provider's object-storage credentials come from, for messages. */

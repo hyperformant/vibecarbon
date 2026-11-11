@@ -321,4 +321,43 @@ describe('resolveS3Config reads the backups bucket through its one resolver', ()
     const cfg = await resolve({ provider: 'hetzner', s3: UPLOADS }, false);
     expect(cfg).toMatchObject({ ...UPLOADS, accessKey: 'ABCDEFGHIJ0123456789' });
   });
+
+  it.each([
+    ['compose', true],
+    ['k8s', false],
+  ])(
+    "M6 %s: a record with a region away from the uploads and no endpoint is read at that region's host",
+    async (_mode, isCompose) => {
+      // No CLI writes this; a hand edit can. Without an endpoint the SDK
+      // signs for the AWS default host and fails naming nothing.
+      const cfg = await resolve(
+        { provider: 'hetzner', s3: UPLOADS, backupS3: { bucket: BACKUPS.bucket, region: 'nbg1' } },
+        isCompose,
+      );
+      expect(cfg).toEqual({
+        ...BACKUPS,
+        accessKey: 'ABCDEFGHIJ0123456789',
+        secretKey: 'x'.repeat(40),
+      });
+    },
+  );
+
+  it('M6: a region the provider has no endpoint for is refused by bucket, region and way out', async () => {
+    await expect(
+      resolve(
+        { provider: 'hetzner', s3: UPLOADS, backupS3: { bucket: BACKUPS.bucket, region: 'xyz9' } },
+        true,
+      ),
+    ).rejects.toThrow(
+      "prod's backups bucket myapp-abc123-backups is on record in xyz9, a region with no known object-storage endpoint, and no endpoint, so the CLI cannot tell which host holds it. Deploy prod again to record it, or add its endpoint to the prod entry in .vibecarbon.json.",
+    );
+  });
+
+  it('M6: a k8s fallback to an app record with neither region nor endpoint is refused, naming the storage bucket', async () => {
+    await expect(
+      resolve({ provider: 'hetzner', s3: { bucket: UPLOADS.bucket } }, false),
+    ).rejects.toThrow(
+      "prod's storage bucket myapp-abc123-prod-storage is on record with no region and no endpoint",
+    );
+  });
 });

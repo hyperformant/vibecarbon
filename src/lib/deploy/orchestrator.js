@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import {
   backupStorageConfig,
-  backupsTargetOf,
+  backupsRecordOf,
   chooseBackupsBucket,
   settleBackupsBucket,
 } from '../backups-bucket.js';
@@ -1435,14 +1435,15 @@ export async function executeDeployment(args, gatheredConfig) {
         // s3-setup leaves a live skeleton with no record, the retry's seed is
         // that skeleton, and the chooser (which never counts the env's own
         // destroyed record) picks a new bucket where restore finds nothing.
-        // None for a new environment.
+        // Carried as written (backupsRecordOf), so an old record's stand-in
+        // region stays a stand-in. None for a new environment.
         backupS3: backupS3Config
           ? {
               bucket: backupS3Config.bucket,
               region: backupS3Config.region,
               endpoint: backupS3Config.endpoint,
             }
-          : (backupsTargetOf(existingEnv) ?? backupsTargetOf(envConfig) ?? undefined),
+          : (backupsRecordOf(existingEnv) ?? backupsRecordOf(envConfig) ?? undefined),
         ...(deployMode === 'compose-ha' || (deployMode === 'kubernetes' && secondaryRegion)
           ? {
               ha: {

@@ -31,6 +31,8 @@ const run = vi.hoisted(() => ({
   ctx: null as Record<string, unknown> | null,
   skipStorageSetup: false,
   priorResults: {} as Record<string, unknown>,
+  /** Every step this run started (the tracker's startStep), in order. */
+  started: [] as string[],
 }));
 
 const clackMock = vi.hoisted(() => ({
@@ -132,7 +134,9 @@ vi.mock('../../../src/lib/deploy/state.js', () => ({
         return true;
       }
     }
-    startStep() {}
+    startStep(step: string) {
+      run.started.push(step);
+    }
     completeStep(step: string, result: unknown) {
       this.results.set(step, result);
     }
@@ -282,6 +286,7 @@ describe('a second storage region never moves another bucket region', () => {
     run.ctx = null;
     run.skipStorageSetup = false;
     run.priorResults = {};
+    run.started.length = 0;
     clackMock.log.info.mockClear();
     clackMock.log.warn.mockClear();
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -513,11 +518,17 @@ describe('a second storage region never moves another bucket region', () => {
       gathered('staging', { compute: 'fsn1', storage: 'fsn1', envConfig: staging }),
     );
 
+    // M1: the storage step was skipped. Its CreateBucket count alone cannot
+    // tell: a re-run creates no bucket either (each one is found, the state
+    // bucket through forRegion at its recorded region).
+    expect(run.started).not.toContain('s3-setup');
     expect(sent('CreateBucket')).toEqual([]);
     const heads = sent('HeadBucket');
     expect(heads).toContainEqual({ command: 'HeadBucket', region: 'fsn1', bucket: STAGING_APP });
     expect(heads).toContainEqual({ command: 'HeadBucket', region: 'nbg1', bucket: BACKUPS });
     expect(heads).toContainEqual({ command: 'HeadBucket', region: 'nbg1', bucket: STATE });
+    // Each bucket was asked only where it lives.
+    expect(heads.filter((h) => h.bucket === BACKUPS).map((h) => h.region)).toEqual(['nbg1']);
     expect(env('staging').backupS3).toEqual({
       bucket: BACKUPS,
       region: 'nbg1',
@@ -734,6 +745,30 @@ describe('a second storage region never moves another bucket region', () => {
       }
     });
 
+    it('M7: a deploy that dies in s3-setup carries an old record as written: its stand-in region never becomes a stated one', async () => {
+      // A very old CLI's record names the bucket only; its region is the
+      // uploads region, as a stand-in (backupsTargetOf).
+      s3.seed(BACKUPS, 'nbg1');
+      s3.seed(STATE, 'nbg1');
+      const old = envRecord('old', { app: 'nbg1', backups: 'nbg1' });
+      old.backupS3 = { bucket: BACKUPS } as typeof old.backupS3;
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: { old },
+      });
+      vi.spyOn(HetznerS3Provider.prototype, 'createBucket').mockRejectedValueOnce(
+        new Error('object storage unreachable'),
+      );
+      await expect(
+        executeDeployment(
+          { yes: true },
+          gathered('old', { compute: 'nbg1', storage: 'nbg1', envConfig: env('old') }) as never,
+        ),
+      ).rejects.toThrow('exit 1');
+      expect(env('old').backupS3).toEqual({ bucket: BACKUPS });
+    });
+
     it('a rebuild whose first attempt dies in s3-setup keeps its recorded bucket on the retry', async () => {
       s3.seed(BACKUPS, 'nbg1');
       s3.seed(PROD_APP, 'nbg1');
@@ -781,8 +816,10 @@ describe('a second storage region never moves another bucket region', () => {
       expect(s3.regionOf(FSN1_BACKUPS)).toBeUndefined();
     });
 
-    it("says nothing of earlier backups for a sibling's bucket that answers from another region", async () => {
-      // prod's record says its backups bucket is in fsn1; it is in nbg1.
+    it("M2: a sibling's bucket that answers from another region is not joined: the new environment's backups stay in its own region", async () => {
+      // prod's record says its backups bucket is in fsn1; it is in nbg1 (a
+      // 0.52 deploy that died between its first skeleton save and its final
+      // save). staging, new in fsn1, plans to share it.
       s3.seed(BACKUPS, 'nbg1');
       s3.seed(STATE, 'nbg1');
       store.current = projectConfigStore({
@@ -793,13 +830,17 @@ describe('a second storage region never moves another bucket region', () => {
 
       await deployToPlan(gathered('staging', { compute: 'fsn1', storage: 'fsn1' }));
 
-      // staging joins prod's bucket where it really is, and has no earlier
-      // backups anywhere, so the line for a recorded bucket stays quiet.
       expect(env('staging').backupS3).toEqual({
-        bucket: BACKUPS,
-        region: 'nbg1',
-        endpoint: ENDPOINT.nbg1,
+        bucket: FSN1_BACKUPS,
+        region: 'fsn1',
+        endpoint: ENDPOINT.fsn1,
       });
+      expect(s3.regionOf(FSN1_BACKUPS)).toBe('fsn1');
+      expect(infoLines()).toContain(
+        `${BACKUPS} already lives in nbg1, so staging's backups in fsn1 go to ${FSN1_BACKUPS}`,
+      );
+      // It has no earlier backups anywhere, so the line for a recorded
+      // bucket stays quiet.
       expect(infoLines().filter((l) => l.includes('where its earlier backups are'))).toEqual([]);
     });
 

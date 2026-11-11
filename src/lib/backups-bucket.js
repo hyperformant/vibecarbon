@@ -83,6 +83,27 @@ export function backupsTargetOf(envConfig) {
 }
 
 /**
+ * The backups record of one environment exactly as written (bucket, and the
+ * region and endpoint only when the record states them), for a writer that
+ * carries a record forward unchanged. Unlike backupsTargetOf it stands
+ * nothing in: carrying a resolved target would turn an old record's
+ * stand-in region (its uploads region) into a stated one, and a stated
+ * region beats a stand-in wherever regions are weighed (the app key fence's
+ * region precedence and its messages).
+ * @param {{ backupS3?: { bucket?: string, region?: string, endpoint?: string } } | null | undefined} envConfig
+ * @returns {{ bucket: string, region?: string, endpoint?: string } | null}
+ */
+export function backupsRecordOf(envConfig) {
+  const record = envConfig?.backupS3;
+  if (!record?.bucket) return null;
+  return {
+    bucket: record.bucket,
+    ...(record.region ? { region: record.region } : {}),
+    ...(record.endpoint ? { endpoint: record.endpoint } : {}),
+  };
+}
+
+/**
  * Every environment that keeps backups in a bucket of this project:
  *   - each live environment's record;
  *   - each `destroyedEnvironments` entry not marked `backupsPurged`: a plain
@@ -218,12 +239,21 @@ export function chooseBackupsBucket({ environment, envConfig, projectConfig, reg
  *     the plan (a pinned bucket, or one an older CLI recorded under the wrong
  *     region), the bucket is chosen again for that region. A recorded or
  *     adopted bucket holds earlier backups and is never moved.
- *   - A `first` plan whose create answers from another region means the base
- *     name already exists there with nothing on record (a concurrent first
- *     deploy, or a crash before the record): that is a definite answer, not a
- *     failure, so this environment switches to its region's own name. The
- *     switch says its one line and returns `source: 'switched'`, so the
- *     caller's "first environment in this region" line stays quiet.
+ *   - A plan that is not `recorded` or `adopted` (`shared`, `first` or
+ *     `region`) whose create answers from another region than planned means
+ *     the bucket is not where the file says: the base name exists there with
+ *     nothing on record (a concurrent first deploy, or a crash before the
+ *     record), or a sibling's record names the wrong region (a 0.52 deploy
+ *     that died between its first skeleton save and its final save, or an
+ *     older environment's stand-in uploads region). That is a definite
+ *     answer, not a failure, and this environment has no backups there yet,
+ *     so it switches to its region's own name: each environment's backups
+ *     stay in its own storage region. The switch says its one line and
+ *     returns `source: 'switched'`, so the caller's "first environment in
+ *     this region" line stays quiet. When the region's own name is the one
+ *     that answered from elsewhere (or the switch's create does too), there
+ *     is no other name to take: the bucket is recorded where it is, and a
+ *     line says so.
  *   - The region and endpoint ALWAYS come from the settled bucket's own
  *     create, never from the plan.
  *
@@ -255,14 +285,22 @@ export async function settleBackupsBucket({
   /** @type {BackupsSource | 'switched'} */
   let source = chosen.source;
   let res = await create(bucket, chosen.region);
-  if (chosen.source === 'first' && res.region !== chosen.region) {
+  const movable = chosen.source !== 'recorded' && chosen.source !== 'adopted';
+  if (movable && res.region !== chosen.region) {
     const regionName = deriveRegionBackupsBucketName(projectConfig, chosen.region);
-    log(
-      `${bucket} already lives in ${res.region}, so ${environment}'s backups in ${chosen.region} go to ${regionName}`,
-    );
-    bucket = regionName;
-    source = 'switched';
-    res = await create(bucket, chosen.region);
+    if (regionName !== bucket) {
+      log(
+        `${bucket} already lives in ${res.region}, so ${environment}'s backups in ${chosen.region} go to ${regionName}`,
+      );
+      bucket = regionName;
+      source = 'switched';
+      res = await create(bucket, chosen.region);
+    }
+    if (res.region !== chosen.region) {
+      log(
+        `${bucket}, ${chosen.region}'s own backups bucket name, already lives in ${res.region}, so ${environment}'s backups go there`,
+      );
+    }
   }
   return {
     target: { bucket, region: res.region, endpoint: res.endpoint },

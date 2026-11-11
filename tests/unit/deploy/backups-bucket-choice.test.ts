@@ -427,20 +427,79 @@ describe('settleBackupsBucket', () => {
     });
   });
 
-  it('takes region and endpoint from the create, never from the plan', async () => {
+  it('M2: a shared plan whose bucket answers from another region switches to this region’s own name, and says so', async () => {
+    // A sibling's record put its bucket in fsn1; it is in hel1.
     const log = vi.fn();
+    const create = vi.fn(async (bucket: string, region: string) =>
+      bucket === HEL1 ? created('hel1', false) : created(region),
+    );
     const settled = await settleBackupsBucket({
       plan: { bucket: HEL1, region: 'fsn1', source: 'shared' },
       appRegion: 'fsn1',
       environment: 'staging',
       projectConfig,
       rechoose: vi.fn(),
-      create: vi.fn(async () => created('hel1', false)),
+      create,
       log,
     });
-    expect(settled.target).toEqual({ bucket: HEL1, region: 'hel1', endpoint: EP('hel1') });
-    // Only a `first` plan switches.
-    expect(log).not.toHaveBeenCalled();
+    expect(create.mock.calls).toEqual([
+      [HEL1, 'fsn1'],
+      [FSN1, 'fsn1'],
+    ]);
+    expect(log.mock.calls).toEqual([
+      [`${HEL1} already lives in hel1, so staging's backups in fsn1 go to ${FSN1}`],
+    ]);
+    // Region and endpoint come from the settled bucket's own create.
+    expect(settled).toEqual({
+      target: { bucket: FSN1, region: 'fsn1', endpoint: EP('fsn1') },
+      created: true,
+      source: 'switched',
+    });
+  });
+
+  it('M2: a region plan whose own name lives elsewhere has no other name: recorded where it is, with a line', async () => {
+    const log = vi.fn();
+    const create = vi.fn(async () => created('nbg1', false));
+    const settled = await settleBackupsBucket({
+      plan: { bucket: FSN1, region: 'fsn1', source: 'region' },
+      appRegion: 'fsn1',
+      environment: 'staging',
+      projectConfig,
+      rechoose: vi.fn(),
+      create,
+      log,
+    });
+    expect(create.mock.calls).toEqual([[FSN1, 'fsn1']]);
+    expect(log.mock.calls).toEqual([
+      [
+        `${FSN1}, fsn1's own backups bucket name, already lives in nbg1, so staging's backups go there`,
+      ],
+    ]);
+    expect(settled).toEqual({
+      target: { bucket: FSN1, region: 'nbg1', endpoint: EP('nbg1') },
+      created: false,
+      source: 'region',
+    });
+  });
+
+  it('M2: a switch whose own create also answers from elsewhere is recorded there, and both lines say so', async () => {
+    const log = vi.fn();
+    const settled = await settleBackupsBucket({
+      plan: { bucket: BASE, region: 'fsn1', source: 'first' },
+      appRegion: 'fsn1',
+      environment: 'staging',
+      projectConfig,
+      rechoose: vi.fn(),
+      create: vi.fn(async () => created('nbg1', false)),
+      log,
+    });
+    expect(log.mock.calls).toEqual([
+      [`${BASE} already lives in nbg1, so staging's backups in fsn1 go to ${FSN1}`],
+      [
+        `${FSN1}, fsn1's own backups bucket name, already lives in nbg1, so staging's backups go there`,
+      ],
+    ]);
+    expect(settled.target).toEqual({ bucket: FSN1, region: 'nbg1', endpoint: EP('nbg1') });
   });
 
   it('keeps the base name when its create answers in the planned region', async () => {
