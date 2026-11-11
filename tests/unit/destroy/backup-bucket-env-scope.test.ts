@@ -240,6 +240,22 @@ describe('handleBackupBucket with a backups bucket per storage region', () => {
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalledWith(FSN1_BACKUPS);
   });
 
+  it("an environment the old bug put in nbg1's base bucket, its uploads in fsn1: -purge reaches the base bucket in nbg1", async () => {
+    // Before the backups bucket was per region, staging (uploads in fsn1)
+    // archived into the base bucket, which lives in nbg1, and keeps it. Its
+    // purge goes where its backups are, never to its uploads region.
+    const config = twoRegions();
+    config.environments.staging = {
+      ...env('staging', { bucket: BACKUPS, region: 'nbg1' }),
+      s3: { bucket: 'myapp-cd9ecc-staging-storage', region: 'fsn1' },
+    };
+    const { messages } = await destroy(config, 'staging', { purgeBackups: true });
+    expect(storageClients).toEqual(['nbg1']);
+    expect(s3.deletePrefix).toHaveBeenCalledWith(BACKUPS, 'backups/myapp/staging/');
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(messages.join('\n')).toContain('bucket kept for prod, which keeps backups there');
+  });
+
   it('a live environment an older CLI deployed (no record) keeps the base bucket, and the kept line names it', async () => {
     // `old` archives into the base name in its uploads region: it has no
     // backups record, only `deployedAt`.
@@ -285,6 +301,11 @@ describe('handleBackupBucket with a backups bucket per storage region', () => {
     expect(results.backupsPurged).toBeUndefined();
     const [entry] = results.leaks.entries;
     expect(entry).toMatchObject({ resourceClass: 'bucket', resource: BACKUPS });
-    expect(entry.reason).toContain('no region on record');
+    expect(entry.reason).toBe(
+      'purge requested (-purge) but the backups bucket has no region on record, so destroy cannot tell which store holds it',
+    );
+    expect(entry.hint).toBe(
+      `Delete backups/myapp/prod/ in ${BACKUPS} via the Hetzner Cloud Object Storage console, and the bucket once no other environment keeps backups there; it keeps billing until removed.`,
+    );
   });
 });

@@ -176,12 +176,33 @@ describe('destroyPreviewBody backup bucket under -purge', () => {
       'Bucket: excitingai-88d16c-backups (WILL BE DELETED, because you passed -purge)',
     );
   });
+
+  it('keeps a bucket whose record names no region anywhere, and says why, as the teardown refuses it', () => {
+    const body = strip(
+      destroyPreviewBody({
+        envConfig: {
+          ...SKELETON,
+          status: 'deployed',
+          s3: { bucket: 'excitingai-88d16c-prod-storage' },
+          backupS3: { bucket: 'excitingai-88d16c-backups' },
+        },
+        projectName: 'excitingai',
+        envName: 'prod',
+        purgeBackups: true,
+        s3SetupCompleted: true,
+      }),
+    );
+    expect(body).toContain(
+      'Bucket: excitingai-88d16c-backups (kept: no region on record, so destroy cannot tell which store holds it; delete backups/excitingai/prod/ manually)',
+    );
+    expect(body).not.toMatch(/excitingai-88d16c-backups \([^)]*WILL BE DELETED/);
+  });
 });
 
 describe('the preview promises exactly what the -purge teardown does', () => {
   const BASE = 'myapp-cd9ecc-backups';
   const FSN1 = 'myapp-cd9ecc-fsn1-backups';
-  const live = (name: string, backupS3?: { bucket: string; region: string }) => ({
+  const live = (name: string, backupS3?: { bucket: string; region?: string }) => ({
     provider: 'hetzner',
     envName: name,
     deployMode: 'compose',
@@ -235,7 +256,12 @@ describe('the preview promises exactly what the -purge teardown does', () => {
       spinner,
       isK8s: false,
     });
-    return { line, deleted: [...store.deletedBuckets], said: messages.join('\n') };
+    return {
+      line,
+      deleted: [...store.deletedBuckets],
+      purgedPrefixes: [...store.deletedPrefixes],
+      said: messages.join('\n'),
+    };
   }
 
   it("staging -purge while prod lives in nbg1: fsn1's bucket goes, in the preview and the teardown", async () => {
@@ -248,6 +274,19 @@ describe('the preview promises exactly what the -purge teardown does', () => {
     const { line, deleted } = await both(layout(twoRegions), 'prod');
     expect(line).toContain(`Bucket: ${BASE} (WILL BE DELETED, because you passed -purge)`);
     expect(deleted).toEqual([BASE]);
+  });
+
+  it('a record with no region anywhere: the preview keeps the bucket and the teardown deletes nothing', async () => {
+    const regionless = {
+      ...live('prod', { bucket: BASE }),
+      s3: { bucket: 'myapp-cd9ecc-prod-storage' },
+    };
+    const { line, deleted, purgedPrefixes } = await both(layout({ prod: regionless }), 'prod');
+    expect(line).toContain(
+      `Bucket: ${BASE} (kept: no region on record, so destroy cannot tell which store holds it; delete backups/myapp/prod/ manually)`,
+    );
+    expect(deleted).toEqual([]);
+    expect(purgedPrefixes).toEqual([]);
   });
 
   it('a live environment with no record (an older CLI) keeps the base bucket, and both name it', async () => {

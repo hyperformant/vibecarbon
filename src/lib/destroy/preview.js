@@ -132,8 +132,11 @@ export function destroyPreviewBody({
 
   // One backups bucket per project and storage region: -purge deletes this
   // env's folder, and the bucket only when no other environment keeps backups
-  // in it (handleBackupBucket), named here as the teardown names them.
-  const backupBucket = backupsTargetOf(envConfig)?.bucket;
+  // in it (handleBackupBucket), named here as the teardown names them. A
+  // record with no region anywhere (nor an uploads region) names no store to
+  // ask, so the teardown refuses it and the preview keeps it too.
+  const backupTarget = backupsTargetOf(envConfig);
+  const backupBucket = backupTarget?.bucket;
   const keepers =
     backupBucketHolders.length > 0 ? backupBucketHolders.join(', ') : 'the other environments';
   const backupBlock = backupBucket
@@ -141,9 +144,11 @@ export function destroyPreviewBody({
     ${
       !purgeBackups
         ? `${c.success('•')} Bucket: ${backupBucket} (PRESERVED for recovery)`
-        : backupBucketHeld
-          ? `${c.error('•')} Bucket: ${backupBucket} (backups/${projectName}/${envName}/ WILL BE DELETED, because you passed -purge; the bucket stays for ${keepers})`
-          : `${c.error('•')} Bucket: ${backupBucket} (WILL BE DELETED, because you passed -purge)`
+        : !backupTarget?.region
+          ? `${c.success('•')} Bucket: ${backupBucket} (kept: no region on record, so destroy cannot tell which store holds it; delete backups/${projectName}/${envName}/ manually)`
+          : backupBucketHeld
+            ? `${c.error('•')} Bucket: ${backupBucket} (backups/${projectName}/${envName}/ WILL BE DELETED, because you passed -purge; the bucket stays for ${keepers})`
+            : `${c.error('•')} Bucket: ${backupBucket} (WILL BE DELETED, because you passed -purge)`
     }${mark(bucketsKnown)}
 `
     : '';
