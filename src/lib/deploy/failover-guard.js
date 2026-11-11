@@ -499,6 +499,26 @@ export function markStandbyUnproven(ctx) {
 }
 
 /**
+ * Mark the standby proven: the counterpart of markStandbyUnproven, for a
+ * reseed that was verified streaming (a restore, a scale). Records the system
+ * identifier (the failover replica proof) and clears the degraded flags an
+ * earlier unproven reseed set, so failover is not refused until a redeploy.
+ * Call it only after the streaming verify passed.
+ *
+ * @param {{ environment: string }} ctx
+ * @param {string} [systemIdentifier]
+ */
+export function markStandbyProven(ctx, systemIdentifier) {
+  recordSystemIdentifier(ctx, systemIdentifier);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) return;
+    envConfig.replication = 'streaming';
+    envConfig.degraded = false;
+  });
+}
+
+/**
  * The `ha` fields a deploy persists for failover's replica proof: the standby's
  * system identifier, only when this deploy verified streaming. A degraded deploy
  * records nothing, so an unplanned failover refuses until one proves it.

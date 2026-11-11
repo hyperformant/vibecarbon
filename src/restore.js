@@ -51,6 +51,7 @@ import {
 import {
   assertNoFailoverInFlight,
   readReplicaState,
+  markStandbyProven as realMarkStandbyProven,
   markStandbyUnproven as realMarkStandbyUnproven,
   recordSystemIdentifier as realRecordSystemIdentifier,
   swappedSinceLastDeploy,
@@ -909,8 +910,8 @@ export async function runComposeRestore({
   envConfig = {},
   restoreCompose = realRestoreCompose,
   configureStandbyReplication = realConfigureStandbyReplication,
+  markStandbyProven = realMarkStandbyProven,
   markStandbyUnproven = realMarkStandbyUnproven,
-  recordSystemIdentifier = realRecordSystemIdentifier,
   pushBaseBackup = pushBaseBackupAfterPromote,
   readStandbyState = (ip) =>
     readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
@@ -1020,7 +1021,7 @@ export async function runComposeRestore({
         if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
           throw new Error('the re-seeded standby did not read back as a replica');
         }
-        recordSystemIdentifier({ environment: envName }, seeded.systemIdentifier);
+        markStandbyProven({ environment: envName }, seeded.systemIdentifier);
         s.stop('Standby re-seeded from restored primary');
       } catch (err) {
         s.stop('Standby re-seed failed');
@@ -1183,6 +1184,7 @@ export async function runK8sRestore({
   reseedStandbyFromPrimary = realReseedStandbyFromPrimary,
   ensureReplicationSlot = realEnsureReplicationSlot,
   readReplicationState = realReadK8sReplicationState,
+  markStandbyProven = realMarkStandbyProven,
   markStandbyUnproven = realMarkStandbyUnproven,
   recordSystemIdentifier = realRecordSystemIdentifier,
   pushBaseBackup = pushBaseBackupAfterPromote,
@@ -1503,6 +1505,8 @@ export async function runK8sRestore({
         );
       }
       s.stop('Standby streaming from restored primary: DR restored');
+      // Verified streaming: clear the degraded flags an earlier unproven reseed left.
+      markStandbyProven({ environment: envName });
     } catch (err) {
       markStandbyUnproven({ environment: envName });
       // Both failed: carry both (the restore itself succeeded).

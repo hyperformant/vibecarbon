@@ -1,8 +1,9 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { assertFailoverPreconditions } from '../../../src/lib/deploy/failover-guard.js';
 import { runComposeRestore } from '../../../src/restore.js';
 
 // The real config writers (journal, proof, fence marker) run in these tests
@@ -65,7 +66,7 @@ const baseArgs = {
   // The post-reseed proof and the config writes (I2), inert by default.
   readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
   markStandbyUnproven: () => {},
-  recordSystemIdentifier: () => {},
+  markStandbyProven: () => {},
   assertWritable: async () => 'writable',
   pushBaseBackup: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
   // Every db container binds the live wal-g role directory.
@@ -345,7 +346,7 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
   };
   const run = async (over: Record<string, unknown>) => {
     const markStandbyUnproven = vi.fn();
-    const recordSystemIdentifier = vi.fn();
+    const markStandbyProven = vi.fn();
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     await runComposeRestore({
       ...baseArgs,
@@ -354,20 +355,17 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
       restoreCompose: vi.fn().mockResolvedValue(undefined),
       configureStandbyReplication: vi.fn().mockResolvedValue(true),
       markStandbyUnproven,
-      recordSystemIdentifier,
+      markStandbyProven,
       ...over,
     });
     warn.mockRestore();
-    return { markStandbyUnproven, recordSystemIdentifier };
+    return { markStandbyUnproven, markStandbyProven };
   };
 
   it('a verified reseed records the identifier and stays proven', async () => {
-    const { markStandbyUnproven, recordSystemIdentifier } = await run({});
+    const { markStandbyUnproven, markStandbyProven } = await run({});
     expect(markStandbyUnproven).not.toHaveBeenCalled();
-    expect(recordSystemIdentifier).toHaveBeenCalledWith(
-      { environment: 'prod' },
-      '7412345678901234567',
-    );
+    expect(markStandbyProven).toHaveBeenCalledWith({ environment: 'prod' }, '7412345678901234567');
   });
 
   it('a failed reseed marks it unproven', async () => {
@@ -378,11 +376,11 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
   });
 
   it('a reseed that does not read back as a replica marks it unproven', async () => {
-    const { markStandbyUnproven, recordSystemIdentifier } = await run({
+    const { markStandbyUnproven, markStandbyProven } = await run({
       readStandbyState: async () => ({ inRecovery: false, systemIdentifier: '1' }),
     });
     expect(markStandbyUnproven).toHaveBeenCalledOnce();
-    expect(recordSystemIdentifier).not.toHaveBeenCalled();
+    expect(markStandbyProven).not.toHaveBeenCalled();
   });
 
   it('a skipped reseed (failed-over pair) marks it unproven', async () => {
@@ -601,5 +599,95 @@ describe('runComposeRestore: a db that predates the live wal-g role is refused b
       },
     });
     expect(probed).toEqual(['10.0.0.1 myapp']);
+  });
+});
+
+// A verified restore clears the degraded flag an earlier unproven reseed set,
+// through the real config writers against a real project file, and failover
+// then allows the promote. A restore whose verify fails stays degraded.
+describe('runComposeRestore: a verified HA restore clears the degraded flag', () => {
+  let dir: string;
+  const readEnv = () =>
+    JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.prod;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-proven-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: {
+          prod: {
+            ...{ deployMode: 'compose-ha' },
+            replication: 'degraded',
+            degraded: true,
+            ha: { ...{}, systemIdentifier: '7412345678901234567' },
+          },
+        },
+      }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const canFailOver = () =>
+    assertFailoverPreconditions({
+      envConfig: readEnv(),
+      environment: 'prod',
+      standbyState: { inRecovery: true, systemIdentifier: '7412345678901234567' },
+      tier: 'compose-ha',
+    });
+
+  it('a restore whose reseed and streaming verify pass leaves the env proven; failover allows', async () => {
+    expect(() => canFailOver()).toThrow(/replication is degraded/);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await runComposeRestore({
+      ...baseArgs,
+      markStandbyProven: undefined,
+      markStandbyUnproven: undefined,
+      recordSystemIdentifier: undefined,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        servers: [
+          { ip: '10.0.0.1', role: 'primary' },
+          { ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose: vi.fn().mockResolvedValue(undefined),
+      configureStandbyReplication: vi.fn().mockResolvedValue(true),
+    });
+    warn.mockRestore();
+    const env = readEnv();
+    expect(env.degraded).toBe(false);
+    expect(env.replication).toBe('streaming');
+    expect(canFailOver()).toEqual({ mode: 'promote' });
+  });
+
+  it('a restore whose verify fails stays degraded', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await runComposeRestore({
+      ...baseArgs,
+      markStandbyProven: undefined,
+      markStandbyUnproven: undefined,
+      recordSystemIdentifier: undefined,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        servers: [
+          { ip: '10.0.0.1', role: 'primary' },
+          { ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose: vi.fn().mockResolvedValue(undefined),
+      configureStandbyReplication: vi.fn().mockResolvedValue(true),
+      readStandbyState: async () => ({ inRecovery: false, systemIdentifier: '1' }),
+    });
+    warn.mockRestore();
+    const env = readEnv();
+    expect(env.degraded).toBe(true);
+    expect(env.replication).toBe('degraded');
+    expect(() => canFailOver()).toThrow(
+      /replication is degraded|different database|nothing proves/,
+    );
   });
 });
