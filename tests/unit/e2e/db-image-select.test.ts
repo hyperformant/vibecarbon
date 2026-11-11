@@ -125,3 +125,20 @@ describe('ghcrManifestExists when the network is down', () => {
     ).rejects.toBeInstanceOf(E2EDbImageError);
   });
 });
+
+describe('ghcrManifestExists when the token body is cut off', () => {
+  it('names ghcr.io instead of leaking a SyntaxError', async () => {
+    const f = vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    const err = await ghcrManifestExists('ghcr.io/a/b:t1', f as unknown as typeof fetch).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(E2EDbImageError);
+    expect(err.message).toMatch(/ghcr\.io/);
+  });
+});

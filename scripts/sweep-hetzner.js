@@ -352,8 +352,13 @@ export function unattachedCsiVolumes(volumes) {
 
 const listVolumePages = () => listPages('volumes', 'volumes');
 
-async function hasUnattachedCsiVolumes(listVolumes = listVolumePages) {
-  return unattachedCsiVolumes((await listVolumes()).items).length > 0;
+// Can the sweep print "clean" without the full recheck? Only when it deleted
+// nothing AND the volume listing was walked completely AND no unattached pvc-*
+// volume exists. A truncated listing proves nothing about volumes, and a
+// deferred CSI pass leaves touched at 0, so either one must fall through to
+// recheckResidue, which fails the sweep.
+export function canSkipRecheck({ touched, volumes }) {
+  return touched === 0 && volumes.complete && unattachedCsiVolumes(volumes.items).length === 0;
 }
 
 // Re-list everything the sweep owns and report what is still there. Returns
@@ -410,7 +415,7 @@ async function main() {
   const s3Touched = await sweepS3Buckets();
   touched += s3Touched;
 
-  if (touched === 0 && !(await hasUnattachedCsiVolumes())) {
+  if (canSkipRecheck({ touched, volumes: await listVolumePages() })) {
     console.log('[sweep] clean — no vibecarbon-managed resources remaining');
     process.exit(0);
   }

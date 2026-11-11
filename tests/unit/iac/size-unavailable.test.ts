@@ -57,7 +57,9 @@ describe('sizeUnavailableError', () => {
     const err = sizeUnavailableError(new Error(STOCKOUT), { plans: rec.plans });
     expect(err).toBeInstanceOf(Error);
     expect(err?.message).toContain('"s-4vcpu-8gb" in nyc3');
-    expect(err?.message).toContain('out of stock');
+    expect(err?.message).toContain(
+      'it answered that the size is not available in the region. That can mean the size is out of stock or that the region does not sell it, and DigitalOcean does not say which.',
+    );
     // every sentence is a fact the CLI knows: no claim about the earlier catalog check
     expect(err?.message).toContain('does not say which');
     expect(err?.message).not.toMatch(/when the deploy checked|right now/);

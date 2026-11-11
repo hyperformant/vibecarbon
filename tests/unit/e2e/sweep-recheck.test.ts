@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — plain JS ops script, no types
-import { CLOUD_KINDS, delWithRetry, recheckResidue } from '../../../scripts/sweep-hetzner.js';
+import {
+  CLOUD_KINDS,
+  canSkipRecheck,
+  delWithRetry,
+  recheckResidue,
+} from '../../../scripts/sweep-hetzner.js';
 
 describe('delWithRetry', () => {
   it('returns true without retrying when the first DELETE succeeds', async () => {
@@ -136,5 +141,28 @@ describe('recheckResidue', () => {
       listVolumes: volumes([]),
     });
     expect(leaked).toBe(1);
+  });
+});
+
+describe('canSkipRecheck', () => {
+  // With pvc-* volumes deferred the sweep touches nothing, so this decision,
+  // not recheckResidue, is what keeps "clean" honest.
+  const uuid = 'e5a3c1f0-1234-4abc-9def-0123456789ab';
+  const pvc = { id: 5, name: `pvc-${uuid}`, server: null };
+
+  it('skips only when nothing was touched and the volume listing is complete and clean', () => {
+    expect(canSkipRecheck({ touched: 0, volumes: { items: [], complete: true } })).toBe(true);
+  });
+
+  it('does not skip when an unattached pvc-* volume was deferred', () => {
+    expect(canSkipRecheck({ touched: 0, volumes: { items: [pvc], complete: true } })).toBe(false);
+  });
+
+  it('does not skip on a truncated volume listing', () => {
+    expect(canSkipRecheck({ touched: 0, volumes: { items: [], complete: false } })).toBe(false);
+  });
+
+  it('does not skip when the sweep deleted something', () => {
+    expect(canSkipRecheck({ touched: 2, volumes: { items: [], complete: true } })).toBe(false);
   });
 });

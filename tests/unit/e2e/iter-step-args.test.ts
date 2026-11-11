@@ -131,3 +131,11 @@ describe('ensureStepDbImage', () => {
     for (const s of STEPS_WITHOUT_IMAGE_PULL) expect(ITER_STEPS).toContain(s);
   });
 });
+
+describe('iter-step.js wiring', () => {
+  it('chooses the db image through ensureStepDbImage, not selectE2EDbImage directly', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'iter-step.js'), 'utf-8');
+    expect(script).toMatch(/await ensureStepDbImage\(step\)/);
+    expect(script).not.toMatch(/selectE2EDbImage/);
+  });
+});

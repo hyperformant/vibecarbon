@@ -10,9 +10,10 @@
  * so the Pulumi path and the direct createServer path share one signature.
  *
  * The catalog filters `available !== false` up front, so this usually means a
- * stock-out after that check, but DO's sentence does not say whether the size is
- * out of stock or not sold in the region, and the message says the same. It is a definite answer from DO, so there is no
- * retry: the message says what to do instead. Unrelated 422s ("already in use",
+ * stock-out after that check. DO's sentence does not say whether the size is
+ * out of stock or not sold in the region, so the message says both are
+ * possible. It is a definite answer from DO, so there is no retry: the message
+ * says what to do instead. Unrelated 422s ("already in use",
  * "overlaps with another VPC", ...) do not match and pass through untouched.
  */
 
