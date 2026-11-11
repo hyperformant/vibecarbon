@@ -125,7 +125,7 @@ async function apiError(response, prefix) {
  * Walk a paginated Linode collection to completion via the `page`/`pages`
  * envelope. Past MAX_PAGES the walk stops: by default with what it has read,
  * or, given `pastGuard`, by throwing it, for a caller that must not take part
- * of the collection for the whole (findARecordsAt).
+ * of the collection for the whole (findARecordsAt, deleteDNSRecord).
  * @param {string} apiToken
  * @param {string} path - e.g. '/domains'
  * @param {string} errorPrefix
@@ -271,7 +271,11 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
 
 /**
  * Ownership-filtered delete core. Takes the already-resolved `zoneName` for
- * the same reason as putRecord.
+ * the same reason as putRecord. Reads the whole zone or throws: past the
+ * page guard a partial read would miss the record and answer `total: 0`,
+ * and destroy would report it gone while it still points at an address
+ * being released. destroy's DNS cleanup catches the throw and reports the
+ * records as a leak.
  * @param {string} apiToken
  * @param {string} zoneId
  * @param {string} zoneName
@@ -282,7 +286,7 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
  */
 async function removeRecords(apiToken, zoneId, zoneName, name, ownedIps, type) {
   const relativeName = fqdnToRelative(name, zoneName);
-  const all = await getRecords(apiToken, zoneId);
+  const all = await getRecords(apiToken, zoneId, { whole: true });
   const records = matching(all, relativeName, String(name).replace(/\.$/, ''), type);
   const total = records.length;
 

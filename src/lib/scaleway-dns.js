@@ -197,7 +197,9 @@ async function apiError(response, prefix) {
  * works whether or not the count is present and cannot loop on a stale count.
  * Past MAX_PAGES full pages the walk stops: by default with what it has read,
  * or, given `pastGuard`, by throwing it, for a caller that must not take part
- * of the collection for the whole (findARecordsAt).
+ * of the collection for the whole (findARecordsAt, deleteDNSRecord). Such a
+ * walk reads one page more first: a collection of exactly MAX_PAGES full
+ * pages ends on a short (empty) page there and is whole, not past the guard.
  *
  * @param {string} apiToken
  * @param {string} path - e.g. '/dns-zones'
@@ -208,8 +210,9 @@ async function apiError(response, prefix) {
  */
 async function walkPages(apiToken, path, key, errorPrefix, { pastGuard } = {}) {
   const items = [];
+  const lastPage = pastGuard ? MAX_PAGES + 1 : MAX_PAGES;
 
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; page <= lastPage; page++) {
     const response = await fetchWithRetry(
       `${DOMAIN_API}${path}?page=${page}&page_size=${PAGE_SIZE}`,
       { headers: authHeaders(apiToken) },
@@ -433,6 +436,11 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * case behind the 2026-05-16 blast-radius bug where one scenario's destroy
  * zeroed a neighbour's record in a shared zone.
  *
+ * Reads the whole zone or throws: past the page guard a partial read would
+ * miss the record and answer `total: 0`, and destroy would report it gone
+ * while it still points at an address being released. destroy's DNS cleanup
+ * catches the throw and reports the records as a leak.
+ *
  * @param {string} apiToken - Scaleway secret key
  * @param {string} zoneId - Zone identity — the zone NAME on Scaleway
  * @param {string} name - Record name (FQDN)
@@ -442,7 +450,7 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  */
 export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = 'A') {
   const relativeName = fqdnToRelative(name, zoneId);
-  const all = await getRecords(apiToken, zoneId);
+  const all = await getRecords(apiToken, zoneId, { whole: true });
   const records = matching(all, relativeName, String(name).replace(/\.$/, ''), type);
   const total = records.length;
 

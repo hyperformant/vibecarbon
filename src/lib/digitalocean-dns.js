@@ -105,7 +105,7 @@ async function apiError(response, prefix) {
  * Walk a paginated DO collection to completion. Past MAX_PAGES the walk
  * stops: by default with what it has read, or, given `pastGuard`, by
  * throwing it, for a caller that must not take part of the collection for
- * the whole (findARecordsAt).
+ * the whole (findARecordsAt, deleteDNSRecord).
  * @param {string} apiToken
  * @param {string} path - e.g. '/domains' (no query)
  * @param {string} key - response array key (e.g. 'domains')
@@ -294,6 +294,11 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * case behind the 2026-05-16 blast-radius bug where one scenario's destroy
  * zeroed a neighbour's record in a shared zone.
  *
+ * Reads the whole zone or throws: past the page guard a partial read would
+ * miss the record and answer `total: 0`, and destroy would report it gone
+ * while it still points at an address being released. destroy's DNS cleanup
+ * catches the throw and reports the records as a leak.
+ *
  * @param {string} apiToken - DigitalOcean API token
  * @param {string} zoneId - Zone identity — the domain NAME on DO
  * @param {string} name - Record name (FQDN)
@@ -303,7 +308,7 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  */
 export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = 'A') {
   const relativeName = fqdnToRelative(name, zoneId);
-  const all = await getRecords(apiToken, zoneId);
+  const all = await getRecords(apiToken, zoneId, { whole: true });
   const records = matching(all, relativeName, String(name).replace(/\.$/, ''), type);
   const total = records.length;
 

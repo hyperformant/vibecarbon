@@ -253,6 +253,11 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * count. Pass an empty array to refuse all deletes (the safer default when
  * envConfig has no server IPs to compare against).
  *
+ * The listing is filtered to this name and type, so one page holds every
+ * match. A listing that fails throws (readCloudflareJson): read as empty, it
+ * answered `total: 0`, and destroy reported records gone that still point at
+ * an address being released.
+ *
  * @param {string} apiToken - Cloudflare API token
  * @param {string} zoneId - Zone ID
  * @param {string} name - Record name (FQDN)
@@ -271,7 +276,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
     },
   );
 
-  const listData = await listResponse.json();
+  const listData = await readCloudflareJson(listResponse, 'Failed to list DNS records');
   const records = (listData.result || []).filter((r) => r.name === name && r.type === type);
   const total = records.length;
 
