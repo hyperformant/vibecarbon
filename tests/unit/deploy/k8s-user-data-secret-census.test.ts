@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
 
 const K3S_DIR = join(__dirname, '../../../carbon/cloud-init/k3s');
 const SENTINEL = 'vc-sentinel-api-token-5e1d';
@@ -87,12 +88,16 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
     .filter((f) => f.endsWith('.sh'))
     .map((f) => [f, readFileSync(join(K3S_DIR, f), 'utf-8')] as const);
 
-  it('there are master, db and worker scripts for every k8s provider', () => {
-    // Hetzner's carry no prefix; the others carry the provider's.
+  it('every k8s provider boots its master, db and workers from a script here', async () => {
+    // From the providers: what each renders is one of these templates, so
+    // the walk below covers every node of every k8s provider.
+    const boot = await k8sBootScripts();
+    expect(boot).toHaveLength(k8sProviders.length * ROLES.length);
+    expect(k8sProviders.length).toBeGreaterThan(0);
     const names = scripts.map(([f]) => f);
-    for (const role of ['master', 'db', 'worker']) {
-      expect(names).toContain(`${role}-init.sh`);
-      for (const prefix of ['do', 'linode']) expect(names).toContain(`${prefix}-${role}-init.sh`);
+    for (const { provider, role, files } of boot) {
+      expect(files, `${provider}'s ${role}`).toHaveLength(1);
+      expect(names).toContain(files[0]);
     }
   });
 
