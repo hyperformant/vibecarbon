@@ -179,6 +179,7 @@ export async function convergeClusterInfra({
     upStack,
     getStackOutputs,
     getOrCreateStack,
+    dropRetiredStackResources,
     classifyK3sTokenProbe,
     summarizePulumiError,
   } = await import('./index.js');
@@ -397,6 +398,12 @@ export async function convergeClusterInfra({
         requireExisting: true,
       }),
     );
+    // Before the preview: a resource the program no longer declares (a
+    // DigitalOcean cluster's reserved IP from before 2026-11) leaves the state
+    // here, so neither this preview nor the up below plans its delete. Scale
+    // and failover reach a stack DNS has not moved off yet: deleting the
+    // address there would cut the domain off (lib/iac/retired-resources.js).
+    await dropRetiredStackResources(previewStack, providerIdFor(envConfig));
     const masterReplacements = [];
     await perfAsync(`scale.k8s.${clusterEnv}.preview`, () =>
       previewStack.preview({

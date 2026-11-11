@@ -92,7 +92,7 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
       fileURLToPath(new URL('../../../src/lib/deploy/k8s/dns-record.js', import.meta.url)),
       'utf8',
     );
-    expect(k8sDns).toMatch(/early = write\(ip, \{ onProgress: /);
+    expect(k8sDns).toMatch(/early = write\(infra, \{ onProgress: /);
   });
 
   it('the compose-ha early HA write (under the boot spinner) suppresses setupHA’s spinner', () => {

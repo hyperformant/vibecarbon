@@ -18,6 +18,12 @@ describe('entryIpFor', () => {
       entryIpFor({ primary: { masterIp: '1.1.1.1', floatingIp: '9.9.9.9' }, standby: {} }),
     ).toBe('9.9.9.9');
   });
+  it('uses the master for a k8s cluster without a floating IP (DigitalOcean)', () => {
+    expect(entryIpFor({ masterIp: '1.1.1.1' })).toBe('1.1.1.1');
+    expect(entryIpFor({ primary: { masterIp: '1.1.1.1' }, standby: { masterIp: '2.2.2.1' } })).toBe(
+      '1.1.1.1',
+    );
+  });
   it('returns null when nothing is known', () => {
     expect(entryIpFor({})).toBeNull();
   });

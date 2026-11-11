@@ -184,7 +184,10 @@ measures the runner's own cache:
 - **Did the flip publish?** The `dns_failover_flip` verification queries the
   zone's **authoritative nameservers** (which hold no cache of their own zone)
   and asserts the A record now carries the promoted IP. It self-skips on
-  `k8s-ha`, whose failover reassigns a floating IP and never rewrites DNS.
+  `k8s-ha`, whose flip repoints the record at the promoted cluster's ingress
+  IP (its floating IP, or a DigitalOcean master's own address), which this
+  node-IP comparison does not model; the DNS-provider read-back check covers
+  it.
 
 The propagation gate log line above is retained as the (now advisory) record of
 how long the runner's public resolvers took to converge. `verify-deploy` and the

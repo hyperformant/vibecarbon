@@ -47,6 +47,7 @@ import {
   DB_STATEFULSET,
 } from '../../../src/lib/deploy/db-workload.js';
 import { swappedSinceLastDeploy } from '../../../src/lib/deploy/failover-guard.js';
+import { clusterIngressIp } from '../../../src/lib/deploy/k8s/ingress-ip.js';
 import {
   RETIRED_HOST_MARKER,
   RETIRED_ROLE,
@@ -1174,7 +1175,10 @@ interface RawEnv {
   deployedAt?: string;
   dns?: { provider?: string; zoneId?: string } | null;
   servers?: Array<{ ip?: string; role?: string }>;
-  ha?: { primary?: { masterIp?: string; floatingIp?: string }; standby?: { masterIp?: string } };
+  ha?: {
+    primary?: { masterIp?: string; floatingIp?: string; ingressIp?: string };
+    standby?: { masterIp?: string };
+  };
 }
 
 function readEnv(projectDir: string, env: string): RawEnv | null {
@@ -1202,16 +1206,17 @@ export function readSwappedSinceLastDeploy(projectDir: string, env: string): boo
 }
 
 /**
- * The IP the A records must carry: k8s-ha flips them to the primary's floating
- * IP (src/failover.js `floatingIp || masterIp`), compose-ha to the node whose
- * role is primary.
+ * The IP the A records must carry: k8s-ha flips them to the primary's ingress
+ * IP (clusterIngressIp, as src/failover.js reads it: the recorded ingressIp,
+ * else the floating IP, else the master, which is what DigitalOcean clusters
+ * use), compose-ha to the node whose role is primary.
  */
 export function readServingIp(projectDir: string, env: string): string | null {
   const envConfig = readEnv(projectDir, env);
   if (!envConfig) return null;
   const ha = envConfig.ha;
   if (ha?.primary?.masterIp && ha?.standby?.masterIp) {
-    return ha.primary.floatingIp || ha.primary.masterIp;
+    return clusterIngressIp(ha.primary);
   }
   return (envConfig.servers ?? []).find((s) => s.role === 'primary')?.ip ?? null;
 }

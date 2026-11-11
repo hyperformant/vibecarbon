@@ -23,9 +23,10 @@
  *               — passed through UNCHANGED so deployK3s receives byte-for-byte
  *               the same options object it got from the former dispatch table.
  *   Filled in by the effect:
- *     clusterResult = deployK3s's return { masterIp, floatingIp, dbIp,
+ *     clusterResult = deployK3s's return { masterIp, floatingIp?, dbIp,
  *                     dbPrivateIp, workerIps, networkId, kubeconfig,
- *                     sshKeyPath, imageTag } — read back into deployResult.
+ *                     sshKeyPath, imageTag } — read back into deployResult
+ *                     (no floatingIp on DigitalOcean, K8S_FLOATING_IP).
  */
 import { perfAsync } from '../../perf.js';
 

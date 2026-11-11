@@ -54,6 +54,7 @@ import {
   setupReplication,
 } from '../k8s/ha/index.js';
 import { haSshKeyName } from '../k8s/ha-ssh-key.js';
+import { clusterIngressIp } from '../k8s/ingress-ip.js';
 import { deployK3s } from '../k8s/k3s.js';
 import { assertReplicationStreamingOrDegraded } from '../replication.js';
 import { clearDiscardableStandby, readDiscardableStandby } from '../standby-lineage.js';
@@ -374,7 +375,8 @@ async function haK8sProvisionClusters(ctx) {
     },
   );
 
-  // The HA DNS records, written as soon as both clusters' ingress IPs exist,
+  // The HA DNS records, written as soon as both clusters' ingress IPs exist
+  // (clusterIngressIp: the floating IP, or on DigitalOcean the master's own),
   // so the first certificate's issuance overlaps the rest of the deploy
   // instead of following the replication gate. The role primary here is the
   // SERVING primary (the persisted role mapping, haStacks, which a failover's
@@ -383,10 +385,10 @@ async function haK8sProvisionClusters(ctx) {
   // records, same setupHA call; haK8sUpdateDns awaits it as the barrier.
   ctx.dnsUpdatePromise = writesK8sHaDns(options)
     ? Promise.all([primaryInfra.promise, standbyInfra.promise]).then(([pInfra, sInfra]) =>
-        pInfra?.floatingIp && sInfra?.floatingIp
+        clusterIngressIp(pInfra) && clusterIngressIp(sInfra)
           ? writeK8sHaDnsRecords(options, {
-              primaryIp: pInfra.floatingIp,
-              standbyIp: sInfra.floatingIp,
+              primary: pInfra,
+              standby: sInfra,
               warmup: ctx.dnsWarmupPromise,
               // Silent: the cluster spinners own the line.
               onProgress: () => {},
@@ -483,14 +485,14 @@ async function haK8sProvisionClusters(ctx) {
     console.error(`[k8s-ha] primary deploy FAILED: ${summarizePulumiError(primarySettled.reason)}`);
   } else {
     console.error(
-      `[k8s-ha] primary deploy OK: masterIp=${primarySettled.value.masterIp} floatingIp=${primarySettled.value.floatingIp} kubeconfig=${primarySettled.value.kubeconfig}`,
+      `[k8s-ha] primary deploy OK: masterIp=${primarySettled.value.masterIp} ingressIp=${clusterIngressIp(primarySettled.value)} kubeconfig=${primarySettled.value.kubeconfig}`,
     );
   }
   if (standbySettled.status === 'rejected') {
     console.error(`[k8s-ha] standby deploy FAILED: ${summarizePulumiError(standbySettled.reason)}`);
   } else {
     console.error(
-      `[k8s-ha] standby deploy OK: masterIp=${standbySettled.value.masterIp} floatingIp=${standbySettled.value.floatingIp} kubeconfig=${standbySettled.value.kubeconfig}`,
+      `[k8s-ha] standby deploy OK: masterIp=${standbySettled.value.masterIp} ingressIp=${clusterIngressIp(standbySettled.value)} kubeconfig=${standbySettled.value.kubeconfig}`,
     );
   }
   if (primarySettled.status === 'rejected' || standbySettled.status === 'rejected') {
@@ -828,24 +830,40 @@ const writesK8sHaDns = (options) =>
   );
 
 /**
- * Write the HA records: apex + wildcard at the role primary's ingress
- * (floating) IP, both clusters named for setupHA's health checks. The targets
- * go on disk first (ha.primary/standby.floatingIp, the role slots destroy's
- * ownedIps reads and failover swaps), so a deploy that fails after this write
- * leaves records destroy removes. A refused write throws.
+ * A side's on-disk record of its DNS target: `ingressIp` always, and the
+ * cluster's floating IP beside it where it has one (Hetzner, Linode). Never a
+ * master's own address as `floatingIp`: destroy releases a recorded
+ * floatingIp by address.
+ */
+function ingressRecord(cluster) {
+  return {
+    ingressIp: clusterIngressIp(cluster),
+    ...(cluster?.floatingIp && { floatingIp: cluster.floatingIp }),
+  };
+}
+
+/**
+ * Write the HA records: apex + wildcard at the role primary's ingress IP
+ * (clusterIngressIp), both clusters named for setupHA's health checks. The
+ * targets go on disk first (ha.primary/standby.ingressIp, the role slots
+ * destroy's ownedIps reads and failover swaps), so a deploy that fails after
+ * this write leaves records destroy removes. A refused write throws.
  *
  * @param {object} options the deploy options (ctx.options)
- * @param {{primaryIp: string, standbyIp: string, warmup?: Promise<unknown>, onProgress?: Function}} o
+ * @param {{primary: object, standby: object, warmup?: Promise<unknown>, onProgress?: Function}} o
+ *   `primary`/`standby`: each cluster's infra signal or deploy result
  */
-async function writeK8sHaDnsRecords(options, { primaryIp, standbyIp, warmup, onProgress }) {
+async function writeK8sHaDnsRecords(options, { primary, standby, warmup, onProgress }) {
+  const primaryIp = clusterIngressIp(primary);
+  const standbyIp = clusterIngressIp(standby);
   // The 0.0.0.0 warm-up write (deploy start) targets the same apex record.
   await warmup;
   updateProjectConfig((onDisk) => {
     const env = onDisk.environments?.[options.environment];
     if (!env) return;
     env.ha = env.ha ?? {};
-    env.ha.primary = { ...(env.ha.primary ?? {}), floatingIp: primaryIp };
-    env.ha.standby = { ...(env.ha.standby ?? {}), floatingIp: standbyIp };
+    env.ha.primary = { ...(env.ha.primary ?? {}), ...ingressRecord(primary) };
+    env.ha.standby = { ...(env.ha.standby ?? {}), ...ingressRecord(standby) };
   });
   const dnsName = DNS_PROVIDERS[options.dnsProvider].name;
   const { setupHA } = await getDnsProvider(options.dnsProvider);
@@ -862,7 +880,9 @@ async function writeK8sHaDnsRecords(options, { primaryIp, standbyIp, warmup, onP
   // A refused record write fails the deploy; "configure DNS manually" over a
   // half-written zone is how a deploy reports success with the site unreachable.
   requireDnsSetup(haResult, `${dnsName} HA DNS records for ${options.domain}`);
-  return { primaryIp, standbyIp };
+  // `at`: when the records took these addresses, which the deploy's release
+  // of a retired reserved IP waits the record's TTL from (ctx.dnsWrite).
+  return { primaryIp, standbyIp, at: Date.now() };
 }
 
 /**
@@ -893,17 +913,30 @@ async function haK8sUpdateDns(ctx) {
     return;
   }
   const early = await ctx.dnsUpdatePromise;
+  let written = early;
   if (
     !early ||
-    early.primaryIp !== primaryResult.floatingIp ||
-    early.standbyIp !== standbyResult.floatingIp
+    early.primaryIp !== clusterIngressIp(primaryResult) ||
+    early.standbyIp !== clusterIngressIp(standbyResult)
   ) {
-    await writeK8sHaDnsRecords(options, {
-      primaryIp: primaryResult.floatingIp,
-      standbyIp: standbyResult.floatingIp,
+    written = await writeK8sHaDnsRecords(options, {
+      primary: primaryResult,
+      standby: standbyResult,
     });
   }
+  // Where the records point now and since when: the orchestrator releases a
+  // retired DigitalOcean reserved IP only once DNS has moved off it
+  // (k8s/retired-reserved-ip.js). Unset when nothing writes the records.
+  ctx.dnsWrite = { target: written.primaryIp, changedAt: written.at };
   p.log.info('DNS configured, use `vibecarbon failover` to switch regions');
+}
+
+/** A cluster's summary line: its ingress IP, and its master's when that differs. */
+function clusterLine(result) {
+  const ingress = clusterIngressIp(result);
+  return ingress === result.masterIp
+    ? c.bold(ingress)
+    : `${c.bold(ingress)} ${c.dim(`(master: ${result.masterIp})`)}`;
 }
 
 /** Print the HA deploy summary + failover-command notes. */
@@ -919,8 +952,8 @@ async function haK8sFinalize(ctx) {
 
   p.note(
     [
-      `Primary (${options.region}):   ${c.bold(primaryResult.floatingIp)} ${c.dim(`(master: ${primaryResult.masterIp})`)}`,
-      `Standby (${options.secondaryRegion}):   ${c.bold(standbyResult.floatingIp)} ${c.dim(`(master: ${standbyResult.masterIp})`)}`,
+      `Primary (${options.region}):   ${clusterLine(primaryResult)}`,
+      `Standby (${options.secondaryRegion}):   ${clusterLine(standbyResult)}`,
       '',
       `Replication:           ${replicationStatus === 'streaming' ? c.success(replicationStatus) : c.warning(replicationStatus.length > 60 ? `${replicationStatus.slice(0, 60)}…` : replicationStatus)}`,
       ...(ctx.standbyImageMissing

@@ -89,6 +89,42 @@ describe('planDestroyTargets', () => {
     expect(plan.ownedIps).toEqual(['1.2.3.4', '1.2.3.5', '9.9.9.1', '9.9.9.2']);
   });
 
+  // The address the records point at is persisted as `ingressIp` (the
+  // floating IP, or on DigitalOcean the master's own address), alongside
+  // any floatingIp. Each address counts once.
+  it('ownedIps: includes ingressIp, single k8s and both k8s-ha sides, each once', () => {
+    const single = planDestroyTargets(
+      { deployMode: 'kubernetes', ingressIp: '5.6.7.8', floatingIp: '5.6.7.8' },
+      projectConfig,
+      'prod',
+    );
+    expect(single.ownedIps).toEqual(['5.6.7.8']);
+    const ha = planDestroyTargets(
+      {
+        deployMode: 'kubernetes',
+        ha: {
+          enabled: true,
+          primary: { ingressIp: '198.51.100.1' },
+          standby: { ingressIp: '198.51.100.2' },
+        },
+      },
+      projectConfig,
+      'prod',
+    );
+    expect(ha.ownedIps).toEqual(['198.51.100.1', '198.51.100.2']);
+  });
+
+  it('ownedIps: a DigitalOcean env mid-migration owns its master and its kept reserved IP', () => {
+    // The records moved to the master; a reserved IP the deploy could not
+    // release is still on record, and records may still point at it.
+    const plan = planDestroyTargets(
+      { deployMode: 'kubernetes', ingressIp: '198.51.100.7', floatingIp: '203.0.113.9' },
+      projectConfig,
+      'prod',
+    );
+    expect(plan.ownedIps).toEqual(['198.51.100.7', '203.0.113.9']);
+  });
+
   it('ownedIps: omits floatingIp entirely when absent (compose tiers unaffected)', () => {
     const envConfig = { deployMode: 'compose', servers: [{ ip: '1.2.3.4' }] };
     const plan = planDestroyTargets(envConfig, projectConfig, 'prod');

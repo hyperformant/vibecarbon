@@ -71,17 +71,13 @@ export const BILLING_EXTRAS = {
     },
   },
   digitalocean: {
-    // The db PVC, 10 GiB on do-block-storage, one per cluster.
+    // The db PVC, 10 GiB on do-block-storage, one per cluster. No ingress
+    // IP: a DigitalOcean cluster's domain points at its master's own address
+    // (its billed IPv4 is the server's, which setMonthly already counts).
     volume: {
       perGbMonthly: 0.1,
       gb: 10,
       source: 'https://docs.digitalocean.com/products/volumes/details/pricing/',
-      checked: '2026-10-22',
-    },
-    // The ingress reserved IP: no charge while assigned.
-    reservedIp: {
-      monthly: 0,
-      source: 'https://docs.digitalocean.com/products/networking/reserved-ips/details/pricing/',
       checked: '2026-10-22',
     },
     objectStorage: {
@@ -186,8 +182,9 @@ export function parseHetznerExtras(payload) {
 
 /**
  * The extras `computeEnvMonthly` adds for `Provider`: per k8s cluster (an
- * ingress IP and the db volume) and per server (a root volume). `live` is
- * what parseHetznerExtras read, where it read anything.
+ * ingress IP where the provider gives one, and the db volume) and per server
+ * (a root volume). `live` is what parseHetznerExtras read, where it read
+ * anything.
  *
  * @param {object} Provider
  * @param {{floatingIpMonthly?: Record<string, number>|null, volumePerGbMonthly?: number|null}} [live]
@@ -204,11 +201,13 @@ export function extrasFor(Provider, live = {}) {
       perServer: 0,
     };
   }
-  if (id === 'digitalocean' || id === 'linode') {
+  if (id === 'digitalocean') {
+    return { perCluster: () => table.volume.perGbMonthly * table.volume.gb, perServer: 0 };
+  }
+  if (id === 'linode') {
     const ip = table.reservedIp;
-    const ipMonthly = ip.monthly ?? ip.perHour * ip.hoursPerMonth;
     return {
-      perCluster: () => ipMonthly + table.volume.perGbMonthly * table.volume.gb,
+      perCluster: () => ip.perHour * ip.hoursPerMonth + table.volume.perGbMonthly * table.volume.gb,
       perServer: 0,
     };
   }

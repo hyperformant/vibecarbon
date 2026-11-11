@@ -9,22 +9,22 @@
 
 import { link } from '../colors.js';
 import { hasAutomatedDns } from '../dns-provider.js';
+import { clusterIngressIp } from './k8s/ingress-ip.js';
 
 /**
- * The public entry IP for each tier's result shape: the floating IP for k8s
- * (single and HA, matching the k8s DNS update), the primary for compose-HA,
- * the lone VPS for compose.
+ * The public entry IP for each tier's result shape: the cluster's ingress IP
+ * for k8s (single and HA, matching the k8s DNS update: clusterIngressIp, the
+ * floating IP or on DigitalOcean the master's own), the primary for
+ * compose-HA, the lone VPS for compose.
  *
  * @param {object} deployResult
  * @returns {string|null}
  */
 export function entryIpFor(deployResult) {
   return (
-    deployResult?.primary?.floatingIp ||
-    deployResult?.floatingIp ||
-    deployResult?.primary?.masterIp ||
+    clusterIngressIp(deployResult?.primary) ||
     deployResult?.primaryIp ||
-    deployResult?.masterIp ||
+    clusterIngressIp(deployResult) ||
     null
   );
 }

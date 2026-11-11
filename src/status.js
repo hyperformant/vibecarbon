@@ -27,6 +27,7 @@ import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
+import { retiredReservedIps } from './lib/deploy/k8s/retired-reserved-ip.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
 import { fetchPublicDomain } from './lib/deploy/public-domain-probe.js';
 import {
@@ -1421,6 +1422,27 @@ export function isHaConfigured(envConfig) {
   return (envConfig.servers ?? []).some((sv) => sv?.role === 'standby');
 }
 
+/**
+ * The environment's held IP rows. A floating IP is the cluster's ingress on
+ * Hetzner and Linode. On DigitalOcean, whose clusters take traffic at the
+ * master's own address, a recorded reserved IP is one a cluster made before
+ * 2026-11 still holds until a deploy sees DNS has moved off it and releases
+ * it (lib/deploy/k8s/retired-reserved-ip.js), so it is labelled as that, never
+ * as the ingress. Exported for tests.
+ *
+ * @param {object} envConfig
+ * @returns {string[]}
+ */
+export function formatAddressLines(envConfig) {
+  const Provider = resolveEnvProvider(envConfig);
+  if (Provider.K8S_FLOATING_IP === false) {
+    return retiredReservedIps(Provider, envConfig).map(
+      (ip) => `${c.dim('Reserved IP')}    ${ip} ${c.dim('(old, not released yet)')}`,
+    );
+  }
+  return envConfig.floatingIp ? [`${c.dim('Floating IP')}    ${envConfig.floatingIp}`] : [];
+}
+
 function renderEnvironment(envName, envConfig, checks) {
   const lines = [];
 
@@ -1447,10 +1469,7 @@ function renderEnvironment(envName, envConfig, checks) {
     lines.push(`${c.dim('Domain')}         ${c.info(envConfig.domain)}`);
   }
 
-  // Floating IP
-  if (envConfig.floatingIp) {
-    lines.push(`${c.dim('Floating IP')}    ${envConfig.floatingIp}`);
-  }
+  lines.push(...formatAddressLines(envConfig));
 
   // S3 Bucket
   if (envConfig.s3?.bucket) {

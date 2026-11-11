@@ -897,6 +897,19 @@ describe('readServingIp', () => {
         'e',
       ),
     ).toBe('1.1.1.1');
+    // The recorded ingressIp wins over a retired reserved IP still on record
+    // (a DigitalOcean env whose deploy could not release it).
+    expect(
+      readServingIp(
+        write({
+          ha: {
+            primary: { masterIp: '1.1.1.1', ingressIp: '1.1.1.1', floatingIp: '2.2.2.2' },
+            standby: { masterIp: '3.3.3.3', ingressIp: '3.3.3.3' },
+          },
+        }),
+        'e',
+      ),
+    ).toBe('1.1.1.1');
     expect(
       readServingIp(
         write({

@@ -121,6 +121,30 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/pm-scrubbed-env.test.ts'],
   },
+  {
+    // The address a k8s cluster's records point at: the floating IP, else
+    // the master (every DigitalOcean cluster's, since it dropped its reserved
+    // IP). Every writer and reader of those records must agree on it, or a
+    // DigitalOcean deploy writes the master while failover flips to a
+    // reserved IP still on record, or the reverse.
+    helper: 'clusterIngressIp',
+    definition: 'src/lib/deploy/k8s/ingress-ip.js',
+    consumers: [
+      'src/lib/deploy/k8s/dns-record.js', // single k8s record writer
+      'src/lib/deploy/effects/k8s-ha.js', // k8s-ha record writer + update-dns barrier
+      'src/lib/deploy/orchestrator.js', // success save (ingressIp) + post-deploy block
+      'src/failover.js', // identifyServers: the DNS flip target
+      'src/lib/deploy/completion-summary.js', // where the site lives
+      'tests/e2e/checks/ha-integrity.ts', // readServingIp
+    ],
+    deepTests: [
+      'tests/unit/deploy/k8s-ingress-ip.test.ts',
+      'tests/unit/deploy/k8s-dns-early-write.test.ts',
+      'tests/unit/deploy/k8s-ha-dns-single-writer.test.ts',
+      'tests/unit/deploy/k8s-ha-dns-early.test.ts',
+      'tests/unit/failover/server-identification.test.ts',
+    ],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');

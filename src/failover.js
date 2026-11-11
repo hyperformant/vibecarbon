@@ -59,6 +59,7 @@ import {
   PROMOTABLE_CERTIFICATES,
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
+import { clusterIngressIp } from './lib/deploy/k8s/ingress-ip.js';
 import { awaitCertManagerLeader } from './lib/deploy/k8s/readiness.js';
 import {
   k8sTlsRestoreLine,
@@ -236,6 +237,12 @@ export function detectScenario(envConfig) {
  * Identify primary and standby servers from the environment config.
  * HA deployments store server info in ha.primary/ha.standby within the environment,
  * or as separate entries in the servers array with region identifiers in their names.
+ *
+ * k8s-ha's `floatingIp` here is each cluster's DNS target, clusterIngressIp of
+ * its record: the recorded ingressIp, else its floating IP, else its master
+ * (DigitalOcean clusters have no floating IP). A reserved IP a DigitalOcean
+ * cluster made before 2026-11 still has on record, unreleased, never wins
+ * over the ingressIp its deploy recorded.
  */
 export function identifyServers(envName, envConfig, _projectConfig) {
   // Check for HA config with primary/standby info nested in the environment
@@ -245,7 +252,7 @@ export function identifyServers(envName, envConfig, _projectConfig) {
         ip: envConfig.ha.primary.masterIp,
         dbIp: envConfig.ha.primary.dbIp,
         dbPrivateIp: envConfig.ha.primary.dbPrivateIp,
-        floatingIp: envConfig.ha.primary.floatingIp || envConfig.ha.primary.masterIp,
+        floatingIp: clusterIngressIp(envConfig.ha.primary),
         region: envConfig.ha.primary.region,
         envKey: envName,
       },
@@ -253,7 +260,7 @@ export function identifyServers(envName, envConfig, _projectConfig) {
         ip: envConfig.ha.standby.masterIp,
         dbIp: envConfig.ha.standby.dbIp,
         dbPrivateIp: envConfig.ha.standby.dbPrivateIp,
-        floatingIp: envConfig.ha.standby.floatingIp || envConfig.ha.standby.masterIp,
+        floatingIp: clusterIngressIp(envConfig.ha.standby),
         region: envConfig.ha.standby.region,
         envKey: envName,
       },

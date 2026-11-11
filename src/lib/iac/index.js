@@ -29,6 +29,7 @@ import { perfEnabled, perfRecord, perfTimer } from '../perf.js';
 import { getProviderClass } from '../providers/index.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
+import { dropStackResources } from './retired-resources.js';
 import { runPastStaleLock, StackHeldError } from './stack-lock.js';
 import {
   classifyStateError,
@@ -547,6 +548,54 @@ export async function repairVultrFirewallRuleInputs(stack) {
 }
 
 /**
+ * Take the resources the provider's programs no longer declare
+ * (`RETIRED_STACK_RESOURCES`) out of the stack's state, so the `up` or preview
+ * that follows never deletes them (lib/iac/retired-resources.js says why).
+ * Every `up` runs it before its refresh (prepareStackForUp), and
+ * convergeClusterInfra before its preview, so deploy, scale and failover all
+ * do. A no-op, and no import, when nothing matches: every provider but
+ * DigitalOcean, and a DigitalOcean stack already without them.
+ *
+ * Throws, unlike the Vultr repair above: a stack it could not read or write
+ * back may still hold the resources, and the `up` would then delete them.
+ * Nothing in the cloud has changed when it throws, so a rerun is safe.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {string|undefined} providerId
+ * @returns {Promise<string[]>} the URNs removed
+ */
+export async function dropRetiredStackResources(stack, providerId) {
+  const retired = providerId ? (getProviderClass(providerId).RETIRED_STACK_RESOURCES ?? []) : [];
+  if (retired.length === 0) return [];
+  let removed = [];
+  try {
+    const state = await withStateBackendRetry(() => stack.exportStack(), 'retired-resource export');
+    const result = dropStackResources(state, retired);
+    removed = result.removed;
+    if (removed.length > 0) {
+      await withStateBackendRetry(
+        () => stack.importStack(result.deployment),
+        'retired-resource import',
+      );
+    }
+  } catch (err) {
+    throw new Error(
+      `Could not take the retired reserved IP out of stack "${stack.name}"'s state, so ` +
+        'Pulumi was not run: it would have deleted that address while your domain may still ' +
+        `point at it. Nothing changed in the cloud; run the command again. Underlying: ${summarizePulumiError(err)}`,
+      { cause: err },
+    );
+  }
+  if (removed.length > 0) {
+    progressLog(
+      `[pulumi] took ${removed.map((urn) => urn.split('::').pop()).join(' and ')} out of ` +
+        `${stack.name}'s state: the address stays assigned until a deploy releases it`,
+    );
+  }
+  return removed;
+}
+
+/**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
  */
@@ -566,6 +615,10 @@ async function upStackImpl(stackName, program, options = {}) {
  */
 async function prepareStackForUp(stackName, program, options) {
   const stack = await getOrCreateStack(stackName, program, options);
+  // Before the refresh too: refreshing ReservedIpAssignment drops it from
+  // state on its own when the API reports the IP elsewhere, and that is not a
+  // decision to leave to a Read.
+  await dropRetiredStackResources(stack, options.provider);
   recordStateOp('refresh');
 
   // Refresh state before `up` to purge pending operations from a crashed

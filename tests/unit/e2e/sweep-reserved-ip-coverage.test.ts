@@ -11,11 +11,13 @@
  *   floatingIps: 0, // reserved IPs are never provisioned by our <X> paths
  *
  * That comment was TRUE when written — the compose tier mints none — and went
- * FALSE the moment the k8s tier landed. digitalocean-k8s.js, linode-k8s.js and
- * vultr-k8s.js all mint one (Linode's own header even warns "BILLING: reserved
- * IPs bill WHILE UNASSIGNED"). The ledger then reported zero meaning "we never
- * looked", not "we found none": a false-clean verdict, the same shape as the
- * storage checks that skipped for months.
+ * FALSE the moment the k8s tier landed. linode-k8s.js and vultr-k8s.js mint
+ * one (Linode's own header even warns "BILLING: reserved IPs bill WHILE
+ * UNASSIGNED"), and digitalocean-k8s.js did until 2026-11: DigitalOcean
+ * clusters made before then still hold one until a deploy or destroy releases
+ * it, so its sweep keeps looking. The ledger then reported zero meaning "we
+ * never looked", not "we found none": a false-clean verdict, the same shape as
+ * the storage checks that skipped for months.
  *
  * Attribution differs, so the correct handling differs, and that asymmetry is
  * deliberate rather than an oversight:
@@ -50,7 +52,7 @@ describe('reserved-IP sweep coverage', () => {
     }
   });
 
-  it('every provider whose k8s program mints a reserved IP actually queries for them', () => {
+  it('every provider whose k8s program mints (or minted) a reserved IP actually queries for them', () => {
     for (const p of K8S_IP_PROVIDERS) {
       expect(code(p), `${p}: sweep never queries any reserved-IP endpoint`).toMatch(
         /reserved[_-]?ips|networking\/ips/i,

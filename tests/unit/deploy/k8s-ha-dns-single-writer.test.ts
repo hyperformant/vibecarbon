@@ -24,8 +24,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const run = vi.hoisted(() => ({
-  /** Floating IP per cluster stack (environment name), what deployK3s reports. */
-  ips: {} as Record<string, { masterIp: string; floatingIp: string }>,
+  /**
+   * Addresses per cluster stack (environment name), what deployK3s reports:
+   * no floatingIp is a cluster that takes traffic at its master (DigitalOcean).
+   */
+  ips: {} as Record<string, { masterIp: string; floatingIp?: string }>,
   /** Effect names of each plan executeDeployment ran, in order. */
   plans: [] as string[][],
   /** Every DNS write, in order: `setupSimple <ip>` / `setupHA <primary> <standby>`. */
@@ -135,12 +138,16 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
 // Deploy state that survives between the two executeDeployment calls of a
 // rerun, keyed by environment like the real file (deploy-state-<env>.json).
 const stateFiles = vi.hoisted(
-  () => new Map<string, Map<string, { status: string; hash: string; result?: unknown }>>(),
+  () =>
+    new Map<
+      string,
+      Map<string, { status: string; hash: string; result?: unknown; completedAt?: number }>
+    >(),
 );
 vi.mock('../../../src/lib/deploy/state.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   StateTracker: class {
-    steps: Map<string, { status: string; hash: string; result?: unknown }>;
+    steps: Map<string, { status: string; hash: string; result?: unknown; completedAt?: number }>;
     constructor(_project: string, environment: string) {
       if (!stateFiles.has(environment)) stateFiles.set(environment, new Map());
       this.steps = stateFiles.get(environment) as typeof this.steps;
@@ -160,10 +167,15 @@ vi.mock('../../../src/lib/deploy/state.js', async (orig) => ({
       if (!s) throw new Error(`Step ${step} was not started`);
       s.status = 'completed';
       s.result = result;
+      s.completedAt = Date.now();
     }
     getStepResult(step: string) {
       const s = this.steps.get(step);
       return s?.status === 'completed' ? s.result : null;
+    }
+    getStepCompletedAt(step: string) {
+      const s = this.steps.get(step);
+      return s?.status === 'completed' ? (s.completedAt ?? null) : null;
     }
     invalidateStep(step: string) {
       this.steps.delete(step);
@@ -425,5 +437,42 @@ describe('single k8s keeps its one early write', () => {
     expect(await deploy(false)).toEqual([]);
     run.ips.prod = { ...SINGLE, floatingIp: '203.0.113.19' };
     expect(await deploy(false)).toEqual(['setupSimple 203.0.113.19']);
+  });
+});
+
+/**
+ * A cluster without a floating IP (every DigitalOcean cluster) has its
+ * records at its master's own address, so a run that replaces a master must
+ * move them to the new master before the public probe, in that same run.
+ */
+describe('a cluster without a floating IP: records at the master, moved with it', () => {
+  const masterOnly = (ip: { masterIp: string }) => ({ masterIp: ip.masterIp });
+  beforeEach(() => {
+    run.ips = {
+      'prod-primary': masterOnly(P),
+      'prod-standby': masterOnly(S),
+      prod: masterOnly(SINGLE),
+    };
+  });
+
+  it('single k8s: first deploy writes the master; a replaced master is rewritten in that run', async () => {
+    expect(await deploy(false)).toEqual([WARMUP, `setupSimple ${SINGLE.masterIp}`]);
+    expect(await deploy(false)).toEqual([]);
+    run.ips.prod = { masterIp: '198.51.100.19' };
+    expect(await deploy(false)).toEqual(['setupSimple 198.51.100.19']);
+    const env = (loadProjectConfig() as { environments: Record<string, object> }).environments.prod;
+    expect(env).toMatchObject({ ingressIp: '198.51.100.19' });
+    expect(env).not.toHaveProperty('floatingIp');
+  });
+
+  it('k8s-ha: setupHA at the masters; a replaced primary master is rewritten in that run', async () => {
+    expect(await deploy(true)).toEqual([WARMUP, `setupHA ${P.masterIp} ${S.masterIp}`]);
+    run.ips['prod-primary'] = { masterIp: '198.51.100.11' };
+    expect(await deploy(true)).toEqual([`setupHA 198.51.100.11 ${S.masterIp}`]);
+    const ha = (loadProjectConfig() as { environments: Record<string, { ha: object }> })
+      .environments.prod.ha as Record<string, object>;
+    expect(ha.primary).toMatchObject({ ingressIp: '198.51.100.11' });
+    expect(ha.primary).not.toHaveProperty('floatingIp');
+    expect(ha.standby).toMatchObject({ ingressIp: S.masterIp });
   });
 });
