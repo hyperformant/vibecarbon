@@ -103,15 +103,19 @@ async function apiError(response, prefix) {
 /**
  * Cursor-paginated collection walk (Vultr's `meta.links.next` idiom).
  * A terminal page reports `next` as an EMPTY STRING, so the loop exits on
- * falsiness rather than on the key being absent.
+ * falsiness rather than on the key being absent. Past MAX_PAGES the walk
+ * stops: by default with what it has read, or, given `pastGuard`, by
+ * throwing it, for a caller that must not take part of the collection for
+ * the whole (findARecordsAt).
  *
  * @param {string} apiToken
  * @param {string} path - e.g. '/domains'
  * @param {string} key - response array key (e.g. 'domains')
  * @param {string} errorPrefix
+ * @param {{pastGuard?: string}} [options] - the error a walk past the guard throws
  * @returns {Promise<object[]>}
  */
-async function walkCursor(apiToken, path, key, errorPrefix) {
+async function walkCursor(apiToken, path, key, errorPrefix, { pastGuard } = {}) {
   const items = [];
   let cursor = '';
 
@@ -127,10 +131,11 @@ async function walkCursor(apiToken, path, key, errorPrefix) {
     if (Array.isArray(data[key])) items.push(...data[key]);
 
     const next = data.meta?.links?.next;
-    if (!next) break;
+    if (!next) return items;
     cursor = next;
   }
 
+  if (pastGuard) throw new Error(pastGuard);
   return items;
 }
 
@@ -138,10 +143,22 @@ async function walkCursor(apiToken, path, key, errorPrefix) {
  * Every record in a zone.
  * @param {string} apiToken
  * @param {string} zoneName - the domain name (Vultr's zone identity)
+ * @param {{whole?: boolean}} [options] - whole: throw rather than return
+ *   part of a zone longer than the walk reads
  * @returns {Promise<object[]>}
  */
-async function getRecords(apiToken, zoneName) {
-  return walkCursor(apiToken, `/domains/${zoneName}/records`, 'records', 'Vultr DNS API error');
+async function getRecords(apiToken, zoneName, { whole = false } = {}) {
+  return walkCursor(
+    apiToken,
+    `/domains/${zoneName}/records`,
+    'records',
+    'Vultr DNS API error',
+    whole
+      ? {
+          pastGuard: `the zone has more than ${MAX_PAGES * PER_PAGE} records, more than vibecarbon reads`,
+        }
+      : {},
+  );
 }
 
 /**
@@ -259,7 +276,8 @@ export async function readARecord(apiToken, zoneId, name) {
  * name. The deploy asks before it releases an address the domain used to
  * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
  * apex and the wildcard, one the user added, would hand its name to whoever
- * the address goes to next. Throws when the zone's records cannot be listed.
+ * the address goes to next. Throws when the zone's records cannot be listed,
+ * or not all of them (more pages than the walk reads).
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
@@ -267,7 +285,9 @@ export async function readARecord(apiToken, zoneId, name) {
  * @returns {Promise<string[]>} sorted, each name once
  */
 export async function findARecordsAt(apiToken, zoneId, address) {
-  const records = await getRecords(apiToken, zoneId);
+  // The whole zone or a throw: a partial read that missed the record would
+  // let the address go.
+  const records = await getRecords(apiToken, zoneId, { whole: true });
   const names = records
     .filter((r) => r.type === 'A' && r.data === address)
     .map((r) => relativeToFqdn(r.name, zoneId));

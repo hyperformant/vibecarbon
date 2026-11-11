@@ -195,14 +195,18 @@ async function apiError(response, prefix) {
  * Walk a page/page_size collection to completion. Scaleway reports
  * `total_count`, but the terminating condition here is a SHORT PAGE — that
  * works whether or not the count is present and cannot loop on a stale count.
+ * Past MAX_PAGES full pages the walk stops: by default with what it has read,
+ * or, given `pastGuard`, by throwing it, for a caller that must not take part
+ * of the collection for the whole (findARecordsAt).
  *
  * @param {string} apiToken
  * @param {string} path - e.g. '/dns-zones'
  * @param {string} key - response array key (e.g. 'dns_zones')
  * @param {string} errorPrefix
+ * @param {{pastGuard?: string}} [options] - the error a walk past the guard throws
  * @returns {Promise<object[]>}
  */
-async function walkPages(apiToken, path, key, errorPrefix) {
+async function walkPages(apiToken, path, key, errorPrefix, { pastGuard } = {}) {
   const items = [];
 
   for (let page = 1; page <= MAX_PAGES; page++) {
@@ -217,9 +221,10 @@ async function walkPages(apiToken, path, key, errorPrefix) {
     const rows = Array.isArray(data[key]) ? data[key] : [];
     items.push(...rows);
 
-    if (rows.length < PAGE_SIZE) break;
+    if (rows.length < PAGE_SIZE) return items;
   }
 
+  if (pastGuard) throw new Error(pastGuard);
   return items;
 }
 
@@ -227,10 +232,22 @@ async function walkPages(apiToken, path, key, errorPrefix) {
  * Every record in a zone.
  * @param {string} apiToken
  * @param {string} zone - the zone NAME (Scaleway's zone identity)
+ * @param {{whole?: boolean}} [options] - whole: throw rather than return
+ *   part of a zone longer than the walk reads
  * @returns {Promise<object[]>}
  */
-async function getRecords(apiToken, zone) {
-  return walkPages(apiToken, `/dns-zones/${zone}/records`, 'records', 'Scaleway DNS API error');
+async function getRecords(apiToken, zone, { whole = false } = {}) {
+  return walkPages(
+    apiToken,
+    `/dns-zones/${zone}/records`,
+    'records',
+    'Scaleway DNS API error',
+    whole
+      ? {
+          pastGuard: `the zone has more than ${MAX_PAGES * PAGE_SIZE} records, more than vibecarbon reads`,
+        }
+      : {},
+  );
 }
 
 /**
@@ -382,7 +399,8 @@ export async function readARecord(apiToken, zoneId, name) {
  * name. The deploy asks before it releases an address the domain used to
  * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
  * apex and the wildcard, one the user added, would hand its name to whoever
- * the address goes to next. Throws when the zone's records cannot be listed.
+ * the address goes to next. Throws when the zone's records cannot be listed,
+ * or not all of them (more pages than the walk reads).
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
@@ -390,7 +408,9 @@ export async function readARecord(apiToken, zoneId, name) {
  * @returns {Promise<string[]>} sorted, each name once
  */
 export async function findARecordsAt(apiToken, zoneId, address) {
-  const records = await getRecords(apiToken, zoneId);
+  // The whole zone or a throw: a partial read that missed the record would
+  // let the address go.
+  const records = await getRecords(apiToken, zoneId, { whole: true });
   const names = records
     .filter((r) => r.type === 'A' && r.data === address)
     .map((r) => relativeToFqdn(r.name, zoneId));

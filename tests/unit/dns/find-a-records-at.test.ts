@@ -153,6 +153,94 @@ describe('findARecordsAt', () => {
     });
   }
 
+  // Each backend's walk stops at a page guard. A zone longer than that is not
+  // read in full, and a partial listing that misses the record at the old
+  // address would let the release go (a false release): past the guard
+  // findARecordsAt throws, as Cloudflare's does, and the release keeps the
+  // address.
+  const endless: Array<{
+    file: string;
+    zoneId: string;
+    pages: number;
+    page: (url: URL, n: number) => unknown;
+  }> = [
+    {
+      file: 'digitalocean-dns.js',
+      zoneId: 'example.com',
+      pages: 20,
+      page: (url) => {
+        const n = Number(url.searchParams.get('page'));
+        return {
+          domain_records: [{ id: n, type: 'A', name: `r${n}`, data: NEW }],
+          links: { pages: { next: 'more' } },
+        };
+      },
+    },
+    {
+      file: 'linode-dns.js',
+      zoneId: '42',
+      pages: 20,
+      page: (url) => {
+        const n = Number(url.searchParams.get('page'));
+        return {
+          data: [{ id: n, type: 'A', name: `r${n}`, target: NEW }],
+          page: n,
+          pages: 25,
+        };
+      },
+    },
+    {
+      file: 'scaleway-dns.js',
+      zoneId: 'example.com',
+      pages: 20,
+      // A full page every time: the walk reads a short page as the end.
+      page: (url) => {
+        const n = Number(url.searchParams.get('page'));
+        return {
+          records: Array.from({ length: 100 }, (_, i) => ({
+            id: `${n}-${i}`,
+            type: 'A',
+            name: `r${n}-${i}`,
+            data: NEW,
+          })),
+        };
+      },
+    },
+    {
+      file: 'vultr-dns.js',
+      zoneId: 'example.com',
+      pages: 20,
+      page: (url) => {
+        const n = Number(url.searchParams.get('cursor') ?? 0) + 1;
+        return {
+          records: [{ id: String(n), type: 'A', name: `r${n}`, data: NEW }],
+          meta: { links: { next: String(n) } },
+        };
+      },
+    },
+  ];
+  for (const { file, zoneId, pages, page } of endless) {
+    it(`${file}: a zone longer than the page guard throws, never reads as the whole zone`, async () => {
+      const recordReads: string[] = [];
+      fetchMock.mockImplementation(async (url: string) => {
+        const u = new URL(url);
+        if (u.pathname.endsWith('/records')) {
+          recordReads.push(url);
+          return ok(page(u, recordReads.length));
+        }
+        // Linode names the zone by id first.
+        if (u.pathname.endsWith('/domains/42')) return ok({ domain: 'example.com' });
+        return new Response('{}', { status: 404 });
+      });
+      const mod = await import(`../../../src/lib/${file}`);
+      await expect(mod.findARecordsAt('t', zoneId, '192.0.2.1')).rejects.toThrow(
+        /more than \d+ records/,
+      );
+      // The guard still bounds the walk: no page past it is asked for.
+      expect(recordReads).toHaveLength(pages);
+    });
+  }
+
   it('cloudflare-dns.js: reads every page, not just the first', async () => {
     fetchMock.mockImplementation(async (url: string) => {
       const page = Number(new URL(url).searchParams.get('page'));
