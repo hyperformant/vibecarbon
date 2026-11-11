@@ -1008,7 +1008,7 @@ async function promptCicd() {
     });
     if (!hasCommits) {
       s.start('Creating initial commit');
-      runCommand(buildGitAddArgv(), { silent: true, ignoreError: true, cwd });
+      runCommand(buildGitAddArgv(), { silent: true, ignoreError: true, cwd, cleanEnv: true });
       runCommand(['git', 'commit', '-m', 'Initial commit - Vibecarbon project'], {
         silent: true,
         cwd,

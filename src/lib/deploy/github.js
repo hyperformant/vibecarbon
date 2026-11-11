@@ -62,6 +62,7 @@ export function checkGitRemote() {
     const result = runCommand('git remote get-url origin', {
       silent: true,
       ignoreError: true,
+      cleanEnv: true,
     });
     return result?.trim() || null;
   } catch {
@@ -82,16 +83,23 @@ export async function createGitHubRepository(projectName, options = {}) {
   // Ensure we have a git repo
   if (!existsSync(join(process.cwd(), '.git'))) {
     s.start('Initializing git repository');
-    runCommand('git init', { silent: true });
+    runCommand('git init', { silent: true, cleanEnv: true });
     s.stop('Git repository initialized');
   }
 
   // Ensure we have at least one commit
-  const hasCommits = runCommand('git rev-parse HEAD', { silent: true, ignoreError: true });
+  const hasCommits = runCommand('git rev-parse HEAD', {
+    silent: true,
+    ignoreError: true,
+    cleanEnv: true,
+  });
   if (!hasCommits) {
     s.start('Creating initial commit');
-    runCommand(buildGitAddArgv(), { silent: true, ignoreError: true });
-    runCommand('git commit -m "Initial commit - Vibecarbon project"', { silent: true });
+    runCommand(buildGitAddArgv(), { silent: true, ignoreError: true, cleanEnv: true });
+    runCommand('git commit -m "Initial commit - Vibecarbon project"', {
+      silent: true,
+      cleanEnv: true,
+    });
     s.stop('Initial commit created');
   }
 
@@ -126,7 +134,11 @@ export async function commitAndPush(branchName, workflowPath, options = {}) {
 
   // Stage the workflow file
   s.start('Staging deployment workflow');
-  runCommand(buildGitAddArgv(process.cwd(), [workflowPath]), { silent: true, ignoreError: true });
+  runCommand(buildGitAddArgv(process.cwd(), [workflowPath]), {
+    silent: true,
+    ignoreError: true,
+    cleanEnv: true,
+  });
   s.stop('Changes staged');
 
   // Commit
@@ -251,7 +263,7 @@ export async function setupGitHubIntegration(projectConfig, _branchName, options
       if (!replace) {
         return { skipped: true, reason: 'non_github_remote' };
       }
-      runCommand('git remote remove origin', { silent: true, ignoreError: true });
+      runCommand('git remote remove origin', { silent: true, ignoreError: true, cleanEnv: true });
     } else {
       return { skipped: true, reason: 'non_github_remote' };
     }
@@ -354,6 +366,7 @@ export async function createGitBranch(branchName) {
     const hasCommits = runCommand('git rev-parse HEAD', {
       silent: true,
       ignoreError: true,
+      cleanEnv: true,
     });
     if (!hasCommits) {
       p.log.warn(`No commits yet - create initial commit, then run: git checkout -b ${branchName}`);

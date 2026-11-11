@@ -424,7 +424,11 @@ async function main(values, positional) {
     // commitAndPush only stages the workflow file — an untracked lockfile would
     // be present locally yet missing from the repo the runner builds from.
     if (generated) {
-      runCommand(buildGitAddArgv(cwd, [lockfile]), { silent: true, ignoreError: true });
+      runCommand(buildGitAddArgv(cwd, [lockfile]), {
+        silent: true,
+        ignoreError: true,
+        cleanEnv: true,
+      });
     }
   }
 
