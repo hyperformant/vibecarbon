@@ -74,7 +74,8 @@ async function stackFor(name: string, size: string) {
         backend: { url: `file://${backend}` },
       },
       envVars: {
-        PULUMI_CONFIG_PASSPHRASE: 'test',
+        // Same shape the CLI hands Pulumi: a per-project passphrase, never ''.
+        PULUMI_CONFIG_PASSPHRASE: 'integration-test-passphrase-0123456789abcdefghij',
         PULUMI_SKIP_UPDATE_CHECK: 'true',
         FAKECLOUD_FILE: cloudFile,
         PATH: `${PLUGIN_DIR}:${process.env.PATH}`,

@@ -13,9 +13,10 @@
  * - One project name ("vibecarbon"), many stacks (one per environment like
  *   "prod", "staging"). HA deploys use two stacks: "<env>-primary" and
  *   "<env>-standby".
- * - Pulumi's own secrets provider isn't used — secrets are resolved from
- *   the operator's environment (shell/CI, or the project's .env.local via
- *   bootstrapOperatorEnv); we pass them to programs as plain config.
+ * - Secrets are resolved from the operator's environment (shell/CI, or the
+ *   project's .env.local via bootstrapOperatorEnv) and passed to programs as
+ *   plain config. The state's secrets provider is encrypted with the
+ *   project's own passphrase (VIBECARBON_STATE_PASSPHRASE, see buildEnv).
  */
 
 import { mkdirSync } from 'node:fs';
@@ -27,6 +28,7 @@ import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
 import { perfEnabled, perfRecord, perfTimer } from '../perf.js';
 import { getProviderClass } from '../providers/index.js';
+import { ensureStatePassphrase, resolveStatePassphrase } from '../state-passphrase.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
@@ -168,7 +170,9 @@ export function resolveBackendUrl(s3Config, provider) {
  * @param {string} [options.providerToken] - The provider's API token. Value
  *   for whatever env var name the provider class declares.
  * @param {object} [options.s3Config]
- * @param {string} [options.configPassphrase]
+ * @param {boolean} [options.decrypts=true] - false for a caller that decrypts
+ *   nothing (stack ls, whoami, stack rm --force): a malformed
+ *   VIBECARBON_STATE_PASSPHRASE then does not stop it.
  * @returns {Record<string, string|undefined>}
  */
 export function buildEnv(options) {
@@ -223,12 +227,24 @@ export function buildEnv(options) {
   // Unknown env vars are ignored by the CLI, so this is inert on a version
   // that predates the flag rather than an error.
   env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS = 'true';
-  // Inline programs don't need a passphrase — but Pulumi insists on one for
-  // the secrets provider. A deterministic empty value keeps the automation
-  // API happy, so nothing in state is encrypted. Secrets flow in at program
-  // time, with one exception: the k8s programs export `k3sToken` as a plain
-  // output, so anyone who can read the state bucket can read the join token.
-  env.PULUMI_CONFIG_PASSPHRASE = options.configPassphrase || '';
+  // The project's state passphrase encrypts the secrets provider, so what the
+  // state holds (the k8s programs' `k3sToken` output among it) is unreadable
+  // without it. SECURITY: never default to '' (that is the empty passphrase
+  // every legacy stack was made with) and never let an inherited
+  // PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE (a shell export
+  // for another project) win over the project's own value. With no project
+  // passphrase both stay unset, so a decrypting call fails loudly instead of
+  // using the wrong key; getOrCreateStack awaits ensureStatePassphrase first,
+  // so every decrypting path has one by the time it gets here.
+  delete env.PULUMI_CONFIG_PASSPHRASE;
+  delete env.PULUMI_CONFIG_PASSPHRASE_FILE;
+  let passphrase = null;
+  try {
+    passphrase = resolveStatePassphrase();
+  } catch (err) {
+    if (options.decrypts !== false) throw err;
+  }
+  if (passphrase) env.PULUMI_CONFIG_PASSPHRASE = passphrase;
   return env;
 }
 
@@ -295,6 +311,14 @@ export function summarizePulumiError(err) {
  *   stack for them silently destroys state. See `isStackNotFoundError`.
  */
 export async function getOrCreateStack(stackName, program, options = {}) {
+  // The choke point for every decrypting Pulumi call: the project's state
+  // passphrase is checked (or made, on a new project) before any workspace
+  // exists. A caller that decrypts nothing (`stack rm --force`) opts out with
+  // `decrypts: false`. A one-time migration of legacy empty-passphrase stacks
+  // belongs right after this check.
+  if (options.decrypts !== false) {
+    await ensureStatePassphrase(options.projectDir ?? process.cwd());
+  }
   recordStateOp('stack-select');
   const pulumiProject = requirePulumiProject(options);
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
@@ -1172,6 +1196,9 @@ export async function removeStackState(stackName, options = {}) {
     stack = await getOrCreateStack(stackName, async () => ({}), {
       ...options,
       requireExisting: true,
+      // Removing a stack decrypts nothing, so a lost passphrase must not
+      // block tearing the state down.
+      decrypts: false,
     });
   } catch (err) {
     if (err?.stackNotFound || /no stack named/i.test(err.message || '')) {
@@ -1304,7 +1331,7 @@ export function classifyK3sTokenProbe({ outputs, error } = {}) {
 export async function listStacks(options = {}) {
   const pulumiProject = requirePulumiProject(options);
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
-  const envVars = buildEnv(options);
+  const envVars = buildEnv({ ...options, decrypts: false });
   try {
     const workspace = await LocalWorkspace.create({
       projectSettings: {
@@ -1347,7 +1374,7 @@ export async function openStateBackend(options) {
       runtime: 'nodejs',
       backend: { url: resolveBackendUrl(options.s3Config, options.provider) },
     },
-    envVars: buildEnv(options),
+    envVars: buildEnv({ ...options, decrypts: false }),
   });
   await workspace.whoAmI();
 }
