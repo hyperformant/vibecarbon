@@ -18,10 +18,12 @@
  * from what a fresh master has: the boot script's own Secret commands (read
  * out of it, tests/_shared/master-init-secrets.ts) run on the node, and no
  * workload carries a restart. applyCloudSecrets runs from here. It must take
- * the Secrets over with their data as it set it, leave an unchanged Secret
- * alone, resourceVersion included, since it runs on every deploy, and replace
- * a rotated token, restarting exactly the workloads that read it: no pod
- * reads a Secret again once it has started.
+ * the Secrets over with their data as it set it, and without the boot
+ * script's last-applied annotation, a copy of the token it applied, whatever
+ * the kubectl (run it with an older one first on PATH to check one). It must
+ * leave an unchanged Secret alone, resourceVersion included, since it runs
+ * on every deploy, and replace a rotated token, restarting exactly the
+ * workloads that read it: no pod reads a Secret again once it has started.
  *
  * Needs Docker, kubectl and GitHub (the upstream manifests). The version
  * channel's k3s smoke runs it too (.github/workflows/version-channel.yml).
@@ -36,7 +38,6 @@ import { applyCloudSecrets } from '../../../src/lib/deploy/k8s/k3s.js';
 import { renderScript } from '../../../src/lib/iac/cloud-init.js';
 import { k3sVersion } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
-import { kubectlClientVersion } from '../../../src/lib/runtime-floors.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 
 const SKIPPED =
@@ -106,7 +107,6 @@ describe.skipIf(SKIPPED)(
   () => {
     let dir: string;
     let kubeconfig: string;
-    let kubectlMinor: number;
     const kube = (args: string[], input?: string) =>
       must('kubectl', args, input, { ...process.env, KUBECONFIG: kubeconfig });
 
@@ -148,9 +148,7 @@ describe.skipIf(SKIPPED)(
         .sort();
 
     beforeAll(() => {
-      const client = run('kubectl', ['version', '--client', '-o', 'json']);
-      expect(client.status, 'kubectl on PATH').toBe(0);
-      kubectlMinor = Number(kubectlClientVersion(client.stdout)?.split('.')[1]);
+      expect(run('kubectl', ['version', '--client']).status, 'kubectl on PATH').toBe(0);
       dir = mkdtempSync(join(tmpdir(), 'vctest-k3s-secrets-'));
       must('docker', [
         'run',
@@ -283,14 +281,11 @@ describe.skipIf(SKIPPED)(
             expect(secret.data).toEqual(stringData);
             expect(secret.managers).toContain('vibecarbon-cli:Apply');
             // The boot script's client-side record of what it applied, token
-            // and all, goes with the takeover: kubectl since 1.26 moves a
-            // client-side apply's fields to the server-side manager and drops
-            // the annotation. kubectl 1.24.17 and 1.25.16, inside the CLI's
-            // floor, leave it, with the boot script's token in it and its
-            // manager beside vibecarbon-cli (measured against this k3s,
-            // 2026-11-11), so only a 1.26+ client is held to it.
-            if (kubectlMinor >= 26) expect(secret.annotations).not.toHaveProperty([LAST_APPLIED]);
-            else expect(secret.annotations).toHaveProperty([LAST_APPLIED]);
+            // and all, goes with the takeover, whatever the kubectl: 1.26 and
+            // later drop it as they move its fields to the server-side
+            // manager, and for 1.24 and 1.25, which keep it (measured against
+            // this k3s, 2026-11-11), applyCloudSecrets removes it.
+            expect(secret.annotations).not.toHaveProperty([LAST_APPLIED]);
           }
           expect(restarted()).toEqual([]);
         },
@@ -318,6 +313,10 @@ describe.skipIf(SKIPPED)(
           await hand(ROTATED_TOKEN);
           for (const { namespace, name, stringData } of expected(ROTATED_TOKEN)) {
             expect(read(namespace, name).data).toEqual(stringData);
+            // The replaced token is nowhere in the Secret, metadata included.
+            const whole = kube(['-n', namespace, 'get', 'secret', name, '-o', 'json']);
+            expect(whole).not.toContain(BOOT_TOKEN);
+            expect(whole).not.toContain(Buffer.from(BOOT_TOKEN).toString('base64'));
           }
           expect(restarted()).toEqual(READERS[providerId]);
         },

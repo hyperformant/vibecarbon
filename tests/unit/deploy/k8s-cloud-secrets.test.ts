@@ -21,6 +21,9 @@
  *     keyed digests and never printed; a Secret that existed and changed
  *     restarts exactly the workloads that read it (found from their pod
  *     templates, secretReaders), an unchanged or a new one restarts nothing;
+ *   - the boot script's last-applied annotation: a Secret the read found it
+ *     on has it removed after the apply, a deploy that finds none makes no
+ *     call, and a failed removal warns with the command and goes on;
  *   - deployK3s: the call has its own perf span, runs after the control-plane
  *     gate and the restore-marker read, before the k3s-apply skip gate, in a
  *     block no condition guards, so a first deploy, a warm redeploy, `deploy
@@ -52,12 +55,19 @@ const cluster = new Map<string, Record<string, string>>();
 let workloads: Record<string, unknown[]> = {};
 /** What `get secret -o json` prints instead of the Secret, when set. */
 let secretOutput: string | null = null;
+/**
+ * The Secrets that carry kubectl's last-applied annotation, `namespace/name`
+ * to the values it records, as the boot script's client-side apply leaves
+ * them. The server-side apply leaves it alone, as kubectl 1.24 and 1.25 do.
+ */
+const lastApplied = new Map<string, Record<string, string>>();
 
-/** A Secret as `kubectl get -o json` prints it, the boot script's last-applied annotation and all. */
+/** A Secret as `kubectl get -o json` prints it, with its last-applied annotation if it has one. */
 function secretJson(namespace: string, name: string, data: Record<string, string>) {
   const encoded = Object.fromEntries(
     Object.entries(data).map(([k, v]) => [k, Buffer.from(v).toString('base64')]),
   );
+  const recorded = lastApplied.get(`${namespace}/${name}`);
   return JSON.stringify({
     apiVersion: 'v1',
     kind: 'Secret',
@@ -65,9 +75,13 @@ function secretJson(namespace: string, name: string, data: Record<string, string
       name,
       namespace,
       resourceVersion: '4242',
-      annotations: {
-        'kubectl.kubernetes.io/last-applied-configuration': JSON.stringify({ stringData: data }),
-      },
+      ...(recorded && {
+        annotations: {
+          'kubectl.kubernetes.io/last-applied-configuration': JSON.stringify({
+            stringData: recorded,
+          }),
+        },
+      }),
     },
     data: encoded,
     type: 'Opaque',
@@ -100,6 +114,15 @@ function fakeKubectl(args: string[], input?: string): string {
       .slice(4)
       .map((r) => `${r} restarted\n`)
       .join('');
+  }
+  if (
+    args[0] === '-n' &&
+    args[2] === 'annotate' &&
+    args[3] === 'secret' &&
+    args[5] === 'kubectl.kubernetes.io/last-applied-configuration-'
+  ) {
+    lastApplied.delete(`${args[1]}/${args[4]}`);
+    return `secret/${args[4]} annotated\n`;
   }
   throw new Error(`the fake kubectl has no answer for: kubectl ${args.join(' ')}`);
 }
@@ -181,6 +204,7 @@ describe('applyCloudSecrets', () => {
   beforeEach(() => {
     calls.length = 0;
     cluster.clear();
+    lastApplied.clear();
     workloads = {};
     secretOutput = null;
     failWhen = null;
@@ -217,13 +241,18 @@ describe('applyCloudSecrets', () => {
     calls.filter(({ argv }) => argv.includes(verb)).map(({ argv }) => argv);
   const applies = () => calls.filter(({ argv }) => argv[1] === 'apply');
   const restarts = () => kubectl('rollout');
-  /** Every token this provider hands over, as the cluster holds them after `token`'s deploy. */
-  const holdAll = (Provider: typeof BaseProvider, token: string) => {
+  /**
+   * Every Secret this provider hands over, as the cluster holds them with
+   * `token`: after a deploy took them over, or (`boot`) as the master's boot
+   * script left them, with kubectl's last-applied record of `token`.
+   */
+  const holdAll = (Provider: typeof BaseProvider, token: string, { boot = false } = {}) => {
     for (const { namespace, name, stringData } of Provider.k8sCloudSecrets({
       token,
       networkId: NETWORK,
     })) {
       cluster.set(`${namespace}/${name}`, { ...stringData });
+      if (boot) lastApplied.set(`${namespace}/${name}`, { ...stringData });
     }
   };
   /** A Deployment whose container reads `secret`'s `key` into its env, as the upstream CCM/CSI do. */
@@ -487,16 +516,99 @@ describe('applyCloudSecrets', () => {
     });
   });
 
+  describe("drops the boot script's last-applied record, once", () => {
+    // kubectl 1.24 and 1.25 keep it through the server-side takeover (the
+    // Docker takeover test measures it), holding the token the boot script
+    // applied; this fake apiserver keeps it the same way.
+    const annotates = () => kubectl('annotate');
+    const verbs = () => calls.map(({ argv }) => (argv[1] === 'apply' ? 'apply' : argv[3]));
+
+    it.each(K8S_PROVIDERS)(
+      '%s: each Secret the read found it on, after the apply, output captured, no token',
+      async (_id, Provider) => {
+        holdAll(Provider, 'vc-sentinel-token-boot', { boot: true });
+        await apply(Provider);
+        expect(annotates()).toEqual(
+          Provider.k8sCloudSecrets({ token: TOKEN }).map(({ namespace, name }) => [
+            'kubectl',
+            '-n',
+            namespace,
+            'annotate',
+            'secret',
+            name,
+            'kubectl.kubernetes.io/last-applied-configuration-',
+          ]),
+        );
+        const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
+        const firstAnnotate = calls.findIndex(({ argv }) => argv[3] === 'annotate');
+        expect(firstAnnotate).toBeGreaterThan(applyAt);
+        expect(lastApplied.size).toBe(0);
+        for (const argv of annotates()) {
+          expect(argv.join(' ')).not.toContain('vc-sentinel-token');
+          expect(argv.join(' ')).not.toContain(MARK);
+        }
+        expect(logged.join('\n')).not.toContain('annotated');
+      },
+    );
+
+    it.each(K8S_PROVIDERS)(
+      '%s: none found, no call: a steady-state deploy is the reads and the apply',
+      async (_id, Provider) => {
+        holdAll(Provider, TOKEN);
+        await apply(Provider);
+        const reads = Provider.k8sCloudSecrets({ token: TOKEN }).map(() => 'get');
+        expect(verbs()).toEqual([...reads, 'apply']);
+      },
+    );
+
+    it('only the Secret that carries it', async () => {
+      holdAll(PROVIDERS.hetzner, TOKEN);
+      lastApplied.set('kube-system/hcloud-csi', { token: TOKEN });
+      await apply(PROVIDERS.hetzner);
+      expect(annotates().map((argv) => argv[5])).toEqual(['hcloud-csi']);
+    });
+
+    it('a Secret this deploy creates gets no call', async () => {
+      await apply(PROVIDERS.linode);
+      expect(annotates()).toEqual([]);
+    });
+
+    it('a failed removal warns with the command to run, and the deploy goes on', async () => {
+      holdAll(PROVIDERS.linode, 'vc-sentinel-token-old', { boot: true });
+      readerPerSecret(PROVIDERS.linode);
+      failWhen = /^-n kube-system annotate secret linode /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl annotate'), {
+        status: 1,
+        stderr: 'error: secrets "linode" is forbidden\n',
+      });
+      await apply(PROVIDERS.linode);
+      expect(logged).toContain(
+        "Couldn't remove kubectl's last-applied record from kube-system/linode, which may hold " +
+          'an earlier copy of your token; the next deploy tries again. To remove it now, run ' +
+          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system annotate secret linode ` +
+          'kubectl.kubernetes.io/last-applied-configuration-`.\n' +
+          'drop the last-applied record from Secret kube-system/linode failed with exit 1: ' +
+          'error: secrets "linode" is forbidden',
+      );
+      // The token went over and its reader restarted all the same.
+      expect(cluster.get('kube-system/linode')).toEqual({ token: TOKEN });
+      expect(restarts()).toHaveLength(1);
+      expect(logged.join('\n')).not.toContain('vc-sentinel-token-old');
+      expect(logged.join('\n')).not.toContain(MARK);
+    });
+  });
+
   describe('the read before the apply never shows a value', () => {
     it.each(K8S_PROVIDERS)(
       '%s: nothing it read reaches stdout, stderr, a log line or an error',
       async (_id, Provider) => {
         // The Secret the cluster holds carries the token in data (base64)
         // and in the boot script's last-applied annotation (plain).
-        holdAll(Provider, TOKEN);
+        holdAll(Provider, TOKEN, { boot: true });
         readerPerSecret(Provider);
         await apply(Provider, { token: 'vc-sentinel-token-new', networkId: NETWORK });
-        expect(kubectl('secret').length).toBe(Provider.k8sCloudSecrets({ token: TOKEN }).length);
+        const reads = kubectl('secret').filter((argv) => argv[3] === 'get');
+        expect(reads.length).toBe(Provider.k8sCloudSecrets({ token: TOKEN }).length);
         const out = logged.join('\n');
         expect(out).not.toContain(MARK);
         expect(out).not.toContain(Buffer.from(TOKEN).toString('base64').slice(0, 16));
@@ -516,9 +628,10 @@ describe('applyCloudSecrets', () => {
       expect(applies()).toHaveLength(0);
     });
 
-    it('keeps keyed digests, never values: a missing key, a missing Secret, a match', async () => {
+    it('keeps keyed digests and the annotation’s presence, never a value', async () => {
       const env = { ...process.env, KUBECONFIG };
       cluster.set('kube-system/hcloud', { token: TOKEN });
+      lastApplied.set('kube-system/hcloud', { token: TOKEN });
       const live = await readSecretFingerprints({
         env,
         namespace: 'kube-system',
@@ -526,11 +639,24 @@ describe('applyCloudSecrets', () => {
         keys: ['token', 'network'],
       });
       expect(live).not.toBeNull();
+      expect(Object.keys(live ?? {}).sort()).toEqual(['fingerprints', 'lastApplied']);
+      expect(live?.lastApplied).toBe(true);
       expect(JSON.stringify(live)).not.toContain(MARK);
-      expect(live?.network).toBe('');
+      expect(JSON.stringify(live)).not.toContain(
+        Buffer.from(TOKEN).toString('base64').slice(0, 16),
+      );
+      expect(live?.fingerprints.network).toBe('');
       expect(secretDataChanged(live, { token: TOKEN })).toBe(false);
       expect(secretDataChanged(live, { token: `${TOKEN}x` })).toBe(true);
       expect(secretDataChanged(live, { token: TOKEN, network: String(NETWORK) })).toBe(true);
+      lastApplied.clear();
+      const taken = await readSecretFingerprints({
+        env,
+        namespace: 'kube-system',
+        name: 'hcloud',
+        keys: ['token'],
+      });
+      expect(taken?.lastApplied).toBe(false);
       const absent = await readSecretFingerprints({
         env,
         namespace: 'kube-system',

@@ -1901,16 +1901,22 @@ function parseKubectlJson(text, what) {
   }
 }
 
+/** kubectl's record of what a client-side `kubectl apply` applied, values and all. */
+export const LAST_APPLIED_ANNOTATION = 'kubectl.kubernetes.io/last-applied-configuration';
+
 /**
- * What a Secret holds now, for change detection: a keyed digest
- * (fingerprintSecret, ../secret-fingerprint.js) of each of `keys`, '' for a
- * key it lacks, or null when there is no such Secret. Read with captureStdout,
- * one Secret per kubectl call: the values stay in this process, only their
- * digests outlive the call, nothing is printed or logged, and a call that
+ * What a Secret holds now, or null when there is no such Secret:
+ * `fingerprints`, a keyed digest (fingerprintSecret, ../secret-fingerprint.js)
+ * of each of `keys`, '' for a key it lacks, for change detection; and
+ * `lastApplied`, whether it carries kubectl's last-applied annotation, which
+ * a client-side apply fills with the values it applied. Read with
+ * captureStdout, one Secret per kubectl call: the values, the annotation's
+ * included, stay in this process, only the digests and the annotation's
+ * presence outlive the call, nothing is printed or logged, and a call that
  * fails has printed nothing to stdout for the CI log to echo.
  *
  * @param {{env: NodeJS.ProcessEnv, namespace: string, name: string, keys: string[], signal?: AbortSignal}} args
- * @returns {Promise<Record<string, string>|null>}
+ * @returns {Promise<{fingerprints: Record<string, string>, lastApplied: boolean}|null>}
  */
 export async function readSecretFingerprints({ env, namespace, name, keys, signal }) {
   const out = await runKubectlWithRetry(
@@ -1924,15 +1930,19 @@ export async function readSecretFingerprints({ env, namespace, name, keys, signa
   );
   const text = String(out ?? '').trim();
   if (text === '') return null;
-  const data = parseKubectlJson(text, `Secret ${namespace}/${name}`)?.data ?? {};
-  return Object.fromEntries(
-    keys.map((key) => [
-      key,
-      typeof data[key] === 'string'
-        ? fingerprintSecret(Buffer.from(data[key], 'base64').toString('utf-8'))
-        : '',
-    ]),
-  );
+  const secret = parseKubectlJson(text, `Secret ${namespace}/${name}`);
+  const data = secret?.data ?? {};
+  return {
+    fingerprints: Object.fromEntries(
+      keys.map((key) => [
+        key,
+        typeof data[key] === 'string'
+          ? fingerprintSecret(Buffer.from(data[key], 'base64').toString('utf-8'))
+          : '',
+      ]),
+    ),
+    lastApplied: typeof secret?.metadata?.annotations?.[LAST_APPLIED_ANNOTATION] === 'string',
+  };
 }
 
 /**
@@ -1941,7 +1951,37 @@ export async function readSecretFingerprints({ env, namespace, name, keys, signa
  */
 export function secretDataChanged(live, stringData) {
   if (!live) return false;
-  return Object.entries(stringData).some(([key, value]) => live[key] !== fingerprintSecret(value));
+  return Object.entries(stringData).some(
+    ([key, value]) => live.fingerprints[key] !== fingerprintSecret(value),
+  );
+}
+
+/**
+ * Remove kubectl's last-applied annotation from a Secret. A failure warns
+ * and the deploy goes on: the Secret and its readers are right without it,
+ * and the next deploy reads the annotation again and tries again. Output
+ * captured: kubectl prints only the Secret's name, and nothing here echoes.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace: string, name: string}} args
+ */
+async function dropLastApplied({ env, namespace, name }) {
+  try {
+    await runKubectlWithRetry(
+      ['-n', namespace, 'annotate', 'secret', name, `${LAST_APPLIED_ANNOTATION}-`],
+      {
+        env,
+        captureStdout: true,
+        description: `drop the last-applied record from Secret ${namespace}/${name}`,
+      },
+    );
+  } catch (err) {
+    progressLog(
+      `Couldn't remove kubectl's last-applied record from ${namespace}/${name}, which ` +
+        'may hold an earlier copy of your token; the next deploy tries again. To ' +
+        `remove it now, run \`KUBECONFIG=${env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>'} ` +
+        `kubectl -n ${namespace} annotate secret ${name} ${LAST_APPLIED_ANNOTATION}-\`.\n${err.message}`,
+    );
+  }
 }
 
 /**
@@ -2070,6 +2110,14 @@ export async function restartSecretReaders({ env, namespace, secretNames, signal
  * does a new one: its readers could not start without it, and they pick it
  * up as soon as it exists.
  *
+ * The boot script's client-side apply left kubectl's last-applied annotation
+ * on its Secrets, a copy of what it applied, token included. kubectl 1.26 and
+ * later drop it as this apply takes a Secret over; 1.24 and 1.25, inside the
+ * CLI's floor, keep it, and a replaced token would live on there. So a
+ * Secret the read found carrying it has it removed after the apply
+ * (dropLastApplied): once, on the deploy that takes the Secret over, and
+ * never on one that finds none.
+ *
  * The token travels on kubectl's stdin only: never argv, which a process
  * listing and a failed command's message show, never a log line, never a
  * file. A Secret without a value refuses before kubectl runs: applying an
@@ -2121,6 +2169,9 @@ export async function applyCloudSecrets({
       .join('\n---\n'),
     description: `applyCloudSecrets: kubectl apply --server-side ${names.join(' ')}`,
   });
+  for (const [i, { namespace, name }] of secrets.entries()) {
+    if (live[i]?.lastApplied) await dropLastApplied({ env, namespace, name });
+  }
   const changed = new Map();
   secrets.forEach(({ namespace, name, stringData }, i) => {
     if (!secretDataChanged(live[i], stringData)) return;
@@ -3993,6 +4044,10 @@ export async function applyK3sManifests({
       });
       // The token as the autoscaler holds it now: it reads it only when it
       // starts, so a replaced one restarts it once the apply below is done.
+      // Its last-applied annotation needs no removal (dropLastApplied): every
+      // writer of this Secret (this apply, `scale`) applies it client-side,
+      // which rewrites the record, so it holds the token just applied, never
+      // a replaced one.
       const caTokenBefore = await readSecretFingerprints({
         env,
         namespace: 'kube-system',
