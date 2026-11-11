@@ -336,11 +336,11 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       expect(body).not.toHaveProperty('vpc_uuid');
     });
 
-    it('throws the DO {message} error shape on a non-ok POST', async () => {
+    it('passes an unrelated 422 message through in the DO {message} error shape', async () => {
       fetchWithRetryMock
         .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
         .mockResolvedValueOnce(
-          resp({ id: 'unprocessable_entity', message: 'size not available in region' }, 422),
+          resp({ id: 'unprocessable_entity', message: 'Name is already in use.' }, 422),
         );
 
       await expect(
@@ -352,7 +352,7 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
           sshKeys: [1],
           labels: {},
         }),
-      ).rejects.toThrow('DigitalOcean API error: size not available in region');
+      ).rejects.toThrow('DigitalOcean API error: Name is already in use.');
     });
 
     it('maps the size-unavailable 422 to a plain out-of-stock message naming size and region', async () => {

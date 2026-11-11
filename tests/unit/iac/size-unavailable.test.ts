@@ -58,6 +58,9 @@ describe('sizeUnavailableError', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err?.message).toContain('"s-4vcpu-8gb" in nyc3');
     expect(err?.message).toContain('out of stock');
+    // every sentence is a fact the CLI knows: no claim about the earlier catalog check
+    expect(err?.message).toContain('does not say which');
+    expect(err?.message).not.toMatch(/when the deploy checked|right now/);
     expect(err?.message).toContain('another size or another region');
     expect(err?.message).toContain('try again later');
     expect(err?.message).not.toContain('422');

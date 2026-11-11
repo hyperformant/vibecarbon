@@ -9,8 +9,9 @@
  * The same `message` is what the REST API returns in its `{id, message}` body,
  * so the Pulumi path and the direct createServer path share one signature.
  *
- * The catalog filters `available !== false` up front, so this only fires on a
- * stock-out inside that window. It is a definite answer from DO, so there is no
+ * The catalog filters `available !== false` up front, so this usually means a
+ * stock-out after that check, but DO's sentence does not say whether the size is
+ * out of stock or not sold in the region, and the message says the same. It is a definite answer from DO, so there is no
  * retry: the message says what to do instead. Unrelated 422s ("already in use",
  * "overlaps with another VPC", ...) do not match and pass through untouched.
  */
@@ -34,12 +35,13 @@ const DIAGNOSTIC_DROPLET = /digitalocean:index:Droplet \(([^)\n]+)\):/g;
  * @param {string} [info.name] droplet name or Pulumi resource name
  */
 export function describeSizeUnavailable({ size, region, name } = {}) {
-  const what = size ? `The droplet size "${size}"` : 'The droplet size you picked';
+  const what = size ? `the droplet size "${size}"` : 'the droplet size you picked';
   const where = region ? ` in ${region}` : ' in that region';
   const which = name ? ` (needed for "${name}")` : '';
   return (
-    `${what}${where} is out of stock on DigitalOcean right now${which}, so it could not be ` +
-    'created. It was available when the deploy checked, and stock changes by the minute. ' +
+    `DigitalOcean could not create ${what}${where}${which}: ` +
+    'it answered that the size is not available in the region. That can mean the size is out of ' +
+    'stock or that the region does not sell it, and DigitalOcean does not say which. ' +
     `Pick another size or another region${region ? ` (other than ${region})` : ''}, or try ` +
     'again later. The deploy did not retry, because DigitalOcean gave a definite answer.'
   );
