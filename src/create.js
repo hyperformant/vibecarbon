@@ -47,6 +47,7 @@ import {
 } from './lib/package-manager.js';
 import { validateGitignore } from './lib/project.js';
 import { generateBucketSalt, generatePassword, generateReplPassword } from './lib/secrets.js';
+import { ensureStatePassphrase, STATE_PASSPHRASE_KEY } from './lib/state-passphrase.js';
 import { projectPathFor, templatePathFor } from './lib/template-paths.js';
 import { createTracker } from './lib/tracker.js';
 import { getUpgradeableFiles } from './lib/upgrade-policy.js';
@@ -1384,6 +1385,12 @@ ${runCmd} test:prepush
       }),
     projectDir,
   );
+  // This project's own Pulumi state passphrase: the value into .env.local
+  // only (never .env, which ships to servers), its fingerprint into the
+  // .vibecarbon.json the initial commit captures. A value inherited from the
+  // shell belongs to another project; a new project makes its own.
+  delete process.env[STATE_PASSPHRASE_KEY];
+  await ensureStatePassphrase(projectDir);
   await tick();
 
   // Create the initial commit so the user starts from a clean, tracked

@@ -370,6 +370,17 @@ export function setupE2EEnv(opts = {}) {
 }
 
 /**
+ * Passphrase variables an e2e child must not inherit: the project's own
+ * (each scenario's `create` makes one) and the two Pulumi spellings a shell
+ * export for another project would put ahead of it.
+ */
+const INHERITED_STATE_PASSPHRASE_KEYS = [
+  'VIBECARBON_STATE_PASSPHRASE',
+  'PULUMI_CONFIG_PASSPHRASE',
+  'PULUMI_CONFIG_PASSPHRASE_FILE',
+];
+
+/**
  * Env for a spawned `vibecarbon` CLI child.
  *
  * Shared by `runCli` (tests/e2e/utils/cli-runner.ts) and
@@ -438,6 +449,13 @@ export function e2eCliEnv(extra = {}, base = process.env, provider = undefined) 
     }
   } else {
     delete env.HCLOUD_TOKEN;
+  }
+
+  // Each e2e project makes its own state passphrase. Dropped AFTER `extra`
+  // is applied for the inherited names only: a scenario passing its own
+  // VIBECARBON_STATE_PASSPHRASE explicitly keeps it.
+  for (const key of INHERITED_STATE_PASSPHRASE_KEYS) {
+    if (!(key in extra)) delete env[key];
   }
 
   // Drop undefined values — spawn() rejects them on some platforms.
