@@ -139,7 +139,10 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
   // 2026-09-19 whole-branch review, so it is no longer an operator-secret key
   // at all and needs no exemption. The harness still sets it programmatically
   // in tests/e2e/utils/e2e-env.js.)
-  const REGISTRY_ONLY_OPERATOR_KEYS = new Set(['PULUMI_BACKEND_URL']);
+  const REGISTRY_ONLY_OPERATOR_KEYS = new Set([
+    'PULUMI_BACKEND_URL',
+    'VIBECARBON_STATE_PASSPHRASE',
+  ]);
 
   it('.env.e2e.example carries no legacy spelling', () => {
     for (const key of exampleKeys) {

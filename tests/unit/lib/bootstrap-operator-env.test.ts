@@ -53,6 +53,15 @@ describe('bootstrapOperatorEnv', () => {
     expect(populated.has('STRIPE_SECRET_KEY')).toBe(false);
   });
 
+  it('loads the state passphrase from .env.local into process.env', () => {
+    writeEnvLocal("VIBECARBON_STATE_PASSPHRASE='a-project-passphrase-0123456789'");
+
+    const populated = bootstrapOperatorEnv(tempBase);
+
+    expect(process.env.VIBECARBON_STATE_PASSPHRASE).toBe('a-project-passphrase-0123456789');
+    expect(populated.has('VIBECARBON_STATE_PASSPHRASE')).toBe(true);
+  });
+
   it('never overrides a real shell env value with the file value', () => {
     process.env.HETZNER_API_TOKEN = 'shell-token';
     writeEnvLocal("HETZNER_API_TOKEN='file-token'");
