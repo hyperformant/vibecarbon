@@ -36,7 +36,7 @@ import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js'
 import {
   appStorageSecretKeys,
   localAppStorageSecrets,
-  markAppBucketsNotFound,
+  recordFenceFindings,
   revokeAppStorageCredential,
   syncHetznerFences,
 } from './lib/deploy/app-storage-credential.js';
@@ -1870,6 +1870,10 @@ async function revokeAppStorageKeyEffect(ctx) {
       // prints once.
       results.fenceGone = fenced.gone ?? [];
       results.fenceFound = (fenced.found ?? []).map((f) => f.bucket);
+      results.fenceLocated = (fenced.located ?? []).map(({ bucket, region }) => ({
+        bucket,
+        region,
+      }));
     } else {
       spinner.stop(
         `App storage key ${record.id} retired; the bucket fences were not updated (no object storage keys here), and they still deny it`,
@@ -2279,13 +2283,15 @@ async function updateProjectConfigEffect(ctx) {
   // environment's record saved since must survive.
   updateProjectConfig((updatedConfig) => {
     writeProjectLevelFields(updatedConfig, results);
-    // A destroyed environment's app bucket the fence found in no region is
-    // marked not found, and one it read again is cleared
-    // (markAppBucketsNotFound). Never appBucketPurged: that is only for a
-    // delete this destroy confirmed, below.
-    markAppBucketsNotFound(updatedConfig, {
+    // What the fence found about destroyed environments' buckets: one in no
+    // region is marked not found, one read again is cleared, and one found
+    // in another region has it written into the record (recordFenceFindings).
+    // Never appBucketPurged: that is only for a delete this destroy
+    // confirmed, below.
+    recordFenceFindings(updatedConfig, {
       gone: results.fenceGone ?? [],
       found: results.fenceFound ?? [],
+      located: results.fenceLocated ?? [],
     });
     if (updatedConfig.environments) {
       // Keep what the environment WAS (placement, domain, DNS, backup bucket,

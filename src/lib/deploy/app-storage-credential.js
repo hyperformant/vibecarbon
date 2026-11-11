@@ -385,50 +385,71 @@ export function markUnfencedBuckets(projectConfig, skipped) {
 }
 
 /**
- * Mark each destroyed environment whose app bucket the fence found in no
- * region (`gone`, applyHetznerFences) `appBucketNotFound`, with the date it
- * was first found so, and clear the mark where the fence read the bucket
- * again (`found`). The mark only keeps the "nothing to fence" line from
- * repeating: the fence still looks for the bucket on every run and fences
- * it wherever it turns up. It is never `appBucketPurged`, which only a
- * `-purge` that confirmed it deleted the bucket writes and which ends the
- * bucket's fence: one wrong "no region has it" must not do that. A bucket
- * a live environment names is never in `gone`.
+ * What one fence run found about the buckets destroyed environments name,
+ * written onto their records (destroyedEnvironments), so the next run reads
+ * the right region and does not repeat itself:
+ *   - `gone` (applyHetznerFences): no region has the bucket. Each destroyed
+ *     record naming it as its app bucket gets `appBucketNotFound`, and each
+ *     naming it as the backups bucket it kept gets `backupsNotFound`, with the
+ *     date it was first found so (a later run keeps that date).
+ *   - `found`: the fence read a marked bucket again; both marks are cleared.
+ *   - `located`: the bucket was found in another region than its record
+ *     says. A destroyed record naming it as its app bucket gets that region
+ *     in `s3.region`, so the next run reads it there with no search and no
+ *     line. (A live record is corrected by its own deploy, and the line says
+ *     so.)
+ * A not-found mark only keeps the "nothing to fence" line from repeating:
+ * the fence still reads the bucket on every run, looks in every region after
+ * a NoSuchBucket, and fences it wherever it turns up. Neither mark is ever
+ * `appBucketPurged` (only a delete `-purge` confirmed writes that, and it
+ * ends the bucket's fence) or `backupsPurged` (which ends the hold): one
+ * wrong "no region has it" must not do either. A bucket a live environment
+ * names is never in `gone`.
  * @param {{ destroyedEnvironments?: Record<string, any> }} projectConfig - changed in place
- * @param {{ gone?: string[], found?: string[] }} seen - bucket names
+ * @param {{ gone?: string[], found?: string[],
+ *   located?: { bucket: string, region: string }[] }} seen - what the run found
  * @param {string} [at] - ISO date for a new mark
  */
-export function markAppBucketsNotFound(
+export function recordFenceFindings(
   projectConfig,
-  { gone = [], found = [] },
+  { gone = [], found = [], located = [] },
   at = new Date().toISOString(),
 ) {
   const missing = new Set(gone);
   const back = new Set(found);
+  const moved = new Map(located.map((l) => [l.bucket, l.region]));
   for (const entry of Object.values(projectConfig.destroyedEnvironments ?? {})) {
-    const bucket = entry?.s3?.bucket;
-    if (!bucket) continue;
-    if (back.has(bucket)) delete entry.appBucketNotFound;
-    else if (missing.has(bucket) && !entry.appBucketNotFound) entry.appBucketNotFound = at;
+    if (!entry) continue;
+    const app = entry.s3?.bucket;
+    if (app) {
+      if (back.has(app)) delete entry.appBucketNotFound;
+      else if (missing.has(app) && !entry.appBucketNotFound) entry.appBucketNotFound = at;
+      if (moved.has(app)) entry.s3.region = moved.get(app);
+    }
+    const backups = entry.backupsPurged ? null : backupsTargetOf(entry)?.bucket;
+    if (backups) {
+      if (back.has(backups)) delete entry.backupsNotFound;
+      else if (missing.has(backups) && !entry.backupsNotFound) entry.backupsNotFound = at;
+    }
   }
   return projectConfig;
 }
 
 /**
  * What a deploy's fence sync leaves on record, applied to the file as it is
- * at the save: the unfenced marks `status` shows (markUnfencedBuckets) and
- * the not-found mark on a destroyed environment's vanished app bucket, set
- * or cleared (markAppBucketsNotFound).
+ * at the save: the unfenced marks `status` shows (markUnfencedBuckets), and
+ * what the run found about destroyed environments' buckets
+ * (recordFenceFindings).
  * @param {object} projectConfig - changed in place
- * @param {{ fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[] }} final -
- *   what finish() returned
+ * @param {{ fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[],
+ *   fenceLocated?: { bucket: string, region: string }[] }} final - what finish() returned
  */
 export function recordFenceOutcome(
   projectConfig,
-  { fenceSkipped, fenceGone = [], fenceFound = [] },
+  { fenceSkipped, fenceGone = [], fenceFound = [], fenceLocated = [] },
 ) {
   if (fenceSkipped) markUnfencedBuckets(projectConfig, fenceSkipped);
-  markAppBucketsNotFound(projectConfig, { gone: fenceGone, found: fenceFound });
+  recordFenceFindings(projectConfig, { gone: fenceGone, found: fenceFound, located: fenceLocated });
   return projectConfig;
 }
 

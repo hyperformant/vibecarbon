@@ -361,11 +361,13 @@ function sameOrigins(a, b) {
  * @returns {{
  *   done: Promise<void>,
  *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null,
- *     fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[] }>,
+ *     fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[],
+ *     fenceLocated?: { bucket: string, region: string }[] }>,
  * }}
  *   `bucketCreatedAt` (ISO string, or null when unknown) is present only on a
- *   provider that fences a pasted app key. `fenceSkipped`, `fenceGone` and
- *   `fenceFound` are present only when the fence ran, for recordFenceOutcome.
+ *   provider that fences a pasted app key. `fenceSkipped`, `fenceGone`,
+ *   `fenceFound` and `fenceLocated` are present only when the fence ran, for
+ *   recordFenceOutcome.
  */
 export function startAppBucketFinalize({
   providerId,
@@ -433,6 +435,7 @@ export function startAppBucketFinalize({
             fenceSkipped: fence.skipped ?? [],
             fenceGone: fence.gone ?? [],
             fenceFound: (fence.found ?? []).map((f) => f.bucket),
+            fenceLocated: (fence.located ?? []).map(({ bucket, region }) => ({ bucket, region })),
           }
         : {};
       const { recorded, createdAt, warning } = await fenceRecord;
@@ -2969,10 +2972,11 @@ export async function executeDeployment(args, gatheredConfig) {
   // recorded so the next deploy or destroy revokes it.
   // A fence target the sync skipped (an absent bucket of an env that never
   // finished a deploy) is marked on that env, for `status`; a sync that
-  // fenced everything clears the marks. A destroyed environment's app bucket
-  // no region has is marked not found, so its line prints once, and the mark
-  // is cleared when the fence reads the bucket again (recordFenceOutcome).
-  // The fence keeps looking for it either way.
+  // fenced everything clears the marks. A destroyed environment's app or
+  // kept backups bucket no region has is marked not found, so its line prints
+  // once, and the mark is cleared when the fence reads the bucket again; one
+  // found in another region has that region written into the destroyed
+  // record (recordFenceOutcome). The fence keeps looking for it either way.
   if (appBucketFinal.fenceSkipped) {
     updateProjectConfig((onDisk) => {
       recordFenceOutcome(onDisk, appBucketFinal);

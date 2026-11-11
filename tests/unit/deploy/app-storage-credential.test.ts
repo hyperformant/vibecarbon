@@ -538,6 +538,77 @@ describe('revoke on destroy', () => {
     }
   });
 
+  it('a destroy that finds a destroyed record’s bucket in another region fences it there and writes that region into the record', async () => {
+    const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const { HetznerS3Provider } = await import('../../../src/lib/providers/hetzner-s3.js');
+    const { S3CompatibleProvider } = await import('../../../src/lib/providers/s3-base.js');
+    const prompts = await import('@clack/prompts');
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
+      accessKey: 'SENTINEL_INFRA_AK',
+      secretKey: 'SENTINEL_INFRA_SK',
+    });
+    vi.spyOn(HetznerS3Provider.prototype, 'ownerId').mockResolvedValue('OWNER');
+    // fsn1, where old's record says, has no such bucket; nbg1 has it.
+    vi.spyOn(S3CompatibleProvider.prototype, 'getBucketPolicy')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' }),
+      )
+      .mockResolvedValue(null);
+    vi.spyOn(S3CompatibleProvider.prototype, 'locateBucket').mockResolvedValue('nbg1');
+    const put = vi
+      .spyOn(S3CompatibleProvider.prototype, 'putBucketPolicy')
+      .mockResolvedValue(undefined as never);
+    const info = vi.spyOn(prompts.log, 'info').mockImplementation(() => {});
+    vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-moved-'));
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      const projectConfig = {
+        projectName: 'proj',
+        environments: {
+          staging: {
+            provider: 'hetzner',
+            s3: {
+              bucket: 'proj-abc-staging',
+              region: 'fsn1',
+              appKey: { id: 'AK_S', scoping: 'paste-fence', tier: 'fenced' },
+            },
+          },
+        },
+        destroyedEnvironments: {
+          old: { s3: { bucket: 'proj-abc-old', region: 'fsn1' }, destroyedAt: 'x' },
+        },
+      };
+      writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(projectConfig));
+      const ctx = {
+        envConfig: projectConfig.environments.staging,
+        projectConfig,
+        environment: 'staging',
+        args: {},
+        results: { leaks: createLeakLedger() } as Record<string, unknown>,
+        cwd: dir,
+        spinner: { start: vi.fn(), stop: vi.fn() },
+      };
+      await DESTROY_EFFECTS.revokeAppStorageKey(ctx);
+      expect(put).toHaveBeenCalledWith('proj-abc-old', expect.anything());
+      expect(info).toHaveBeenCalledWith(
+        "app key fence: proj-abc-old is in nbg1, not fsn1 as destroyed old's record says; fenced it there",
+      );
+      await DESTROY_EFFECTS.updateProjectConfig(ctx);
+      const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
+      expect(saved.destroyedEnvironments.old.s3).toEqual({
+        bucket: 'proj-abc-old',
+        region: 'nbg1',
+      });
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('the destroy preview names the key it will revoke', async () => {
     const { destroyPreviewBody } = await import('../../../src/lib/destroy/preview.js');
     const body = destroyPreviewBody({

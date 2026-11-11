@@ -80,8 +80,9 @@ export function envIdentityOf(envConfig) {
  * @returns {{ envConfig: Record<string, unknown>, fromDestroyed: { destroyedAt?: string } | null }}
  *   `fromDestroyed` is non-null exactly when the seed came from a destroyed
  *   record, so the caller can say so; `destroyedAt`, `backupsPurged`,
- *   `appBucketPurged` and `appBucketNotFound` are bookkeeping and are kept
- *   OUT of `envConfig` so they never land in the persisted env block.
+ *   `appBucketPurged`, `appBucketNotFound` and `backupsNotFound` are
+ *   bookkeeping and are kept OUT of `envConfig` so they never land in the
+ *   persisted env block.
  *
  * A record marked `backupsPurged` also seeds no `backupS3`. That destroy's
  * -purge deleted the environment's backups folder, and the bucket too when no
@@ -98,13 +99,14 @@ export function resolveEnvSeed(projectConfig, envName) {
   if (live) return { envConfig: live, fromDestroyed: null };
   const recorded = projectConfig?.destroyedEnvironments?.[envName];
   if (!recorded) return { envConfig: {}, fromDestroyed: null };
-  // backupsPurged, appBucketPurged and appBucketNotFound are bookkeeping
-  // too (backupsHoldings, the app key fence).
+  // backupsPurged and the app key fence's marks are bookkeeping too
+  // (backupsHoldings, the fence).
   const {
     destroyedAt,
     backupsPurged,
     appBucketPurged: _deleted,
     appBucketNotFound: _notFound,
+    backupsNotFound: _backupsNotFound,
     ...identity
   } = recorded;
   if (!backupsPurged) return { envConfig: identity, fromDestroyed: { destroyedAt } };

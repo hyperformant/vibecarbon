@@ -26,9 +26,12 @@ import { deriveProjectBucketName, deriveRegionBackupsBucketName } from './provid
 /**
  * One environment keeping backups in one bucket. `regionRecorded` is false
  * when the region is a stand-in (the uploads region of a record that names
- * none); `live` is false for a destroyed environment's record.
+ * none); `live` is false for a destroyed environment's record. `notFound`
+ * (a destroyed record only) is true when the record carries
+ * `backupsNotFound`: an earlier app key fence run found the bucket in no
+ * region. It still holds the bucket; the mark only quiets the fence's report.
  * @typedef {{ env: string, bucket: string, region: string | null,
- *   regionRecorded: boolean, live: boolean }} BackupsHolding
+ *   regionRecorded: boolean, live: boolean, notFound?: boolean }} BackupsHolding
  */
 
 /**
@@ -120,7 +123,14 @@ export function backupsHoldings(projectConfig, { except } = {}) {
   for (const [env, entry] of Object.entries(projectConfig?.destroyedEnvironments ?? {})) {
     if (env === except || entry?.backupsPurged) continue;
     const target = backupsTargetOf(entry);
-    if (target) out.push({ env, ...holdingOf(entry, target), live: false });
+    if (target) {
+      out.push({
+        env,
+        ...holdingOf(entry, target),
+        live: false,
+        notFound: Boolean(entry.backupsNotFound),
+      });
+    }
   }
   return out;
 }

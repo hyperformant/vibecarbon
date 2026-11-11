@@ -117,7 +117,14 @@ describe('backupsHoldings and backupsBucketHolders', () => {
       },
     );
     expect(backupsHoldings(config, {})).toEqual([
-      { env: 'old', bucket: BASE, region: 'nbg1', regionRecorded: true, live: false },
+      {
+        env: 'old',
+        bucket: BASE,
+        region: 'nbg1',
+        regionRecorded: true,
+        live: false,
+        notFound: false,
+      },
     ]);
   });
 
@@ -137,7 +144,14 @@ describe('backupsHoldings and backupsBucketHolders', () => {
     const config = project({ veryOld }, { gone: veryOld });
     expect(backupsHoldings(config, {})).toEqual([
       { env: 'veryOld', bucket: FSN1, region: 'fsn1', regionRecorded: false, live: true },
-      { env: 'gone', bucket: FSN1, region: 'fsn1', regionRecorded: false, live: false },
+      {
+        env: 'gone',
+        bucket: FSN1,
+        region: 'fsn1',
+        regionRecorded: false,
+        live: false,
+        notFound: false,
+      },
     ]);
   });
 
