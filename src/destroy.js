@@ -36,6 +36,7 @@ import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js'
 import {
   appStorageSecretKeys,
   localAppStorageSecrets,
+  markGoneAppBuckets,
   revokeAppStorageCredential,
   syncHetznerFences,
 } from './lib/deploy/app-storage-credential.js';
@@ -1814,6 +1815,8 @@ async function revokeAppStorageKeyEffect(ctx) {
       });
       spinner.stop(`App storage key ${record.id} retired; it stays denied in every bucket fence`);
       for (const line of fenceInfoLines(fenced)) p.log.info(line);
+      // Marked in this destroy's config write, so the line prints once.
+      results.fenceGone = fenced.gone ?? [];
     } else {
       spinner.stop(
         `App storage key ${record.id} retired; the bucket fences were not updated (no object storage keys here), and they still deny it`,
@@ -2223,6 +2226,9 @@ async function updateProjectConfigEffect(ctx) {
   // environment's record saved since must survive.
   updateProjectConfig((updatedConfig) => {
     writeProjectLevelFields(updatedConfig, results);
+    // A destroyed environment's app bucket the fence found in no region is
+    // marked deleted, as -purge marks one it deletes (markGoneAppBuckets).
+    markGoneAppBuckets(updatedConfig, results.fenceGone ?? []);
     if (updatedConfig.environments) {
       // Keep what the environment WAS (placement, domain, DNS, backup bucket,
       // sizing) under a sibling key `deploy` reads when this name is deployed

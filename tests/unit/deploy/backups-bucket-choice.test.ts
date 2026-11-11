@@ -4,7 +4,8 @@
  * One bucket per project and storage region: the first region keeps
  * `<project>-<salt>-backups`, each further region gets
  * `<project>-<salt>-<region>-backups`. The chooser's rules, first match wins:
- * recorded (the env's own record, never moved), shared (another environment's
+ * recorded (the env's own record, never moved), adopted (an older CLI's
+ * deployed environment with no record keeps the base name, never moved), shared (another environment's
  * backups in this region), first (the base name, held by nobody), region (the
  * region's own name). The settle step creates the chosen bucket and takes its
  * region and endpoint from that create, never from the plan.
@@ -244,6 +245,64 @@ describe('chooseBackupsBucket', () => {
     });
   });
 
+  /** An environment an older CLI deployed: uploads in `region`, no backups record. */
+  const olderCli = (region: string, extra: Record<string, unknown> = {}) => ({
+    deployedAt: '2026-01-01T00:00:00.000Z',
+    s3: { bucket: 'myapp-abc123-staging-storage', region, endpoint: EP(region) },
+    ...extra,
+  });
+
+  it('adopted: an older CLI’s deployed environment keeps the base name, where its earlier backups are, whatever its siblings hold', () => {
+    // Alone, with a sibling holding the base name elsewhere (rule 4 would
+    // give fsn1's name), and with a sibling's bucket in its region (rule 2).
+    for (const config of [
+      project(),
+      project({ prod: live('nbg1', BASE) }),
+      project({ prod: live('fsn1', FSN1) }),
+    ]) {
+      expect(choose(config, 'fsn1', olderCli('fsn1'))).toEqual({
+        bucket: BASE,
+        region: 'fsn1',
+        source: 'adopted',
+      });
+    }
+  });
+
+  it('adopted: servers on record count as deployed too, and the plan region is its uploads region', () => {
+    const { deployedAt: _d, ...noStamp } = olderCli('hel1', { servers: [{ name: 's1' }] });
+    expect(choose(project(), 'fsn1', noStamp)).toEqual({
+      bucket: BASE,
+      region: 'hel1',
+      source: 'adopted',
+    });
+  });
+
+  it('a new environment keeps the rules: a seed, a skeleton or nothing is never adopted', () => {
+    const config = project({ prod: live('nbg1', BASE) });
+    // A purged rebuild's seed keeps the uploads record but no deployedAt or servers.
+    const seed = resolveEnvSeed(
+      project(
+        {},
+        {
+          staging: {
+            s3: { bucket: 'myapp-abc123-staging-storage', region: 'fsn1' },
+            backupS3: { bucket: BASE, region: 'nbg1' },
+            backupsPurged: true,
+            destroyedAt: 'x',
+          },
+        },
+      ),
+      'staging',
+    ).envConfig;
+    for (const envConfig of [{}, { status: 'deploying', s3: { region: 'fsn1' } }, seed]) {
+      expect(choose(config, 'fsn1', envConfig)).toEqual({
+        bucket: FSN1,
+        region: 'fsn1',
+        source: 'region',
+      });
+    }
+  });
+
   it("never counts the environment's own entries as a sibling", () => {
     // staging's own skeleton (no record yet) and its own purged record hold nothing.
     const config = project({ staging: { status: 'deploying' } }, {});
@@ -297,6 +356,31 @@ describe('settleBackupsBucket', () => {
     expect(rechoose).not.toHaveBeenCalled();
     expect(create.mock.calls).toEqual([[BASE, 'nbg1']]);
     expect(settled.target).toEqual({ bucket: BASE, region: 'nbg1', endpoint: EP('nbg1') });
+  });
+
+  it('never re-chooses or switches an adopted bucket: it is recorded where its create finds it', async () => {
+    const rechoose = vi.fn();
+    const log = vi.fn();
+    // Planned in its recorded uploads region (hel1), not where the uploads
+    // bucket settled (fsn1); the base bucket answers from nbg1.
+    const create = vi.fn(async () => created('nbg1', false));
+    const settled = await settleBackupsBucket({
+      plan: { bucket: BASE, region: 'hel1', source: 'adopted' },
+      appRegion: 'fsn1',
+      environment: 'staging',
+      projectConfig,
+      rechoose,
+      create,
+      log,
+    });
+    expect(rechoose).not.toHaveBeenCalled();
+    expect(create.mock.calls).toEqual([[BASE, 'hel1']]);
+    expect(log).not.toHaveBeenCalled();
+    expect(settled).toEqual({
+      target: { bucket: BASE, region: 'nbg1', endpoint: EP('nbg1') },
+      created: false,
+      source: 'adopted',
+    });
   });
 
   it('switches from the base name to the region name when the base lives elsewhere, and says so', async () => {

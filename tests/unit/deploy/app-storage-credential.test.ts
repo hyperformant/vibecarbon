@@ -400,7 +400,7 @@ describe('revoke on destroy', () => {
     }
   });
 
-  it('a destroy says when a bucket only a destroyed environment kept is in no region, never passing it over silently', async () => {
+  it('a destroy says when a bucket only a destroyed environment kept is in no region, and marks it so it says so once', async () => {
     const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
     const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
     const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
@@ -440,19 +440,27 @@ describe('revoke on destroy', () => {
           old: { s3: { bucket: 'proj-abc-old', region: 'fsn1' }, destroyedAt: 'x' },
         },
       };
-      await DESTROY_EFFECTS.revokeAppStorageKey({
+      writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(projectConfig));
+      const ctx = {
         envConfig: projectConfig.environments.staging,
         projectConfig,
         environment: 'staging',
         args: {},
-        results: { leaks: createLeakLedger() },
+        results: { leaks: createLeakLedger() } as Record<string, unknown>,
         cwd: dir,
         spinner: { start: vi.fn(), stop: vi.fn() },
-      });
+      };
+      await DESTROY_EFFECTS.revokeAppStorageKey(ctx);
       expect(locate).toHaveBeenCalledWith('proj-abc-old');
       expect(info).toHaveBeenCalledWith(
         "app key fence: nothing to fence on proj-abc-old: only a destroyed environment's record names it, and no region has it now",
       );
+      // The destroy's own config write marks it, as -purge marks a bucket it
+      // deletes, so the next fence never asks again.
+      await DESTROY_EFFECTS.updateProjectConfig(ctx);
+      const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
+      expect(saved.destroyedEnvironments.old).toMatchObject({ appBucketPurged: true });
+      expect(saved.environments).not.toHaveProperty('staging');
     } finally {
       process.chdir(cwd);
       rmSync(dir, { recursive: true, force: true });

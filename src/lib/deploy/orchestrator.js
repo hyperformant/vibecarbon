@@ -51,7 +51,7 @@ import {
 import {
   finishAppKeyRotation,
   localAppStorageSecrets,
-  markUnfencedBuckets,
+  recordFenceOutcome,
   resolveAppStorageCredential,
   scopingOf,
   syncHetznerFences,
@@ -360,10 +360,12 @@ function sameOrigins(a, b) {
  * @param {(ms: number) => Promise<void>} [opts.sleep] - test seam for the readiness poll
  * @returns {{
  *   done: Promise<void>,
- *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null }>,
+ *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null,
+ *     fenceSkipped?: string[], fenceGone?: string[] }>,
  * }}
  *   `bucketCreatedAt` (ISO string, or null when unknown) is present only on a
- *   provider that fences a pasted app key.
+ *   provider that fences a pasted app key. `fenceSkipped` and `fenceGone` are
+ *   present only when the fence ran, for recordFenceOutcome.
  */
 export function startAppBucketFinalize({
   providerId,
@@ -426,7 +428,9 @@ export function startAppBucketFinalize({
       for (const line of fenceInfoLines(fence)) log.info(line);
       // Present only when the fence ran, so the caller can persist (or clear)
       // the unfenced marker status shows.
-      const fenceOut = fence ? { fenceSkipped: fence.skipped ?? [] } : {};
+      const fenceOut = fence
+        ? { fenceSkipped: fence.skipped ?? [], fenceGone: fence.gone ?? [] }
+        : {};
       const { recorded, createdAt, warning } = await fenceRecord;
       if (warning) log.warn(warning);
       if (!recorded) return fenceOut;
@@ -1564,6 +1568,12 @@ export async function executeDeployment(args, gatheredConfig) {
       if (settled.source === 'recorded' && settled.target.region !== app.region) {
         p.log.info(
           `${environment}'s backups stay in ${settled.target.bucket} (${settled.target.region}), where its earlier backups are; its uploads are in ${app.region}`,
+        );
+      }
+      // Said once: from this deploy on, the bucket is on record.
+      if (settled.source === 'adopted') {
+        p.log.info(
+          `${environment} has no backups record from an older vibecarbon, so its backups stay in ${settled.target.bucket} (${settled.target.region}), where its earlier backups are, and this deploy records it`,
         );
       }
 
@@ -2955,10 +2965,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // recorded so the next deploy or destroy revokes it.
   // A fence target the sync skipped (an absent bucket of an env that never
   // finished a deploy) is marked on that env, for `status`; a sync that
-  // fenced everything clears the marks.
+  // fenced everything clears the marks. A destroyed environment's app bucket
+  // no region has is marked deleted, so its line prints once
+  // (recordFenceOutcome).
   if (appBucketFinal.fenceSkipped) {
     updateProjectConfig((onDisk) => {
-      markUnfencedBuckets(onDisk, appBucketFinal.fenceSkipped);
+      recordFenceOutcome(onDisk, appBucketFinal);
     });
   }
   s3Config.appKey = await finishAppKeyRotation({

@@ -684,6 +684,56 @@ describe('a second storage region never moves another bucket region', () => {
       expect(infoLines().filter((l) => l.includes(FIRST_LINE))).toEqual([]);
     });
 
+    it('an older CLI’s environment with no backups record adopts the base bucket where it is, and restore reads it there', async () => {
+      // old archived into the base name, which lives in nbg1; its uploads are
+      // in fsn1, and its record names no backups bucket. Nobody else holds
+      // the base name, so a new environment here would get `first`, find the
+      // base in nbg1, and switch to fsn1's own name, away from old's backups.
+      s3.seed(BACKUPS, 'nbg1');
+      s3.seed('myapp-abc123-old-storage', 'fsn1');
+      s3.seed(STATE, 'nbg1');
+      const { backupS3: _none, ...older } = envRecord('old', { app: 'fsn1', backups: 'nbg1' });
+      store.current = projectConfigStore({
+        projectName: 'myapp',
+        bucketSalt: 'abc123',
+        environments: { old: older },
+      });
+
+      await deployToPlan(gathered('old', { compute: 'fsn1', storage: 'fsn1', envConfig: older }));
+
+      expect(env('old').backupS3).toEqual({
+        bucket: BACKUPS,
+        region: 'nbg1',
+        endpoint: ENDPOINT.nbg1,
+      });
+      expect(env('old').s3.region).toBe('fsn1');
+      // No switch, and no bucket made for it.
+      expect(sent('CreateBucket').map((c) => c.bucket)).not.toContain(FSN1_BACKUPS);
+      expect(s3.buckets.has(FSN1_BACKUPS)).toBe(false);
+      expect(infoLines().filter((l) => l.includes('already lives in'))).toEqual([]);
+      expect(infoLines()).toContain(
+        `old has no backups record from an older vibecarbon, so its backups stay in ${BACKUPS} (nbg1), where its earlier backups are, and this deploy records it`,
+      );
+
+      // Restore takes the bucket from the record: the base bucket, at nbg1's host.
+      const { resolveS3Config } = await import('../../../src/lib/walg/restore-base.js');
+      vi.stubEnv('HETZNER_ACCESS_KEY', KEYS.accessKey);
+      vi.stubEnv('HETZNER_SECRET_KEY', KEYS.secretKey);
+      try {
+        expect(
+          await resolveS3Config({
+            isCompose: true,
+            envName: 'old',
+            projectName: 'myapp',
+            envConfig: env('old'),
+            skipPrompts: true,
+          }),
+        ).toMatchObject({ bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('a rebuild whose first attempt dies in s3-setup keeps its recorded bucket on the retry', async () => {
       s3.seed(BACKUPS, 'nbg1');
       s3.seed(PROD_APP, 'nbg1');

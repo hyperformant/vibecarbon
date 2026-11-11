@@ -7,6 +7,7 @@ import {
   APP_STORAGE_SECRET_PREFIX,
   appStorageSecretKeys,
   markUnfencedBuckets,
+  recordFenceOutcome,
   resolveAppStorageCredential,
   syncHetznerFences,
   unfencedBucketsLine,
@@ -467,7 +468,10 @@ describe('absent fence targets on a deploy (round 2)', () => {
       fence: async () => out,
     });
     const log = { warn: vi.fn(), info: vi.fn() };
-    await expect(finalize.finish(log)).resolves.toEqual({ fenceSkipped: ['proj-abc-staging'] });
+    await expect(finalize.finish(log)).resolves.toEqual({
+      fenceSkipped: ['proj-abc-staging'],
+      fenceGone: [],
+    });
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringMatching(/fence NOT set on proj-abc-staging/),
     );
@@ -887,6 +891,61 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     expect(fenceInfoLines(out)).toEqual([
       "app key fence: nothing to fence on proj-abc-staging: only a destroyed environment's record names it, and no region has it now",
     ]);
+  });
+
+  it('the gone line prints once: the deploy’s save marks the record, and the next deploy never asks', async () => {
+    const { startAppBucketFinalize } = await import('../../../src/lib/deploy/orchestrator.js');
+    // On disk: staging destroyed with -purge by a CLI from before the mark.
+    const cfg = afterStagingDestroyed({ purge: true, marked: false });
+    const world = newWorld({ gone: new Set([FSN1, 'proj-abc-staging']) });
+    const deploy = async () => {
+      const finalize = startAppBucketFinalize({
+        providerId: 'digitalocean',
+        createProvider: async () => ({
+          getBucketCorsOrigins: async () => ['https://qa.dev'],
+          setBucketCors: async () => {},
+        }),
+        bucket: 'proj-abc-qa',
+        domain: 'qa.dev',
+        fence: () =>
+          syncHetznerFences({
+            projectConfig: cfg,
+            environment: 'qa',
+            s3: storeAt('nbg1', world),
+            secrets: qaKeys(),
+            createProbe: async () => probeAt('nbg1', []),
+            ...fakeClock(),
+          }),
+      });
+      const log = { warn: vi.fn(), info: vi.fn() };
+      // What the deploy's save does with finish()'s answer.
+      recordFenceOutcome(cfg, await finalize.finish(log));
+      return log.info.mock.calls.map((c) => String(c[0]));
+    };
+
+    const GONE_LINE =
+      "app key fence: nothing to fence on proj-abc-staging: only a destroyed environment's record names it, and no region has it now";
+    expect(await deploy()).toContain(GONE_LINE);
+    expect(cfg.destroyedEnvironments?.staging).toMatchObject({ appBucketPurged: true });
+
+    world.calls.length = 0;
+    expect(await deploy()).not.toContain(GONE_LINE);
+    expect(world.calls.filter((c) => c.includes('proj-abc-staging'))).toEqual([]);
+  });
+
+  it('the save marks only the records whose app bucket no region has', () => {
+    const cfg: Project = {
+      projectName: 'proj',
+      environments: { qa: fencedEnv('qa', 'AK_Q', 'nbg1', BASE) },
+      destroyedEnvironments: {
+        gone: { s3: { bucket: 'proj-abc-gone' }, destroyedAt: 'x' },
+        kept: { s3: { bucket: 'proj-abc-kept' }, destroyedAt: 'x' },
+      },
+    };
+    recordFenceOutcome(cfg, { fenceSkipped: [], fenceGone: ['proj-abc-gone'] });
+    expect(cfg.destroyedEnvironments?.gone).toMatchObject({ appBucketPurged: true });
+    expect(cfg.destroyedEnvironments?.kept).not.toHaveProperty('appBucketPurged');
+    expect(cfg.environments.qa).not.toHaveProperty('appBucketPurged');
   });
 
   it('N1: a kept app bucket whose destroyed record names the wrong region (the old bug) is fenced where it is', async () => {

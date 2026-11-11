@@ -33,8 +33,28 @@ import { deriveProjectBucketName, deriveRegionBackupsBucketName } from './provid
 
 /**
  * How the deploy picked the bucket (chooseBackupsBucket's rules, in order).
- * @typedef {'recorded' | 'shared' | 'first' | 'region'} BackupsSource
+ * @typedef {'recorded' | 'adopted' | 'shared' | 'first' | 'region'} BackupsSource
  */
+
+/**
+ * An environment an older CLI deployed that has no backups record: it has a
+ * finished deploy (`deployedAt`) or servers on record. A rebuild's seed has
+ * neither (resolveEnvSeed keeps identity only), and a first deploy saves its
+ * backups record in the skeleton before it makes any server, so neither ever
+ * reads as one. Such an environment archived into the base name: every CLI
+ * since the first public release recorded the bucket it chose, and chose
+ * `envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig,
+ * 'backups')` (32afb12d, src/lib/deploy/prompts.js:749).
+ * @param {object | null | undefined} envConfig
+ */
+function deployedWithoutRecord(envConfig) {
+  return (
+    !backupsTargetOf(envConfig) &&
+    Boolean(
+      envConfig?.deployedAt || (Array.isArray(envConfig?.servers) && envConfig.servers.length),
+    )
+  );
+}
 
 /**
  * The backups record of one environment (`environments.<env>.backupS3`, or a
@@ -66,9 +86,11 @@ export function backupsTargetOf(envConfig) {
  *     destroy keeps the environment's backups for recovery, so it holds its
  *     bucket just as a live one does, and a `-purge` that removed its folder
  *     records `backupsPurged`, after which it holds nothing;
- *   - a live environment an older CLI deployed (`deployedAt`, no record): it
- *     archives into the base name in its uploads region, so it is never
- *     orphaned by a purge or chosen around by a sibling.
+ *   - a live environment an older CLI deployed with no record
+ *     (deployedWithoutRecord): it archives into the base name, in its uploads
+ *     region as far as the file can tell, so it is never orphaned by a purge
+ *     or chosen around by a sibling. Its next deploy adopts that bucket where
+ *     it really is (chooseBackupsBucket's `adopted`) and records it.
  * A name can appear twice (a destroyed record and the live rebuild of it);
  * backupsBucketHolders folds that.
  *
@@ -85,7 +107,7 @@ export function backupsHoldings(projectConfig, { except } = {}) {
     const target = backupsTargetOf(envConfig);
     if (target) {
       out.push({ env, ...holdingOf(envConfig, target), live: true });
-    } else if (envConfig?.deployedAt) {
+    } else if (deployedWithoutRecord(envConfig)) {
       out.push({
         env,
         bucket: deriveProjectBucketName(projectConfig, 'backups'),
@@ -140,13 +162,19 @@ export function backupsBucketHolders(projectConfig, { bucket, except }) {
  *      destroyed record for a rebuild). Never moved, region included: earlier
  *      lineages stay where restore looks for them, even for an environment an
  *      older CLI put in another region's bucket.
+ *   1b. `adopted`: an environment an older CLI deployed with no record
+ *      (deployedWithoutRecord) keeps the base name, the bucket its earlier
+ *      backups are in, wherever it is. Never re-chosen or switched, like a
+ *      record: the settle's create finds its real region and the deploy
+ *      records it. Its region here is the uploads region, the file's best
+ *      guess.
  *   2. `shared`: another environment's backups in `region`. Several names
  *      there should not happen; the base name wins if among them, else the
  *      smallest, so every caller agrees.
  *   3. `first`: the base name, when no other environment holds it. Any holding
  *      of it is in another region by now (one in `region` was rule 2's).
  *   4. `region`: this region's own name.
- * The region of rules 2-4 is a plan: settleBackupsBucket creates the bucket
+ * The region of rules 1b-4 is a plan: settleBackupsBucket creates the bucket
  * and takes its real region from that create.
  *
  * @param {{ environment: string, envConfig: object, projectConfig: Parameters<typeof backupsHoldings>[0],
@@ -158,8 +186,11 @@ export function chooseBackupsBucket({ environment, envConfig, projectConfig, reg
   // A record with no region anywhere (nor an uploads region) has nothing to
   // keep: the requested region is the only one there is.
   if (own) return { bucket: own.bucket, region: own.region ?? region, source: 'recorded' };
-  const holdings = backupsHoldings(projectConfig, { except: environment });
   const base = deriveProjectBucketName(projectConfig, 'backups');
+  if (deployedWithoutRecord(envConfig)) {
+    return { bucket: base, region: envConfig.s3?.region ?? region, source: 'adopted' };
+  }
+  const holdings = backupsHoldings(projectConfig, { except: environment });
   const here = [...new Set(holdings.filter((h) => h.region === region).map((h) => h.bucket))];
   if (here.length > 0) {
     const bucket = here.includes(base) ? base : here.sort()[0];
@@ -172,10 +203,11 @@ export function chooseBackupsBucket({ environment, envConfig, projectConfig, reg
 /**
  * Create (or find) the planned backups bucket and settle where it really is.
  *
- *   - A plan that is not `recorded` follows the uploads bucket: when the
- *     uploads bucket's own create found it in another region than the plan
- *     (a pinned bucket, or one an older CLI recorded under the wrong region),
- *     the bucket is chosen again for that region.
+ *   - A plan that is not `recorded` or `adopted` follows the uploads bucket:
+ *     when the uploads bucket's own create found it in another region than
+ *     the plan (a pinned bucket, or one an older CLI recorded under the wrong
+ *     region), the bucket is chosen again for that region. A recorded or
+ *     adopted bucket holds earlier backups and is never moved.
  *   - A `first` plan whose create answers from another region means the base
  *     name already exists there with nothing on record (a concurrent first
  *     deploy, or a crash before the record): that is a definite answer, not a
@@ -207,8 +239,8 @@ export async function settleBackupsBucket({
   create,
   log,
 }) {
-  const chosen =
-    plan.source !== 'recorded' && plan.region !== appRegion ? rechoose(appRegion) : plan;
+  const kept = plan.source === 'recorded' || plan.source === 'adopted';
+  const chosen = !kept && plan.region !== appRegion ? rechoose(appRegion) : plan;
   let bucket = chosen.bucket;
   /** @type {BackupsSource | 'switched'} */
   let source = chosen.source;

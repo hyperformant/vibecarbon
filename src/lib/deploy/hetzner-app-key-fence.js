@@ -136,8 +136,9 @@ function pastedKeys(projectConfig) {
  *   - every app bucket a destroyed environment's record names, unless that
  *     destroy's -purge deleted it (`appBucketPurged`). A plain destroy keeps
  *     it with its uploads, and -purge keeps a pinned or shared one. A record
- *     from before the mark reads as kept, and one found in no region is
- *     passed over and reported (applyHetznerFences' `gone`).
+ *     from before the mark reads as kept; one found in no region is passed
+ *     over and reported (applyHetznerFences' `gone`), and the caller's save
+ *     marks it (markGoneAppBuckets), so that happens once.
  * Every RETIRED pasted key (`projectConfig.retiredAppKeys`: replaced, or its
  * env destroyed) is denied everywhere: the CLI cannot revoke a pasted key,
  * so it stays fenced until the operator deletes it in the console and

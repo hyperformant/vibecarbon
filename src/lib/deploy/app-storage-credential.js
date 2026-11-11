@@ -385,6 +385,37 @@ export function markUnfencedBuckets(projectConfig, skipped) {
 }
 
 /**
+ * Mark each destroyed environment whose app bucket the fence found in no
+ * region (`gone`, applyHetznerFences) as `appBucketPurged`, the mark a
+ * `-purge` that deleted it writes. The fence then never asks about it again,
+ * so its "nothing to fence" line prints once. A bucket a live environment
+ * names is never in `gone`.
+ * @param {{ destroyedEnvironments?: Record<string, any> }} projectConfig - changed in place
+ * @param {string[]} gone
+ */
+export function markGoneAppBuckets(projectConfig, gone) {
+  const missing = new Set(gone);
+  for (const entry of Object.values(projectConfig.destroyedEnvironments ?? {})) {
+    if (entry?.s3?.bucket && missing.has(entry.s3.bucket)) entry.appBucketPurged = true;
+  }
+  return projectConfig;
+}
+
+/**
+ * What a deploy's fence sync leaves on record, applied to the file as it is
+ * at the save: the unfenced marks `status` shows (markUnfencedBuckets) and
+ * the deleted mark on a destroyed environment's vanished app bucket
+ * (markGoneAppBuckets).
+ * @param {object} projectConfig - changed in place
+ * @param {{ fenceSkipped?: string[], fenceGone?: string[] }} final - what finish() returned
+ */
+export function recordFenceOutcome(projectConfig, { fenceSkipped, fenceGone = [] }) {
+  if (fenceSkipped) markUnfencedBuckets(projectConfig, fenceSkipped);
+  markGoneAppBuckets(projectConfig, fenceGone);
+  return projectConfig;
+}
+
+/**
  * The `status` row for an env with buckets its app-key fence could not
  * cover, or null.
  * @param {{ s3?: { unfencedBuckets?: string[] } }} envConfig
