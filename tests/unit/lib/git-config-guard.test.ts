@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertConfigUnchanged,
   diffConfigSnapshots,
   parseConfigList,
 } from '../../_shared/git-config-guard.js';
-import guardSetup from '../../setup/git-config-guard.js';
+import { createGuard as guardSetup } from '../../setup/git-config-guard.js';
 
 const list = (...records: string[]) => `${records.join('\0')}\0`;
 
@@ -82,13 +82,39 @@ describe('git config guard comparison', () => {
     );
     expect(diffConfigSnapshots(base, after)).toEqual([]);
   });
+});
 
-  it('the real setup takes a snapshot and its teardown passes on an untouched config', () => {
-    const teardown = guardSetup();
-    expect(typeof teardown).toBe('function');
-    // Another worktree may legitimately touch non-branch keys in this window
-    // (git remote add); only the pass path on a quiet config is asserted here.
-    expect(() => (teardown as () => void)()).not.toThrow();
+describe('the global setup teardown', () => {
+  const quiet = () => parseConfigList(list('core.bare\nfalse'));
+  const tampered = () => parseConfigList(list('core.bare\ntrue'));
+  let savedExit: typeof process.exitCode;
+  beforeEach(() => {
+    savedExit = process.exitCode;
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.exitCode = savedExit;
+  });
+
+  const run = (after: () => Map<string, string[]>) => {
+    const seq = [quiet, after];
+    const teardown = guardSetup(() => (seq.shift() as () => Map<string, string[]>)());
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    (teardown as () => void)();
+    return err.mock.calls.flat().join('\n');
+  };
+
+  it('a differing snapshot prints the changed key and sets exit code 1', () => {
+    const printed = run(tampered);
+    expect(printed).toContain('core.bare: ["false"] -> ["true"]');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('an identical snapshot prints nothing and leaves the exit code alone', () => {
+    const printed = run(quiet);
+    expect(printed).toBe('');
+    expect(process.exitCode).toBeUndefined();
   });
 });
 
