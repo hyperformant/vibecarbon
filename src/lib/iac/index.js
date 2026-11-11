@@ -445,6 +445,20 @@ export async function getOrCreateStack(stackName, program, options = {}) {
 const stateProbes = new Map();
 
 /**
+ * Stacks (by probe key) whose migration THIS process started and that then
+ * stopped the open with an error. The child can finish re-encrypting and still
+ * exit non-zero, so the next open in this process may find the state already
+ * readable; it says what the failed one could not. A run that never tried
+ * stays out of it: only the process that migrated announces. REMOVE AFTER
+ * 2027-02-11 with the migration.
+ * @type {Set<string>}
+ */
+const migrationsAttempted = new Set();
+
+const MIGRATED_NOTICE = (name) =>
+  `Your Pulumi state for ${name} was stored with an empty passphrase. vibecarbon re-encrypted it with this project's passphrase.`;
+
+/**
  * The deployment a stack's first-open probe exported, kept on the Stack
  * object that open returned, for the up path to read once instead of
  * exporting again (takeProbedDeployment).
@@ -455,6 +469,7 @@ const probedDeployments = new WeakMap();
 /** Test-only: forget which stacks this process already read. */
 export function __resetStateProbesForTests() {
   stateProbes.clear();
+  migrationsAttempted.clear();
 }
 
 /**
@@ -503,7 +518,7 @@ async function probeStackState(stack, key, passphrase) {
     await earlier;
     return;
   }
-  const read = readOrMigrateState(stack, passphrase);
+  const read = readOrMigrateState(stack, passphrase, key);
   const settled = read.then(() => undefined);
   // The failure reaches this caller through `read`; a concurrent opener
   // awaiting `settled` gets it too, and with none, nothing is left unhandled.
@@ -539,12 +554,17 @@ function exportForProbe(stack) {
  *
  * @param {object} stack
  * @param {string} passphrase
+ * @param {string} key the probe key (see migrationsAttempted)
  * @returns {Promise<object>} the exported deployment
  */
-async function readOrMigrateState(stack, passphrase) {
+async function readOrMigrateState(stack, passphrase, key) {
   let refused;
   try {
-    return await exportForProbe(stack);
+    const deployment = await exportForProbe(stack);
+    // A migration this process started finished after all (its child exited
+    // non-zero on the way out): the user was told it stopped, so say it is done.
+    if (migrationsAttempted.delete(key)) p.log.info(MIGRATED_NOTICE(stack.name));
+    return deployment;
   } catch (err) {
     if (!isStatePassphraseFailure(err)) throw err;
     refused = err;
@@ -554,7 +574,7 @@ async function readOrMigrateState(stack, passphrase) {
   // re-encrypted) by a CLI that has this, and a refusal here just throws the
   // typed error below.
   const migration = await perfAsync('state.passphraseMigrate', () =>
-    migrateFromEmptyPassphrase(stack, passphrase),
+    migrateFromEmptyPassphrase(stack, passphrase, key),
   );
   if (!migration.ok) {
     // '' was refused too. Another process may have re-encrypted the stack
@@ -562,7 +582,12 @@ async function readOrMigrateState(stack, passphrase) {
     // passphrase reads it now and '' no longer does. One more read tells
     // that apart from a state neither opens.
     try {
-      return await exportForProbe(stack);
+      const deployment = await exportForProbe(stack);
+      // Only when this run's own attempt got as far as the child (it ended
+      // non-zero, then the retry found '' refused): the state is the new
+      // passphrase's because of this run. A pure race stays silent.
+      if (migration.attempted) p.log.info(MIGRATED_NOTICE(stack.name));
+      return deployment;
     } catch (err) {
       if (!isStatePassphraseFailure(err)) throw err;
     }
@@ -581,9 +606,7 @@ async function readOrMigrateState(stack, passphrase) {
     }
     throw err;
   }
-  p.log.info(
-    `Your Pulumi state for ${stack.name} was stored with an empty passphrase. vibecarbon re-encrypted it with this project's passphrase.`,
-  );
+  p.log.info(MIGRATED_NOTICE(stack.name));
   return deployment;
 }
 
@@ -621,14 +644,26 @@ async function readOrMigrateState(stack, passphrase) {
  *
  * @param {object} stack
  * @param {string} passphrase
- * @returns {Promise<{ ok: boolean, detail: string }>}
+ * @param {string} key the probe key (see migrationsAttempted)
+ * @returns {Promise<{ ok: boolean, detail: string, attempted?: boolean }>}
+ *   `attempted`: an earlier run of the child in this call ended for a reason
+ *   other than the passphrase (so it may have written the state before it
+ *   failed). A held or stale lock counts too, which can over-announce in the
+ *   rare race where another process also migrated; it never under-announces.
  * @throws {StackHeldError} when a live run holds the stack's lock
  */
-async function migrateFromEmptyPassphrase(stack, passphrase) {
+async function migrateFromEmptyPassphrase(stack, passphrase, key) {
   const step = `re-encrypting the Pulumi state for ${stack.name}`;
+  let attempted = false;
   try {
     await withStateBackendRetry(
-      () => runPastStaleLock(stack, () => changeSecretsProvider(stack, passphrase)),
+      () =>
+        runPastStaleLock(stack, () =>
+          changeSecretsProvider(stack, passphrase).catch((err) => {
+            if (!isStatePassphraseFailure(err)) attempted = true;
+            throw err;
+          }),
+        ),
       step,
     );
     return { ok: true, detail: '' };
@@ -636,8 +671,9 @@ async function migrateFromEmptyPassphrase(stack, passphrase) {
     if (err instanceof StackHeldError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     if (isStatePassphraseFailure(err)) {
-      return { ok: false, detail: summarizeCommandError(message) };
+      return { ok: false, detail: summarizeCommandError(message), attempted };
     }
+    migrationsAttempted.add(key);
     // Whether the child got as far as the import or not, the next open reads
     // the state with one passphrase or the other.
     throw new Error(

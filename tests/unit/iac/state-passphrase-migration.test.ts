@@ -410,6 +410,51 @@ describe('a migration that fails for any reason but the passphrase is never rule
     expect(infos).toEqual([]);
   });
 
+  it("this run's own migration finished before its child exited non-zero: the retry is refused, the re-read opens it, and it says so once", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      fakePulumi.legacy('e1', exportRefusal);
+      let run = 0;
+      fakePulumi.behaviour.migrate = (name) => {
+        if (run++ === 0) {
+          // The state was written; the store's answer to the child was not.
+          fakePulumi.legacyStacks.delete(name);
+          return { code: 1, stderr: THROTTLED };
+        }
+        return { code: 1, stderr: MIGRATION_REFUSAL };
+      };
+
+      const open = getStackOutputs('e1', async () => ({}), BASE);
+      await vi.waitFor(() => expect(logged.join('\n')).toContain('attempt 1/5'));
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(open).resolves.toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(fakePulumi.calls.filter((c) => c === 'migrate:e1')).toHaveLength(2);
+    expect(infos).toEqual([MIGRATED]);
+  });
+
+  it('a migration that finished but stopped the open with an error: the next open in this process says so once, then stays quiet', async () => {
+    fakePulumi.legacy('e1', exportRefusal);
+    fakePulumi.behaviour.migrate = (name) => {
+      fakePulumi.legacyStacks.delete(name);
+      return { code: 1, stderr: STORE_FAULT };
+    };
+
+    await expect(getStackOutputs('e1', async () => ({}), BASE)).rejects.toThrow(
+      'Stopped while re-encrypting',
+    );
+    expect(infos).toEqual([]);
+
+    await getStackOutputs('e1', async () => ({}), BASE);
+    expect(infos).toEqual([MIGRATED]);
+
+    await getStackOutputs('e1', async () => ({}), BASE);
+    expect(infos).toEqual([MIGRATED]);
+  });
+
   it("another run re-encrypted it first: '' is refused, the project's passphrase reads it now, and the open goes on", async () => {
     let reads = 0;
     fakePulumi.behaviour.exportStack = () => {
