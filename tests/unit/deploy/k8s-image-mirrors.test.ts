@@ -244,6 +244,9 @@ describe('mirror set shape', () => {
     expect(digests).toEqual([...new Set(digests)]);
     const pause = MIRRORED_IMAGES.find((i) => i.repo === 'pause');
     const rancherPause = MIRRORED_IMAGES.find((i) => i.repo === 'rancher/mirrored-pause');
+    // Both present, or the pair below compares undefined with undefined.
+    expect(pause).toBeDefined();
+    expect(rancherPause).toBeDefined();
     expect(pause?.tag).toBe(rancherPause?.tag);
     expect(pause?.digest).toBe(rancherPause?.digest);
   });
