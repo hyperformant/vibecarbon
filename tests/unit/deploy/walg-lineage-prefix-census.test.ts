@@ -374,7 +374,7 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
     const values = buildDbManifestValues({
       dbImageTag: 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2',
       s3Config: { bucket: 'b', walgPrefix: 'backups/proj/prod/walg', endpoint: 'e', region: 'r' },
-      backupBucketName: 'proj-backups',
+      backupTarget: { bucket: 'proj-backups', region: 'r', endpoint: 'e' },
       storageClass: 'hcloud-volumes',
       walArchiveSha: 'x',
     });

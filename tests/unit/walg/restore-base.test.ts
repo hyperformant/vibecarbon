@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { backupStorageConfig } from '../../../src/lib/backups-bucket.js';
 import {
   listBaseBackups,
   NoRestorePointError,
+  resolveDeployRestorePoint,
   resolveRestoreBase,
 } from '../../../src/lib/walg/restore-base.js';
 
@@ -75,7 +77,19 @@ function fakeS3(objects: Record<string, string>, opts: { missingBucket?: boolean
         const contents = keys
           .filter((k) => !k.slice(prefix.length).includes('/'))
           .map((Key) => ({ Key }));
-        return { Contents: contents, IsTruncated: false };
+        // A delimited listing (the lineage folders) answers the folders too.
+        const folders =
+          cmd.input.Delimiter === '/'
+            ? [
+                ...new Set(
+                  keys
+                    .map((k) => k.slice(prefix.length))
+                    .filter((rest) => rest.includes('/'))
+                    .map((rest) => `${prefix}${rest.split('/')[0]}/`),
+                ),
+              ].map((Prefix) => ({ Prefix }))
+            : [];
+        return { Contents: contents, CommonPrefixes: folders, IsTruncated: false };
       }
       if (cmd.constructor.name === 'GetObjectCommand') {
         const body = objects[String(cmd.input.Key)];
@@ -156,5 +170,71 @@ describe('listBaseBackups', () => {
     });
     const [b] = await listBaseBackups({ s3, bucket: 'b', prefix });
     expect(b.timeline).toBe(10);
+  });
+});
+
+describe('resolveDeployRestorePoint reads the backups bucket at its own endpoint', () => {
+  const fixture = JSON.parse(
+    readFileSync(join(process.cwd(), 'tests/fixtures/walg/sentinel-3.0.9.json'), 'utf-8'),
+  );
+  const NAME = fixture.name as string;
+  const LINEAGE = '7699032860122738725';
+  const prefix = 'backups/myapp/prod/walg';
+  // The uploads bucket in fsn1; the backups bucket recorded in nbg1.
+  const uploads = {
+    accessKey: 'AK',
+    secretKey: 'SK',
+    walgPrefix: prefix,
+    bucket: 'myapp-abc123-prod-storage',
+    region: 'fsn1',
+    endpoint: 'https://fsn1.your-objectstorage.com',
+  };
+  const target = {
+    bucket: 'myapp-abc123-backups',
+    region: 'nbg1',
+    endpoint: 'https://nbg1.your-objectstorage.com',
+  };
+  const objects = {
+    [`${prefix}/${LINEAGE}/basebackups_005/${NAME}_backup_stop_sentinel.json`]: JSON.stringify(
+      fixture.sentinel,
+    ),
+  };
+
+  it("lists the backups bucket through a client built for the backups bucket's endpoint", async () => {
+    const s3 = fakeS3(objects);
+    const makeClient = vi.fn(async () => s3);
+    const point = await resolveDeployRestorePoint({
+      restore: 'latest',
+      k8s: true,
+      backup: backupStorageConfig(uploads, target),
+      credentialVars: 'HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY',
+      makeClient,
+    });
+    expect(point).toMatchObject({ backup: NAME, lineage: LINEAGE, target: 'latest' });
+    expect(makeClient).toHaveBeenCalledTimes(1);
+    expect(makeClient).toHaveBeenCalledWith({
+      accessKey: 'AK',
+      secretKey: 'SK',
+      walgPrefix: prefix,
+      bucket: 'myapp-abc123-backups',
+      region: 'nbg1',
+      endpoint: 'https://nbg1.your-objectstorage.com',
+    });
+    // Every read named the backups bucket, never the uploads bucket.
+    expect(new Set(s3.calls.map((c) => c.input.Bucket))).toEqual(new Set(['myapp-abc123-backups']));
+  });
+
+  it('with no backups target there is nothing to restore from', async () => {
+    const makeClient = vi.fn();
+    await expect(
+      resolveDeployRestorePoint({
+        restore: 'latest',
+        k8s: true,
+        backup: backupStorageConfig(uploads, null),
+        credentialVars: 'HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY',
+        makeClient,
+      }),
+    ).rejects.toThrow(/no backup bucket on record/);
+    expect(makeClient).not.toHaveBeenCalled();
   });
 });

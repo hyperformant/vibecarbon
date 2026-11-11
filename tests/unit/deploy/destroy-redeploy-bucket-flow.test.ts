@@ -143,7 +143,11 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
       region: 'fsn1',
     });
     expect(backups).toEqual({ bucket: BACKUPS, region: 'nbg1', source: 'recorded' });
-    const backupBucketName = backups.bucket;
+    const backupTarget = {
+      bucket: backups.bucket,
+      region: backups.region,
+      endpoint: 'https://nbg1.your-objectstorage.com',
+    };
 
     // The project-local .env still names some other bucket (dev's `-local`,
     // or a stale copy of the deleted one); the deploy override must win.
@@ -159,7 +163,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
         region: 'nbg1',
         endpoint: 'https://nbg1.your-objectstorage.com',
       },
-      backupS3: { bucket: backupBucketName },
+      backupTarget,
     });
     stages.push(stage);
     const serverEnv = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));

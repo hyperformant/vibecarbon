@@ -608,19 +608,21 @@ export function restorePointOf(chosenSource, lineage) {
 /**
  * The restore point `deploy -restore` seeds the new database from, resolved
  * before anything is provisioned (C5): the exact base backup, read from the
- * stop sentinels in the bucket and prefix the db pod's wal-g uses (the
- * backup bucket, else the storage bucket; s3Config.walgPrefix), with its
- * target, recovery config and size. Null for a deploy without -restore.
+ * stop sentinels in the backups bucket and prefix the db pod's wal-g uses
+ * (`backup`, backupStorageConfig's config of the deploy's settled backups
+ * target: its bucket, region and endpoint, and the env's walgPrefix), with
+ * its target, recovery config and size. Null for a deploy without -restore.
  * deployK3s only checks the object is complete.
  *
- * Reads only (ListObjectsV2, GetObject), with the deploy's own object-storage
+ * Reads only (ListObjectsV2, GetObject), through a client built for the
+ * backups bucket's own endpoint, with the deploy's own object-storage
  * credentials (Decision 1). Errors name the variables, never a value.
  *
  * The base comes from one lineage's folder: `lineage` (the -lineage flag), or
  * resolveRestoreLineage's pick from `envConfig.backup` (the destroyed
  * environment's record, which survives a destroy).
  *
- * @param {{ restore: string | null, k8s: boolean, envConfig?: object, lineage?: string | null, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
+ * @param {{ restore: string | null, k8s: boolean, envConfig?: object, lineage?: string | null, backup: { bucket?: string, walgPrefix?: string, endpoint?: string | null, region?: string | null, accessKey?: string, secretKey?: string } | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
  * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number, attempt: string, lineage: string } | null>}
  * @throws {NoRestorePointError} when no base backup satisfies the restore point
  * @throws {AmbiguousLineageError}
@@ -630,8 +632,7 @@ export async function resolveDeployRestorePoint({
   k8s,
   envConfig,
   lineage: flag = null,
-  s3Config,
-  backupBucketName,
+  backup,
   credentialVars,
   makeClient = createS3Client,
 }) {
@@ -648,15 +649,15 @@ export async function resolveDeployRestorePoint({
         '(e.g. base_000000010000000000000004) or an ISO-8601 time (e.g. 2026-06-22T14:30:00Z)',
     );
   }
-  const bucket = backupBucketName || s3Config?.bucket;
-  const prefix = s3Config?.walgPrefix;
+  const bucket = backup?.bucket;
+  const prefix = backup?.walgPrefix;
   if (!bucket || !prefix) {
     throw new Error('there is no backup bucket on record for this environment to restore from');
   }
-  if (!s3Config.accessKey || !s3Config.secretKey) {
+  if (!backup.accessKey || !backup.secretKey) {
     throw new Error(`reading the backups in s3://${bucket}/${prefix} needs ${credentialVars}`);
   }
-  const s3 = await makeClient({ ...s3Config, bucket });
+  const s3 = await makeClient(backup);
   const lineages = await listLineages({ s3, bucket, base: prefix });
   const lineage = resolveRestoreLineage({
     envConfig,

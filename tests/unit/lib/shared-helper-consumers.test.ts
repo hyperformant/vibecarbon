@@ -145,6 +145,24 @@ const REGISTRY = [
       'tests/unit/failover/server-identification.test.ts',
     ],
   },
+  {
+    // Every S3 call to the backups bucket used to spread the uploads config
+    // with only the bucket swapped (`{ ...s3Config, bucket }`), so a backups
+    // bucket in another region was asked at the uploads bucket's host. One
+    // builder now takes the region and endpoint from the backups target;
+    // census (c) in the deep test catches a spread coming back anywhere.
+    helper: 'backupStorageConfig',
+    definition: 'src/lib/backups-bucket.js',
+    consumers: [
+      'src/lib/deploy/orchestrator.js', // k8s TLS snapshot, deploy -restore point, lineage listing
+      'src/lib/deploy/effects/index.js', // compose TLS restore
+      'src/lib/deploy/k8s/k3s.js', // k8s TLS restore
+    ],
+    deepTests: [
+      'tests/unit/deploy/backups-bucket-choice.test.ts',
+      'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts',
+    ],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');

@@ -16,6 +16,8 @@
  * `<project>-<salt>-<region>-backups` (src/lib/backups-bucket.js), and an
  * environment that already has a record keeps it.
  */
+import { readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -151,6 +153,7 @@ const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
 const { resolveAppStorageCredential } = await import(
   '../../../src/lib/deploy/app-storage-credential.js'
 );
+const { parseDotenv } = await import('../../../src/lib/dotenv.js');
 
 const ENDPOINT = HetznerS3Provider.ENDPOINTS as Record<string, string>;
 const BACKUPS = 'myapp-abc123-backups';
@@ -228,7 +231,17 @@ function gathered(
 /** Deploy up to the plan; returns the plan's ctx. */
 async function deployToPlan(g: ReturnType<typeof gathered>) {
   await expect(executeDeployment({ yes: true }, g as never)).rejects.toThrow('FAKE_PLAN_STOP');
-  return run.ctx as { s3Config: Record<string, unknown> };
+  return run.ctx as { s3Config: Record<string, unknown>; bundlePath: string };
+}
+
+/** The compose bundle's server `.env` and `app.env`, read, then removed. */
+function bundleEnvs(bundlePath: string) {
+  try {
+    const read = (file: string) => parseDotenv(readFileSync(join(bundlePath, file), 'utf-8'));
+    return { env: read('.env'), app: read('app.env') };
+  } finally {
+    rmSync(bundlePath, { recursive: true, force: true });
+  }
 }
 
 const env = (name: string) => loadProjectConfig()?.environments?.[name];
@@ -305,6 +318,15 @@ describe('a second storage region never moves another bucket region', () => {
     expect(infoLines()).toContain(
       `staging's backups stay in ${BACKUPS} (nbg1), where its earlier backups are; its uploads are in fsn1`,
     );
+    // The bundle: wal-g (the db service, .env) reaches the backups bucket in
+    // nbg1; the app (app.env) keeps its uploads in fsn1.
+    const { env: serverEnv, app } = bundleEnvs(ctx.bundlePath);
+    expect(serverEnv.S3_BACKUP_BUCKET).toBe(BACKUPS);
+    expect(serverEnv.S3_ENDPOINT).toBe(ENDPOINT.nbg1);
+    expect(serverEnv.S3_REGION).toBe('nbg1');
+    expect(app.S3_BUCKET).toBe(STAGING_APP);
+    expect(app.S3_ENDPOINT).toBe(ENDPOINT.fsn1);
+    expect(app.S3_REGION).toBe('fsn1');
   });
 
   it('an environment recorded under the wrong region is repaired from where its bucket is', async () => {
@@ -385,6 +407,41 @@ describe('a second storage region never moves another bucket region', () => {
     expect(s3.regionOf(BACKUPS)).toBe('fsn1');
     const warned = clackMock.log.warn.mock.calls.map((call) => String(call[0]));
     expect(warned.some((l) => l.includes(`${STATE} lives in hel1`))).toBe(true);
+  });
+
+  it('a state bucket that is not where its record says is found, and the step records where it is', async () => {
+    // The record says nbg1; the state bucket really lives in fsn1. The state
+    // create asks nbg1 (HEAD 404, then BucketAlreadyExists) and finds it in
+    // fsn1 by its own search: nothing is created and nothing else moves.
+    s3.seed(STAGING_APP, 'fsn1');
+    s3.seed(BACKUPS, 'fsn1');
+    s3.seed(STATE, 'fsn1');
+    const recorded = envRecord('staging', { app: 'fsn1', backups: 'fsn1' });
+    expect(recorded.s3.stateBucketRegion).toBe('nbg1');
+    store.current = projectConfigStore({
+      projectName: 'myapp',
+      bucketSalt: 'abc123',
+      environments: { staging: recorded },
+    });
+
+    const ctx = await deployToPlan(
+      gathered('staging', { compute: 'fsn1', storage: 'fsn1', envConfig: recorded }),
+    );
+
+    expect(sent('CreateBucket').map((c) => [c.bucket, c.region])).toEqual([[STATE, 'nbg1']]);
+    expect([...s3.buckets.keys()].sort()).toEqual([BACKUPS, STAGING_APP, STATE].sort());
+    expect(s3.regionOf(STATE)).toBe('fsn1');
+    expect(ctx.s3Config.stateBucketRegion).toBe('fsn1');
+    expect(ctx.s3Config.stateEndpoint).toBe(ENDPOINT.fsn1);
+    expect(env('staging').s3.stateBucketRegion).toBe('fsn1');
+    expect(env('staging').s3.stateEndpoint).toBe(ENDPOINT.fsn1);
+    // The uploads and backups records are untouched.
+    expect(env('staging').s3.region).toBe('fsn1');
+    expect(env('staging').backupS3).toEqual({
+      bucket: BACKUPS,
+      region: 'fsn1',
+      endpoint: ENDPOINT.fsn1,
+    });
   });
 
   it('reads a seeded state bucket in its own region, so nothing is migrated', async () => {

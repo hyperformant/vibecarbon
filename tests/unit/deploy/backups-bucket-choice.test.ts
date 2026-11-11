@@ -11,6 +11,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  backupStorageConfig,
   backupsBucketHolders,
   backupsHoldings,
   backupsTargetOf,
@@ -347,5 +348,46 @@ describe('settleBackupsBucket', () => {
       source: 'first',
     });
     expect(log).not.toHaveBeenCalled();
+  });
+});
+
+describe('backupStorageConfig (the one S3 config that talks to the backups bucket)', () => {
+  const app = {
+    accessKey: 'AK',
+    secretKey: 'SK',
+    walgPrefix: 'backups/myapp/staging/walg',
+    bucket: 'myapp-abc123-staging-storage',
+    region: 'fsn1',
+    endpoint: EP('fsn1'),
+    stateBucket: 'myapp-abc123-storage-pulumi-state',
+    appCredential: { accessKey: 'APP', secretKey: 'APPSK' },
+  };
+
+  it("names the backups bucket at its own region and endpoint, with the deploy's credentials", () => {
+    expect(
+      backupStorageConfig(app, { bucket: BASE, region: 'nbg1', endpoint: EP('nbg1') }),
+    ).toEqual({
+      accessKey: 'AK',
+      secretKey: 'SK',
+      walgPrefix: 'backups/myapp/staging/walg',
+      bucket: BASE,
+      region: 'nbg1',
+      endpoint: EP('nbg1'),
+    });
+  });
+
+  it('carries nothing else of the uploads config: no state bucket, no app key', () => {
+    const cfg = backupStorageConfig(app, { bucket: BASE, region: 'fsn1', endpoint: EP('fsn1') });
+    expect(Object.keys(cfg ?? {}).sort()).toEqual(
+      ['accessKey', 'bucket', 'endpoint', 'region', 'secretKey', 'walgPrefix'].sort(),
+    );
+  });
+
+  it('is null without a target, so no caller falls back to the uploads host by accident', () => {
+    expect(backupStorageConfig(app, null)).toBeNull();
+    expect(backupStorageConfig(app, undefined)).toBeNull();
+    expect(
+      backupStorageConfig(app, { bucket: '', region: 'fsn1', endpoint: EP('fsn1') }),
+    ).toBeNull();
   });
 });

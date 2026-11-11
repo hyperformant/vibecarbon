@@ -426,7 +426,7 @@ const applySecrets = (walgRole: 'primary' | 'standby') =>
     kubeconfig: join(dir, 'kubeconfig'),
     envLocal: { POSTGRES_PASSWORD: 'x' },
     s3Config: undefined,
-    backupBucketName: null,
+    backupTarget: null,
     restore: null,
     walgRole,
   });

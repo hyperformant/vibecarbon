@@ -396,7 +396,7 @@ describe('deploy -restore resolves the lineage too', () => {
   const args = (over: Record<string, unknown> = {}) => ({
     restore: 'latest',
     k8s: true,
-    s3Config,
+    backup: s3Config,
     credentialVars: 'HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY',
     makeClient: () => fakeS3(destroyedAndRedeployed),
     ...over,

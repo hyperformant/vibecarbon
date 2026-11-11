@@ -1615,7 +1615,9 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
       secretKey: 'SK',
       walgPrefix: 'backups/proj/e2e/walg',
     },
-    backupBucketName: 'proj-backups',
+    // The backups bucket in another region than the uploads bucket (an
+    // environment an older CLI put in another region's bucket).
+    backupTarget: { bucket: 'proj-backups', region: 'nbg1', endpoint: 'https://nbg1.example.test' },
     operatorEnv: 'e2e',
   });
   const isLiveTlsRead = (a: string[]) =>
@@ -1656,6 +1658,27 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
       if (role !== 'standby') expect(read).toBeGreaterThan(lease);
     });
   }
+
+  it("reads the snapshot from the backups bucket at its own region and endpoint, not the uploads store's", async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const { readTlsSnapshot } = await import('../../../src/lib/deploy/tls-snapshot.js');
+    vi.mocked(readTlsSnapshot).mockClear();
+    await applyK3sManifests(withBackups(makeProjectDir()));
+    expect(readTlsSnapshot).toHaveBeenCalledTimes(1);
+    const [s3Config, key] = vi.mocked(readTlsSnapshot).mock.calls[0] as unknown as [
+      Record<string, unknown>,
+      string,
+    ];
+    expect(s3Config).toEqual({
+      accessKey: 'AK',
+      secretKey: 'SK',
+      walgPrefix: 'backups/proj/e2e/walg',
+      bucket: 'proj-backups',
+      region: 'nbg1',
+      endpoint: 'https://nbg1.example.test',
+    });
+    expect(key).toMatch(/^backups\/proj\/e2e\/tls\//);
+  });
 
   it('standby: never restores', async () => {
     const { applyK3sManifests } = await k3sPromise;

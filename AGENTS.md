@@ -68,7 +68,8 @@ derivation. The app uploads bucket is separate: one per environment
 plain destroy and deleted by `-purge`. Backups are one bucket per project and
 storage region (`<project>-<salt>-backups` for the first region,
 `<project>-<salt>-<region>-backups` after), chosen only by
-`chooseBackupsBucket` and read only through `backupsTargetOf`
+`chooseBackupsBucket`, read only through `backupsTargetOf` and reached only
+through `backupStorageConfig`, at its own region and endpoint
 (`src/lib/backups-bucket.js`); destroy keeps it, `-purge` deletes it with its
 last holder. The derived state bucket is project-level, so `-purge` deletes it
 only with the last live environment, then clears the record and rotates

@@ -263,7 +263,15 @@ describe('k8s: the app Secret and the infra Secret', () => {
   });
 
   it('buildInfraSecretData carries DB_PASSWORD and REPL_PASSWORD, and no app key', () => {
-    const infra = buildInfraSecretData({ envLocal, s3Config, backupBucketName: 'myapp-backups' });
+    const infra = buildInfraSecretData({
+      envLocal,
+      s3Config,
+      backupTarget: {
+        bucket: 'myapp-backups',
+        region: s3Config.region,
+        endpoint: s3Config.endpoint,
+      },
+    });
     expect(infra.DB_PASSWORD).toBe('SENTINEL_DB_PASSWORD');
     expect(infra.REPL_PASSWORD).toBe('SENTINEL_REPL_PASSWORD');
     expect(infra.METABASE_DB_PASSWORD).toBe('SENTINEL_METABASE_DB_PASSWORD');

@@ -471,7 +471,11 @@ describe('the separation invariant: the app pair is never the WAL-G or Pulumi pa
 
       const appSecret = buildAppSecretData({ envLocal: {}, s3Config });
       expect(appSecret.S3_ACCESS_KEY).toBe(app.accessKey);
-      const infraSecret = buildInfraSecretData({ envLocal: {}, s3Config, backupBucketName: 'b' });
+      const infraSecret = buildInfraSecretData({
+        envLocal: {},
+        s3Config,
+        backupTarget: { bucket: 'b', region: s3Config.region, endpoint: s3Config.endpoint },
+      });
       expect(infraSecret.S3_CREDENTIALS_INI).toContain(INFRA.accessKey);
       expect(infraSecret.S3_CREDENTIALS_INI).not.toContain(app.accessKey);
 

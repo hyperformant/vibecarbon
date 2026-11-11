@@ -9,9 +9,11 @@
  * in its own storage region, and restore reads its own region's bucket.
  *
  * This module owns every answer about that bucket: the deploy chooses it here
- * (chooseBackupsBucket, then settleBackupsBucket), and every reader takes the
- * record through backupsTargetOf. Nothing else derives a backups name. Pure:
- * no I/O, no prompts; settleBackupsBucket is handed its create and its log.
+ * (chooseBackupsBucket, then settleBackupsBucket), every reader takes the
+ * record through backupsTargetOf, and every S3 call to it is configured by
+ * backupStorageConfig, at the bucket's own region and endpoint. Nothing else
+ * derives a backups name. Pure: no I/O, no prompts; settleBackupsBucket is
+ * handed its create and its log.
  */
 import { deriveProjectBucketName, deriveRegionBackupsBucketName } from './providers/s3-base.js';
 
@@ -204,5 +206,34 @@ export async function settleBackupsBucket({
     target: { bucket, region: res.region, endpoint: res.endpoint },
     created: res.created,
     source,
+  };
+}
+
+/**
+ * The S3 config that talks to the backups bucket: the deploy's object-storage
+ * credentials and WAL-G prefix, with the bucket, region and endpoint of the
+ * target. The ONE way to build it: a `{ ...s3Config, bucket }` spread keeps
+ * the uploads bucket's region and endpoint, and a backups bucket in another
+ * region (an environment an older CLI put there, which keeps it) then answers
+ * from the wrong host. Nothing else of the uploads config rides along (no
+ * state bucket, no app key). Null without a target, so no caller reaches the
+ * uploads host by accident; a caller with a legacy no-backups-bucket path
+ * falls back to its uploads config explicitly.
+ *
+ * @param {{ accessKey?: string, secretKey?: string, walgPrefix?: string } | null | undefined} s3Config
+ * @param {BackupsTarget | null | undefined} target
+ * @returns {{ accessKey: string | undefined, secretKey: string | undefined,
+ *   walgPrefix: string | undefined, bucket: string, region: string | null,
+ *   endpoint: string | null } | null}
+ */
+export function backupStorageConfig(s3Config, target) {
+  if (!target?.bucket) return null;
+  return {
+    accessKey: s3Config?.accessKey,
+    secretKey: s3Config?.secretKey,
+    walgPrefix: s3Config?.walgPrefix,
+    bucket: target.bucket,
+    region: target.region,
+    endpoint: target.endpoint,
   };
 }

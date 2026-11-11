@@ -24,7 +24,7 @@ describe('k8s app and infra Secrets', () => {
         endpoint: 'https://fsn1.your-objectstorage.com',
         region: 'fsn1',
       },
-      backupBucketName: null,
+      backupTarget: null,
     };
     const app = buildAppSecretData(args);
     const infra = buildInfraSecretData(args);
@@ -41,7 +41,7 @@ describe('k8s app and infra Secrets', () => {
       // `restore` is the deploy -restore marker (a backup name and recovery
       // settings), not an environment; nor is `walgRole` (the db's wal-g role
       // intent, primary or standby).
-      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName,\s*restore,\s*walgRole,?\s*\}\)/,
+      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupTarget,\s*restore,\s*walgRole,?\s*\}\)/,
     );
     expect(k3s).not.toMatch(/VC_ENV\s*=/);
   });

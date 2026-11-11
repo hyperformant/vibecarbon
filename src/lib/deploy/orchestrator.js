@@ -6,7 +6,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { backupsTargetOf, chooseBackupsBucket, settleBackupsBucket } from '../backups-bucket.js';
+import {
+  backupStorageConfig,
+  backupsTargetOf,
+  chooseBackupsBucket,
+  settleBackupsBucket,
+} from '../backups-bucket.js';
 import { formatCommandNote } from '../cli/help.js';
 import { progressLog, spinner } from '../cli/progress.js';
 import { resolvePrimary } from '../cli/resolve-primary.js';
@@ -658,10 +663,13 @@ function probeFailureReason(probeResult) {
  * CertificateRequest created after the restore is one warning with
  * cert-manager's reason. Never throws.
  *
+ * The snapshot goes to the backups bucket at its own region and endpoint
+ * (backupStorageConfig), never through the uploads bucket's host.
+ *
  * @param {{ domain: string, environment: string, projectName: string,
  *   kubeconfig: string, s3Config?: object,
- *   backupS3Config?: { bucket?: string }, tlsRestoredAt?: string|null,
- *   deps?: object }} args
+ *   backupS3Config?: import('../backups-bucket.js').BackupsTarget | null,
+ *   tlsRestoredAt?: string|null, deps?: object }} args
  * @returns {Promise<{ state: 'trusted'|'pending', checkedAt: string, reason?: string, ca: string }>}
  */
 export async function verifyK8sTls({
@@ -726,7 +734,7 @@ export async function verifyK8sTls({
   } else {
     const saved = await perfAsync('deploy.tls.snapshot', () =>
       snapshot({
-        s3Config: { ...s3Config, bucket: backupS3Config?.bucket },
+        s3Config: backupStorageConfig(s3Config, backupS3Config),
         projectName,
         envName: environment,
         ca,
@@ -1765,8 +1773,8 @@ export async function executeDeployment(args, gatheredConfig) {
         // environment left (envConfig.backup survives a destroy).
         envConfig,
         lineage: args.lineage,
-        s3Config,
-        backupBucketName: backupS3Config?.bucket || null,
+        // The settled backups bucket, at its own region and endpoint.
+        backup: backupStorageConfig(s3Config, backupS3Config),
         credentialVars: backupCredentialVars(envConfig),
       }),
     );
@@ -2037,7 +2045,10 @@ export async function executeDeployment(args, gatheredConfig) {
     metabase: services.metabase,
     redis: services.redis,
     s3: s3Config,
-    backupS3: backupS3Config,
+    // wal-g and the TLS snapshot on the server reach the backups bucket at
+    // its own region and endpoint (the bundle's `.env`); the app keeps the
+    // uploads bucket's (`app.env`).
+    backupTarget: backupS3Config,
     // Where the server saves its TLS certificate after every base backup
     // (backup/tls-snapshot.sh): the env backup folder, per CA, the same CA
     // verifyTlsReady records. No backup bucket: no snapshot.
@@ -2156,7 +2167,10 @@ export async function executeDeployment(args, gatheredConfig) {
       dnsProvider,
       s3Config,
       backupConfig,
-      backupBucketName: backupS3Config?.bucket || null,
+      // The backups bucket with its region and endpoint: wal-g's prefix,
+      // endpoint and region in the db StatefulSet, the infra Secret's bucket,
+      // the TLS restore's read. Both k8s-ha clusters take it from these options.
+      backupTarget: backupS3Config,
       // DR: the resolved restore point (above), or null. deployK3s writes its
       // marker before the db applies, so the db pod's walg-restore init fetches
       // that backup; the restored DB carries its migration ledger, so the app's
@@ -2958,7 +2972,10 @@ export async function executeDeployment(args, gatheredConfig) {
   let backupLineage;
   {
     const primaryIp = deployedPrimaryIp(tier, deployResult);
-    const lineageBucket = backupS3Config?.bucket || s3Config?.bucket;
+    // The backups bucket at its own region and endpoint; the uploads bucket
+    // only for an environment with no backups target (the legacy path,
+    // where wal-g archives into the uploads bucket).
+    const lineageStore = backupStorageConfig(s3Config, backupS3Config) ?? s3Config;
     try {
       if (!primaryIp) throw new Error('no primary address in the deploy result');
       backupLineage = await recordDeployedLineage({
@@ -2969,11 +2986,11 @@ export async function executeDeployment(args, gatheredConfig) {
         where: primaryIp,
         exec: await deployedPrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
         listLineages:
-          lineageBucket && s3Config?.accessKey && s3Config?.secretKey
+          lineageStore?.bucket && lineageStore.accessKey && lineageStore.secretKey
             ? async () =>
                 listLineages({
-                  s3: await createS3Client({ ...s3Config, bucket: lineageBucket }),
-                  bucket: lineageBucket,
+                  s3: await createS3Client(lineageStore),
+                  bucket: lineageStore.bucket,
                   base: walgPrefixFor(projectConfig.projectName, environment),
                 })
             : null,
