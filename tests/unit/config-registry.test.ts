@@ -311,6 +311,7 @@ describe('config-registry', () => {
         'SMTP_PORT',
         'STRIPE_SECRET_KEY',
         'STRIPE_WEBHOOK_SECRET',
+        'VIBECARBON_STATE_PASSPHRASE',
       ]);
       // This list IS the decision record for which formats are vendor-backed
       // enough to assert. Removed, and why (each stays loose until the vendor

@@ -30,7 +30,7 @@ export function __resetStatePassphraseForTests() {
 }
 
 export class StatePassphraseError extends Error {
-  /** @param {'missing' | 'mismatch'} reason @param {string} message */
+  /** @param {'missing' | 'mismatch' | 'invalid'} reason @param {string} message */
   constructor(reason, message) {
     super(message);
     this.name = 'StatePassphraseError';
@@ -54,9 +54,22 @@ export function statePassphraseFingerprint(passphrase) {
   return `sha256:${hex.slice(0, 16)}`;
 }
 
-/** The passphrase from the environment (shell wins over .env.local), or null. */
+/**
+ * The passphrase from the environment (shell wins over .env.local), or null.
+ * @throws {StatePassphraseError} 'invalid' when the value fails the registry's
+ *   shape (too short or outside base64url): it is refused before anything
+ *   uses or fingerprints it. The message never echoes the value.
+ */
 export function resolveStatePassphrase() {
-  return readOperatorVar(STATE_PASSPHRASE_KEY).value;
+  const { value, problem } = readOperatorVar(STATE_PASSPHRASE_KEY);
+  if (value && problem) {
+    const source = describeCredentialSource([STATE_PASSPHRASE_KEY]);
+    throw new StatePassphraseError(
+      'invalid',
+      `Your ${STATE_PASSPHRASE_KEY} (from ${source.where}) is too weak to protect your Pulumi state: it needs at least 43 letters, digits, dashes or underscores. Use the value vibecarbon generated for this project. If this project has no deployed state yet, delete the line and run this again to make a new one.`,
+    );
+  }
+  return value;
 }
 
 function recordedFingerprint(dir) {
@@ -100,6 +113,14 @@ export async function ensureStatePassphrase(projectDir) {
   }
 
   if (expected) {
+    // The CLI folds .env.local into the environment once at startup. A
+    // process that started while another was still generating can have
+    // missed the file, so look at it once more before calling it missing.
+    const onDisk = loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
+    if (onDisk) {
+      process.env[STATE_PASSPHRASE_KEY] = onDisk;
+      return ensureStatePassphrase(dir);
+    }
     throw new StatePassphraseError(
       'missing',
       `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it, then run this again.`,

@@ -1,11 +1,23 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@clack/prompts', () => ({ log: { info: vi.fn(), warn: vi.fn() } }));
 
+// Lets a test hand ensureStatePassphrase a STALE fingerprint read (the one it
+// takes before the config lock), as if another process landed in between.
+vi.mock('../../../src/lib/config.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../../src/lib/config.js')>();
+  return { ...actual, readProjectConfigFile: vi.fn(actual.readProjectConfigFile) };
+});
+
 import * as p from '@clack/prompts';
+import * as configModule from '../../../src/lib/config.js';
+import { bootstrapOperatorEnv } from '../../../src/lib/project.js';
 import {
   __resetStatePassphraseForTests,
   ensureStatePassphrase,
@@ -54,8 +66,9 @@ describe('state passphrase', () => {
 
   it('resolveStatePassphrase reads only the environment', () => {
     expect(resolveStatePassphrase()).toBeNull();
-    process.env[KEY] = 'a-passphrase-of-some-length';
-    expect(resolveStatePassphrase()).toBe('a-passphrase-of-some-length');
+    const v = generateStatePassphrase();
+    process.env[KEY] = v;
+    expect(resolveStatePassphrase()).toBe(v);
   });
 
   it('case 1: value and matching fingerprint return the value', async () => {
@@ -116,7 +129,12 @@ describe('state passphrase', () => {
 
   it('the next call after generating succeeds (fingerprint was recorded)', async () => {
     const v = await ensureStatePassphrase(dir);
+    // A new process: the memo is gone and the env is rebuilt from .env.local
+    // by the CLI's bootstrap, so this proves the file round trip.
     __resetStatePassphraseForTests();
+    delete process.env[KEY];
+    bootstrapOperatorEnv(dir);
+    expect(process.env[KEY]).toBe(v);
     expect(await ensureStatePassphrase(dir)).toBe(v);
   });
 
@@ -137,8 +155,7 @@ describe('state passphrase', () => {
     }
   });
 
-  it('concurrent ensures yield one value', async () => {
-    mkdirSync(dir, { recursive: true });
+  it('in-process calls after the first reuse its value (one log, one value)', async () => {
     const [a, b, c] = await Promise.all([
       ensureStatePassphrase(dir),
       ensureStatePassphrase(dir),
@@ -149,5 +166,78 @@ describe('state passphrase', () => {
     expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(a));
     expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toContain(a);
     expect(p.log.info).toHaveBeenCalledTimes(1);
+  });
+
+  it('a loser of the generate race adopts the winner without overwriting it', async () => {
+    // The winner landed after this call's unlocked fingerprint read: its
+    // fingerprint and .env.local are already on disk, this process has no env.
+    const winner = generateStatePassphrase();
+    writeManifest(statePassphraseFingerprint(winner));
+    writeFileSync(join(dir, '.env.local'), `${KEY}=${winner}\n`);
+    vi.mocked(configModule.readProjectConfigFile).mockReturnValueOnce(null);
+
+    expect(await ensureStatePassphrase(dir)).toBe(winner);
+    expect(process.env[KEY]).toBe(winner);
+    expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(`${KEY}=${winner}\n`);
+    expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(winner));
+    expect(p.log.info).not.toHaveBeenCalled();
+  });
+
+  it('separate processes racing on one project end with one value and one fingerprint', async () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), 'vc-state-pass-script-'));
+    try {
+      const script = join(scriptDir, 'ensure.mjs');
+      const mod = pathToFileURL(resolve('src/lib/state-passphrase.js')).href;
+      writeFileSync(
+        script,
+        `import { ensureStatePassphrase } from ${JSON.stringify(mod)};
+const v = await ensureStatePassphrase(process.argv[2]);
+console.log('RESULT ' + v);
+`,
+      );
+      const env = { ...process.env };
+      delete env[KEY];
+      const run = () =>
+        promisify(execFile)(process.execPath, [script, dir], { env, timeout: 60_000 });
+      const outs = await Promise.all(Array.from({ length: 6 }, run));
+      const values = outs.map((o) => /^RESULT (.+)$/m.exec(o.stdout)?.[1]);
+      expect(new Set(values).size).toBe(1);
+      const v = values[0] as string;
+      expect(v).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(v));
+      expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(
+        `# Local-only environment overrides (not committed to git)\n${KEY}=${v}\n`,
+      );
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+
+  describe('a weak or malformed value is refused before use', () => {
+    it.each([
+      ['too short', 'short-but-urlsafe'],
+      ['outside base64url', `${'a'.repeat(43)}!`],
+      ['with a space', `${'a'.repeat(30)} ${'b'.repeat(30)}`],
+    ])('%s: invalid, nothing recorded, value not echoed', async (_name, weak) => {
+      process.env[KEY] = weak;
+      expect(() => resolveStatePassphrase()).toThrow(StatePassphraseError);
+      const err = await ensureStatePassphrase(dir).catch((e) => e);
+      expect(err).toBeInstanceOf(StatePassphraseError);
+      expect(err.reason).toBe('invalid');
+      expect(err.message).toContain(STATE_PASSPHRASE_KEY);
+      expect(err.message).not.toContain(weak);
+      expect(existsSync(join(dir, '.vibecarbon.json'))).toBe(false);
+    });
+
+    it('a generated value is accepted', () => {
+      const v = generateStatePassphrase();
+      process.env[KEY] = v;
+      expect(resolveStatePassphrase()).toBe(v);
+    });
+
+    it('a blank value counts as not set', () => {
+      process.env[KEY] = '';
+      expect(resolveStatePassphrase()).toBeNull();
+    });
   });
 });

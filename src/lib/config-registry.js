@@ -797,8 +797,14 @@ export const CONFIG_KEYS = [
     feature: 'providers',
     kind: 'secret',
     optional: true,
-    shape: { minLen: 16, describe: 'at least 16 characters' },
-    sample: 'state-passphrase-sample-0123456789',
+    // SECURITY: the fingerprint is committed and is a fast unsalted hash, so
+    // only a high-entropy value is allowed: the generated shape (32 random
+    // bytes, base64url), which cannot be brute-forced from the fingerprint.
+    shape: {
+      regex: /^[A-Za-z0-9_-]{43,}$/,
+      describe: 'at least 43 letters, digits, dashes or underscores',
+    },
+    sample: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ-_0123',
     where: '.env.local',
     scope: 'state',
   },
