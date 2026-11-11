@@ -1447,7 +1447,9 @@ export async function executeDeployment(args, gatheredConfig) {
       // compare. A failure here stays quiet: the finalize step below reads the
       // rule, writes it if it is missing, and reports what still fails.
       const beforeFirstRead = () =>
-        s3Provider.setBucketCors(s3Config.bucket, envCorsOrigins(domain)).catch(() => {});
+        s3Provider
+          .setBucketCors(s3Config.bucket, envCorsOrigins(domain), { untilVisibleMs: 15_000 })
+          .catch(() => {});
       const bucket = await s3Provider.createBucket(s3Config.bucket, { beforeFirstRead });
       assertBucketReady(bucket, 'App storage');
       s3Spinner.stop(
