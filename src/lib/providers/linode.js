@@ -17,7 +17,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import { BaseProvider, deleteFailure, deleteRefused, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
 // HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
@@ -1567,14 +1567,16 @@ export class LinodeProvider extends BaseProvider {
 
   /**
    * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}),
-   * answered in DigitalOcean's shape (ReservedIpRelease) so destroy reads
-   * both one way. Here the DELETE alone decides: 2xx or 404 is released, any
-   * other status is a refusal. DigitalOcean's twin reads the address back
-   * because DO has kept an IP it answered a DELETE for; nothing like that has
-   * been seen on Linode, and destroy reads Linode's listing before it deletes
+   * answered as a ReservedIpRelease (providers/base.js) so destroy reads
+   * every provider one way. Here the DELETE alone decides: 2xx or 404 is
+   * released, a 4xx is a refusal (still held), and any other status, a 5xx
+   * that outlasted fetchWithRetry's retries, proves nothing either way
+   * (deleteRefused). DigitalOcean's twin reads the address back because DO
+   * has kept an IP it answered a DELETE for; nothing like that has been seen
+   * on Linode, and destroy reads Linode's listing before it deletes
    * (reservedIpLabelMatch).
    * @param {string} address
-   * @returns {Promise<import('./digitalocean.js').ReservedIpRelease>}
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
     const response = await fetchWithRetry(
@@ -1584,9 +1586,9 @@ export class LinodeProvider extends BaseProvider {
     if (response.ok || response.status === 404) return { released: true };
     return {
       released: false,
-      held: true,
+      held: deleteRefused(response.status) ? true : null,
       region: null,
-      reason: `Linode refused the delete (HTTP ${response.status})`,
+      reason: deleteFailure('Linode', response.status),
     };
   }
 

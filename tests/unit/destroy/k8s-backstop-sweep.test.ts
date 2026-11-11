@@ -17,11 +17,18 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 
 import { planK8sBackstopTargets, sweepK8sBackstopTargets } from '../../../src/destroy.js';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
-import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
+import {
+  DigitalOceanProvider,
+  encodeLabel as doLabel,
+} from '../../../src/lib/providers/digitalocean.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
 
-beforeEach(() => fetchWithRetryMock.mockReset());
+// A block body: an arrow that returns the mock would hand vitest a cleanup
+// hook, and vitest would call the mock once more after every test.
+beforeEach(() => {
+  fetchWithRetryMock.mockReset();
+});
 
 const spinner = () => ({ start: vi.fn(), stop: vi.fn() });
 const makeResults = () => ({
@@ -196,17 +203,23 @@ describe('a saved reserved IP address is released only while it is still ours', 
     expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
 
-  it('DigitalOcean: reserved IPs carry no tags, so the address alone still releases it', async () => {
+  it('DigitalOcean: reserved IPs carry no tags, so an unassigned address is still ours and released', async () => {
     const provider = new DigitalOceanProvider('token');
     vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
     vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
     const deleteReservedIpByAddress = vi
       .spyOn(provider, 'deleteReservedIpByAddress')
       .mockResolvedValue({ released: true });
+    fetchWithRetryMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ reserved_ip: { ip: '203.0.113.7', droplet: null } }),
+    });
     const results = makeResults();
     await sweep(provider, results);
     expect(deleteReservedIpByAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
-    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+    // The one read: where the address is assigned.
+    expect(fetchWithRetryMock).toHaveBeenCalledOnce();
     expect(results.leaks.entries).toHaveLength(0);
   });
 });
@@ -225,23 +238,35 @@ describe('DigitalOcean: the backstop reads the reserved IP back before it report
     floatingIp: IP,
     networkName: 'proj-prod-network',
   };
-  /** The DELETE answers `del` (or throws it); the read by address answers `read`. */
-  const api = (del: number | Error, read: number | 'listed' | Error) =>
+  type Read = number | 'listed' | Error | { droplet: { id: number; name: string; tags: string[] } };
+  const answer = (read: Read) => {
+    if (read instanceof Error) throw read;
+    if (read === 'listed' || typeof read === 'object') {
+      const droplet = typeof read === 'object' ? read.droplet : null;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ reserved_ip: { ip: IP, region: { slug: 'nyc3' }, droplet } }),
+      };
+    }
+    return { ok: read < 300, status: read, json: async () => ({}) };
+  };
+  /**
+   * The read before the delete answers `before` (where the address is
+   * assigned; unassigned by default), the DELETE answers `del` (or throws
+   * it), and the read by address after it answers `read`.
+   */
+  const api = (del: number | Error, read: Read, before: Read = 'listed') => {
+    let gets = 0;
     fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
       if (init?.method === 'DELETE') {
         if (del instanceof Error) throw del;
         return { ok: del < 300, status: del, json: async () => ({}) };
       }
-      if (read instanceof Error) throw read;
-      if (read === 'listed') {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ reserved_ip: { ip: IP, region: { slug: 'nyc3' }, droplet: null } }),
-        };
-      }
-      return { ok: read < 300, status: read, json: async () => ({}) };
+      gets += 1;
+      return answer(gets === 1 ? before : read);
     });
+  };
   const sweep = async () => {
     const provider = new DigitalOceanProvider('token');
     vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
@@ -259,13 +284,18 @@ describe('DigitalOcean: the backstop reads the reserved IP back before it report
     return { results, s };
   };
   const stops = (s: ReturnType<typeof spinner>) => s.stop.mock.calls.map(([line]) => line);
+  const calls = () =>
+    fetchWithRetryMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${url}`);
+  const doTags = (project: string, environment: string) => [
+    doLabel('project', project),
+    doLabel('environment', environment),
+    doLabel('role', 'master'),
+  ];
 
   it('DELETE accepted and the read answers 404: released, nothing reported or kept', async () => {
     api(204, 404);
     const { results, s } = await sweep();
-    expect(
-      fetchWithRetryMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${url}`),
-    ).toEqual([`DELETE ${IP_URL}`, `GET ${IP_URL}`]);
+    expect(calls()).toEqual([`GET ${IP_URL}`, `DELETE ${IP_URL}`, `GET ${IP_URL}`]);
     expect(results.leaks.entries).toHaveLength(0);
     expect(results.unreleasedReservedIps).toEqual([]);
     expect(stops(s)).toContain('Reserved IP released (backstop)');
@@ -309,6 +339,128 @@ describe('DigitalOcean: the backstop reads the reserved IP back before it report
     ]);
     expect(results.leaks.entries[0].reason).toContain('socket hang up');
     expect(results.unreleasedReservedIps).toEqual([IP]);
+  });
+
+  it('an address DigitalOcean no longer has is already released: nothing deleted or kept', async () => {
+    api(204, 404, 404);
+    const { results, s } = await sweep();
+    expect(calls()).toEqual([`GET ${IP_URL}`]);
+    expect(stops(s)).toContain('Reserved IP already released');
+    expect(results.leaks.entries).toHaveLength(0);
+    expect(results.unreleasedReservedIps).toEqual([]);
+  });
+
+  // By now this cluster's droplets are deleted, so a droplet holding the
+  // address got it after the release: never delete it out from under it.
+  it("assigned to a droplet that is not this cluster's: left alone, never deleted, and reported as someone else's", async () => {
+    api(204, 404, { droplet: { id: 4242, name: 'shop-web-1', tags: doTags('shop', 'prod') } });
+    const { results, s } = await sweep();
+    expect(calls()).toEqual([`GET ${IP_URL}`]);
+    expect(results.leaks.entries).toHaveLength(1);
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({
+      severity: 'foreign',
+      resourceClass: 'reserved-ip',
+      resource: IP,
+    });
+    expect(entry.reason).toContain('assigned to droplet shop-web-1 (4242)');
+    expect(entry.reason).toContain('likely reissued');
+    expect(stops(s)).toContain(
+      `Reserved IP ${IP} left alone: it is assigned to droplet shop-web-1 (4242)`,
+    );
+    // Somebody else's address: nothing of ours to retry.
+    expect(results.unreleasedReservedIps).toEqual([]);
+  });
+
+  it("still assigned to this cluster's own droplet: never deleted, a leak, and the record kept", async () => {
+    api(204, 404, {
+      droplet: { id: 77, name: 'proj-prod-master', tags: doTags('proj', 'prod') },
+    });
+    const { results } = await sweep();
+    expect(calls()).toEqual([`GET ${IP_URL}`]);
+    expect(results.leaks.entries).toHaveLength(1);
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({ severity: 'leak', resourceClass: 'reserved-ip', resource: IP });
+    expect(entry.reason).toContain("this cluster's droplet proj-prod-master (77)");
+    expect(entry.hint).toContain('Run `vibecarbon destroy prod` again');
+    expect(results.unreleasedReservedIps).toEqual([IP]);
+  });
+
+  it('the read before the delete fails: nothing deleted, unverified, and the record kept', async () => {
+    api(204, 404, 500);
+    const { results } = await sweep();
+    expect(calls()).toEqual([`GET ${IP_URL}`]);
+    expect(results.leaks.entries.map((e: { severity: string }) => e.severity)).toEqual([
+      'unverified',
+    ]);
+    expect(results.leaks.entries[0].reason).toContain('HTTP 500');
+    expect(results.unreleasedReservedIps).toEqual([IP]);
+  });
+});
+
+// The results object is built in main(); a caller that builds its own (a
+// test, a future tier) may not carry the list. Every branch that keeps the
+// record keeps it all the same.
+describe('the backstop keeps the record on a results object without the list', () => {
+  const unassigned = { reserved_ip: { ip: '203.0.113.7', droplet: null } };
+  const heldByOurs = {
+    reserved_ip: {
+      ip: '203.0.113.7',
+      droplet: {
+        id: 77,
+        name: 'proj-prod-master',
+        tags: [doLabel('project', 'proj'), doLabel('environment', 'prod')],
+      },
+    },
+  };
+  type Read = { ok: boolean; status: number; body?: unknown };
+  const cases: Array<{ name: string; reads: Read[] }> = [
+    { name: 'the read before the delete fails', reads: [{ ok: false, status: 500 }] },
+    {
+      name: 'the read after the delete fails',
+      reads: [
+        { ok: true, status: 200, body: unassigned },
+        { ok: false, status: 503 },
+      ],
+    },
+    {
+      name: "this cluster's droplet still holds it",
+      reads: [{ ok: true, status: 200, body: heldByOurs }],
+    },
+  ];
+  it.each(cases)('$name', async ({ reads }) => {
+    const queue = [...reads];
+    fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') return { ok: true, status: 204 };
+      const next = queue.shift() as Read;
+      if (!next) throw new Error(`unexpected read: ${_url}`);
+      return { ok: next.ok, status: next.status, json: async () => next.body ?? {} };
+    });
+    const provider = new DigitalOceanProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    const results: Record<string, unknown> = {
+      firewalls: [],
+      sshKeys: [],
+      leaks: createLeakLedger(),
+    };
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: [
+        {
+          stackEnv: 'prod',
+          firewallName: 'proj-prod-firewall',
+          sshKeyName: null,
+          floatingIp: '203.0.113.7',
+          networkName: 'proj-prod-network',
+        },
+      ],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
 });
 

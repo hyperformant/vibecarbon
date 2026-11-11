@@ -24,7 +24,7 @@ import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-u
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import { BaseProvider, deleteFailure, replaceWireguardPeerRules } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
 // touches, mirroring Hetzner's set: SSH and the k8s API.
@@ -122,15 +122,7 @@ export function normalizePublicKey(publicKey) {
   return `${type || ''} ${body || ''}`.trim();
 }
 
-/**
- * What a provider's `deleteReservedIpByAddress` says about the address.
- * `released`: it is off the account. Otherwise `held` is true when it is
- * still on the account (still listed, or the delete refused) and null when
- * nothing proves it either way; `region` is where the provider lists it,
- * when it said; `reason` is a clause for the line that reports it.
- * @typedef {{released: true}
- *   | {released: false, held: true|null, region: string|null, reason: string}} ReservedIpRelease
- */
+/** @typedef {import('./base.js').ReservedIpRelease} ReservedIpRelease */
 
 /**
  * A reserved IP whose release nothing proves either way.
@@ -1872,6 +1864,8 @@ export class DigitalOceanProvider extends BaseProvider {
    * anything else proves nothing either way. No waiting and no second try:
    * an address that is not proven released stays on the caller's record, and
    * the next deploy or destroy asks again. A DELETE that throws throws.
+   * A DELETE that failed is named in the reason whatever the read says, so
+   * a read that fails too reports both.
    * @param {string} address
    * @returns {Promise<ReservedIpRelease>}
    */
@@ -1879,24 +1873,64 @@ export class DigitalOceanProvider extends BaseProvider {
     const url = `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`;
     const headers = { Authorization: `Bearer ${this.apiToken}` };
     const deleted = await fetchWithRetry(url, { method: 'DELETE', headers });
-    const refused =
-      deleted.ok || deleted.status === 404
-        ? null
-        : `DigitalOcean refused the delete (HTTP ${deleted.status})`;
+    const failedDelete =
+      deleted.ok || deleted.status === 404 ? null : deleteFailure('DigitalOcean', deleted.status);
+    const readFailed = (detail) =>
+      notProven(
+        failedDelete
+          ? `${failedDelete} and the read-back failed (${detail})`
+          : `the read-back after the delete failed (${detail})`,
+      );
     let read;
     try {
       read = await fetchWithRetry(url, { headers });
     } catch (err) {
-      return notProven(`the read-back after the delete failed (${err?.message ?? err})`);
+      return readFailed(err?.message ?? String(err));
     }
     if (read.status === 404) return { released: true };
-    if (!read.ok) return notProven(`the read-back after the delete failed (HTTP ${read.status})`);
+    if (!read.ok) return readFailed(`HTTP ${read.status}`);
     const body = await read.json().catch(() => ({}));
     return {
       released: false,
       held: true,
       region: body?.reserved_ip?.region?.slug ?? null,
-      reason: refused ?? 'DigitalOcean still lists it after the delete',
+      reason: failedDelete ?? 'DigitalOcean still lists it after the delete',
+    };
+  }
+
+  /**
+   * Whether the reserved IP at `address` is assigned, and to whose droplet.
+   * Destroy's backstop asks before it deletes an address saved at deploy
+   * time: by then this cluster's droplets are deleted, so an address
+   * assigned to a droplet is in use, and only a droplet carrying ALL of
+   * `labels` as tags (the encodeLabel encoding the k8s program tags its
+   * droplets with) is this cluster's. DO reserved IPs carry no tags of
+   * their own; the droplet is the only attribution DO gives.
+   * @param {string} address
+   * @param {Object<string,string>} labels - empty matches no droplet
+   * @returns {Promise<{found: false}
+   *   | {found: true, droplet: null}
+   *   | {found: true, droplet: {id: number, name: string}, matches: boolean}>}
+   *   found is false when DigitalOcean has no reserved IP at that address
+   * @throws when the read fails
+   */
+  async reservedIpAssignment(address, labels) {
+    const response = await fetchWithRetry(
+      `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`,
+      { headers: { Authorization: `Bearer ${this.apiToken}` } },
+    );
+    if (response.status === 404) return { found: false };
+    if (!response.ok) {
+      throw new Error(`GET /reserved_ips/${address} failed: HTTP ${response.status}`);
+    }
+    const droplet = (await response.json())?.reserved_ip?.droplet;
+    if (!droplet) return { found: true, droplet: null };
+    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
+    const tags = droplet.tags ?? [];
+    return {
+      found: true,
+      droplet: { id: droplet.id, name: droplet.name },
+      matches: wanted.length > 0 && wanted.every((t) => tags.includes(t)),
     };
   }
 

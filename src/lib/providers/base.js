@@ -13,6 +13,39 @@
  * tests then walk you through the rest.
  */
 
+/**
+ * Whether a DELETE's HTTP status is the provider refusing it (4xx). A 5xx,
+ * which fetchWithRetry has already retried, proves nothing either way: the
+ * delete may or may not have happened.
+ * @param {number} status
+ * @returns {boolean}
+ */
+export function deleteRefused(status) {
+  return status >= 400 && status < 500;
+}
+
+/**
+ * The clause for a DELETE that did not succeed, worded by deleteRefused.
+ * @param {string} providerName
+ * @param {number} status
+ * @returns {string}
+ */
+export function deleteFailure(providerName, status) {
+  return deleteRefused(status)
+    ? `${providerName} refused the delete (HTTP ${status})`
+    : `${providerName} could not complete the delete (HTTP ${status})`;
+}
+
+/**
+ * What a provider's `deleteReservedIpByAddress` says about the address.
+ * `released`: it is off the account. Otherwise `held` is true when it is
+ * still on the account (still listed, or the delete refused) and null when
+ * nothing proves it either way; `region` is where the provider lists it,
+ * when it said; `reason` is a clause for the line that reports it.
+ * @typedef {{released: true}
+ *   | {released: false, held: true|null, region: string|null, reason: string}} ReservedIpRelease
+ */
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")

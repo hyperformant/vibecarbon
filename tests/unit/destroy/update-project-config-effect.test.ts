@@ -168,7 +168,8 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   // restore→failover, 2026-08-07). The generation rotates only when a
   // last-environment -purge deleted the state bucket (covered in
   // state-bucket-purge-scope.test.ts). An unverified destroy must NOT rotate —
-  // its retry targets the old names.
+  // its retry targets the old names (unless its -purge already deleted the
+  // state bucket; see the purge cases below).
   it('does NOT rotate stateBucketGeneration on a verified destroy that kept the state bucket', async () => {
     // A plain destroy keeps the state bucket (retainStateBucket), so nothing
     // is recreated and the hazard cannot arise — rotating would strand the
@@ -224,6 +225,68 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
     expect(message).toContain('203.0.113.7');
     expect(message).toContain('`vibecarbon destroy prod`');
     expect(message).not.toContain('—');
+  });
+
+  it('names each unreleased address once: "X, Y and Z"', async () => {
+    // k8s-ha: both side stacks can name one environment-level address.
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = [
+      '203.0.113.7',
+      '203.0.113.8',
+      '203.0.113.7',
+      '203.0.113.9',
+    ];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain('the reserved IPs 203.0.113.7, 203.0.113.8 and 203.0.113.9 are');
+  });
+
+  // A -purge of the last environment deletes the state bucket in the step
+  // before this one, whether or not the entry is then kept. The kept entry
+  // must not take the generation's rotation with it: the next deploy or
+  // destroy would derive the deleted bucket's name and recreate it, the
+  // same-name recreate that lost acked writes on 2026-08-07.
+  for (const keptBy of ['an unreleased reserved IP', 'an unverified Pulumi destroy']) {
+    it(`a purge that deleted the state bucket still rotates the generation when ${keptBy} keeps the entry`, async () => {
+      const ctx = makeCtx({ pulumiDestroyFailed: keptBy === 'an unverified Pulumi destroy' });
+      ctx.projectConfig.stateBucketGeneration = 'aaaaaa';
+      ctx.projectConfig.retainedStateBucket = 'proj-state-old';
+      store.reset(ctx.projectConfig);
+      Object.assign(ctx.results, {
+        stateBucketPurged: true,
+        // retainStateBucket's purge drops the retained name.
+        retainedStateBucket: { value: undefined },
+        ...(keptBy === 'an unreleased reserved IP' && {
+          unreleasedReservedIps: ['203.0.113.7'],
+        }),
+      });
+
+      await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+      expect(store.state.writes).toHaveLength(1);
+      const saved = store.state.writes[0];
+      expect(saved.environments).toHaveProperty('prod');
+      expect(saved).not.toHaveProperty('destroyedEnvironments');
+      expect(saved.stateBucketGeneration).toMatch(/^\w+$/);
+      expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
+      expect(saved).not.toHaveProperty('retainedStateBucket');
+    });
+  }
+
+  it('a kept entry still records the retained state-bucket name', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    Object.assign(ctx.results, {
+      retainedStateBucket: { value: 'proj-state' },
+      unreleasedReservedIps: ['203.0.113.7'],
+    });
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    const saved = store.lastWrite();
+    expect(saved?.retainedStateBucket).toBe('proj-state');
+    expect(saved?.environments).toHaveProperty('prod');
   });
 
   it('removes the entry as before once every reserved IP is released', async () => {

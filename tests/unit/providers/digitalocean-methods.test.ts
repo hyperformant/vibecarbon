@@ -1628,6 +1628,34 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
     });
 
+    it('a DELETE that failed with a 5xx is named as not completed, not refused', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 502)).mockResolvedValueOnce(listed());
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: true,
+        region: 'nyc3',
+        reason: 'DigitalOcean could not complete the delete (HTTP 502)',
+      });
+    });
+
+    it('a failed DELETE whose read-back fails too names both', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 403)).mockResolvedValueOnce(resp({}, 403));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: null,
+        region: null,
+        reason: 'DigitalOcean refused the delete (HTTP 403) and the read-back failed (HTTP 403)',
+      });
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({}, 502))
+        .mockRejectedValueOnce(new Error('socket hang up'));
+      expect(await provider.deleteReservedIpByAddress(IP)).toMatchObject({
+        held: null,
+        reason:
+          'DigitalOcean could not complete the delete (HTTP 502) and the read-back failed (socket hang up)',
+      });
+    });
+
     it('a read that answers anything else, or throws, proves nothing either way', async () => {
       fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(resp({}, 503));
       expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
@@ -1645,6 +1673,64 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
         region: null,
         reason: 'the read-back after the delete failed (socket hang up)',
       });
+    });
+  });
+
+  // Destroy's backstop asks this before it deletes a saved address: by then
+  // the cluster's droplets are deleted, so an assigned address is in use,
+  // and only a droplet carrying this project's and stack's tags is ours.
+  describe('reservedIpAssignment', () => {
+    const IP = '203.0.113.9';
+    const URL_IP = `${BASE}/reserved_ips/${IP}`;
+    const labels = { project: 'proj', environment: 'prod' };
+    const assigned = (tags: string[]) =>
+      resp({
+        reserved_ip: {
+          ip: IP,
+          region: { slug: 'nyc3' },
+          droplet: { id: 77, name: 'proj-prod-master', tags, networks: {} },
+        },
+      });
+
+    it('one GET of the address; 404 is not found', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.reservedIpAssignment(IP, labels)).toEqual({ found: false });
+      expect(calls()).toEqual([['GET', URL_IP]]);
+    });
+
+    it('an unassigned address has no droplet', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(
+        resp({ reserved_ip: { ip: IP, region: { slug: 'nyc3' }, droplet: null } }),
+      );
+      expect(await provider.reservedIpAssignment(IP, labels)).toEqual({
+        found: true,
+        droplet: null,
+      });
+    });
+
+    it('a droplet carrying every label matches; one missing a label does not', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(
+        assigned([...encodeLabels(labels), encodeLabel('role', 'master')]),
+      );
+      expect(await provider.reservedIpAssignment(IP, labels)).toEqual({
+        found: true,
+        droplet: { id: 77, name: 'proj-prod-master' },
+        matches: true,
+      });
+      fetchWithRetryMock.mockResolvedValueOnce(
+        assigned(encodeLabels({ project: 'proj', environment: 'staging' })),
+      );
+      expect(await provider.reservedIpAssignment(IP, labels)).toMatchObject({ matches: false });
+    });
+
+    it('empty labels match no droplet', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(assigned(encodeLabels(labels)));
+      expect(await provider.reservedIpAssignment(IP, {})).toMatchObject({ matches: false });
+    });
+
+    it('a read that fails throws, so nothing is deleted on a guess', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 503));
+      await expect(provider.reservedIpAssignment(IP, labels)).rejects.toThrow(/HTTP 503/);
     });
   });
 

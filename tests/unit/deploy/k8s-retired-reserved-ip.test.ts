@@ -494,12 +494,12 @@ describe('releaseRetiredReservedIps: managed DNS', () => {
   });
 
   it('a refused DELETE keeps the record and warns with every way it still gets released', async () => {
-    deletesAnswer(500, 'listed');
+    deletesAnswer(422, 'listed');
     const { s, log, run } = release({ ingressIp: MASTER, floatingIp: OLD });
     const out = await run;
     expect(out.released).toEqual([]);
     expect(out.kept).toEqual([
-      { address: OLD, reason: 'DigitalOcean refused the delete (HTTP 500)' },
+      { address: OLD, reason: 'DigitalOcean refused the delete (HTTP 422)' },
     ]);
     // Still on record: the next deploy and destroy's backstop both read it.
     expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);

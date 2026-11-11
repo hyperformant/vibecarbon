@@ -218,22 +218,36 @@ describe('LinodeProvider deletes', () => {
     expect(refused.apiError?.message).toMatch(/HTTP 400 in use/);
   });
 
-  it("deleteReservedIpByAddress answers from the DELETE alone, in DigitalOcean's shape", async () => {
+  it('deleteReservedIpByAddress answers from the DELETE alone, as a ReservedIpRelease', async () => {
     const p = new LinodeProvider('tok');
     fetchWithRetryMock.mockResolvedValueOnce(status(200));
     expect(await p.deleteReservedIpByAddress('1.2.3.4')).toEqual({ released: true });
     fetchWithRetryMock.mockResolvedValueOnce(status(404));
     expect(await p.deleteReservedIpByAddress('1.2.3.4')).toEqual({ released: true });
-    fetchWithRetryMock.mockResolvedValueOnce(status(500));
+    expect(fetchWithRetryMock).toHaveBeenCalledTimes(2);
+    expect(fetchWithRetryMock.mock.calls[0][0]).toMatch(/\/networking\/reserved\/ips\/1\.2\.3\.4$/);
+    expect(fetchWithRetryMock.mock.calls[0][1].method).toBe('DELETE');
+  });
+
+  // A 4xx is Linode refusing the delete: the address is still held. A 5xx
+  // that outlasted fetchWithRetry's retries proves nothing either way, the
+  // same rule as DigitalOcean's: the delete may have happened.
+  it('deleteReservedIpByAddress: a 4xx refusal is held, a 5xx proves nothing', async () => {
+    const p = new LinodeProvider('tok');
+    fetchWithRetryMock.mockResolvedValueOnce(status(400));
     expect(await p.deleteReservedIpByAddress('1.2.3.4')).toEqual({
       released: false,
       held: true,
       region: null,
-      reason: 'Linode refused the delete (HTTP 500)',
+      reason: 'Linode refused the delete (HTTP 400)',
     });
-    expect(fetchWithRetryMock).toHaveBeenCalledTimes(3);
-    expect(fetchWithRetryMock.mock.calls[0][0]).toMatch(/\/networking\/reserved\/ips\/1\.2\.3\.4$/);
-    expect(fetchWithRetryMock.mock.calls[0][1].method).toBe('DELETE');
+    fetchWithRetryMock.mockResolvedValueOnce(status(503));
+    expect(await p.deleteReservedIpByAddress('1.2.3.4')).toEqual({
+      released: false,
+      held: null,
+      region: null,
+      reason: 'Linode could not complete the delete (HTTP 503)',
+    });
   });
 
   // destroy reads "not on the account" as already released, so a listing

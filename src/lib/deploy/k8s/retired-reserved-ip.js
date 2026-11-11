@@ -539,7 +539,7 @@ function oneLine(err) {
  * @param {object} o
  * @param {string} o.environment
  * @param {{K8S_FLOATING_IP?: boolean, NAME: string}} o.Provider
- * @param {{deleteReservedIpByAddress: (address: string) => Promise<import('../../providers/digitalocean.js').ReservedIpRelease>}} o.provider
+ * @param {{deleteReservedIpByAddress: (address: string) => Promise<import('../../providers/base.js').ReservedIpRelease>}} o.provider
  *   released only when it says so: DigitalOcean's reads the address back
  * @param {{info: (line: string) => void, warn: (line: string) => void}} o.log
  * @param {string|null|undefined} o.domain - the environment's domain

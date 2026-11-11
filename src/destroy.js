@@ -1847,9 +1847,57 @@ async function deleteGithubEnvEffect(ctx) {
   }
 }
 
+/**
+ * Distinct addresses for one line: "X", "X and Y", "X, Y and Z".
+ * @param {string[]} addresses - each once
+ * @returns {string}
+ */
+function joinAddresses(addresses) {
+  if (addresses.length <= 1) return addresses.join('');
+  return `${addresses.slice(0, -1).join(', ')} and ${addresses.at(-1)}`;
+}
+
+/**
+ * The project-level fields this destroy decided, written whether or not the
+ * environment's entry is removed: the retained state-bucket name
+ * (retainStateBucket) and, after a -purge deleted the state bucket, a fresh
+ * stateBucketGeneration. A kept entry must not lose them: a -purge of the
+ * last environment deletes the state bucket whether or not the entry stays,
+ * and the next deploy or destroy must then derive a fresh name rather than
+ * recreate the deleted one (the same-name recreate that lost acked writes on
+ * 2026-08-07).
+ * @param {object} updatedConfig - the file as it is now
+ * @param {object} results
+ */
+function writeProjectLevelFields(updatedConfig, results) {
+  if (results.retainedStateBucket) {
+    if (results.retainedStateBucket.value === undefined) delete updatedConfig.retainedStateBucket;
+    else updatedConfig.retainedStateBucket = results.retainedStateBucket.value;
+  }
+  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
+  // deleted the derived state bucket (the last live environment). The next
+  // deploy then derives a FRESH state-bucket name rather than recreating the
+  // one just deleted: Hetzner Object Storage can ack writes into a
+  // just-recreated same-name bucket and lose them (e4 restore->failover,
+  // 2026-08-07). Every other destroy keeps the state bucket (see
+  // retainStateBucket), and rotating then would strand the warm bucket.
+  //
+  // The app bucket name stays stable; it is not rotated here.
+  if (results.stateBucketPurged) {
+    updatedConfig.stateBucketGeneration = generateBucketSalt();
+  }
+}
+
 // 5. Remove the destroyed environment from project config.
 async function updateProjectConfigEffect(ctx) {
   const { projectConfig, environment, spinner, results } = ctx;
+  // Both keep branches below keep the environment's entry, and still write
+  // the project-level fields (writeProjectLevelFields): the purge of the
+  // last environment runs before this step whether or not the entry stays.
+  const writeProjectLevelOnly = () => {
+    if (!results.retainedStateBucket && !results.stateBucketPurged) return;
+    updateProjectConfig((updatedConfig) => writeProjectLevelFields(updatedConfig, results));
+  };
   // M3 Task 9f fix round 2: keep the environment's config entry when its
   // Pulumi destroy couldn't be verified (recordPulumiDestroyOutcome /
   // destroyK8sTier's catch both set results.pulumiDestroyFailed — the same
@@ -1864,6 +1912,7 @@ async function updateProjectConfigEffect(ctx) {
   // this flag is never set there.
   if (results.pulumiDestroyFailed) {
     spinner.start('Updating project configuration');
+    writeProjectLevelOnly();
     spinner.stop('Configuration kept (Pulumi destroy was not verified; see the leak report)');
     results.leaks.unverified({
       resourceClass: 'project-config',
@@ -1877,14 +1926,16 @@ async function updateProjectConfigEffect(ctx) {
   // A recorded reserved IP of ours that the backstop could not prove released
   // (sweepK8sBackstopTargets) is named nowhere but this entry: kept, as
   // above, so the next destroy retries it. The backstop's own leak line says
-  // so; this adds none.
-  const unreleased = results.unreleasedReservedIps ?? [];
+  // so; this adds none. Each address once: on k8s-ha both side stacks can
+  // name one environment-level address.
+  const unreleased = [...new Set(results.unreleasedReservedIps ?? [])];
   if (unreleased.length > 0) {
     spinner.start('Updating project configuration');
+    writeProjectLevelOnly();
     const named =
       unreleased.length === 1
         ? `the reserved IP ${unreleased[0]} is`
-        : `the reserved IPs ${unreleased.join(' and ')} are`;
+        : `the reserved IPs ${joinAddresses(unreleased)} are`;
     spinner.stop(
       `Configuration kept: ${named} not released yet, ` +
         `so the next \`vibecarbon destroy ${environment}\` can retry`,
@@ -1896,10 +1947,7 @@ async function updateProjectConfigEffect(ctx) {
   // was loaded when this destroy started, and a failover journal or another
   // environment's record saved since must survive.
   updateProjectConfig((updatedConfig) => {
-    if (results.retainedStateBucket) {
-      if (results.retainedStateBucket.value === undefined) delete updatedConfig.retainedStateBucket;
-      else updatedConfig.retainedStateBucket = results.retainedStateBucket.value;
-    }
+    writeProjectLevelFields(updatedConfig, results);
     if (updatedConfig.environments) {
       // Keep what the environment WAS (placement, domain, DNS, backup bucket,
       // sizing) under a sibling key `deploy` reads when this name is deployed
@@ -1922,18 +1970,6 @@ async function updateProjectConfigEffect(ctx) {
         };
       }
       delete updatedConfig.environments[environment];
-    }
-    // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
-    // deleted the derived state bucket (the last live environment). The next
-    // deploy then derives a FRESH state-bucket name rather than recreating the
-    // one just deleted: Hetzner Object Storage can ack writes into a
-    // just-recreated same-name bucket and lose them (e4 restore->failover,
-    // 2026-08-07). Every other destroy keeps the state bucket (see
-    // retainStateBucket), and rotating then would strand the warm bucket.
-    //
-    // The app bucket name stays stable; it is not rotated here.
-    if (results.stateBucketPurged) {
-      updatedConfig.stateBucketGeneration = generateBucketSalt();
     }
   });
   spinner.stop('Configuration updated');
@@ -2726,17 +2762,37 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry tags (Linode: `reservedIpLabelMatch`) is asked, and only
  * an IP carrying this project's and this stack's tags (the labels the k8s
- * program stamps) counts as ours. DigitalOcean reserved IPs carry no tags, so
- * the saved address is their only attribution and they count as ours.
+ * program stamps) counts as ours.
+ *
+ * DigitalOcean reserved IPs carry no tags, so DO is asked where the address
+ * is assigned (`reservedIpAssignment`). This runs after the teardown, so
+ * this cluster's droplets are deleted: an unassigned address is ours, one
+ * assigned to a droplet that does not carry this project's and stack's tags
+ * was reissued and is someone else's (`assigned`), and one still assigned
+ * to a droplet that does carry them is ours, held by a droplet the teardown
+ * did not delete (`held`). Neither assigned verdict is ever deleted.
  *
  * @param {object} provider
  * @param {string} address
  * @param {string|undefined} projectName
  * @param {string} stackEnv
- * @returns {Promise<{verdict: 'ours'} | {verdict: 'released'} | {verdict: 'foreign', tags: string[]}>}
- * @throws when the tags cannot be read, or there is no project name to check them against
+ * @returns {Promise<{verdict: 'ours'} | {verdict: 'released'} | {verdict: 'foreign', tags: string[]}
+ *   | {verdict: 'assigned' | 'held', droplet: {id: number, name: string}}>}
+ * @throws when the address cannot be read, or there is no project name to check tags against
  */
 async function savedReservedIpOwner(provider, address, projectName, stackEnv) {
+  const labels = projectName ? { project: projectName, environment: stackEnv } : {};
+  if (typeof provider.reservedIpAssignment === 'function') {
+    const read = await provider.reservedIpAssignment(address, labels);
+    if (!read.found) return { verdict: 'released' };
+    if (!read.droplet) return { verdict: 'ours' };
+    if (!projectName) {
+      throw new Error(
+        `it is assigned to droplet ${read.droplet.name}, and there is no project name to check its tags against`,
+      );
+    }
+    return { verdict: read.matches ? 'held' : 'assigned', droplet: read.droplet };
+  }
   if (typeof provider.reservedIpLabelMatch !== 'function') return { verdict: 'ours' };
   if (!projectName) throw new Error('no project name to check its tags against');
   const match = await provider.reservedIpLabelMatch(address, {
@@ -2745,6 +2801,19 @@ async function savedReservedIpOwner(provider, address, projectName, stackEnv) {
   });
   if (!match.found) return { verdict: 'released' };
   return match.matches ? { verdict: 'ours' } : { verdict: 'foreign', tags: match.tags };
+}
+
+/**
+ * Keep an address of ours that is not proven released on record:
+ * updateProjectConfigEffect keeps the environment's entry while any is
+ * listed, so the next destroy retries it. Tolerates a results object built
+ * without the list, as updateProjectConfigEffect does.
+ * @param {{unreleasedReservedIps?: string[]}} results
+ * @param {string} address
+ */
+function keepUnreleased(results, address) {
+  results.unreleasedReservedIps ??= [];
+  results.unreleasedReservedIps.push(address);
 }
 
 /**
@@ -2833,13 +2902,15 @@ export async function sweepK8sBackstopTargets({
     // assignment resource that deletes itself from state on refresh) were
     // written up at the former `digitalocean.ReservedIp` construction site in
     // src/lib/iac/programs/digitalocean-k8s.js (git history). By the time
-    // this runs the droplets are gone, so the IP is unassigned. DigitalOcean's
-    // delete counts it released only once the read by address answers 404
-    // (DigitalOceanProvider.deleteReservedIpByAddress): DO has answered a
-    // DELETE with success and kept the IP.
+    // this runs the droplets are gone, so the IP should be unassigned.
+    // DigitalOcean's delete counts it released only once the read by address
+    // answers 404 (DigitalOceanProvider.deleteReservedIpByAddress): DO has
+    // answered a DELETE with success and kept the IP.
     //
-    // A provider whose reserved IPs carry tags (Linode) is asked first
-    // whether the saved address is still this cluster's (savedReservedIpOwner).
+    // Every provider is asked first whether the saved address is still this
+    // cluster's (savedReservedIpOwner): Linode by the IP's own tags, and
+    // DigitalOcean by the droplet it is assigned to. An assigned address is
+    // never deleted.
     //
     // An address of ours that is not proven released keeps the environment's
     // record (results.unreleasedReservedIps, read by updateProjectConfigEffect):
@@ -2866,13 +2937,41 @@ export async function sweepK8sBackstopTargets({
               `not project ${projectName} and stack ${target.stackEnv}, so the address was likely reissued`,
             hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
           });
+        } else if (owner.verdict === 'assigned') {
+          // This cluster's droplets are deleted by now, so a droplet holding
+          // the address is someone else's: never delete it out from under it.
+          const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
+          s.stop(`Reserved IP ${address} left alone: it is assigned to droplet ${droplet}`);
+          results.leaks.foreign({
+            resourceClass: 'reserved-ip',
+            resource: address,
+            reason:
+              `not released: it is assigned to droplet ${droplet}, which is not project ` +
+              `${projectName} and stack ${target.stackEnv}'s, so the address was likely reissued`,
+            hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
+          });
+        } else if (owner.verdict === 'held') {
+          // Still assigned to a droplet of this cluster that the teardown did
+          // not delete (its own line above says so). Ours, so it stays on
+          // record, but never deleted out from under a running droplet.
+          const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
+          s.stop(
+            `Reserved IP ${address} left alone: this cluster's droplet ${droplet} still holds it`,
+          );
+          keepUnreleased(results, address);
+          results.leaks.leak({
+            resourceClass: 'reserved-ip',
+            resource: address,
+            reason: `not released: it is still assigned to this cluster's droplet ${droplet}, which was not deleted`,
+            hint: retry,
+          });
         } else {
           const outcome = await provider.deleteReservedIpByAddress(address);
           if (outcome.released) {
             s.stop('Reserved IP released (backstop)');
           } else {
             s.stop(`Reserved IP ${address} is not released: ${outcome.reason}`);
-            results.unreleasedReservedIps.push(address);
+            keepUnreleased(results, address);
             const entry = {
               resourceClass: 'reserved-ip',
               resource: describeResource({ name: address, region: outcome.region }),
@@ -2893,7 +2992,7 @@ export async function sweepK8sBackstopTargets({
         }
       } catch (error) {
         s.stop(`Reserved IP backstop check failed: ${error.message}`);
-        results.unreleasedReservedIps.push(address);
+        keepUnreleased(results, address);
         results.leaks.unverified({
           resourceClass: 'reserved-ip',
           resource: address,
