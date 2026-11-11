@@ -27,7 +27,15 @@ const s3 = {
   })),
   getBucketCorsOrigins: vi.fn(async (_b: string) => [] as string[]),
   setBucketCors: vi.fn(async (_b: string, _o: string[]) => {}),
+  // Every region is asked (S3CompatibleProvider.locateBucket).
+  locateBucket: vi.fn(async (_b: string): Promise<string | null> => null),
+  forRegion: vi.fn((_region: string) => s3),
 };
+const noSuchBucket = () =>
+  Object.assign(new Error('The specified bucket does not exist'), {
+    name: 'NoSuchBucket',
+    $metadata: { httpStatusCode: 404 },
+  });
 
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
@@ -281,13 +289,12 @@ describe('the destroyed record says when -purge deleted the app bucket', () => {
     );
   });
 
-  it('a bucket not found where the record says is not marked: the record may name the wrong region', async () => {
-    s3.emptyAndDeleteBucket.mockRejectedValueOnce(
-      Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' }),
-    );
+  it('a bucket no region has is not marked: nothing was deleted', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
     expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).not.toHaveProperty(
       'appBucketPurged',
     );
+    expect(s3.locateBucket).toHaveBeenCalledWith(STAGING_BUCKET);
   });
 
   it('a plain destroy, and a -purge that keeps a pinned bucket, are not marked', async () => {
@@ -297,6 +304,55 @@ describe('the destroyed record says when -purge deleted the app bucket', () => {
         Object.assign(cfg.environments.staging.s3, { bucketPin: true });
       }),
     ).not.toHaveProperty('appBucketPurged');
+  });
+});
+
+describe('-purge finds an app bucket its record puts in the wrong region (the old bug, before a redeploy)', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+  });
+
+  it('deletes it where it is, says where, and marks the record', async () => {
+    // staging's record says fsn1; its uploads bucket is in nbg1.
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    const { results, text } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(s3.forRegion).toHaveBeenCalledWith('nbg1');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledTimes(2);
+    expect(results.appBucketPurged).toBe(true);
+    expect(results.s3Bucket).toBe(STAGING_BUCKET);
+    expect(text).toContain(
+      'S3 bucket deleted in nbg1, not fsn1 as its record said (2 objects removed)',
+    );
+    expect(text).not.toContain('not found');
+  });
+
+  it('says not found only when no region has it', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    const { results, text } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(s3.locateBucket).toHaveBeenCalledWith(STAGING_BUCKET);
+    expect(s3.forRegion).not.toHaveBeenCalled();
+    expect(results.appBucketPurged).toBeUndefined();
+    expect(text).toContain('S3 bucket not found in any region (already deleted or never created)');
+  });
+
+  it('a region search that cannot answer leaves it, as a leak naming the region, never marked', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockRejectedValueOnce(
+      new Error(
+        `hel1 answered "AccessDenied" when asked whether it holds bucket ${STAGING_BUCKET}, so where the bucket is cannot be told`,
+      ),
+    );
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(results.appBucketPurged).toBeUndefined();
+    const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
+    expect(ledger.entries[0]?.reason).toContain(`hel1 answered "AccessDenied"`);
   });
 });
 

@@ -1206,6 +1206,55 @@ function deleteGitHubEnvironment(envName) {
 // BACKUP BUCKET CLEANUP
 // ============================================================================
 
+/** True when an S3 error says the bucket does not exist. */
+function isNoSuchBucket(err) {
+  return (
+    err?.name === 'NoSuchBucket' ||
+    err?.Code === 'NoSuchBucket' ||
+    err?.$metadata?.httpStatusCode === 404
+  );
+}
+
+/**
+ * Run `op` on a bucket at its recorded region, and when that region says the
+ * bucket does not exist, look for it in every region before concluding
+ * anything (locateBucket). A record can name the wrong region: an environment
+ * that hit the old bug and was not deployed since, or a deploy that died
+ * before its final save. A store asked in the wrong region answers "no such
+ * bucket" for a bucket full of data, so that answer alone never means gone.
+ *
+ * Returns where `op` ran, or `{ gone: true }` only when every region said not
+ * found. A region that answers anything else throws (locateBucket names the
+ * bucket and the region), and so does a store that says NoSuchBucket where the
+ * search then finds the bucket: the caller keeps it and records why.
+ * @template T
+ * @param {{ forRegion: (region: string) => any, locateBucket: (bucket: string) => Promise<string|null> }} store
+ *   the client at `region`
+ * @param {string} bucket
+ * @param {string} region - where the record says the bucket is
+ * @param {(store: any) => Promise<T>} op
+ * @returns {Promise<{ result: T, region: string, gone?: false } | { gone: true }>}
+ */
+async function atBucketRegion(store, bucket, region, op) {
+  try {
+    return { result: await op(store), region };
+  } catch (err) {
+    if (!isNoSuchBucket(err)) throw err;
+    const found = await store.locateBucket(bucket);
+    if (found === null) return { gone: true };
+    if (found === region) {
+      throw new Error(
+        `${bucket} answered NoSuchBucket in ${region}, but a HeadBucket there finds it: the store is answering two ways, so it was left in place. Run the destroy again in a few minutes.`,
+      );
+    }
+    return { result: await op(store.forRegion(found)), region: found };
+  }
+}
+
+/** ` in fsn1, not nbg1 as its record said` when the bucket was found elsewhere. */
+const foundElsewhere = (ran, recorded) =>
+  ran && ran !== recorded ? ` in ${ran}, not ${recorded} as its record said` : '';
+
 /**
  * Handle the backup S3 bucket at the end of destroy. Default behavior is to
  * preserve the bucket for recovery (production users); --purge-backups deletes
@@ -1276,60 +1325,60 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       s3Creds.secretKey,
       region,
     );
-    try {
-      // Bound the purge so a slow/contended S3 endpoint can't consume the whole
-      // destroy budget. The Hetzner resources are already freed (Pulumi destroy
-      // ran before this), but a single S3 op can hang up to ~9 min under the
-      // SDK (maxAttempts 3 × 60s socketTimeout) × _send (maxAttempts 3) retry
-      // layers — observed on k8s teardown, where the storage bucket doubles as
-      // the Pulumi state backend (slow/contended), blowing the 600s
-      // final-destroy timeout and getting the whole step SIGKILLed. On timeout
-      // we leave the bucket for the orphan sweep / next destroy rather than hang.
-      const PURGE_TIMEOUT_MS = 180_000;
-      const purge = async () => {
-        const { objectsRemoved } = await s3Provider.deletePrefix(bucketName, envBackupPrefix);
-        if (!deleteBucket) return { kept: true, objectsRemoved };
-        return s3Provider.emptyAndDeleteBucket(bucketName);
-      };
-      const result = await Promise.race([
-        purge(),
-        new Promise((_, reject) => {
-          // Detach the timer from the event loop so a fast purge win doesn't
-          // leave it holding the process open — handle-probe evidence
-          // (2026-08-23 matrix) showed every destroy lingering ~175s past its
-          // completion banner on exactly this handle. A detached timer still
-          // fires if the purge genuinely hangs; it just stops blocking exit.
-          const t = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `backup bucket purge exceeded ${PURGE_TIMEOUT_MS / 1000}s, left for the orphan sweep / a retried destroy`,
-                ),
+    // Bound the purge so a slow/contended S3 endpoint can't consume the whole
+    // destroy budget. The Hetzner resources are already freed (Pulumi destroy
+    // ran before this), but a single S3 op can hang up to ~9 min under the
+    // SDK (maxAttempts 3 × 60s socketTimeout) × _send (maxAttempts 3) retry
+    // layers — observed on k8s teardown, where the storage bucket doubles as
+    // the Pulumi state backend (slow/contended), blowing the 600s
+    // final-destroy timeout and getting the whole step SIGKILLed. On timeout
+    // we leave the bucket for the orphan sweep / next destroy rather than hang.
+    const PURGE_TIMEOUT_MS = 180_000;
+    const purgeAt = async (store) => {
+      const { objectsRemoved } = await store.deletePrefix(bucketName, envBackupPrefix);
+      if (!deleteBucket) return { kept: true, objectsRemoved };
+      return store.emptyAndDeleteBucket(bucketName);
+    };
+    // Where the record says, else wherever the bucket really is: a wrong
+    // region on record must never read as "purged" while the folder stays.
+    const outcome = await Promise.race([
+      atBucketRegion(s3Provider, bucketName, region, purgeAt),
+      new Promise((_, reject) => {
+        // Detach the timer from the event loop so a fast purge win doesn't
+        // leave it holding the process open — handle-probe evidence
+        // (2026-08-23 matrix) showed every destroy lingering ~175s past its
+        // completion banner on exactly this handle. A detached timer still
+        // fires if the purge genuinely hangs; it just stops blocking exit.
+        const t = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `backup bucket purge exceeded ${PURGE_TIMEOUT_MS / 1000}s, left for the orphan sweep / a retried destroy`,
               ),
-            PURGE_TIMEOUT_MS,
-          );
-          if (typeof t?.unref === 'function') t.unref();
-        }),
-      ]);
-      spinner.stop(
-        result.kept
-          ? `Backups under ${envBackupPrefix} purged (${result.objectsRemoved} objects removed); bucket kept for ${holders.join(', ')}, which ${holders.length === 1 ? 'keeps' : 'keep'} backups there`
-          : result.deleted
-            ? result.objectsRemoved > 0
-              ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
-              : 'Backup bucket purged'
-            : result.shellDeferred
-              ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
-              : 'Backup bucket not found',
-      );
+            ),
+          PURGE_TIMEOUT_MS,
+        );
+        if (typeof t?.unref === 'function') t.unref();
+      }),
+    ]);
+    if (outcome.gone) {
+      spinner.stop('Backup bucket not found in any region (already deleted or never created)');
       return { purged: true };
-    } catch (bucketError) {
-      if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
-        spinner.stop('Backup bucket not found (already deleted or never created)');
-        return { purged: true };
-      }
-      throw bucketError;
     }
+    const { result } = outcome;
+    const where = foundElsewhere(outcome.region, region);
+    spinner.stop(
+      result.kept
+        ? `Backups under ${envBackupPrefix} purged${where} (${result.objectsRemoved} objects removed); bucket kept for ${holders.join(', ')}, which ${holders.length === 1 ? 'keeps' : 'keep'} backups there`
+        : result.deleted
+          ? result.objectsRemoved > 0
+            ? `Backup bucket purged${where} (${result.objectsRemoved} objects removed)`
+            : `Backup bucket purged${where}`
+          : result.shellDeferred
+            ? `Backup bucket emptied${where} (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
+            : 'Backup bucket not found',
+    );
+    return { purged: true };
   } catch (error) {
     spinner.stop(`Backup bucket purge failed: ${error.message}`);
     leaks.leak({
@@ -1692,35 +1741,37 @@ async function deleteAppBucketEffect(ctx) {
         s3Creds.secretKey,
         s3Region,
       );
-      try {
-        const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
-        if (result.deleted) {
-          results.s3Bucket = s3BucketName;
-          // The destroyed record says so, and the app key fence never asks
-          // about this bucket again. Only a delete confirmed here counts:
-          // "not found" may be a wrong region on record, and an emptied
-          // shell still exists, so the fence keeps both.
-          results.appBucketPurged = true;
-          spinner.stop(
-            result.objectsRemoved > 0
-              ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
-              : 'S3 bucket deleted',
-          );
-        } else if (result.shellDeferred) {
-          results.s3Bucket = s3BucketName;
-          spinner.stop(
-            `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
-          );
-        } else {
-          spinner.stop('S3 bucket not found');
-        }
-      } catch (bucketError) {
-        // NoSuchBucket means it was already deleted or never created — not an error
-        if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
-          spinner.stop('S3 bucket not found (already deleted or never created)');
-        } else {
-          throw bucketError;
-        }
+      // Where the record says, else wherever the bucket really is: an
+      // environment that hit the old bug records its uploads under the wrong
+      // region until its next deploy, and its uploads are still there.
+      const outcome = await atBucketRegion(s3Provider, s3BucketName, s3Region, (store) =>
+        store.emptyAndDeleteBucket(s3BucketName),
+      );
+      if (outcome.gone) {
+        spinner.stop('S3 bucket not found in any region (already deleted or never created)');
+        return;
+      }
+      const result = outcome.result;
+      const where = foundElsewhere(outcome.region, s3Region);
+      if (result.deleted) {
+        results.s3Bucket = s3BucketName;
+        // The destroyed record says so, and the app key fence never asks
+        // about this bucket again. Only a delete confirmed here counts:
+        // "not found" anywhere is not a delete, and an emptied shell still
+        // exists, so the fence keeps both.
+        results.appBucketPurged = true;
+        spinner.stop(
+          result.objectsRemoved > 0
+            ? `S3 bucket deleted${where} (${result.objectsRemoved} objects removed)`
+            : `S3 bucket deleted${where}`,
+        );
+      } else if (result.shellDeferred) {
+        results.s3Bucket = s3BucketName;
+        spinner.stop(
+          `S3 bucket emptied${where} (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
+        );
+      } else {
+        spinner.stop('S3 bucket not found');
       }
     } else {
       spinner.stop('S3 bucket skipped (no credentials available)');

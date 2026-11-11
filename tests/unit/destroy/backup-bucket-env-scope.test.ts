@@ -20,7 +20,19 @@ const s3 = {
     objectsRemoved: 0,
     warnings: [],
   })),
+  // Every region is asked (S3CompatibleProvider.locateBucket).
+  locateBucket: vi.fn(async (_b: string): Promise<string | null> => null),
+  // The same fake at another region; the region is logged with the others.
+  forRegion: vi.fn((region: string) => {
+    storageClients.push(region);
+    return s3;
+  }),
 };
+const noSuchBucket = () =>
+  Object.assign(new Error('The specified bucket does not exist'), {
+    name: 'NoSuchBucket',
+    $metadata: { httpStatusCode: 404 },
+  });
 
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
@@ -288,6 +300,74 @@ describe('handleBackupBucket with a backups bucket per storage region', () => {
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
     expect(messages.join('\n')).toContain(
       'bucket kept for prod, preview, qa, which keep backups there',
+    );
+  });
+
+  it('a record naming the wrong region: -purge looks in every region and purges the folder where the bucket is', async () => {
+    // The old bug, or a deploy that died before its final save: the record
+    // says fsn1, the bucket and staging's folder are in nbg1.
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    const { results, messages } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(s3.locateBucket).toHaveBeenCalledWith(BACKUPS);
+    expect(storageClients).toEqual(['fsn1', 'nbg1']);
+    expect(s3.deletePrefix).toHaveBeenCalledTimes(2);
+    expect(s3.deletePrefix).toHaveBeenLastCalledWith(BACKUPS, 'backups/myapp/staging/');
+    expect(results.backupsPurged).toBe(true);
+    expect(messages.join('\n')).toContain(
+      'Backups under backups/myapp/staging/ purged in nbg1, not fsn1 as its record said (5 objects removed); bucket kept for prod',
+    );
+  });
+
+  it('the last environment at a wrong region: the bucket is deleted where it is', async () => {
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    const { messages } = await destroy(project(['prod']), 'prod', { purgeBackups: true });
+    expect(storageClients).toEqual(['fsn1', 'nbg1']);
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
+    expect(messages.join('\n')).toContain(
+      'Backup bucket purged in nbg1, not fsn1 as its record said',
+    );
+  });
+
+  it('a bucket no region has is purged with nothing to remove, and says so', async () => {
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    const { results, messages } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(s3.locateBucket).toHaveBeenCalledWith(BACKUPS);
+    expect(s3.deletePrefix).toHaveBeenCalledTimes(1);
+    expect(results.backupsPurged).toBe(true);
+    expect(messages.join('\n')).toContain(
+      'Backup bucket not found in any region (already deleted or never created)',
+    );
+  });
+
+  it('a region search that cannot answer, or a store answering two ways, is never recorded as purged', async () => {
+    saved.configs.length = 0;
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockRejectedValueOnce(
+      new Error('hel1 answered "AccessDenied" when asked whether it holds bucket x'),
+    );
+    const searched = await destroy(
+      project(['prod', 'staging']),
+      'staging',
+      { purgeBackups: true },
+      true,
+    );
+    expect(searched.results.backupsPurged).toBeUndefined();
+    expect(searched.results.leaks.entries[0]?.reason).toContain('hel1 answered "AccessDenied"');
+    const after = saved.configs.at(-1) as ReturnType<typeof project>;
+    expect(after.destroyedEnvironments?.staging).not.toHaveProperty('backupsPurged');
+
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('fsn1');
+    const twoWays = await destroy(project(['prod', 'staging']), 'staging', { purgeBackups: true });
+    expect(twoWays.results.backupsPurged).toBeUndefined();
+    expect(twoWays.results.leaks.entries[0]?.reason).toContain(
+      'the store is answering two ways, so it was left in place',
     );
   });
 

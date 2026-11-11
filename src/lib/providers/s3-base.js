@@ -527,7 +527,9 @@ export class S3CompatibleProvider {
    * returns null ONLY when every region answered not-found. findBucketRegion
    * swallows every per-region failure, so an unreachable store reads as
    * "nowhere"; this throws instead, so a caller never mistakes silence for
-   * absence.
+   * absence. That error names the bucket and the region that answered, with
+   * the answer in plain words (describeS3Error), never the SDK error alone;
+   * `region`, `bucket` and `cause` are on it for a caller's own message.
    * @param {string} bucketName
    * @returns {Promise<string|null>} the region holding the bucket, or null
    */
@@ -547,7 +549,13 @@ export class S3CompatibleProvider {
         const status = error?.$metadata?.httpStatusCode;
         if (error?.name === 'NotFound' || error?.name === 'NoSuchBucket' || status === 404)
           continue;
-        throw error;
+        throw Object.assign(
+          new Error(
+            `${region} answered "${describeS3Error(error, { endpoint })}" when asked whether it holds bucket ${bucketName}, so where the bucket is cannot be told`,
+            { cause: error },
+          ),
+          { name: 'BucketLocateError', bucket: bucketName, region },
+        );
       }
     }
     return null;
