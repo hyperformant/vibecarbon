@@ -237,8 +237,15 @@ describe('mirror set shape', () => {
   });
 
   it('no two entries share a digest (a copy-paste pin would point one image at another)', () => {
-    const digests = MIRRORED_IMAGES.map((i) => i.digest);
+    // registry.k8s.io/pause and rancher/mirrored-pause are the same upstream
+    // build published under two names (k3s mirrors Kubernetes's pause), so at
+    // the same tag they legitimately share a digest; nothing else may.
+    const digests = MIRRORED_IMAGES.filter((i) => i.repo !== 'pause').map((i) => i.digest);
     expect(digests).toEqual([...new Set(digests)]);
+    const pause = MIRRORED_IMAGES.find((i) => i.repo === 'pause');
+    const rancherPause = MIRRORED_IMAGES.find((i) => i.repo === 'rancher/mirrored-pause');
+    expect(pause?.tag).toBe(rancherPause?.tag);
+    expect(pause?.digest).toBe(rancherPause?.digest);
   });
 
   it('has no duplicate (repo, tag) entries', () => {
@@ -287,9 +294,9 @@ describe('mirror set shape', () => {
 
   it('mirrors pause — the scale-trigger + local-overlay placeholder image', () => {
     expect(pauseImageRef()).toBe(
-      'ghcr.io/hyperformant/pause:3.9@sha256:8d4106c88ec0bd28001e34c975d65175d994072d65341f62a8ab0754b0fafe10',
+      'ghcr.io/hyperformant/pause:3.10.2@sha256:412c4a7219cb8a299a37337f3d87810c5340095322e15594a1637785adad0f17',
     );
-    expect(MIRRORED_IMAGES.some((i) => i.repo === 'pause' && i.tag === '3.9')).toBe(true);
+    expect(MIRRORED_IMAGES.some((i) => i.repo === 'pause' && i.tag === '3.10.2')).toBe(true);
   });
 });
 
