@@ -141,10 +141,10 @@ export function hasAutomatedDns(dnsProvider) {
 /**
  * The hint on a DNS record whose delete the API refused (destroy's
  * cleanupDnsRecords and compose-ha's teardown). The by-hand delete is the step
- * that works: destroy removes the environment's entry either way, so running
- * it again answers that the environment is not found, and keeping the entry
- * for one record would repeat the whole teardown with a token that was just
- * refused.
+ * that works: a re-run would bring the token that was just refused. The hint
+ * says nothing about a re-run, because whether destroy keeps the environment's
+ * entry depends on the rest of the teardown (a sweep that cannot list keeps
+ * it), not on this record.
  * @param {string} name - the record's fully qualified name
  * @param {string} dnsProviderName - DNS_PROVIDERS[id].name
  * @returns {string}
@@ -152,8 +152,7 @@ export function hasAutomatedDns(dnsProvider) {
 export function dnsRefusedHint(name, dnsProviderName) {
   return (
     `Delete ${name} in your ${dnsProviderName} DNS settings. It points at an address this ` +
-    'destroy released, and a stale record shadows the next deploy. The environment is off ' +
-    'the record now, so running destroy again will not retry it.'
+    'destroy released, and a stale record shadows the next deploy.'
   );
 }
 
