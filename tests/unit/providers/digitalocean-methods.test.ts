@@ -355,6 +355,48 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       ).rejects.toThrow('DigitalOcean API error: size not available in region');
     });
 
+    it('maps the size-unavailable 422 to a plain out-of-stock message naming size and region', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
+        .mockResolvedValueOnce(
+          resp(
+            { id: 'unprocessable_entity', message: 'Size is not available in this region.' },
+            422,
+          ),
+        );
+
+      const err = await provider
+        .createServer({
+          name: 'x',
+          region: 'nyc3',
+          serverType: 's-2vcpu-4gb',
+          image: 'ubuntu-26-04-x64',
+          sshKeys: [1],
+          labels: {},
+        })
+        .catch((e: Error) => e);
+      expect(err.message).toContain('"s-2vcpu-4gb" in nyc3');
+      expect(err.message).toContain('out of stock');
+      expect(err.message).not.toContain('DigitalOcean API error');
+    });
+
+    it('does not treat the size sentence on another status as a stock-out', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
+        .mockResolvedValueOnce(resp({ message: 'Size is not available in this region.' }, 500));
+
+      await expect(
+        provider.createServer({
+          name: 'x',
+          region: 'nyc3',
+          serverType: 's-2vcpu-4gb',
+          image: 'ubuntu-26-04-x64',
+          sshKeys: [1],
+          labels: {},
+        }),
+      ).rejects.toThrow('DigitalOcean API error: Size is not available in this region.');
+    });
+
     // M3 Task 5b Critical — DO's droplet-create `ssh_keys` field accepts
     // only numeric IDs/fingerprints, never names (unlike Hetzner's, which
     // accepts either). groups.js passes `sshKeys: [this.config.sshKeyName]`

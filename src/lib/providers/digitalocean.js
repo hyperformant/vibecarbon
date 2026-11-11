@@ -20,6 +20,7 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
+import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-unavailable.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
@@ -933,6 +934,10 @@ export class DigitalOceanProvider extends BaseProvider {
 
     if (!response.ok) {
       const error = await response.json();
+      if (response.status === 422 && SIZE_UNAVAILABLE_MESSAGE.test(error.message || '')) {
+        // Out of stock after the catalog check: a definite answer, no retry.
+        throw new Error(describeSizeUnavailable({ size: serverType, region, name }));
+      }
       throw new Error(`DigitalOcean API error: ${error.message || 'Unknown error'}`);
     }
 

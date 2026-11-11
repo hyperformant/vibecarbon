@@ -30,6 +30,7 @@ import { getProviderClass } from '../providers/index.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
+import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
 import { runPastStaleLock, StackHeldError } from './stack-lock.js';
 import {
   classifyStateError,
@@ -707,6 +708,9 @@ async function runUp(stack, options) {
     options.perfStem && perfEnabled()
       ? createResourceTimer({ stem: options.perfStem, record: perfRecord })
       : null;
+  // Size and region each droplet was asked for: a create DO refuses is never
+  // written to state, so an out-of-stock message can only name them from here.
+  const dropletPlans = createDropletPlanRecorder();
   try {
     // A `up` that failed on an S3 `SlowDown` may have already acquired the stack
     // lock before erroring. Its process has exited by the retry, so the retry
@@ -718,7 +722,10 @@ async function runUp(stack, options) {
           return stack.up({
             onOutput: options.onOutput,
             color: 'never',
-            ...(resourceTimer ? { onEvent: resourceTimer.onEvent } : {}),
+            onEvent: (event) => {
+              dropletPlans.onEvent(event);
+              resourceTimer?.onEvent(event);
+            },
           });
         }),
       'up',
@@ -821,6 +828,11 @@ async function runUp(stack, options) {
         const stalled = createTimeoutError(err, { resources });
         if (stalled) throw stalled;
       }
+      // DigitalOcean refused the create because the size went out of stock
+      // after the catalog check. A definite answer, so one plain message and
+      // no retry (the full text is in the log above).
+      const outOfStock = sizeUnavailableError(err, { plans: dropletPlans.plans });
+      if (outOfStock) throw outOfStock;
       throw err;
     }
   }
