@@ -4577,8 +4577,24 @@ async function destroyK8sTier({
           labelsNameEnvironment(provider, labels, projectConfig.projectName, clusterNames)
         );
       });
+      // An incomplete listing proves nothing about the pages it never read,
+      // whether or not it found servers on the ones it did. settleUnreadableStacks
+      // reads a clean ledger as "the sweeps covered this stack", so a
+      // truncated listing must leave this line even after deleting what it found.
+      const recordInconclusiveScan = () =>
+        results.leaks.unverified({
+          resourceClass: 'server',
+          resource: `orphaned-server scan: ${clusterNames.join(', ')}`,
+          reason:
+            'the server listing came back incomplete, so "no orphaned servers" could not be established',
+          hint: `Check the ${Provider.NAME} console for servers labelled project=${projectConfig.projectName} in this environment.`,
+        });
       if (orphanedServers.length > 0) {
-        s.stop(`Found ${orphanedServers.length} orphaned server(s)`);
+        s.stop(
+          complete
+            ? `Found ${orphanedServers.length} orphaned server(s)`
+            : `Found ${orphanedServers.length} orphaned server(s) in an incomplete server listing`,
+        );
         for (const sv of orphanedServers) {
           s.start(`Deleting orphaned server: ${sv.name} (${Provider.getPublicIP(sv) || sv.id})`);
           try {
@@ -4602,15 +4618,10 @@ async function destroyK8sTier({
             });
           }
         }
+        if (!complete) recordInconclusiveScan();
       } else if (!complete) {
         s.stop('Orphaned-server check inconclusive, server listing was incomplete');
-        results.leaks.unverified({
-          resourceClass: 'server',
-          resource: `orphaned-server scan: ${clusterNames.join(', ')}`,
-          reason:
-            'the server listing came back incomplete, so "no orphaned servers" could not be established',
-          hint: `Check the ${Provider.NAME} console for servers labelled project=${projectConfig.projectName} in this environment.`,
-        });
+        recordInconclusiveScan();
       } else {
         s.stop('No orphaned servers found');
       }

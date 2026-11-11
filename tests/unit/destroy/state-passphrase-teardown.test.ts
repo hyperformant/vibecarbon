@@ -71,19 +71,21 @@ vi.mock('../../../src/lib/csi-volumes.js', async (orig) => ({
 const cloudCalls: string[] = [];
 let backstop = true;
 let firewallDeleteFails = false;
-let serverListingComplete = true;
+/**
+ * How the server listing answers: whole, or cut short (a soft-failed page)
+ * after finding nothing or after finding the labelled server.
+ */
+let serverListing: 'complete' | 'incomplete-empty' | 'incomplete-found' = 'complete';
 const LABELLED_SERVER = {
   id: 21,
   name: 'proj-e1-master',
   labels: { 'managed-by': 'vibecarbon', project: 'proj', environment: 'e1', role: 'master' },
 };
 const SPECIFIC: Record<string, (...args: unknown[]) => unknown> = {
-  // An incomplete listing that found nothing: the sweep can't say "no
-  // orphaned servers", so it records the scan as unverified.
-  listServersDetailed: async () =>
-    serverListingComplete
-      ? { items: [LABELLED_SERVER], complete: true }
-      : { items: [], complete: false },
+  listServersDetailed: async () => ({
+    items: serverListing === 'incomplete-empty' ? [] : [LABELLED_SERVER],
+    complete: serverListing === 'complete',
+  }),
   listVolumesDetailed: async () => ({ items: [], complete: true }),
   serverLabels: (sv: unknown) => (sv as { labels?: Record<string, string> }).labels ?? {},
   labelValue: (_k: unknown, v: unknown) => v,
@@ -241,7 +243,7 @@ beforeEach(() => {
   cloudCalls.length = 0;
   backstop = true;
   firewallDeleteFails = false;
-  serverListingComplete = true;
+  serverListing = 'complete';
   __resetStatePassphraseForTests();
   vi.stubEnv('HETZNER_ACCESS_KEY', 'AK');
   vi.stubEnv('HETZNER_SECRET_KEY', 'SK');
@@ -356,6 +358,30 @@ describe('k8s, refused before Pulumi ran: the record goes only when the backstop
     expect(ctx.results.pulumiDestroyFailed).toBe(true);
   });
 
+  it('a cut-short server listing that found a server: deleted, and the scan still reads unverified, so the record is kept', async () => {
+    project({ value: undefined });
+    serverListing = 'incomplete-found';
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    // What the listing found goes; what it never read can't be ruled out,
+    // so the ledger is not clean and the record stays for the retry.
+    expect(cloudCalls).toContain('deleteServer:21');
+    expect(ctx.results.leaks.entries).toContainEqual(
+      expect.objectContaining({
+        resourceClass: 'server',
+        severity: 'unverified',
+        resource: 'orphaned-server scan: proj-e1',
+      }),
+    );
+    expect(removals()).toEqual([]);
+    const [entry, ...rest] = stackEntries(ctx);
+    expect(rest).toEqual([]);
+    expect(entry.reason).toContain('stack record was kept');
+    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+  });
+
   it('no backstop: the record is kept, whatever the sweeps did', async () => {
     project({ value: OTHER_PASSPHRASE });
     backstop = false;
@@ -445,7 +471,7 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
     fakePulumi.trackRemovals();
     fakePulumi.refuseReads(passphraseRefusal);
     backstop = false;
-    serverListingComplete = false;
+    serverListing = 'incomplete-empty';
     const ctx = makeCtx('k8s', dir);
 
     await run('destroyK8sInfra', ctx);
@@ -463,7 +489,7 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
     // a failure) and the sweeps run again. This time they finish, and
     // nothing keeps the environment entry any more.
     fakePulumi.calls.length = 0;
-    serverListingComplete = true;
+    serverListing = 'complete';
     const retry = makeCtx('k8s', dir);
     await run('destroyK8sInfra', retry);
     expect(fakePulumi.calls).toContain('select:e1');

@@ -28,6 +28,29 @@ import {
 const run = (c: StateErrorCase) =>
   classifyStateError({ message: c.message, operation: c.operation });
 
+/**
+ * Two errors whose causes point at each other. Each `cause` read is counted,
+ * and past 50 reads it throws: the walk is synchronous, so without its cycle
+ * guard it would spin forever and vitest's timeout would never fire. This
+ * turns a missing guard into a failure.
+ */
+function countedCauseCycle() {
+  let reads = 0;
+  const outer = new Error('outer');
+  const inner = new Error('inner');
+  const pointAt = (from: Error, to: Error) =>
+    Object.defineProperty(from, 'cause', {
+      get() {
+        reads += 1;
+        if (reads > 50) throw new Error('walked past 50 cause links: the cycle guard is gone');
+        return to;
+      },
+    });
+  pointAt(outer, inner);
+  pointAt(inner, outer);
+  return { head: outer, reads: () => reads };
+}
+
 /** Fails loudly if an incident is renamed or removed, rather than silently. */
 const byId = (id: string): StateErrorCase => {
   const found = [...STATE_ERROR_CORPUS, ...STATE_ERROR_NEGATIVES].find((c) => c.id === id);
@@ -200,11 +223,10 @@ describe('isStatePassphraseFailure', () => {
     expect(isStatePassphraseFailure(null)).toBe(false);
   });
 
-  it('survives a cause cycle', () => {
-    const a = new Error('outer') as Error & { cause?: unknown };
-    const b = new Error('inner', { cause: a });
-    a.cause = b;
-    expect(isStatePassphraseFailure(a)).toBe(false);
+  it('survives a cause cycle, visiting each error once', () => {
+    const cycle = countedCauseCycle();
+    expect(isStatePassphraseFailure(cycle.head)).toBe(false);
+    expect(cycle.reads()).toBe(2);
   });
 });
 
@@ -266,10 +288,9 @@ describe('findStatePassphraseError', () => {
     expect(findStatePassphraseError('StatePassphraseError')).toBeNull();
   });
 
-  it('stops on a cause cycle', () => {
-    const a: Error & { cause?: unknown } = new Error('a');
-    const b = new Error('b', { cause: a });
-    a.cause = b;
-    expect(findStatePassphraseError(a)).toBeNull();
+  it('stops on a cause cycle, visiting each error once', () => {
+    const cycle = countedCauseCycle();
+    expect(findStatePassphraseError(cycle.head)).toBeNull();
+    expect(cycle.reads()).toBe(2);
   });
 });
