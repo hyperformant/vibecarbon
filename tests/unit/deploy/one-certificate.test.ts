@@ -12,8 +12,7 @@
  *   before anything is provisioned, naming `vibecarbon upgrade`
  *   (staleObservabilityTlsProblem).
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -23,12 +22,13 @@ import {
   staleClusterIssuersProblem,
   staleObservabilityTlsProblem,
 } from '../../../src/lib/deploy/k8s/one-certificate.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const ROOT = process.cwd();
 const SHIPPED = join(ROOT, 'services', 'observability', 'k8s');
 
 function projectWith(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-one-cert-'));
+  const dir = createTempDir('vc-one-cert-');
   const obs = join(dir, 'k8s', 'base', 'observability');
   mkdirSync(obs, { recursive: true });
   for (const [name, text] of Object.entries(files)) writeFileSync(join(obs, name), text);
@@ -64,7 +64,7 @@ describe('staleObservabilityTlsProblem', () => {
   });
 
   it('passes a project without the observability add-on', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-one-cert-'));
+    const dir = createTempDir('vc-one-cert-');
     expect(staleObservabilityTlsProblem(dir)).toBeNull();
   });
 
@@ -109,7 +109,7 @@ const ISSUERS_REFUSAL =
   "This project's cluster issuers predate HTTP-01 certificates. Run `vibecarbon upgrade`, then deploy again. Nothing was provisioned.";
 
 function projectWithIssuers(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-issuers-'));
+  const dir = createTempDir('vc-issuers-');
   const d = join(dir, 'k8s', 'infra', 'cert-manager-resources');
   mkdirSync(d, { recursive: true });
   for (const [name, text] of Object.entries(files)) writeFileSync(join(d, name), text);
@@ -160,7 +160,7 @@ describe('staleClusterIssuersProblem', () => {
   });
 
   it('never judges a project with no k8s issuer scaffold (a compose project)', () => {
-    expect(staleClusterIssuersProblem(mkdtempSync(join(tmpdir(), 'vc-issuers-')))).toBeNull();
+    expect(staleClusterIssuersProblem(createTempDir('vc-issuers-'))).toBeNull();
   });
 
   it('is called in the k8s-only branch of the deploy preflight, before the operator-IP step', () => {

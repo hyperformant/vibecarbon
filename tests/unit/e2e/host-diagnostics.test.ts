@@ -9,10 +9,10 @@
  * disk, a crash loop) lives on the host, reachable over ssh while the API is
  * not.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   buildHostDiagnosticScript,
   collectHostDiagnostics,
@@ -150,7 +150,7 @@ describe('redactHostDiagnostics', () => {
 
 describe('findClusterHosts', () => {
   const project = () => {
-    const dir = mkdtempSync(join(tmpdir(), 'hostdiag-'));
+    const dir = createTempDir('hostdiag-');
     mkdirSync(join(dir, '.vibecarbon'));
     return dir;
   };

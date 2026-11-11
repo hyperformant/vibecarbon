@@ -1,5 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
@@ -7,6 +6,7 @@ import { loadConfig } from '../../../src/autoscaler/config.js';
 import { renderCarbonAutoscalerConfig } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('renderCarbonAutoscalerConfig', () => {
   // Stand-in for a provider class — renderCarbonAutoscalerConfig reads
@@ -48,7 +48,7 @@ describe('renderCarbonAutoscalerConfig', () => {
 
   it('produces a document that passes src/autoscaler/config.js loadConfig (cross-module contract proof)', async () => {
     const out = await renderCarbonAutoscalerConfig(baseArgs);
-    const dir = mkdtempSync(join(tmpdir(), 'vc-ca-config-'));
+    const dir = createTempDir('vc-ca-config-');
     const path = join(dir, 'config.json');
     writeFileSync(path, out);
     expect(() => loadConfig(path)).not.toThrow();

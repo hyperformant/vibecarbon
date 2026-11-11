@@ -1,24 +1,36 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Per-WORKER uplink-lock dir: vitest workers are real processes, and the
+// Every test file gets its own temp root, and os.tmpdir() points inside it
+// (TMPDIR is read on every call, and CLI children inherit it), so whatever a
+// test makes there is seen and removed when the file ends. A leftover fails
+// the file (tempLeftovers, tests/_shared/temp-census.ts): tests had left
+// hundreds of thousands of entries in this machine's /tmp before the census.
+const realEnv = process.env;
+const outerTmpdir = realEnv.TMPDIR;
+const fileRoot = mkdtempSync(join(tmpdir(), 'vc-test-'));
+const fileTmp = join(fileRoot, 'tmp');
+mkdirSync(fileTmp);
+process.env.TMPDIR = fileTmp;
+
+// Per-file uplink-lock dir: vitest workers are real processes, and the
 // cross-process uplink lock (src/lib/deploy/uplink-lock.js) would otherwise
-// serialize unrelated test files through one real home-dir lock — and leave
+// serialize unrelated test files through one real home-dir lock, and leave
 // lock residue behind on aborted runs. Isolation here, not fs mocking, per
-// the unit-test-mocking house rule.
-process.env.VIBECARBON_UPLINK_LOCK_DIR = join(
-  mkdtempSync(join(tmpdir(), 'vc-test-uplink-')),
-  'uplink-push.lock',
-);
+// the unit-test-mocking house rule. Beside the census dir, not in it.
+mkdirSync(join(fileRoot, 'uplink'));
+process.env.VIBECARBON_UPLINK_LOCK_DIR = join(fileRoot, 'uplink', 'uplink-push.lock');
 
 // The secret-fingerprint HMAC key (src/lib/deploy/secret-fingerprint.js) is
-// minted under the home dir by default; tests get a per-worker temp dir so no
+// minted under the home dir by default; tests get a per-file dir so no
 // caller (digestEnvLocalSecrets, tokenFingerprint) touches the developer's
 // real ~/.vibecarbon.
-process.env.VIBECARBON_FINGERPRINT_KEY_DIR = mkdtempSync(join(tmpdir(), 'vc-test-fpkey-'));
+process.env.VIBECARBON_FINGERPRINT_KEY_DIR = join(fileRoot, 'fpkey');
+mkdirSync(process.env.VIBECARBON_FINGERPRINT_KEY_DIR, { mode: 0o700 });
 
 import { afterAll, afterEach, beforeAll } from 'vitest';
+import { closeTempRoot } from '../_shared/temp-census.js';
 import { cleanupAllTempDirs } from '../_shared/temp-dir.js';
 
 // An in-process deploy reads the version channel at its start. No test reaches
@@ -62,18 +74,26 @@ afterEach(() => {
 afterAll(async () => {
   // Clean up any remaining temp directories
   await cleanupAllTempDirs();
+  const tempProblem = closeTempRoot(fileRoot, fileTmp);
 
   const appeared = CONFIG_RESIDUE.filter(
     (f) => !residueAtStart.has(f) && existsSync(join(REPO_ROOT, f)),
   );
   for (const f of appeared) rmSync(join(REPO_ROOT, f), { force: true });
+
+  // Restore original environment, and the process's own TMPDIR (os.tmpdir()
+  // reads the real environment, not a replaced process.env object).
+  process.env = originalEnv;
+  if (outerTmpdir === undefined) delete realEnv.TMPDIR;
+  else realEnv.TMPDIR = outerTmpdir;
+
+  const problems: string[] = [];
   if (appeared.length > 0) {
-    throw new Error(
+    problems.push(
       `a test wrote ${appeared.join(', ')} at the repo root (removed now): stub ` +
         'updateProjectConfig or point the test at a temp dir (vi.spyOn(process, "cwd"))',
     );
   }
-
-  // Restore original environment
-  process.env = originalEnv;
+  if (tempProblem) problems.push(tempProblem);
+  if (problems.length > 0) throw new Error(problems.join('. Also, '));
 });

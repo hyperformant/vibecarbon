@@ -11,10 +11,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
   CONTINUITY_CHECK,
@@ -229,7 +229,7 @@ describe('renderRtoRpoMd', () => {
 
 describe('injectRtoRpoIntoDoc', () => {
   it('replaces only the content between the markers and reports change', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'rto-rpo-test-'));
+    const dir = createTempDir('rto-rpo-test-');
     const docPath = join(dir, 'doc.md');
     writeFileSync(docPath, `before\n${RTO_RPO_BEGIN_MARKER}\nold\n${RTO_RPO_END_MARKER}\nafter\n`);
 
@@ -241,7 +241,7 @@ describe('injectRtoRpoIntoDoc', () => {
   });
 
   it('throws when the marker pair is missing', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'rto-rpo-test-'));
+    const dir = createTempDir('rto-rpo-test-');
     const docPath = join(dir, 'no-markers.md');
     writeFileSync(docPath, 'no markers here\n');
     expect(() => injectRtoRpoIntoDoc(docPath, 'X')).toThrow(/marker pair/);

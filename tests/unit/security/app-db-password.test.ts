@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { generateEnvLocal } from '../../../src/create.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { ensureAppDbPassword } from '../../../src/upgrade.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * APP_DB_PASSWORD is the password of the app's own database role,
@@ -15,7 +15,7 @@ import { ensureAppDbPassword } from '../../../src/upgrade.js';
  */
 describe('APP_DB_PASSWORD reaches every project', () => {
   const project = (line: string | null) => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-appdb-'));
+    const dir = createTempDir('vc-appdb-');
     const body = `PROJECT_NAME=demo\n${line ? `${line}\n` : ''}`;
     writeFileSync(join(dir, '.env.local'), body);
     writeFileSync(join(dir, '.env'), body);
@@ -56,7 +56,7 @@ describe('APP_DB_PASSWORD reaches every project', () => {
   });
 
   it('copies one present in only one file to the other', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-appdb-'));
+    const dir = createTempDir('vc-appdb-');
     writeFileSync(join(dir, '.env.local'), 'APP_DB_PASSWORD=SENTINEL_LOCAL\n');
     writeFileSync(join(dir, '.env'), 'PROJECT_NAME=demo\n');
     expect(ensureAppDbPassword(dir)).toBe('copied');

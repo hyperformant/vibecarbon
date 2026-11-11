@@ -17,10 +17,10 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
@@ -51,9 +51,9 @@ export interface RealProjectOptions {
   withDeployedState?: boolean;
 }
 
-/** Process-wide cache. Populated by ensureCached(); cleaned up by `vitest`'s
- * tmpdir cleanup (the parent dir is in the OS tmpdir, so worst case the
- * OS reaps it). */
+/** Per-test-file cache (each file runs in its own module context). Populated
+ * by ensureCached(); its parent is a createTempDir, removed when the file
+ * ends (tests/setup/global-setup.ts). */
 let cachedProjectPath: string | null = null;
 
 /**
@@ -62,7 +62,7 @@ let cachedProjectPath: string | null = null;
  */
 function ensureCached(): string {
   if (cachedProjectPath) return cachedProjectPath;
-  const parent = mkdtempSync(join(tmpdir(), 'vc-real-cache-'));
+  const parent = createTempDir('vc-real-cache-');
   // The cached project would otherwise come out pnpm-based when run through
   // `pnpm test:integration` and npm-based when vitest is invoked directly — the
   // fixture would silently depend on how you started the run. See the module
@@ -110,7 +110,7 @@ function ensureCached(): string {
  */
 export function realProject(opts: RealProjectOptions = {}): string {
   const cached = ensureCached();
-  const parent = mkdtempSync(join(tmpdir(), 'vc-real-'));
+  const parent = createTempDir('vc-real-');
   const clonePath = join(parent, 'app');
   // cp -a preserves perms + ownership + symlinks. Recursive by default.
   execFileSync('cp', ['-a', cached, clonePath], { stdio: 'ignore' });

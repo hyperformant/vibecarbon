@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { oauthCallbackUrl } from '../../../src/configure.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { betterAuthUpgradeNotes, ensureBetterAuthSecret } from '../../../src/upgrade.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * BETTER_AUTH_SECRET signs the app's sessions (auth runs inside the app).
@@ -14,7 +14,7 @@ import { betterAuthUpgradeNotes, ensureBetterAuthSecret } from '../../../src/upg
  */
 describe('BETTER_AUTH_SECRET reaches every project', () => {
   const project = (line: string | null) => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-bas-'));
+    const dir = createTempDir('vc-bas-');
     const body = `PROJECT_NAME=demo\n${line ? `${line}\n` : ''}`;
     writeFileSync(join(dir, '.env.local'), body);
     writeFileSync(join(dir, '.env'), body);
@@ -48,7 +48,7 @@ describe('BETTER_AUTH_SECRET reaches every project', () => {
 
   it('heals .env from a valid .env.local key (the deploy ships .env)', () => {
     const existing = 'L'.repeat(48);
-    const dir = mkdtempSync(join(tmpdir(), 'vc-bas-'));
+    const dir = createTempDir('vc-bas-');
     writeFileSync(join(dir, '.env.local'), `BETTER_AUTH_SECRET=${existing}\n`);
     writeFileSync(join(dir, '.env'), 'PROJECT_NAME=demo\n');
     expect(ensureBetterAuthSecret(dir)).toBe('copied');
@@ -58,7 +58,7 @@ describe('BETTER_AUTH_SECRET reaches every project', () => {
 
   it('heals .env.local from a valid .env key instead of rotating it', () => {
     const existing = 'E'.repeat(48);
-    const dir = mkdtempSync(join(tmpdir(), 'vc-bas-'));
+    const dir = createTempDir('vc-bas-');
     writeFileSync(join(dir, '.env.local'), 'PROJECT_NAME=demo\n');
     writeFileSync(join(dir, '.env'), `BETTER_AUTH_SECRET=${existing}\n`);
     expect(ensureBetterAuthSecret(dir)).toBe('copied');

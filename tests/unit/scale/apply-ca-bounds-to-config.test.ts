@@ -1,7 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // `applyCaBoundsToConfig` is a pure exported helper in src/scale.js (the CA
 // bounds re-patch's mutate step — see `scaleApplyK8sChanges`). Importing
@@ -168,7 +168,7 @@ describe('applyCaBoundsToConfig', () => {
       newMax: 4,
       newType: 'cx23',
     });
-    const dir = mkdtempSync(join(tmpdir(), 'vc-ca-bounds-'));
+    const dir = createTempDir('vc-ca-bounds-');
     const path = join(dir, 'config.json');
     writeFileSync(path, out);
     expect(() => loadConfig(path)).not.toThrow();

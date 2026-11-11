@@ -1,5 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -10,6 +9,7 @@ import {
   parseDotenv,
   readEnvFiles,
 } from '../../../src/lib/dotenv.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('encodeDotenvValue grammar', () => {
   it('emits bare values for the safe alphabet', () => {
@@ -106,7 +106,7 @@ describe('parseDotenv / readEnvFiles', () => {
     });
   });
   it('layers .env.local over .env and skips missing files', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dotenv-'));
+    const dir = createTempDir('dotenv-');
     expect(readEnvFiles(dir)).toEqual({});
     writeFileSync(join(dir, '.env'), 'A=1\nB=from-env\n');
     writeFileSync(join(dir, '.env.local'), 'B=from-local\nC=3\n');

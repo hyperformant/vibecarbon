@@ -8,12 +8,12 @@
  * serving primary, and a replication slot with no WAL cap.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { walgRoleReadShell } from '../../../src/lib/deploy/walg-role.js';
 import { shEscape } from '../../../src/lib/shell.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   buildDbIncarnationCommand,
   buildDisarmProbeCommand,
@@ -106,7 +106,7 @@ describe('parseDisarmProbe', () => {
   it('the k8s probe survives the remote shell: the role read reaches sh -c as one word', () => {
     // Run the whole probe in a real shell with kubectl stubbed: the exec call
     // records its argv, and what follows `--` is exactly what db-0 runs.
-    const dir = mkdtempSync(join(tmpdir(), 'vc-disarm-argv-'));
+    const dir = createTempDir('vc-disarm-argv-');
     try {
       const argvFile = join(dir, 'argv');
       const stub = `kubectl() { if [ "$3" = exec ]; then printf '%s\\0' "$@" > ${shEscape(argvFile)}; fi; }`;
@@ -149,7 +149,7 @@ describe('parseDisarmProbe', () => {
   });
 
   it('the probes run the shared reader for real: a role file reads back through it', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-disarm-'));
+    const dir = createTempDir('vc-disarm-');
     try {
       const roleDir = join(dir, '.vibecarbon-role');
       mkdirSync(roleDir);
@@ -640,7 +640,7 @@ describe('zero-transition reseed checks', () => {
   });
 
   it('the in-pod swap record read prints absent, or its mtime and content', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-a7-'));
+    const dir = createTempDir('vc-a7-');
     try {
       const script = reseededFromProbe(dir);
       const absent = spawnSync('sh', ['-c', script], { encoding: 'utf8' });
@@ -872,11 +872,10 @@ describe('checkDnsFlipVerified', () => {
 
 describe('readServingIp', () => {
   it('is the k8s-ha primary floating IP, else its master, else the compose role primary', async () => {
-    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { writeFileSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const { tmpdir } = await import('node:os');
     const write = (env: object) => {
-      const dir = mkdtempSync(join(tmpdir(), 'ha-integrity-'));
+      const dir = createTempDir('ha-integrity-');
       writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ environments: { e: env } }));
       return dir;
     };

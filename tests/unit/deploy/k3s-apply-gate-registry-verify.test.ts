@@ -1,9 +1,8 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { primaryRegistryHasImage, shouldSkipK3sApply } from '../../../src/lib/deploy/k8s/k3s.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The primary's one image delivery (deliverImage: a layer delta into the
@@ -17,7 +16,7 @@ const IMAGE = '10.0.1.1:5000/quorum:abc-123';
 const inputs = { imageTag: IMAGE };
 
 function warmState() {
-  vi.spyOn(process, 'cwd').mockReturnValue(mkdtempSync(join(tmpdir(), 'vc-gate-')));
+  vi.spyOn(process, 'cwd').mockReturnValue(createTempDir('vc-gate-'));
   const state = new StateTracker('quorum', 'e4');
   state.startStep('k3s-apply', inputs);
   state.completeStep('k3s-apply');

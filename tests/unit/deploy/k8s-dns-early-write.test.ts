@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createK8sDnsWriter } from '../../../src/lib/deploy/k8s/dns-record.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Single-cluster k8s writes the domain's A record the moment deployK3s
@@ -19,7 +19,7 @@ let setupSimple: ReturnType<typeof vi.fn>;
 let calls: string[];
 
 function writer(overrides: Record<string, unknown> = {}) {
-  vi.spyOn(process, 'cwd').mockReturnValue(mkdtempSync(join(tmpdir(), 'vc-k8s-dns-')));
+  vi.spyOn(process, 'cwd').mockReturnValue(createTempDir('vc-k8s-dns-'));
   const state = new StateTracker('quorum', 'e3');
   return {
     state,

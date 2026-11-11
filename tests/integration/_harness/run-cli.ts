@@ -15,9 +15,9 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
@@ -29,7 +29,7 @@ const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 let FAKE_HOME: string | null = null;
 function getFakeHome(): string {
   if (FAKE_HOME) return FAKE_HOME;
-  FAKE_HOME = mkdtempSync(join(tmpdir(), 'vibecarbon-fake-home-'));
+  FAKE_HOME = createTempDir('vibecarbon-fake-home-');
   mkdirSync(join(FAKE_HOME, '.vibecarbon'), { recursive: true });
   return FAKE_HOME;
 }

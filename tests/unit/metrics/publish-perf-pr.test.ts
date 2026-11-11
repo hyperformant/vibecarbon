@@ -17,10 +17,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
   loadPerfData,
@@ -110,7 +111,7 @@ function makeLegDb(rootDir: string, provider: string): { dbPath: string; db: E2E
  * files" a meaningful assertion.
  */
 function makeSurfacePaths(initialData: PerfData = { providers: {} }): SurfacePaths {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-publish-surfaces-'));
+  const dir = createTempDir('vc-publish-surfaces-');
   const dataPath = join(dir, 'perf-data.json');
   writeFileSync(dataPath, serializePerfData(initialData));
   const readmePath = join(dir, 'README.md');
@@ -133,12 +134,12 @@ describe('discoverLegArtifacts', () => {
   });
 
   it('returns [] for an empty root directory', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-empty-'));
+    const root = createTempDir('vc-legs-empty-');
     expect(discoverLegArtifacts(root)).toEqual([]);
   });
 
   it('finds a leg with an e2e.db and derives its provider from the directory name', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-one-'));
+    const root = createTempDir('vc-legs-one-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     db.close();
 
@@ -146,7 +147,7 @@ describe('discoverLegArtifacts', () => {
   });
 
   it('ignores directories that do not match the e2e-results-<provider> naming', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-stray-'));
+    const root = createTempDir('vc-legs-stray-');
     mkdirSync(join(root, 'some-other-artifact'), { recursive: true });
     writeFileSync(join(root, 'some-other-artifact', 'e2e.db'), '');
     const { db } = makeLegDb(root, 'hetzner');
@@ -157,7 +158,7 @@ describe('discoverLegArtifacts', () => {
   });
 
   it('ignores an e2e-results-<provider> directory with no e2e.db inside (leg produced nothing)', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-nodb-'));
+    const root = createTempDir('vc-legs-nodb-');
     // Simulates a leg whose "Upload results" step ran (if: always()) but the
     // job died before ever writing tests/results/e2e.db — the log made it,
     // the db didn't.
@@ -171,7 +172,7 @@ describe('discoverLegArtifacts', () => {
   });
 
   it('sorts multiple legs by provider name', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-sorted-'));
+    const root = createTempDir('vc-legs-sorted-');
     const hetzner = makeLegDb(root, 'hetzner');
     hetzner.db.close();
     const digitalocean = makeLegDb(root, 'digitalocean');
@@ -189,7 +190,7 @@ describe('discoverLegArtifacts', () => {
   // implementation returned `[]` for (task-8-review.md C-1).
   describe('flattened single-artifact layout (root-level e2e.db, no subdirectory)', () => {
     it('finds a root-level e2e.db and recovers the provider from the sibling ci-batch-<provider>.log', () => {
-      const root = mkdtempSync(join(tmpdir(), 'vc-legs-flat-log-'));
+      const root = createTempDir('vc-legs-flat-log-');
       const dbPath = join(root, 'e2e.db');
       const db = new E2EDb(dbPath);
       db.close();
@@ -199,7 +200,7 @@ describe('discoverLegArtifacts', () => {
     });
 
     it("falls back to the db's own scenarios.provider column when no sibling log is present", () => {
-      const root = mkdtempSync(join(tmpdir(), 'vc-legs-flat-nolog-'));
+      const root = createTempDir('vc-legs-flat-nolog-');
       const dbPath = join(root, 'e2e.db');
       const db = new E2EDb(dbPath);
       const runId = createTestRun(db);
@@ -212,7 +213,7 @@ describe('discoverLegArtifacts', () => {
     });
 
     it("labels the leg 'unknown' when neither a sibling log nor a scenario row exists, but still finds it", () => {
-      const root = mkdtempSync(join(tmpdir(), 'vc-legs-flat-blank-'));
+      const root = createTempDir('vc-legs-flat-blank-');
       const dbPath = join(root, 'e2e.db');
       const db = new E2EDb(dbPath);
       // A run row with zero scenarios — the process died between createRun
@@ -227,7 +228,7 @@ describe('discoverLegArtifacts', () => {
       // Not a real download-artifact output (the two layouts are mutually
       // exclusive by construction — see the module doc) but pins the
       // precedence defensively.
-      const root = mkdtempSync(join(tmpdir(), 'vc-legs-both-layouts-'));
+      const root = createTempDir('vc-legs-both-layouts-');
       const nested = makeLegDb(root, 'hetzner');
       nested.db.close();
       const strayDb = new E2EDb(join(root, 'e2e.db'));
@@ -244,7 +245,7 @@ describe('discoverLegArtifacts', () => {
 
 describe('updateLeg', () => {
   it('returns runId: null and a no-op result for a db with no recorded runs', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-leg-empty-'));
+    const root = createTempDir('vc-leg-empty-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     db.close();
     const { dataPath } = makeSurfacePaths();
@@ -256,7 +257,7 @@ describe('updateLeg', () => {
   });
 
   it("merges only its own provider into the data file (other providers have zero rows in this leg's db)", () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-leg-hetzner-green-'));
+    const root = createTempDir('vc-leg-hetzner-green-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
@@ -275,7 +276,7 @@ describe('updateLeg', () => {
   });
 
   it('a leg with partial registry coverage updates nothing', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-leg-partial-'));
+    const root = createTempDir('vc-leg-partial-');
     const { dbPath, db } = makeLegDb(root, 'digitalocean');
     const runId = createTestRun(db);
     seedScenario(db, runId, 'digitalocean', 'compose');
@@ -296,7 +297,7 @@ describe('updateLeg', () => {
 
 describe('collectAndRender', () => {
   it('merges two green legs into the data file and re-renders every surface once', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-both-green-'));
+    const root = createTempDir('vc-legs-both-green-');
 
     const hetzner = makeLegDb(root, 'hetzner');
     const hetznerRunId = createTestRun(hetzner.db);
@@ -331,7 +332,7 @@ describe('collectAndRender', () => {
   });
 
   it('reports no changed files when no leg has full-green coverage and the surfaces are already in sync', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-none-green-'));
+    const root = createTempDir('vc-legs-none-green-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
     seedScenario(db, runId, 'hetzner', 'compose'); // partial: missing 3 modes
@@ -345,7 +346,7 @@ describe('collectAndRender', () => {
   });
 
   it("one leg failing does not block the other leg's numbers from landing", () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-one-fails-'));
+    const root = createTempDir('vc-legs-one-fails-');
 
     const hetzner = makeLegDb(root, 'hetzner');
     const hetznerRunId = createTestRun(hetzner.db);
@@ -387,7 +388,7 @@ describe('collectAndRender', () => {
         },
       },
     };
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-preserve-'));
+    const root = createTempDir('vc-legs-preserve-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
@@ -405,7 +406,7 @@ describe('collectAndRender', () => {
   });
 
   it('passes origin through to the provenance footer', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-origin-'));
+    const root = createTempDir('vc-legs-origin-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
@@ -424,7 +425,7 @@ describe('collectAndRender', () => {
   // a flattened root-level e2e.db (see the discoverLegArtifacts describe
   // block above).
   it('C-1: works end-to-end for the flattened single-provider-dispatch layout', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-flat-e2e-'));
+    const root = createTempDir('vc-legs-flat-e2e-');
     const dbPath = join(root, 'e2e.db');
     const db = new E2EDb(dbPath);
     const runId = createTestRun(db);
@@ -518,7 +519,7 @@ describe('collectAndRender with a pending perf-table-update branch', () => {
     const pending: PerfData = {
       providers: { vultr: entry('c023f94', '2026-09-02', 403_000) },
     };
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-pending-'));
+    const root = createTempDir('vc-legs-pending-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
@@ -546,7 +547,7 @@ describe('collectAndRender with a pending perf-table-update branch', () => {
     const pending: PerfData = {
       providers: { vultr: entry('c023f94', '2026-09-02', 403_000) },
     };
-    const root = mkdtempSync(join(tmpdir(), 'vc-legs-pending-only-'));
+    const root = createTempDir('vc-legs-pending-only-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
     seedScenario(db, runId, 'hetzner', 'compose', { status: 'fail' });

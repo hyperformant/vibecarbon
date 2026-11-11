@@ -1,12 +1,12 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DotenvValueError, parseDotenv } from '../../../src/lib/dotenv.js';
 import { setEnvVar } from '../../../src/lib/project.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 function project(env: string, local: string) {
-  const cwd = mkdtempSync(join(tmpdir(), 'setenv-'));
+  const cwd = createTempDir('setenv-');
   writeFileSync(join(cwd, '.env'), env);
   writeFileSync(join(cwd, '.env.local'), local);
   return cwd;
@@ -39,7 +39,7 @@ describe('setEnvVar writes the portable grammar', () => {
     expect(readFileSync(join(cwd, '.env.local'), 'utf-8')).toBe('A=1\n');
   });
   it('localOnly creates .env.local and leaves .env alone', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'setenv-'));
+    const cwd = createTempDir('setenv-');
     writeFileSync(join(cwd, '.env'), 'A=1\n');
     setEnvVar('T', 'tok', cwd, { localOnly: true });
     expect(readFileSync(join(cwd, '.env'), 'utf-8')).toBe('A=1\n');

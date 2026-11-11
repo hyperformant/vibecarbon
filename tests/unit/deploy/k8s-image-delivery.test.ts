@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -11,6 +10,7 @@ import {
   registryImageTag,
   standbyImageRef,
 } from '../../../src/lib/deploy/k8s/image-delivery.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('image-delivery helpers', () => {
   it('parses a local-registry ref', () => {
@@ -91,7 +91,7 @@ describe('MANIFEST_DIGEST_SH runs', () => {
   });
 
   function runDigest(stubBody: string) {
-    dir = mkdtempSync(join(tmpdir(), 'digest-stub-'));
+    dir = createTempDir('digest-stub-');
     const curl = join(dir, 'curl');
     writeFileSync(curl, `#!/bin/sh\n${stubBody}\n`);
     chmodSync(curl, 0o755);
@@ -139,7 +139,7 @@ describe('a ctr-pushed tag is what the apply-gate probe and the standby copy rea
 
   /** A PATH with stub `curl` (the registry) and `k3s` (ctr pull / push). */
   function stubRegistry(seed: Record<string, { manifest: string; digest: string }>) {
-    dir = mkdtempSync(join(tmpdir(), 'ctr-pushed-'));
+    dir = createTempDir('ctr-pushed-');
     const store = join(dir, 'store');
     const bin = join(dir, 'bin');
     spawnSync('mkdir', ['-p', store, bin]);

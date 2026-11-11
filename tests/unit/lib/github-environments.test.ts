@@ -4,10 +4,10 @@
  * made; verifies the correct argv is passed and that secret values flow
  * through stdin (not --body on argv) for secret-set operations.
  */
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const runCommandAsyncMock = vi.fn();
 
@@ -198,7 +198,7 @@ describe('github-environments', () => {
         'kind: Config',
         '',
       ].join('\n');
-      const dir = mkdtempSync(join(tmpdir(), 'vc-upload-kc-'));
+      const dir = createTempDir('vc-upload-kc-');
       const path = join(dir, 'kubeconfig-prod');
       writeFileSync(path, old);
       const { uploadKubeconfig } = await freshImport();

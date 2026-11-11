@@ -5,19 +5,18 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashContent } from '../../../../src/lib/checksum.js';
 import { staleObservabilityTlsProblem } from '../../../../src/lib/deploy/k8s/one-certificate.js';
 import { gitScrubbedEnv } from '../../../_shared/git-env.js';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
   assertSuccess,
@@ -367,7 +366,7 @@ describe('vibecarbon upgrade', () => {
     installStaleObservability(project, { recordChecksums: true });
     // The add-on's k8s dir is replaced by a symlink to a directory outside
     // the project: upgrade must not write there.
-    const outside = mkdtempSync(join(tmpdir(), 'vc-upgrade-outside-'));
+    const outside = createTempDir('vc-upgrade-outside-');
     const obs = join(project, 'k8s', 'base', 'observability');
     for (const f of ['kustomization.yaml', 'ingressroute.yaml']) {
       writeFileSync(join(outside, f), 'outside\n');
@@ -388,7 +387,7 @@ describe('vibecarbon upgrade', () => {
 
   describe('a sidecar path that is a symlink', () => {
     function plantSidecarLink(rel: string, suffix: '.upgrade-backup' | '.upgrade-new') {
-      const outside = mkdtempSync(join(tmpdir(), 'vc-upgrade-sidecar-'));
+      const outside = createTempDir('vc-upgrade-sidecar-');
       const target = join(outside, 'target');
       writeFileSync(target, 'outside\n');
       symlinkSync(target, join(project, `${rel}${suffix}`));

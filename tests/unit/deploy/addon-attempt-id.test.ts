@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { composeStartAddonJobCmd, swapComposeHaRoles } from '../../../src/lib/deploy/compose/ha.js';
 import { reconcileCommand } from '../../../src/lib/deploy/compose/index.js';
 import { attemptEnv, mintAttemptId } from '../../../src/lib/services/addon-start.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Minor 1: the add-on status file is current only for the attempt (deploy,
@@ -47,7 +47,7 @@ describe('a failover passes its own id to the job and saves the same id', () => 
   });
 
   it('the swap save records it as lastAttemptId', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-attempt-swap-'));
+    const dir = createTempDir('vc-attempt-swap-');
     vi.spyOn(process, 'cwd').mockReturnValue(dir);
     writeFileSync(
       join(dir, '.vibecarbon.json'),

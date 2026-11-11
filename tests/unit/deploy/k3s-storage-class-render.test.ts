@@ -17,11 +17,11 @@
  * PVC immutability is why this is pre-apply (a temp-dir render), not a
  * deploy-time kubectl patch — see the function's own doc in k3s.js.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { renderK8sStorageClassPlaceholder } from '../../../src/lib/deploy/k8s/k3s.js';
+import { adoptTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const ROOT = join(__dirname, '../../..');
 const REAL_GRAFANA_PVC = join(ROOT, 'services/observability/k8s/grafana-pvc.yaml');
@@ -36,7 +36,7 @@ const KUSTOMIZATION_CONTROL = [
 ].join('\n');
 
 function makeSourceDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-storageclass-src-'));
+  const dir = createTempDir('vc-storageclass-src-');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'grafana-pvc.yaml'), readFileSync(REAL_GRAFANA_PVC, 'utf-8'));
   writeFileSync(join(dir, 'kustomization.yaml'), KUSTOMIZATION_CONTROL);
@@ -55,7 +55,7 @@ describe('renderK8sStorageClassPlaceholder', () => {
 
   it('Hetzner: resolves to hcloud-volumes, byte-identical to the pre-Task-4 literal', () => {
     const srcDir = makeSourceDir();
-    const outDir = renderK8sStorageClassPlaceholder(srcDir, 'hcloud-volumes');
+    const outDir = adoptTempDir(renderK8sStorageClassPlaceholder(srcDir, 'hcloud-volumes'));
 
     expect(outDir).not.toBe(srcDir);
     const rendered = readFileSync(join(outDir, 'grafana-pvc.yaml'), 'utf-8');
@@ -72,7 +72,7 @@ describe('renderK8sStorageClassPlaceholder', () => {
 
   it('DigitalOcean: resolves to do-block-storage', () => {
     const srcDir = makeSourceDir();
-    const outDir = renderK8sStorageClassPlaceholder(srcDir, 'do-block-storage');
+    const outDir = adoptTempDir(renderK8sStorageClassPlaceholder(srcDir, 'do-block-storage'));
 
     const rendered = readFileSync(join(outDir, 'grafana-pvc.yaml'), 'utf-8');
     expect(rendered).toContain('storageClassName: do-block-storage');
@@ -82,7 +82,7 @@ describe('renderK8sStorageClassPlaceholder', () => {
 
   it('a file with no placeholder passes through byte-identical', () => {
     const srcDir = makeSourceDir();
-    const outDir = renderK8sStorageClassPlaceholder(srcDir, 'hcloud-volumes');
+    const outDir = adoptTempDir(renderK8sStorageClassPlaceholder(srcDir, 'hcloud-volumes'));
 
     expect(readFileSync(join(outDir, 'kustomization.yaml'), 'utf-8')).toBe(KUSTOMIZATION_CONTROL);
   });
@@ -90,7 +90,7 @@ describe('renderK8sStorageClassPlaceholder', () => {
   it('never mutates the source directory (no dirty git working tree after deploy)', () => {
     const srcDir = makeSourceDir();
     const before = readFileSync(join(srcDir, 'grafana-pvc.yaml'), 'utf-8');
-    renderK8sStorageClassPlaceholder(srcDir, 'hcloud-volumes');
+    adoptTempDir(renderK8sStorageClassPlaceholder(srcDir, 'hcloud-volumes'));
     const after = readFileSync(join(srcDir, 'grafana-pvc.yaml'), 'utf-8');
 
     expect(after).toBe(before);
@@ -105,12 +105,12 @@ describe('renderK8sStorageClassPlaceholder', () => {
     // A fresh unique parent per run (mkdtempSync), with a FIXED-name
     // `observability` subdir inside it — collision-free across parallel/
     // repeated test runs while still exercising the real basename.
-    const parent = mkdtempSync(join(tmpdir(), 'vc-storageclass-parent-'));
+    const parent = createTempDir('vc-storageclass-parent-');
     const namedSrcDir = join(parent, 'observability');
     mkdirSync(namedSrcDir, { recursive: true });
     writeFileSync(join(namedSrcDir, 'kustomization.yaml'), KUSTOMIZATION_CONTROL);
 
-    const outDir = renderK8sStorageClassPlaceholder(namedSrcDir, 'hcloud-volumes');
+    const outDir = adoptTempDir(renderK8sStorageClassPlaceholder(namedSrcDir, 'hcloud-volumes'));
     expect(outDir).toContain('observability');
     expect(existsSync(join(outDir, 'kustomization.yaml'))).toBe(true);
   });
@@ -118,7 +118,7 @@ describe('renderK8sStorageClassPlaceholder', () => {
 
 describe('unresolved-placeholder guard (T4 review: k8s accepts a literal placeholder silently)', () => {
   it('throws when the storageClass value is empty instead of writing an unresolved placeholder', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sc-guard-src-'));
+    const dir = createTempDir('sc-guard-src-');
     writeFileSync(join(dir, 'pvc.yaml'), 'storageClassName: {{K8S_STORAGE_CLASS}}\n');
     try {
       expect(() => renderK8sStorageClassPlaceholder(dir, '')).toThrow(

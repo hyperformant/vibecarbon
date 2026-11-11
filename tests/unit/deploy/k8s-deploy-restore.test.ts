@@ -19,10 +19,10 @@
  * `spawn` mocked (the same seam as k3s-apply-manifests-ordering.test.ts).
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
 vi.mock('node:child_process', async () => {
@@ -415,7 +415,7 @@ function installSpawn() {
 }
 
 function projectDir() {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-deploy-restore-'));
+  const dir = createTempDir('vc-deploy-restore-');
   mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });
   writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
   writeFileSync(

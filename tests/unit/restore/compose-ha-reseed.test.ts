@@ -1,15 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertFailoverPreconditions } from '../../../src/lib/deploy/failover-guard.js';
 import { runComposeRestore } from '../../../src/restore.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The real config writers (journal, proof, fence marker) run in these tests
 // against no project: point them at an empty dir, never the repo root, where
 // they would take the real config lock.
-const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+const noProjectDir = createTempDir('vc-no-project-');
 beforeEach(() => {
   vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
 });
@@ -641,7 +641,7 @@ describe('runComposeRestore: a verified HA restore clears the degraded flag', ()
   const readEnv = () =>
     JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.prod;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-proven-'));
+    dir = createTempDir('vc-proven-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({

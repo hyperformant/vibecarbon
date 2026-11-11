@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
 import { namesHost } from '../../_shared/hosts.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
 /**
@@ -491,7 +491,7 @@ function installSpawnMock() {
 }
 
 function makeProjectDir({ withObservability = false, withRegistry = false } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-k3s-apply-'));
+  const dir = createTempDir('vc-k3s-apply-');
   // renderK8sBase refuses a base without the db StatefulSet, so the project
   // carries the real one, as `create` lays it down.
   mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });

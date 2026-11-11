@@ -24,17 +24,16 @@
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The copy off the master: each test says what lands at the destination.
 let scpImpl: (args: string[]) => Promise<unknown> = async () => {};
@@ -73,7 +72,7 @@ users:
 const parse = (text: string) => load(text) as any;
 
 function tempProject() {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-kubeconfig-'));
+  const dir = createTempDir('vc-kubeconfig-');
   mkdirSync(join(dir, '.vibecarbon'), { recursive: true });
   return dir;
 }

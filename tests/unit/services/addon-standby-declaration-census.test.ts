@@ -1,12 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll, load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -21,6 +13,7 @@ import {
   k8sStandbyZeroedWorkloads,
   loadAddonStandby,
 } from '../../../src/lib/services/standby-policy.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Add-on standby-declaration census. Every add-on under services/ declares
@@ -152,7 +145,7 @@ describe('standby-policy helpers', () => {
   });
 
   it('enabledK8sAddonNames reads k8s/base/<name>/kustomization.yaml', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-standby-'));
+    const dir = createTempDir('vc-standby-');
     mkdirSync(join(dir, 'k8s', 'base', 'redis'), { recursive: true });
     writeFileSync(join(dir, 'k8s', 'base', 'redis', 'kustomization.yaml'), 'kind: Kustomization\n');
     mkdirSync(join(dir, 'k8s', 'base', 'n8n'), { recursive: true });

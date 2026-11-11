@@ -13,14 +13,14 @@
  * psql's :'pw' quoting, and compose and k8s hand only that value to the
  * add-on.
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
 import { addonSecretUpgradeNotes, ensureAddonSecrets } from '../../../src/upgrade.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
@@ -111,7 +111,7 @@ describe('add-on database passwords', () => {
 
   describe('vibecarbon upgrade heals a project that has the add-on but not its password', () => {
     const project = (services: string[], lines: string) => {
-      const dir = mkdtempSync(join(tmpdir(), 'vc-addon-pw-'));
+      const dir = createTempDir('vc-addon-pw-');
       const svcs = Object.fromEntries(services.map((s) => [s, { version: '1.0.0' }]));
       writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ services: svcs }));
       writeFileSync(join(dir, '.env.local'), `PROJECT_NAME=demo\n${lines}`);
@@ -226,7 +226,7 @@ describe('add-on database passwords', () => {
         { key: 'METABASE_DB_PASSWORD', status: 'generated' },
       ]);
       expect(env(dir, '.env.local').METABASE_DB_PASSWORD).toBeUndefined();
-      const bare = mkdtempSync(join(tmpdir(), 'vc-addon-pw-'));
+      const bare = createTempDir('vc-addon-pw-');
       mkdirSync(join(bare, 'x'));
       expect(ensureAddonSecrets(bare)).toEqual([]);
     });

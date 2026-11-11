@@ -6,19 +6,18 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { symlinkedComponent, writeSidecar } from '../../../src/lib/project-write-guard.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 function project() {
-  const root = mkdtempSync(join(tmpdir(), 'vc-write-guard-'));
-  const outside = mkdtempSync(join(tmpdir(), 'vc-write-guard-out-'));
+  const root = createTempDir('vc-write-guard-');
+  const outside = createTempDir('vc-write-guard-out-');
   mkdirSync(join(root, 'k8s', 'base'), { recursive: true });
   writeFileSync(join(outside, 'target.yaml'), 'x\n');
   return { root, outside };

@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 /**
  * Finding #2: runK8sRestore performs a first-class VERIFIED standby re-seed for
@@ -20,11 +19,12 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertFailoverPreconditions } from '../../../src/lib/deploy/failover-guard.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The real config writers (journal, proof, fence marker) run in these tests
 // against no project: point them at an empty dir, never the repo root, where
 // they would take the real config lock.
-const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+const noProjectDir = createTempDir('vc-no-project-');
 beforeEach(() => {
   vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
 });
@@ -379,11 +379,10 @@ describe('runK8sRestore: a standby not re-seeded and verified is marked unproven
 
 describe('markStandbyUnproven', () => {
   it('sets replication degraded and drops the recorded identifier, keeping the rest', async () => {
-    const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { readFileSync, rmSync, writeFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const { markStandbyUnproven } = await import('../../../src/lib/deploy/failover-guard.js');
-    const dir = mkdtempSync(join(tmpdir(), 'vc-unproven-'));
+    const dir = createTempDir('vc-unproven-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -702,7 +701,7 @@ describe('runK8sRestore: a verified HA restore clears the degraded flag', () => 
   const readEnv = () =>
     JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.prod;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-proven-'));
+    dir = createTempDir('vc-proven-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
