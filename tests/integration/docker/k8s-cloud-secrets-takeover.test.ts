@@ -1,7 +1,7 @@
 /**
  * The CLI's server-side apply takes over the cloud Secrets an earlier
  * vibecarbon's boot script made, on a real apiserver, removes what nothing
- * reads any more, and restarts what reads a new or changed one.
+ * reads any more, and restarts what reads a changed one.
  *
  * deployK3s hands the provider API token to the cluster on every deploy
  * (applyCloudSecrets). Masters an earlier vibecarbon booted hold the same
@@ -27,8 +27,10 @@
  * of the token the boot script applied, whatever the kubectl (run it with an
  * older one first on PATH to check one). It must leave an unchanged Secret
  * alone, resourceVersion included, since it runs on every deploy, replace a
- * rotated token, and restart exactly the workloads that read a new or
- * changed one: no pod reads a Secret again once it has started.
+ * rotated token, and restart exactly the workloads that read a changed one:
+ * no pod reads a Secret again once it has started. A new one restarts
+ * nothing: the kubelet starts what waited for it
+ * (tests/integration/docker/k8s-secret-readers-restart.test.ts).
  *
  * Needs Docker, kubectl and GitHub (the upstream manifests). The version
  * channel's k3s smoke runs it too (.github/workflows/version-channel.yml).
@@ -413,7 +415,7 @@ describe.skipIf(SKIPPED)(
       );
 
       it(
-        'creates the Secrets a new master lacks, and restarts what reads them',
+        'creates the Secrets a new master lacks, and restarts nothing',
         async () => {
           // A master the current boot script booted: no cloud Secret at all.
           oldMaster();
@@ -424,7 +426,7 @@ describe.skipIf(SKIPPED)(
           for (const { namespace, name, stringData } of expected(ROTATED_TOKEN)) {
             expect(read(namespace, name).data).toEqual(stringData);
           }
-          expect(restarted()).toEqual(READERS[providerId]);
+          expect(restarted()).toEqual([]);
         },
         LONG,
       );

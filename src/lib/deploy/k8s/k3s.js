@@ -16,7 +16,7 @@
  *   6. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
  *   6b. Hand the provider API token to the cluster: the CCM/CSI Secrets
  *      (applyCloudSecrets), on every deploy, warm ones too, restarting what
- *      reads one that is new or changed.
+ *      reads one that changed.
  *   7. Finish the build and retag it `<masterPrivateIp>:5000/<project>:<tag>`
  *      (deliverAppImage).
  *   8. applyK3sManifests: the image's layer delta into the master's
@@ -2083,24 +2083,28 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
 }
 
 /**
- * Restart the workloads that read Secrets this deploy just changed or
- * created, as findSecretReaders found them before the apply: they read them
- * when they start (env from secretKeyRef, the upstream CCM/CSI manifests and
- * the cluster autoscaler), so a new value reaches them only through a new
- * pod. `kubectl rollout restart` and no wait: the rollout runs on its own.
+ * Restart the workloads that read Secrets this deploy just changed, as
+ * findSecretReaders found them before the apply: they read them when they
+ * start (env from secretKeyRef, the upstream CCM/CSI manifests and the
+ * cluster autoscaler), so a new value reaches them only through a new pod.
+ * `kubectl rollout restart` and no wait: the rollout runs on its own.
  *
- * A restart that fails after a change leaves them on the old value, and the
- * next deploy finds the Secret already matching and restarts nothing, so the
- * error says how to restart them by hand. After `created` Secrets, every one
- * of `read` new to the cluster, it only warns: the readers were waiting for
- * them, and Kubernetes retries a pod that waits for a Secret on its own,
- * within about ten seconds (kubelet's 10 s pod-sync backoff); the restart
- * only starts them now.
+ * Never for a Secret this deploy creates. Its readers have waited for it since
+ * the master booted, and the kubelet starts each waiting pod on its own retry
+ * (measured on k3s 1.37: 4 to 9 s). A restart there started a StatefulSet's
+ * pod twice (its controller replaces a pod only once it is Running and
+ * Ready, so it waits for that same retry, then replaces the pod that just
+ * started), and ran a Deployment's waiting pod beside its replacement
+ * (tests/integration/docker/k8s-secret-readers-restart.test.ts).
  *
- * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal, created?: boolean}} args
+ * A restart that fails leaves them on the old value, and the next deploy
+ * finds the Secret already matching and restarts nothing, so the error says
+ * how to restart them by hand.
+ *
+ * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal}} args
  * @returns {Promise<string[]>} what it restarted, as `kind/name`
  */
-export async function restartSecretReaders({ env, namespace, readers, read, signal, created }) {
+export async function restartSecretReaders({ env, namespace, readers, read, signal }) {
   if (readers.length === 0) return readers;
   const secrets = listing(read.map((name) => `${namespace}/${name}`));
   const one = readers.length === 1;
@@ -2121,14 +2125,6 @@ export async function restartSecretReaders({ env, namespace, readers, read, sign
       description: `restart ${readers.join(' ')}`,
     });
   } catch (err) {
-    if (created) {
-      progressLog(
-        `Couldn't restart ${listing(readers)}, so Kubernetes starts ${one ? 'it' : 'them'} with ` +
-          `the new ${secrets} on its own retry, within about ten seconds. To start ` +
-          `${one ? 'it' : 'them'} now, run ${byHand}.\n${err.message}`,
-      );
-      return [];
-    }
     throw new Error(
       `${secrets} changed, but restarting ${listing(readers)} didn't go through, so ` +
         `${one ? 'it still runs' : 'they still run'} with the old value, and the next deploy ` +
@@ -2222,14 +2218,13 @@ async function removeRetiredKeys({ env, namespace, name, keys }) {
  * (tests/integration/docker/k8s-cloud-secrets-takeover.test.ts).
  *
  * The controllers read the token when they start. So each Secret is read
- * first (readSecretFingerprints), and when one is new or now gets other
- * values, the workloads that read it are found before the apply
- * (findSecretReaders) and restarted after it (restartSecretReaders). An
- * unchanged Secret restarts nothing. A new one restarts its readers too: they
- * have waited for it since the master booted, and a restart starts them in
- * about a second where Kubernetes' own retry takes up to ten. On Hetzner and
- * DigitalOcean one of them is the CCM, which keeps every node tainted
- * uninitialized until it runs, so cert-manager and the registry wait on it.
+ * first (readSecretFingerprints), and when one now gets other values, the
+ * workloads that read it are found before the apply (findSecretReaders) and
+ * restarted after it (restartSecretReaders). An unchanged Secret restarts
+ * nothing, and so does a new one: its readers have waited for it since the
+ * master booted, and the kubelet starts them on its own retry
+ * (restartSecretReaders says why a restart there does harm). Nothing is
+ * listed for a new one either, so a first deploy never fails on the list.
  *
  * What an earlier vibecarbon wrote and nothing reads any more
  * (ProviderClass.K8S_RETIRED_CLOUD_SECRETS) goes too: a whole Secret is
@@ -2284,18 +2279,15 @@ export async function applyCloudSecrets({ env, ProviderClass, token }) {
       .filter((r) => !r.keys)
       .map(({ namespace, name }) => deleteRetiredSecret({ env, ProviderClass, namespace, name })),
   ]);
-  /** Per namespace, the Secrets this deploy creates or changes, and whether it creates them all. */
-  const handOver = new Map();
+  /** Per namespace, the Secrets that existed and this deploy changes. */
+  const changed = new Map();
   secrets.forEach(({ namespace, name, stringData }, i) => {
-    if (live[i] && !secretDataChanged(live[i], stringData)) return;
-    const entry = handOver.get(namespace) ?? { secretNames: [], created: true };
-    entry.secretNames.push(name);
-    if (live[i]) entry.created = false;
-    handOver.set(namespace, entry);
+    if (!secretDataChanged(live[i], stringData)) return;
+    changed.set(namespace, [...(changed.get(namespace) ?? []), name]);
   });
   const readers = [];
-  for (const [namespace, { secretNames, created }] of handOver) {
-    readers.push({ ...(await findSecretReaders({ env, namespace, secretNames })), created });
+  for (const [namespace, secretNames] of changed) {
+    readers.push(await findSecretReaders({ env, namespace, secretNames }));
   }
   await runKubectlWithRetry([...CLOUD_SECRETS_APPLY_ARGV], {
     env,
@@ -5962,8 +5954,8 @@ async function deployK3sSteps(options, inFlight) {
     //     and CSI driver as their Secrets (applyCloudSecrets). On every
     //     deploy, under no step gate and no role or restore condition: a
     //     skipped k3s-apply, `deploy -restore` and the k8s-ha standby hand it
-    //     over too. A new or changed token restarts the controllers that
-    //     read it.
+    //     over too. A changed token restarts the controllers that read it;
+    //     a new one restarts nothing (the kubelet starts what waited for it).
     //     After the marker read, so a refused deploy changes nothing on the
     //     cluster.
     await perfAsync(`deploy.${perfPrefix}.cloudSecrets`, () =>

@@ -23,11 +23,12 @@
  *     token never on argv, never in a log line or the error; no token
  *     refuses before kubectl runs, saying what to do next;
  *   - restarts: each Secret is read before the apply, its values kept as
- *     keyed digests and never printed; a Secret this deploy creates or
- *     changes restarts exactly the workloads that read it (found from their
- *     pod templates, secretReaders), an unchanged one restarts nothing; a
- *     failed restart after a change fails the deploy with the command to run,
- *     after a creation only warns;
+ *     keyed digests and never printed; a Secret this deploy changes restarts
+ *     exactly the workloads that read it (found from their pod templates,
+ *     secretReaders); an unchanged one, or one it creates, restarts nothing
+ *     and lists nothing (the kubelet starts a reader waiting for a new one,
+ *     tests/integration/docker/k8s-secret-readers-restart.test.ts); a failed
+ *     restart fails the deploy with the command to run;
  *   - the retired ones: a master an earlier vibecarbon booted ends with
  *     exactly the CLI's Secrets and keys, a whole Secret deleted alongside the
  *     reads, a key patched out after the apply, each said once, and a failure
@@ -526,7 +527,7 @@ describe('applyCloudSecrets', () => {
     expect(logged).toEqual([]);
   });
 
-  describe('restarts what reads a new or changed Secret, and nothing else', () => {
+  describe('restarts what reads a changed Secret, and nothing else', () => {
     it.each(K8S_PROVIDERS)('%s: unchanged Secrets restart nothing', async (_id, Provider) => {
       holdAll(Provider, TOKEN);
       readerPerSecret(Provider);
@@ -592,53 +593,47 @@ describe('applyCloudSecrets', () => {
     });
 
     it.each(K8S_PROVIDERS)(
-      '%s: Secrets this deploy creates restart exactly what reads them, after the apply',
+      '%s: Secrets this deploy creates restart nothing and list nothing',
       async (_id, Provider) => {
-        // Waiting since the master booted; Kubernetes' own retry would take
-        // up to ten seconds more.
+        // Waiting since the master booted: the kubelet starts each on its own
+        // retry, and a restart would start a StatefulSet's pod twice.
         readerPerSecret(Provider);
         await apply(Provider);
         expect(applies()).toHaveLength(1);
-        const secrets = Provider.k8sCloudSecrets({ token: TOKEN });
-        expect(restarts().map((argv) => argv.slice(5))).toEqual([
-          secrets.map(({ name }) => `deployment/reads-${name}`).sort(),
+        expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+        expect(restarts()).toEqual([]);
+        expect(logged).toEqual([
+          `Handing your ${Provider.NAME} API token to the cluster (${Provider.k8sCloudSecrets({
+            token: TOKEN,
+          })
+            .map(({ namespace, name }) => `${namespace}/${name}`)
+            .join(', ')}).`,
         ]);
-        const applyAt = calls.findIndex(({ argv }) => argv[1] === 'apply');
-        expect(calls.findIndex(({ argv }) => argv[3] === 'rollout')).toBeGreaterThan(applyAt);
       },
     );
 
-    it('a restart after creating that fails only warns: Kubernetes starts them on its own', async () => {
+    it('a workload list that would fail cannot fail a first deploy: none is asked for', async () => {
       readerPerSecret(PROVIDERS.linode);
-      failWhen = /^-n kube-system rollout restart /;
-      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout restart'), {
+      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets /;
+      kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
         status: 1,
-        stderr: 'error: deployments.apps "reads-linode" is forbidden\n',
+        stderr: 'error: deployments.apps is forbidden\n',
       });
       await apply(PROVIDERS.linode);
       expect(cluster.get('kube-system/linode')).toEqual({ token: TOKEN });
-      expect(logged.at(-1)).toBe(
-        "Couldn't restart deployment/reads-linode, so Kubernetes starts it with the new " +
-          'kube-system/linode on its own retry, within about ten seconds. To start it now, run ' +
-          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout restart ` +
-          'deployment/reads-linode`.\nrestart deployment/reads-linode failed with exit 1: ' +
-          'error: deployments.apps "reads-linode" is forbidden',
-      );
-      expect(logged.join('\n')).not.toContain(MARK);
+      expect(restarts()).toEqual([]);
     });
 
-    it('one Secret new and one changed in a namespace: a failed restart fails as a change does', async () => {
+    it('one Secret new and one changed in a namespace: only the changed one’s readers restart', async () => {
       cluster.set('kube-system/one', { token: 'vc-sentinel-token-old' });
       workloads['kube-system'] = [envReader('reads-one', 'one'), envReader('reads-two', 'two')];
-      failWhen = /^-n kube-system rollout restart /;
-      kubectlFails = Object.assign(new Error('Command failed: kubectl rollout restart'), {
-        status: 1,
-        stderr: 'error: forbidden\n',
-      });
-      const err = await apply(TwoSecrets).catch((e: Error) => e);
-      expect(err).toBeInstanceOf(Error);
-      expect(err.message).toMatch(
-        /^kube-system\/one and kube-system\/two changed, but restarting deployment\/reads-one and deployment\/reads-two didn't go through/,
+      await apply(TwoSecrets);
+      expect(restarts()).toEqual([
+        ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/reads-one'],
+      ]);
+      expect(logged.at(-1)).toBe(
+        'Restarting deployment/reads-one so it picks up the new kube-system/one: it reads it ' +
+          'only when it starts.',
       );
     });
 
