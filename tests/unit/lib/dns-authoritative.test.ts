@@ -35,7 +35,7 @@ function fakes(table: Table) {
           setImmediate(() => cb(err));
         } else setImmediate(() => cb(null, a));
       };
-    return { resolveNs: answer('NS'), resolve4: answer('A') };
+    return { resolveNs: answer('NS'), resolve4: answer('A'), resolveCname: answer('CNAME') };
   };
   return { asked, made, make };
 }
@@ -142,6 +142,106 @@ describe('lookupAuthoritativeA', () => {
     if (!res.ok) throw new Error(res.reason);
     expect(res.answers).toHaveLength(6);
     for (const a of res.answers) expect(a).toMatchObject({ addresses: [], ttl: null });
+  });
+
+  // A nameserver answers an A query for a CNAME whose target is in another
+  // zone with the CNAME alone: c-ares reads that as "no A record". The target
+  // could be the very address about to be released.
+  it('"no A record" that is a CNAME fails the lookup: it is not followed', async () => {
+    const auth = fakes({
+      '192.0.2.1': served('198.51.100.7', 300),
+      '192.0.2.2': served('198.51.100.7', 300),
+      '192.0.2.3': {
+        'A app.example.com': [{ address: '198.51.100.7', ttl: 300 }],
+        'A *.app.example.com': { code: dns.NODATA },
+        'CNAME *.app.example.com': ['edge.cdn.test'],
+      },
+    });
+    const res = await lookupAuthoritativeA(names, {
+      domain: 'app.example.com',
+      makePublicResolver: fakes(ZONE).make,
+      makeAuthoritativeResolver: auth.make,
+      publicServers: PUBLIC,
+    });
+    expect(res).toEqual({
+      ok: false,
+      reason:
+        '*.app.example.com at ns2.dns.test (192.0.2.3) is a CNAME to edge.cdn.test, ' +
+        'which this check does not follow',
+    });
+    // Asked of the same server that answered "no A record".
+    expect(auth.asked).toContainEqual(
+      expect.objectContaining({ server: '192.0.2.3', method: 'CNAME', name: '*.app.example.com' }),
+    );
+  });
+
+  // Node 24's c-ares spells that answer as an empty list, not ENODATA.
+  it('an empty A answer that is a CNAME fails the lookup the same way', async () => {
+    const auth = fakes({
+      '192.0.2.1': {
+        'A app.example.com': [],
+        'CNAME app.example.com': ['app.example.com.cdn.test'],
+      },
+    });
+    const res = await lookupAuthoritativeA(['app.example.com'], {
+      domain: 'app.example.com',
+      makePublicResolver: fakes({
+        '1.1.1.1': { 'NS app.example.com': ['ns1.dns.test'], 'A ns1.dns.test': ['192.0.2.1'] },
+      }).make,
+      makeAuthoritativeResolver: auth.make,
+      publicServers: PUBLIC,
+    });
+    expect(res.ok).toBe(false);
+    expect(!res.ok && res.reason).toContain('is a CNAME to app.example.com.cdn.test');
+  });
+
+  it('a CNAME query that fails after "no A record" fails the lookup too', async () => {
+    const auth = fakes({
+      '192.0.2.1': served('198.51.100.7', 300),
+      '192.0.2.2': served('198.51.100.7', 300),
+      '192.0.2.3': {
+        ...served('198.51.100.7', 300),
+        'A app.example.com': { code: dns.NODATA },
+        'CNAME app.example.com': { code: dns.TIMEOUT },
+      },
+    });
+    const res = await lookupAuthoritativeA(names, {
+      domain: 'app.example.com',
+      makePublicResolver: fakes(ZONE).make,
+      makeAuthoritativeResolver: auth.make,
+      publicServers: PUBLIC,
+    });
+    expect(res).toEqual({
+      ok: false,
+      reason: `no answer for app.example.com's CNAME at ns2.dns.test (192.0.2.3): ${dns.TIMEOUT}`,
+    });
+  });
+
+  it('"no A record" and no CNAME either is an empty answer', async () => {
+    const auth = fakes({
+      '192.0.2.1': {
+        'A app.example.com': { code: dns.NODATA },
+        'CNAME app.example.com': { code: dns.NODATA },
+      },
+    });
+    const res = await lookupAuthoritativeA(['app.example.com'], {
+      domain: 'app.example.com',
+      makePublicResolver: fakes({
+        '1.1.1.1': { 'NS app.example.com': ['ns1.dns.test'], 'A ns1.dns.test': ['192.0.2.1'] },
+      }).make,
+      makeAuthoritativeResolver: auth.make,
+      publicServers: PUBLIC,
+    });
+    if (!res.ok) throw new Error(res.reason);
+    expect(res.answers).toEqual([
+      {
+        name: 'app.example.com',
+        server: '192.0.2.1',
+        host: 'ns1.dns.test',
+        addresses: [],
+        ttl: null,
+      },
+    ]);
   });
 
   it('one nameserver address that does not answer fails the whole lookup', async () => {

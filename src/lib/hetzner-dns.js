@@ -100,6 +100,21 @@ function fqdnToRelative(fqdn, zoneName) {
   return clean;
 }
 
+/**
+ * A record's name as the zone stores it, fully qualified: the apex spelling
+ * ('@', '') is the zone itself, a name already under the zone stays.
+ * @param {string} name
+ * @param {string} zoneName
+ * @returns {string}
+ */
+function relativeToFqdn(name, zoneName) {
+  const clean = String(name ?? '').replace(/\.$/, '');
+  const zone = String(zoneName).replace(/\.$/, '');
+  if (clean === '@' || clean === '' || clean === zone) return zone;
+  if (clean.endsWith(`.${zone}`)) return clean;
+  return `${clean}.${zone}`;
+}
+
 // zoneId → zone name, so the uniform record CRUD (which receives only a
 // zoneId, like every other backend) doesn't refetch the zone per call.
 // Zone names are immutable on Hetzner (rename = delete + recreate with a
@@ -318,6 +333,27 @@ export async function readARecord(apiToken, zoneId, name) {
   return rrsets
     .filter((r) => r.type === 'A' && r.name === relativeName)
     .flatMap((r) => (r.records ?? []).map((rec) => rec.value));
+}
+
+/**
+ * Every A record in the zone whose value is `address`, by fully qualified
+ * name. The deploy asks before it releases an address the domain used to
+ * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
+ * apex and the wildcard, one the user added, would hand its name to whoever
+ * the address goes to next. Throws when the zone's records cannot be listed.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone identity
+ * @param {string} address - an IPv4 address
+ * @returns {Promise<string[]>} sorted, each name once
+ */
+export async function findARecordsAt(apiToken, zoneId, address) {
+  const zoneName = await zoneNameForId(apiToken, zoneId);
+  const rrsets = await getRrsets(apiToken, zoneId);
+  const names = rrsets
+    .filter((r) => r.type === 'A' && (r.records ?? []).some((rec) => rec.value === address))
+    .map((r) => relativeToFqdn(r.name, zoneName));
+  return [...new Set(names)].sort();
 }
 
 /**

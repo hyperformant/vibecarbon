@@ -20,7 +20,10 @@
  * Dropped from state, the address stays assigned to the master and keeps
  * serving. The deploy releases it by address once DNS has moved off it
  * (lib/deploy/k8s/retired-reserved-ip.js), and destroy's backstop releases a
- * recorded one by address as before.
+ * recorded one by address as before. Both read the address from the
+ * environment's record, so the surgery hands every address it takes out to
+ * a recorder before the import: an environment saved before the record kept
+ * it would otherwise lose the only trace of an address it still pays for.
  *
  * Every path that runs `up` or a preview calls this first, before the
  * refresh (upStack's prepareStackForUp, convergeClusterInfra's preview), via
@@ -51,18 +54,25 @@ function logicalName(urn) {
  *
  * @param {{ deployment?: { resources?: object[], pending_operations?: object[] } }} state - exportStack's result
  * @param {readonly RetiredResource[]} retired
- * @returns {{ deployment: object, removed: string[] }} `removed`: the URNs taken out, once each
+ * @returns {{ deployment: object, removed: string[], addresses: string[] }}
+ *   `removed`: the URNs taken out, once each. `addresses`: the IP addresses
+ *   those resources held (`outputs.ipAddress`), once each.
  */
 export function dropStackResources(state, retired) {
   const next = structuredClone(state);
   const resources = next?.deployment?.resources;
   if (!Array.isArray(resources) || retired.length === 0) {
-    return { deployment: next, removed: [] };
+    return { deployment: next, removed: [], addresses: [] };
   }
   const isRetired = (r) =>
     retired.some((spec) => r?.type === spec.type && logicalName(r?.urn) === spec.name);
   const gone = resources.filter(isRetired);
-  if (gone.length === 0) return { deployment: next, removed: [] };
+  if (gone.length === 0) return { deployment: next, removed: [], addresses: [] };
+  const addresses = [
+    ...new Set(
+      gone.map((r) => r?.outputs?.ipAddress).filter((a) => typeof a === 'string' && a !== ''),
+    ),
+  ];
 
   const goneUrns = new Set(gone.map((r) => r.urn));
   // A child of a removed resource moves to that resource's parent; follow the
@@ -99,5 +109,5 @@ export function dropStackResources(state, retired) {
       (op) => !goneUrns.has(op?.resource?.urn),
     );
   }
-  return { deployment: next, removed: [...goneUrns] };
+  return { deployment: next, removed: [...goneUrns], addresses };
 }

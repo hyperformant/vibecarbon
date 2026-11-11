@@ -551,10 +551,19 @@ export async function repairVultrFirewallRuleInputs(stack) {
  * Take the resources the provider's programs no longer declare
  * (`RETIRED_STACK_RESOURCES`) out of the stack's state, so the `up` or preview
  * that follows never deletes them (lib/iac/retired-resources.js says why).
- * Every `up` runs it before its refresh (prepareStackForUp), and
- * convergeClusterInfra before its preview, so deploy, scale and failover all
+ * Every `up` runs it before its refresh (prepareStackForUp), convergeClusterInfra
+ * before its preview, and the deploy before it releases a retired address
+ * (lib/deploy/k8s/retired-reserved-ip.js), so deploy, scale and failover all
  * do. A no-op, and no import, when nothing matches: every provider but
  * DigitalOcean, and a DigitalOcean stack already without them.
+ *
+ * `recordAddresses` gets the addresses taken out, before the import: the
+ * stack is their last record, and the deploy and destroy release them only
+ * by the address the environment's record keeps.
+ *
+ * The import takes the stack's lock. A lock whose holder is gone is cleared
+ * (runPastStaleLock); one a live run holds stops here with StackHeldError,
+ * unchanged, so the caller can tell "in use" from "unreadable".
  *
  * Throws, unlike the Vultr repair above: a stack it could not read or write
  * back may still hold the resources, and the `up` would then delete them.
@@ -562,23 +571,28 @@ export async function repairVultrFirewallRuleInputs(stack) {
  *
  * @param {import('@pulumi/pulumi/automation').Stack} stack
  * @param {string|undefined} providerId
- * @returns {Promise<string[]>} the URNs removed
+ * @param {{recordAddresses?: (addresses: string[]) => unknown}} [options]
+ * @returns {Promise<{removed: string[], addresses: string[], deployment: object|null}>}
+ *   `removed`: the URNs taken out. `deployment`: the stack's state as it now
+ *   stands (after the import, or as exported when nothing matched), null
+ *   when the provider retires nothing and no export ran.
  */
-export async function dropRetiredStackResources(stack, providerId) {
+export async function dropRetiredStackResources(stack, providerId, { recordAddresses } = {}) {
   const retired = providerId ? (getProviderClass(providerId).RETIRED_STACK_RESOURCES ?? []) : [];
-  if (retired.length === 0) return [];
-  let removed = [];
+  if (retired.length === 0) return { removed: [], addresses: [], deployment: null };
+  let result;
   try {
     const state = await withStateBackendRetry(() => stack.exportStack(), 'retired-resource export');
-    const result = dropStackResources(state, retired);
-    removed = result.removed;
-    if (removed.length > 0) {
+    result = dropStackResources(state, retired);
+    if (result.removed.length > 0) {
+      if (recordAddresses && result.addresses.length > 0) await recordAddresses(result.addresses);
       await withStateBackendRetry(
-        () => stack.importStack(result.deployment),
+        () => runPastStaleLock(stack, () => stack.importStack(result.deployment)),
         'retired-resource import',
       );
     }
   } catch (err) {
+    if (err instanceof StackHeldError) throw err;
     throw new Error(
       `Could not take the retired reserved IP out of stack "${stack.name}"'s state, so ` +
         'Pulumi was not run: it would have deleted that address while your domain may still ' +
@@ -586,18 +600,20 @@ export async function dropRetiredStackResources(stack, providerId) {
       { cause: err },
     );
   }
-  if (removed.length > 0) {
+  if (result.removed.length > 0) {
     progressLog(
-      `[pulumi] took ${removed.map((urn) => urn.split('::').pop()).join(' and ')} out of ` +
+      `[pulumi] took ${result.removed.map((urn) => urn.split('::').pop()).join(' and ')} out of ` +
         `${stack.name}'s state: the address stays assigned until a deploy releases it`,
     );
   }
-  return removed;
+  return { removed: result.removed, addresses: result.addresses, deployment: result.deployment };
 }
 
 /**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
+ * `options.recordRetiredAddresses` records the addresses the retired-resource
+ * surgery takes out of the stack (dropRetiredStackResources).
  */
 async function upStackImpl(stackName, program, options = {}) {
   // `options.perfStem` is the caller's own perf timer name (e.g.
@@ -618,7 +634,9 @@ async function prepareStackForUp(stackName, program, options) {
   // Before the refresh too: refreshing ReservedIpAssignment drops it from
   // state on its own when the API reports the IP elsewhere, and that is not a
   // decision to leave to a Read.
-  await dropRetiredStackResources(stack, options.provider);
+  const surgery = await dropRetiredStackResources(stack, options.provider, {
+    recordAddresses: options.recordRetiredAddresses,
+  });
   recordStateOp('refresh');
 
   // Refresh state before `up` to purge pending operations from a crashed
@@ -640,9 +658,11 @@ async function prepareStackForUp(stackName, program, options) {
   // to reconcile). Refresh still pays plugin spawn + cloud API listing,
   // ~3-8s on cold compose deploys for nothing. exportStack() failure
   // falls through to the safer always-refresh path.
+  // The surgery above already read the state on a provider that retires
+  // resources (DigitalOcean): reuse it rather than export twice per up.
   let needsRefresh = true;
   try {
-    const state = await stack.exportStack();
+    const state = surgery.deployment ?? (await stack.exportStack());
     const resources = state?.deployment?.resources ?? [];
     needsRefresh = resources.some((r) => r.type !== 'pulumi:pulumi:Stack');
   } catch {

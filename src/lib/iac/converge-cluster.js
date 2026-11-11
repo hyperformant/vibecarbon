@@ -40,6 +40,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
 import { haSshKeyName as haSshKeyNameFor } from '../deploy/k8s/ha-ssh-key.js';
+import { recordRetiredReservedIps } from '../deploy/k8s/retired-reserved-ip.js';
 import { k3sVersion } from '../images.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
@@ -403,7 +404,12 @@ export async function convergeClusterInfra({
     // here, so neither this preview nor the up below plans its delete. Scale
     // and failover reach a stack DNS has not moved off yet: deleting the
     // address there would cut the domain off (lib/iac/retired-resources.js).
-    await dropRetiredStackResources(previewStack, providerIdFor(envConfig));
+    // The addresses it takes out go onto the environment's record, where the
+    // deploy's release and destroy find them (k8s/retired-reserved-ip.js).
+    await dropRetiredStackResources(previewStack, providerIdFor(envConfig), {
+      recordAddresses: (addresses) =>
+        recordRetiredReservedIps({ environment, stackName: clusterEnv, addresses }),
+    });
     const masterReplacements = [];
     await perfAsync(`scale.k8s.${clusterEnv}.preview`, () =>
       previewStack.preview({

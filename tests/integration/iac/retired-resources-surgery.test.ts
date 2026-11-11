@@ -20,7 +20,12 @@
  *     delete nothing, the up leaves the cloud as it was (the IP still
  *     assigned to the master), and a second surgery is a no-op;
  *   - a child parented to the removed IP moves to the IP's parent and the
- *     import accepts that too.
+ *     import accepts that too;
+ *   - a warm redeploy (no up, so the stack still lists the IP and its
+ *     assignment): the deploy's release takes them out of the stack before
+ *     it releases the address, and destroy then succeeds. The control
+ *     releases the address with the stack still listing it, and destroy
+ *     fails on the assignment's 404, as it would forever.
  *
  * Skipped locally where no pulumi CLI is installed. Under CI it runs: the
  * integration job installs the CLI pinned to the SDK version, and a missing
@@ -34,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { releaseRetiredReservedIps } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
 
 const hasPulumi = (() => {
@@ -160,6 +166,52 @@ async function plan(stack: Awaited<ReturnType<typeof stackFor>>) {
 const ipOf = (stackOutputs: Record<string, { value: unknown }>) =>
   String(stackOutputs.floatingIp.value);
 
+/** DigitalOcean's DELETE /v2/reserved_ips/{address}: the address leaves the account. */
+function releaseByAddress(address: string) {
+  const cloud = readCloud();
+  delete cloud.things?.['fakecloud:index:ReservedIp'][address];
+  writeFileSync(cloudFile, JSON.stringify(cloud));
+  return true;
+}
+
+const DOMAIN = 'app.example.test';
+const MASTER = '10.0.0.1';
+/** DNS has moved: every name answers the master, long past its TTL. */
+const moved = async () => ({
+  ok: true,
+  zone: 'example.test',
+  answers: [DOMAIN, `*.${DOMAIN}`].map((name) => ({
+    name,
+    server: '192.0.2.1',
+    host: 'ns1.example.test',
+    addresses: [MASTER],
+    ttl: 60,
+  })),
+});
+
+/** The deploy's release, on a warm redeploy's record, with `dropRetired` as given. */
+async function releaseOnWarmRedeploy(
+  stackName: string,
+  address: string,
+  dropRetired: (stack: string) => Promise<unknown>,
+) {
+  const config = { environments: { [stackName]: { floatingIp: address, ingressIp: MASTER } } };
+  return releaseRetiredReservedIps({
+    environment: stackName,
+    Provider: { K8S_FLOATING_IP: false, NAME: 'DigitalOcean' },
+    provider: { deleteReservedIpByAddress: async (a: string) => releaseByAddress(a) },
+    log: { info: () => {}, warn: () => {} },
+    domain: DOMAIN,
+    dnsWrite: { target: MASTER, changedAt: Date.now() - 3_600_000 },
+    newAddress: MASTER,
+    dropRetired,
+    zoneRecordsAt: async () => [],
+    lookup: moved as never,
+    readConfig: () => config,
+    updateConfig: (fn: (c: typeof config) => void) => fn(config),
+  });
+}
+
 describe.skipIf(!hasPulumi && !process.env.CI)(
   'retired reserved IP leaves the stack, never deleted (real engine, fake cloud)',
   () => {
@@ -219,6 +271,38 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
       // Idempotent: a second surgery finds nothing to remove and changes nothing.
       const again = dropStackResources(await current.exportStack(), RETIRED);
       expect(again.removed).toEqual([]);
+    });
+
+    it('control: an address released while the stack lists it fails destroy on the 404', async () => {
+      const stack = await stackFor('warm-control', oldProgram());
+      const address = ipOf((await stack.up()).outputs);
+      // What the release did before it dropped the stack's hold first.
+      releaseByAddress(address);
+      const current = await stackFor('warm-control', newProgram(address));
+      await expect(current.destroy()).rejects.toThrow(/404/);
+    });
+
+    it('warm redeploy: the release takes the address out of the stack first, and destroy succeeds', async () => {
+      const stack = await stackFor('warm', oldProgram());
+      const address = ipOf((await stack.up()).outputs);
+      // A warm redeploy runs no up: the stack still lists the IP and its assignment.
+      const held = JSON.stringify((await stack.exportStack()).deployment);
+      expect(held).toContain('::ingress-assignment');
+
+      const dropRetired = async (stackName: string) => {
+        const s = await stackFor(stackName, newProgram(address));
+        const { deployment, removed } = dropStackResources(await s.exportStack(), RETIRED);
+        if (removed.length > 0) await s.importStack(deployment);
+      };
+      const out = await releaseOnWarmRedeploy('warm', address, dropRetired);
+      expect(out).toEqual({ released: [address], kept: [] });
+      expect(readCloud().things?.['fakecloud:index:ReservedIp'][address]).toBeUndefined();
+
+      const current = await stackFor('warm', newProgram(address));
+      await current.refresh();
+      await current.destroy();
+      const after = JSON.stringify((await current.exportStack()).deployment ?? {});
+      expect(after).not.toContain('::master');
     });
 
     it('a child of the removed IP moves to its parent, and the import accepts it', async () => {

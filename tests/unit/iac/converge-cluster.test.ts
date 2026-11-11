@@ -29,6 +29,7 @@ const getStackOutputsMock = vi.fn();
 const getOrCreateStackMock = vi.fn();
 const classifyK3sTokenProbeMock = vi.fn();
 const dropRetiredMock = vi.fn();
+const recordRetiredMock = vi.fn();
 
 vi.mock('../../../src/lib/iac/index.js', () => ({
   upStack: (...a: unknown[]) => upStackMock(...a),
@@ -40,6 +41,11 @@ vi.mock('../../../src/lib/iac/index.js', () => ({
   // Pulumi aborts so they stop reading "code: -2" (2026-08-06 RCA).
   summarizePulumiError: (err: unknown) =>
     (err instanceof Error ? err.message : String(err)).split('\n')[0],
+}));
+
+// The recorder writes the cwd project config: stood in for here.
+vi.mock('../../../src/lib/deploy/k8s/retired-reserved-ip.js', () => ({
+  recordRetiredReservedIps: (...a: unknown[]) => recordRetiredMock(...a),
 }));
 
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
@@ -87,7 +93,8 @@ beforeEach(() => {
   getOrCreateStackMock.mockReset();
   classifyK3sTokenProbeMock.mockReset();
   dropRetiredMock.mockReset();
-  dropRetiredMock.mockResolvedValue([]);
+  dropRetiredMock.mockResolvedValue({ removed: [], addresses: [], deployment: null });
+  recordRetiredMock.mockReset();
 
   // Defaults: probe returns an empty (fresh-stack) classification, preview
   // emits no events (no master replace), upStack succeeds with outputs.
@@ -375,7 +382,18 @@ describe('convergeClusterInfra', () => {
     });
 
     expect(order).toEqual(['drop', 'preview', 'up']);
-    expect(dropRetiredMock).toHaveBeenCalledWith(stack, 'digitalocean');
+    expect(dropRetiredMock).toHaveBeenCalledWith(stack, 'digitalocean', {
+      recordAddresses: expect.any(Function),
+    });
+    // What the surgery takes out goes onto the record of this cluster's stack,
+    // in the environment as the operator names it.
+    const [, , { recordAddresses }] = dropRetiredMock.mock.calls[0];
+    recordAddresses(['203.0.113.9']);
+    expect(recordRetiredMock).toHaveBeenCalledWith({
+      environment: 'unit-cluster-xyz',
+      stackName: 'unit-cluster-xyz',
+      addresses: ['203.0.113.9'],
+    });
   });
 
   it('(i2) a failed surgery stops the converge before the preview and the up', async () => {

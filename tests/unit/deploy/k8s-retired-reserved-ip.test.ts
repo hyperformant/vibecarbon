@@ -14,7 +14,15 @@
  *     DNS (the user is told the old and the new address); released only by a
  *     later deploy, at least the TTL (an hour at least) after a deploy first
  *     saw DNS without it;
+ *   - managed DNS: no DELETE while any A record in the zone has the address
+ *     (a record the user added, a proxied origin), or the zone cannot be
+ *     listed;
  *   - a lookup that could not run, or no domain, keeps it;
+ *   - just before the DELETE, every stack that may still list the address
+ *     lets go of it (a warm redeploy ran no up); a stack that cannot keeps
+ *     it, because a stack listing a released address fails every destroy;
+ *   - the lines name what was checked and what was not: a record in another
+ *     zone, a proxy's or CDN's origin;
  *   - the release itself goes through the real provider method (a DELETE by
  *     address on the wire), a released address leaves the record, a failed
  *     one stays (so the next deploy or destroy's backstop still finds it);
@@ -31,9 +39,12 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 
 import {
   MANUAL_DNS_MIN_WAIT_SECONDS,
+  recordRetiredReservedIps,
   releaseRetiredReservedIps,
   releaseVerdict,
+  retiredReservedIpStacks,
   retiredReservedIps,
+  zoneVerdict,
 } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
@@ -116,6 +127,10 @@ function release(
     dnsWrite = managed() as { target: string; changedAt: number } | null,
     domain = DOMAIN as string | null,
     now = NOW,
+    dropRetired = vi.fn(async (_stack: string) => {}),
+    zoneRecordsAt = vi.fn(async (_address: string) => [] as string[]) as
+      | ((address: string) => Promise<string[]>)
+      | null,
   } = {},
 ) {
   const s = store(env);
@@ -129,12 +144,14 @@ function release(
     domain,
     dnsWrite,
     newAddress: MASTER,
+    dropRetired,
+    zoneRecordsAt,
     lookup: lookupFn as never,
     now: () => now,
     readConfig: s.readConfig,
     updateConfig: s.updateConfig,
   });
-  return { s, log, run, lookupFn };
+  return { s, log, run, lookupFn, dropRetired, zoneRecordsAt };
 }
 
 describe('retiredReservedIps', () => {
@@ -213,7 +230,23 @@ describe('releaseVerdict: managed DNS', () => {
     expect(verdict({ ok: false, reason: 'no answer for app.example.com at ns1' })).toEqual({
       release: false,
       kind: 'unchecked',
+      source: 'nameservers',
       reason: 'no answer for app.example.com at ns1',
+    });
+  });
+
+  it('not moved: says what each nameserver that missed the new address served', () => {
+    const lagging = served([MASTER]);
+    lagging.answers[2].addresses = ['192.0.2.200'];
+    lagging.answers[3].addresses = [];
+    expect(verdict(lagging)).toEqual({
+      release: false,
+      kind: 'not-moved',
+      names: [DOMAIN, `*.${DOMAIN}`],
+      served: [
+        { name: DOMAIN, host: 'ns2.example.net', server: '192.0.2.2', addresses: ['192.0.2.200'] },
+        { name: `*.${DOMAIN}`, host: 'ns2.example.net', server: '192.0.2.2', addresses: [] },
+      ],
     });
   });
 
@@ -333,7 +366,7 @@ describe('releaseRetiredReservedIps: managed DNS', () => {
     expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
     const [line] = log.warn.mock.calls[0];
     // Why it stays: the nameservers did not answer, and the reason.
-    expect(line).toContain(`could not get an answer from ${DOMAIN}'s nameservers`);
+    expect(line).toContain(`could not check what ${DOMAIN}'s nameservers answer`);
     expect(line).toContain('1.1.1.1 ETIMEOUT');
     // What it costs while it stays.
     expect(line).toContain(
@@ -523,5 +556,317 @@ describe('releaseRetiredReservedIps: what it never touches', () => {
       expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
     }
     expect(fetchWithRetryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('releaseRetiredReservedIps: the stacks let go first', () => {
+  // A warm redeploy runs no up, so the stack can still list the IP and its
+  // assignment. Released while listed, every destroy after fails on it.
+  it('single k8s: the environment stack drops it, then the DELETE', async () => {
+    const order: string[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      order.push(`DELETE ${url.split('/').pop()}`);
+      return { ok: true, status: 204 };
+    });
+    const dropRetired = vi.fn(async (stack: string) => {
+      order.push(`drop ${stack}`);
+    });
+    const { run } = release({ ingressIp: MASTER, floatingIp: OLD }, { dropRetired });
+    expect((await run).released).toEqual([OLD]);
+    expect(order).toEqual(['drop prod', `DELETE ${OLD}`]);
+  });
+
+  it('a stack that cannot let go keeps the address: no DELETE, a warning, the next deploy retries', async () => {
+    const dropRetired = vi.fn(async () => {
+      throw new Error(
+        'Stack "prod" is in use by another run: someone@laptop (pid 1), started now.\nmore',
+      );
+    });
+    const { s, log, run } = release({ ingressIp: MASTER, floatingIp: OLD }, { dropRetired });
+    const out = await run;
+    expect(out.released).toEqual([]);
+    expect(out.kept).toEqual([
+      {
+        address: OLD,
+        reason:
+          'stack prod: Stack "prod" is in use by another run: someone@laptop (pid 1), started now.',
+      },
+    ]);
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+    expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
+    const [line] = log.warn.mock.calls[0];
+    expect(line).toContain(`could not take it out of stack prod's Pulumi state`);
+    expect(line).toContain('`vibecarbon destroy prod` fail on it');
+    expect(line).toContain('the next deploy tries again');
+    expect(line).not.toContain('—');
+  });
+
+  it('k8s-ha: each address leaves its own side stack, by .stack, else by role', async () => {
+    deletesAnswer(204);
+    const dropRetired = vi.fn(async (_stack: string) => {});
+    const { run } = release(
+      {
+        ha: {
+          // The stack name a side records wins over its role.
+          primary: { stack: 'prod', floatingIp: OLD },
+          // Recorded before sides carried their stack.
+          standby: { floatingIp: OLD_STANDBY },
+        },
+      },
+      { dropRetired },
+    );
+    expect((await run).released).toEqual([OLD, OLD_STANDBY]);
+    expect(dropRetired.mock.calls.map(([stack]) => stack)).toEqual(['prod', 'prod-standby']);
+  });
+
+  it('each stack is asked once, however many of its addresses go', async () => {
+    deletesAnswer(204);
+    const dropRetired = vi.fn(async (_stack: string) => {});
+    const { run } = release(
+      {
+        floatingIp: OLD,
+        ha: { primary: { stack: 'prod', floatingIp: OLD_STANDBY }, standby: { stack: 'prod-b' } },
+      },
+      { dropRetired },
+    );
+    expect((await run).released).toEqual([OLD, OLD_STANDBY]);
+    expect(dropRetired.mock.calls.map(([stack]) => stack).sort()).toEqual(['prod', 'prod-b']);
+  });
+
+  it('an address that stays is never dropped from its stack', async () => {
+    const { run, dropRetired } = release(
+      { ingressIp: MASTER, floatingIp: OLD },
+      { lookup: served([OLD]) },
+    );
+    expect((await run).released).toEqual([]);
+    expect(dropRetired).not.toHaveBeenCalled();
+  });
+
+  it('without a way to open the stack, nothing is released', async () => {
+    const s = store({ ingressIp: MASTER, floatingIp: OLD });
+    const out = await releaseRetiredReservedIps({
+      environment: 'prod',
+      Provider: DigitalOceanProvider,
+      provider: new DigitalOceanProvider('token'),
+      log: logger(),
+      domain: DOMAIN,
+      dnsWrite: managed(),
+      newAddress: MASTER,
+      zoneRecordsAt: async () => [],
+      lookup: (async () => served([MASTER])) as never,
+      now: () => NOW,
+      readConfig: s.readConfig,
+      updateConfig: s.updateConfig,
+    });
+    expect(out.released).toEqual([]);
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('releaseRetiredReservedIps: every A record in a managed zone', () => {
+  it('a record the user added at the old address keeps it, and the warning names it', async () => {
+    const zoneRecordsAt = vi.fn(async () => [`legacy.${DOMAIN}`]);
+    const { s, log, run, dropRetired } = release(
+      { ingressIp: MASTER, floatingIp: OLD },
+      { zoneRecordsAt },
+    );
+    expect((await run).kept).toEqual([{ address: OLD, reason: 'zone-record' }]);
+    expect(zoneRecordsAt).toHaveBeenCalledWith(OLD);
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+    expect(dropRetired).not.toHaveBeenCalled();
+    expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
+    const [line] = log.warn.mock.calls[0];
+    expect(line).toContain(`legacy.${DOMAIN} in ${DOMAIN}'s DNS zone still points at ${OLD}`);
+    expect(line).toContain(`point it at ${MASTER}, or remove it`);
+    expect(line).not.toContain('—');
+  });
+
+  it('while resolvers catch up too: the record is named rather than the wait', async () => {
+    const { log, run } = release(
+      { floatingIp: OLD },
+      { dnsWrite: managed(20), zoneRecordsAt: async () => [DOMAIN, `old.${DOMAIN}`] },
+    );
+    expect((await run).kept).toEqual([{ address: OLD, reason: 'zone-record' }]);
+    expect(log.warn.mock.calls[0][0]).toContain(`${DOMAIN} and old.${DOMAIN} in ${DOMAIN}'s`);
+  });
+
+  it('a zone it cannot list keeps it, saying so and what it costs', async () => {
+    const { log, run } = release(
+      { ingressIp: MASTER, floatingIp: OLD },
+      {
+        zoneRecordsAt: async () => {
+          throw new Error('DigitalOcean DNS API error: Unable to authenticate you\nstack');
+        },
+      },
+    );
+    expect((await run).kept).toEqual([{ address: OLD, reason: 'unchecked' }]);
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+    const [line] = log.warn.mock.calls[0];
+    expect(line).toContain(
+      `could not list the A records in ${DOMAIN}'s DNS zone (DigitalOcean DNS API error: Unable to authenticate you)`,
+    );
+    expect(line).toContain('bills it whenever it is not assigned to a droplet');
+  });
+
+  it('managed DNS with no way to list the zone releases nothing', async () => {
+    const { run } = release({ floatingIp: OLD }, { zoneRecordsAt: null });
+    expect((await run).kept).toEqual([{ address: OLD, reason: 'unchecked' }]);
+    expect(fetchWithRetryMock).not.toHaveBeenCalled();
+  });
+
+  it('not asked with DNS kept by hand, nor when the nameservers already keep it', async () => {
+    const byHand = release({ floatingIp: OLD }, { dnsWrite: null });
+    await byHand.run;
+    expect(byHand.zoneRecordsAt).not.toHaveBeenCalled();
+    const answered = release({ floatingIp: OLD }, { lookup: served([OLD]) });
+    await answered.run;
+    expect(answered.zoneRecordsAt).not.toHaveBeenCalled();
+  });
+});
+
+describe('zoneVerdict', () => {
+  const release = { release: true, kind: 'release' } as const;
+  it('no record at the address: the verdict stands', () => {
+    expect(zoneVerdict(release, { ok: true, names: [] })).toBe(release);
+  });
+  it('a record at the address, or a listing that failed: keep', () => {
+    expect(zoneVerdict(release, { ok: true, names: ['a.example.com'] })).toEqual({
+      release: false,
+      kind: 'zone-record',
+      names: ['a.example.com'],
+    });
+    expect(zoneVerdict(release, { ok: false, reason: '403' })).toEqual({
+      release: false,
+      kind: 'unchecked',
+      source: 'zone',
+      reason: '403',
+    });
+  });
+  it('a verdict that keeps it already passes through', () => {
+    const kept = { release: false, kind: 'still-answered', names: [DOMAIN] } as const;
+    expect(zoneVerdict(kept, { ok: false, reason: 'x' })).toBe(kept);
+  });
+});
+
+describe('the lines say what was checked and what was not', () => {
+  it('managed: the kept line names the apex, the wildcard and the zone, and what else must move', async () => {
+    const { log, run } = release({ floatingIp: OLD }, { dnsWrite: managed(20) });
+    await run;
+    const [line] = log.info.mock.calls[0];
+    expect(line).toContain(
+      `vibecarbon checks ${DOMAIN} and *.${DOMAIN} at ${DOMAIN}'s nameservers, and every A record in its DNS zone`,
+    );
+    expect(line).toContain(`Anything else that points at ${OLD} has to move to ${MASTER} first`);
+    expect(line).toContain('a record in another zone');
+    expect(line).not.toContain('—');
+  });
+
+  it("by hand: no zone listing, and a proxy's or CDN's origin has to move too", async () => {
+    const { log, run } = release({ floatingIp: OLD }, { dnsWrite: null });
+    await run;
+    const [line] = log.info.mock.calls[0];
+    expect(line).toContain(
+      `vibecarbon checks ${DOMAIN} and *.${DOMAIN} at ${DOMAIN}'s nameservers.`,
+    );
+    expect(line).not.toContain('every A record');
+    expect(line).toContain(
+      `the origin of a proxy or CDN in front of ${DOMAIN} (Cloudflare's orange cloud, say), which the nameservers do not show`,
+    );
+  });
+
+  it('the release line names what was checked', async () => {
+    deletesAnswer(204);
+    const { log, run } = release({ floatingIp: OLD });
+    await run;
+    const [line] = log.info.mock.calls[0];
+    expect(line).toContain(`released the reserved IP ${OLD}`);
+    expect(line).toContain(
+      `vibecarbon checked ${DOMAIN} and *.${DOMAIN} at ${DOMAIN}'s nameservers, and every A record in its DNS zone and none points at it`,
+    );
+    expect(line).toContain(`needs to point at ${MASTER} now`);
+    expect(line).not.toContain('—');
+  });
+
+  it('not moved: names the nameservers that missed the new address and what they served', async () => {
+    const lagging = served([MASTER]);
+    lagging.answers[4].addresses = ['192.0.2.200'];
+    const { log, run } = release({ floatingIp: OLD }, { lookup: lagging });
+    expect((await run).kept).toEqual([{ address: OLD, reason: 'not-moved' }]);
+    expect(log.info.mock.calls[0][0]).toContain(
+      `do not answer ${MASTER} for every name yet (ns3.example.net (192.0.2.3) answered 192.0.2.200 for ${DOMAIN})`,
+    );
+  });
+});
+
+describe('retiredReservedIpStacks', () => {
+  it('single k8s: the environment is the stack', () => {
+    expect(retiredReservedIpStacks('prod', { floatingIp: OLD })).toEqual(
+      new Map([[OLD, ['prod']]]),
+    );
+  });
+  it('k8s-ha: each side by its .stack, else its role', () => {
+    expect(
+      retiredReservedIpStacks('prod', {
+        ha: {
+          primary: { stack: 'prod-standby', floatingIp: OLD },
+          standby: { floatingIp: OLD_STANDBY },
+        },
+      }),
+    ).toEqual(
+      new Map([
+        [OLD, ['prod-standby']],
+        [OLD_STANDBY, ['prod-standby']],
+      ]),
+    );
+    expect(
+      retiredReservedIpStacks('prod', { ha: { primary: { floatingIp: OLD }, standby: {} } }),
+    ).toEqual(new Map([[OLD, ['prod-primary']]]));
+  });
+  it('an environment-level address on k8s-ha could be either side', () => {
+    expect(
+      retiredReservedIpStacks('prod', {
+        floatingIp: OLD,
+        ha: { primary: { stack: 'prod' }, standby: { stack: 'prod-standby' } },
+      }),
+    ).toEqual(new Map([[OLD, ['prod', 'prod-standby']]]));
+  });
+});
+
+describe('recordRetiredReservedIps', () => {
+  const record = (env: Env | undefined, stackName: string, addresses = [OLD]) => {
+    const config = { environments: env ? { prod: structuredClone(env) } : {} };
+    recordRetiredReservedIps({
+      environment: 'prod',
+      stackName,
+      addresses,
+      updateConfig: (fn: (c: typeof config) => void) => fn(config),
+    });
+    return config.environments.prod as Env | undefined;
+  };
+
+  it('single k8s: onto the environment, where it names none', () => {
+    expect(record({ ingressIp: MASTER }, 'prod')).toEqual({ ingressIp: MASTER, floatingIp: OLD });
+    expect(record({ floatingIp: '203.0.113.50' }, 'prod')).toEqual({ floatingIp: '203.0.113.50' });
+  });
+
+  it('k8s-ha: onto the side whose stack it is, else by role', () => {
+    expect(
+      record({ ha: { primary: { stack: 'prod-standby' }, standby: { stack: 'prod' } } }, 'prod'),
+    ).toEqual({
+      ha: { primary: { stack: 'prod-standby' }, standby: { stack: 'prod', floatingIp: OLD } },
+    });
+    expect(record({ ha: { standby: { masterIp: MASTER } } }, 'prod-standby')).toEqual({
+      ha: { standby: { masterIp: MASTER, floatingIp: OLD } },
+    });
+    // No side on record yet: one is made, carrying its stack.
+    expect(record({ ha: {} }, 'prod-primary')).toEqual({
+      ha: { primary: { stack: 'prod-primary', floatingIp: OLD } },
+    });
+  });
+
+  it('a stack the environment does not own, or no environment: nothing written', () => {
+    expect(record({ ingressIp: MASTER }, 'staging')).toEqual({ ingressIp: MASTER });
+    expect(record(undefined, 'prod')).toBeUndefined();
+    expect(record({ ingressIp: MASTER }, 'prod', [])).toEqual({ ingressIp: MASTER });
   });
 });

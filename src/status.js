@@ -1427,8 +1427,13 @@ export function isHaConfigured(envConfig) {
  * Hetzner and Linode. On DigitalOcean, whose clusters take traffic at the
  * master's own address, a recorded reserved IP is one a cluster made before
  * 2026-11 still holds until a deploy sees DNS has moved off it and releases
- * it (lib/deploy/k8s/retired-reserved-ip.js), so it is labelled as that, never
- * as the ingress. Exported for tests.
+ * it (lib/deploy/k8s/retired-reserved-ip.js). Where the record that holds it
+ * (the environment, or the k8s-ha side) also names an ingressIp, a deploy
+ * with this program has run and the domain belongs at that address, so the
+ * reserved IP is the old one. Where none is named, no such deploy has run
+ * yet and the reserved IP is still where the domain points: labelled that
+ * way, so someone checking their DNS sees the address it should show.
+ * Exported for tests.
  *
  * @param {object} envConfig
  * @returns {string[]}
@@ -1436,9 +1441,14 @@ export function isHaConfigured(envConfig) {
 export function formatAddressLines(envConfig) {
   const Provider = resolveEnvProvider(envConfig);
   if (Provider.K8S_FLOATING_IP === false) {
-    return retiredReservedIps(Provider, envConfig).map(
-      (ip) => `${c.dim('Reserved IP')}    ${ip} ${c.dim('(old, not released yet)')}`,
-    );
+    const owners = [envConfig, envConfig.ha?.primary, envConfig.ha?.standby];
+    return retiredReservedIps(Provider, envConfig).map((ip) => {
+      const moved = owners.some((o) => o?.floatingIp === ip && o.ingressIp);
+      const note = moved
+        ? '(old, not released yet)'
+        : '(the ingress until the domain moves to the master)';
+      return `${c.dim('Reserved IP')}    ${ip} ${c.dim(note)}`;
+    });
   }
   return envConfig.floatingIp ? [`${c.dim('Floating IP')}    ${envConfig.floatingIp}`] : [];
 }

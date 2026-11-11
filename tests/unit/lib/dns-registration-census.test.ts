@@ -36,6 +36,10 @@ const CONTRACT = [
   'createDNSRecord',
   'deleteDNSRecord',
   'deleteApexAndWildcard',
+  // The retired reserved IP's release lists the zone with it
+  // (lib/deploy/k8s/retired-reserved-ip.js): a backend without it keeps the
+  // address forever.
+  'findARecordsAt',
 ] as const;
 
 describe('DNS backend registration census', () => {

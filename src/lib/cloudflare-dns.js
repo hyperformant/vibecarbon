@@ -92,6 +92,10 @@ export async function getZones(apiToken) {
 // DNS RECORD OPERATIONS
 // ============================================================================
 
+/** findARecordsAt's page size, and the most pages it reads before it gives up. */
+const RECORD_PAGE_SIZE = 1000;
+const MAX_RECORD_PAGES = 50;
+
 /**
  * Cloudflare reports failure two ways: a non-2xx status, or a 200 whose JSON
  * carries `success: false`. Both must stop the caller; a 401/403 used to fall
@@ -192,6 +196,47 @@ export async function readARecord(apiToken, zoneId, name) {
   );
   const body = await readCloudflareJson(response, 'Failed to read DNS record');
   return (body.result ?? []).filter((r) => r.name === name && r.type === 'A').map((r) => r.content);
+}
+
+/**
+ * Every A record in the zone whose value is `address`, by fully qualified
+ * name. The deploy asks before it releases an address the domain used to
+ * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
+ * apex and the wildcard, one the user added, would hand its name to whoever
+ * the address goes to next. A proxied record (the orange cloud) counts: the
+ * address is its origin. Throws when the zone's records cannot be listed.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone identity
+ * @param {string} address - an IPv4 address
+ * @returns {Promise<string[]>} sorted, each name once
+ */
+export async function findARecordsAt(apiToken, zoneId, address) {
+  const names = new Set();
+  // Every A record, page by page, filtered here: the list's content filters
+  // are not ours to bet a release on. Past MAX_RECORD_PAGES the zone is not
+  // read in full, and a partial read must not pass for an empty one.
+  for (let page = 1; ; page++) {
+    if (page > MAX_RECORD_PAGES) {
+      throw new Error(
+        `Cloudflare zone has more than ${MAX_RECORD_PAGES * RECORD_PAGE_SIZE} A records to check`,
+      );
+    }
+    const response = await fetchWithRetry(
+      `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&per_page=${RECORD_PAGE_SIZE}&page=${page}`,
+      { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' } },
+    );
+    const body = await readCloudflareJson(response, 'Failed to list DNS records');
+    const rows = body.result ?? [];
+    for (const r of rows) {
+      if (r.type === 'A' && r.content === address) names.add(String(r.name).replace(/\.$/, ''));
+    }
+    // total_pages when Cloudflare says it, else a full page means more.
+    const totalPages = Number(body.result_info?.total_pages);
+    const more = Number.isFinite(totalPages) ? totalPages > page : rows.length === RECORD_PAGE_SIZE;
+    if (!more) break;
+  }
+  return [...names].sort();
 }
 
 /**

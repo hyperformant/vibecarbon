@@ -173,6 +173,7 @@ import {
   kubectlSkewNotice,
   watchAppMigrationFailure,
 } from './readiness.js';
+import { recordRetiredReservedIps } from './retired-reserved-ip.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
 import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
 
@@ -5169,6 +5170,15 @@ async function deployK3sSteps(options, inFlight) {
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
+        // A DigitalOcean cluster made before 2026-11: the reserved IP the up
+        // takes out of this stack goes onto the environment's record, where
+        // the release and destroy find it (k8s/retired-reserved-ip.js).
+        recordRetiredAddresses: (addresses) =>
+          recordRetiredReservedIps({
+            environment: options.operatorEnv ?? options.environment,
+            stackName: options.environment,
+            addresses,
+          }),
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays the loud last resort. Same
         // family member as the compose provision sites (bc94b18): this gate

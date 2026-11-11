@@ -22,8 +22,12 @@
  * Any answer it could not get makes the whole lookup fail (`ok: false`, with
  * the reason): the caller keeps the address rather than release it on a
  * partial view. "No such name" and "no A record" are answers (empty), not
- * failures. Bounded: each query has AUTHORITATIVE_QUERY_TIMEOUT_MS and two
- * tries, and they run side by side.
+ * failures, except where the name is a CNAME: a nameserver answers an A
+ * query for a CNAME whose target lives in another zone with the CNAME alone,
+ * which c-ares reads as "no A record" (an empty list), while the target may
+ * resolve to the very address. So "no A record" is asked again as a CNAME, and a CNAME fails the
+ * lookup: this does not follow it. Bounded: each query has
+ * AUTHORITATIVE_QUERY_TIMEOUT_MS and two tries, and they run side by side.
  */
 import dnsCallback from 'node:dns';
 import { PUBLIC_DNS_SERVERS, publicResolver } from './deploy/public-dns-lookup.js';
@@ -180,11 +184,30 @@ export async function lookupAuthoritativeA(
   );
   const results = await Promise.all(
     queries.map(async ({ host, ip, name }) => {
-      const { value, code } = await ask(makeAuthoritativeResolver([ip]), 'resolve4', name, {
-        ttl: true,
-      });
+      const resolver = makeAuthoritativeResolver([ip]);
+      const { value, code } = await ask(resolver, 'resolve4', name, { ttl: true });
       if (code && !NO_RECORD_CODES.has(code)) {
-        return { error: `${name} at ${host} (${ip}): ${code}` };
+        return { error: `no answer for ${name} at ${host} (${ip}): ${code}` };
+      }
+      // SECURITY: "no A record" may be a CNAME the server answered alone (its
+      // target in another zone). Where it leads is not this zone's answer, so
+      // a CNAME, or a CNAME query that fails, fails the lookup. Node 24's
+      // c-ares hands that answer back as an empty list, not ENODATA (a local
+      // server, tests/integration/dns/authoritative-lookup.test.ts), so both
+      // spellings of "no A record" are asked again.
+      const noA = code === dnsCallback.NODATA || (Array.isArray(value) && value.length === 0);
+      if (noA) {
+        const cname = await ask(resolver, 'resolveCname', name);
+        if (Array.isArray(cname.value) && cname.value.length > 0) {
+          return {
+            error:
+              `${name} at ${host} (${ip}) is a CNAME to ${cname.value.join(', ')}, ` +
+              'which this check does not follow',
+          };
+        }
+        if (cname.code && !NO_RECORD_CODES.has(cname.code)) {
+          return { error: `no answer for ${name}'s CNAME at ${host} (${ip}): ${cname.code}` };
+        }
       }
       const records = Array.isArray(value) ? value : [];
       return {
@@ -199,8 +222,6 @@ export async function lookupAuthoritativeA(
     }),
   );
   const errors = results.filter((r) => r.error).map((r) => r.error);
-  if (errors.length > 0) {
-    return { ok: false, reason: `no answer for ${errors.join('; ')}` };
-  }
+  if (errors.length > 0) return { ok: false, reason: errors.join('; ') };
   return { ok: true, zone: ns.zone, answers: results.map((r) => r.answer) };
 }

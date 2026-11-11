@@ -5,8 +5,9 @@
  * providers/index.js#PROVIDERS on the compute axis. Each `DNS_PROVIDERS`
  * row maps a DNS provider id to its backend module (uniform surface:
  * getZones, setupSimple, setupHA, upsertApexAndWildcard, createDNSRecord,
- * deleteDNSRecord, deleteApexAndWildcard — contract-tested), the operator
- * credential env var, and the compute provider whose token it can alias.
+ * deleteDNSRecord, deleteApexAndWildcard, findARecordsAt — contract-tested),
+ * the operator credential env var, and the compute provider whose token it
+ * can alias.
  *
  * Dispatch is throw-on-unknown: 'manual' and unrecognized ids are ERRORS
  * here — callers gate automated-DNS flows behind `hasAutomatedDns(id)`

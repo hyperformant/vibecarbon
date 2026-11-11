@@ -7,6 +7,8 @@
  *   - the wildcard is asked as the literal name `*.<domain>` (the record a
  *     DNS backend wrote), and its own TTL comes back;
  *   - NXDOMAIN and NOERROR-without-records are empty answers;
+ *   - a name that is a CNAME to another zone, which an A query gets back
+ *     alone and c-ares reads as "no A record", fails the lookup;
  *   - a server that never answers fails the lookup, inside its bound
  *     (AUTHORITATIVE_QUERY_TIMEOUT_MS, two tries).
  *
@@ -26,10 +28,11 @@ import {
 
 const A = 1;
 const NS = 2;
+const CNAME = 5;
 
 type Rr =
   | { type: typeof A; address: string; ttl: number }
-  | { type: typeof NS; host: string; ttl: number };
+  | { type: typeof NS | typeof CNAME; host: string; ttl: number };
 /** Lower-cased name -> records; a name absent here is NXDOMAIN. */
 let zone: Record<string, Rr[]> = {};
 /** Names the server never answers. */
@@ -62,7 +65,9 @@ function answer(msg: Buffer): Buffer | null {
   const key = q.name.toLowerCase();
   if (silent.has(key)) return null;
   const known = zone[key];
-  const records = (known ?? []).filter((r) => r.type === q.type);
+  // A name's CNAME answers every query for it, as a nameserver serves one:
+  // with no records of the target here (another zone), the CNAME alone.
+  const records = (known ?? []).filter((r) => r.type === q.type || r.type === CNAME);
   const header = Buffer.alloc(12);
   msg.copy(header, 0, 0, 2); // id
   // QR, AA, RD copied; RCODE 3 (NXDOMAIN) for a name the zone lacks.
@@ -152,6 +157,26 @@ describe('authoritative A lookup over the wire (local DNS server)', () => {
       ['app.example.test', ['198.51.100.7'], 300],
       ['*.app.example.test', [], null],
     ]);
+  });
+
+  it('a wildcard that is a CNAME to another zone fails the lookup: it is not followed', async () => {
+    zone = {
+      'app.example.test': [{ type: A, address: '198.51.100.7', ttl: 300 }],
+      '*.app.example.test': [{ type: CNAME, host: 'edge.cdn.test', ttl: 300 }],
+      'example.test': [{ type: NS, host: 'ns1.example.test', ttl: 3600 }],
+      'ns1.example.test': [{ type: A, address: '127.0.0.1', ttl: 3600 }],
+    };
+    silent = new Set();
+    received.length = 0;
+    const res = await lookup('app.example.test');
+    expect(res).toEqual({
+      ok: false,
+      reason:
+        '*.app.example.test at ns1.example.test (127.0.0.1) is a CNAME to edge.cdn.test, ' +
+        'which this check does not follow',
+    });
+    // The A query came back with the CNAME alone, so the CNAME was asked.
+    expect(received).toContainEqual({ name: '*.app.example.test', type: CNAME });
   });
 
   it('a nameserver that never answers fails the lookup within its bound', async () => {

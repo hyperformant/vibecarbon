@@ -60,6 +60,23 @@ describe('the release is told where DNS points', () => {
     expect(args).toContain('newAddress: clusterIngressIp(deployResult.primary ?? deployResult),');
   });
 
+  it("gets a way to take the address out of the stack, and to list the zone's records", () => {
+    expect(args).toMatch(/\bdropRetired,/);
+    expect(args).toMatch(/\bzoneRecordsAt,/);
+    const gate = src.lastIndexOf('if (isK8sTier(tier)) {', release);
+    const setup = src.slice(gate, release);
+    // An existing stack only (never an empty one made in its place), and the
+    // same surgery every up runs.
+    const drop = setup.slice(setup.indexOf('const dropRetired = async (stackName) => {'));
+    expect(drop).toMatch(/getOrCreateStack\(stackName, async \(\) => \(\{\}\), \{/);
+    expect(drop).toContain('requireExisting: true,');
+    expect(drop).toContain('await dropRetiredStackResources(stack, ingressProviderId);');
+    // Managed DNS only, through the backend that wrote the records.
+    expect(setup).toMatch(
+      /const zoneRecordsAt =\s+hasAutomatedDns\(dnsProvider\) && dnsToken && dnsZoneId\s+\? async \(address\) =>\s+\(await getDnsProvider\(dnsProvider\)\)\.findARecordsAt\(dnsToken, dnsZoneId, address\)\s+: null;/,
+    );
+  });
+
   it('dnsWrite is declared once, before the tiers, and set only by the two DNS writers', () => {
     const decl = src.indexOf('let dnsWrite = null;');
     expect(decl).toBeGreaterThan(0);
@@ -141,5 +158,45 @@ describe('haSidesRecord: each side records its ingress address', () => {
     );
     expect(record.primary).toMatchObject({ ingressIp: '198.51.100.8', floatingIp: '203.0.113.10' });
     expect(record.standby.floatingIp).toBeUndefined();
+  });
+
+  it('a side recorded without its stack keeps its reserved IP by role', () => {
+    // The surgery records a retired address onto a side saved before sides
+    // carried `.stack`; the save must not drop it.
+    const prior = { primary: { floatingIp: '203.0.113.9' }, standby: { stack: 'prod-standby' } };
+    const record = haSidesRecord(
+      {
+        primary: side('prod-primary', '198.51.100.7'),
+        standby: side('prod-standby', '198.51.100.8'),
+      },
+      fallback,
+      prior,
+    );
+    expect(record.primary.floatingIp).toBe('203.0.113.9');
+    expect(record.standby.floatingIp).toBeUndefined();
+    // A side that records another stack is not matched by role.
+    const swapped = haSidesRecord(
+      {
+        primary: side('prod-primary', '198.51.100.7'),
+        standby: side('prod-standby', '198.51.100.8'),
+      },
+      fallback,
+      { primary: { stack: 'prod-other', floatingIp: '203.0.113.9' } },
+    );
+    expect(swapped.primary.floatingIp).toBeUndefined();
+  });
+});
+
+describe('the up records what the surgery takes out', () => {
+  const k3s = readFileSync(
+    fileURLToPath(new URL('../../../src/lib/deploy/k8s/k3s.js', import.meta.url)),
+    'utf8',
+  );
+  it("deployK3s's up hands the addresses to the environment's record, under the operator's name", () => {
+    const up = k3s.indexOf('upStack(options.environment, program, {');
+    const call = k3s.slice(up, k3s.indexOf('requiredOutputs,', up));
+    expect(call).toMatch(
+      /recordRetiredAddresses: \(addresses\) =>\s+recordRetiredReservedIps\(\{\s+environment: options\.operatorEnv \?\? options\.environment,\s+stackName: options\.environment,\s+addresses,/,
+    );
   });
 });

@@ -960,14 +960,20 @@ function pendingStandbyRecord(secondaryRegion, types) {
  * else a reserved IP the same stack still has on record (a DigitalOcean
  * cluster made before 2026-11 whose release failed,
  * k8s/retired-reserved-ip.js), so the next deploy or destroy can still
- * release it. Matched by stack, which a failover's role swap carries along.
+ * release it. Matched by stack, which a failover's role swap carries along,
+ * else by role for a side recorded without one.
  */
 function sideFloatingIp(result, priorHa) {
   if (result.floatingIp) return result.floatingIp;
-  const prior = [priorHa?.primary, priorHa?.standby].find(
+  const byStack = [priorHa?.primary, priorHa?.standby].find(
     (side) => side?.stack && side.stack === result.stack,
   );
-  return prior?.floatingIp;
+  if (byStack) return byStack.floatingIp;
+  // A record saved before sides carried `.stack` (never swapped, since a
+  // failover records it): matched by role, as destroy's backstop does.
+  const role = ['primary', 'standby'].find((r) => String(result.stack ?? '').endsWith(`-${r}`));
+  const byRole = role ? priorHa?.[role] : undefined;
+  return byRole && !byRole.stack ? byRole.floatingIp : undefined;
 }
 
 /**
@@ -2612,16 +2618,39 @@ export async function executeDeployment(args, gatheredConfig) {
   }
 
   // A DigitalOcean k8s cluster made before 2026-11 still has its reserved IP
-  // on record, assigned to the master and out of the stack's state (every up
-  // takes it out, lib/iac/retired-resources.js). Release it by address once
-  // the domain's own nameservers no longer answer with it and the record's
-  // TTL has passed since DNS moved, else keep it for a later deploy; with DNS
-  // kept by hand, say where to point the records (k8s/retired-reserved-ip.js).
-  // After the public probe, which throws on failure; before the save below,
-  // which reads the record fresh and so keeps only an address that stayed. A
-  // no-op on Hetzner and Linode.
+  // on record, assigned to the master (every up takes it out of the stack's
+  // state, lib/iac/retired-resources.js). Release it by address once the
+  // domain's own nameservers no longer answer with it, no A record in a
+  // managed zone has it, and the record's TTL has passed since DNS moved,
+  // else keep it for a later deploy; with DNS kept by hand, say where to
+  // point the records (k8s/retired-reserved-ip.js). After the public probe,
+  // which throws on failure; before the save below, which reads the record
+  // fresh and so keeps only an address that stayed. A no-op on Hetzner and
+  // Linode.
   if (isK8sTier(tier)) {
     const IngressProvider = providerFor(envConfig);
+    const ingressProviderId = providerIdFor(envConfig);
+    // A warm redeploy skips the up, so the stack can still list the address:
+    // the release takes it out first, as every up would, or destroy would
+    // fail on an address already gone.
+    const dropRetired = async (stackName) => {
+      const { dropRetiredStackResources, getOrCreateStack } = await import('../iac/index.js');
+      const stack = await getOrCreateStack(stackName, async () => ({}), {
+        provider: ingressProviderId,
+        providerToken: apiToken,
+        s3Config,
+        projectName: projectConfig.projectName,
+        requireExisting: true,
+      });
+      await dropRetiredStackResources(stack, ingressProviderId);
+    };
+    // Managed DNS: every A record in the zone at the address, through the
+    // same backend and token that wrote the records.
+    const zoneRecordsAt =
+      hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId
+        ? async (address) =>
+            (await getDnsProvider(dnsProvider)).findARecordsAt(dnsToken, dnsZoneId, address)
+        : null;
     await releaseRetiredReservedIps({
       environment,
       Provider: IngressProvider,
@@ -2630,6 +2659,8 @@ export async function executeDeployment(args, gatheredConfig) {
       domain,
       dnsWrite,
       newAddress: clusterIngressIp(deployResult.primary ?? deployResult),
+      dropRetired,
+      zoneRecordsAt,
     });
   }
 

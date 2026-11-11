@@ -13,6 +13,8 @@
  * assigned) is tests/integration/iac/retired-resources-surgery.test.ts; these
  * pin the transform on a DigitalOcean checkpoint's real shape, and the wiring.
  */
+import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const selectStackMock = vi.fn();
@@ -33,6 +35,7 @@ vi.mock('../../../src/lib/cli/progress.js', () => ({
 
 const { dropStackResources } = await import('../../../src/lib/iac/retired-resources.js');
 const { dropRetiredStackResources, upStack } = await import('../../../src/lib/iac/index.js');
+const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
 const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
@@ -155,8 +158,10 @@ describe('RETIRED_STACK_RESOURCES', () => {
 describe('dropStackResources', () => {
   it('both present: removes both, and leaves every other resource as it was', () => {
     const before = doCheckpoint();
-    const { deployment, removed } = dropStackResources(before, RETIRED);
+    const { deployment, removed, addresses } = dropStackResources(before, RETIRED);
     expect(removed.sort()).toEqual([ASSIGN, IP].sort());
+    // The address the IP held, once: the record the release reads it from.
+    expect(addresses).toEqual(['203.0.113.9']);
     expect(urns(deployment)).toEqual([STACK, PROVIDER, FIREWALL, MASTER, DB]);
     // Untouched resources are byte-identical; the input is not mutated.
     expect(deployment.deployment.resources.find((r: { urn: string }) => r.urn === DB)).toEqual(
@@ -182,8 +187,9 @@ describe('dropStackResources', () => {
 
   it('none present: nothing removed, content unchanged', () => {
     const state = doCheckpoint({ ip: false, assignment: false });
-    const { deployment, removed } = dropStackResources(state, RETIRED);
+    const { deployment, removed, addresses } = dropStackResources(state, RETIRED);
     expect(removed).toEqual([]);
+    expect(addresses).toEqual([]);
     expect(deployment).toEqual(state);
   });
 
@@ -261,11 +267,26 @@ function fakeStack(state: unknown, order: string[] = [], over: Record<string, un
   };
 }
 
+/** A pid that has exited. */
+const deadPid = () => spawnSync('true').pid;
+
+/** Pulumi's error for a stack another run holds, as stack-lock.test.ts spells it. */
+const lockedError = (holder: string, at = new Date().toISOString()) =>
+  new Error(
+    'code: 255\n stdout: \n stderr: error: the stack is currently locked by 1 lock(s). Either wait ' +
+      'for the other process(es) to end or delete the lock file with `pulumi cancel`.\n' +
+      `  s3://b/.pulumi/locks/organization/p/s/u.json?endpoint=https://x&region=y: created by ${holder} at ${at}\n`,
+  );
+
 describe('dropRetiredStackResources', () => {
   it('DigitalOcean: imports the state without them, and says so', async () => {
     const stack = fakeStack(doCheckpoint());
-    const removed = await dropRetiredStackResources(stack as never, 'digitalocean');
+    const { removed, addresses, deployment } = await dropRetiredStackResources(
+      stack as never,
+      'digitalocean',
+    );
     expect(removed.sort()).toEqual([ASSIGN, IP].sort());
+    expect(addresses).toEqual(['203.0.113.9']);
     expect(stack.importStack).toHaveBeenCalledOnce();
     expect(urns(stack.importStack.mock.calls[0][0])).toEqual([
       STACK,
@@ -274,21 +295,55 @@ describe('dropRetiredStackResources', () => {
       MASTER,
       DB,
     ]);
+    // The state as it now stands, for the caller to reuse.
+    expect(deployment).toEqual(stack.importStack.mock.calls[0][0]);
     expect(progressLogMock.mock.calls.flat().join('\n')).toContain(
       'ingress and ingress-assignment',
     );
   });
 
-  it('nothing to remove: no import', async () => {
-    const stack = fakeStack(doCheckpoint({ ip: false, assignment: false }));
-    expect(await dropRetiredStackResources(stack as never, 'digitalocean')).toEqual([]);
+  it('records the addresses it takes out before the import, so the record keeps them', async () => {
+    const order: string[] = [];
+    const stack = fakeStack(doCheckpoint(), order);
+    const recordAddresses = vi.fn((addresses: string[]) => {
+      order.push(`record ${addresses.join(',')}`);
+    });
+    await dropRetiredStackResources(stack as never, 'digitalocean', { recordAddresses });
+    expect(order).toEqual(['export', 'record 203.0.113.9', 'import']);
+  });
+
+  it('a recorder that fails stops before the import: the stack keeps the only record', async () => {
+    const stack = fakeStack(doCheckpoint());
+    const recordAddresses = vi.fn(() => {
+      throw new Error('EACCES: .vibecarbon.json');
+    });
+    await expect(
+      dropRetiredStackResources(stack as never, 'digitalocean', { recordAddresses }),
+    ).rejects.toThrow(/Pulumi was not run.*EACCES/s);
     expect(stack.importStack).not.toHaveBeenCalled();
+  });
+
+  it('nothing to remove: no import, no record, and the exported state comes back', async () => {
+    const state = doCheckpoint({ ip: false, assignment: false });
+    const stack = fakeStack(state);
+    const recordAddresses = vi.fn();
+    const result = await dropRetiredStackResources(stack as never, 'digitalocean', {
+      recordAddresses,
+    });
+    expect(result.removed).toEqual([]);
+    expect(result.deployment).toEqual(state);
+    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(recordAddresses).not.toHaveBeenCalled();
   });
 
   it('a provider with nothing retired: not even an export', async () => {
     const stack = fakeStack(doCheckpoint());
     for (const id of ['hetzner', 'linode', 'vultr', 'scaleway']) {
-      expect(await dropRetiredStackResources(stack as never, id)).toEqual([]);
+      expect(await dropRetiredStackResources(stack as never, id)).toEqual({
+        removed: [],
+        addresses: [],
+        deployment: null,
+      });
     }
     expect(stack.exportStack).not.toHaveBeenCalled();
   });
@@ -311,6 +366,32 @@ describe('dropRetiredStackResources', () => {
       /state file contains errors/,
     );
   });
+
+  // The import takes the stack's lock, like every other write.
+  it('a lock left by a dead run on this machine is cleared, and the surgery goes on', async () => {
+    const importStack = vi
+      .fn()
+      .mockRejectedValueOnce(lockedError(`u@${hostname()} (pid ${deadPid()})`))
+      .mockResolvedValueOnce(undefined);
+    const cancel = vi.fn(async () => {});
+    const stack = fakeStack(doCheckpoint(), [], { importStack, cancel });
+    const { removed } = await dropRetiredStackResources(stack as never, 'digitalocean');
+    expect(removed.sort()).toEqual([ASSIGN, IP].sort());
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(importStack).toHaveBeenCalledTimes(2);
+  });
+
+  it('a lock a live run holds stops with StackHeldError, unchanged, and is never cleared', async () => {
+    const importStack = vi.fn(async () => {
+      throw lockedError('someone@another-laptop (pid 123)');
+    });
+    const cancel = vi.fn(async () => {});
+    const stack = fakeStack(doCheckpoint(), [], { importStack, cancel });
+    const err = await dropRetiredStackResources(stack as never, 'digitalocean').catch((e) => e);
+    expect(err).toBeInstanceOf(StackHeldError);
+    expect(err.message).toMatch(/in use by another run: someone@another-laptop \(pid 123\)/);
+    expect(cancel).not.toHaveBeenCalled();
+  });
 });
 
 describe('upStack runs the surgery before the refresh and the up', () => {
@@ -322,6 +403,32 @@ describe('upStack runs the surgery before the refresh and the up', () => {
     expect(order.indexOf('import')).toBeGreaterThan(-1);
     expect(order.indexOf('import')).toBeLessThan(order.indexOf('refresh'));
     expect(order.indexOf('refresh')).toBeLessThan(order.indexOf('up'));
+  });
+
+  it('DigitalOcean: one export serves the surgery and the refresh check', async () => {
+    const order: string[] = [];
+    const stack = fakeStack(doCheckpoint(), order);
+    selectStackMock.mockResolvedValue(stack);
+    await upStack('prod', () => ({}), { projectName: 'acme', provider: 'digitalocean' });
+    // The read after the refresh is the Vultr repair's, on every provider.
+    const beforeRefresh = order.slice(0, order.indexOf('refresh'));
+    expect(beforeRefresh.filter((op) => op === 'export')).toHaveLength(1);
+    expect(stack.refresh).toHaveBeenCalledOnce();
+  });
+
+  it('hands the addresses the surgery takes out to the caller before the import', async () => {
+    const order: string[] = [];
+    const stack = fakeStack(doCheckpoint(), order);
+    selectStackMock.mockResolvedValue(stack);
+    const recordRetiredAddresses = vi.fn((addresses: string[]) => {
+      order.push(`record ${addresses.join(',')}`);
+    });
+    await upStack('prod', () => ({}), {
+      projectName: 'acme',
+      provider: 'digitalocean',
+      recordRetiredAddresses,
+    });
+    expect(order.slice(0, 3)).toEqual(['export', 'record 203.0.113.9', 'import']);
   });
 
   it('a failed surgery stops before the refresh: Pulumi never runs', async () => {

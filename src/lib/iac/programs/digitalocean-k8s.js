@@ -36,12 +36,17 @@
  *     program ran, and it failed the standby's deploy in run 42401297085
  *     with `422 Droplet already has a pending event`, on an event the API
  *     never shows. A cluster made before carries one in its stack and its
- *     record: the next deploy's `pulumi up` deletes it from the stack, and
- *     the deploy then releases the address itself
- *     (lib/deploy/k8s/retired-reserved-ip.js), because the provider's
- *     delete left it allocated and billing on every `pulumi destroy` ever
- *     observed (the upstream defects are written up in git history, at this
- *     file's former `digitalocean.ReservedIp('ingress')`).
+ *     record. Pulumi never deletes it: before every up and preview, and
+ *     before the deploy releases the address, the reserved IP and its
+ *     assignment are taken out of the stack's state
+ *     (lib/iac/retired-resources.js), so the address stays assigned to the
+ *     master and keeps serving while DNS moves. The deploy then releases it
+ *     by address once nothing in DNS points at it
+ *     (lib/deploy/k8s/retired-reserved-ip.js); Pulumi's own delete would
+ *     have cut the domain off before DNS moved, and the provider's delete
+ *     left it allocated and billing on every `pulumi destroy` ever observed
+ *     (the upstream defects are written up in git history, at this file's
+ *     former `digitalocean.ReservedIp('ingress')`).
  *   - No `PlacementGroup` equivalent — DO has no droplet spread/
  *     anti-affinity primitive (M3 dossier §8-repo). Workers are NOT spread
  *     across failure domains the way Hetzner's workers are.

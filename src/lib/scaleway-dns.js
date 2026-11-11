@@ -249,6 +249,21 @@ function matching(records, relativeName, fqdn, type) {
 }
 
 /**
+ * A record's name as the zone stores it, fully qualified: the apex spelling
+ * ('@', '') is the zone itself, a name already under the zone stays.
+ * @param {string} name
+ * @param {string} zoneName
+ * @returns {string}
+ */
+function relativeToFqdn(name, zoneName) {
+  const clean = String(name ?? '').replace(/\.$/, '');
+  const zone = String(zoneName).replace(/\.$/, '');
+  if (clean === '@' || clean === '' || clean === zone) return zone;
+  if (clean.endsWith(`.${zone}`)) return clean;
+  return `${clean}.${zone}`;
+}
+
+/**
  * TXT payloads travel QUOTED on this API (`"token"`, not `token`) — the shape
  * a live add was verified in. Everything else (A/AAAA/CNAME) is sent verbatim.
  * Idempotent: an already-quoted value is left alone.
@@ -360,6 +375,26 @@ export async function readARecord(apiToken, zoneId, name) {
   const records = await getRecords(apiToken, zoneId);
   const fqdn = String(name).replace(/\.$/, '');
   return matching(records, fqdnToRelative(name, zoneId), fqdn, 'A').map((r) => r.data);
+}
+
+/**
+ * Every A record in the zone whose value is `address`, by fully qualified
+ * name. The deploy asks before it releases an address the domain used to
+ * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
+ * apex and the wildcard, one the user added, would hand its name to whoever
+ * the address goes to next. Throws when the zone's records cannot be listed.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone identity
+ * @param {string} address - an IPv4 address
+ * @returns {Promise<string[]>} sorted, each name once
+ */
+export async function findARecordsAt(apiToken, zoneId, address) {
+  const records = await getRecords(apiToken, zoneId);
+  const names = records
+    .filter((r) => r.type === 'A' && r.data === address)
+    .map((r) => relativeToFqdn(r.name, zoneId));
+  return [...new Set(names)].sort();
 }
 
 /**

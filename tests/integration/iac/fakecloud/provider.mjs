@@ -14,7 +14,10 @@
  *   - fakecloud:index:ReservedIp gets an address for an id;
  *   - fakecloud:index:ReservedIpAssignment records `assignedTo` on its IP
  *     when created and clears it when deleted, so a test can see whether
- *     Pulumi ever unassigned the address.
+ *     Pulumi ever unassigned the address. Reading or deleting one whose IP
+ *     is gone (released by address, outside Pulumi) fails with a 404, as
+ *     DigitalOcean's API answers for an address no longer on the account:
+ *     the stack that still lists it can then neither refresh nor destroy.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as provider from '@pulumi/pulumi/provider/index.js';
@@ -37,6 +40,17 @@ const typeOf = (urn) => String(urn).split('::')[2].split('$').pop();
 const thingsOf = (cloud, type) => {
   cloud.things[type] ??= {};
   return cloud.things[type];
+};
+
+/** The reserved IP an assignment names, or DigitalOcean's 404 for one released. */
+const ipOrNotFound = (cloud, assignment) => {
+  const ip = thingsOf(cloud, RESERVED_IP)[assignment.ipAddress];
+  if (!ip) {
+    throw new Error(
+      `GET /v2/reserved_ips/${assignment.ipAddress}: 404 The resource you were accessing could not be found.`,
+    );
+  }
+  return ip;
 };
 
 const fakecloud = {
@@ -92,6 +106,7 @@ const fakecloud = {
     }
     const live = thingsOf(cloud, type)[id];
     if (!live) return {};
+    if (type === ASSIGNMENT) ipOrNotFound(cloud, live);
     const { assignedTo: _assignedTo, ...stored } = live;
     const inputs = { ...stored };
     if (type === RESERVED_IP) delete inputs.ipAddress;
@@ -118,8 +133,7 @@ const fakecloud = {
     } else {
       if (type === ASSIGNMENT) {
         const assignment = thingsOf(cloud, ASSIGNMENT)[id];
-        const ip = assignment && thingsOf(cloud, RESERVED_IP)[assignment.ipAddress];
-        if (ip) ip.assignedTo = null;
+        if (assignment) ipOrNotFound(cloud, assignment).assignedTo = null;
       }
       delete thingsOf(cloud, type)[id];
     }
