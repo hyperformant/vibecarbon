@@ -6,23 +6,30 @@
  * every other command reads it through backupsTargetOf, and nothing else
  * derives a backups name. That only holds while:
  *   (a) nothing under src/ or tests/e2e/ but backups-bucket.js reads the
- *       record field itself (`.backupS3`, or `['backupS3']`): restore, backup,
- *       status, destroy, failover, scale, configure and the e2e checks all take
- *       the bucket, its region and its endpoint from backupsTargetOf, so an old
- *       record without a region or endpoint means one thing everywhere.
- *       Writers use the `backupS3:` key and env-identity.js lists the field
- *       name; neither matches. Comment lines are not code and are skipped.
+ *       record field itself (`.backupS3`, `['backupS3']`, or a destructuring
+ *       `const { backupS3 } = envConfig`): restore, backup, status, destroy,
+ *       failover, scale, configure and the e2e checks all take the bucket, its
+ *       region and its endpoint from backupsTargetOf, so an old record without
+ *       a region or endpoint means one thing everywhere. Writers use the
+ *       `backupS3:` key and env-identity.js lists the field name; neither
+ *       matches. env-identity.js's one destructuring of the field is allowed
+ *       by its exact pattern (DESTRUCTURE_ALLOWED says why). Function
+ *       parameters are not checked (scale.js's option `{ backupS3 = null }`
+ *       is a resolved config, not the record), except a first parameter with
+ *       a default, which reads like an assignment. Comment lines are not code
+ *       and are skipped.
  *   (b) a backups NAME is spelled only by its definitions in s3-base.js and by
  *       backups-bucket.js: `deriveRegionBackupsBucketName(` and a
  *       `deriveProjectBucketName(` naming 'backups' appear nowhere else, and
  *       `chooseBackupsBucket(` is called only by the deploy (orchestrator.js)
  *       and backups-bucket.js itself.
  *   (c) nothing under src/ builds a backups S3 config by spreading an uploads
- *       config with the bucket swapped (`{ ...s3Config, bucket: … }`, the
- *       shorthand `{ ...s3Config, bucket }`, or `bucket` further along the
- *       same object): that keeps the uploads bucket's region and endpoint, so
- *       a backups bucket in another region is asked at the wrong host.
- *       backupStorageConfig is the one way to talk to the backups bucket.
+ *       config with the bucket swapped: an object literal with a
+ *       `...s3Config` spread anywhere in it and a `bucket` key (or the
+ *       shorthand `bucket`) at its own level after the spread, past any
+ *       nested-brace value. That keeps the uploads bucket's region and
+ *       endpoint, so a backups bucket in another region is asked at the wrong
+ *       host. backupStorageConfig is the one way to talk to the backups bucket.
  *   (d) `loadBackupS3Config`, the old raw reader of the record, is gone from
  *       src/ and tests/ for good.
  *   (e) both sides of a k8s-ha pair use the environment's one backups bucket:
@@ -55,11 +62,22 @@ const DEPLOY = 'src/lib/deploy/orchestrator.js';
 const K8S_HA = 'src/lib/deploy/effects/k8s-ha.js';
 const CENSUS = 'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts';
 const RAW_RECORD_READ = /\.backupS3\b|\[\s*['"]backupS3['"]\s*\]/;
-// `[^{}]*` keeps the match inside the one object literal: a `bucket` key in
-// a nested object (`appKey: { bucket }`) is not the spread's.
-const SWAPPED_BUCKET_SPREAD = /\{\s*\.\.\.[\w.?]*s3Config\s*,[^{}]*\bbucket\s*[:,}]/;
-// Built so this file never spells the name it hunts.
-const OLD_READER = ['loadBackup', 'S3Config'].join('');
+// The record field as a key of a destructuring pattern, at any depth; a
+// binding named like it (`{ bucket: backupS3 }`) follows a `:` and is not one.
+const RECORD_KEY_IN_PATTERN = /[{,]\s*backupS3\s*[:,}=]/;
+/** The one destructuring of the record field allowed outside backups-bucket.js. */
+const DESTRUCTURE_ALLOWED = [
+  {
+    file: 'src/lib/env-identity.js',
+    pattern: /^\{\s*backupS3:\s*_purged,\s*\.\.\.kept\s*\}$/,
+    why: 'resolveEnvSeed takes the field out of a purged seed by name, so the rebuild chooses its bucket as a new environment would; it drops the record and never reads where the backups are',
+  },
+];
+// An uploads config spread into an object literal (`...s3Config`,
+// `...ctx.s3Config`); swappedBucketSpreads checks the keys after it.
+const UPLOADS_SPREAD = /\.\.\.[\w.?]*s3Config\b/g;
+// Arm (d) skips this file, which names the reader in its header.
+const OLD_READER = 'loadBackupS3Config';
 const PER_SIDE_STORAGE_KEY = /(^|[{,\s])(backupTarget|s3Config|backupS3Config)\s*[:,}]/m;
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -93,11 +111,50 @@ function codeLines(text: string): string {
     .join('\n');
 }
 
+/** The text from the `{` at `open` through its matching `}`. */
+function balancedBraces(text: string, open: number): string {
+  let depth = 0;
+  let end = open;
+  for (; end < text.length; end++) {
+    if (text[end] === '{') depth++;
+    else if (text[end] === '}' && --depth === 0) break;
+  }
+  return text.slice(open, end + 1);
+}
+
+/**
+ * Every object destructuring pattern in `code` that is assigned from
+ * something: `const|let|var { … } = …` and `({ … } = …)`, braces balanced.
+ * A call's object argument and an arrow's parameter are followed by `)`, so
+ * neither counts.
+ */
+function destructuringPatterns(code: string): string[] {
+  const out: string[] = [];
+  for (const m of code.matchAll(/(?:\b(?:const|let|var)\s*|\(\s*)\{/g)) {
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const pattern = balancedBraces(code, open);
+    if (/^\s*=(?![=>])/.test(code.slice(open + pattern.length))) out.push(pattern);
+  }
+  return out;
+}
+
+/** Does `code` destructure the record field, other than the allowed drop in `file`? */
+function destructuresRecord(file: string, code: string): boolean {
+  return destructuringPatterns(code).some(
+    (pattern) =>
+      RECORD_KEY_IN_PATTERN.test(pattern) &&
+      !DESTRUCTURE_ALLOWED.some((a) => a.file === file && a.pattern.test(pattern)),
+  );
+}
+
 /** Files under src/ or tests/e2e/, other than backups-bucket.js, that read the record field. */
 function rawRecordReaders(root: string): string[] {
   return files(root)
     .filter(([f]) => f !== OWNER)
-    .filter(([, text]) => RAW_RECORD_READ.test(codeLines(text)))
+    .filter(([f, text]) => {
+      const code = codeLines(text);
+      return RAW_RECORD_READ.test(code) || destructuresRecord(f, code);
+    })
     .map(([f]) => f)
     .sort();
 }
@@ -135,11 +192,69 @@ function chooserCallers(root: string): string[] {
     .sort();
 }
 
+/** An entry of an object literal that sets `bucket` (`bucket: …`, or the shorthand). */
+const isBucketKey = (entry: string) =>
+  /^\s*['"]?bucket['"]?\s*(:|$)/.test(entry.replace(/\/\/[^\n]*/g, ''));
+
+/**
+ * Does an object literal in `code` spread an uploads config and then set
+ * `bucket` at its own level? The literal is the nearest unclosed `{` before
+ * the spread (a `(` or `[` first means a call or an array, no object). Its
+ * entries after the spread are split at its own commas; a nested value's
+ * braces, brackets and parentheses are skipped whole, so a `bucket` inside
+ * `appKey: { bucket }` is that object's, and a `bucket` after such a value is
+ * still seen.
+ */
+function hasSwappedBucketSpread(code: string): boolean {
+  for (const m of code.matchAll(UPLOADS_SPREAD)) {
+    const at = m.index ?? 0;
+    let depth = 0;
+    let inObject = false;
+    for (let i = at - 1; i >= 0; i--) {
+      const ch = code[i];
+      if (ch === '}' || ch === ')' || ch === ']') depth++;
+      else if (ch === '{' || ch === '(' || ch === '[') {
+        if (depth === 0) {
+          inObject = ch === '{';
+          break;
+        }
+        depth--;
+      }
+    }
+    if (!inObject) continue;
+    let level = 0;
+    let entry = '';
+    for (let i = at + m[0].length; i < code.length; i++) {
+      const ch = code[i];
+      if (ch === '{' || ch === '(' || ch === '[') {
+        level++;
+        continue;
+      }
+      if (ch === '}' || ch === ')' || ch === ']') {
+        if (level === 0) {
+          if (isBucketKey(entry)) return true;
+          break;
+        }
+        level--;
+        continue;
+      }
+      if (level > 0) continue;
+      if (ch === ',') {
+        if (isBucketKey(entry)) return true;
+        entry = '';
+      } else {
+        entry += ch;
+      }
+    }
+  }
+  return false;
+}
+
 /** Files under src/ that spread an uploads config with the bucket swapped. */
 function swappedBucketSpreads(root: string): string[] {
   return files(root)
     .filter(([f]) => f.startsWith('src/'))
-    .filter(([, text]) => SWAPPED_BUCKET_SPREAD.test(codeLines(text)))
+    .filter(([, text]) => hasSwappedBucketSpread(codeLines(text)))
     .map(([f]) => f)
     .sort();
 }
@@ -291,6 +406,14 @@ describe('backups bucket single resolver census', () => {
       plant('src/f.js', 'const bucket = backup.bucket;\nread({ ...s3Config, bucket });\n');
       plant('src/g.js', 'read({ ...ctx.s3Config, region: r,\n  bucket: b });\n');
       plant('src/h.js', 'read({ ...s3Config, endpoint, bucket, region });\n');
+      // A spread that is not first, a bucket after a nested-brace value, and
+      // one after a second spread.
+      plant('src/l.js', 'read({ region, ...s3Config, bucket });\n');
+      plant('src/m.js', 'read({ ...s3Config, appKey: { id: k }, bucket: b });\n');
+      plant(
+        'src/n.js',
+        'read({\n  ...base,\n  ...ctx.s3Config,\n  retry: { n: 1 },\n  bucket,\n});\n',
+      );
       // The one builder, a spread that keeps the bucket, a nested object's
       // bucket, look-alike keys, a comment, and tests/e2e are fine.
       plant('src/d.js', 'const cfg = backupStorageConfig(s3Config, backupTarget);\n');
@@ -299,6 +422,12 @@ describe('backups bucket single resolver census', () => {
       plant('src/j.js', 'const cfg = { ...s3Config, stateBucket: s, bucketPin: p };\n');
       plant('src/k.js', '/**\n * never `{ ...s3Config, bucket }`\n */\nexport const x = 1;\n');
       plant('tests/e2e/x.ts', 'const cfg = { ...s3Config, bucket: other };\n');
+      // A bucket set before the spread is overwritten by it, a spread into a
+      // call or an array is no object's, and a nested object's spread keeps
+      // its own keys.
+      plant('src/o.js', 'const cfg = { bucket: b, ...s3Config, region };\n');
+      plant('src/p.js', 'log(...s3Config, bucket);\nconst a = [...s3Configs, bucket];\n');
+      plant('src/q.js', 'const cfg = { outer: { ...s3Config, region }, bucket: b };\n');
       expect(swappedBucketSpreads(tmp)).toEqual([
         'src/a.js',
         'src/b.js',
@@ -306,6 +435,9 @@ describe('backups bucket single resolver census', () => {
         'src/f.js',
         'src/g.js',
         'src/h.js',
+        'src/l.js',
+        'src/m.js',
+        'src/n.js',
       ]);
     });
 
@@ -331,6 +463,35 @@ describe('backups bucket single resolver census', () => {
         'src/lib/y.js',
         'tests/e2e/checks/z.ts',
       ]);
+    });
+
+    it('catches the record destructured out of an object, and lets env-identity drop it by name', () => {
+      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      plant('src/lib/a.js', 'const { backupS3 } = envConfig;\n');
+      plant('src/lib/b.js', 'const {\n  s3,\n  backupS3: record,\n} = env;\n');
+      plant('src/lib/c.js', 'let record;\n({ backupS3: record } = cfg);\n');
+      plant('src/lib/d.js', 'const { s3: { region }, backupS3 } = env;\n');
+      plant('tests/e2e/checks/e.ts', 'let { backupS3 = null } = env;\n');
+      // env-identity drops the field from a purged seed by name; a writer, a
+      // look-alike name, an arrow's parameter and tests/unit are fine.
+      plant('src/lib/env-identity.js', 'const { backupS3: _purged, ...kept } = identity;\n');
+      plant('src/lib/f.js', 'save({ backupS3: target });\nprepare(ctx, { backupS3 });\n');
+      plant('src/lib/g.js', 'const { backupS3Config } = ctx;\n');
+      plant('src/lib/h.js', 'const pick = ({ backupS3 }) => backupS3;\n');
+      plant('tests/unit/a.test.ts', 'const { backupS3 } = env;\n');
+      expect(rawRecordReaders(tmp)).toEqual([
+        'src/lib/a.js',
+        'src/lib/b.js',
+        'src/lib/c.js',
+        'src/lib/d.js',
+        'tests/e2e/checks/e.ts',
+      ]);
+      // The allowance is that one drop, not the file.
+      plant(
+        'src/lib/env-identity.js',
+        'const { backupS3: _purged, ...kept } = identity;\nconst { backupS3 } = live;\n',
+      );
+      expect(rawRecordReaders(tmp)).toContain('src/lib/env-identity.js');
     });
 
     it('catches the old raw reader anywhere in src/ or tests/', () => {

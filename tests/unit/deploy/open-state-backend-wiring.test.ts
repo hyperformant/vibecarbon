@@ -6,6 +6,9 @@
  * storage setup, and a first deploy into a state bucket that already exists,
  * pay nothing.
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -194,7 +197,12 @@ async function planCtx(deployMode: string) {
 const MODES = ['compose-ha', 'kubernetes'];
 
 describe('the HA plan asks to open the state backend', () => {
+  // Each case runs in a scratch project dir: the deploy's command log goes to
+  // <cwd>/.vibecarbon/logs, never the repo's.
+  let scratch = '';
   beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'vc-open-state-wiring-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(scratch);
     store.current = projectConfigStore({
       projectName: 'wireapp',
       bucketSalt: 'abc123',
@@ -205,7 +213,10 @@ describe('the HA plan asks to open the state backend', () => {
     run.skipStorageSetup = false;
     run.buckets.length = 0;
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(scratch, { recursive: true, force: true });
+  });
 
   it.each(MODES)('%s: when this run created the state bucket', async (mode) => {
     const ctx = await planCtx(mode);
