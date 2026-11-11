@@ -1389,13 +1389,13 @@ ${runCmd} test:prepush
   // This project's own Pulumi state passphrase: the value into .env.local
   // only (never .env, which ships to servers), its fingerprint into the
   // .vibecarbon.json the initial commit captures. A value inherited from the
-  // shell belongs to another project; a new project makes its own.
+  // shell was not made for this project, so a new project makes its own.
   if (
     readOperatorVar(STATE_PASSPHRASE_KEY).value &&
     !getBootstrappedKeys().has(STATE_PASSPHRASE_KEY)
   ) {
     p.log.warn(
-      `Your shell exports ${STATE_PASSPHRASE_KEY}, which belongs to another project. This project made its own in .env.local. Unset the shell one before you deploy: a shell value wins over .env.local and won't match this project.`,
+      `Your shell exports ${STATE_PASSPHRASE_KEY}, which vibecarbon didn't make for this new project. This project made its own in .env.local. Unset the shell one before you deploy: a shell value wins over .env.local and won't match.`,
     );
   }
   delete process.env[STATE_PASSPHRASE_KEY];

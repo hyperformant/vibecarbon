@@ -234,17 +234,14 @@ export async function ensureStatePassphrase(projectDir) {
   let generated = false;
   updateProjectConfig((manifest) => {
     if (manifest.stateEncryption?.fingerprint) return;
-    // Never overwrite a stored passphrase (a process that missed it, or an
-    // empty shell export, can reach here): record its fingerprint and let the
-    // re-check below adopt it.
-    const stored = loadEnvVariables(dir)[STATE_PASSPHRASE_KEY];
-    if (stored) {
-      manifest.stateEncryption = {
-        ...manifest.stateEncryption,
-        fingerprint: statePassphraseFingerprint(stored),
-      };
-      return;
-    }
+    // Never overwrite a stored passphrase (a writer that landed after the
+    // look above can reach here): record nothing and let the re-check below
+    // adopt it, shape check and fingerprint included. Read the way that look
+    // does, trimmed and unquoted, so a value of only spaces is not "stored".
+    const stored = readOperatorVar(STATE_PASSPHRASE_KEY, {
+      env: { [STATE_PASSPHRASE_KEY]: loadEnvVariables(dir)[STATE_PASSPHRASE_KEY] },
+    }).value;
+    if (stored) return;
     // SECURITY: .env.local only (localOnly), never .env, which ships to servers.
     setEnvVar(STATE_PASSPHRASE_KEY, fresh, dir, { localOnly: true });
     manifest.stateEncryption = {

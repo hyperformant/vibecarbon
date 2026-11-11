@@ -121,4 +121,16 @@ describe('upgrade backfills the state passphrase', () => {
       statePassphraseFingerprint(stored),
     );
   });
+
+  it('a value of only spaces is no passphrase: dry and real both say a new one is made', async () => {
+    writeFileSync(
+      join(dir, '.env.local'),
+      'PROJECT_NAME=demo\nVIBECARBON_STATE_PASSPHRASE="   "\n',
+    );
+    vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', '');
+
+    expect(await ensureStatePassphraseForUpgrade(dir, { dryRun: true })).toBe('generated');
+    expect(await ensureStatePassphraseForUpgrade(dir)).toBe('generated');
+    expect(valueIn('.env.local')?.length).toBeGreaterThanOrEqual(43);
+  });
 });

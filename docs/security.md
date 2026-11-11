@@ -221,17 +221,17 @@ Scaleway could mint a one-bucket key only if the deploy key held org-wide IAM wr
 
 ### State encryption
 
-vibecarbon keeps a record of what it built (servers, networks, firewalls and volumes) in a Pulumi state file in your object storage. Pulumi can encrypt the secret values in that file with a passphrase. Every project has its own passphrase, so one project's passphrase never opens another project's state. Today the passphrase protects the values Pulumi marks secret; moving the remaining token-bearing values under it is planned.
+vibecarbon keeps a record of what it built (servers, networks, firewalls, SSH keys and IP addresses) in a Pulumi state file in your object storage. Pulumi can encrypt the secret values in that file with a passphrase. Every project has its own passphrase, so one project's passphrase never opens another project's state. Today the passphrase protects the values Pulumi marks secret; moving the remaining token-bearing values under it is planned.
 
 **Where it lives.** The passphrase is `VIBECARBON_STATE_PASSPHRASE` in your project's `.env.local`. That file is git-ignored. vibecarbon never writes this value to `.env`, uploads it to GitHub or ships it to a server, and it is stripped from bundles. `vibecarbon create` makes it. A project from an older version gets one the first time `upgrade`, `deploy`, `scale`, `failover` or a Kubernetes `destroy` runs. Keep a copy in your password manager: `.env.local` is the only place it is stored.
 
 **What `.vibecarbon.json` records.** Only a fingerprint of the passphrase (`stateEncryption.fingerprint`, a short hash), never the passphrase itself. Commit it. The fingerprint is how vibecarbon tells you "this isn't the passphrase this project was set up with" before it touches your state, instead of failing halfway through a deploy.
 
-**A teammate** pulls the repo, then copies the passphrase from your password manager into their `.env.local` as `VIBECARBON_STATE_PASSPHRASE=<value>`. A value exported in their shell works too, and wins over `.env.local`. If it doesn't match the committed fingerprint, vibecarbon says so and stops.
+**A teammate.** They pull the repo, then copy the passphrase from your password manager into their `.env.local` as `VIBECARBON_STATE_PASSPHRASE=<value>`. A value exported in their shell works too, and wins over `.env.local`. If it doesn't match the committed fingerprint, vibecarbon says so and stops.
 
 **Older projects.** Before this, every project's state was encrypted with an empty passphrase. A stack that holds encrypted values (Linode and Vultr keep server passwords there) is re-encrypted with your project's passphrase the first time a command opens it, and vibecarbon tells you once. A stack with none (Hetzner, DigitalOcean, Scaleway) reads as it is and moves to the new passphrase on its next deploy, without a notice. Once a stack has moved, vibecarbon 0.52 and earlier can't open it, so upgrade everyone who deploys this project together.
 
-**If you lose it.** `vibecarbon status` and a compose `vibecarbon destroy` never open the state, so they keep working. A Kubernetes destroy can't read the state without the passphrase, so it removes the project's servers through your provider's API and lists anything left for you to delete (DigitalOcean and Linode also sweep the project's leftovers themselves). The state itself can't be read again, so to start over:
+**If you lose it.** `vibecarbon status` and a compose `vibecarbon destroy` never open the state, so they keep working. A Kubernetes destroy can't read the state without the passphrase, so it removes the project's servers through your provider's API and lists anything left for you to delete (on DigitalOcean and Linode, vibecarbon also sweeps the project's leftovers itself). The state itself can't be read again, so to start over:
 
 1. Delete the `stateEncryption` entry from `.vibecarbon.json`.
 2. Run `vibecarbon destroy <env>` for each environment you deployed with the old passphrase (once more if it asks). It removes the unreadable record.

@@ -206,7 +206,10 @@ export async function ensureStatePassphraseForUpgrade(cwd, { dryRun = false } = 
     }
     if (hadFingerprint) return null;
     const hasValue = Boolean(
-      readOperatorVar(STATE_PASSPHRASE_KEY).value || loadEnvVariables(cwd)[STATE_PASSPHRASE_KEY],
+      readOperatorVar(STATE_PASSPHRASE_KEY).value ||
+        readOperatorVar(STATE_PASSPHRASE_KEY, {
+          env: { [STATE_PASSPHRASE_KEY]: loadEnvVariables(cwd)[STATE_PASSPHRASE_KEY] },
+        }).value,
     );
     return hasValue ? 'recorded' : 'generated';
   }

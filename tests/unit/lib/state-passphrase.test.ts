@@ -12,7 +12,11 @@ vi.mock('@clack/prompts', () => ({ log: { info: vi.fn(), warn: vi.fn() } }));
 // takes before the config lock), as if another process landed in between.
 vi.mock('../../../src/lib/config.js', async (importActual) => {
   const actual = await importActual<typeof import('../../../src/lib/config.js')>();
-  return { ...actual, readProjectConfigFile: vi.fn(actual.readProjectConfigFile) };
+  return {
+    ...actual,
+    readProjectConfigFile: vi.fn(actual.readProjectConfigFile),
+    updateProjectConfig: vi.fn(actual.updateProjectConfig),
+  };
 });
 
 import * as p from '@clack/prompts';
@@ -158,6 +162,48 @@ describe('state passphrase', () => {
       expect(findStatePassphraseProblem(dir)).toBeNull();
       writeFileSync(join(dir, '.env.local'), `${KEY}=short\n`);
       expect(findStatePassphraseProblem(dir)?.reason).toBe('invalid');
+    });
+
+    it('a value of only spaces is not stored: a fresh passphrase and its fingerprint replace it', async () => {
+      writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+      writeFileSync(join(dir, '.env.local'), `${KEY}="   "\n`);
+      const made = await ensureStatePassphrase(dir);
+      expect(made).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(made));
+      expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toContain(`${KEY}=${made}`);
+    });
+
+    describe('a writer landing .env.local between the look and the config lock', () => {
+      const race = (line: string) => {
+        writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+        const real = vi.mocked(configModule.updateProjectConfig).getMockImplementation();
+        vi.mocked(configModule.updateProjectConfig).mockImplementationOnce((...args) => {
+          writeFileSync(join(dir, '.env.local'), `${line}\n`);
+          return (real as typeof configModule.updateProjectConfig)(...args);
+        });
+      };
+
+      it('a valid value is adopted, never overwritten', async () => {
+        const racer = 'R'.repeat(43);
+        race(`${KEY}=${racer}`);
+        await expect(ensureStatePassphrase(dir)).resolves.toBe(racer);
+        expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(`${KEY}=${racer}\n`);
+        expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(racer));
+      });
+
+      it('an untrimmed value is fingerprinted as the trimmed one', async () => {
+        const racer = 'R'.repeat(43);
+        race(`${KEY}="  ${racer}  "`);
+        await expect(ensureStatePassphrase(dir)).resolves.toBe(racer);
+        expect(manifest().stateEncryption.fingerprint).toBe(statePassphraseFingerprint(racer));
+      });
+
+      it('a weak value is refused and never fingerprinted', async () => {
+        race(`${KEY}=weak`);
+        await expect(ensureStatePassphrase(dir)).rejects.toMatchObject({ reason: 'invalid' });
+        expect(manifest().stateEncryption).toBeUndefined();
+        expect(readFileSync(join(dir, '.env.local'), 'utf-8')).toBe(`${KEY}=weak\n`);
+      });
     });
 
     it('with nothing stored it still makes one', async () => {
