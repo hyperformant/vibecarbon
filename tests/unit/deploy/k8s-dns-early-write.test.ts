@@ -216,7 +216,7 @@ describe('createK8sDnsWriter.finish reports the write', () => {
  * k8s). The writer persists the IP before writing the record, so a deploy
  * that fails afterwards leaves a record destroy removes. The floating IP is
  * persisted beside it only where the cluster has one: destroy's backstop
- * releases a recorded floatingIp by address, and must never be handed a
+ * releases a recorded floatingIp by address (reservedIps), and must never be handed a
  * DigitalOcean master's own address.
  */
 describe('createK8sDnsWriter persists the target before writing', () => {
@@ -243,7 +243,10 @@ describe('createK8sDnsWriter persists the target before writing', () => {
       envConfig,
       projectConfig: { projectName: 'quorum' },
     });
-    return { ownedIps: plan.ownedIps, releases: backstop.floatingIp };
+    return {
+      ownedIps: plan.ownedIps,
+      releases: backstop.reservedIps.map((r: { address: string }) => r.address),
+    };
   };
 
   it('the floating IP is on disk before the early write starts', async () => {
@@ -257,7 +260,7 @@ describe('createK8sDnsWriter persists the target before writing', () => {
     // destroy, reading what was persisted after a failed deploy, owns it.
     const { ownedIps, releases } = await destroyPlanFor(persisted[0]);
     expect(ownedIps).toContain('203.0.113.9');
-    expect(releases).toBe('203.0.113.9');
+    expect(releases).toEqual(['203.0.113.9']);
   });
 
   it('no floating IP (DigitalOcean): the master IP is on disk as ingressIp only, before the write', async () => {
@@ -271,7 +274,7 @@ describe('createK8sDnsWriter persists the target before writing', () => {
     // release: the master's own address is never treated as a reserved IP.
     const { ownedIps, releases } = await destroyPlanFor(persisted[0]);
     expect(ownedIps).toContain('198.51.100.7');
-    expect(releases).toBeNull();
+    expect(releases).toEqual([]);
   });
 
   it('a target that could not be persisted is not written early', async () => {

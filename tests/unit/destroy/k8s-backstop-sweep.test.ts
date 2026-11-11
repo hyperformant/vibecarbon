@@ -21,6 +21,7 @@ import {
   DigitalOceanProvider,
   encodeLabel as doLabel,
 } from '../../../src/lib/providers/digitalocean.js';
+import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
 
@@ -110,7 +111,7 @@ describe('sweepK8sBackstopTargets on Linode', () => {
           stackEnv: 'prod',
           firewallName: 'proj-prod-firewall',
           sshKeyName: null,
-          floatingIp: '203.0.113.7',
+          reservedIps: [{ address: '203.0.113.7', stacks: ['prod'] }],
           networkName: 'proj-prod-network',
         },
       ],
@@ -139,7 +140,7 @@ describe('a saved reserved IP address is released only while it is still ours', 
     stackEnv: 'prod-primary',
     firewallName: 'proj-prod-primary-firewall',
     sshKeyName: null,
-    floatingIp: '203.0.113.7',
+    reservedIps: [{ address: '203.0.113.7', stacks: ['prod-primary'] }],
     networkName: 'proj-prod-primary-network',
   };
   const linode = () => {
@@ -186,7 +187,8 @@ describe('a saved reserved IP address is released only while it is still ours', 
   });
 
   it('Linode: an address no longer reserved on the account is already released', async () => {
-    reservedIpsListing([{ address: '203.0.113.99', tags: tags('proj', 'prod-primary') }]);
+    // The account holds another project's address only.
+    reservedIpsListing([{ address: '203.0.113.99', tags: tags('other', 'prod-primary') }]);
     const results = makeResults();
     await sweep(linode(), results);
     expect(deleteUrls()).toEqual([]);
@@ -198,7 +200,8 @@ describe('a saved reserved IP address is released only while it is still ours', 
     const results = makeResults();
     await sweep(linode(), results);
     expect(deleteUrls()).toEqual([]);
-    expect(severities(results)).toEqual(['unverified:reserved-ip']);
+    // Once for the recorded address, once for the label sweep beside it.
+    expect(severities(results)).toEqual(['unverified:reserved-ip', 'unverified:reserved-ip']);
     // Not proven released: the record stays for the next destroy.
     expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
@@ -235,7 +238,7 @@ describe('DigitalOcean: the backstop reads the reserved IP back before it report
     stackEnv: 'prod',
     firewallName: 'proj-prod-firewall',
     sshKeyName: null,
-    floatingIp: IP,
+    reservedIps: [{ address: IP, stacks: ['prod'] }],
     networkName: 'proj-prod-network',
   };
   type Read = number | 'listed' | Error | { droplet: { id: number; name: string; tags: string[] } };
@@ -451,7 +454,7 @@ describe('the backstop keeps the record on a results object without the list', (
           stackEnv: 'prod',
           firewallName: 'proj-prod-firewall',
           sshKeyName: null,
-          floatingIp: '203.0.113.7',
+          reservedIps: [{ address: '203.0.113.7', stacks: ['prod'] }],
           networkName: 'proj-prod-network',
         },
       ],
@@ -469,7 +472,7 @@ describe('reserved IP found by tag when no address was persisted', () => {
     stackEnv: 'prod',
     firewallName: 'proj-prod-firewall',
     sshKeyName: null,
-    floatingIp: null,
+    reservedIps: [],
     networkName: 'proj-prod-network',
   };
   it("deletes this cluster's tagged IP and no other environment or project", async () => {
@@ -510,6 +513,250 @@ describe('reserved IP found by tag when no address was persisted', () => {
 
   it('DigitalOcean has no by-label method, so a missing address is skipped as before', () => {
     expect(typeof new DigitalOceanProvider('token').deleteReservedIpsByLabels).toBe('undefined');
+  });
+});
+
+// A deploy killed while Pulumi was creating the reserved IP leaves it out of
+// the stack's state (the pre-destroy refresh drops a pending create) and out
+// of the record. The label sweep finds it by the program's labels, beside any
+// recorded address, and never touches another environment's or project's.
+describe('the label sweep runs beside a recorded address', () => {
+  const target = {
+    stackEnv: 'prod',
+    firewallName: 'proj-prod-firewall',
+    sshKeyName: null,
+    reservedIps: [{ address: '203.0.113.7', stacks: ['prod'] }],
+    networkName: 'proj-prod-network',
+  };
+  const linode = () => {
+    const provider = new LinodeProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    return provider;
+  };
+
+  it('releases an unrecorded IP labelled for this stack, the recorded one once, and no other', async () => {
+    reservedIpsListing([
+      { address: '203.0.113.7', tags: tags('proj', 'prod') },
+      { address: '203.0.113.8', tags: tags('proj', 'prod') },
+      { address: '203.0.113.9', tags: tags('proj', 'staging') },
+      { address: '203.0.113.10', tags: tags('other', 'prod') },
+    ]);
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider: linode(),
+      targets: [target],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(deleteUrls()).toEqual([
+      'https://api.linode.com/v4/networking/reserved/ips/203.0.113.7',
+      'https://api.linode.com/v4/networking/reserved/ips/203.0.113.8',
+    ]);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it('one found by label that is not released stays on record, so the next destroy retries it', async () => {
+    fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') return { ok: false, status: 403, json: async () => ({}) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          page: 1,
+          pages: 1,
+          data: [{ address: '203.0.113.8', tags: tags('proj', 'prod') }],
+        }),
+      };
+    });
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider: linode(),
+      targets: [{ ...target, reservedIps: [] }],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(results.leaks.entries).toHaveLength(1);
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({ severity: 'leak', resourceClass: 'reserved-ip' });
+    expect(entry.resource).toBe('203.0.113.8');
+    expect(entry.reason).toContain('Linode refused the delete (HTTP 403)');
+    expect(entry.hint).toContain('Run `vibecarbon destroy prod` again');
+    expect(`${entry.reason} ${entry.hint}`).not.toContain('—');
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.8']);
+  });
+});
+
+// The backstop reads k8s-ha's environment-level address as either side's
+// (planK8sBackstopTargets): its owner check accepts either side's tags.
+describe('an environment-level address on k8s-ha belongs to either side', () => {
+  const IP = '203.0.113.30';
+  const target = {
+    stackEnv: 'prod-primary',
+    firewallName: 'proj-prod-primary-firewall',
+    sshKeyName: null,
+    reservedIps: [{ address: IP, stacks: ['prod-primary', 'prod-standby'] }],
+    networkName: 'proj-prod-primary-network',
+  };
+  const sweepWith = async (provider: object) => {
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: [target, { ...target, stackEnv: 'prod-standby', reservedIps: [] }],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    return results;
+  };
+
+  it("Linode: tagged for the standby, it is this environment's and released", async () => {
+    const provider = new LinodeProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    reservedIpsListing([{ address: IP, tags: tags('proj', 'prod-standby') }]);
+    const results = await sweepWith(provider);
+    // Released once: the standby's label sweep leaves the recorded address to the address path.
+    expect(deleteUrls()).toEqual([`https://api.linode.com/v4/networking/reserved/ips/${IP}`]);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it("DigitalOcean: held by the standby's droplet, it is this cluster's, never someone else's", async () => {
+    const provider = new DigitalOceanProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    fetchWithRetryMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        reserved_ip: {
+          ip: IP,
+          droplet: {
+            id: 77,
+            name: 'proj-prod-standby-master',
+            tags: [doLabel('project', 'proj'), doLabel('environment', 'prod-standby')],
+          },
+        },
+      }),
+    });
+    const results = await sweepWith(provider);
+    expect(deleteUrls()).toEqual([]);
+    expect(
+      results.leaks.entries.map((e: { severity: string }) => e.severity),
+      'held by our own droplet, not reissued',
+    ).toEqual(['leak']);
+    expect(results.unreleasedReservedIps).toEqual([IP]);
+  });
+
+  it('DigitalOcean: unassigned, it is released once across both sides', async () => {
+    const provider = new DigitalOceanProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    let gets = 0;
+    fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') return { ok: true, status: 204, json: async () => ({}) };
+      gets += 1;
+      return gets === 1
+        ? { ok: true, status: 200, json: async () => ({ reserved_ip: { ip: IP, droplet: null } }) }
+        : { ok: false, status: 404, json: async () => ({}) };
+    });
+    const targets = planK8sBackstopTargets({
+      plan: { tier: 'k8s-ha', stackEnvs: ['prod-primary', 'prod-standby'] },
+      envConfig: {
+        floatingIp: IP,
+        ha: { primary: { stack: 'prod-primary' }, standby: { stack: 'prod-standby' } },
+      },
+      projectConfig: { projectName: 'proj' },
+    });
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets,
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(deleteUrls()).toEqual([`https://api.digitalocean.com/v2/reserved_ips/${IP}`]);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+});
+
+// Hetzner's k8s program labels its Floating IP with the project and the
+// stack's environment. Its Pulumi destroy removes the IP, firewall, network
+// and key, so the name sweeps stay off (K8S_DESTROY_BACKSTOP), but a Floating
+// IP a killed deploy never recorded is found by its labels all the same.
+describe('Hetzner: the label sweep alone', () => {
+  const target = {
+    stackEnv: 'prod',
+    firewallName: 'proj-prod-firewall',
+    sshKeyName: 'proj-prod-nbg1-key',
+    reservedIps: [{ address: '203.0.113.7', stacks: ['prod'] }],
+    networkName: 'proj-prod-network',
+  };
+  const floatingIps = (
+    items: Array<{ id: number; ip: string; labels: Record<string, string>; server?: number }>,
+  ) =>
+    fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') return { ok: true, status: 204, json: async () => ({}) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          floating_ips: items.map((i) => ({ server: null, ...i })),
+          meta: { pagination: { next_page: null } },
+        }),
+      };
+    });
+
+  it("releases this stack's labelled Floating IP, recorded or not, and no other; no name sweeps", async () => {
+    const provider = new HetznerProvider('token');
+    const byName = [
+      vi.spyOn(provider, 'deleteFirewallByName'),
+      vi.spyOn(provider, 'deleteSSHKeyByName'),
+    ];
+    floatingIps([
+      { id: 7, ip: '203.0.113.7', labels: { project: 'proj', environment: 'prod' } },
+      { id: 8, ip: '203.0.113.8', labels: { project: 'proj', environment: 'staging' } },
+      { id: 9, ip: '203.0.113.9', labels: { project: 'other', environment: 'prod' } },
+    ]);
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: [target],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(deleteUrls()).toEqual(['https://api.hetzner.cloud/v1/floating_ips/7']);
+    for (const spy of byName) expect(spy).not.toHaveBeenCalled();
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it('one still assigned to a server is left alone, reported, and kept on record', async () => {
+    floatingIps([
+      { id: 7, ip: '203.0.113.7', labels: { project: 'proj', environment: 'prod' }, server: 42 },
+    ]);
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider: new HetznerProvider('token'),
+      targets: [target],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries).toHaveLength(1);
+    expect(results.leaks.entries[0]).toMatchObject({ severity: 'leak', resource: '203.0.113.7' });
+    expect(results.leaks.entries[0].reason).toContain('still assigned to server 42');
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
 });
 

@@ -2380,6 +2380,26 @@ async function destroyComposeTier({
     );
   }
 
+  // A flexible IP the compose program made before its server (Scaleway,
+  // COMPOSE_FLOATING_IP): deleteServer above frees only an IP attached to the
+  // server, so one a deploy killed in between left attached to nothing is
+  // found by the environment's labels.
+  if (
+    providerToken &&
+    Provider.COMPOSE_FLOATING_IP === true &&
+    projectConfig.projectName &&
+    typeof provider.deleteReservedIpsByLabels === 'function'
+  ) {
+    await sweepTaggedReservedIps({
+      provider,
+      projectName: projectConfig.projectName,
+      stackEnv: environment,
+      results,
+      s,
+      environment,
+    });
+  }
+
   // Delete Hetzner firewall.
   // Pulumi (src/lib/iac/programs/hetzner-compose.js) names the firewall
   //   `${projectName}-${environment}-firewall`
@@ -2702,55 +2722,74 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
 }
 
 /**
- * The DO k8s backstop's per-stack target list. Exported for unit testing.
+ * The k8s backstop's per-stack target list. Exported for unit testing.
  *
  * One entry per Pulumi stack (single k8s: the environment itself; k8s-ha:
  * `<env>-primary` + `<env>-standby`), carrying the literal resource names the
  * DO and Linode k8s programs create for that stack (digitalocean-k8s.js:
  * `${clusterName}-firewall` / `${clusterName}-network` /
- * `${clusterName}-${region}-key`) plus the reserved-IP address persisted for
+ * `${clusterName}-${region}-key`) plus the reserved-IP addresses recorded for
  * that stack. Deriving these from the USER-FACING environment instead (the
  * pre-d4 shape) named a cluster that never existed on k8s-ha — both real
  * per-stack firewalls/VPCs and BOTH reserved IPs leaked every HA destroy.
  *
- * - `floatingIp` is a recorded floating/reserved IP only (`floatingIp`, never
- *   `ingressIp`), so the backstop never releases a master's own address. A
- *   DigitalOcean cluster made since 2026-11 has none (K8S_FLOATING_IP false;
- *   its domain points at the master), so its target is null; one made before
+ * - `reservedIps` are recorded floating/reserved IPs only (`floatingIp`,
+ *   never `ingressIp`), so the backstop never releases a master's own
+ *   address. A DigitalOcean cluster made since 2026-11 has none
+ *   (K8S_FLOATING_IP false; its domain points at the master); one made before
  *   still has its reserved IP recorded until a deploy releases it
  *   (lib/deploy/k8s/retired-reserved-ip.js), and this releases it if that
  *   deploy never ran or its release failed.
  * - `sshKeyName` is null on HA: both clusters share one key created OUTSIDE
  *   Pulumi (`${project}-${env}-ha-key`), swept by its own block.
- * - `floatingIp` follows the STACK identity: failover swaps roles under
- *   `envConfig.ha.{primary,standby}.stack`, so match by `.stack` first and
- *   fall back to the role suffix for pre-swap configs that never persisted it.
+ * - A k8s-ha side's address follows the STACK identity: failover swaps roles
+ *   under `envConfig.ha.{primary,standby}.stack`, so match by `.stack` first
+ *   and fall back to the role suffix for pre-swap configs that never
+ *   persisted it.
+ * - On k8s-ha an environment-level `floatingIp` is read too, as either
+ *   side's, the way the deploy's release reads it (retiredReservedIpStacks):
+ *   the address is any stack's that may hold it (`stacks`, its owner check
+ *   accepts each), and it is released once, by the first.
  *
  * @param {{plan: {tier: string, stackEnvs: string[]}, envConfig: object, projectConfig: {projectName: string}}} args
- * @returns {Array<{stackEnv: string, firewallName: string, sshKeyName: string|null, floatingIp: string|null, networkName: string}>}
+ * @returns {Array<{stackEnv: string, firewallName: string, sshKeyName: string|null, reservedIps: Array<{address: string, stacks: string[]}>, networkName: string}>}
  */
 export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
   const isHA = isHATier(plan.tier);
   const haEntries = [envConfig.ha?.primary, envConfig.ha?.standby].filter(Boolean);
+  /** address -> the stacks it may be, the first the one that releases it */
+  const stacksOf = new Map();
+  const add = (address, stackEnv) => {
+    if (!address) return;
+    const stacks = stacksOf.get(address) ?? [];
+    if (!stacks.includes(stackEnv)) stacks.push(stackEnv);
+    stacksOf.set(address, stacks);
+  };
+  for (const stackEnv of plan.stackEnvs) {
+    if (!isHA) {
+      add(envConfig.floatingIp, stackEnv);
+      continue;
+    }
+    const byStack = haEntries.find((e) => e.stack === stackEnv);
+    const byRoleSuffix = stackEnv.endsWith('-primary')
+      ? envConfig.ha?.primary
+      : stackEnv.endsWith('-standby')
+        ? envConfig.ha?.standby
+        : null;
+    add(byStack?.floatingIp ?? byRoleSuffix?.floatingIp, stackEnv);
+  }
+  if (isHA && envConfig.floatingIp && !stacksOf.has(envConfig.floatingIp)) {
+    for (const stackEnv of plan.stackEnvs) add(envConfig.floatingIp, stackEnv);
+  }
   return plan.stackEnvs.map((stackEnv) => {
     const clusterName = `${projectConfig.projectName}-${stackEnv}`;
-    let floatingIp = null;
-    if (isHA) {
-      const byStack = haEntries.find((e) => e.stack === stackEnv);
-      const byRoleSuffix = stackEnv.endsWith('-primary')
-        ? envConfig.ha?.primary
-        : stackEnv.endsWith('-standby')
-          ? envConfig.ha?.standby
-          : null;
-      floatingIp = byStack?.floatingIp ?? byRoleSuffix?.floatingIp ?? null;
-    } else {
-      floatingIp = envConfig.floatingIp ?? null;
-    }
     return {
       stackEnv,
       firewallName: `${clusterName}-firewall`,
       sshKeyName: !isHA && envConfig.region ? `${clusterName}-${envConfig.region}-key` : null,
-      floatingIp,
+      reservedIps: [...stacksOf]
+        .filter(([, stacks]) => stacks[0] === stackEnv)
+        .map(([address, stacks]) => ({ address, stacks })),
       networkName: `${clusterName}-network`,
     };
   });
@@ -2761,46 +2800,55 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * cluster's. Linode reissues a released address within minutes, so by
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry tags (Linode: `reservedIpLabelMatch`) is asked, and only
- * an IP carrying this project's and this stack's tags (the labels the k8s
- * program stamps) counts as ours.
+ * an IP carrying this project's tags and those of one of `stackEnvs` (the
+ * labels the k8s program stamps) counts as ours.
  *
  * DigitalOcean reserved IPs carry no tags, so DO is asked where the address
  * is assigned (`reservedIpAssignment`). This runs after the teardown, so
  * this cluster's droplets are deleted: an unassigned address is ours, one
- * assigned to a droplet that does not carry this project's and stack's tags
- * was reissued and is someone else's (`assigned`), and one still assigned
- * to a droplet that does carry them is ours, held by a droplet the teardown
- * did not delete (`held`). Neither assigned verdict is ever deleted.
+ * assigned to a droplet that carries neither this project's tags nor those
+ * of one of `stackEnvs` was reissued and is someone else's (`assigned`), and
+ * one still assigned to a droplet that does carry them is ours, held by a
+ * droplet the teardown did not delete (`held`). Neither assigned verdict is
+ * ever deleted.
  *
  * @param {object} provider
  * @param {string} address
  * @param {string|undefined} projectName
- * @param {string} stackEnv
+ * @param {string[]} stackEnvs - the stacks the address may be (two for a k8s-ha environment-level one)
  * @returns {Promise<{verdict: 'ours'} | {verdict: 'released'} | {verdict: 'foreign', tags: string[]}
  *   | {verdict: 'assigned' | 'held', droplet: {id: number, name: string}}>}
  * @throws when the address cannot be read, or there is no project name to check tags against
  */
-async function savedReservedIpOwner(provider, address, projectName, stackEnv) {
-  const labels = projectName ? { project: projectName, environment: stackEnv } : {};
+async function savedReservedIpOwner(provider, address, projectName, stackEnvs) {
+  const labelsFor = (stackEnv) =>
+    projectName ? { project: projectName, environment: stackEnv } : {};
   if (typeof provider.reservedIpAssignment === 'function') {
-    const read = await provider.reservedIpAssignment(address, labels);
-    if (!read.found) return { verdict: 'released' };
-    if (!read.droplet) return { verdict: 'ours' };
-    if (!projectName) {
-      throw new Error(
-        `it is assigned to droplet ${read.droplet.name}, and there is no project name to check its tags against`,
-      );
+    let droplet = null;
+    for (const stackEnv of stackEnvs) {
+      const read = await provider.reservedIpAssignment(address, labelsFor(stackEnv));
+      if (!read.found) return { verdict: 'released' };
+      if (!read.droplet) return { verdict: 'ours' };
+      if (!projectName) {
+        throw new Error(
+          `it is assigned to droplet ${read.droplet.name}, and there is no project name to check its tags against`,
+        );
+      }
+      if (read.matches) return { verdict: 'held', droplet: read.droplet };
+      droplet = read.droplet;
     }
-    return { verdict: read.matches ? 'held' : 'assigned', droplet: read.droplet };
+    return { verdict: 'assigned', droplet };
   }
   if (typeof provider.reservedIpLabelMatch !== 'function') return { verdict: 'ours' };
   if (!projectName) throw new Error('no project name to check its tags against');
-  const match = await provider.reservedIpLabelMatch(address, {
-    project: projectName,
-    environment: stackEnv,
-  });
-  if (!match.found) return { verdict: 'released' };
-  return match.matches ? { verdict: 'ours' } : { verdict: 'foreign', tags: match.tags };
+  let tags = [];
+  for (const stackEnv of stackEnvs) {
+    const match = await provider.reservedIpLabelMatch(address, labelsFor(stackEnv));
+    if (!match.found) return { verdict: 'released' };
+    if (match.matches) return { verdict: 'ours' };
+    tags = match.tags;
+  }
+  return { verdict: 'foreign', tags };
 }
 
 /**
@@ -2817,11 +2865,207 @@ function keepUnreleased(results, address) {
 }
 
 /**
- * Idempotent name/address deletes for the leftovers `pulumi destroy` has
- * been seen to skip on a provider with `K8S_DESTROY_BACKSTOP`: firewall, SSH
- * key, reserved IP, then the VPC last. Every delete goes by name or address,
- * never through the cluster, so a deploy that died before the cluster was
- * ready (no kubeconfig) is swept just the same.
+ * The retry line every reserved IP of ours that is not released carries.
+ * @param {string} environment - as the operator names it
+ * @param {{NAME: string, RESERVED_IP_NAME?: string}} Provider
+ */
+function reservedIpRetryHint(environment, Provider) {
+  const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
+  return (
+    `Run \`vibecarbon destroy ${environment}\` again to retry it: the environment ` +
+    'stays in .vibecarbon.json until it is released. Or release it in the ' +
+    `${Provider.NAME} console, where it is listed with your ${noun}s.`
+  );
+}
+
+/**
+ * Release one reserved IP the environment's record names (the address
+ * path). Every provider is asked first whether the saved address is still
+ * this cluster's (savedReservedIpOwner): Linode by the IP's own tags, and
+ * DigitalOcean by the droplet it is assigned to. An assigned address is never
+ * deleted. An address of ours that is not proven released keeps the
+ * environment's record (keepUnreleased): the record is the only place it is
+ * named, so the next destroy retries it.
+ *
+ * @param {{provider: object, address: string, stacks: string[], projectName?: string, results: object, s: {start: Function, stop: Function}, retry: string}} args
+ */
+async function releaseRecordedReservedIp({
+  provider,
+  address,
+  stacks,
+  projectName,
+  results,
+  s,
+  retry,
+}) {
+  const Provider = provider.constructor;
+  const stackNames = stacks.join(' or ');
+  s.start(`Verifying ${Provider.NAME} reserved IP is gone: ${address}`);
+  try {
+    const owner = await savedReservedIpOwner(provider, address, projectName, stacks);
+    if (owner.verdict === 'released') {
+      s.stop('Reserved IP already released');
+    } else if (owner.verdict === 'foreign') {
+      s.stop(`Reserved IP ${address} left alone: it is no longer this cluster's`);
+      results.leaks.foreign({
+        resourceClass: 'reserved-ip',
+        resource: address,
+        reason:
+          `not released: it carries ${owner.tags.length ? owner.tags.join(', ') : 'no tags'}, ` +
+          `not project ${projectName} and stack ${stackNames}, so the address was likely reissued`,
+        hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
+      });
+    } else if (owner.verdict === 'assigned') {
+      // This cluster's droplets are deleted by now, so a droplet holding
+      // the address is someone else's: never delete it out from under it.
+      const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
+      s.stop(`Reserved IP ${address} left alone: it is assigned to droplet ${droplet}`);
+      results.leaks.foreign({
+        resourceClass: 'reserved-ip',
+        resource: address,
+        reason:
+          `not released: it is assigned to droplet ${droplet}, which is not project ` +
+          `${projectName} and stack ${stackNames}'s, so the address was likely reissued`,
+        hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
+      });
+    } else if (owner.verdict === 'held') {
+      // Still assigned to a droplet of this cluster that the teardown did
+      // not delete (its own line above says so). Ours, so it stays on
+      // record, but never deleted out from under a running droplet.
+      const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
+      s.stop(`Reserved IP ${address} left alone: this cluster's droplet ${droplet} still holds it`);
+      keepUnreleased(results, address);
+      results.leaks.leak({
+        resourceClass: 'reserved-ip',
+        resource: address,
+        reason: `not released: it is still assigned to this cluster's droplet ${droplet}, which was not deleted`,
+        hint: retry,
+      });
+    } else {
+      const outcome = await provider.deleteReservedIpByAddress(address);
+      if (outcome.released) {
+        s.stop('Reserved IP released (backstop)');
+      } else {
+        s.stop(`Reserved IP ${address} is not released: ${outcome.reason}`);
+        keepUnreleased(results, address);
+        const entry = {
+          resourceClass: 'reserved-ip',
+          resource: describeResource({ name: address, region: outcome.region }),
+          hint: retry,
+        };
+        if (outcome.held) {
+          results.leaks.leak({
+            ...entry,
+            reason: `${outcome.reason}, so it is not released and keeps billing on your ${Provider.NAME} account`,
+          });
+        } else {
+          results.leaks.unverified({
+            ...entry,
+            reason: `${outcome.reason}, so vibecarbon cannot tell whether ${Provider.NAME} released it; if not, it keeps billing`,
+          });
+        }
+      }
+    }
+  } catch (error) {
+    s.stop(`Reserved IP backstop check failed: ${error.message}`);
+    keepUnreleased(results, address);
+    results.leaks.unverified({
+      resourceClass: 'reserved-ip',
+      resource: address,
+      reason: `backstop check threw: ${error.message}, could not confirm it is released; if it is not, it keeps billing`,
+      hint: retry,
+    });
+  }
+}
+
+/**
+ * Release every floating or reserved IP the provider still holds with this
+ * project's and this stack's labels (`deleteReservedIpsByLabels`), the
+ * labels the provider's Pulumi programs stamp on it. It is how destroy finds
+ * one no record names: a deploy killed while Pulumi was creating the IP
+ * leaves it out of the stack's state (the pre-destroy refresh drops a
+ * pending create) and out of .vibecarbon.json, and it bills until released.
+ *
+ * Scoped to exactly this project and this stack, never the project alone:
+ * another environment's IP, or another project's, is never touched.
+ * `except` names addresses the record already names, which the address path
+ * (releaseRecordedReservedIp) handles. One found here that is not released is
+ * kept on record like any other of ours, so the next destroy retries it.
+ * Exported for unit testing.
+ *
+ * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string}} args
+ *   `stackEnv`: the stack's environment label (k8s-ha: `<env>-primary` or
+ *   `<env>-standby`; compose and single k8s: the environment).
+ *   `environment`: as the operator names it, for the retry line.
+ */
+export async function sweepTaggedReservedIps({
+  provider,
+  projectName,
+  stackEnv,
+  except = [],
+  results,
+  s,
+  environment,
+}) {
+  const Provider = provider.constructor;
+  const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
+  const scope = `project ${projectName}, environment ${stackEnv}`;
+  s.start(`Looking for ${Provider.NAME} ${noun}s labelled ${scope}`);
+  try {
+    const swept = await provider.deleteReservedIpsByLabels(
+      { project: projectName, environment: stackEnv },
+      { except },
+    );
+    s.stop(
+      swept.deleted.length > 0
+        ? `Released by label (backstop): ${swept.deleted.join(', ')}`
+        : swept.failed.length > 0
+          ? `Found by label and not released: ${swept.failed.map((f) => f.address).join(', ')}`
+          : `No ${noun} labelled ${scope} left`,
+    );
+    for (const failure of swept.failed) {
+      keepUnreleased(results, failure.address);
+      const entry = {
+        resourceClass: 'reserved-ip',
+        resource: failure.address,
+        hint: reservedIpRetryHint(environment, Provider),
+      };
+      if (failure.held) {
+        results.leaks.leak({
+          ...entry,
+          reason: `${noun} labelled ${scope} not released: ${failure.reason}, so it keeps billing on your ${Provider.NAME} account`,
+        });
+      } else {
+        results.leaks.unverified({
+          ...entry,
+          reason: `${noun} labelled ${scope}: ${failure.reason}, so vibecarbon cannot tell whether ${Provider.NAME} released it; if not, it keeps billing`,
+        });
+      }
+    }
+  } catch (error) {
+    s.stop(`${noun} label check failed: ${error.message}`);
+    results.leaks.unverified({
+      resourceClass: 'reserved-ip',
+      resource: `${noun}s labelled ${scope}`,
+      reason: `the listing failed: ${error.message}, so vibecarbon could not confirm none is left`,
+      hint: `Check the ${Provider.NAME} console for a ${noun} labelled ${scope}; it keeps billing until it is released.`,
+    });
+  }
+}
+
+/**
+ * The k8s destroy backstop, per stack, after `pulumi destroy`. Every delete
+ * goes by name, address or label, never through the cluster, so a deploy
+ * that died before the cluster was ready (no kubeconfig) is swept just the
+ * same.
+ *
+ * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode), whose
+ *   `pulumi destroy` has been seen to skip them: the firewall and SSH key by
+ *   name, each recorded reserved IP by address (releaseRecordedReservedIp),
+ *   then the VPC last.
+ * - On every provider whose reserved IPs carry the program's labels
+ *   (`deleteReservedIpsByLabels`: Hetzner, Linode): the IPs labelled for the
+ *   stack that no record names (sweepTaggedReservedIps), before the VPC.
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
@@ -2837,244 +3081,146 @@ export async function sweepK8sBackstopTargets({
   environment,
 }) {
   const Provider = provider.constructor;
+  const byName = Provider.K8S_DESTROY_BACKSTOP === true;
+  const byLabel = Boolean(projectName) && typeof provider.deleteReservedIpsByLabels === 'function';
+  // The address path handles every recorded address, on whichever stack's
+  // pass it falls; the label sweep leaves them all to it, so none is handled
+  // (or reported) twice.
+  const recorded = byName ? targets.flatMap((t) => t.reservedIps.map((r) => r.address)) : [];
   for (const target of targets) {
-    // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
-    const firewallName = target.firewallName;
-    s.start(`Verifying ${Provider.NAME} firewall is gone: ${firewallName}`);
-    try {
-      const result = await provider.deleteFirewallByName(firewallName);
-      if (result.deleted) {
-        results.firewalls.push(firewallName);
-        s.stop('Firewall deleted (backstop)');
-      } else if (result.apiError) {
-        s.stop(`Firewall backstop failed: ${result.apiError.message}`);
-        results.leaks.leak({
-          resourceClass: 'firewall',
-          resource: firewallName,
-          reason: `backstop delete did not complete: ${result.apiError.message}`,
-          hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
-        });
-      } else {
-        s.stop('Firewall already gone (Pulumi)');
-      }
-    } catch (error) {
-      s.stop(`Firewall backstop check failed: ${error.message}`);
-      results.leaks.unverified({
+    if (byName) await sweepByName({ provider, target, results, s, projectName, environment });
+    if (byLabel) {
+      await sweepTaggedReservedIps({
+        provider,
+        projectName,
+        stackEnv: target.stackEnv,
+        except: recorded,
+        results,
+        s,
+        environment,
+      });
+    }
+    if (byName) await deleteBackstopNetwork({ provider, target, results, s });
+  }
+}
+
+/**
+ * The name and address half of the backstop for one stack: firewall, SSH
+ * key, then each recorded reserved IP.
+ * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string}} args
+ */
+async function sweepByName({ provider, target, results, s, projectName, environment }) {
+  const Provider = provider.constructor;
+  // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
+  const firewallName = target.firewallName;
+  s.start(`Verifying ${Provider.NAME} firewall is gone: ${firewallName}`);
+  try {
+    const result = await provider.deleteFirewallByName(firewallName);
+    if (result.deleted) {
+      results.firewalls.push(firewallName);
+      s.stop('Firewall deleted (backstop)');
+    } else if (result.apiError) {
+      s.stop(`Firewall backstop failed: ${result.apiError.message}`);
+      results.leaks.leak({
         resourceClass: 'firewall',
         resource: firewallName,
-        reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
+        reason: `backstop delete did not complete: ${result.apiError.message}`,
         hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
       });
+    } else {
+      s.stop('Firewall already gone (Pulumi)');
     }
+  } catch (error) {
+    s.stop(`Firewall backstop check failed: ${error.message}`);
+    results.leaks.unverified({
+      resourceClass: 'firewall',
+      resource: firewallName,
+      reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
+      hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
+    });
+  }
 
-    // SSH key — literal name from digitalocean-k8s.js:
-    // `${clusterName}-${config.location}-key` (config.location ===
-    // envConfig.region). Null on HA: both clusters share one key created
-    // OUTSIDE Pulumi, swept by the dedicated block below.
-    const sshKeyName = target.sshKeyName;
-    if (sshKeyName) {
-      s.start(`Verifying ${Provider.NAME} SSH key is gone: ${sshKeyName}`);
-      try {
-        const deleted = await provider.deleteSSHKeyByName(sshKeyName);
-        if (deleted) results.sshKeys.push(sshKeyName);
-        s.stop(deleted ? 'SSH key deleted (backstop)' : 'SSH key already gone (Pulumi)');
-      } catch (error) {
-        s.stop(`SSH key backstop check failed: ${error.message}`);
-        results.leaks.unverified({
-          resourceClass: 'ssh-key',
-          resource: sshKeyName,
-          reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-          hint: `Delete it via the ${Provider.NAME} console, because a leaked key blocks the next deploy's key registration by name.`,
-        });
-      }
-    }
-
-    // Reserved IP — unnamed on DO; attribution is the address persisted
-    // at deploy time (orchestrator.js): envConfig.floatingIp for single
-    // k8s, envConfig.ha.{primary,standby}.floatingIp per stack for HA.
-    // Also feeds plan.ownedIps above so the DNS record finally matches.
-    //
-    // On DigitalOcean only clusters made before 2026-11 have one (today's
-    // program makes none), and this backstop is not belt-and-braces there,
-    // it is THE mechanism: the reserved IP is the one resource `pulumi
-    // destroy` was observed to leave behind every time. The upstream provider
-    // defects that explained it (a Delete that never unassigns + an
-    // assignment resource that deletes itself from state on refresh) were
-    // written up at the former `digitalocean.ReservedIp` construction site in
-    // src/lib/iac/programs/digitalocean-k8s.js (git history). By the time
-    // this runs the droplets are gone, so the IP should be unassigned.
-    // DigitalOcean's delete counts it released only once the read by address
-    // answers 404 (DigitalOceanProvider.deleteReservedIpByAddress): DO has
-    // answered a DELETE with success and kept the IP.
-    //
-    // Every provider is asked first whether the saved address is still this
-    // cluster's (savedReservedIpOwner): Linode by the IP's own tags, and
-    // DigitalOcean by the droplet it is assigned to. An assigned address is
-    // never deleted.
-    //
-    // An address of ours that is not proven released keeps the environment's
-    // record (results.unreleasedReservedIps, read by updateProjectConfigEffect):
-    // the record is the only place the address is named, so the next destroy
-    // retries it.
-    if (target.floatingIp) {
-      const address = target.floatingIp;
-      const retry =
-        `Run \`vibecarbon destroy ${environment}\` again to retry it: the environment ` +
-        'stays in .vibecarbon.json until it is released. Or release it in the ' +
-        `${Provider.NAME} console (look for reserved IPs under networking).`;
-      s.start(`Verifying ${Provider.NAME} reserved IP is gone: ${address}`);
-      try {
-        const owner = await savedReservedIpOwner(provider, address, projectName, target.stackEnv);
-        if (owner.verdict === 'released') {
-          s.stop('Reserved IP already released');
-        } else if (owner.verdict === 'foreign') {
-          s.stop(`Reserved IP ${address} left alone: it is no longer this cluster's`);
-          results.leaks.foreign({
-            resourceClass: 'reserved-ip',
-            resource: address,
-            reason:
-              `not released: it carries ${owner.tags.length ? owner.tags.join(', ') : 'no tags'}, ` +
-              `not project ${projectName} and stack ${target.stackEnv}, so the address was likely reissued`,
-            hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
-          });
-        } else if (owner.verdict === 'assigned') {
-          // This cluster's droplets are deleted by now, so a droplet holding
-          // the address is someone else's: never delete it out from under it.
-          const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
-          s.stop(`Reserved IP ${address} left alone: it is assigned to droplet ${droplet}`);
-          results.leaks.foreign({
-            resourceClass: 'reserved-ip',
-            resource: address,
-            reason:
-              `not released: it is assigned to droplet ${droplet}, which is not project ` +
-              `${projectName} and stack ${target.stackEnv}'s, so the address was likely reissued`,
-            hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
-          });
-        } else if (owner.verdict === 'held') {
-          // Still assigned to a droplet of this cluster that the teardown did
-          // not delete (its own line above says so). Ours, so it stays on
-          // record, but never deleted out from under a running droplet.
-          const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
-          s.stop(
-            `Reserved IP ${address} left alone: this cluster's droplet ${droplet} still holds it`,
-          );
-          keepUnreleased(results, address);
-          results.leaks.leak({
-            resourceClass: 'reserved-ip',
-            resource: address,
-            reason: `not released: it is still assigned to this cluster's droplet ${droplet}, which was not deleted`,
-            hint: retry,
-          });
-        } else {
-          const outcome = await provider.deleteReservedIpByAddress(address);
-          if (outcome.released) {
-            s.stop('Reserved IP released (backstop)');
-          } else {
-            s.stop(`Reserved IP ${address} is not released: ${outcome.reason}`);
-            keepUnreleased(results, address);
-            const entry = {
-              resourceClass: 'reserved-ip',
-              resource: describeResource({ name: address, region: outcome.region }),
-              hint: retry,
-            };
-            if (outcome.held) {
-              results.leaks.leak({
-                ...entry,
-                reason: `${outcome.reason}, so it is not released and keeps billing on your ${Provider.NAME} account`,
-              });
-            } else {
-              results.leaks.unverified({
-                ...entry,
-                reason: `${outcome.reason}, so vibecarbon cannot tell whether ${Provider.NAME} released it; if not, it keeps billing`,
-              });
-            }
-          }
-        }
-      } catch (error) {
-        s.stop(`Reserved IP backstop check failed: ${error.message}`);
-        keepUnreleased(results, address);
-        results.leaks.unverified({
-          resourceClass: 'reserved-ip',
-          resource: address,
-          reason: `backstop check threw: ${error.message}, could not confirm it is released; if it is not, it keeps billing`,
-          hint: retry,
-        });
-      }
-    }
-
-    // No persisted address: the deploy died after `pulumi up` created the
-    // reserved IP but before its address reached envConfig. A provider whose
-    // reserved IPs carry tags (Linode) finds them by the labels its Pulumi
-    // program stamps: project plus the per-stack environment, which is one
-    // cluster (k8s-ha has one stack per cluster). Never project alone.
-    // DigitalOcean reserved IPs carry no tags, so it lacks the method and
-    // keeps the address-only behaviour above.
-    if (
-      !target.floatingIp &&
-      projectName &&
-      typeof provider.deleteReservedIpsByLabels === 'function'
-    ) {
-      s.start(`Looking for ${Provider.NAME} reserved IPs tagged for ${target.stackEnv}`);
-      try {
-        const swept = await provider.deleteReservedIpsByLabels({
-          project: projectName,
-          environment: target.stackEnv,
-        });
-        s.stop(
-          swept.deleted.length > 0
-            ? `Reserved IP released by tag (backstop): ${swept.deleted.join(', ')}`
-            : 'No tagged reserved IP left',
-        );
-        for (const failure of swept.failed) {
-          results.leaks.leak({
-            resourceClass: 'reserved-ip',
-            resource: failure.address,
-            reason: 'backstop delete by tag did not release it',
-            hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
-          });
-        }
-      } catch (error) {
-        s.stop(`Reserved IP tag check failed: ${error.message}`);
-        results.leaks.unverified({
-          resourceClass: 'reserved-ip',
-          resource: `reserved IPs tagged ${projectName}/${target.stackEnv}`,
-          reason: `backstop listing threw: ${error.message}, could not confirm none remain`,
-          hint: `Check the ${Provider.NAME} console for a reserved IP left behind by this cluster.`,
-        });
-      }
-    }
-
-    // VPC LAST — DO refuses to delete a non-empty VPC (still-attached
-    // servers/load balancers/etc respond non-2xx). By this point Pulumi
-    // + every sweep above should have cleared every member; a refusal
-    // here is therefore a genuine ordering bug elsewhere, not a
-    // not-found — surface it loudly rather than swallow it.
-    const networkName = target.networkName;
-    s.start(`Verifying ${Provider.NAME} VPC is gone: ${networkName}`);
+  // SSH key — literal name from digitalocean-k8s.js:
+  // `${clusterName}-${config.location}-key` (config.location ===
+  // envConfig.region). Null on HA: both clusters share one key created
+  // OUTSIDE Pulumi, swept by the dedicated block below.
+  const sshKeyName = target.sshKeyName;
+  if (sshKeyName) {
+    s.start(`Verifying ${Provider.NAME} SSH key is gone: ${sshKeyName}`);
     try {
-      const result = await provider.deleteNetworkByName(networkName);
-      if (result.deleted) {
-        s.stop('VPC deleted (backstop)');
-      } else if (result.apiError) {
-        s.stop(`VPC backstop failed: ${result.apiError.message}`);
-        results.leaks.leak({
-          resourceClass: 'network',
-          resource: networkName,
-          reason: `delete refused (likely still has members): ${result.apiError.message}`,
-          hint: `Check the ${Provider.NAME} console for leftover servers, load balancers or managed databases in this VPC, delete them, then delete the VPC manually.`,
-        });
-      } else {
-        s.stop('VPC already gone (Pulumi)');
-      }
+      const deleted = await provider.deleteSSHKeyByName(sshKeyName);
+      if (deleted) results.sshKeys.push(sshKeyName);
+      s.stop(deleted ? 'SSH key deleted (backstop)' : 'SSH key already gone (Pulumi)');
     } catch (error) {
-      s.stop(`VPC backstop check failed: ${error.message}`);
+      s.stop(`SSH key backstop check failed: ${error.message}`);
       results.leaks.unverified({
-        resourceClass: 'network',
-        resource: networkName,
+        resourceClass: 'ssh-key',
+        resource: sshKeyName,
         reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-        hint: `Check the ${Provider.NAME} console for a surviving VPC and any servers or load balancers still inside it.`,
+        hint: `Delete it via the ${Provider.NAME} console, because a leaked key blocks the next deploy's key registration by name.`,
       });
     }
+  }
+
+  // Reserved IPs — unnamed on DO; attribution is the address persisted at
+  // deploy time (orchestrator.js): envConfig.floatingIp for single k8s,
+  // envConfig.ha.{primary,standby}.floatingIp per stack for HA, and an
+  // environment-level one on HA as either side's (planK8sBackstopTargets).
+  // Also feeds plan.ownedIps above so the DNS record finally matches.
+  //
+  // On DigitalOcean only clusters made before 2026-11 have one (today's
+  // program makes none), and this backstop is not belt-and-braces there,
+  // it is THE mechanism: the reserved IP is the one resource `pulumi
+  // destroy` was observed to leave behind every time. The upstream provider
+  // defects that explained it (a Delete that never unassigns + an
+  // assignment resource that deletes itself from state on refresh) were
+  // written up at the former `digitalocean.ReservedIp` construction site in
+  // src/lib/iac/programs/digitalocean-k8s.js (git history). By the time
+  // this runs the droplets are gone, so the IP should be unassigned.
+  // DigitalOcean's delete counts it released only once the read by address
+  // answers 404 (DigitalOceanProvider.deleteReservedIpByAddress): DO has
+  // answered a DELETE with success and kept the IP.
+  const retry = reservedIpRetryHint(environment, Provider);
+  for (const { address, stacks } of target.reservedIps) {
+    await releaseRecordedReservedIp({ provider, address, stacks, projectName, results, s, retry });
+  }
+}
+
+/**
+ * The backstop's VPC delete, LAST for its stack: DO refuses to delete a
+ * non-empty VPC (still-attached servers/load balancers/etc respond non-2xx).
+ * By this point Pulumi + every sweep above should have cleared every member;
+ * a refusal here is therefore a genuine ordering bug elsewhere, not a
+ * not-found, so it is surfaced loudly rather than swallowed.
+ * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}}} args
+ */
+async function deleteBackstopNetwork({ provider, target, results, s }) {
+  const Provider = provider.constructor;
+  const networkName = target.networkName;
+  s.start(`Verifying ${Provider.NAME} VPC is gone: ${networkName}`);
+  try {
+    const result = await provider.deleteNetworkByName(networkName);
+    if (result.deleted) {
+      s.stop('VPC deleted (backstop)');
+    } else if (result.apiError) {
+      s.stop(`VPC backstop failed: ${result.apiError.message}`);
+      results.leaks.leak({
+        resourceClass: 'network',
+        resource: networkName,
+        reason: `delete refused (likely still has members): ${result.apiError.message}`,
+        hint: `Check the ${Provider.NAME} console for leftover servers, load balancers or managed databases in this VPC, delete them, then delete the VPC manually.`,
+      });
+    } else {
+      s.stop('VPC already gone (Pulumi)');
+    }
+  } catch (error) {
+    s.stop(`VPC backstop check failed: ${error.message}`);
+    results.leaks.unverified({
+      resourceClass: 'network',
+      resource: networkName,
+      reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
+      hint: `Check the ${Provider.NAME} console for a surviving VPC and any servers or load balancers still inside it.`,
+    });
   }
 }
 
@@ -3572,8 +3718,14 @@ async function destroyK8sTier({
     // name/address deletes that don't depend on trusting Pulumi's own report
     // at all, so leftover resources get cleaned up regardless of whether the
     // Pulumi step above was verified or not. Hetzner's k8s Pulumi destroy has
-    // never been observed to leak these, so it opts out of this and only gets the
-    // ownedIps fix above (its k8s DNS record was the actual gap there).
+    // never been observed to leak these, so it opts out of the name sweeps
+    // and only gets the ownedIps fix above (its k8s DNS record was the actual
+    // gap there).
+    // Every provider whose reserved IPs carry the program's labels (Hetzner,
+    // Linode) also gets the label sweep: a deploy killed while Pulumi was
+    // creating the floating IP leaves it in no state and no record, and the
+    // pre-destroy refresh drops the pending create, so `pulumi destroy`
+    // cannot see it either (sweepTaggedReservedIps).
     // One pass per Pulumi STACK: k8s-ha is two stacks (`<env>-primary` /
     // `<env>-standby`), each with its own firewall/VPC (and reserved IP, on
     // Linode or a DigitalOcean cluster made before 2026-11) — deriving
@@ -3581,7 +3733,7 @@ async function destroyK8sTier({
     // shape) named a cluster that never existed on HA and leaked all of them.
     // Target list + naming is planK8sBackstopTargets (exported, unit-pinned);
     // single k8s stays byte-identical to the old single-target behavior.
-    if (Provider.K8S_DESTROY_BACKSTOP === true && providerToken) {
+    if (providerToken) {
       await sweepK8sBackstopTargets({
         provider,
         targets: planK8sBackstopTargets({ plan, envConfig, projectConfig }),

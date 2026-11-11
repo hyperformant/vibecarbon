@@ -56,7 +56,7 @@ import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import { BaseProvider, deleteFailure, deleteRefused, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -263,6 +263,16 @@ export class ScalewayProvider extends BaseProvider {
   // (CCM/CSI/block-storage/DNS-flip) recorded in the audit; the k8s tiers
   // are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+
+  /**
+   * The compose program gives the server a flexible IP, made before the
+   * server: destroy looks for one by the environment's labels
+   * (deleteReservedIpsByLabels). See BaseProvider.COMPOSE_FLOATING_IP.
+   * @type {boolean}
+   */
+  static COMPOSE_FLOATING_IP = true;
+
+  static RESERVED_IP_NAME = 'flexible IP';
 
   /**
    * IaC env bag — the three-credential seam (audit design flag 2), AND the
@@ -1816,6 +1826,60 @@ export class ScalewayProvider extends BaseProvider {
       if (res.status !== 404) sawFailure = true;
     }
     return !sawFailure;
+  }
+
+  /**
+   * Release every flexible IP whose tags carry ALL of the given labels (the
+   * encodeLabel encoding the compose program tags its IP with). The compose
+   * program creates the IP before the server, and destroy deletes the server
+   * by its API, which releases only an IP attached to it: a deploy killed in
+   * between leaves the IP attached to nothing and named nowhere but here.
+   * Filters client-side over every zone's listing. Empty labels match
+   * nothing. One still attached to a server is left alone: destroy runs
+   * after the server deletes, so that server is one they did not delete.
+   * @param {Object<string,string>} labels
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
+   * @throws when the listing cannot be read whole
+   */
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
+    const wanted = encodeLabels(labels ?? {});
+    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const { items, complete, status } = await this.listFlexibleIPsDetailed();
+    if (!complete) {
+      throw new Error(
+        status === undefined
+          ? 'a zone holds more flexible IPs than vibecarbon reads'
+          : `GET /ips failed: HTTP ${status}`,
+      );
+    }
+    const skip = new Set(except);
+    const deleted = [];
+    const failed = [];
+    for (const ip of items) {
+      if (!wanted.every((tag) => (ip.tags ?? []).includes(tag)) || skip.has(ip.address)) continue;
+      if (ip.server) {
+        failed.push({
+          address: ip.address,
+          held: true,
+          reason: `it is still attached to server ${ip.server.name ?? ip.server.id}, which was not deleted`,
+        });
+        continue;
+      }
+      const res = await fetchWithRetry(
+        `${ScalewayProvider.API_BASE}/instance/v1/zones/${ip.zone}/ips/${ip.id}`,
+        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
+      );
+      if (res.ok || res.status === 404) deleted.push(ip.address);
+      else {
+        failed.push({
+          address: ip.address,
+          held: deleteRefused(res.status) ? true : null,
+          reason: deleteFailure(ScalewayProvider.NAME, res.status),
+        });
+      }
+    }
+    return { deleted, failed };
   }
 
   // ── Destroy-sweep field accessors ───────────────────────────────────────

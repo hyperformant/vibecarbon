@@ -46,6 +46,18 @@ export function deleteFailure(providerName, status) {
  *   | {released: false, held: true|null, region: string|null, reason: string}} ReservedIpRelease
  */
 
+/**
+ * What a provider's `deleteReservedIpsByLabels(labels, {except})` did: the
+ * floating or reserved IPs carrying ALL of `labels` that it released, and the
+ * ones it did not, each with `held` (still on the account: assigned to a
+ * server, which it never takes an address off, or a refused delete) or null
+ * (nothing proves it either way), and a `reason` clause. Empty labels match
+ * nothing, and an address in `except` is skipped (the caller handled it).
+ * The method throws when the listing cannot be read whole: a partial one
+ * would read as "nothing left".
+ * @typedef {{deleted: string[], failed: Array<{address: string, held: true|null, reason: string}>}} TaggedReservedIpSweep
+ */
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")
@@ -259,6 +271,25 @@ export class BaseProvider {
    * @type {boolean}
    */
   static K8S_FLOATING_IP = true;
+
+  /**
+   * Whether this provider's compose program gives the server a floating (or
+   * reserved) IP. Scaleway's does (a flexible IP); no other provider's does.
+   * Compose destroy deletes the server by its API, which frees only an IP
+   * still attached to it, so where this is true destroy also looks for one
+   * by the environment's labels (deleteReservedIpsByLabels): a deploy killed
+   * between creating the IP and the server leaves it attached to nothing.
+   * The program census (tests/unit/iac/floating-ip-backstop-census.test.ts)
+   * holds every program to it.
+   * @type {boolean}
+   */
+  static COMPOSE_FLOATING_IP = false;
+
+  /**
+   * What the provider calls a floating or reserved IP, in destroy's lines.
+   * @type {string}
+   */
+  static RESERVED_IP_NAME = 'reserved IP';
 
   /**
    * Resources this provider's programs once declared and no longer do, which

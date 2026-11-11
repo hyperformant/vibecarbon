@@ -10,7 +10,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import { BaseProvider, deleteFailure, deleteRefused, replaceWireguardPeerRules } from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
 // C9 — operator firewall access. Verbatim value-move of operator-ip.js's old
@@ -359,6 +359,8 @@ export class HetznerProvider extends BaseProvider {
   static HA_REGIONS = ['fsn1', 'hel1'];
 
   static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
+
+  static RESERVED_IP_NAME = 'Floating IP';
 
   static EU_REGIONS = ['fsn1', 'nbg1', 'hel1'];
   static US_REGIONS = ['ash', 'hil'];
@@ -1640,6 +1642,73 @@ export class HetznerProvider extends BaseProvider {
     });
 
     return response.ok || response.status === 404;
+  }
+
+  /**
+   * Delete every Floating IP carrying ALL of the given labels (the k8s
+   * program labels its ingress IP with the project and the stack's
+   * environment). Destroy asks after `pulumi destroy`: a deploy killed while
+   * Pulumi was creating the IP leaves it out of the stack's state (the
+   * pre-destroy refresh drops a pending create) and out of .vibecarbon.json,
+   * and it bills until deleted.
+   *
+   * The listing asks for the labels (`label_selector`) and the result is
+   * filtered again here, so a selector the API reads more loosely can never
+   * widen what is deleted. Empty labels match nothing. Hetzner refuses to
+   * delete an assigned Floating IP (`must_be_unassigned`, since 2026-05), and
+   * an address is never taken off a running server, so one still assigned is
+   * left alone: the server holding it is one the teardown did not delete.
+   * @param {Object<string,string>} labels
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
+   * @throws when the listing cannot be read whole
+   */
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
+    const wanted = Object.entries(labels ?? {});
+    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const selector = wanted.map(([k, v]) => `${k}=${v}`).join(',');
+    const { items, complete, status } = await listHetznerPages({
+      path: '/floating_ips',
+      key: 'floating_ips',
+      query: `label_selector=${encodeURIComponent(selector)}`,
+      token: this.apiToken,
+      apiBase: HetznerProvider.API_BASE,
+      fetchImpl: fetchWithRetry,
+    });
+    if (!complete) {
+      throw new Error(
+        status === undefined
+          ? 'the project has more Floating IPs than vibecarbon reads'
+          : `GET /floating_ips failed: HTTP ${status}`,
+      );
+    }
+    const skip = new Set(except);
+    const deleted = [];
+    const failed = [];
+    for (const ip of items) {
+      if (!wanted.every(([k, v]) => ip.labels?.[k] === v) || skip.has(ip.ip)) continue;
+      if (ip.server != null) {
+        failed.push({
+          address: ip.ip,
+          held: true,
+          reason: `it is still assigned to server ${ip.server}, which was not deleted`,
+        });
+        continue;
+      }
+      const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/floating_ips/${ip.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${this.apiToken}` },
+      });
+      if (response.ok || response.status === 404) deleted.push(ip.ip);
+      else {
+        failed.push({
+          address: ip.ip,
+          held: deleteRefused(response.status) ? true : null,
+          reason: deleteFailure(HetznerProvider.NAME, response.status),
+        });
+      }
+    }
+    return { deleted, failed };
   }
 
   /**

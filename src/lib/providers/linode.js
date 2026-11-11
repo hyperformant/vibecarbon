@@ -1597,7 +1597,7 @@ export class LinodeProvider extends BaseProvider {
    * GET /networking/reserved/ips). An account past the guard is not read in
    * full, and a partial listing must not pass for the whole: destroy reads an
    * address missing from it as already released (reservedIpLabelMatch).
-   * @returns {Promise<Array<{ address: string, tags?: string[] }>>}
+   * @returns {Promise<Array<{ address: string, tags?: string[], linode_id?: number|null }>>}
    * @throws when a page cannot be read, or there are more pages than the guard reads
    */
   async _listReservedIps() {
@@ -1650,22 +1650,36 @@ export class LinodeProvider extends BaseProvider {
    * (same encodeLabel encoding the k8s Pulumi program tags with). Lists
    * GET /networking/reserved/ips and filters client-side, the way
    * listServersDetailed does, so no server-side filter syntax is relied on.
-   * Empty labels match nothing: it never sweeps the whole account.
+   * Empty labels match nothing: it never sweeps the whole account. One still
+   * assigned to a Linode (`linode_id`) is left alone: destroy runs after the
+   * teardown, so the Linode holding it is one the teardown did not delete,
+   * and an address is never taken off a running server.
    * @param {Object<string,string>} labels
-   * @returns {Promise<{ deleted: string[], failed: Array<{ address: string }> }>}
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
    * @throws when the listing cannot be read
    */
-  async deleteReservedIpsByLabels(labels) {
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
     const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
     if (wanted.length === 0) return { deleted: [], failed: [] };
-    const matches = (await this._listReservedIps())
-      .filter((ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)))
-      .map((ip) => ip.address);
+    const skip = new Set(except);
+    const matches = (await this._listReservedIps()).filter(
+      (ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)) && !skip.has(ip.address),
+    );
     const deleted = [];
     const failed = [];
-    for (const address of matches) {
-      if ((await this.deleteReservedIpByAddress(address)).released) deleted.push(address);
-      else failed.push({ address });
+    for (const ip of matches) {
+      if (ip.linode_id != null) {
+        failed.push({
+          address: ip.address,
+          held: true,
+          reason: `it is still assigned to Linode ${ip.linode_id}, which was not deleted`,
+        });
+        continue;
+      }
+      const outcome = await this.deleteReservedIpByAddress(ip.address);
+      if (outcome.released) deleted.push(ip.address);
+      else failed.push({ address: ip.address, held: outcome.held, reason: outcome.reason });
     }
     return { deleted, failed };
   }

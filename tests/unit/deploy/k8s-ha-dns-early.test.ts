@@ -262,7 +262,7 @@ describe('k8s-ha DNS: written once both ingress IPs are known', () => {
       envConfig: env,
       projectConfig: { projectName: 'q' },
     });
-    expect(targets.map((t: { floatingIp: string | null }) => t.floatingIp)).toEqual([null, null]);
+    expect(targets.map((t: { reservedIps: unknown[] }) => t.reservedIps)).toEqual([[], []]);
     // The barrier finds the same addresses and writes nothing more.
     await K8S_HA_EFFECTS.haK8sUpdateDns(ctx);
     expect(setupHA).toHaveBeenCalledTimes(1);
