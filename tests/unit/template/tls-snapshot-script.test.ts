@@ -335,8 +335,9 @@ describe('the snapshot prefix and apex reach the servers as data', () => {
 
   it('the compose deploy passes the prefix to renderBundle only with a backup bucket', () => {
     const src = read('src/lib/deploy/orchestrator.js');
-    const call = src.slice(src.indexOf('const bundlePath = renderBundle('));
-    expect(call.slice(0, call.indexOf('});'))).toMatch(/tlsSnapshotPrefix/);
+    const options = src.slice(src.indexOf('const bundleOptions = {'));
+    expect(options.slice(0, options.indexOf('\n  };'))).toMatch(/tlsSnapshotPrefix/);
+    expect(src).toMatch(/renderBundle\(projectConfig\.projectName, bundleOptions\)/);
     expect(src).toMatch(
       /backupS3Config\?\.bucket\s*\?\s*tlsSnapshotS3Prefix\(\{\s*backupBucket: backupS3Config\.bucket/,
     );

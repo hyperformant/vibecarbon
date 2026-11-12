@@ -18,6 +18,8 @@ import { environmentServerNames } from '../../destroy/server-naming.js';
 import { waitForDNSPropagation } from '../../dns-propagation.js';
 import {
   DNS_PROVIDERS,
+  dnsRecordsByHandHint,
+  dnsRefusedHint,
   findZoneForDomain,
   getDnsProvider,
   hasAutomatedDns,
@@ -1037,8 +1039,8 @@ export async function destroyComposeHA(options) {
 
   /** @type {Array<{ resourceClass: string, resource: string, reason: string }>} */
   const leaks = [];
-  const noteLeak = (resourceClass, resource, reason) =>
-    leaks.push({ resourceClass, resource, reason });
+  const noteLeak = (resourceClass, resource, reason, hint) =>
+    leaks.push({ resourceClass, resource, reason, ...(hint && { hint }) });
 
   // Stop compose services on both servers in parallel
   onProgress('Stopping services on all servers...');
@@ -1090,7 +1092,14 @@ export async function destroyComposeHA(options) {
     onProgress('Waiting for VPS deletion to complete...');
   }
   const serverOutcomes = await Promise.allSettled(
-    serversToDelete.map((server) => provider.deleteServer(server.id, { waitUntilGone: true })),
+    serversToDelete.map((server) =>
+      provider.deleteServer(server.id, {
+        waitUntilGone: true,
+        // A billed resource the delete left behind (Scaleway's detached SBS
+        // volumes) is a leak line like the rest.
+        onLeftover: (line) => leaks.push(line),
+      }),
+    ),
   );
   serverOutcomes.forEach((outcome, index) => {
     if (outcome.status !== 'rejected') return;
@@ -1202,6 +1211,7 @@ export async function destroyComposeHA(options) {
             'dns-record',
             `${envConfig.domain} (${row.name})`,
             `no ${row.tokenEnv} available for DNS cleanup`,
+            dnsRecordsByHandHint(envConfig.domain, row.name),
           );
           return;
         }
@@ -1215,10 +1225,20 @@ export async function destroyComposeHA(options) {
           }
           // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
           // that died pre-provision leaves records no server ever "owned".
-          await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [
+          const { failed } = await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [
             ...ownedIps,
             '0.0.0.0',
           ]);
+          // A refused delete leaves the record in place, at an address this
+          // teardown releases: a leak, by record (a 404 is never one).
+          for (const { name, target, reason } of failed) {
+            noteLeak(
+              'dns-record',
+              `${name} → ${target} (${row.name} zone ${zoneId})`,
+              `delete refused: ${reason}`,
+              dnsRefusedHint(name, row.name),
+            );
+          }
           if (typeof dns.deleteHealthCheck === 'function') {
             await Promise.allSettled(
               (envConfig.servers || []).map((server) =>
@@ -1231,6 +1251,7 @@ export async function destroyComposeHA(options) {
             'dns-record',
             `${envConfig.domain} (${row.name} zone ${zoneId})`,
             `delete failed: ${error.message}`,
+            dnsRecordsByHandHint(envConfig.domain, row.name),
           );
         }
       })(),

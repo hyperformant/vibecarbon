@@ -15,6 +15,16 @@ export function createTempDir(prefix = 'vibecarbon-test-'): string {
 }
 
 /**
+ * Track a temp dir something else made (code under test that returns one,
+ * such as a render into a fresh temp copy), so it is removed with the rest.
+ * Returns the path.
+ */
+export function adoptTempDir(path: string): string {
+  tempDirs.add(path);
+  return path;
+}
+
+/**
  * Clean up a specific temporary directory
  */
 export function cleanupTempDir(path: string): void {

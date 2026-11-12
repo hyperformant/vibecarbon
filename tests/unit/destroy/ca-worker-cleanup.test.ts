@@ -276,7 +276,7 @@ describe('cleanupAutoscalerWorkers', () => {
     // the rest of the sweep.
     expect(result.deleted).toEqual(['ca-worker-good', 'ca-worker-also-good']);
     // ...and the broken one is REPORTED, not silently skipped. A surviving CA
-    // worker is outside Pulumi state (no destroy retry reaches it), bills, and
+    // worker is outside Pulumi state (no `pulumi destroy` retry reaches it), bills, and
     // makes the cluster network delete fail with "still in use" — so destroy
     // needs it in the leak report and the exit code.
     expect(result.failed).toEqual([

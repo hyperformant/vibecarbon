@@ -225,6 +225,7 @@ describe('linode-dns deleteDNSRecord (ownership-aware)', () => {
       skipped: 2,
       total: 3,
       skippedTargets: ['5.6.7.8', '9.10.11.12'],
+      failed: [],
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(String(fetchMock.mock.calls[2][0])).toBe(
@@ -247,7 +248,7 @@ describe('linode-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('tok', '4321', 'e1.example.com', ['1.2.3.4', '1.2.3.5']);
 
-    expect(result).toEqual({ deleted: 2, skipped: 0, total: 2, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 2, skipped: 0, total: 2, skippedTargets: [], failed: [] });
   });
 
   it('refuses to delete anything when ownedIps is empty (safer default)', async () => {
@@ -257,7 +258,13 @@ describe('linode-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('tok', '4321', 'e1.example.com', []);
 
-    expect(result).toEqual({ deleted: 0, skipped: 1, total: 1, skippedTargets: ['1.2.3.4'] });
+    expect(result).toEqual({
+      deleted: 0,
+      skipped: 1,
+      total: 1,
+      skippedTargets: ['1.2.3.4'],
+      failed: [],
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -270,7 +277,7 @@ describe('linode-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('tok', '4321', 'absent.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] });
   });
 
   it('matches the apex by its EMPTY relative name, not the FQDN', async () => {
@@ -296,7 +303,7 @@ describe('linode-dns deleteApexAndWildcard', () => {
     const { deleteApexAndWildcard } = await import(MOD);
     const result = await deleteApexAndWildcard('tok', '4321', 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: [], failed: [] });
     // Exactly one /domains/4321 lookup — not one per half.
     const zoneLookups = fetchMock.mock.calls.filter(
       (c) => String(c[0]) === 'https://api.linode.com/v4/domains/4321',
@@ -313,7 +320,11 @@ describe('linode-dns deleteApexAndWildcard', () => {
     const { deleteApexAndWildcard } = await import(MOD);
     const result = await deleteApexAndWildcard('tok', '4321', 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: false, preservedTargets: ['5.5.5.5', '6.6.6.6'] });
+    expect(result).toEqual({
+      deletedAny: false,
+      preservedTargets: ['5.5.5.5', '6.6.6.6'],
+      failed: [],
+    });
   });
 });
 

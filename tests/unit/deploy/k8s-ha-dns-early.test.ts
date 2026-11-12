@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -101,7 +101,10 @@ beforeEach(() => {
   failRole = null;
   IPS = FLOATING;
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  rmSync(dir, { recursive: true, force: true });
+});
 
 describe('k8s-ha DNS: written once both ingress IPs are known', () => {
   it('starts before the slow cluster steps finish, with the same setupHA arguments', async () => {
@@ -262,7 +265,7 @@ describe('k8s-ha DNS: written once both ingress IPs are known', () => {
       envConfig: env,
       projectConfig: { projectName: 'q' },
     });
-    expect(targets.map((t: { floatingIp: string | null }) => t.floatingIp)).toEqual([null, null]);
+    expect(targets.map((t: { reservedIps: unknown[] }) => t.reservedIps)).toEqual([[], []]);
     // The barrier finds the same addresses and writes nothing more.
     await K8S_HA_EFFECTS.haK8sUpdateDns(ctx);
     expect(setupHA).toHaveBeenCalledTimes(1);

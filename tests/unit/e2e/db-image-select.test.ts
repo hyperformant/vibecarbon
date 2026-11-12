@@ -100,3 +100,45 @@ describe('ghcrManifestExists', () => {
     ).rejects.toThrow(/not a ghcr.io/);
   });
 });
+
+describe('ghcrManifestExists when the network is down', () => {
+  it('turns a fetch TypeError into an E2EDbImageError naming ghcr.io and the cause', async () => {
+    const down = vi.fn(async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } });
+    });
+    const err = await ghcrManifestExists('ghcr.io/a/b:t1', down as unknown as typeof fetch).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(E2EDbImageError);
+    expect(err.message).toMatch(/ghcr\.io/);
+    expect(err.message).toMatch(/ENOTFOUND/);
+  });
+
+  it('does the same when only the manifest request fails', async () => {
+    const f = vi.fn(async (url: string) => {
+      if (url.includes('/token'))
+        return { status: 200, ok: true, json: async () => ({ token: 't' }) };
+      throw new TypeError('fetch failed');
+    });
+    await expect(
+      ghcrManifestExists('ghcr.io/a/b:t1', f as unknown as typeof fetch),
+    ).rejects.toBeInstanceOf(E2EDbImageError);
+  });
+});
+
+describe('ghcrManifestExists when the token body is cut off', () => {
+  it('names ghcr.io instead of leaking a SyntaxError', async () => {
+    const f = vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    const err = await ghcrManifestExists('ghcr.io/a/b:t1', f as unknown as typeof fetch).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(E2EDbImageError);
+    expect(err.message).toMatch(/ghcr\.io/);
+  });
+});

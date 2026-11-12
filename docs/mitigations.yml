@@ -83,6 +83,19 @@ classes:
       - site: "src/lib/providers/s3-base.js :: deleteBucket-consistency-ladder"
         detectable: false
         notes: inline BucketNotEmpty post-empty lag ride-out (-purge path)
+      - site: "src/lib/providers/s3-base.js :: setBucketCors-untilVisible"
+        detectable: false
+        notes: >-
+          Hetzner's new-bucket window: the CORS rule is the first request a
+          new app bucket gets (createBucket's beforeFirstRead, after the 2 s
+          bucketQuietMs pause), and a first PutBucketCors on a seconds-old
+          Hetzner bucket can answer 404 once without the bucket going bad
+          (2026-11-05 batch wv5: 4 of 15 buckets, one 404 each, then 20
+          clean minutes). Only deploy's beforeFirstRead asks for it
+          (untilVisibleMs: 15_000, src/lib/deploy/orchestrator.js); it
+          retries a 404 once a second until the deadline, and anything else
+          fails at once. Every other caller passes 0 and fails on the first
+          404.
   - class: provider-api-network-transients
     attribution: external-asserted
     evidence: >-

@@ -3,22 +3,14 @@
  * Shared helper functions for all deployment modes
  */
 
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runCommand, runCommandAsync } from '../command.js';
 import { formatDotenvLine, parseDotenv } from '../dotenv.js';
 import { buildHostKeyOpts } from '../host-keys.js';
 import { getProviderClass } from '../providers/index.js';
 import { scpWithRetry } from '../ssh.js';
+import { makeTempDir, removeTempDir } from '../temp-dir.js';
 
 /**
  * Build the SSH `-o` options string for compose provisioning, pinned to the
@@ -97,7 +89,8 @@ export function getBranchName(envName) {
  * @param {Record<string, string>} updates - key/value pairs to set in .env
  */
 export async function mergeRemoteDotenv(host, sshOpts, remoteDir, updates) {
-  const dir = mkdtempSync(join(tmpdir(), 'vibecarbon-envmerge-'));
+  // Holds the server's .env, every secret on it, for the merge.
+  const dir = makeTempDir('vibecarbon-envmerge-');
   const local = join(dir, '.env');
   try {
     // Pull remote .env
@@ -136,7 +129,7 @@ export async function mergeRemoteDotenv(host, sshOpts, remoteDir, updates) {
       );
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 }
 

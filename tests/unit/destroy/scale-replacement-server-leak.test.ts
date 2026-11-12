@@ -104,7 +104,10 @@ describe('destroy backstop sweep for environment-owned servers', () => {
 
     const result = await sweepEnvironmentServers({ provider, leaks, ...ENV });
 
-    expect(deleteServer).toHaveBeenCalledWith(301, { waitUntilGone: true });
+    expect(deleteServer).toHaveBeenCalledWith(301, {
+      waitUntilGone: true,
+      onLeftover: expect.any(Function),
+    });
     expect(result.deleted).toEqual(['proj-e2-primary-new']);
     expect(leaks.isClean()).toBe(true);
   });
@@ -116,7 +119,10 @@ describe('destroy backstop sweep for environment-owned servers', () => {
 
     await sweepEnvironmentServers({ provider, leaks, ...ENV });
 
-    expect(deleteServer).toHaveBeenCalledWith(302, { waitUntilGone: true });
+    expect(deleteServer).toHaveBeenCalledWith(302, {
+      waitUntilGone: true,
+      onLeftover: expect.any(Function),
+    });
   });
 
   it('matches compose-ha’s per-stack environment label, not just the plain env', async () => {
@@ -136,7 +142,10 @@ describe('destroy backstop sweep for environment-owned servers', () => {
 
     await sweepEnvironmentServers({ provider, leaks: createLeakLedger(), ...ENV });
 
-    expect(deleteServer).toHaveBeenCalledWith(303, { waitUntilGone: true });
+    expect(deleteServer).toHaveBeenCalledWith(303, {
+      waitUntilGone: true,
+      onLeftover: expect.any(Function),
+    });
   });
 
   it('records a LEAK when the delete fails — never a silent pass', async () => {

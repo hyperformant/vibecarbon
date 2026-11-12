@@ -101,7 +101,12 @@ function resolveOwnerAndRepo(projectDir) {
     const out = execFileSync(
       'gh',
       ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-      { cwd: projectDir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
+      {
+        env: gitSafeEnv(),
+        cwd: projectDir,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
     ).trim();
     const [owner, name] = out.split('/');
     if (owner && name) return { owner, name };

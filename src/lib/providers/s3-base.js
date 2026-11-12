@@ -62,8 +62,25 @@ const TRANSIENT_S3_ERROR_RE =
 // already retries both. 425 deliberately absent — S3 never sends Too Early.
 const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
-function isTransientS3Error(error) {
+// A definite 4xx answer: the store understood the request and said no. 408
+// (request timeout) and 429 (rate limit) are the two 4xx that mean "try
+// again"; every other 4xx is final.
+function isDefiniteClientError(status) {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
+/**
+ * Whether an S3 error is worth retrying. The HTTP status is read first: a
+ * definite 4xx is never transient, whatever its message says. S3-compatible
+ * stores send some 4xx with no message at all, which the AWS SDK words
+ * `UnknownError`, and the wording regex below reads that as a network
+ * failure: a plain 404 ("no policy") cost 15 s of retries.
+ * @param {Error & {$metadata?: {httpStatusCode?: number}}} error
+ * @returns {boolean}
+ */
+export function isTransientS3Error(error) {
   if (!error) return false;
+  if (isDefiniteClientError(error.$metadata?.httpStatusCode)) return false;
   if (TRANSIENT_S3_ERROR_RE.test(error.name ?? '')) return true;
   if (TRANSIENT_S3_ERROR_RE.test(error.message ?? '')) return true;
   const status = error.$metadata?.httpStatusCode;
@@ -1040,9 +1057,12 @@ export class S3CompatibleProvider {
    * requests from arbitrary sites.
    * @param {string} bucketName - Bucket name
    * @param {string[]} allowedOrigins - Exact origins, e.g. ['https://example.com']
+   * @param {object} [opts]
+   * @param {number} [opts.untilVisibleMs=0] - keep retrying a 404 once a second for
+   *   up to this long (a bucket created seconds ago); 0 fails on the first 404
    * @returns {Promise<void>}
    */
-  async setBucketCors(bucketName, allowedOrigins) {
+  async setBucketCors(bucketName, allowedOrigins, { untilVisibleMs = 0 } = {}) {
     if (!allowedOrigins?.length || allowedOrigins.includes('*')) {
       throw new Error('Bucket CORS needs explicit origins; a wildcard origin is not allowed.');
     }
@@ -1060,7 +1080,19 @@ export class S3CompatibleProvider {
         ],
       },
     });
-    await this._send(command);
+    // A bucket created seconds ago can answer 404 for a short while on some
+    // stores (Hetzner). That is a definite answer to `_send`, so a caller
+    // writing to a brand new bucket asks for its own bounded wait here.
+    const deadline = Date.now() + untilVisibleMs;
+    for (;;) {
+      try {
+        await this._send(command);
+        return;
+      } catch (err) {
+        if (err?.$metadata?.httpStatusCode !== 404 || Date.now() + 1000 > deadline) throw err;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
   }
 
   /**

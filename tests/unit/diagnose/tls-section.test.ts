@@ -7,8 +7,7 @@
  * Both reads are bounded: the log by --since and --tail, each read by
  * kubectl's request timeout.
  */
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,6 +19,7 @@ vi.mock('node:child_process', async (orig) => {
 
 import { DIAGNOSE_LOG_BOUNDS, diagnoseK8s, SPEC } from '../../../src/diagnose.js';
 import { CERT_MANAGER_CONTROLLER } from '../../../src/lib/deploy/k8s/acme-challenges.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 function stubReport() {
   const sections: string[] = [];
@@ -34,7 +34,7 @@ function stubReport() {
 }
 
 async function run(sectionsToRun: string[]) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-diag-tls-'));
+  const dir = createTempDir('vc-diag-tls-');
   const kubeconfig = join(dir, 'kubeconfig');
   writeFileSync(kubeconfig, 'apiVersion: v1\n');
   const report = stubReport();

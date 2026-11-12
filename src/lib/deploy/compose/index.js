@@ -7,8 +7,6 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
@@ -35,6 +33,7 @@ import {
   runWithTransportRetry,
   sshRunScript,
 } from '../../ssh.js';
+import { withTempDir } from '../../temp-dir.js';
 import { validateDomain } from '../../validators.js';
 import { hasBackupResult, parseBackupResult } from '../../walg/backup-result.js';
 import {
@@ -594,38 +593,27 @@ fi
 }
 
 /**
- * Collect deploy files and sync them to the server.
- * Supports pre-rendered bundlePath (Phase 1 Optimization).
+ * Pack the rendered bundle and sync it to the server.
+ *
+ * The deploy passes the bundle it rendered (`options.bundlePath`) and removes
+ * it itself once its dispatch settles (orchestrator). Scale passes none, so
+ * this renders its own for the one upload and removes it before returning or
+ * throwing. The tarball, which holds the same .env, goes either way.
  */
 export async function setupServerFiles(ip, sshKeyPath, projectName, options = {}) {
-  const remoteDir = `/opt/${projectName}`;
-  const stageDir = options.bundlePath || mkdtempSync(join(tmpdir(), 'vc-deploy-'));
-
-  try {
-    // If not using a pre-rendered bundle, perform ad-hoc rendering (legacy path)
-    if (!options.bundlePath) {
-      // ... (rest of the manual rendering logic if needed, but we now use bundle.js)
-      // Actually, to keep it clean, we just import renderBundle if bundlePath is missing
-      const { renderBundle } = await import('../bundle.js');
-      const adhocBundle = renderBundle(projectName, options);
-      // Copy from adhoc to stageDir or just use adhoc
-      // For simplicity, let's just use the renderBundle result
-      options.bundlePath = adhocBundle;
-    }
-
-    // -- Single tar + SSH pipe to extract on server --
-    // Per-arm filename. HA-scale and HA-deploy fan two arms in parallel
-    // through this function, both with the same projectName. A shared
-    // /tmp path was racing — Arm A's stream of the bundle could mid-flight
-    // read a file Arm B had already begun overwriting, surfacing on the
-    // remote side as "gzip: stdin: unexpected end of file". The ip + pid +
-    // random suffix gives each arm its own file so the cleanup rmSync below
-    // can't yank Arm A's stream out from under it.
-    const safeIp = ip.replace(/[^0-9a-zA-Z]/g, '_');
-    const tarPath = join(
-      tmpdir(),
-      `vc-deploy-${projectName}-${safeIp}-${process.pid}-${randomBytes(6).toString('hex')}.tar.gz`,
+  if (!options.bundlePath) {
+    const { withBundle } = await import('../bundle.js');
+    return withBundle(projectName, options, (bundlePath) =>
+      setupServerFiles(ip, sshKeyPath, projectName, { ...options, bundlePath }),
     );
+  }
+  const remoteDir = `/opt/${projectName}`;
+  // A temp dir per call, not one shared path: HA-scale and HA-deploy fan two
+  // arms through here at once with the same projectName, and a shared tarball
+  // path raced (one arm's stream read a file the other had begun overwriting,
+  // "gzip: stdin: unexpected end of file" on the server).
+  await withTempDir('vc-bundle-tar-', async (tarDir) => {
+    const tarPath = join(tarDir, 'bundle.tar.gz');
     // Inner pack vs upload+extract split — pack is local CPU-bound, upload
     // is bandwidth-bound. Splitting them isolates whether a slow deploy is
     // dev-laptop or network/server side. Clack spinners replace the older
@@ -674,23 +662,7 @@ export async function setupServerFiles(ip, sshKeyPath, projectName, options = {}
       uploadSpinner.stop('Bundle upload failed', 1);
       throw err;
     }
-
-    // Clean up local tar
-    try {
-      rmSync(tarPath, { force: true });
-    } catch {
-      // Ignore cleanup errors
-    }
-  } finally {
-    // Clean up staging dir only if we created it (adhoc)
-    if (!options.bundlePath) {
-      try {
-        rmSync(stageDir, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
-  }
+  });
 }
 
 /**

@@ -15,13 +15,15 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // compose / compose-ha: no GitHub environment delete, no summary note.
 // remove-stack-state sits between the teardown and the buckets: the compose
 // teardown reaps via direct provider APIs (no `pulumi destroy`), so its stack
-// record must be reconciled explicitly, and the effect reads the teardown's
-// leak-ledger verdict — closest-possible ordering. k8s tiers need no such
-// step (destroyStack runs `pulumi destroy` + `removeStack`).
+// record must be reconciled explicitly. It keeps the stack exactly when the
+// environment's entry is kept (entryKeptReason), so it comes after the last
+// step that can add a line that keeps the entry: the teardown and the app
+// storage key revoke. k8s tiers need no such step (destroyStack runs
+// `pulumi destroy` + `removeStack`).
 const EXPECTED_COMPOSE_SEQUENCE = [
   'destroy-compose-services',
-  'remove-stack-state',
   'revoke-app-storage-key',
+  'remove-stack-state',
   'delete-app-bucket',
   'retain-state-bucket',
   'handle-backup-bucket',
@@ -32,8 +34,8 @@ const EXPECTED_COMPOSE_SEQUENCE = [
 
 const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'destroy-compose-ha',
-  'remove-stack-state',
   'revoke-app-storage-key',
+  'remove-stack-state',
   'delete-app-bucket',
   'retain-state-bucket',
   'handle-backup-bucket',

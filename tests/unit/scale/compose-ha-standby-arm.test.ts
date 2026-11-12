@@ -166,7 +166,7 @@ vi.mock('../../../src/lib/deploy/failover-guard.js', async (orig) => {
         receiverStatus: isPrimary ? null : streams ? 'streaming' : 'startup',
       };
     },
-    recordSystemIdentifier: (_c: unknown, sysid: string) => {
+    markStandbyProven: (_c: unknown, sysid: string) => {
       h.recorded.push(sysid);
     },
     markStandbyUnproven: () => {

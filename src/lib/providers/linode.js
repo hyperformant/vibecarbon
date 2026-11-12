@@ -17,7 +17,13 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  replaceWireguardPeerRules,
+  sweepLabels,
+} from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
 // HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
@@ -128,6 +134,22 @@ function fnv1a32hex(input) {
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * What a reserved IPv4 is assigned to, as a phrase, or null when it is
+ * unassigned. Either field means assigned: `linode_id` names a Linode, and
+ * `assigned_entity` any entity the address is assigned to, so an address held
+ * by something other than a Linode counts too.
+ * @param {{ linode_id?: number|null, assigned_entity?: {id: number, label?: string, type?: string}|null }} ip
+ * @returns {string|null}
+ */
+function reservedIpHolder(ip) {
+  if (ip.linode_id != null) return `Linode ${ip.linode_id}`;
+  if (ip.assigned_entity != null) {
+    return `${ip.assigned_entity.type ?? 'entity'} ${ip.assigned_entity.label ?? ip.assigned_entity.id}`;
+  }
+  return null;
 }
 
 /**
@@ -1566,31 +1588,47 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}).
-   * Idempotent: 404 counts as already gone.
+   * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}),
+   * answered as a ReservedIpRelease (providers/base.js) so destroy reads
+   * every provider one way. Here the DELETE alone decides: 2xx or 404 is
+   * released, a 4xx is a refusal (still held), and any other status, a 5xx
+   * that outlasted fetchWithRetry's retries, proves nothing either way
+   * (deleteRefused). DigitalOcean's twin reads the address back because DO
+   * has kept an IP it answered a DELETE for; nothing like that has been seen
+   * on Linode, and destroy reads Linode's listing before it deletes
+   * (reservedIpLabelMatch).
    * @param {string} address
-   * @returns {Promise<boolean>} true on success or if already gone (404)
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
     const response = await fetchWithRetry(
       `${LinodeProvider.API_BASE}/networking/reserved/ips/${address}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
     );
-    return response.ok || response.status === 404;
+    if (response.ok || response.status === 404) return { released: true };
+    return {
+      released: false,
+      held: deleteRefused(response.status) ? true : null,
+      region: null,
+      reason: deleteFailure('Linode', response.status),
+    };
   }
 
   /**
    * Every reserved IPv4 on the account (guarded paginated walk of
-   * GET /networking/reserved/ips).
-   * @returns {Promise<Array<{ address: string, tags?: string[] }>>}
-   * @throws when a page cannot be read
+   * GET /networking/reserved/ips). An account past the guard is not read in
+   * full, and a partial listing must not pass for the whole: destroy reads an
+   * address missing from it as already released (reservedIpLabelMatch).
+   * @returns {Promise<Array<{ address: string, tags?: string[], linode_id?: number|null, assigned_entity?: {id: number, label?: string, type?: string}|null }>>}
+   * @throws when a page cannot be read, or there are more pages than the guard reads
    */
   async _listReservedIps() {
     const ips = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
+    const pageSize = 100;
+    const maxPages = 20;
+    for (let page = 1; page <= maxPages; page++) {
       const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=100`,
+        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=${pageSize}`,
         { headers: { Authorization: `Bearer ${this.apiToken}` } },
       );
       if (!response.ok) {
@@ -1598,22 +1636,26 @@ export class LinodeProvider extends BaseProvider {
       }
       const data = await response.json();
       ips.push(...(data.data ?? []));
-      if (!data.pages || page >= data.pages) break;
-      page++;
+      if (!data.pages || page >= data.pages) return ips;
     }
-    return ips;
+    throw new Error(
+      `the Linode account has more than ${maxPages * pageSize} reserved IPs, more than vibecarbon reads`,
+    );
   }
 
   /**
    * Whether the reserved IPv4 at `address` still carries ALL of `labels` as
-   * tags (the encodeLabel encoding the k8s program tags with). Destroy asks
-   * before it releases an address saved at deploy time: Linode reissues a
-   * released address within minutes, so by destroy time the saved address
-   * can be another project's. Empty labels match nothing.
+   * tags (the encodeLabel encoding the k8s program tags with), and what it
+   * is assigned to. Destroy asks before it releases an address saved at
+   * deploy time: Linode reissues a released address within minutes, so by
+   * destroy time the saved address can be another project's, and one of
+   * ours still assigned to a Linode the teardown did not delete must never
+   * be taken off it. Empty labels match nothing.
    * @param {string} address
    * @param {Object<string,string>} labels
-   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[] }>}
-   *   found is false when the account holds no reserved IP at that address
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
+   *   found is false when the account holds no reserved IP at that address;
+   *   holder names what the address is assigned to, null when unassigned
    * @throws when the listing cannot be read
    */
   async reservedIpLabelMatch(address, labels) {
@@ -1625,6 +1667,7 @@ export class LinodeProvider extends BaseProvider {
       found: true,
       matches: wanted.length > 0 && wanted.every((t) => tags.includes(t)),
       tags,
+      holder: reservedIpHolder(ip),
     };
   }
 
@@ -1633,22 +1676,37 @@ export class LinodeProvider extends BaseProvider {
    * (same encodeLabel encoding the k8s Pulumi program tags with). Lists
    * GET /networking/reserved/ips and filters client-side, the way
    * listServersDetailed does, so no server-side filter syntax is relied on.
-   * Empty labels match nothing: it never sweeps the whole account.
+   * A label without a value is refused (sweepLabels): it never sweeps the
+   * whole account. One still assigned (`linode_id`, or `assigned_entity` for
+   * any entity) is left alone: destroy runs after the teardown, so whatever
+   * holds it is something the teardown did not delete, and an address is
+   * never taken off a running server.
    * @param {Object<string,string>} labels
-   * @returns {Promise<{ deleted: string[], failed: Array<{ address: string }> }>}
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
    * @throws when the listing cannot be read
    */
-  async deleteReservedIpsByLabels(labels) {
-    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
-    if (wanted.length === 0) return { deleted: [], failed: [] };
-    const matches = (await this._listReservedIps())
-      .filter((ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)))
-      .map((ip) => ip.address);
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
+    const wanted = sweepLabels(labels).map(([k, v]) => encodeLabel(k, v));
+    const skip = new Set(except);
+    const matches = (await this._listReservedIps()).filter(
+      (ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)) && !skip.has(ip.address),
+    );
     const deleted = [];
     const failed = [];
-    for (const address of matches) {
-      if (await this.deleteReservedIpByAddress(address)) deleted.push(address);
-      else failed.push({ address });
+    for (const ip of matches) {
+      const holder = reservedIpHolder(ip);
+      if (holder) {
+        failed.push({
+          address: ip.address,
+          held: true,
+          reason: `it is still assigned to ${holder}, which was not deleted`,
+        });
+        continue;
+      }
+      const outcome = await this.deleteReservedIpByAddress(ip.address);
+      if (outcome.released) deleted.push(ip.address);
+      else failed.push({ address: ip.address, held: outcome.held, reason: outcome.reason });
     }
     return { deleted, failed };
   }

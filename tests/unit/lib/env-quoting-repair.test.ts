@@ -8,15 +8,15 @@
  * only) and the per-key warning; silent when there is nothing to say.
  * Fixture values only.
  */
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { readProjectEnvFiles, repairLegacyEnvQuoting } from '../../../src/lib/project.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 function project(files: Record<string, string>) {
-  const cwd = mkdtempSync(join(tmpdir(), 'env-repair-'));
+  const cwd = createTempDir('env-repair-');
   for (const [name, content] of Object.entries(files)) writeFileSync(join(cwd, name), content);
   return cwd;
 }

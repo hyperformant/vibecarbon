@@ -8,16 +8,15 @@
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashContent } from '../../../../src/lib/checksum.js';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
   assertSuccess,
@@ -122,7 +121,7 @@ describe('vibecarbon add', () => {
     it('never writes through a symlinked path inside the project', () => {
       // A cloned project whose k8s/base/observability is a symlink to a
       // directory elsewhere: add must not write there.
-      const outside = mkdtempSync(join(tmpdir(), 'vc-add-outside-'));
+      const outside = createTempDir('vc-add-outside-');
       mkdirSync(join(project, 'k8s', 'base'), { recursive: true });
       symlinkSync(outside, join(project, 'k8s', 'base', 'observability'));
       const r = runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 });

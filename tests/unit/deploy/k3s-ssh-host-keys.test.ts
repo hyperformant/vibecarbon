@@ -1,8 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Mock spawn: both waitForK3sReady's ssh probe and fetchKubeconfig's scp now
 // go through runCommandAsync (Task A3), which spawns rather than using
@@ -46,7 +45,7 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
       () => fakeChild(0, 'CONNECTED\nREADY\n') as unknown as ReturnType<typeof spawn>,
     );
 
-    const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
+    const tmp = createTempDir('vc-k3s-test-');
     const khPath = join(tmp, '.vibecarbon', 'known_hosts_e2e');
 
     await waitForK3sReady('1.2.3.4', '/tmp/key', khPath, 5);
@@ -71,7 +70,7 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     spawnMock.mockReset();
     spawnMock.mockImplementation(() => fakeChild(255) as unknown as ReturnType<typeof spawn>);
     const timers = vi.spyOn(globalThis, 'setTimeout');
-    const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
+    const tmp = createTempDir('vc-k3s-test-');
 
     await expect(waitForK3sReady('1.2.3.4', '/tmp/key', join(tmp, 'kh'), 1)).rejects.toThrow(
       /k3s did not become ready/,
@@ -90,7 +89,7 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     spawnMock.mockReset();
     spawnMock.mockImplementationOnce(() => fakeChild(0) as unknown as ReturnType<typeof spawn>);
 
-    const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
+    const tmp = createTempDir('vc-k3s-test-');
     const projectDir = tmp;
     // fetchKubeconfig reads then writes the kubeconfig file. Stub the
     // intermediate file so the post-scp readFileSync doesn't crash.

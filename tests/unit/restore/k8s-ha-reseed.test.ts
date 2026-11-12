@@ -1,5 +1,4 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 /**
  * Finding #2: runK8sRestore performs a first-class VERIFIED standby re-seed for
@@ -18,12 +17,14 @@ import { join } from 'node:path';
  * inert no-ops; the reseed + verify closures are injected.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { assertFailoverPreconditions } from '../../../src/lib/deploy/failover-guard.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The real config writers (journal, proof, fence marker) run in these tests
 // against no project: point them at an empty dir, never the repo root, where
 // they would take the real config lock.
-const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+const noProjectDir = createTempDir('vc-no-project-');
 beforeEach(() => {
   vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
 });
@@ -378,11 +379,10 @@ describe('runK8sRestore: a standby not re-seeded and verified is marked unproven
 
 describe('markStandbyUnproven', () => {
   it('sets replication degraded and drops the recorded identifier, keeping the rest', async () => {
-    const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { readFileSync, rmSync, writeFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const { markStandbyUnproven } = await import('../../../src/lib/deploy/failover-guard.js');
-    const dir = mkdtempSync(join(tmpdir(), 'vc-unproven-'));
+    const dir = createTempDir('vc-unproven-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -690,5 +690,80 @@ describe('runK8sRestore: a busy reseed stage names the reseed command, never a r
     expect(err.message).toMatch(/do not rerun the restore/i);
     expect(err.message).not.toMatch(/DIVERGED/);
     expect(markUnproven).toHaveBeenCalled();
+  });
+});
+
+// A verified restore clears the degraded flag an earlier unproven reseed set,
+// through the real config writers against a real project file, and failover
+// then allows the promote. A restore whose verify fails stays degraded.
+describe('runK8sRestore: a verified HA restore clears the degraded flag', () => {
+  let dir: string;
+  const readEnv = () =>
+    JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.prod;
+  beforeEach(() => {
+    dir = createTempDir('vc-proven-');
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: {
+          prod: {
+            ...haEnvConfig,
+            replication: 'degraded',
+            degraded: true,
+            ha: { ...haEnvConfig.ha, systemIdentifier: '7412345678901234567' },
+          },
+        },
+      }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const canFailOver = () =>
+    assertFailoverPreconditions({
+      envConfig: readEnv(),
+      environment: 'prod',
+      standbyState: { inRecovery: true, systemIdentifier: '7412345678901234567' },
+      tier: 'k8s-ha',
+    });
+
+  it('a restore whose reseed and streaming verify pass leaves the env proven; failover allows', async () => {
+    expect(() => canFailOver()).toThrow(/replication is degraded/);
+    const outcome = runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi.fn().mockResolvedValue('reseeded'),
+      readReplicationState: vi.fn().mockResolvedValue('streaming'),
+      verifySleep: async () => {},
+      recordSystemIdentifier: vi.fn(),
+    });
+    await outcome;
+    const env = readEnv();
+    expect(env.degraded).toBe(false);
+    expect(env.replication).toBe('streaming');
+    expect(canFailOver()).toEqual({ mode: 'promote' });
+  });
+
+  it('a restore whose verify fails stays degraded', async () => {
+    const outcome = runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi.fn().mockResolvedValue('reseeded'),
+      readReplicationState: vi.fn().mockResolvedValue(''),
+      verifySleep: async () => {},
+      recordSystemIdentifier: vi.fn(),
+    });
+    await expect(outcome).rejects.toThrow(/HA restore/);
+    const env = readEnv();
+    expect(env.degraded).toBe(true);
+    expect(env.replication).toBe('degraded');
+    expect(() => canFailOver()).toThrow(
+      /replication is degraded|different database|nothing proves/,
+    );
   });
 });

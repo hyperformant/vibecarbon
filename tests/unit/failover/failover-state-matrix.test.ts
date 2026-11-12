@@ -18,17 +18,17 @@
  * ssh, iac or config write runs; the journal helpers and the tri-state promote
  * are exercised on their own below.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 // The real config writers (journal, proof, fence marker) run in these tests
 // against no project: point them at an empty dir, never the repo root, where
 // they would take the real config lock.
-const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+const noProjectDir = createTempDir('vc-no-project-');
 beforeEach(() => {
   vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
 });
@@ -958,7 +958,7 @@ describe('failover journal (R2)', () => {
   });
 
   const seed = (env: Record<string, unknown>) => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-journal-'));
+    dir = createTempDir('vc-journal-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({ projectName: 'proj', environments: { e4: env } }),

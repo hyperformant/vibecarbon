@@ -43,7 +43,6 @@ import {
   constants as fsConstants,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -60,6 +59,7 @@ import { knownHostsPathForKey, SSH_CONNECTION_OPTS } from '../host-keys.js';
 import { NODE_RUNTIME_IMAGE } from '../images.js';
 import { perfRecord, perfTimer } from '../perf.js';
 import { shEscape } from '../shell.js';
+import { makeTempDir, removeTempDir } from '../temp-dir.js';
 import { TARGET_PLATFORM } from './platform.js';
 import { acquireUplinkLock } from './uplink-lock.js';
 
@@ -575,18 +575,19 @@ export async function deliverImage({
   } catch (err) {
     throw new DeliveryError(err.message);
   }
-  const work = mkdtempSync(join(workRoot, DELTA_DIR_PREFIX));
-  // Who owns this dir, for sweepStaleDeltaDirs: the finally below removes it,
-  // but a killed run never reaches that.
-  writeFileSync(
-    join(work, DELTA_OWNER_FILE),
-    JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
-  );
+  const work = makeTempDir(DELTA_DIR_PREFIX, { parent: workRoot });
   const archiveDir = join(work, 'save');
   const stageDir = join(work, 'stage');
-  mkdirSync(archiveDir);
-  mkdirSync(stageDir);
   try {
+    // Who owns this dir, for sweepStaleDeltaDirs: the finally below removes
+    // it, and the exit sweep does on a Ctrl-C (temp-dir.js), but a killed run
+    // (SIGKILL) reaches neither.
+    writeFileSync(
+      join(work, DELTA_OWNER_FILE),
+      JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+    );
+    mkdirSync(archiveDir);
+    mkdirSync(stageDir);
     // The total below is mostly not the transfer: a 5 MB delta took 20-136 s
     // (e2e 2026-11-05). These say which stage to look at.
     const saveTimer = perfTimer('deploy.image.delta.save');
@@ -697,7 +698,7 @@ export async function deliverImage({
     timer.end('(failed)');
     throw err;
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    removeTempDir(work);
   }
   // After the work dir is gone: a pushAfter that never settles (the deploy
   // failed before the registry served) holds nothing on this machine.

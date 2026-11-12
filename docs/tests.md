@@ -75,6 +75,10 @@ describe('vibecarbon add observability', () => {
 
 `tests/_shared/` (HTTP fakes, temp-dir helpers, docker utils) is the home for cross-tier infrastructure. Anything specific to a single tier lives under that tier's `_harness/` (currently only `tests/integration/_harness/`).
 
+### The shared git config guard
+
+Every worktree shares one `.git/config`, and twice a test run changed it unnoticed (`core.bare=true`, then a fake `user.name`/`user.email`). `tests/setup/git-config-guard.ts` is a vitest `globalSetup` on the root config, so every project runs it: it snapshots `git config --local --list` before the run and compares after. A difference prints the changed keys, sets exit code 1 and restores nothing. `branch.*` keys are ignored (git rewrites them on `push -u`). `npm pack` also runs this repo's `prepare` (`git config core.hooksPath git-hooks`), an idempotent write the guard does not flag while the value is already set.
+
 ## E2E tests
 
 **`tests/e2e/scenarios/`**: full deploy/destroy/scale/restore matrix over the scenarios in the provider registry (`testConfig.e2e.providers` in `tests/config.ts`), which providers and scenarios come from; which deploy tiers each provider supports comes from that provider's `SUPPORTED_TIERS` in `src/lib/providers/<id>.js`. Run via `pnpm test:e2e` (the runner with metrics). Requires `REAL_INFRA=true` and burns real cloud credit on whichever provider you select.

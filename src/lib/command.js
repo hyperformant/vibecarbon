@@ -11,12 +11,12 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import which from 'which';
 import { scrubPackageManagerEnv } from './package-manager-env.js';
+import { withTempDirSync } from './temp-dir.js';
 
 /**
  * Track active child processes for graceful shutdown on SIGINT/SIGTERM.
@@ -344,14 +344,11 @@ export function runCommandAsync(cmd, options = {}) {
  * @param {object} [options]
  */
 export function runShellScript(bashScript, options = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'vibecarbon-script-'));
-  const file = join(dir, 'script.sh');
-  try {
+  return withTempDirSync('vibecarbon-script-', (dir) => {
+    const file = join(dir, 'script.sh');
     writeFileSync(file, bashScript, { mode: 0o700 });
     return runCommand(['bash', file], options);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 /**

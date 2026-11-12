@@ -3,10 +3,10 @@
  * stubs needed for the basic shape, no cloud calls when status hits a
  * not-deployed env.
  */
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
   assertSuccess,
@@ -75,7 +75,7 @@ describe('vibecarbon status', () => {
 
     // No SSH key exists anywhere this HOME can see, so checkRemoteContainers
     // resolves every server to a "no ssh key" row instead of attempting SSH.
-    const emptyHome = mkdtempSync(join(tmpdir(), 'vc-status-no-key-'));
+    const emptyHome = createTempDir('vc-status-no-key-');
 
     const r = runCli('status', ['-json'], {
       cwd: project,

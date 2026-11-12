@@ -31,6 +31,7 @@ import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-ba
 import { readSshVersion } from '../runtime-floors.js';
 import { mintAttemptId } from '../services/addon-start.js';
 import { sshKeyPathFor } from '../ssh.js';
+import { removeTempDir, startStaleSecretSweep } from '../temp-dir.js';
 import { createTracker } from '../tracker.js';
 import { resolveDeployImageSet } from '../version-channel.js';
 import {
@@ -74,7 +75,7 @@ import {
   staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { clusterIngressIp } from './k8s/ingress-ip.js';
-import { releaseRetiredReservedIps } from './k8s/retired-reserved-ip.js';
+import { createDeployDropRetired, releaseRetiredReservedIps } from './k8s/retired-reserved-ip.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
 import { k8sPsqlRunner } from './replication.js';
@@ -1052,6 +1053,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // The whole deploy, start to success outro: the e2e cold-deploy budgets
   // (tests/e2e/checks/deploy-budget.ts) read it, minus the TLS first look.
   const deployTotalTimer = perfTimer('deploy.total');
+  // Deploy bundles and other temp dirs and files with secrets in them that
+  // earlier runs left in the OS temp dir: removed in the background
+  // (temp-dir.js), so the deploy never waits on them. Its one line, when it
+  // removed some, waits for a quiet point (flushed before the outro), so it
+  // never breaks a spinner's line.
+  const staleSecretSweep = startStaleSecretSweep();
   const {
     projectConfig,
     envConfig,
@@ -1447,7 +1454,9 @@ export async function executeDeployment(args, gatheredConfig) {
       // compare. A failure here stays quiet: the finalize step below reads the
       // rule, writes it if it is missing, and reports what still fails.
       const beforeFirstRead = () =>
-        s3Provider.setBucketCors(s3Config.bucket, envCorsOrigins(domain)).catch(() => {});
+        s3Provider
+          .setBucketCors(s3Config.bucket, envCorsOrigins(domain), { untilVisibleMs: 15_000 })
+          .catch(() => {});
       const bucket = await s3Provider.createBucket(s3Config.bucket, { beforeFirstRead });
       assertBucketReady(bucket, 'App storage');
       s3Spinner.stop(
@@ -1917,15 +1926,21 @@ export async function executeDeployment(args, gatheredConfig) {
     ? ciReady.imageTag
     : buildImageRef(ciReady.githubOwner, ciReady.repoName, ciReady.imageTag);
 
-  // --- STEP 3: Local Bundle Rendering (Unified) ---
-  // renderBundle is sync (cp + writeFile fan-out); perfTimer captures total
-  // wall-clock time for the staging-dir build. Typical ~50-300ms.
-  const bundleRenderTimer = perfTimer('deploy.bundle.pack');
+  // --- STEP 3: The deploy bundle (compose tiers) ---
+  // What a compose server gets (bundle.js): the compose files and scripts, and
+  // the .env and app.env with every secret the app runs on. Rendered here,
+  // before the DNS warm-up (STEP 4) and the pending-server repair, so a render
+  // that fails (a full /tmp, an unreadable project file, a value no .env can
+  // hold) stops the deploy before anything outside this machine changes. Its
+  // one reader is the compose plan's setup-server-files step, and k8s never
+  // reads it, so the k8s tiers render none. The try below owns it: removed
+  // once the dispatch settles, whatever the outcome (a Ctrl-C leaves it to the
+  // exit sweep, temp-dir.js). renderBundle is sync, typically ~50-300 ms.
   // verbose=false: per-file `[bundle] Copying X` lines bypass the clack
   // gutter and print flush-left, breaking the visual flow. Bundle content
   // is reproducible from the project tree; debug it by re-running with
   // VIBECARBON_PERF=1 + VIBECARBON_BUNDLE_VERBOSE=1 if needed.
-  const bundlePath = renderBundle(projectConfig.projectName, {
+  const bundleOptions = {
     domain,
     environment,
     image: imageRef,
@@ -1947,379 +1962,394 @@ export async function executeDeployment(args, gatheredConfig) {
         })
       : '',
     verbose: process.env.VIBECARBON_BUNDLE_VERBOSE === '1',
-  });
-  bundleRenderTimer.end();
-
-  // --- STEP 4: DNS Warm-up (parallel with VM provisioning) ---
-  // Kick off the placeholder-DNS write in the background so TTL starts
-  // draining while we spin up the VM. The real-IP update below awaits the
-  // warm-up handle to avoid racing two writes on the same record.
-  const dnsInputs = { domain, dnsProvider, dnsZoneId };
-  const dnsWarmupPromise =
-    domain && hasAutomatedDns(dnsProvider) && !state.shouldSkip('dns-setup', dnsInputs)
-      ? (async () => {
-          state.startStep('dns-setup', dnsInputs);
-          try {
-            const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
-            if (!dnsZoneId) {
-              p.log.info('DNS warm-up skipped (Zone ID not found)');
-              return null;
-            }
-            // onProgress suppresses setupSimple's internal spinner: this warm-up
-            // runs in the BACKGROUND, concurrently with the foreground
-            // "Provisioning VPS" spinner (STEP 5). Two animating clack spinners
-            // fight over the one TTY line and garble it. The warm-up's own
-            // completion is logged below; no competing animation.
-            const result = await updateDnsIp(dnsToken, dnsZoneId, domain, '0.0.0.0', {
-              onProgress: () => {},
-            });
-            if (result?.success === false) {
-              // Best-effort: the real-IP write below is the one that must land.
-              p.log.warn(`Initial DNS setup failed: ${result.error}`);
-              return null;
-            }
-            state.completeStep('dns-setup', result);
-            p.log.info('DNS records warmed up');
-            return result;
-          } catch (error) {
-            p.log.warn(`Initial DNS setup failed: ${error.message}`);
-            return null;
-          }
-        })()
-      : Promise.resolve(null);
-
-  // --- STEP 5: Architecture Dispatch ---
-  // One entry per tier, keyed by the registry. deploymentConfig is a cheap,
-  // pure object literal built unconditionally above the table; its k8s-only
-  // fields are simply unused on the compose paths.
-  //
-  // Role↔stack mapping (Task 6): `envConfig` here is the environment's
-  // persisted project config AS IT STOOD before this deploy invocation
-  // (gatheredConfig read it off disk during config-gathering, upstream of
-  // executeDeployment) — exactly the mapping a post-failover redeploy needs
-  // to follow. Task 7 is what makes `ha.primary.stack` / `ha.standby.stack`
-  // actually present (a pre-Task-7 or first-ever deploy has no `.stack`, so
-  // this is null and haK8sProvisionClusters falls back to the
-  // `${environment}-primary` / `${environment}-standby` stack-birth
-  // defaults). This intentionally reads `envConfig`, NOT the `persistedConfig`
-  // /`persistedEnvConfig` re-read further down (~line 1290) — that re-read
-  // exists to pick up THIS deploy's own mid-flight saves and must not be
-  // pulled forward, or a fresh deploy could see its own in-progress writes.
-  //
-  // Each side also carries its recorded master/db types (and the standby its
-  // worker, from ha.standbyWorkerSpec), with or without a stack: the fan-out
-  // keeps them, so a redeploy never resizes or refuses an existing env
-  // (src/lib/deploy/standby-types.js haStacksFrom).
-  const haStacks = haStacksFrom(envConfig);
-  const deploymentConfig = {
-    projectName: projectConfig.projectName,
-    environment: config.environment,
-    provider: config.provider,
-    region,
-    secondaryRegion,
-    masterServerType,
-    dbServerType,
-    workerServerType,
-    serverType,
-    minWorkers,
-    maxWorkers,
-    domain,
-    ha: config.ha,
-    haStacks,
-    // `deploy -server-type` given: new sizes for both clusters, so the
-    // standby's recorded types give way (k8s-ha fan-out).
-    serverTypeRequested: !!args.serverType,
-    // A first-deploy rerun with a different -standby-region: the standby's
-    // recorded types were resolved for the old location and give way too.
-    standbyRetargeted: !!gatheredConfig.standbyRetargeted,
-    observability: config.observability,
-    services,
-    apiToken,
-    dnsZoneId,
-    dnsToken,
-    dnsProvider,
-    s3Config,
-    backupConfig,
-    backupBucketName: backupS3Config?.bucket || null,
-    // DR: the resolved restore point (above), or null. deployK3s writes its
-    // marker before the db applies, so the db pod's walg-restore init fetches
-    // that backup; the restored DB carries its migration ledger, so the app's
-    // migrate init container applies only what the backup lacks.
-    restore: restorePoint,
-    // The environment as the operator names it: HA clusters deploy under their
-    // stack names, and the commands an error prints must use this one.
-    operatorEnv: environment,
-    // Finding #1: hard-gate k8s-HA replication unless the operator opts into a
-    // warm/degraded standby via `deploy -allow-degraded`.
-    allowDegraded: !!args.allowDegraded,
-    operatorCidrs: projectConfig.operatorCidrs ?? [],
-    imageReadyPromise,
-    tracker,
-    state,
   };
-
-  const deployCtx = {
-    projectConfig,
-    environment,
-    envConfig,
-    region,
-    serverType,
-    services,
-    domain,
-    dnsProvider,
-    apiToken,
-    dnsZoneId,
-    dnsToken,
-    backupConfig,
-    // The backups bucket: compose-ha's replication and both compose tiers'
-    // restore-tls / snapshot-tls read it.
-    backupS3Config,
-    imageRef,
-    bundlePath,
-    ciReady,
-    s3Config,
-    state,
-    dnsWarmupPromise,
-    isDirectDeploy,
-    isComposeLocal,
-    localImageTag,
-    composeLocalBuildPromise,
-    newStateBackend,
-    attemptId,
-  };
-
-  // All four tiers are now plan-driven: planDeploy(tier) → runPlan → EFFECTS.
-  // The former TIER_DEPLOYERS dispatch table (k8s / k8s-ha calling deployK3s /
-  // deployK8sHA directly) is gone — each branch below assembles the tier's ctx
-  // and runs its pure plan against the shared effect registry. The per-tier
-  // ctx assembly + deployResult extraction genuinely differ (compose ctx keys
-  // vs k8s's `{ options: deploymentConfig }` vs the HA result shapes below), so
-  // this dispatch is kept intentionally (Task 9 dead-code sweep inspected it
-  // and left it as legitimate config-shaping, not dead dispatch).
-  const { planDeploy } = await import('./plan/deploy-plan.js');
-  const { runPlan } = await import('./plan/runner.js');
-  const { EFFECTS } = await import('./effects/index.js');
-
-  // A compose scale replaced a server outside Pulumi and could not point the
-  // stack at the new one (or was killed before it did): repair that state
-  // before any Pulumi `up`, whose refresh would otherwise drop the deleted
-  // server and build a second one. Refuses the deploy when it cannot.
-  if (isComposeTier(tier) && envConfig?.pendingServerState?.length) {
-    const { repairPendingServerState } = await import('./compose/server-state-sync.js');
-    await repairPendingServerState({
-      environment,
-      envConfig,
-      options: {
-        provider: providerIdFor(envConfig),
-        providerToken: apiToken,
-        s3Config,
-        projectName: projectConfig.projectName,
-      },
-    });
+  let bundlePath = null;
+  if (isComposeTier(tier)) {
+    const bundleRenderTimer = perfTimer('deploy.bundle.pack');
+    bundlePath = renderBundle(projectConfig.projectName, bundleOptions);
+    bundleRenderTimer.end();
   }
-
-  // Single k8s's A record (k8s/dns-record.js): started from deployK3s's
-  // onInfraReady, finished by the post-deploy block below. Single k8s only.
-  // A k8s-ha deploy's records have one writer, its plan's update-dns step
-  // (effects/k8s-ha.js, the provider's setupHA), and a second, single-cluster
-  // write after it would replace the HA records with setupSimple's while the
-  // first certificate may still be issuing. Compose never touches the k8s engine.
-  const k8sDns =
-    tier === 'k8s'
-      ? (await import('./k8s/index.js')).createK8sDnsWriter({
-          domain,
-          dnsProvider,
-          dnsToken,
-          dnsZoneId,
-          state,
-          dnsWarmupPromise,
-          getDnsProvider,
-          // Single k8s: the record's target is on disk before the record points
-          // at it, so destroy owns it if the deploy fails (the final save
-          // writes the same ingressIp). The cluster's floating IP, where it
-          // has one, is recorded beside it, never a master's own address:
-          // destroy releases a recorded floatingIp by address. k8s-ha
-          // persists per cluster instead.
-          persistOwnedIp:
-            tier === 'k8s'
-              ? ({ ingressIp, floatingIp }) =>
-                  updateProjectConfig((onDisk) => {
-                    const env = onDisk.environments?.[environment];
-                    if (!env) return;
-                    env.ingressIp = ingressIp;
-                    if (floatingIp) env.floatingIp = floatingIp;
-                  })
-              : null,
-        })
-      : null;
 
   let deployResult;
   // Where this run's managed-DNS writer has the domain's records and since
   // when ({target, changedAt}, k8s tiers): read by the release of a retired
   // DigitalOcean reserved IP below. Null when the records are kept by hand.
   let dnsWrite = null;
-  if (tier === 'compose') {
-    // Compose (single, non-HA) runs through the pure step-plan + effect
-    // registry (planDeploy → runPlan → EFFECTS), which REPLACES the former
-    // inlined deployComposeSingle block. The plan's steps carry the exact
-    // operations, order, args, state-gating and conditionals the inline path
-    // ran; ctx threads the mutable server identity the effects fill in
-    // (serverIp / providerServerId / providerServerName) and the orchestrator
-    // reads back into the single-server deployResult shape below.
-    const sshKeyPath = sshKeyPathFor(environment);
-    // Single-node compose: its one server, whichever record resolvePrimary names.
-    const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
-    const composeCtx = {
-      ...deployCtx,
-      sshKeyPath,
-      // Seed the mutable server identity from any prior deploy so the warm
-      // path (`when: !ctx.serverIp`) skips provisioning. provisionServer sets
-      // these on a fresh deploy.
-      serverIp: composeServer?.ip || null,
-      providerServerId: composeServer?.id || null,
-      providerServerName: composeServer?.providerServerName || null,
-      providerFirewallId: composeServer?.firewallId || null,
-      // Docker Hub creds gate + drive the dockerhub-login step. Loaded here so
-      // the step's when-predicate stays pure (mirrors the compose-ha path,
-      // which also loads dockerHub creds in the orchestrator).
-      dockerHubCreds: resolveDockerHubCreds(),
-    };
-    await runPlan(planDeploy('compose', config), composeCtx, EFFECTS);
-    deployResult = {
-      masterIp: composeCtx.serverIp,
-      serverId: composeCtx.providerServerId || 'manual',
-      serverName: composeCtx.providerServerName,
-      firewallId: composeCtx.providerFirewallId,
-      // The verify-tls verdict (trusted or pending), persisted as envConfig.tls.
-      ...(composeCtx.tlsState && { tls: composeCtx.tlsState }),
-    };
-  } else if (tier === 'compose-ha') {
-    // Compose-HA runs through the same pure step-plan + effect registry as
-    // single compose (planDeploy → runPlan → EFFECTS), REPLACING the former
-    // deployComposeHA orchestration. The plan's steps carry the exact
-    // operations, order, args, fan-out, perf labels and warn/throw semantics
-    // deployComposeHA ran over the primary+standby pair; ctx threads the
-    // mutable two-node identity the effects fill in (primary/standby/degraded)
-    // and the orchestrator reads back into the HA deployResult shape below.
-    const sshKeyPath = sshKeyPathFor(environment);
-    const s = tracker.spinner();
-    s.start('Starting HA deployment...');
-    const composeHaCtx = {
-      ...deployCtx,
-      sshKeyPath,
-      // Preserve the exact default the removed deployComposeHA call applied at
-      // its call site (`serverType || <literal>`) — deployCtx.serverType is the
-      // raw gatheredConfig value, which may be undefined. RCA (2026-07-22):
-      // this assignment runs BEFORE the compose-ha effect, so effects/compose-ha.js's
-      // own `ctx.serverType || Provider.DEFAULT_COMPOSE_HA_TYPE` fallback was
-      // dead code — ctx.serverType was always already set by the time the
-      // effect read it. Routed through Provider so the literal lives in ONE
-      // place — deliberately not restated here, because the last copy of it
-      // said 'cx23' long after that SKU stopped being placeable in the EU.
-      serverType: serverType || providerFor(envConfig).DEFAULT_COMPOSE_TYPE,
-      // `deploy -server-type` given: that type applies to both stacks; without
-      // it each keeps its server's recorded type (a scale may have changed one).
+  // Single k8s's A record writer (set in the dispatch below, finished after it).
+  let k8sDns = null;
+  try {
+    // --- STEP 4: DNS Warm-up (parallel with VM provisioning) ---
+    // Kick off the placeholder-DNS write in the background so TTL starts
+    // draining while we spin up the VM. The real-IP update below awaits the
+    // warm-up handle to avoid racing two writes on the same record.
+    const dnsInputs = { domain, dnsProvider, dnsZoneId };
+    const dnsWarmupPromise =
+      domain && hasAutomatedDns(dnsProvider) && !state.shouldSkip('dns-setup', dnsInputs)
+        ? (async () => {
+            state.startStep('dns-setup', dnsInputs);
+            try {
+              const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
+              if (!dnsZoneId) {
+                p.log.info('DNS warm-up skipped (Zone ID not found)');
+                return null;
+              }
+              // onProgress suppresses setupSimple's internal spinner: this warm-up
+              // runs in the BACKGROUND, concurrently with the foreground
+              // "Provisioning VPS" spinner (STEP 5). Two animating clack spinners
+              // fight over the one TTY line and garble it. The warm-up's own
+              // completion is logged below; no competing animation.
+              const result = await updateDnsIp(dnsToken, dnsZoneId, domain, '0.0.0.0', {
+                onProgress: () => {},
+              });
+              if (result?.success === false) {
+                // Best-effort: the real-IP write below is the one that must land.
+                p.log.warn(`Initial DNS setup failed: ${result.error}`);
+                return null;
+              }
+              state.completeStep('dns-setup', result);
+              p.log.info('DNS records warmed up');
+              return result;
+            } catch (error) {
+              p.log.warn(`Initial DNS setup failed: ${error.message}`);
+              return null;
+            }
+          })()
+        : Promise.resolve(null);
+
+    // --- STEP 5: Architecture Dispatch ---
+    // One entry per tier, keyed by the registry. deploymentConfig is a cheap,
+    // pure object literal built unconditionally above the table; its k8s-only
+    // fields are simply unused on the compose paths.
+    //
+    // Role↔stack mapping (Task 6): `envConfig` here is the environment's
+    // persisted project config AS IT STOOD before this deploy invocation
+    // (gatheredConfig read it off disk during config-gathering, upstream of
+    // executeDeployment) — exactly the mapping a post-failover redeploy needs
+    // to follow. Task 7 is what makes `ha.primary.stack` / `ha.standby.stack`
+    // actually present (a pre-Task-7 or first-ever deploy has no `.stack`, so
+    // this is null and haK8sProvisionClusters falls back to the
+    // `${environment}-primary` / `${environment}-standby` stack-birth
+    // defaults). This intentionally reads `envConfig`, NOT the `persistedConfig`
+    // /`persistedEnvConfig` re-read further down (~line 1290) — that re-read
+    // exists to pick up THIS deploy's own mid-flight saves and must not be
+    // pulled forward, or a fresh deploy could see its own in-progress writes.
+    //
+    // Each side also carries its recorded master/db types (and the standby its
+    // worker, from ha.standbyWorkerSpec), with or without a stack: the fan-out
+    // keeps them, so a redeploy never resizes or refuses an existing env
+    // (src/lib/deploy/standby-types.js haStacksFrom).
+    const haStacks = haStacksFrom(envConfig);
+    const deploymentConfig = {
+      projectName: projectConfig.projectName,
+      environment: config.environment,
+      provider: config.provider,
+      region,
+      secondaryRegion,
+      masterServerType,
+      dbServerType,
+      workerServerType,
+      serverType,
+      minWorkers,
+      maxWorkers,
+      domain,
+      ha: config.ha,
+      haStacks,
+      // `deploy -server-type` given: new sizes for both clusters, so the
+      // standby's recorded types give way (k8s-ha fan-out).
       serverTypeRequested: !!args.serverType,
-      secondaryRegion: secondaryRegion || undefined,
-      // Docker Hub + GHCR creds gate the HA login fan-out; loaded here so the
-      // effects stay pure of credential I/O (mirrors the single-compose ctx).
-      dockerHubCreds: resolveDockerHubCreds(),
-      ghcrPullCreds: ciReady.ghcrPullCreds,
-      // Finding #1: hard-gate replication unless the operator opts into a
+      // A first-deploy rerun with a different -standby-region: the standby's
+      // recorded types were resolved for the old location and give way too.
+      standbyRetargeted: !!gatheredConfig.standbyRetargeted,
+      observability: config.observability,
+      services,
+      apiToken,
+      dnsZoneId,
+      dnsToken,
+      dnsProvider,
+      s3Config,
+      backupConfig,
+      backupBucketName: backupS3Config?.bucket || null,
+      // DR: the resolved restore point (above), or null. deployK3s writes its
+      // marker before the db applies, so the db pod's walg-restore init fetches
+      // that backup; the restored DB carries its migration ledger, so the app's
+      // migrate init container applies only what the backup lacks.
+      restore: restorePoint,
+      // The environment as the operator names it: HA clusters deploy under their
+      // stack names, and the commands an error prints must use this one.
+      operatorEnv: environment,
+      // Finding #1: hard-gate k8s-HA replication unless the operator opts into a
       // warm/degraded standby via `deploy -allow-degraded`.
       allowDegraded: !!args.allowDegraded,
-      // Role mapping on a failed-over pair (null otherwise): the effects resolve
-      // ctx.primary / ctx.standby by role and keep each node's stack.
-      reconverge: composeHaReconverge,
-      onProgress: (msg) => s.message(msg),
+      operatorCidrs: projectConfig.operatorCidrs ?? [],
+      imageReadyPromise,
+      tracker,
+      state,
     };
-    // Wrap the entire pipeline so the perf trace shows the headline cost
-    // (which contains the deploy.ha.compose.* sub-stages from the effects).
-    await perfAsync('deploy.ha.compose.full', () =>
-      runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
-    );
-    s.stop('Compose HA deployment complete');
-    // A reconverge that did not verify streaming and record the identifier
-    // stays degraded and keeps its last deployedAt (haFinalizeConfig), so the
-    // next deploy resumes it.
-    const reconvergeIncomplete = !!composeHaCtx.reconverge && !composeHaCtx.reconvergeComplete;
-    const haDegraded = !!composeHaCtx.degraded || reconvergeIncomplete;
-    deployResult = {
-      success: true,
-      primaryIp: composeHaCtx.primary.ip,
-      standbyIp: composeHaCtx.standby.ip,
-      domain,
-      deployMode: 'compose-ha',
-      degraded: haDegraded,
-      replication: haDegraded ? 'degraded' : 'streaming',
-      // haSeedRecord persists the identifier only when streaming was verified.
-      replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming' : 'degraded',
-      systemIdentifier: composeHaCtx.systemIdentifier ?? null,
-      reconvergeIncomplete,
-      ...(composeHaCtx.tlsState && { tls: composeHaCtx.tlsState }),
-    };
-  } else if (tier === 'k8s') {
-    // Single-cluster k3s runs through the plan as a single black-box step that
-    // wraps deployK3s (preserving its `deploy.k3s.full` perf span). ctx carries
-    // the deploymentConfig deployK3s consumes UNCHANGED under ctx.options; the
-    // effect fills ctx.clusterResult, which is deployK3s's return read back into
-    // the single-cluster deployResult the post-dispatch k8s block expects.
-    // One addition: onInfraReady starts the domain's A record write the moment
-    // the cluster's addresses exist (k8s/dns-record.js), so it overlaps the
-    // image delivery and manifest apply. k8s-ha's fan-out owns its own hook.
-    const k8sCtx = { options: { ...deploymentConfig, onInfraReady: k8sDns.onInfraReady } };
-    await runPlan(planDeploy('k8s', config), k8sCtx, EFFECTS);
-    deployResult = k8sCtx.clusterResult;
-  } else {
-    // k8s-ha: two clusters (primary + standby) deployed in parallel + the
-    // WireGuard replication transport, run through the plan (planDeploy →
-    // runPlan → EFFECTS), REPLACING the former deployK8sHA orchestration. ctx
-    // carries the deploymentConfig UNCHANGED under ctx.options; the effects fill
-    // ctx.primaryResult / standbyResult / replicationStatus, read back into the
-    // HA deployResult the post-dispatch block + config-persist expect. The
-    // headline `deploy.ha.k8s.full` perf span (which contains the effects'
-    // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
-    // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
-    // not race the 0.0.0.0 warm-up write of the same apex record.
-    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, newStateBackend };
-    await perfAsync('deploy.ha.k8s.full', () =>
-      runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
-    );
-    dnsWrite = k8sHaCtx.dnsWrite ?? null;
-    // The retired cluster is the standby this deploy just rebuilt and gated on
-    // streaming (or finalized degraded under -allow-degraded): this deploy
-    // stamps deployedAt, so the fence comes off here, before that save. A
-    // marker left behind would make it refuse its own backups once a later
-    // failover promotes it, so a failed clear fails the deploy (the env stays
-    // swapped and the rerun clears it).
-    const retiredFence = await finishK8sRetiredFence({
-      retiredAtEntry,
-      standbyIp: k8sHaCtx.standbyResult?.masterIp,
-      projectName: projectConfig.projectName,
+
+    const deployCtx = {
+      projectConfig,
       environment,
-    });
-    // The backup-prefix fence follows the role primary (backup-fence.js): a
-    // reconverge, an aborted failover or a recreated database moves it along.
-    const fencePrimaryIp = k8sHaCtx.primaryResult?.masterIp;
-    if (fencePrimaryIp) {
-      const fence = await writeK8sBackupFence({
-        ip: fencePrimaryIp,
-        sshKeyPath: sshKeyPathFor(environment),
-      });
-      if (!fence.ok) p.log.warn(backupFenceWarning(fencePrimaryIp, fence.reason));
-      recordBackupFence({ environment }, fence);
-    }
-    deployResult = {
-      primary: k8sHaCtx.primaryResult,
-      standby: k8sHaCtx.standbyResult,
+      envConfig,
+      region,
+      serverType,
+      services,
       domain,
-      replicationStatus: k8sHaCtx.replicationStatus,
-      ...k8sHaDegradedVerdict(k8sHaCtx),
-      systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
-      // A retired side that is not a replica yet keeps its fence: deployedAt
-      // stays unstamped, so the env stays swapped and the next deploy retries.
-      reconvergeIncomplete: retiredFence.kept,
+      dnsProvider,
+      apiToken,
+      dnsZoneId,
+      dnsToken,
+      backupConfig,
+      // The backups bucket: compose-ha's replication and both compose tiers'
+      // restore-tls / snapshot-tls read it.
+      backupS3Config,
+      imageRef,
+      bundlePath,
+      ciReady,
+      s3Config,
+      state,
+      dnsWarmupPromise,
+      isDirectDeploy,
+      isComposeLocal,
+      localImageTag,
+      composeLocalBuildPromise,
+      newStateBackend,
+      attemptId,
     };
+
+    // All four tiers are now plan-driven: planDeploy(tier) → runPlan → EFFECTS.
+    // The former TIER_DEPLOYERS dispatch table (k8s / k8s-ha calling deployK3s /
+    // deployK8sHA directly) is gone — each branch below assembles the tier's ctx
+    // and runs its pure plan against the shared effect registry. The per-tier
+    // ctx assembly + deployResult extraction genuinely differ (compose ctx keys
+    // vs k8s's `{ options: deploymentConfig }` vs the HA result shapes below), so
+    // this dispatch is kept intentionally (Task 9 dead-code sweep inspected it
+    // and left it as legitimate config-shaping, not dead dispatch).
+    const { planDeploy } = await import('./plan/deploy-plan.js');
+    const { runPlan } = await import('./plan/runner.js');
+    const { EFFECTS } = await import('./effects/index.js');
+
+    // A compose scale replaced a server outside Pulumi and could not point the
+    // stack at the new one (or was killed before it did): repair that state
+    // before any Pulumi `up`, whose refresh would otherwise drop the deleted
+    // server and build a second one. Refuses the deploy when it cannot.
+    if (isComposeTier(tier) && envConfig?.pendingServerState?.length) {
+      const { repairPendingServerState } = await import('./compose/server-state-sync.js');
+      await repairPendingServerState({
+        environment,
+        envConfig,
+        options: {
+          provider: providerIdFor(envConfig),
+          providerToken: apiToken,
+          s3Config,
+          projectName: projectConfig.projectName,
+        },
+      });
+    }
+
+    // Single k8s's A record (k8s/dns-record.js): started from deployK3s's
+    // onInfraReady, finished by the post-deploy block below. Single k8s only.
+    // A k8s-ha deploy's records have one writer, its plan's update-dns step
+    // (effects/k8s-ha.js, the provider's setupHA), and a second, single-cluster
+    // write after it would replace the HA records with setupSimple's while the
+    // first certificate may still be issuing. Compose never touches the k8s engine.
+    k8sDns =
+      tier === 'k8s'
+        ? (await import('./k8s/index.js')).createK8sDnsWriter({
+            domain,
+            dnsProvider,
+            dnsToken,
+            dnsZoneId,
+            state,
+            dnsWarmupPromise,
+            getDnsProvider,
+            // Single k8s: the record's target is on disk before the record points
+            // at it, so destroy owns it if the deploy fails (the final save
+            // writes the same ingressIp). The cluster's floating IP, where it
+            // has one, is recorded beside it, never a master's own address:
+            // destroy releases a recorded floatingIp by address. k8s-ha
+            // persists per cluster instead.
+            persistOwnedIp:
+              tier === 'k8s'
+                ? ({ ingressIp, floatingIp }) =>
+                    updateProjectConfig((onDisk) => {
+                      const env = onDisk.environments?.[environment];
+                      if (!env) return;
+                      env.ingressIp = ingressIp;
+                      if (floatingIp) env.floatingIp = floatingIp;
+                    })
+                : null,
+          })
+        : null;
+
+    if (tier === 'compose') {
+      // Compose (single, non-HA) runs through the pure step-plan + effect
+      // registry (planDeploy → runPlan → EFFECTS), which REPLACES the former
+      // inlined deployComposeSingle block. The plan's steps carry the exact
+      // operations, order, args, state-gating and conditionals the inline path
+      // ran; ctx threads the mutable server identity the effects fill in
+      // (serverIp / providerServerId / providerServerName) and the orchestrator
+      // reads back into the single-server deployResult shape below.
+      const sshKeyPath = sshKeyPathFor(environment);
+      // Single-node compose: its one server, whichever record resolvePrimary names.
+      const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
+      const composeCtx = {
+        ...deployCtx,
+        sshKeyPath,
+        // Seed the mutable server identity from any prior deploy so the warm
+        // path (`when: !ctx.serverIp`) skips provisioning. provisionServer sets
+        // these on a fresh deploy.
+        serverIp: composeServer?.ip || null,
+        providerServerId: composeServer?.id || null,
+        providerServerName: composeServer?.providerServerName || null,
+        providerFirewallId: composeServer?.firewallId || null,
+        // Docker Hub creds gate + drive the dockerhub-login step. Loaded here so
+        // the step's when-predicate stays pure (mirrors the compose-ha path,
+        // which also loads dockerHub creds in the orchestrator).
+        dockerHubCreds: resolveDockerHubCreds(),
+      };
+      await runPlan(planDeploy('compose', config), composeCtx, EFFECTS);
+      deployResult = {
+        masterIp: composeCtx.serverIp,
+        serverId: composeCtx.providerServerId || 'manual',
+        serverName: composeCtx.providerServerName,
+        firewallId: composeCtx.providerFirewallId,
+        // The verify-tls verdict (trusted or pending), persisted as envConfig.tls.
+        ...(composeCtx.tlsState && { tls: composeCtx.tlsState }),
+      };
+    } else if (tier === 'compose-ha') {
+      // Compose-HA runs through the same pure step-plan + effect registry as
+      // single compose (planDeploy → runPlan → EFFECTS), REPLACING the former
+      // deployComposeHA orchestration. The plan's steps carry the exact
+      // operations, order, args, fan-out, perf labels and warn/throw semantics
+      // deployComposeHA ran over the primary+standby pair; ctx threads the
+      // mutable two-node identity the effects fill in (primary/standby/degraded)
+      // and the orchestrator reads back into the HA deployResult shape below.
+      const sshKeyPath = sshKeyPathFor(environment);
+      const s = tracker.spinner();
+      s.start('Starting HA deployment...');
+      const composeHaCtx = {
+        ...deployCtx,
+        sshKeyPath,
+        // Preserve the exact default the removed deployComposeHA call applied at
+        // its call site (`serverType || <literal>`) — deployCtx.serverType is the
+        // raw gatheredConfig value, which may be undefined. RCA (2026-07-22):
+        // this assignment runs BEFORE the compose-ha effect, so effects/compose-ha.js's
+        // own `ctx.serverType || Provider.DEFAULT_COMPOSE_HA_TYPE` fallback was
+        // dead code — ctx.serverType was always already set by the time the
+        // effect read it. Routed through Provider so the literal lives in ONE
+        // place — deliberately not restated here, because the last copy of it
+        // said 'cx23' long after that SKU stopped being placeable in the EU.
+        serverType: serverType || providerFor(envConfig).DEFAULT_COMPOSE_TYPE,
+        // `deploy -server-type` given: that type applies to both stacks; without
+        // it each keeps its server's recorded type (a scale may have changed one).
+        serverTypeRequested: !!args.serverType,
+        secondaryRegion: secondaryRegion || undefined,
+        // Docker Hub + GHCR creds gate the HA login fan-out; loaded here so the
+        // effects stay pure of credential I/O (mirrors the single-compose ctx).
+        dockerHubCreds: resolveDockerHubCreds(),
+        ghcrPullCreds: ciReady.ghcrPullCreds,
+        // Finding #1: hard-gate replication unless the operator opts into a
+        // warm/degraded standby via `deploy -allow-degraded`.
+        allowDegraded: !!args.allowDegraded,
+        // Role mapping on a failed-over pair (null otherwise): the effects resolve
+        // ctx.primary / ctx.standby by role and keep each node's stack.
+        reconverge: composeHaReconverge,
+        onProgress: (msg) => s.message(msg),
+      };
+      // Wrap the entire pipeline so the perf trace shows the headline cost
+      // (which contains the deploy.ha.compose.* sub-stages from the effects).
+      // The bundle is removed after the dispatch (the finally below): the setup
+      // fan uploads it to both nodes and settles only after both uploads have
+      // (haSetupServerFiles), so no upload still reads it then.
+      await perfAsync('deploy.ha.compose.full', () =>
+        runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
+      );
+      s.stop('Compose HA deployment complete');
+      // A reconverge that did not verify streaming and record the identifier
+      // stays degraded and keeps its last deployedAt (haFinalizeConfig), so the
+      // next deploy resumes it.
+      const reconvergeIncomplete = !!composeHaCtx.reconverge && !composeHaCtx.reconvergeComplete;
+      const haDegraded = !!composeHaCtx.degraded || reconvergeIncomplete;
+      deployResult = {
+        success: true,
+        primaryIp: composeHaCtx.primary.ip,
+        standbyIp: composeHaCtx.standby.ip,
+        domain,
+        deployMode: 'compose-ha',
+        degraded: haDegraded,
+        replication: haDegraded ? 'degraded' : 'streaming',
+        // haSeedRecord persists the identifier only when streaming was verified.
+        replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming' : 'degraded',
+        systemIdentifier: composeHaCtx.systemIdentifier ?? null,
+        reconvergeIncomplete,
+        ...(composeHaCtx.tlsState && { tls: composeHaCtx.tlsState }),
+      };
+    } else if (tier === 'k8s') {
+      // Single-cluster k3s runs through the plan as a single black-box step that
+      // wraps deployK3s (preserving its `deploy.k3s.full` perf span). ctx carries
+      // the deploymentConfig deployK3s consumes UNCHANGED under ctx.options; the
+      // effect fills ctx.clusterResult, which is deployK3s's return read back into
+      // the single-cluster deployResult the post-dispatch k8s block expects.
+      // One addition: onInfraReady starts the domain's A record write the moment
+      // the cluster's addresses exist (k8s/dns-record.js), so it overlaps the
+      // image delivery and manifest apply. k8s-ha's fan-out owns its own hook.
+      const k8sCtx = { options: { ...deploymentConfig, onInfraReady: k8sDns.onInfraReady } };
+      await runPlan(planDeploy('k8s', config), k8sCtx, EFFECTS);
+      deployResult = k8sCtx.clusterResult;
+    } else {
+      // k8s-ha: two clusters (primary + standby) deployed in parallel + the
+      // WireGuard replication transport, run through the plan (planDeploy →
+      // runPlan → EFFECTS), REPLACING the former deployK8sHA orchestration. ctx
+      // carries the deploymentConfig UNCHANGED under ctx.options; the effects fill
+      // ctx.primaryResult / standbyResult / replicationStatus, read back into the
+      // HA deployResult the post-dispatch block + config-persist expect. The
+      // headline `deploy.ha.k8s.full` perf span (which contains the effects'
+      // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
+      // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
+      // not race the 0.0.0.0 warm-up write of the same apex record.
+      const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, newStateBackend };
+      await perfAsync('deploy.ha.k8s.full', () =>
+        runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
+      );
+      dnsWrite = k8sHaCtx.dnsWrite ?? null;
+      // The retired cluster is the standby this deploy just rebuilt and gated on
+      // streaming (or finalized degraded under -allow-degraded): this deploy
+      // stamps deployedAt, so the fence comes off here, before that save. A
+      // marker left behind would make it refuse its own backups once a later
+      // failover promotes it, so a failed clear fails the deploy (the env stays
+      // swapped and the rerun clears it).
+      const retiredFence = await finishK8sRetiredFence({
+        retiredAtEntry,
+        standbyIp: k8sHaCtx.standbyResult?.masterIp,
+        projectName: projectConfig.projectName,
+        environment,
+      });
+      // The backup-prefix fence follows the role primary (backup-fence.js): a
+      // reconverge, an aborted failover or a recreated database moves it along.
+      const fencePrimaryIp = k8sHaCtx.primaryResult?.masterIp;
+      if (fencePrimaryIp) {
+        const fence = await writeK8sBackupFence({
+          ip: fencePrimaryIp,
+          sshKeyPath: sshKeyPathFor(environment),
+        });
+        if (!fence.ok) p.log.warn(backupFenceWarning(fencePrimaryIp, fence.reason));
+        recordBackupFence({ environment }, fence);
+      }
+      deployResult = {
+        primary: k8sHaCtx.primaryResult,
+        standby: k8sHaCtx.standbyResult,
+        domain,
+        replicationStatus: k8sHaCtx.replicationStatus,
+        ...k8sHaDegradedVerdict(k8sHaCtx),
+        systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
+        // A retired side that is not a replica yet keeps its fence: deployedAt
+        // stays unstamped, so the env stays swapped and the next deploy retries.
+        reconvergeIncomplete: retiredFence.kept,
+      };
+    }
+  } finally {
+    // Every reader of the bundle ran in the compose plans above.
+    if (bundlePath) removeTempDir(bundlePath);
   }
 
   // Defence in depth (write-fence.js): after bring-up the role primary must take
@@ -2632,18 +2662,15 @@ export async function executeDeployment(args, gatheredConfig) {
     const ingressProviderId = providerIdFor(envConfig);
     // A warm redeploy skips the up, so the stack can still list the address:
     // the release takes it out first, as every up would, or destroy would
-    // fail on an address already gone.
-    const dropRetired = async (stackName) => {
-      const { dropRetiredStackResources, getOrCreateStack } = await import('../iac/index.js');
-      const stack = await getOrCreateStack(stackName, async () => ({}), {
-        provider: ingressProviderId,
-        providerToken: apiToken,
-        s3Config,
-        projectName: projectConfig.projectName,
-        requireExisting: true,
-      });
-      await dropRetiredStackResources(stack, ingressProviderId);
-    };
+    // fail on an address already gone. Every address the surgery takes out
+    // that the stack's record lacks is recorded (createDeployDropRetired).
+    const dropRetired = createDeployDropRetired({
+      environment,
+      providerId: ingressProviderId,
+      providerToken: apiToken,
+      s3Config,
+      projectName: projectConfig.projectName,
+    });
     // Managed DNS: every A record in the zone at the address, through the
     // same backend and token that wrote the records.
     const zoneRecordsAt =
@@ -3068,6 +3095,7 @@ export async function executeDeployment(args, gatheredConfig) {
     }),
   );
 
+  await staleSecretSweep.flush((line) => p.log.info(line));
   const { formatted: timeStr } = tracker.finish();
   deployTotalTimer.end();
   p.log.success(`Deployment to ${c.bold(environment)} complete! ${c.dim(`(${timeStr})`)}`);

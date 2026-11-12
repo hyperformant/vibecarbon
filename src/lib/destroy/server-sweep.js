@@ -59,10 +59,13 @@ export async function sweepEnvironmentServers({
   onProgress = () => {},
 }) {
   const scope = `${projectName}-${environment}`;
+  // A server line keeps the environment's entry (ENTRY_KEEP_BY_CLASS in
+  // destroy.js), so the re-run this offers can run, and it runs this sweep.
   const consoleHint =
-    `Check the ${providerName} console for servers named ${scope}*; a server left by a killed ` +
-    '`vibecarbon scale` is outside Pulumi state, so no destroy retry reaches it, and its name ' +
-    'blocks the next deploy with "name is already used".';
+    `Run \`vibecarbon destroy ${environment}\` again to retry: the environment stays in ` +
+    `.vibecarbon.json, and the re-run looks for servers named ${scope}* again. Or delete it ` +
+    `in the ${providerName} console: a server left by a killed \`vibecarbon scale\` is ` +
+    'outside Pulumi state, and its name blocks the next deploy with "name is already used".';
 
   let listing;
   try {
@@ -114,7 +117,10 @@ export async function sweepEnvironmentServers({
     const label = server.name || `id ${server.id}`;
     onProgress(`Deleting surviving server: ${label}`);
     try {
-      await provider.deleteServer(server.id, { waitUntilGone: true });
+      await provider.deleteServer(server.id, {
+        waitUntilGone: true,
+        onLeftover: (line) => leaks.leak(line),
+      });
       deleted.push(server.name ?? String(server.id));
     } catch (error) {
       leaks.leak({

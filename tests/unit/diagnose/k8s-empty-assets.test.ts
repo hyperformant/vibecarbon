@@ -6,8 +6,7 @@
  * deployment made `kubectl get deploy ''` fail. A section whose asset is
  * empty is skipped, for every provider.
  */
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +18,7 @@ vi.mock('node:child_process', async (orig) => {
 
 import { diagnoseK8s } from '../../../src/diagnose.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 type Call = { cmd: string; args: string[] };
 
@@ -35,7 +35,7 @@ function stubReport() {
 }
 
 async function runSections(Provider: { K8S_ASSETS: Record<string, string> }, providerId: string) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-diag-'));
+  const dir = createTempDir('vc-diag-');
   const kubeconfig = join(dir, 'kubeconfig');
   writeFileSync(kubeconfig, 'apiVersion: v1\n');
   const report = stubReport();

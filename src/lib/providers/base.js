@@ -13,6 +13,85 @@
  * tests then walk you through the rest.
  */
 
+/**
+ * Whether a DELETE's HTTP status is the provider refusing it (4xx). A 5xx,
+ * which fetchWithRetry has already retried, proves nothing either way: the
+ * delete may or may not have happened.
+ * @param {number} status
+ * @returns {boolean}
+ */
+export function deleteRefused(status) {
+  return status >= 400 && status < 500;
+}
+
+/**
+ * The clause for a DELETE that did not succeed, worded by deleteRefused.
+ * @param {string} providerName
+ * @param {number} status
+ * @returns {string}
+ */
+export function deleteFailure(providerName, status) {
+  return deleteRefused(status)
+    ? `${providerName} refused the delete (HTTP ${status})`
+    : `${providerName} could not complete the delete (HTTP ${status})`;
+}
+
+/**
+ * What a provider's `deleteReservedIpByAddress` says about the address.
+ * `released`: it is off the account. Otherwise `held` is true when it is
+ * still on the account (still listed, or the delete refused) and null when
+ * nothing proves it either way; `region` is where the provider lists it,
+ * when it said; `reason` is a clause for the line that reports it.
+ * @typedef {{released: true}
+ *   | {released: false, held: true|null, region: string|null, reason: string}} ReservedIpRelease
+ */
+
+/**
+ * What a provider's `deleteReservedIpsByLabels(labels, {except})` did: the
+ * floating or reserved IPs carrying ALL of `labels` that it released, and the
+ * ones it did not, each with `held` (still on the account: assigned to a
+ * server, which it never takes an address off, or a refused delete) or null
+ * (nothing proves it either way), and a `reason` clause. An address in
+ * `except` is skipped (the caller handled it). The method throws when the
+ * listing cannot be read whole (a partial one would read as "nothing left"),
+ * and before any read when a label is missing (sweepLabels).
+ * `serverTerminating` marks an address held by a server this process asked
+ * to terminate that was still terminating (Scaleway), which the next destroy
+ * releases.
+ * @typedef {{deleted: string[], failed: Array<{address: string, held: true|null, reason: string, serverTerminating?: true}>}} TaggedReservedIpSweep
+ */
+
+/**
+ * A billed resource a server delete left behind, shaped as a destroy ledger
+ * line (leak-ledger.js): `deleteServer`'s `onLeftover` receives it.
+ * @typedef {{resourceClass: string, resource: string, reason: string, hint: string}} ServerLeftover
+ */
+
+/**
+ * The labels a `deleteReservedIpsByLabels` sweep is scoped by, refused unless
+ * there is at least one and every one has a value. A sweep without its full
+ * scope never runs: an undefined value would read as the literal tag
+ * `environment:undefined` on one provider and as a bare key on another, and
+ * no sweep may widen past this project's and this stack's labels. It throws
+ * rather than answer "nothing found", which would read as a clean sweep.
+ * @param {Object<string, string|undefined|null>|undefined|null} labels
+ * @returns {Array<[string, string]>}
+ */
+export function sweepLabels(labels) {
+  const entries = Object.entries(labels ?? {});
+  const missing = entries.filter(([, v]) => typeof v !== 'string' || v.trim() === '');
+  if (entries.length === 0 || missing.length > 0) {
+    throw new Error(
+      `refusing to sweep by labels without a value for each (${
+        entries.length === 0
+          ? 'no labels given'
+          : `no value for ${missing.map(([k]) => k).join(', ')}`
+      }), so nothing was listed or released`,
+    );
+  }
+  return entries;
+}
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")
@@ -226,6 +305,25 @@ export class BaseProvider {
    * @type {boolean}
    */
   static K8S_FLOATING_IP = true;
+
+  /**
+   * Whether this provider's compose program gives the server a floating (or
+   * reserved) IP. Scaleway's does (a flexible IP); no other provider's does.
+   * Compose destroy deletes the server by its API, which frees only an IP
+   * still attached to it, so where this is true destroy also looks for one
+   * by the environment's labels (deleteReservedIpsByLabels): a deploy killed
+   * between creating the IP and the server leaves it attached to nothing.
+   * The program census (tests/unit/iac/floating-ip-backstop-census.test.ts)
+   * holds every program to it.
+   * @type {boolean}
+   */
+  static COMPOSE_FLOATING_IP = false;
+
+  /**
+   * What the provider calls a floating or reserved IP, in destroy's lines.
+   * @type {string}
+   */
+  static RESERVED_IP_NAME = 'reserved IP';
 
   /**
    * Resources this provider's programs once declared and no longer do, which
@@ -560,8 +658,13 @@ export class BaseProvider {
    *     provider's own asynchronous teardown (a recreate-before-drained
    *     race can otherwise collide on a "name already in use" error).
    *
+   * `options.onLeftover`: a provider whose server delete can leave a billed
+   * resource behind that nothing else finds (Scaleway's detached SBS
+   * volumes) hands it to this, as a ledger line, instead of only warning.
+   * Every destroy-side call passes it (tests/unit/destroy/entry-keep-class-table.test.ts).
+   *
    * @param {string|number} serverId - Server ID
-   * @param {{waitUntilGone?: boolean}} [options]
+   * @param {{waitUntilGone?: boolean, onLeftover?: (line: ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>} void in default mode; in
    *   waitUntilGone mode, true if the server was present at delete time
    *   (poll attempted), false if it was already gone.

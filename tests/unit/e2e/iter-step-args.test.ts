@@ -8,14 +8,16 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { COMMANDS } from '../../../src/lib/cli/command-registry.js';
 import { parseFlags } from '../../../src/lib/cli/parse-flags.js';
 import { REPO_ROOT } from '../../../tests/e2e/utils/e2e-env.js';
 import {
+  ensureStepDbImage,
   ITER_STEPS,
   isPurgeDestroy,
   iterStepCliArgs,
+  STEPS_WITHOUT_IMAGE_PULL,
 } from '../../../tests/e2e/utils/iter-step-args.js';
 
 const ENV = 'prod-e2e1234';
@@ -98,5 +100,42 @@ describe('iter-step runs each step with arguments its command accepts', () => {
     // One call, inside that branch.
     expect(script.split('await finishRigTeardown(').length).toBe(2);
     expect(script.slice(gate, cleanup)).not.toMatch(/\n {2}\}\n/);
+  });
+});
+
+describe('ensureStepDbImage', () => {
+  // `destroy` ran selectE2EDbImage like every step, so tearing a rig down
+  // needed ghcr.io reachable and crashed offline. Steps that never pull skip it.
+  it.each(['destroy', 'status', 'diagnose'])('%s never asks ghcr.io', async (step) => {
+    const select = vi.fn(async () => ({ ref: 'x', source: 'release' as const }));
+    await expect(ensureStepDbImage(step, { select })).resolves.toBe(false);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('every other step still checks the image', async () => {
+    for (const step of ITER_STEPS.filter((s) => !STEPS_WITHOUT_IMAGE_PULL.includes(s))) {
+      const select = vi.fn(async () => ({ ref: 'x', source: 'release' as const }));
+      await expect(ensureStepDbImage(step, { select })).resolves.toBe(true);
+      expect(select).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('lets an image error through for a step that pulls', async () => {
+    const select = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    await expect(ensureStepDbImage('deploy', { select })).rejects.toThrow('boom');
+  });
+
+  it('only exempts steps that exist', () => {
+    for (const s of STEPS_WITHOUT_IMAGE_PULL) expect(ITER_STEPS).toContain(s);
+  });
+});
+
+describe('iter-step.js wiring', () => {
+  it('chooses the db image through ensureStepDbImage, not selectE2EDbImage directly', () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'iter-step.js'), 'utf-8');
+    expect(script).toMatch(/await ensureStepDbImage\(step\)/);
+    expect(script).not.toMatch(/selectE2EDbImage/);
   });
 });

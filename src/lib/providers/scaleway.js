@@ -56,7 +56,13 @@ import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  replaceWireguardPeerRules,
+  sweepLabels,
+} from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -76,6 +82,25 @@ const WG_PORT = 51821;
 // GB on Scaleway's wire is 10^9 bytes (the live catalog reports
 // volumes_constraint.max_size = 40000000000 for DEV1-M's 40 GB).
 const GB = 1_000_000_000;
+
+/**
+ * How long deleteServer waits for a terminated server's record to go.
+ */
+const TERMINATE_WAIT_MS = 120_000;
+
+/** How long deleteServer keeps trying to delete a detached SBS volume. */
+const SBS_DELETE_WAIT_MS = 60_000;
+
+/**
+ * Servers this process asked Scaleway to terminate that were still there
+ * when deleteServer stopped waiting (TERMINATE_WAIT_MS). Module-level, not
+ * per instance: destroy deletes servers and sweeps flexible IPs through
+ * different provider instances (compose-ha). The label sweep reads it, so an
+ * IP still attached to one is reported as waiting on a termination the next
+ * destroy finds finished, not as held by a server nobody deleted.
+ * @type {Set<string>}
+ */
+const serversStillTerminating = new Set();
 
 /**
  * Encode a label key/value pair into a Scaleway tag string — same
@@ -263,6 +288,16 @@ export class ScalewayProvider extends BaseProvider {
   // (CCM/CSI/block-storage/DNS-flip) recorded in the audit; the k8s tiers
   // are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+
+  /**
+   * The compose program gives the server a flexible IP, made before the
+   * server: destroy looks for one by the environment's labels
+   * (deleteReservedIpsByLabels). See BaseProvider.COMPOSE_FLOATING_IP.
+   * @type {boolean}
+   */
+  static COMPOSE_FLOATING_IP = true;
+
+  static RESERVED_IP_NAME = 'flexible IP';
 
   /**
    * IaC env bag — the three-credential seam (audit design flag 2), AND the
@@ -1104,11 +1139,16 @@ export class ScalewayProvider extends BaseProvider {
    * the volumes are only deletable after termination completes, so
    * returning early would trade scale-path latency for an unbounded
    * billing leak. `waitUntilGone` only selects the return value.
+   *
+   * An SBS volume step 4 cannot delete is reported through `onLeftover`
+   * (destroy turns it into a ledger leak), or warned on stderr when no one
+   * asked. Nothing finds it again: a later deleteServer finds the server
+   * gone and reads no volumes, so the line names the console delete.
    * @param {string} serverId
-   * @param {{waitUntilGone?: boolean}} [options]
+   * @param {{waitUntilGone?: boolean, onLeftover?: (line: import('./base.js').ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>}
    */
-  async deleteServer(serverId, { waitUntilGone = false } = {}) {
+  async deleteServer(serverId, { waitUntilGone = false, onLeftover } = {}) {
     const zone = await this._findServerZone(serverId);
     if (!zone) return waitUntilGone ? false : undefined; // already gone
 
@@ -1145,7 +1185,9 @@ export class ScalewayProvider extends BaseProvider {
 
     // 3. Wait for the record to disappear — the detached-SBS deletes below
     // are only valid once termination completes, in EITHER mode (see doc).
-    await pollUntil(
+    // A server still there when the wait runs out is noted, so the label
+    // sweep can say its flexible IP waits on the termination.
+    const terminated = await pollUntil(
       async () => {
         const probe = await fetch(
           `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/servers/${serverId}`,
@@ -1154,36 +1196,57 @@ export class ScalewayProvider extends BaseProvider {
         return probe.status === 404;
       },
       {
-        budgetMs: 120_000,
+        budgetMs: TERMINATE_WAIT_MS,
         initialDelayMs: 2_000,
         backoffFactor: 1,
         description: `server ${serverId} termination`,
       },
-    ).catch(() => {});
+    ).then(
+      () => true,
+      () => false,
+    );
+    if (terminated) serversStillTerminating.delete(String(serverId));
+    else serversStillTerminating.add(String(serverId));
 
     // 4. Delete the detached SBS volumes (Block Storage API — a different
     // product than the Instance API's legacy volumes endpoint). Brief
     // retry: the detach can trail the server 404 by a few seconds.
     for (const volumeId of sbsVolumeIds) {
+      let lastStatus;
       await pollUntil(
         async () => {
           const res = await fetchWithRetry(
             `${ScalewayProvider.API_BASE}/block/v1/zones/${zone}/volumes/${volumeId}`,
             { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
           );
+          lastStatus = res.status;
           return res.ok || res.status === 404;
         },
         {
-          budgetMs: 60_000,
+          budgetMs: SBS_DELETE_WAIT_MS,
           initialDelayMs: 2_000,
           backoffFactor: 1,
           description: `SBS volume ${volumeId} deletion`,
         },
-      ).catch(() => {
-        console.warn(
-          `Warning: Scaleway SBS volume ${volumeId} (zone ${zone}) could not be deleted; it ` +
-            'bills until removed. Delete it in the console or re-run destroy.',
-        );
+      ).catch((err) => {
+        const lastAnswer =
+          lastStatus === undefined
+            ? `no answer: ${err?.cause?.message ?? err?.message ?? err}`
+            : `last answer HTTP ${lastStatus}`;
+        const leftover = {
+          resourceClass: 'detached-volume',
+          resource: `SBS volume ${volumeId} (${zone})`,
+          reason:
+            `server ${serverId}'s delete left it behind, and deleting it failed for ` +
+            `${SBS_DELETE_WAIT_MS / 1000} s (${lastAnswer})` +
+            (terminated ? '' : ', while the server was still terminating'),
+          hint:
+            `Delete it in the Scaleway console under Block Storage, Volumes (zone ${zone}); it ` +
+            'bills until removed. Running destroy again does not find it: the server it ' +
+            'belonged to is gone.',
+        };
+        if (onLeftover) onLeftover(leftover);
+        else console.warn(`Warning: ${leftover.resource}: ${leftover.reason}. ${leftover.hint}`);
       });
     }
 
@@ -1816,6 +1879,74 @@ export class ScalewayProvider extends BaseProvider {
       if (res.status !== 404) sawFailure = true;
     }
     return !sawFailure;
+  }
+
+  /**
+   * Release every flexible IP whose tags carry ALL of the given labels (the
+   * encodeLabel encoding the compose program tags its IP with). The compose
+   * program creates the IP before the server, and destroy deletes the server
+   * by its API, which releases only an IP attached to it: a deploy killed in
+   * between leaves the IP attached to nothing and named nowhere but here.
+   * Filters client-side over every zone's listing. A label without a value
+   * is refused (sweepLabels). One still attached to a server is left alone: destroy runs
+   * after the server deletes, so that server is one they did not delete, or
+   * one this process asked to terminate that was still terminating when
+   * deleteServer stopped waiting (`serverTerminating`: the next destroy finds
+   * it gone and releases the IP).
+   * @param {Object<string,string>} labels
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
+   * @throws when the listing cannot be read whole
+   */
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
+    const wanted = encodeLabels(Object.fromEntries(sweepLabels(labels)));
+    const { items, complete, status } = await this.listFlexibleIPsDetailed();
+    if (!complete) {
+      throw new Error(
+        status === undefined
+          ? 'a zone holds more flexible IPs than vibecarbon reads'
+          : `GET /ips failed: HTTP ${status}`,
+      );
+    }
+    const skip = new Set(except);
+    const deleted = [];
+    const failed = [];
+    for (const ip of items) {
+      if (!wanted.every((tag) => (ip.tags ?? []).includes(tag)) || skip.has(ip.address)) continue;
+      if (ip.server) {
+        const server = ip.server.name ?? ip.server.id;
+        if (serversStillTerminating.has(String(ip.server.id))) {
+          failed.push({
+            address: ip.address,
+            held: true,
+            serverTerminating: true,
+            reason:
+              `it is still attached to server ${server}, which was still terminating when ` +
+              `vibecarbon stopped waiting after ${TERMINATE_WAIT_MS / 60_000} minutes`,
+          });
+        } else {
+          failed.push({
+            address: ip.address,
+            held: true,
+            reason: `it is still attached to server ${server}, which was not deleted`,
+          });
+        }
+        continue;
+      }
+      const res = await fetchWithRetry(
+        `${ScalewayProvider.API_BASE}/instance/v1/zones/${ip.zone}/ips/${ip.id}`,
+        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
+      );
+      if (res.ok || res.status === 404) deleted.push(ip.address);
+      else {
+        failed.push({
+          address: ip.address,
+          held: deleteRefused(res.status) ? true : null,
+          reason: deleteFailure(ScalewayProvider.NAME, res.status),
+        });
+      }
+    }
+    return { deleted, failed };
   }
 
   // ── Destroy-sweep field accessors ───────────────────────────────────────

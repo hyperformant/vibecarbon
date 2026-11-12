@@ -28,6 +28,7 @@ import {
   installNodeVersionFile,
   installWorkflowFile,
 } from '../../../src/lib/ci-setup.js';
+import { gitScrubbedEnv } from '../../_shared/git-env.js';
 
 const WORKFLOW_REL = '.github/workflows/vibecarbon-build.yml';
 const NVMRC_REL = '.nvmrc';
@@ -133,7 +134,7 @@ describe('ci-setup: .nvmrc install + commit gating', () => {
     // core.hooksPath, init.defaultBranch) out of it, so this runs identically
     // in CI and on any machine.
     const HERMETIC_GIT_ENV = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+      Object.entries(gitScrubbedEnv()).filter(([key]) => !key.startsWith('GIT_')),
     );
 
     function git(...args: string[]) {

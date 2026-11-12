@@ -15,15 +15,7 @@
  * from, so a newly added overlay cannot reach deploy and miss failover.
  */
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  statSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
@@ -46,6 +38,7 @@ import {
   writeComposeWalgRole,
 } from '../../../src/lib/deploy/walg-role.js';
 import { shEscape } from '../../../src/lib/shell.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('walgRoleDegradedMessage', () => {
   const msg = walgRoleDegradedMessage({
@@ -131,7 +124,7 @@ describe('walg role primitives', () => {
     expect(() => dbRoleConfigMapManifest(undefined as never)).toThrow(/unknown wal-g role/);
   });
   it('the write is atomic and reads itself back through the one parser, run for real', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+    const dir = createTempDir('vc-role-');
     const r = spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'primary')], { encoding: 'utf-8' });
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe('WALG_ROLE_FILE=primary');
@@ -143,7 +136,7 @@ describe('walg role primitives', () => {
     );
   });
   it('never follows a symlink planted at the tmp name', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+    const dir = createTempDir('vc-role-');
     writeFileSync(join(dir, 'victim'), 'x');
     symlinkSync(join(dir, 'victim'), join(dir, 'walg-role.tmp'));
     const r = spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'standby')], { encoding: 'utf-8' });
@@ -325,14 +318,14 @@ describe('walg role primitives', () => {
     expect(podMountsWalgRoleDir(sidecar)).toBe(false);
   });
   it('the read shell never fails and reports an empty role for a missing file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+    const dir = createTempDir('vc-role-');
     const r = spawnSync('sh', ['-c', walgRoleReadShell(dir)], { encoding: 'utf-8' });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('WALG_ROLE_FILE=\n');
   });
   it('the one read-back reads the role line, an empty role, or no answer', () => {
     for (const role of ['primary', 'standby']) {
-      const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+      const dir = createTempDir('vc-role-');
       writeFileSync(join(dir, 'walg-role'), `${role}\n`);
       const r = spawnSync('sh', ['-c', walgRoleReadShell(dir)], { encoding: 'utf-8' });
       expect(parseWalgRoleReadBack(r.stdout)).toBe(role);
@@ -343,7 +336,7 @@ describe('walg role primitives', () => {
     expect(parseWalgRoleReadBack(undefined)).toBeUndefined();
   });
   it('a write into a missing directory fails loudly and prints no role line', () => {
-    const dir = join(mkdtempSync(join(tmpdir(), 'vc-role-')), 'absent');
+    const dir = join(createTempDir('vc-role-'), 'absent');
     const r = spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'primary')], { encoding: 'utf-8' });
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toContain('WALG_ROLE_FILE=');

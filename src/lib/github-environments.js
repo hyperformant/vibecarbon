@@ -33,7 +33,7 @@ import { withCompressionDisabled } from './kubeconfig.js';
 async function getRepoSlug({ timeout } = {}) {
   const out = await runCommandAsync(
     ['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { silent: true, timeout },
+    { cleanEnv: true, silent: true, timeout },
   );
   return out.toString().trim();
 }
@@ -45,6 +45,7 @@ async function getRepoSlug({ timeout } = {}) {
 export async function ensureEnvironment(envName, { timeout } = {}) {
   const repo = await getRepoSlug({ timeout });
   await runCommandAsync(['gh', 'api', `repos/${repo}/environments/${envName}`, '-X', 'PUT'], {
+    cleanEnv: true,
     silent: true,
     timeout,
   });
@@ -62,7 +63,7 @@ export async function listEnvironmentVariables(envName, { timeout } = {}) {
   try {
     const out = await runCommandAsync(
       ['gh', 'variable', 'list', '--env', envName, '--json', 'name', '-q', '.[].name'],
-      { silent: true, timeout },
+      { cleanEnv: true, silent: true, timeout },
     );
     return String(out ?? '')
       .split('\n')
@@ -211,7 +212,7 @@ export async function uploadKubeconfig(envName, kubeconfigPath) {
 export async function triggerDeployWorkflow(envName) {
   await runCommandAsync(
     ['gh', 'workflow', 'run', 'deploy.yml', '--ref', 'main', '-F', `environment=${envName}`],
-    { silent: true },
+    { cleanEnv: true, silent: true },
   );
 }
 
@@ -247,7 +248,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
             '--json',
             'databaseId,status,conclusion,jobs',
           ],
-          { silent: true, ignoreError: true },
+          { cleanEnv: true, silent: true, ignoreError: true },
         );
         if (stateOut) {
           const info = JSON.parse(stateOut.toString())[0];
@@ -282,7 +283,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
             '--json',
             'status,conclusion,databaseId',
           ],
-          { silent: true, ignoreError: true },
+          { cleanEnv: true, silent: true, ignoreError: true },
         )
       )?.toString() ?? '[]';
     let run;
@@ -305,7 +306,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
       try {
         const logOut = await runCommandAsync(
           ['gh', 'run', 'view', String(run.databaseId), '--log-failed'],
-          { silent: true, ignoreError: true, timeout: 60_000 },
+          { cleanEnv: true, silent: true, ignoreError: true, timeout: 60_000 },
         );
         if (logOut) {
           const text = logOut.toString();
@@ -346,7 +347,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
         '--json',
         'databaseId,status',
       ],
-      { silent: true, ignoreError: true },
+      { cleanEnv: true, silent: true, ignoreError: true },
     );
     if (out) {
       const parsed = JSON.parse(out.toString())[0];
@@ -359,7 +360,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
         // signal we need.
         const jobsOut = await runCommandAsync(
           ['gh', 'run', 'view', String(runId), '--json', 'status,conclusion,jobs,url,createdAt'],
-          { silent: true, ignoreError: true, timeout: 60_000 },
+          { cleanEnv: true, silent: true, ignoreError: true, timeout: 60_000 },
         );
         if (jobsOut) {
           try {

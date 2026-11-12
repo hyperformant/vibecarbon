@@ -79,7 +79,7 @@ describe('deleteApexAndWildcard', () => {
 
     const result = await deleteApexAndWildcard('token', 'zone', 'e1.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: [], failed: [] });
     const deleteCalls = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'DELETE');
     expect(deleteCalls).toHaveLength(2);
   });
@@ -89,7 +89,7 @@ describe('deleteApexAndWildcard', () => {
 
     const result = await deleteApexAndWildcard('token', 'zone', 'e1.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: ['5.6.7.8'] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: ['5.6.7.8'], failed: [] });
     const deleteCalls = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'DELETE');
     expect(deleteCalls).toHaveLength(1);
   });
@@ -99,7 +99,7 @@ describe('deleteApexAndWildcard', () => {
 
     const result = await deleteApexAndWildcard('token', 'zone', 'e1.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: ['5.6.7.8'] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: ['5.6.7.8'], failed: [] });
     const deleteCalls = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'DELETE');
     expect(deleteCalls).toHaveLength(1);
   });
@@ -109,7 +109,11 @@ describe('deleteApexAndWildcard', () => {
 
     const result = await deleteApexAndWildcard('token', 'zone', 'e1.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: false, preservedTargets: ['5.6.7.8', '9.10.11.12'] });
+    expect(result).toEqual({
+      deletedAny: false,
+      preservedTargets: ['5.6.7.8', '9.10.11.12'],
+      failed: [],
+    });
     const deleteCalls = fetchMock.mock.calls.filter(([, opts]) => opts?.method === 'DELETE');
     expect(deleteCalls).toHaveLength(0);
   });
@@ -119,7 +123,7 @@ describe('deleteApexAndWildcard', () => {
 
     const result = await deleteApexAndWildcard('token', 'zone', 'absent.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: false, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: false, preservedTargets: [], failed: [] });
   });
 
   // M3 Task 9f made ownedIps include the floating/reserved IP a k8s cluster's
@@ -134,7 +138,7 @@ describe('deleteApexAndWildcard', () => {
       '129.212.153.70',
     ]);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: [], failed: [] });
   });
 });
 

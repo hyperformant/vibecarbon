@@ -18,10 +18,10 @@
  * so the real compose/ha.js replication helpers run and every command they
  * would send is recorded (the argv census below).
  */
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const PROMOTED_IP = '203.0.113.20'; // stack <env>-standby, role primary after the failover
 const RETIRED_IP = '203.0.113.10'; // stack <env>-primary, role standby after the failover
@@ -560,7 +560,7 @@ describe('configureStandbyReplication takes the primary tunnel address explicitl
 
 describe('haProvisionServers on a swapped env', () => {
   it('keeps each stack at its birth region and resolves the pair by role', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'reconverge-'));
+    const dir = createTempDir('reconverge-');
     const sshKeyPath = join(dir, 'key');
     writeFileSync(`${sshKeyPath}.pub`, 'ssh-ed25519 AAAA test');
     const ctx = baseCtx({

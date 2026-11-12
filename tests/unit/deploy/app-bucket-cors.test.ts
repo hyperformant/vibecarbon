@@ -244,7 +244,9 @@ describe('orchestrator call site', () => {
     ]);
     const hook = src.match(/const beforeFirstRead = \(\) =>\s+[^;]*;/)?.[0];
     expect(hook, 'the hook the app bucket create passes').toBeTruthy();
-    expect(hook).toContain('s3Provider.setBucketCors(s3Config.bucket, envCorsOrigins(domain))');
+    expect(hook).toMatch(
+      /s3Provider\s*\.setBucketCors\(s3Config\.bucket, envCorsOrigins\(domain\), \{\s*untilVisibleMs: 15_000/,
+    );
     // The whole point: a read here is what the hook exists to get ahead of,
     // and on a new bucket it cost 15 s on every provider.
     expect(hook).not.toMatch(/applyAppBucketCors|getBucketCorsOrigins/);

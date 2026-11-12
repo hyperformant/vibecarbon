@@ -336,11 +336,11 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       expect(body).not.toHaveProperty('vpc_uuid');
     });
 
-    it('throws the DO {message} error shape on a non-ok POST', async () => {
+    it('passes an unrelated 422 message through in the DO {message} error shape', async () => {
       fetchWithRetryMock
         .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
         .mockResolvedValueOnce(
-          resp({ id: 'unprocessable_entity', message: 'size not available in region' }, 422),
+          resp({ id: 'unprocessable_entity', message: 'Name is already in use.' }, 422),
         );
 
       await expect(
@@ -352,7 +352,49 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
           sshKeys: [1],
           labels: {},
         }),
-      ).rejects.toThrow('DigitalOcean API error: size not available in region');
+      ).rejects.toThrow('DigitalOcean API error: Name is already in use.');
+    });
+
+    it('maps the size-unavailable 422 to a plain out-of-stock message naming size and region', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
+        .mockResolvedValueOnce(
+          resp(
+            { id: 'unprocessable_entity', message: 'Size is not available in this region.' },
+            422,
+          ),
+        );
+
+      const err = await provider
+        .createServer({
+          name: 'x',
+          region: 'nyc3',
+          serverType: 's-2vcpu-4gb',
+          image: 'ubuntu-26-04-x64',
+          sshKeys: [1],
+          labels: {},
+        })
+        .catch((e: Error) => e);
+      expect(err.message).toContain('"s-2vcpu-4gb" in nyc3');
+      expect(err.message).toContain('out of stock');
+      expect(err.message).not.toContain('DigitalOcean API error');
+    });
+
+    it('does not treat the size sentence on another status as a stock-out', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
+        .mockResolvedValueOnce(resp({ message: 'Size is not available in this region.' }, 500));
+
+      await expect(
+        provider.createServer({
+          name: 'x',
+          region: 'nyc3',
+          serverType: 's-2vcpu-4gb',
+          image: 'ubuntu-26-04-x64',
+          sshKeys: [1],
+          labels: {},
+        }),
+      ).rejects.toThrow('DigitalOcean API error: Size is not available in this region.');
     });
 
     // M3 Task 5b Critical — DO's droplet-create `ssh_keys` field accepts
@@ -1528,27 +1570,167 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
     });
   });
 
-  // M3 Task 9f — the k8s destroy sweep's DO-only backstop for
-  // digitalocean-k8s.js's `reservedIp` resource. Unlike every other DO
-  // resource here, ReservedIp has no `name` — the wire path param IS the
-  // address, so this is deliberately a simple boolean idempotent delete
-  // (deleteVolume's shape), not deleteFirewallByName's richer shape.
+  // A reserved IP has no `name`: the wire path param IS the address. DO has
+  // answered a DELETE with success and kept the IP, and its 404 has meant
+  // nothing on its own (SSH keys, 2026-11-06), so the release is the read
+  // by address: 404 is gone, a listing is not released, anything else
+  // proves nothing. One DELETE, one read, no waiting.
   describe('deleteReservedIpByAddress', () => {
-    it('DELETEs /reserved_ips/{address} (true on ok)', async () => {
-      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204));
-      const out = await provider.deleteReservedIpByAddress('203.0.113.9');
-      expect(calls()).toEqual([['DELETE', `${BASE}/reserved_ips/203.0.113.9`]]);
-      expect(out).toBe(true);
+    const IP = '203.0.113.9';
+    const URL_IP = `${BASE}/reserved_ips/${IP}`;
+    const listed = (droplet: unknown = null) =>
+      resp({ reserved_ip: { ip: IP, region: { slug: 'nyc3', name: 'New York 3' }, droplet } });
+
+    it('released only when the read by address answers 404: one DELETE, one GET', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
+      expect(calls()).toEqual([
+        ['DELETE', URL_IP],
+        ['GET', URL_IP],
+      ]);
     });
 
-    it('returns true on 404 (already gone — idempotent)', async () => {
+    it('a DELETE DO accepts while it still lists the address is not released, with its region', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(listed());
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: true,
+        region: 'nyc3',
+        reason: 'DigitalOcean still lists it after the delete',
+      });
+      expect(calls()).toHaveLength(2);
+    });
+
+    it('a 404 DELETE proves nothing alone: the read decides', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404)).mockResolvedValueOnce(listed());
+      expect(await provider.deleteReservedIpByAddress(IP)).toMatchObject({
+        released: false,
+        held: true,
+      });
+    });
+
+    it('a refused DELETE whose address is still listed names the refusal', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ message: 'busy' }, 422))
+        .mockResolvedValueOnce(listed({ id: 7 }));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: true,
+        region: 'nyc3',
+        reason: 'DigitalOcean refused the delete (HTTP 422)',
+      });
+    });
+
+    it('a refused DELETE whose address reads back 404 is gone all the same', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 500)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({ released: true });
+    });
+
+    it('a DELETE that failed with a 5xx is named as not completed, not refused', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 502)).mockResolvedValueOnce(listed());
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: true,
+        region: 'nyc3',
+        reason: 'DigitalOcean could not complete the delete (HTTP 502)',
+      });
+    });
+
+    it('a failed DELETE whose read-back fails too names both', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 403)).mockResolvedValueOnce(resp({}, 403));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: null,
+        region: null,
+        reason: 'DigitalOcean refused the delete (HTTP 403) and the read-back failed (HTTP 403)',
+      });
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({}, 502))
+        .mockRejectedValueOnce(new Error('socket hang up'));
+      expect(await provider.deleteReservedIpByAddress(IP)).toMatchObject({
+        held: null,
+        reason:
+          'DigitalOcean could not complete the delete (HTTP 502) and the read-back failed (socket hang up)',
+      });
+    });
+
+    it('a read that answers anything else, or throws, proves nothing either way', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204)).mockResolvedValueOnce(resp({}, 503));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: null,
+        region: null,
+        reason: 'the read-back after the delete failed (HTTP 503)',
+      });
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({}, 204))
+        .mockRejectedValueOnce(new Error('socket hang up'));
+      expect(await provider.deleteReservedIpByAddress(IP)).toEqual({
+        released: false,
+        held: null,
+        region: null,
+        reason: 'the read-back after the delete failed (socket hang up)',
+      });
+    });
+  });
+
+  // Destroy's backstop asks this before it deletes a saved address: by then
+  // the cluster's droplets are deleted, so an assigned address is in use,
+  // and only a droplet carrying this project's and stack's tags is ours.
+  describe('reservedIpAssignment', () => {
+    const IP = '203.0.113.9';
+    const URL_IP = `${BASE}/reserved_ips/${IP}`;
+    const labels = { project: 'proj', environment: 'prod' };
+    const assigned = (tags: string[]) =>
+      resp({
+        reserved_ip: {
+          ip: IP,
+          region: { slug: 'nyc3' },
+          droplet: { id: 77, name: 'proj-prod-master', tags, networks: {} },
+        },
+      });
+
+    it('one GET of the address; 404 is not found', async () => {
       fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404));
-      expect(await provider.deleteReservedIpByAddress('203.0.113.9')).toBe(true);
+      expect(await provider.reservedIpAssignment(IP, labels)).toEqual({ found: false });
+      expect(calls()).toEqual([['GET', URL_IP]]);
     });
 
-    it('returns false on a genuine failure (e.g. 500)', async () => {
-      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 500));
-      expect(await provider.deleteReservedIpByAddress('203.0.113.9')).toBe(false);
+    it('an unassigned address has no droplet', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(
+        resp({ reserved_ip: { ip: IP, region: { slug: 'nyc3' }, droplet: null } }),
+      );
+      expect(await provider.reservedIpAssignment(IP, labels)).toEqual({
+        found: true,
+        droplet: null,
+      });
+    });
+
+    it('a droplet carrying every label matches; one missing a label does not', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(
+        assigned([...encodeLabels(labels), encodeLabel('role', 'master')]),
+      );
+      expect(await provider.reservedIpAssignment(IP, labels)).toEqual({
+        found: true,
+        droplet: { id: 77, name: 'proj-prod-master' },
+        matches: true,
+      });
+      fetchWithRetryMock.mockResolvedValueOnce(
+        assigned(encodeLabels({ project: 'proj', environment: 'staging' })),
+      );
+      expect(await provider.reservedIpAssignment(IP, labels)).toMatchObject({ matches: false });
+    });
+
+    it('empty labels match no droplet', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(assigned(encodeLabels(labels)));
+      expect(await provider.reservedIpAssignment(IP, {})).toMatchObject({ matches: false });
+    });
+
+    it('a read that fails throws, so nothing is deleted on a guess', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 503));
+      await expect(provider.reservedIpAssignment(IP, labels)).rejects.toThrow(/HTTP 503/);
     });
   });
 

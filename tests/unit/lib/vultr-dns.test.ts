@@ -228,6 +228,7 @@ describe('vultr-dns deleteDNSRecord (ownership-aware)', () => {
       skipped: 2,
       total: 3,
       skippedTargets: ['5.6.7.8', '9.10.11.12'],
+      failed: [],
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain('/records/a');
@@ -250,7 +251,7 @@ describe('vultr-dns deleteDNSRecord (ownership-aware)', () => {
       '1.2.3.5',
     ]);
 
-    expect(result).toEqual({ deleted: 2, skipped: 0, total: 2, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 2, skipped: 0, total: 2, skippedTargets: [], failed: [] });
   });
 
   it('refuses to delete anything when ownedIps is empty (safer default)', async () => {
@@ -259,7 +260,13 @@ describe('vultr-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('tok', 'example.com', 'e1.example.com', []);
 
-    expect(result).toEqual({ deleted: 0, skipped: 1, total: 1, skippedTargets: ['1.2.3.4'] });
+    expect(result).toEqual({
+      deleted: 0,
+      skipped: 1,
+      total: 1,
+      skippedTargets: ['1.2.3.4'],
+      failed: [],
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -271,7 +278,7 @@ describe('vultr-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('tok', 'example.com', 'absent.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] });
   });
 
   it('matches the apex by its EMPTY relative name, not the FQDN', async () => {
@@ -309,6 +316,7 @@ describe('vultr-dns deleteDNSRecord (ownership-aware)', () => {
       skipped: 1,
       total: 2,
       skippedTargets: ['5.6.7.8'],
+      failed: [],
     });
     expect(String(fetchMock.mock.calls[2][0])).toContain('/records/p2');
   });
@@ -324,7 +332,7 @@ describe('vultr-dns deleteApexAndWildcard', () => {
     const { deleteApexAndWildcard } = await import(MOD);
     const result = await deleteApexAndWildcard('tok', 'example.com', 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: [], failed: [] });
   });
 
   it('preserves foreign targets from BOTH halves in preservedTargets', async () => {
@@ -335,7 +343,11 @@ describe('vultr-dns deleteApexAndWildcard', () => {
     const { deleteApexAndWildcard } = await import(MOD);
     const result = await deleteApexAndWildcard('tok', 'example.com', 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: false, preservedTargets: ['5.5.5.5', '6.6.6.6'] });
+    expect(result).toEqual({
+      deletedAny: false,
+      preservedTargets: ['5.5.5.5', '6.6.6.6'],
+      failed: [],
+    });
   });
 });
 

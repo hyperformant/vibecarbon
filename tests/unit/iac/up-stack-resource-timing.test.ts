@@ -1,6 +1,7 @@
 /**
- * upStack hands `stack.up` an `onEvent` handler only when perf tracing is on
- * AND the caller named its timer (`perfStem`), and emits `<stem>.prepare`.
+ * upStack emits `[perf]` timing lines only when perf tracing is on AND the caller
+ * named its timer (`perfStem`); the `onEvent` handler itself is always passed
+ * (the droplet plan recorder needs it), and `<stem>.prepare` is emitted.
  * The handler pairs real engine events into `[perf] <stem>.resource.*` lines.
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -59,11 +60,22 @@ describe('upStack resource timing', () => {
     expect(out).toMatch(/\[perf\] deploy\.iac\.upStack\.resource\.Server\.web \d+ms/);
   });
 
-  it('without a perfStem there is no handler and no extra lines', async () => {
-    const stack = fakeStack(() => {});
+  it('without a perfStem the handler (kept for droplet plans) writes no timing lines', async () => {
+    const urn = 'urn:pulumi:e1::proj::hcloud:index/server:Server::web';
+    const stack = fakeStack((opts) => {
+      opts.onEvent?.({ resourcePreEvent: { metadata: { op: 'create', urn, type: 'x:y:Server' } } });
+      opts.onEvent?.({ resOutputsEvent: { metadata: { op: 'create', urn, type: 'x:y:Server' } } });
+    });
     selectStack.mockResolvedValue(stack);
-    const { upStack } = await import('../../../src/lib/iac/index.js');
-    await upStack('e1', () => ({}), { projectName: 'p' });
-    expect(stack.up.mock.calls[0][0]).not.toHaveProperty('onEvent');
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let out = '';
+    try {
+      const { upStack } = await import('../../../src/lib/iac/index.js');
+      await upStack('e1', () => ({}), { projectName: 'p' });
+      out = write.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      write.mockRestore();
+    }
+    expect(out).not.toMatch(/\[perf\]/);
   });
 });

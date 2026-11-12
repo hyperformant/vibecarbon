@@ -9,6 +9,12 @@
  * bucket and lose them (e4 restore->failover, 2026-08-07). The purge therefore
  * rotates `stateBucketGeneration`, so the next derivation names a fresh bucket.
  * Nothing else rotates it: a kept bucket must stay findable.
+ *
+ * A destroy that keeps the environment's entry (its Pulumi destroy was not
+ * verified, or a reserved IP of ours is not released yet) keeps the bucket
+ * too, even under -purge of the last environment: the next destroy of the
+ * environment retries from that entry and needs this bucket to do it. The
+ * next clean destroy -purge then deletes it.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
@@ -35,7 +41,11 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
   return {
     ...real,
-    providerFor: () => ({ NAME: 'Hetzner Cloud', promptObjectStorageCredentials: promptCreds }),
+    providerFor: () => ({
+      NAME: 'Hetzner Cloud',
+      RESERVED_IP_NAME: 'Floating IP',
+      promptObjectStorageCredentials: promptCreds,
+    }),
     getObjectStorageProvider: async () => s3,
   };
 });
@@ -64,7 +74,17 @@ function project(names: string[]) {
   };
 }
 
-async function destroy(projectConfig: ReturnType<typeof project>, environment: string) {
+type Outcome = {
+  pulumiDestroyFailed?: boolean;
+  unreleasedReservedIps?: string[];
+  unsweptReservedIpScopes?: string[];
+};
+
+async function destroy(
+  projectConfig: ReturnType<typeof project>,
+  environment: string,
+  outcome: Outcome = {},
+) {
   const messages: string[] = [];
   // The file as it was when the destroy loaded it.
   store.reset(structuredClone(projectConfig));
@@ -73,7 +93,8 @@ async function destroy(projectConfig: ReturnType<typeof project>, environment: s
     projectConfig,
     environment,
     args: { purgeBackups: true },
-    results: { leaks: createLeakLedger() },
+    // What the teardown before these steps decided.
+    results: { leaks: createLeakLedger(), ...outcome },
     spinner: {
       start: (m?: string) => messages.push(`start:${m ?? ''}`),
       stop: (m?: string) => messages.push(`stop:${m ?? ''}`),
@@ -83,7 +104,8 @@ async function destroy(projectConfig: ReturnType<typeof project>, environment: s
   };
   await DESTROY_EFFECTS.retainStateBucket(ctx);
   await DESTROY_EFFECTS.updateProjectConfig(ctx);
-  return { ctx, messages, saved: store.lastWrite() as Record<string, unknown> };
+  // The file as it is after the destroy (a kept entry may write nothing).
+  return { ctx, messages, saved: store.state.disk as Record<string, unknown> };
 }
 
 describe('derived state bucket under -purge', () => {
@@ -114,5 +136,63 @@ describe('derived state bucket under -purge', () => {
     s3.emptyAndDeleteBucket.mockResolvedValueOnce({ deleted: false, objectsRemoved: 0 });
     const { saved } = await destroy(project(['prod']), 'prod');
     expect(saved.stateBucketGeneration).toBe('aaaaaa');
+  });
+});
+
+describe('the last environment under -purge, when its entry is kept', () => {
+  beforeEach(() => {
+    store.reset();
+    promptCreds.mockClear();
+    s3.emptyAndDeleteBucket.mockClear();
+  });
+
+  const kept: Array<[string, Outcome, RegExp]> = [
+    ['its Pulumi destroy was not verified', { pulumiDestroyFailed: true }, /not verified/],
+    [
+      'a Floating IP of ours is not released yet',
+      { unreleasedReservedIps: ['203.0.113.9', '203.0.113.9'] },
+      // In the provider's own word.
+      /the Floating IP 203\.0\.113\.9 is not released/,
+    ],
+    [
+      'a label listing could not be read',
+      { unsweptReservedIpScopes: ['prod'] },
+      /the Floating IPs labelled for prod could not be listed/,
+    ],
+  ];
+
+  it.each(kept)('%s: keeps the bucket, rotates nothing, and says why', async (_, outcome, why) => {
+    const before = { ...project(['prod']), retainedStateBucket: STATE };
+    const { messages, saved } = await destroy(before, 'prod', outcome);
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(promptCreds).not.toHaveBeenCalled();
+    // The entry and everything the next destroy resolves the bucket from stay.
+    expect((saved.environments as Record<string, unknown>).prod).toBeDefined();
+    expect(saved.stateBucketGeneration).toBe('aaaaaa');
+    expect(saved.retainedStateBucket).toBe(STATE);
+    const line = messages.find((m) => m.startsWith('stop:Pulumi state bucket kept'));
+    expect(line).toContain(STATE);
+    expect(line).toMatch(why);
+    expect(line).toContain('`vibecarbon destroy prod`');
+    expect(line).toContain('`vibecarbon destroy prod -purge`');
+    expect(line).not.toMatch(/\u2014/);
+  });
+
+  it('a kept bucket is plain output, not a ledger entry', async () => {
+    const { ctx, messages } = await destroy(project(['prod']), 'prod', {
+      unreleasedReservedIps: ['203.0.113.9'],
+    });
+    expect(messages.some((m) => m.startsWith('stop:Pulumi state bucket kept'))).toBe(true);
+    expect(ctx.results.leaks.counts()).toMatchObject({ leak: 0, unverified: 0 });
+  });
+
+  it('the next clean destroy -purge deletes it and rotates the generation', async () => {
+    const first = await destroy(project(['prod']), 'prod', { pulumiDestroyFailed: true });
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    const again = structuredClone(first.saved) as ReturnType<typeof project>;
+    const { saved } = await destroy(again, 'prod');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(STATE);
+    expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
+    expect((saved.environments as Record<string, unknown>).prod).toBeUndefined();
   });
 });

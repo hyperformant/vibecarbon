@@ -33,7 +33,8 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   };
 });
 
-const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+const { DESTROY_EFFECTS, sweepTaggedReservedIps } = await import('../../../src/destroy.js');
+const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
 
 function fakeSpinner() {
@@ -168,7 +169,8 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   // restore→failover, 2026-08-07). The generation rotates only when a
   // last-environment -purge deleted the state bucket (covered in
   // state-bucket-purge-scope.test.ts). An unverified destroy must NOT rotate —
-  // its retry targets the old names.
+  // its retry targets the old names (unless its -purge already deleted the
+  // state bucket; see the purge cases below).
   it('does NOT rotate stateBucketGeneration on a verified destroy that kept the state bucket', async () => {
     // A plain destroy keeps the state bucket (retainStateBucket), so nothing
     // is recreated and the hazard cannot arise — rotating would strand the
@@ -205,6 +207,100 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
     expect(store.state.writes).toEqual([]);
     expect(ctx.projectConfig.stateBucketGeneration).toBe('aaaaaa');
   });
+
+  // The reserved-IP backstop could not prove an address released (the read
+  // by address did not answer 404). The environment's record is the only
+  // place that address is named, so the entry stays and the next destroy
+  // retries it; the backstop's own leak line already says so, once.
+  it('keeps the environment entry while a reserved IP is not proven released', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = ['203.0.113.7'];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    expect(store.state.writes).toEqual([]);
+    expect(ctx.projectConfig.environments).toHaveProperty('prod');
+    expect(ctx.projectConfig).not.toHaveProperty('destroyedEnvironments');
+    expect(ctx.results.leaks.entries).toEqual([]);
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain('203.0.113.7');
+    expect(message).toContain('`vibecarbon destroy prod`');
+    expect(message).not.toContain('—');
+  });
+
+  it('names each unreleased address once: "X, Y and Z"', async () => {
+    // k8s-ha: both side stacks can name one environment-level address.
+    const ctx = Object.assign(makeCtx({ pulumiDestroyFailed: false }), {
+      envConfig: { provider: 'digitalocean' },
+    });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = [
+      '203.0.113.7',
+      '203.0.113.8',
+      '203.0.113.7',
+      '203.0.113.9',
+    ];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain('the reserved IPs 203.0.113.7, 203.0.113.8 and 203.0.113.9 are');
+  });
+
+  // A -purge of the last environment deletes the state bucket in the step
+  // before this one, whether or not the entry is then kept. The kept entry
+  // must not take the generation's rotation with it: the next deploy or
+  // destroy would derive the deleted bucket's name and recreate it, the
+  // same-name recreate that lost acked writes on 2026-08-07.
+  for (const keptBy of ['an unreleased reserved IP', 'an unverified Pulumi destroy']) {
+    it(`a purge that deleted the state bucket still rotates the generation when ${keptBy} keeps the entry`, async () => {
+      const ctx = makeCtx({ pulumiDestroyFailed: keptBy === 'an unverified Pulumi destroy' });
+      ctx.projectConfig.stateBucketGeneration = 'aaaaaa';
+      ctx.projectConfig.retainedStateBucket = 'proj-state-old';
+      store.reset(ctx.projectConfig);
+      Object.assign(ctx.results, {
+        stateBucketPurged: true,
+        // retainStateBucket's purge drops the retained name.
+        retainedStateBucket: { value: undefined },
+        ...(keptBy === 'an unreleased reserved IP' && {
+          unreleasedReservedIps: ['203.0.113.7'],
+        }),
+      });
+
+      await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+      expect(store.state.writes).toHaveLength(1);
+      const saved = store.state.writes[0];
+      expect(saved.environments).toHaveProperty('prod');
+      expect(saved).not.toHaveProperty('destroyedEnvironments');
+      expect(saved.stateBucketGeneration).toMatch(/^\w+$/);
+      expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
+      expect(saved).not.toHaveProperty('retainedStateBucket');
+    });
+  }
+
+  it('a kept entry still records the retained state-bucket name', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    Object.assign(ctx.results, {
+      retainedStateBucket: { value: 'proj-state' },
+      unreleasedReservedIps: ['203.0.113.7'],
+    });
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    const saved = store.lastWrite();
+    expect(saved?.retainedStateBucket).toBe('proj-state');
+    expect(saved?.environments).toHaveProperty('prod');
+  });
+
+  it('removes the entry as before once every reserved IP is released', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = [];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    expect(store.state.writes[0].environments).not.toHaveProperty('prod');
+    expect(ctx.spinner.stop).toHaveBeenCalledWith('Configuration updated');
+  });
 });
 
 describe('storageBucketGeneration', () => {
@@ -221,5 +317,76 @@ describe('storageBucketGeneration', () => {
 
     const savedConfig = store.state.writes[0];
     expect(savedConfig.storageBucketGeneration).toBe('aaaaaa');
+  });
+});
+
+/**
+ * The kept-config line names the IPs in the provider's own word (its
+ * RESERVED_IP_NAME), the word the backstop's leak line above it uses too.
+ */
+describe("the kept-config line uses the provider's own word for the IP", () => {
+  const WORD: Record<string, string> = {
+    hetzner: 'Floating IP',
+    scaleway: 'flexible IP',
+    digitalocean: 'reserved IP',
+    linode: 'reserved IP',
+    vultr: 'reserved IP',
+  };
+
+  it('covers every provider', () => {
+    expect(Object.keys(WORD).sort()).toEqual(Object.keys(PROVIDERS).sort());
+  });
+
+  it.each(Object.entries(WORD))('%s: %s', async (provider, word) => {
+    const ctx = Object.assign(makeCtx({ pulumiDestroyFailed: false }), {
+      envConfig: { provider },
+    });
+    (ctx.results as Record<string, unknown>).unreleasedReservedIps = ['203.0.113.7', '203.0.113.8'];
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain(`the ${word}s 203.0.113.7 and 203.0.113.8 are not released yet`);
+  });
+});
+
+/**
+ * A label listing that cannot be read leaves an IP no record names possibly
+ * billing. The sweep records it unverified, and the entry stays, so
+ * `vibecarbon destroy <env>` can run the sweep again.
+ */
+describe('an unreadable label listing keeps the entry', () => {
+  function unreadable() {
+    function Hetzner() {}
+    Object.assign(Hetzner, { NAME: 'Hetzner Cloud', RESERVED_IP_NAME: 'Floating IP' });
+    Hetzner.prototype.deleteReservedIpsByLabels = async () => {
+      throw new Error('GET /floating_ips failed: HTTP 503');
+    };
+    return new (Hetzner as unknown as new () => object)();
+  }
+
+  it('the next destroy can run the sweep again', async () => {
+    const ctx = Object.assign(makeCtx({ pulumiDestroyFailed: false }), {
+      envConfig: { provider: 'hetzner' },
+    });
+    await sweepTaggedReservedIps({
+      provider: unreadable(),
+      projectName: 'proj',
+      stackEnv: 'prod-primary',
+      results: ctx.results,
+      s: fakeSpinner(),
+      environment: 'prod',
+    });
+    const [entry] = ctx.results.leaks.entries;
+    expect(entry).toMatchObject({ severity: 'unverified', resourceClass: 'reserved-ip' });
+    expect(entry.hint).toContain('`vibecarbon destroy prod`');
+
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+
+    expect(store.state.writes).toEqual([]);
+    expect(ctx.projectConfig.environments).toHaveProperty('prod');
+    const [message] = ctx.spinner.stop.mock.calls[0];
+    expect(message).toContain('the Floating IPs labelled for prod-primary could not be listed');
+    expect(message).toContain('`vibecarbon destroy prod`');
   });
 });

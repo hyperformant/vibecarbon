@@ -4,14 +4,14 @@
  * Bypasses local QEMU and remote registries for maximum speed.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { progressLog, spinner } from '../cli/progress.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { knownHostsPathForKey } from '../host-keys.js';
 import { perfTimer } from '../perf.js';
+import { makeTempDir, removeTempDir } from '../temp-dir.js';
 import { PLATFORM_BUILD_FLAG } from './platform.js';
 
 /**
@@ -137,8 +137,8 @@ export async function buildRemote(ip, sshKeyPath, imageTag, cwd, buildArgs = {})
 
   const dockerHost = `ssh://root@${ip}`;
 
-  // Create a temporary directory for our SSH wrapper
-  const tempBinDir = mkdtempSync(join(tmpdir(), 'vc-bin-'));
+  // Create a temporary directory for our SSH wrapper (and the ssh mux socket)
+  const tempBinDir = makeTempDir('vc-bin-');
   const sshWrapperPath = join(tempBinDir, 'ssh');
 
   // Create an SSH wrapper script that forces our options. Docker uses the
@@ -160,7 +160,6 @@ export async function buildRemote(ip, sshKeyPath, imageTag, cwd, buildArgs = {})
   const sshWrapper = `#!/bin/bash
 exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$VIBECARBON_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ControlMaster=auto -o ControlPath="$VIBECARBON_SSH_MUX/%C" -o ControlPersist=60s "$@"
 `;
-  writeFileSync(sshWrapperPath, sshWrapper, { mode: 0o755 });
 
   const env = {
     ...process.env,
@@ -181,6 +180,8 @@ exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -
   };
 
   try {
+    // Inside the try: a failed write still removes the dir (finally below).
+    writeFileSync(sshWrapperPath, sshWrapper, { mode: 0o755 });
     // 1. Ensure the host is reachable and sshd is ready. Caller has usually
     // already gone through setupServer/waitForDockerReady, so SSH is live by
     // attempt 0; the fast leg [1, 1, 2, 2] catches that path quickly. Tail
@@ -354,10 +355,6 @@ exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -
     p.log.error(error.message);
     return false;
   } finally {
-    try {
-      rmSync(tempBinDir, { recursive: true, force: true });
-    } catch {
-      /* ignore cleanup errors */
-    }
+    removeTempDir(tempBinDir);
   }
 }

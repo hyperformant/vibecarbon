@@ -530,8 +530,9 @@ export const CSI_SIDECAR_MIRRORS = {
  */
 export const PAUSE_IMAGE = {
   repo: 'pause',
-  tag: '3.9',
-  digest: 'sha256:8d4106c88ec0bd28001e34c975d65175d994072d65341f62a8ab0754b0fafe10',
+  tag: '3.10.2',
+  digest: 'sha256:412c4a7219cb8a299a37337f3d87810c5340095322e15594a1637785adad0f17',
+  index: 'sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4',
 };
 
 /** Docker Hub, the other registry the mirror set copies from. */
@@ -1051,7 +1052,7 @@ export function renderManifestImages(text) {
   );
 }
 
-/** @returns {string} the mirrored pause ref — e.g. "ghcr.io/hyperformant/pause:3.9@sha256:…" */
+/** @returns {string} the mirrored pause ref — e.g. "ghcr.io/hyperformant/pause:3.10.2@sha256:…" */
 export function pauseImageRef() {
   return k8sMirrorRef(PAUSE_IMAGE);
 }

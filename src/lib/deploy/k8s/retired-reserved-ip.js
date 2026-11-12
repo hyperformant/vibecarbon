@@ -165,6 +165,83 @@ export function recordRetiredReservedIps({
 }
 
 /**
+ * The release's `dropRetired` as the deploy builds it: open the stack, then
+ * take the retired resources out of its state (`drop`, which is
+ * dropRetiredStackResources), recording on that stack's own record every
+ * address the surgery takes out that the record lacks
+ * (recordRetiredReservedIps). An environment-level address on k8s-ha names
+ * both side stacks (retiredReservedIpStacks), and each side's surgery takes
+ * out every retired address that stack holds: the other side's own address,
+ * recorded nowhere, would otherwise leave state with no record, and nothing
+ * would ever release it.
+ *
+ * @param {object} o
+ * @param {string} o.environment - the environment as the operator names it
+ * @param {(stackName: string) => Promise<object>} o.openStack - an existing stack only
+ * @param {(stack: object, options: {recordAddresses: (addresses: string[]) => unknown}) => Promise<unknown>} o.drop
+ * @param {(fn: (config: object) => void) => unknown} [o.updateConfig]
+ * @returns {(stackName: string) => Promise<void>}
+ */
+export function createDropRetired({
+  environment,
+  openStack,
+  drop,
+  updateConfig = updateProjectConfig,
+}) {
+  return async (stackName) => {
+    const stack = await openStack(stackName);
+    await drop(stack, {
+      recordAddresses: (addresses) =>
+        recordRetiredReservedIps({ environment, stackName, addresses, updateConfig }),
+    });
+  };
+}
+
+/**
+ * The deploy's `dropRetired` (orchestrator, before the release): open the
+ * stack as it exists in the state backend the deploy used, never an empty
+ * one made in its place (requireExisting), and run on it the same surgery
+ * every up runs (dropRetiredStackResources), recording each address it takes
+ * out where the record names none (createDropRetired).
+ *
+ * @param {object} o
+ * @param {string} o.environment - the environment as the operator names it
+ * @param {string} o.providerId - the cluster's provider, whose RETIRED_STACK_RESOURCES the surgery removes
+ * @param {string} o.providerToken
+ * @param {object|null} o.s3Config - the state backend (PULUMI_BACKEND_URL overrides it)
+ * @param {string} o.projectName
+ * @param {(fn: (config: object) => void) => unknown} [o.updateConfig]
+ * @returns {(stackName: string) => Promise<void>}
+ */
+export function createDeployDropRetired({
+  environment,
+  providerId,
+  providerToken,
+  s3Config,
+  projectName,
+  updateConfig = updateProjectConfig,
+}) {
+  return createDropRetired({
+    environment,
+    openStack: async (stackName) => {
+      const { getOrCreateStack } = await import('../../iac/index.js');
+      return getOrCreateStack(stackName, async () => ({}), {
+        provider: providerId,
+        providerToken,
+        s3Config,
+        projectName,
+        requireExisting: true,
+      });
+    },
+    drop: async (stack, options) => {
+      const { dropRetiredStackResources } = await import('../../iac/index.js');
+      return dropRetiredStackResources(stack, providerId, options);
+    },
+    updateConfig,
+  });
+}
+
+/**
  * @typedef {{ target: string, changedAt: number }} DnsWrite
  *   This run's managed-DNS writer has the domain's records at `target`, as
  *   set by the write at `changedAt` (epoch ms): this run's, or an earlier
@@ -461,6 +538,33 @@ function keptLine(verdict, { address, environment, domain, newAddress, dnsWrite,
   }
 }
 
+/**
+ * The line for an address whose DELETE did not prove it released: still on
+ * the account (`held`), or nothing proves it either way. It stays on record.
+ * @param {{held: true|null, region: string|null, reason: string}} outcome
+ * @param {{address: string, environment: string, providerName: string}} o
+ * @returns {string}
+ */
+function notReleasedLine(outcome, { address, environment, providerName }) {
+  const bill = 'which bills a reserved IP while it is not assigned to a droplet';
+  if (outcome.held) {
+    return (
+      `DNS no longer answers with the reserved IP ${address}, but it is not released: ` +
+      `${outcome.reason}. It is still on your ${providerName} account` +
+      `${outcome.region ? ` in ${outcome.region}` : ''}, ${bill}. The next deploy tries again, ` +
+      `\`vibecarbon destroy ${environment}\` releases it too, or you can release it in the ` +
+      `${providerName} console under Networking, Reserved IPs.`
+    );
+  }
+  return (
+    `DNS no longer answers with the reserved IP ${address}, but vibecarbon cannot tell whether ` +
+    `it was released: ${outcome.reason}. If it was not, it is still on your ${providerName} ` +
+    `account, ${bill}. The next deploy checks again, \`vibecarbon destroy ${environment}\` ` +
+    `does too, or you can look for it in the ${providerName} console under Networking, ` +
+    'Reserved IPs.'
+  );
+}
+
 /** An error's first line, short enough for a log line. */
 function oneLine(err) {
   const text = err instanceof Error ? err.message : String(err);
@@ -479,7 +583,8 @@ function oneLine(err) {
  * @param {object} o
  * @param {string} o.environment
  * @param {{K8S_FLOATING_IP?: boolean, NAME: string}} o.Provider
- * @param {{deleteReservedIpByAddress: (address: string) => Promise<boolean>}} o.provider
+ * @param {{deleteReservedIpByAddress: (address: string) => Promise<import('../../providers/base.js').ReservedIpRelease>}} o.provider
+ *   released only when it says so: DigitalOcean's reads the address back
  * @param {{info: (line: string) => void, warn: (line: string) => void}} o.log
  * @param {string|null|undefined} o.domain - the environment's domain
  * @param {DnsWrite|null} o.dnsWrite - this run's managed-DNS write; null when DNS is kept by hand
@@ -625,23 +730,17 @@ export async function releaseRetiredReservedIps({
     }
     if (!dropped) continue;
 
-    let reason = null;
+    // Released only when the provider proves it (DigitalOcean reads the
+    // address back after the DELETE); anything else stays on record.
+    let outcome;
     try {
-      if (!(await provider.deleteReservedIpByAddress(address))) {
-        reason = `${Provider.NAME} did not accept the delete`;
-      }
+      outcome = await provider.deleteReservedIpByAddress(address);
     } catch (err) {
-      reason = err instanceof Error ? err.message : String(err);
+      outcome = { released: false, held: null, region: null, reason: oneLine(err) };
     }
-    if (reason) {
-      kept.push({ address, reason });
-      log.warn(
-        `DNS no longer answers with the reserved IP ${address}, but it could not be released ` +
-          `(${reason}), so it is still on your ${Provider.NAME} account, which bills a reserved ` +
-          'IP while it is not assigned to a droplet. The next deploy tries again, ' +
-          `\`vibecarbon destroy ${environment}\` releases it too, or you can release it in the ` +
-          `${Provider.NAME} console under Networking, Reserved IPs.`,
-      );
+    if (!outcome.released) {
+      kept.push({ address, reason: outcome.reason });
+      log.warn(notReleasedLine(outcome, { address, environment, providerName: Provider.NAME }));
       continue;
     }
     updateConfig((onDisk) => {

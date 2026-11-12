@@ -499,6 +499,58 @@ export function markStandbyUnproven(ctx) {
 }
 
 /**
+ * Mark the standby proven: the counterpart of markStandbyUnproven, for a
+ * reseed that was verified streaming (a restore, a scale). Records the system
+ * identifier (the failover replica proof) and clears the degraded flags an
+ * earlier unproven reseed set, so failover is not refused until a redeploy.
+ * Call it only after the streaming verify passed.
+ *
+ * @param {{ environment: string }} ctx
+ * @param {string} [systemIdentifier]
+ */
+export function markStandbyProven(ctx, systemIdentifier) {
+  recordSystemIdentifier(ctx, systemIdentifier);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) return;
+    envConfig.replication = 'streaming';
+    envConfig.degraded = false;
+  });
+}
+
+/**
+ * Prove a compose-ha standby streaming from the primary: the primary reads out
+ * of recovery with an identifier, and the standby reads in recovery with that
+ * same identifier AND a walreceiver in `streaming`. The one proof a scale
+ * rejoin and a restore reseed share before markStandbyProven.
+ *
+ * @param {object} args
+ * @param {(ip: string) => Promise<{inRecovery: boolean|null, systemIdentifier?: string|null, receiverStatus?: string|null}>} args.readState
+ * @param {string} args.primaryIp
+ * @param {string} args.standbyIp
+ * @param {(opts: {readState: () => Promise<string>}) => Promise<{streaming: boolean, lastState?: string}>} args.verify
+ * @returns {Promise<string>} the proven system identifier
+ * @throws {Error} when the primary or standby does not prove out
+ */
+export async function proveStandbyStreaming({ readState, primaryIp, standbyIp, verify }) {
+  const primaryState = await readState(primaryIp);
+  const sysid = primaryState?.inRecovery === false ? primaryState.systemIdentifier : null;
+  if (!sysid) throw new Error(`the primary ${primaryIp} did not read back as a primary`);
+  const proof = await verify({
+    readState: async () => {
+      const st = await readState(standbyIp);
+      return st?.inRecovery === true && st.systemIdentifier === sysid
+        ? (st.receiverStatus ?? '')
+        : '';
+    },
+  });
+  if (!proof.streaming) {
+    throw new Error(`it is not streaming (last state: ${proof.lastState || 'none'})`);
+  }
+  return sysid;
+}
+
+/**
  * The `ha` fields a deploy persists for failover's replica proof: the standby's
  * system identifier, only when this deploy verified streaming. A degraded deploy
  * records nothing, so an unplanned failover refuses until one proves it.

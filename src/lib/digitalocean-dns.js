@@ -102,18 +102,21 @@ async function apiError(response, prefix) {
 }
 
 /**
- * Walk a paginated DO collection to completion.
+ * Walk a paginated DO collection to completion. Past MAX_PAGES the walk
+ * stops: by default with what it has read, or, given `pastGuard`, by
+ * throwing it, for a caller that must not take part of the collection for
+ * the whole (findARecordsAt, deleteDNSRecord).
  * @param {string} apiToken
  * @param {string} path - e.g. '/domains' (no query)
  * @param {string} key - response array key (e.g. 'domains')
  * @param {string} errorPrefix
+ * @param {{pastGuard?: string}} [options] - the error a walk past the guard throws
  * @returns {Promise<object[]>}
  */
-async function walkPages(apiToken, path, key, errorPrefix) {
+async function walkPages(apiToken, path, key, errorPrefix, { pastGuard } = {}) {
   const items = [];
-  let page = 1;
 
-  for (let guard = 0; guard < MAX_PAGES; guard++) {
+  for (let page = 1; page <= MAX_PAGES; page++) {
     const response = await fetchWithRetry(`${API_BASE}${path}?per_page=${PER_PAGE}&page=${page}`, {
       headers: { Authorization: `Bearer ${apiToken}` },
     });
@@ -123,10 +126,10 @@ async function walkPages(apiToken, path, key, errorPrefix) {
     const data = await response.json();
     if (Array.isArray(data[key])) items.push(...data[key]);
 
-    if (!data.links?.pages?.next) break;
-    page++;
+    if (!data.links?.pages?.next) return items;
   }
 
+  if (pastGuard) throw new Error(pastGuard);
   return items;
 }
 
@@ -141,14 +144,21 @@ async function walkPages(apiToken, path, key, errorPrefix) {
  *
  * @param {string} apiToken
  * @param {string} zoneName - the domain name (DO's zone identity)
+ * @param {{whole?: boolean}} [options] - whole: throw rather than return
+ *   part of a zone longer than the walk reads
  * @returns {Promise<object[]>}
  */
-async function getRecords(apiToken, zoneName) {
+async function getRecords(apiToken, zoneName, { whole = false } = {}) {
   return walkPages(
     apiToken,
     `/domains/${zoneName}/records`,
     'domain_records',
     'DigitalOcean DNS API error',
+    whole
+      ? {
+          pastGuard: `the zone has more than ${MAX_PAGES * PER_PAGE} records, more than vibecarbon reads`,
+        }
+      : {},
   );
 }
 
@@ -252,7 +262,8 @@ export async function readARecord(apiToken, zoneId, name) {
  * name. The deploy asks before it releases an address the domain used to
  * point at (lib/deploy/k8s/retired-reserved-ip.js): a record outside the
  * apex and the wildcard, one the user added, would hand its name to whoever
- * the address goes to next. Throws when the zone's records cannot be listed.
+ * the address goes to next. Throws when the zone's records cannot be listed,
+ * or not all of them (more pages than the walk reads).
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
@@ -260,12 +271,20 @@ export async function readARecord(apiToken, zoneId, name) {
  * @returns {Promise<string[]>} sorted, each name once
  */
 export async function findARecordsAt(apiToken, zoneId, address) {
-  const records = await getRecords(apiToken, zoneId);
+  // The whole zone or a throw: a partial read that missed the record would
+  // let the address go.
+  const records = await getRecords(apiToken, zoneId, { whole: true });
   const names = records
     .filter((r) => r.type === 'A' && r.data === address)
     .map((r) => relativeToFqdn(r.name, zoneId));
   return [...new Set(names)].sort();
 }
+
+/**
+ * A record delete the DNS API refused: the record still exists. A 404 is a
+ * record already gone, never one of these. destroy reports each as a leak.
+ * @typedef {{name: string, target: string, reason: string}} DnsDeleteFailure
+ */
 
 /**
  * Delete a DNS record, but only if its target IP belongs to this caller.
@@ -281,26 +300,33 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * case behind the 2026-05-16 blast-radius bug where one scenario's destroy
  * zeroed a neighbour's record in a shared zone.
  *
+ * Reads the whole zone or throws: past the page guard a partial read would
+ * miss the record and answer `total: 0`, and destroy would report it gone
+ * while it still points at an address being released. destroy's DNS cleanup
+ * catches the throw and reports the records as a leak.
+ *
  * @param {string} apiToken - DigitalOcean API token
  * @param {string} zoneId - Zone identity — the domain NAME on DO
  * @param {string} name - Record name (FQDN)
  * @param {string[]} ownedIps - IPs that belong to this caller's stack
  * @param {string} [type='A'] - Record type
- * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[]}>}
+ * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = 'A') {
   const relativeName = fqdnToRelative(name, zoneId);
-  const all = await getRecords(apiToken, zoneId);
-  const records = matching(all, relativeName, String(name).replace(/\.$/, ''), type);
+  const all = await getRecords(apiToken, zoneId, { whole: true });
+  const fqdn = String(name).replace(/\.$/, '');
+  const records = matching(all, relativeName, fqdn, type);
   const total = records.length;
 
   if (total === 0) {
-    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [] };
+    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] };
   }
 
   const owned = new Set(ownedIps || []);
   let deleted = 0;
   const skippedTargets = [];
+  const failed = [];
 
   for (const record of records) {
     if (!owned.has(record.data)) {
@@ -312,9 +338,12 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
       headers: { Authorization: `Bearer ${apiToken}` },
     });
     if (response.ok) deleted++;
+    else if (response.status !== 404) {
+      failed.push({ name: fqdn, target: record.data, reason: `HTTP ${response.status}` });
+    }
   }
 
-  return { deleted, skipped: skippedTargets.length, total, skippedTargets };
+  return { deleted, skipped: skippedTargets.length, total, skippedTargets, failed };
 }
 
 /**
@@ -331,7 +360,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
  * @param {string} zoneId - Zone identity — the domain NAME on DO
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string[]} ownedIps - IPs that belong to this caller's stack
- * @returns {Promise<{deletedAny: boolean, preservedTargets: string[]}>}
+ * @returns {Promise<{deletedAny: boolean, preservedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) {
   const [root, wildcard] = await Promise.all([
@@ -341,6 +370,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
   return {
     deletedAny: root.deleted > 0 || wildcard.deleted > 0,
     preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
+    failed: [...root.failed, ...wildcard.failed],
   };
 }
 

@@ -38,6 +38,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 });
 
 import {
+  createDropRetired,
   MANUAL_DNS_MIN_WAIT_SECONDS,
   recordRetiredReservedIps,
   releaseRetiredReservedIps,
@@ -112,9 +113,24 @@ const deleteUrls = () =>
   fetchWithRetryMock.mock.calls
     .filter(([, init]) => init?.method === 'DELETE')
     .map(([url]) => url as string);
-/** Every DELETE answers with `status`. */
-const deletesAnswer = (status: number) =>
-  fetchWithRetryMock.mockImplementation(async () => ({ ok: status < 300, status }));
+/**
+ * Every DELETE answers with `status`; the read by address that follows
+ * answers `read`: 404 (gone), 'listed' (DigitalOcean still has it, in nyc3),
+ * or another status.
+ */
+const deletesAnswer = (status: number, read: number | 'listed' = 404) =>
+  fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+    if (init?.method === 'DELETE') return { ok: status < 300, status };
+    if (read === 'listed') {
+      const ip = url.split('/').pop();
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ reserved_ip: { ip, region: { slug: 'nyc3' }, droplet: null } }),
+      };
+    }
+    return { ok: read < 300, status: read, json: async () => ({}) };
+  });
 
 /** Managed DNS: this run's writer put the records at MASTER `ago` seconds before NOW. */
 const managed = (ago = 600) => ({ target: MASTER, changedAt: NOW - ago * 1000 });
@@ -401,11 +417,58 @@ describe('releaseRetiredReservedIps: managed DNS', () => {
     expect(log.warn.mock.calls[0][0]).toContain('setServers: invalid IP address');
   });
 
-  it('already gone (404) counts as released', async () => {
+  it('a DELETE that answers 404 is released once the read by address agrees', async () => {
     deletesAnswer(404);
     const { s, run } = release({ ingressIp: MASTER, floatingIp: OLD });
     expect((await run).released).toEqual([OLD]);
     expect(s.config.environments.prod).not.toHaveProperty('floatingIp');
+  });
+
+  // DigitalOcean has answered a DELETE with success and kept the address.
+  it('a DELETE DigitalOcean accepts but still lists: kept, and a warning naming the address, region and bill', async () => {
+    deletesAnswer(204, 'listed');
+    const { s, log, run } = release({ ingressIp: MASTER, floatingIp: OLD });
+    const out = await run;
+    expect(out.released).toEqual([]);
+    expect(out.kept).toEqual([
+      { address: OLD, reason: 'DigitalOcean still lists it after the delete' },
+    ]);
+    // Still on record: the next deploy and destroy's backstop both read it.
+    expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
+    expect(s.updateConfig).not.toHaveBeenCalled();
+    expect(log.info).not.toHaveBeenCalledWith(expect.stringContaining('released the reserved IP'));
+    const [line] = log.warn.mock.calls[0];
+    expect(line).toContain(`the reserved IP ${OLD}, but it is not released`);
+    expect(line).toContain('DigitalOcean still lists it after the delete');
+    expect(line).toContain('still on your DigitalOcean account in nyc3');
+    expect(line).toContain('bills a reserved IP while it is not assigned to a droplet');
+    expect(line).toContain('The next deploy tries again');
+    expect(line).toContain('`vibecarbon destroy prod`');
+    expect(line).not.toContain('—');
+  });
+
+  it('a 404 DELETE whose read still lists the address is kept too', async () => {
+    deletesAnswer(404, 'listed');
+    const { s, run } = release({ ingressIp: MASTER, floatingIp: OLD });
+    expect((await run).released).toEqual([]);
+    expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
+  });
+
+  it('a read that fails proves nothing: kept, and the warning says it cannot tell', async () => {
+    deletesAnswer(204, 503);
+    const { s, log, run } = release({ ingressIp: MASTER, floatingIp: OLD });
+    expect((await run).kept).toEqual([
+      { address: OLD, reason: 'the read-back after the delete failed (HTTP 503)' },
+    ]);
+    expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
+    const [line] = log.warn.mock.calls[0];
+    expect(line).toContain(
+      `the reserved IP ${OLD}, but vibecarbon cannot tell whether it was released`,
+    );
+    expect(line).toContain('the read-back after the delete failed (HTTP 503)');
+    expect(line).toContain('If it was not, it is still on your DigitalOcean account');
+    expect(line).toContain('The next deploy checks again');
+    expect(line).not.toContain('—');
   });
 
   it('k8s-ha: releases both sides, each by its own address, with one lookup', async () => {
@@ -431,11 +494,13 @@ describe('releaseRetiredReservedIps: managed DNS', () => {
   });
 
   it('a refused DELETE keeps the record and warns with every way it still gets released', async () => {
-    deletesAnswer(500);
+    deletesAnswer(422, 'listed');
     const { s, log, run } = release({ ingressIp: MASTER, floatingIp: OLD });
     const out = await run;
     expect(out.released).toEqual([]);
-    expect(out.kept).toEqual([{ address: OLD, reason: 'DigitalOcean did not accept the delete' }]);
+    expect(out.kept).toEqual([
+      { address: OLD, reason: 'DigitalOcean refused the delete (HTTP 422)' },
+    ]);
     // Still on record: the next deploy and destroy's backstop both read it.
     expect(s.config.environments.prod).toHaveProperty('floatingIp', OLD);
     expect(s.updateConfig).not.toHaveBeenCalled();
@@ -564,16 +629,16 @@ describe('releaseRetiredReservedIps: the stacks let go first', () => {
   // assignment. Released while listed, every destroy after fails on it.
   it('single k8s: the environment stack drops it, then the DELETE', async () => {
     const order: string[] = [];
-    fetchWithRetryMock.mockImplementation(async (url: string) => {
-      order.push(`DELETE ${url.split('/').pop()}`);
-      return { ok: true, status: 204 };
+    fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      order.push(`${init?.method ?? 'GET'} ${url.split('/').pop()}`);
+      return init?.method === 'DELETE' ? { ok: true, status: 204 } : { ok: false, status: 404 };
     });
     const dropRetired = vi.fn(async (stack: string) => {
       order.push(`drop ${stack}`);
     });
     const { run } = release({ ingressIp: MASTER, floatingIp: OLD }, { dropRetired });
     expect((await run).released).toEqual([OLD]);
-    expect(order).toEqual(['drop prod', `DELETE ${OLD}`]);
+    expect(order).toEqual(['drop prod', `DELETE ${OLD}`, `GET ${OLD}`]);
   });
 
   it('a stack that cannot let go keeps the address: no DELETE, a warning, the next deploy retries', async () => {
@@ -660,6 +725,76 @@ describe('releaseRetiredReservedIps: the stacks let go first', () => {
     });
     expect(out.released).toEqual([]);
     expect(fetchWithRetryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("createDropRetired: the deploy's drop records what the surgery takes out", () => {
+  // An environment-level address on k8s-ha names both side stacks, and each
+  // side's surgery takes out every retired address that stack holds. The
+  // other side's own address, recorded nowhere, has to land on that side's
+  // record, or it leaves the stack with no record and is never released.
+  it("k8s-ha, an environment-level address: the other side's own address is recorded on that side", async () => {
+    deletesAnswer(204);
+    const s = store({
+      floatingIp: OLD,
+      ha: {
+        primary: { stack: 'prod', ingressIp: MASTER },
+        standby: { stack: 'prod-standby', ingressIp: '198.51.100.8' },
+      },
+    });
+    const held: Record<string, string[]> = { prod: [OLD], 'prod-standby': [OLD_STANDBY] };
+    const opened: string[] = [];
+    const dropRetired = createDropRetired({
+      environment: 'prod',
+      openStack: async (stackName: string) => {
+        opened.push(stackName);
+        return { name: stackName };
+      },
+      // dropRetiredStackResources's contract: the addresses it takes out go
+      // to recordAddresses, when it is given one, before the import.
+      drop: async (
+        stack: { name: string },
+        { recordAddresses }: { recordAddresses?: (a: string[]) => unknown } = {},
+      ) => {
+        await recordAddresses?.(held[stack.name]);
+      },
+      updateConfig: s.updateConfig,
+    });
+    const out = await releaseRetiredReservedIps({
+      environment: 'prod',
+      Provider: DigitalOceanProvider,
+      provider: new DigitalOceanProvider('token'),
+      log: logger(),
+      domain: DOMAIN,
+      dnsWrite: managed(),
+      newAddress: MASTER,
+      dropRetired,
+      zoneRecordsAt: async () => [],
+      lookup: (async () => served([MASTER])) as never,
+      now: () => NOW,
+      readConfig: s.readConfig,
+      updateConfig: s.updateConfig,
+    });
+    expect(out.released).toEqual([OLD]);
+    expect(opened).toEqual(['prod', 'prod-standby']);
+    expect(s.config.environments.prod).toEqual({
+      ha: {
+        primary: { stack: 'prod', ingressIp: MASTER },
+        // Out of its stack, onto its record: the next deploy releases it.
+        standby: { stack: 'prod-standby', ingressIp: '198.51.100.8', floatingIp: OLD_STANDBY },
+      },
+    });
+  });
+
+  it('a stack that cannot be opened fails the drop, so nothing is released', async () => {
+    const dropRetired = createDropRetired({
+      environment: 'prod',
+      openStack: async () => {
+        throw new Error('no stack named prod');
+      },
+      drop: vi.fn(),
+    });
+    await expect(dropRetired('prod')).rejects.toThrow('no stack named prod');
   });
 });
 

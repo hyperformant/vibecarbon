@@ -947,7 +947,7 @@ async function promptCicd() {
     return null;
   }
   try {
-    runCommand(['gh', 'auth', 'status'], { silent: true });
+    runCommand(['gh', 'auth', 'status'], { cleanEnv: true, silent: true });
   } catch {
     p.log.error(
       '`gh` is not authenticated. Run `gh auth login` and re-run `vibecarbon configure`.',
@@ -1008,7 +1008,7 @@ async function promptCicd() {
     });
     if (!hasCommits) {
       s.start('Creating initial commit');
-      runCommand(buildGitAddArgv(), { silent: true, ignoreError: true, cwd });
+      runCommand(buildGitAddArgv(), { silent: true, ignoreError: true, cwd, cleanEnv: true });
       runCommand(['git', 'commit', '-m', 'Initial commit - Vibecarbon project'], {
         silent: true,
         cwd,
@@ -1022,7 +1022,7 @@ async function promptCicd() {
       // projectName is basename-validated at create time; visibility is a literal.
       runCommand(
         ['gh', 'repo', 'create', projectName, `--${visibility}`, '--source=.', '--remote=origin'],
-        { silent: true, timeout: 60000, cwd },
+        { cleanEnv: true, silent: true, timeout: 60000, cwd },
       );
       s.stop('GitHub repository created');
     } catch (err) {

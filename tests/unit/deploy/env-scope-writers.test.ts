@@ -60,10 +60,11 @@ describe('no writer knows S3_KEY_PREFIX', () => {
 describe('compose and compose-ha server .env', () => {
   it('the orchestrator renders the bundle with the environment and its s3Config', () => {
     const orch = src('src/lib/deploy/orchestrator.js');
-    const call = orch.slice(orch.indexOf('renderBundle(projectConfig.projectName, {'));
-    const body = call.slice(0, call.indexOf('});'));
+    const options = orch.slice(orch.indexOf('const bundleOptions = {'));
+    const body = options.slice(0, options.indexOf('\n  };'));
     expect(body).toMatch(/\benvironment,/);
     expect(body).toMatch(/s3: s3Config,/);
+    expect(orch).toMatch(/renderBundle\(projectConfig\.projectName, bundleOptions\)/);
   });
 
   it('compose-ha ships that same rendered bundle, not a second .env writer', () => {

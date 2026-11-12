@@ -38,13 +38,13 @@
  */
 
 import * as p from '@clack/prompts';
-import { updateProjectConfig } from '../../config.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
 import { composeWriterServices } from '../../services/standby-policy.js';
 import {
+  markStandbyProven,
   markStandbyUnproven,
+  proveStandbyStreaming,
   readReplicaState,
-  recordSystemIdentifier,
   swappedSinceLastDeploy,
 } from '../failover-guard.js';
 import {
@@ -351,22 +351,6 @@ export async function writeComposeReplicationOverlay({
 }
 
 /**
- * Record a standby the scale proved streaming: its system identifier (the
- * failover replica proof) and the env's replication state, as a deploy that
- * verified streaming records them. An earlier unproven reseed in the same
- * scale (markStandbyUnproven) is then superseded.
- */
-function recordProvenStandby(ctx, systemIdentifier) {
-  recordSystemIdentifier(ctx, systemIdentifier);
-  updateProjectConfig((config) => {
-    const envConfig = config.environments?.[ctx.environment];
-    if (!envConfig) return;
-    envConfig.replication = 'streaming';
-    envConfig.degraded = false;
-  });
-}
-
-/**
  * Reseed a compose-ha standby from the primary after a scale moved either
  * node (Decision 3), and prove it streaming. Both nodes keep the tunnel
  * address of the stack they were born as (R11), so the tunnel is brought up
@@ -416,7 +400,7 @@ export async function rejoinComposeStandby({
     readState = (ip) =>
       readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
     verify = verifyStreaming,
-    record = recordProvenStandby,
+    record = markStandbyProven,
     markUnproven = markStandbyUnproven,
     warn = (msg) => p.log.warn(msg),
   } = deps;
@@ -450,20 +434,12 @@ export async function rejoinComposeStandby({
     await reseed(standby.ip, primary.ip, sshKeyPath, projectName, {
       primaryHost: wgIpOf({ stackIdentity: primaryStack }),
     });
-    const primaryState = await readState(primary.ip);
-    const sysid = primaryState?.inRecovery === false ? primaryState.systemIdentifier : null;
-    if (!sysid) throw new Error(`the primary ${primary.ip} did not read back as a primary`);
-    const proof = await verify({
-      readState: async () => {
-        const st = await readState(standby.ip);
-        return st?.inRecovery === true && st.systemIdentifier === sysid
-          ? (st.receiverStatus ?? '')
-          : '';
-      },
+    const sysid = await proveStandbyStreaming({
+      readState,
+      primaryIp: primary.ip,
+      standbyIp: standby.ip,
+      verify,
     });
-    if (!proof.streaming) {
-      throw new Error(`it is not streaming (last state: ${proof.lastState || 'none'})`);
-    }
     record({ environment }, sysid);
     return 'streaming';
   } catch (err) {

@@ -15,10 +15,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
   collectProviderRunData,
@@ -104,7 +105,7 @@ function seedFullGreenRun(
 }
 
 function tempDataPath(): string {
-  return join(mkdtempSync(join(tmpdir(), 'vc-perf-data-')), 'perf-data.json');
+  return join(createTempDir('vc-perf-data-'), 'perf-data.json');
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +425,7 @@ describe('renderUnifiedPerfTableMd', () => {
 // ---------------------------------------------------------------------------
 
 function makeReadmeFile(contents: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-perf-readme-'));
+  const dir = createTempDir('vc-perf-readme-');
   const file = join(dir, 'README.md');
   writeFileSync(file, contents);
   return file;
@@ -507,13 +508,13 @@ describe('patchInlinePerfMarkers', () => {
 
 describe('syncCarbonPerfData', () => {
   it('writes the canonical serialization to the carbon data file', () => {
-    const file = join(mkdtempSync(join(tmpdir(), 'vc-carbon-data-')), 'vendor-matrix-data.json');
+    const file = join(createTempDir('vc-carbon-data-'), 'vendor-matrix-data.json');
     expect(syncCarbonPerfData(file, fixtureData())).toBe(true);
     expect(readFileSync(file, 'utf8')).toBe(serializePerfData(fixtureData()));
   });
 
   it('is a no-op returning false when the file already matches', () => {
-    const file = join(mkdtempSync(join(tmpdir(), 'vc-carbon-data-')), 'vendor-matrix-data.json');
+    const file = join(createTempDir('vc-carbon-data-'), 'vendor-matrix-data.json');
     syncCarbonPerfData(file, fixtureData());
     expect(syncCarbonPerfData(file, fixtureData())).toBe(false);
   });

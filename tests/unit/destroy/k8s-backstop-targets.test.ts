@@ -16,6 +16,10 @@ import { describe, expect, it } from 'vitest';
 import { planK8sBackstopTargets } from '../../../src/destroy.js';
 
 const projectConfig = { projectName: 'proj' };
+/** Each target's addresses, by stack. */
+const addressesOf = (
+  targets: Array<{ stackEnv: string; reservedIps: Array<{ address: string }> }>,
+) => Object.fromEntries(targets.map((t) => [t.stackEnv, t.reservedIps.map((r) => r.address)]));
 
 describe('planK8sBackstopTargets', () => {
   it('single k8s: one target, names byte-identical to the pre-d4 backstop', () => {
@@ -29,7 +33,7 @@ describe('planK8sBackstopTargets', () => {
         stackEnv: 'e3',
         firewallName: 'proj-e3-firewall',
         sshKeyName: 'proj-e3-nyc3-key',
-        floatingIp: '203.0.113.7',
+        reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],
         networkName: 'proj-e3-network',
       },
     ]);
@@ -42,7 +46,7 @@ describe('planK8sBackstopTargets', () => {
       projectConfig,
     });
     expect(t.sshKeyName).toBeNull();
-    expect(t.floatingIp).toBe('203.0.113.7');
+    expect(t.reservedIps).toEqual([{ address: '203.0.113.7', stacks: ['e3'] }]);
   });
 
   it('k8s-ha: two per-stack targets; shared HA key handled elsewhere (sshKeyName null)', () => {
@@ -62,20 +66,20 @@ describe('planK8sBackstopTargets', () => {
         stackEnv: 'e4-primary',
         firewallName: 'proj-e4-primary-firewall',
         sshKeyName: null,
-        floatingIp: '203.0.113.10',
+        reservedIps: [{ address: '203.0.113.10', stacks: ['e4-primary'] }],
         networkName: 'proj-e4-primary-network',
       },
       {
         stackEnv: 'e4-standby',
         firewallName: 'proj-e4-standby-firewall',
         sshKeyName: null,
-        floatingIp: '203.0.113.20',
+        reservedIps: [{ address: '203.0.113.20', stacks: ['e4-standby'] }],
         networkName: 'proj-e4-standby-network',
       },
     ]);
   });
 
-  it('k8s-ha after a failover role swap: floatingIp follows the STACK, not the role', () => {
+  it('k8s-ha after a failover role swap: the address follows the STACK, not the role', () => {
     // failover persists the swap under ha.{primary,standby}.stack — the
     // stack identity ('e4-standby') keeps its own reserved IP regardless of
     // which role currently points at it.
@@ -89,8 +93,10 @@ describe('planK8sBackstopTargets', () => {
       },
       projectConfig,
     });
-    expect(targets.find((t) => t.stackEnv === 'e4-primary')?.floatingIp).toBe('203.0.113.10');
-    expect(targets.find((t) => t.stackEnv === 'e4-standby')?.floatingIp).toBe('203.0.113.20');
+    expect(addressesOf(targets)).toEqual({
+      'e4-primary': ['203.0.113.10'],
+      'e4-standby': ['203.0.113.20'],
+    });
   });
 
   it('k8s-ha with a pre-swap config lacking .stack: falls back to role-suffix mapping', () => {
@@ -104,17 +110,19 @@ describe('planK8sBackstopTargets', () => {
       },
       projectConfig,
     });
-    expect(targets.find((t) => t.stackEnv === 'e4-primary')?.floatingIp).toBe('203.0.113.10');
-    expect(targets.find((t) => t.stackEnv === 'e4-standby')?.floatingIp).toBe('203.0.113.20');
+    expect(addressesOf(targets)).toEqual({
+      'e4-primary': ['203.0.113.10'],
+      'e4-standby': ['203.0.113.20'],
+    });
   });
 
-  it('missing floatingIp yields null (backstop skips the release, never throws)', () => {
+  it('no recorded address yields none (the backstop skips the release, never throws)', () => {
     const [t] = planK8sBackstopTargets({
       plan: { tier: 'k8s', stackEnvs: ['e3'] },
       envConfig: { region: 'nyc3' },
       projectConfig,
     });
-    expect(t.floatingIp).toBeNull();
+    expect(t.reservedIps).toEqual([]);
   });
 
   it("a cluster on today's program: its ingressIp (the master's own address) is never a release target", () => {
@@ -123,7 +131,7 @@ describe('planK8sBackstopTargets', () => {
       envConfig: { region: 'nyc3', ingressIp: '198.51.100.7' },
       projectConfig,
     });
-    expect(single.floatingIp).toBeNull();
+    expect(single.reservedIps).toEqual([]);
     const ha = planK8sBackstopTargets({
       plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
       envConfig: {
@@ -134,7 +142,7 @@ describe('planK8sBackstopTargets', () => {
       },
       projectConfig,
     });
-    expect(ha.map((t) => t.floatingIp)).toEqual([null, null]);
+    expect(ha.map((t) => t.reservedIps)).toEqual([[], []]);
   });
 
   it('a reserved IP a DigitalOcean env still holds (not released yet) is released by destroy', () => {
@@ -146,7 +154,7 @@ describe('planK8sBackstopTargets', () => {
       envConfig: { region: 'nyc3', ingressIp: '198.51.100.7', floatingIp: '203.0.113.9' },
       projectConfig,
     });
-    expect(single.floatingIp).toBe('203.0.113.9');
+    expect(single.reservedIps).toEqual([{ address: '203.0.113.9', stacks: ['e3'] }]);
     const ha = planK8sBackstopTargets({
       plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
       envConfig: {
@@ -157,7 +165,74 @@ describe('planK8sBackstopTargets', () => {
       },
       projectConfig,
     });
-    expect(ha.map((t) => t.floatingIp)).toEqual(['203.0.113.10', '203.0.113.20']);
+    expect(addressesOf(ha)).toEqual({
+      'e4-primary': ['203.0.113.10'],
+      'e4-standby': ['203.0.113.20'],
+    });
+  });
+});
+
+// The deploy's release reads an environment-level `floatingIp` on k8s-ha too,
+// as either side's (retiredReservedIpStacks): a record can hold one there. The
+// backstop reads the same keys, so an address the release could not free is
+// never left for nobody to release. Each address is released once, by the
+// first stack that names it, and its owner check accepts every stack it may
+// belong to.
+describe('planK8sBackstopTargets on k8s-ha reads an environment-level address too', () => {
+  const plan = { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] };
+
+  it('with no side address, it is released once, as either side', () => {
+    const targets = planK8sBackstopTargets({
+      plan,
+      envConfig: {
+        floatingIp: '203.0.113.30',
+        ha: { primary: { stack: 'e4-primary' }, standby: { stack: 'e4-standby' } },
+      },
+      projectConfig,
+    });
+    expect(targets.map((t) => t.reservedIps)).toEqual([
+      [{ address: '203.0.113.30', stacks: ['e4-primary', 'e4-standby'] }],
+      [],
+    ]);
+  });
+
+  it('beside both side addresses, it is a third address, once', () => {
+    const targets = planK8sBackstopTargets({
+      plan,
+      envConfig: {
+        floatingIp: '203.0.113.30',
+        ha: {
+          primary: { stack: 'e4-primary', floatingIp: '203.0.113.10' },
+          standby: { stack: 'e4-standby', floatingIp: '203.0.113.20' },
+        },
+      },
+      projectConfig,
+    });
+    expect(targets.map((t) => t.reservedIps)).toEqual([
+      [
+        { address: '203.0.113.10', stacks: ['e4-primary'] },
+        { address: '203.0.113.30', stacks: ['e4-primary', 'e4-standby'] },
+      ],
+      [{ address: '203.0.113.20', stacks: ['e4-standby'] }],
+    ]);
+  });
+
+  it("the same address as a side's: once, as that side's", () => {
+    const targets = planK8sBackstopTargets({
+      plan,
+      envConfig: {
+        floatingIp: '203.0.113.20',
+        ha: {
+          primary: { stack: 'e4-primary' },
+          standby: { stack: 'e4-standby', floatingIp: '203.0.113.20' },
+        },
+      },
+      projectConfig,
+    });
+    expect(targets.map((t) => t.reservedIps)).toEqual([
+      [],
+      [{ address: '203.0.113.20', stacks: ['e4-standby'] }],
+    ]);
   });
 });
 
@@ -173,7 +248,7 @@ describe('planK8sBackstopTargets on Linode', () => {
         stackEnv: 'e3',
         firewallName: 'proj-e3-firewall',
         sshKeyName: 'proj-e3-us-iad-key',
-        floatingIp: '203.0.113.7',
+        reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],
         networkName: 'proj-e3-network',
       },
     ]);
@@ -188,9 +263,16 @@ describe('planK8sBackstopTargets on Linode', () => {
       },
       projectConfig,
     });
-    expect(ha.map((t) => [t.firewallName, t.sshKeyName, t.floatingIp, t.networkName])).toEqual([
-      ['proj-e4-primary-firewall', null, '203.0.113.10', 'proj-e4-primary-network'],
-      ['proj-e4-standby-firewall', null, '203.0.113.20', 'proj-e4-standby-network'],
+    expect(
+      ha.map((t) => [
+        t.firewallName,
+        t.sshKeyName,
+        t.reservedIps.map((r) => r.address),
+        t.networkName,
+      ]),
+    ).toEqual([
+      ['proj-e4-primary-firewall', null, ['203.0.113.10'], 'proj-e4-primary-network'],
+      ['proj-e4-standby-firewall', null, ['203.0.113.20'], 'proj-e4-standby-network'],
     ]);
   });
 });

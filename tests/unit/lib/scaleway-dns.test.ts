@@ -282,7 +282,13 @@ describe('scaleway-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('secret', ZONE, 'e1.example.com', ['1.2.3.4', '1.2.3.5']);
 
-    expect(result).toEqual({ deleted: 2, skipped: 1, total: 3, skippedTargets: ['5.6.7.8'] });
+    expect(result).toEqual({
+      deleted: 2,
+      skipped: 1,
+      total: 3,
+      skippedTargets: ['5.6.7.8'],
+      failed: [],
+    });
     // Two records removed, ONE round trip — there is no per-record endpoint.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][1].method).toBe('PATCH');
@@ -297,7 +303,13 @@ describe('scaleway-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('secret', ZONE, 'e1.example.com', []);
 
-    expect(result).toEqual({ deleted: 0, skipped: 1, total: 1, skippedTargets: ['1.2.3.4'] });
+    expect(result).toEqual({
+      deleted: 0,
+      skipped: 1,
+      total: 1,
+      skippedTargets: ['1.2.3.4'],
+      failed: [],
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -310,7 +322,13 @@ describe('scaleway-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('secret', ZONE, 'e1.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 0, skipped: 0, total: 1, skippedTargets: [] });
+    expect(result).toEqual({
+      deleted: 0,
+      skipped: 0,
+      total: 1,
+      skippedTargets: [],
+      failed: [{ name: 'e1.example.com', target: '1.2.3.4', reason: 'HTTP 409' }],
+    });
   });
 
   it('returns total=0 when the record does not exist', async () => {
@@ -321,7 +339,7 @@ describe('scaleway-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import(MOD);
     const result = await deleteDNSRecord('secret', ZONE, 'absent.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -347,7 +365,7 @@ describe('scaleway-dns deleteApexAndWildcard', () => {
     const { deleteApexAndWildcard } = await import(MOD);
     const result = await deleteApexAndWildcard('secret', ZONE, 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: [], failed: [] });
     // Read, write, read, write — the second read only starts once the first
     // PATCH has landed, so two updates never race on the zone's serial.
     expect(fetchMock.mock.calls.map((c) => c[1]?.method ?? 'GET')).toEqual([
@@ -368,7 +386,11 @@ describe('scaleway-dns deleteApexAndWildcard', () => {
     const { deleteApexAndWildcard } = await import(MOD);
     const result = await deleteApexAndWildcard('secret', ZONE, 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: false, preservedTargets: ['5.5.5.5', '6.6.6.6'] });
+    expect(result).toEqual({
+      deletedAny: false,
+      preservedTargets: ['5.5.5.5', '6.6.6.6'],
+      failed: [],
+    });
   });
 });
 

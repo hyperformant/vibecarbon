@@ -20,10 +20,11 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
+import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-unavailable.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import { BaseProvider, deleteFailure, replaceWireguardPeerRules } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
 // touches, mirroring Hetzner's set: SSH and the k8s API.
@@ -119,6 +120,17 @@ export function decodeLabels(tags = []) {
 export function normalizePublicKey(publicKey) {
   const [type, body] = (publicKey || '').trim().split(/\s+/);
   return `${type || ''} ${body || ''}`.trim();
+}
+
+/** @typedef {import('./base.js').ReservedIpRelease} ReservedIpRelease */
+
+/**
+ * A reserved IP whose release nothing proves either way.
+ * @param {string} reason
+ * @returns {ReservedIpRelease}
+ */
+function notProven(reason) {
+  return { released: false, held: null, region: null, reason };
 }
 
 export class DigitalOceanProvider extends BaseProvider {
@@ -933,6 +945,10 @@ export class DigitalOceanProvider extends BaseProvider {
 
     if (!response.ok) {
       const error = await response.json();
+      if (response.status === 422 && SIZE_UNAVAILABLE_MESSAGE.test(error.message || '')) {
+        // Out of stock after the catalog check: a definite answer, no retry.
+        throw new Error(describeSizeUnavailable({ size: serverType, region, name }));
+      }
       throw new Error(`DigitalOcean API error: ${error.message || 'Unknown error'}`);
     }
 
@@ -1838,16 +1854,84 @@ export class DigitalOceanProvider extends BaseProvider {
    * is the address itself (`DELETE /v2/reserved_ips/{reserved_ip}`), so the
    * only durable attribution is the address recorded as `envConfig.floatingIp`
    * (`ha.<role>.floatingIp` on k8s-ha) — callers pass that value straight
-   * through. Idempotent — 404 counts as already-gone/success.
+   * through.
+   *
+   * Released means the read by address answers 404, whatever the DELETE
+   * said: DO has answered a DELETE with success and kept the IP, and its
+   * answers disagree with themselves around a write (a 404 for an SSH key
+   * that still existed, a deleted key listed for 22 s; deleteSSHKeyById). So
+   * after the DELETE, one GET: 404 is released, a listing is not, and
+   * anything else proves nothing either way. No waiting and no second try:
+   * an address that is not proven released stays on the caller's record, and
+   * the next deploy or destroy asks again. A DELETE that throws throws.
+   * A DELETE that failed is named in the reason whatever the read says, so
+   * a read that fails too reports both.
    * @param {string} address
-   * @returns {Promise<boolean>} true on success or if already gone (404)
+   * @returns {Promise<ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
+    const url = `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`;
+    const headers = { Authorization: `Bearer ${this.apiToken}` };
+    const deleted = await fetchWithRetry(url, { method: 'DELETE', headers });
+    const failedDelete =
+      deleted.ok || deleted.status === 404 ? null : deleteFailure('DigitalOcean', deleted.status);
+    const readFailed = (detail) =>
+      notProven(
+        failedDelete
+          ? `${failedDelete} and the read-back failed (${detail})`
+          : `the read-back after the delete failed (${detail})`,
+      );
+    let read;
+    try {
+      read = await fetchWithRetry(url, { headers });
+    } catch (err) {
+      return readFailed(err?.message ?? String(err));
+    }
+    if (read.status === 404) return { released: true };
+    if (!read.ok) return readFailed(`HTTP ${read.status}`);
+    const body = await read.json().catch(() => ({}));
+    return {
+      released: false,
+      held: true,
+      region: body?.reserved_ip?.region?.slug ?? null,
+      reason: failedDelete ?? 'DigitalOcean still lists it after the delete',
+    };
+  }
+
+  /**
+   * Whether the reserved IP at `address` is assigned, and to whose droplet.
+   * Destroy's backstop asks before it deletes an address saved at deploy
+   * time: by then this cluster's droplets are deleted, so an address
+   * assigned to a droplet is in use, and only a droplet carrying ALL of
+   * `labels` as tags (the encodeLabel encoding the k8s program tags its
+   * droplets with) is this cluster's. DO reserved IPs carry no tags of
+   * their own; the droplet is the only attribution DO gives.
+   * @param {string} address
+   * @param {Object<string,string>} labels - empty matches no droplet
+   * @returns {Promise<{found: false}
+   *   | {found: true, droplet: null}
+   *   | {found: true, droplet: {id: number, name: string}, matches: boolean}>}
+   *   found is false when DigitalOcean has no reserved IP at that address
+   * @throws when the read fails
+   */
+  async reservedIpAssignment(address, labels) {
     const response = await fetchWithRetry(
       `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
+      { headers: { Authorization: `Bearer ${this.apiToken}` } },
     );
-    return response.ok || response.status === 404;
+    if (response.status === 404) return { found: false };
+    if (!response.ok) {
+      throw new Error(`GET /reserved_ips/${address} failed: HTTP ${response.status}`);
+    }
+    const droplet = (await response.json())?.reserved_ip?.droplet;
+    if (!droplet) return { found: true, droplet: null };
+    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
+    const tags = droplet.tags ?? [];
+    return {
+      found: true,
+      droplet: { id: droplet.id, name: droplet.name },
+      matches: wanted.length > 0 && wanted.every((t) => tags.includes(t)),
+    };
   }
 
   /**

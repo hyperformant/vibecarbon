@@ -224,7 +224,11 @@ describe('destroyComposeHA — Cloudflare DNS root+wildcard pair (M3 Task 9i fix
     vi.unstubAllEnvs();
   });
 
-  function stubEverything(rootContent: string | null, wildcardContent: string | null) {
+  function stubEverything(
+    rootContent: string | null,
+    wildcardContent: string | null,
+    refused: string[] = [],
+  ) {
     fetchWithRetryMock.mockImplementation((url: string, options?: { method?: string }) => {
       const method = options?.method ?? 'GET';
       // Hetzner Cloud side (servers/firewalls/ssh key) — "already gone /
@@ -235,7 +239,11 @@ describe('destroyComposeHA — Cloudflare DNS root+wildcard pair (M3 Task 9i fix
       // Cloudflare side.
       if (url.includes('/healthchecks')) return Promise.resolve(resp({ result: [] }));
       if (url.includes('/dns_records/')) {
-        return Promise.resolve(resp({ success: true })); // DELETE by id
+        // DELETE by id; a refused one answers 403.
+        const id = url.split('/dns_records/')[1];
+        return Promise.resolve(
+          refused.includes(id) ? resp({ success: false }, 403) : resp({ success: true }),
+        );
       }
       if (url.includes('/dns_records?')) {
         // deleteDNSRecord filters listed records by exact `r.name === name`,
@@ -288,5 +296,31 @@ describe('destroyComposeHA — Cloudflare DNS root+wildcard pair (M3 Task 9i fix
     });
 
     expect(dnsRecordDeleteIds()).toEqual(['root']);
+  });
+
+  it('a refused record delete is a leak by its name, never silent (R7b)', async () => {
+    stubEverything('1.1.1.1', '1.1.1.1', ['wc']);
+
+    const { leaks } = await destroyComposeHA({
+      projectName: 'proj',
+      environment: 'e2',
+      envConfig: cfEnvConfig,
+      providerToken: TOKEN,
+      onProgress: () => {},
+    });
+
+    const dns = leaks.filter((l: { resourceClass: string }) => l.resourceClass === 'dns-record');
+    expect(dns).toHaveLength(1);
+    expect(dns[0].resource).toContain('*.e2.example.com');
+    expect(dns[0].resource).toContain('1.1.1.1');
+    expect(dns[0].reason).toMatch(/403/);
+    // A step that works: named for the DNS provider, not the compute console
+    // the fallback names. No re-run: a DNS line never keeps the environment's
+    // entry (ENTRY_KEEP_BY_CLASS), so a re-run could not find it.
+    expect(dns[0].hint).toBe(
+      'Delete *.e2.example.com in your Cloudflare DNS settings. It points at an address this ' +
+        'environment no longer uses, and a stale record shadows the next deploy.',
+    );
+    expect(dns[0].hint).not.toMatch(/off the record|will not retry|destroy again/);
   });
 });

@@ -121,7 +121,10 @@ describe('sweepEnvironmentServers on Linode with a squeezed project tag', () => 
       deployMode: 'compose-ha',
     });
 
-    expect(deleteServer).toHaveBeenCalledExactlyOnceWith(1, { waitUntilGone: true });
+    expect(deleteServer).toHaveBeenCalledExactlyOnceWith(1, {
+      waitUntilGone: true,
+      onLeftover: expect.any(Function),
+    });
     expect(leaks.isClean()).toBe(true);
   });
 });

@@ -173,6 +173,9 @@ describe('trustLetsEncryptStagingRoots', () => {
     expect(combined.length).toBe(EXPECTED_ROOTS.length + 1);
 
     rmSync(dir, { recursive: true, force: true });
+    // The merged bundle the harness keeps for its own lifetime (children read
+    // it at their startup); this test is its only reader.
+    rmSync(String(env.NODE_EXTRA_CA_CERTS), { force: true });
   });
 
   it('normalises the path so children spawned with a different cwd still find it', () => {

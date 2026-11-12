@@ -340,6 +340,50 @@ export async function sweepCsiOrphanVolumes({
   return touched;
 }
 
+// The CSI pass defers while ANY server exists, and pvc-* names carry neither
+// the label nor the scratch prefix, so the scoped kinds loop never sees them:
+// "recheck clean" used to print over volumes the sweep had just announced it
+// was deferring. A pvc-* volume with no server is a leak whether the pass
+// deferred it or a delete FAILED. Attached ones belong to a live cluster (an
+// in-scope one is already reported as its server), so they are left out.
+export function unattachedCsiVolumes(volumes) {
+  return volumes.filter((v) => v.server === null && isCsiVolumeName(v.name));
+}
+
+const listVolumePages = () => listPages('volumes', 'volumes');
+
+// Can the sweep print "clean" without the full recheck? Only when it deleted
+// nothing AND the volume listing was walked completely AND no unattached pvc-*
+// volume exists. A truncated listing proves nothing about volumes, and a
+// deferred CSI pass leaves touched at 0, so either one must fall through to
+// recheckResidue, which fails the sweep.
+export function canSkipRecheck({ touched, volumes }) {
+  return touched === 0 && volumes.complete && unattachedCsiVolumes(volumes.items).length === 0;
+}
+
+// Re-list everything the sweep owns and report what is still there. Returns
+// the leak count and the number of listings that could not be walked fully.
+export async function recheckResidue({
+  kinds = CLOUD_KINDS,
+  listScoped = listScopedResources,
+  listVolumes = listVolumePages,
+} = {}) {
+  let leaked = 0;
+  let blind = 0;
+  for (const [type, key, labelFn] of kinds) {
+    const remaining = await listScoped(type, key);
+    for (const it of remaining.items) console.error(`  - ${type} ${labelFn(it)}`);
+    leaked += remaining.items.length;
+    if (!remaining.complete) blind += 1;
+  }
+  const volumes = await listVolumes();
+  if (!volumes.complete) blind += 1;
+  const csi = unattachedCsiVolumes(volumes.items);
+  for (const v of csi) console.error(`  - volumes ${v.id} ${v.name} (unattached pvc-*, CSI orphan)`);
+  leaked += csi.length;
+  return { leaked, blind };
+}
+
 async function main() {
   if (!token) {
     console.error('HETZNER_API_TOKEN required');
@@ -371,7 +415,7 @@ async function main() {
   const s3Touched = await sweepS3Buckets();
   touched += s3Touched;
 
-  if (touched === 0) {
+  if (canSkipRecheck({ touched, volumes: await listVolumePages() })) {
     console.log('[sweep] clean — no vibecarbon-managed resources remaining');
     process.exit(0);
   }
@@ -384,14 +428,7 @@ async function main() {
   // preflight does not gate on them, and Hetzner Ceph's BucketNotEmpty
   // eventual consistency makes freshly-emptied shells transiently
   // undeletable — successive sweeps converge on those.
-  let leaked = 0;
-  let blind = 0;
-  for (const [type, key, labelFn] of CLOUD_KINDS) {
-    const remaining = await listScopedResources(type, key);
-    for (const it of remaining.items) console.error(`  - ${type} ${labelFn(it)}`);
-    leaked += remaining.items.length;
-    if (!remaining.complete) blind += 1;
-  }
+  const { leaked, blind } = await recheckResidue();
   if (leaked > 0) {
     console.error(`[sweep] WARNING: ${leaked} resource(s) still present after delete attempts`);
     process.exit(1);

@@ -606,3 +606,181 @@ describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volu
     ).toBe(false);
   });
 });
+
+// terminate only DETACHES an SBS volume, and deleteServer deletes it after.
+// One it cannot delete in 60 s bills on, and nothing finds it again: a later
+// deleteServer finds the server gone (404) and reads no volumes. So it is a
+// ledger line for destroy (onLeftover), with the console delete as its step.
+describe('an SBS volume deleteServer cannot delete', () => {
+  function wire() {
+    let serverGone = false;
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (/\/zones\/fr-par-1\/servers\/srv-v$/.test(url) && method === 'GET') {
+        return serverGone
+          ? jsonResp({}, 404)
+          : jsonResp({
+              server: {
+                id: 'srv-v',
+                volumes: { '0': { id: 'vol-9', volume_type: 'sbs_volume' } },
+                public_ips: [],
+              },
+            });
+      }
+      if (url.endsWith('/servers/srv-v/action') && method === 'POST') {
+        serverGone = true;
+        return jsonResp({ task: { id: 't1' } });
+      }
+      // Scaleway refuses the volume delete for the whole window.
+      if (url.includes('/block/v1/zones/fr-par-1/volumes/vol-9') && method === 'DELETE') {
+        return jsonResp({ message: 'resource is in a transient state' }, 409);
+      }
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function deleteWithClock(options: Record<string, unknown>) {
+    vi.useFakeTimers();
+    wire();
+    const done = new ScalewayProvider('tok').deleteServer('srv-v', options);
+    await vi.advanceTimersByTimeAsync(70_000);
+    return done;
+  }
+
+  it('hands destroy a leak line with the volume id and zone, and the console delete', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const leftovers: Array<Record<string, string>> = [];
+    const result = await deleteWithClock({
+      waitUntilGone: true,
+      onLeftover: (line: Record<string, string>) => leftovers.push(line),
+    });
+    expect(result).toBe(true);
+    expect(leftovers).toEqual([
+      {
+        resourceClass: 'detached-volume',
+        resource: 'SBS volume vol-9 (fr-par-1)',
+        reason:
+          "server srv-v's delete left it behind, and deleting it failed for 60 s (last answer HTTP 409)",
+        hint:
+          'Delete it in the Scaleway console under Block Storage, Volumes (zone fr-par-1); it ' +
+          'bills until removed. Running destroy again does not find it: the server it belonged ' +
+          'to is gone.',
+      },
+    ]);
+    // The ledger has it: nothing on stderr to break a spinner's line.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns with the same console step when nobody asked for the line (scale)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await deleteWithClock({});
+    expect(warn).toHaveBeenCalledOnce();
+    const [text] = warn.mock.calls[0] as [string];
+    expect(text).toContain('SBS volume vol-9 (fr-par-1)');
+    expect(text).toContain('Block Storage, Volumes (zone fr-par-1)');
+    // The old line promised a re-run that cannot find it.
+    expect(text).not.toMatch(/re-run destroy/);
+  });
+});
+
+// deleteServer waits 120 s for a terminated server's record to go, then
+// moves on. Its flexible IP stays attached until the termination finishes,
+// so the label sweep that runs next finds it held. That server was deleted,
+// not left alone: the line says it is still terminating, and that the next
+// destroy (which finds it gone) releases the IP.
+describe('a server still terminating when deleteServer stops waiting', () => {
+  const PROJECT_TAGS = [encodeLabel('project', 'proj'), encodeLabel('environment', 'prod')];
+  function wire(serverId: string) {
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (url.endsWith(`/zones/fr-par-1/servers/${serverId}`) && method === 'GET') {
+        // Never gone: the termination outlasts the wait.
+        return jsonResp({ server: { id: serverId, volumes: {}, public_ips: [] } });
+      }
+      if (url.endsWith(`/servers/${serverId}/action`) && method === 'POST') {
+        return jsonResp({ task: { id: 't1' } });
+      }
+      if (url.includes('/zones/fr-par-1/ips?') && method === 'GET') {
+        return jsonResp({
+          ips: [
+            {
+              id: 'ip-1',
+              address: '203.0.113.20',
+              server: { id: serverId, name: 'proj-prod' },
+              tags: PROJECT_TAGS,
+            },
+            {
+              id: 'ip-2',
+              address: '203.0.113.21',
+              server: { id: 'srv-other', name: 'proj-prod-left' },
+              tags: PROJECT_TAGS,
+            },
+          ],
+        });
+      }
+      if (method === 'DELETE') throw new Error(`unexpected delete: ${url}`);
+      return jsonResp({ ips: [], servers: [] }, url.includes('/ips?') ? 200 : 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('names the termination, offers the re-run, and still keeps the address on record', async () => {
+    vi.useFakeTimers();
+    wire('srv-slow');
+    // destroy deletes the server through one instance and sweeps through another.
+    const done = new ScalewayProvider('tok').deleteServer('srv-slow', { waitUntilGone: true });
+    await vi.advanceTimersByTimeAsync(125_000);
+    await done;
+    vi.useRealTimers();
+
+    const { sweepTaggedReservedIps } = await import('../../../src/destroy.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const results = { leaks: createLeakLedger(), unreleasedReservedIps: [] as string[] };
+    await sweepTaggedReservedIps({
+      provider: new ScalewayProvider('tok'),
+      projectName: 'proj',
+      stackEnv: 'prod',
+      results,
+      s: { start: vi.fn(), stop: vi.fn() },
+      environment: 'prod',
+    });
+
+    const byAddress = Object.fromEntries(
+      results.leaks.entries.map((e: { resource: string }) => [e.resource, e]),
+    );
+    const slow = byAddress['203.0.113.20'];
+    expect(slow).toMatchObject({ severity: 'leak', resourceClass: 'reserved-ip' });
+    expect(slow.reason).toContain(
+      'still attached to server proj-prod, which was still terminating when vibecarbon stopped waiting after 2 minutes',
+    );
+    expect(slow.hint).toBe(
+      'Run `vibecarbon destroy prod` again once the server is gone: the environment stays in ' +
+        '.vibecarbon.json, and that destroy releases it. Or release it in the Scaleway console ' +
+        'after the server is deleted.',
+    );
+    // A server nobody asked to terminate keeps the old wording.
+    const left = byAddress['203.0.113.21'];
+    expect(left.reason).toContain('still attached to server proj-prod-left, which was not deleted');
+    expect(left.hint).not.toContain('once the server is gone');
+    // Kept on record either way, so the next destroy runs the sweep again.
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.20', '203.0.113.21']);
+  });
+});

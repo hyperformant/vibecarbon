@@ -20,6 +20,11 @@ export default defineConfig({
       'tests/e2e/**/*.test.ts',
     ],
 
+    // Fails the run when it changed the shared .git/config (every project
+    // inherits this: a project's own globalSetup list is merged with it, not a
+    // replacement, which is verified in tests/unit/lib/git-config-guard.test.ts).
+    globalSetup: ['tests/setup/git-config-guard.ts'],
+
     // Setup files
     setupFiles: ['tests/setup/global-setup.ts'],
 

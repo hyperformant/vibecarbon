@@ -139,6 +139,41 @@ export function hasAutomatedDns(dnsProvider) {
 }
 
 /**
+ * The hint on a DNS record whose delete the API refused (destroy's
+ * cleanupDnsRecords and compose-ha's teardown). The by-hand delete is the step
+ * that works: a re-run would bring the token that was just refused, and a DNS
+ * line never keeps the environment's entry (ENTRY_KEEP_BY_CLASS in
+ * src/destroy.js), so the hint never offers one. "No longer uses", not
+ * "released": the record's address may be a reserved IP this destroy could
+ * not release, or never recorded.
+ * @param {string} name - the record's fully qualified name
+ * @param {string} dnsProviderName - DNS_PROVIDERS[id].name
+ * @returns {string}
+ */
+export function dnsRefusedHint(name, dnsProviderName) {
+  return (
+    `Delete ${name} in your ${dnsProviderName} DNS settings. It points at an address this ` +
+    'environment no longer uses, and a stale record shadows the next deploy.'
+  );
+}
+
+/**
+ * The hint when destroy could not delete an environment's DNS records at
+ * all (no token, or the delete threw): the by-hand delete of both records
+ * the deploy made, for the same reasons as dnsRefusedHint.
+ * @param {string} domain - the environment's domain (the apex record)
+ * @param {string} dnsProviderName - DNS_PROVIDERS[id].name
+ * @returns {string}
+ */
+export function dnsRecordsByHandHint(domain, dnsProviderName) {
+  return (
+    `Delete the A records for ${domain} and *.${domain} in your ${dnsProviderName} DNS ` +
+    'settings. They point at an address this environment no longer uses, and a stale ' +
+    'record shadows the next deploy.'
+  );
+}
+
+/**
  * Resolve a DNS provider id to its backend module.
  *
  * @param {string} dnsProvider - A DNS_PROVIDERS key

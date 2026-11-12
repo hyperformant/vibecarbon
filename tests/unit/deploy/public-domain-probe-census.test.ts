@@ -85,7 +85,7 @@ const RAW_OPENERS_ALLOWED: Record<string, { calls: string[]; why: string }> = {
 const NOT_A_PROBE: Record<string, string> = {
   'configure.js:oauthCallbackUrl':
     'the OAuth callback URI shown to the operator to paste into a provider console',
-  'lib/deploy/bundle.js:renderBundle':
+  'lib/deploy/bundle.js:writeBundle':
     'SITE_URL written into the app env; the app serves it, the CLI never requests it',
   'lib/deploy/compose/build-args.js:collectComposeBuildArgs':
     'VITE_PUBLIC_URL baked into the client build',

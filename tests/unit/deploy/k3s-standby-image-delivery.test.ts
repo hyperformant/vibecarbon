@@ -1,5 +1,3 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -8,6 +6,7 @@ import {
   startAppImageBuild,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * A k8s-ha standby takes the primary's app image by copy: it never builds or
@@ -19,7 +18,7 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
  */
 function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = {}) {
   // StateTracker writes under process.cwd()/.vibecarbon (state.js:26).
-  vi.spyOn(process, 'cwd').mockReturnValue(mkdtempSync(join(tmpdir(), 'vc-deliver-')));
+  vi.spyOn(process, 'cwd').mockReturnValue(createTempDir('vc-deliver-'));
   // The build tags the image for no particular cluster; deliverAppImage
   // retags it for the master's registry once the master's private IP is known.
   const buildAppImage = vi.fn(async () => ({
@@ -339,8 +338,8 @@ describe('deliverAppImage: takes the early build and retags it for the registry'
 describe('the early inputs plus the real master IP hash like a fresh read', () => {
   it('masterPrivateIp keeps its key position, so the gate hash is identical', async () => {
     const { buildK3sBuildInputs } = await import('../../../src/lib/deploy/k8s/k3s.js');
-    const { mkdtempSync, writeFileSync } = await import('node:fs');
-    const dir = mkdtempSync(join(tmpdir(), 'vc-early-inputs-'));
+    const { writeFileSync } = await import('node:fs');
+    const dir = createTempDir('vc-early-inputs-');
     writeFileSync(join(dir, 'Dockerfile'), 'FROM scratch\n');
     const args = { projectName: 'q', domain: undefined, projectDir: dir };
     const early = buildK3sBuildInputs({ ...args, masterPrivateIp: null });

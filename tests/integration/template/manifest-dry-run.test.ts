@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { adoptTempDir } from '../../_shared/temp-dir.js';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
 
@@ -114,9 +115,11 @@ describe('observability kustomization', () => {
   beforeAll(async () => {
     // @ts-expect-error — JS module without types
     const { renderK8sStorageClassPlaceholder } = await import('../../../src/lib/deploy/k8s/k3s.js');
-    renderedDir = renderK8sStorageClassPlaceholder(
-      resolve(REPO_ROOT, 'services/observability/k8s'),
-      'hcloud-volumes',
+    renderedDir = adoptTempDir(
+      renderK8sStorageClassPlaceholder(
+        resolve(REPO_ROOT, 'services/observability/k8s'),
+        'hcloud-volumes',
+      ),
     );
   }, 60_000);
 

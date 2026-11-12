@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ciAvailable } from '../../../src/lib/ci-setup.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Census: the project config file is read through `lib/config.js`, never by
@@ -68,9 +69,8 @@ describe('project config is read through one accessor', () => {
   it('ciAvailable reads the file that is actually written', () => {
     // The regression itself, pinned behaviorally rather than by spelling.
     // An undotted read returns false here no matter what the config says.
-    const { mkdtempSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
-    const { tmpdir } = require('node:os') as typeof import('node:os');
-    const dir = mkdtempSync(join(tmpdir(), 'vc-cfg-'));
+    const { writeFileSync } = require('node:fs') as typeof import('node:fs');
+    const dir = createTempDir('vc-cfg-');
 
     writeFileSync(
       join(dir, '.vibecarbon.json'),

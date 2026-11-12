@@ -45,6 +45,7 @@ describe('cloudflare deleteDNSRecord (ownership-aware)', () => {
       skipped: 2,
       total: 3,
       skippedTargets: ['5.6.7.8', '9.10.11.12'],
+      failed: [],
     });
     // Exactly 2 fetches: the list + a single DELETE for r1.
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -68,7 +69,7 @@ describe('cloudflare deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import('../../../src/lib/cloudflare-dns.js');
     const result = await deleteDNSRecord('token', 'zone', 'e1.example.com', ['1.2.3.4', '1.2.3.5']);
 
-    expect(result).toEqual({ deleted: 2, skipped: 0, total: 2, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 2, skipped: 0, total: 2, skippedTargets: [], failed: [] });
   });
 
   it('refuses to delete anything when ownedIps is empty (safer default)', async () => {
@@ -89,6 +90,7 @@ describe('cloudflare deleteDNSRecord (ownership-aware)', () => {
       skipped: 1,
       total: 1,
       skippedTargets: ['1.2.3.4'],
+      failed: [],
     });
     // No DELETE call should have been issued — only the list.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -100,7 +102,7 @@ describe('cloudflare deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import('../../../src/lib/cloudflare-dns.js');
     const result = await deleteDNSRecord('token', 'zone', 'absent.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -121,7 +123,7 @@ describe('cloudflare deleteDNSRecord (ownership-aware)', () => {
     const ownedIps = ['10.0.1.1', '129.212.153.70'];
     const result = await deleteDNSRecord('token', 'zone', 'e1.example.com', ownedIps);
 
-    expect(result).toEqual({ deleted: 1, skipped: 0, total: 1, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 1, skipped: 0, total: 1, skippedTargets: [], failed: [] });
   });
 });
 
@@ -149,7 +151,7 @@ describe('hetzner-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import('../../../src/lib/hetzner-dns.js');
     const result = await deleteDNSRecord('token', 'zone-own-a', 'e1.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 1, skipped: 0, total: 1, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 1, skipped: 0, total: 1, skippedTargets: [], failed: [] });
 
     const deleteCall = fetchMock.mock.calls[2];
     expect(deleteCall[0]).toContain('/rrsets/e1/A');
@@ -170,7 +172,13 @@ describe('hetzner-dns deleteDNSRecord (ownership-aware)', () => {
 
     // Hetzner rrsets are all-or-nothing: one unowned value preserves the
     // whole rrset, so deleted stays 0 even though '1.2.3.4' is ours.
-    expect(result).toEqual({ deleted: 0, skipped: 1, total: 2, skippedTargets: ['5.6.7.8'] });
+    expect(result).toEqual({
+      deleted: 0,
+      skipped: 1,
+      total: 2,
+      skippedTargets: ['5.6.7.8'],
+      failed: [],
+    });
     // No DELETE call should have been issued — getZone + list only.
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -187,7 +195,13 @@ describe('hetzner-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import('../../../src/lib/hetzner-dns.js');
     const result = await deleteDNSRecord('token', 'zone-own-c', 'e1.example.com', []);
 
-    expect(result).toEqual({ deleted: 0, skipped: 1, total: 1, skippedTargets: ['1.2.3.4'] });
+    expect(result).toEqual({
+      deleted: 0,
+      skipped: 1,
+      total: 1,
+      skippedTargets: ['1.2.3.4'],
+      failed: [],
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -198,7 +212,7 @@ describe('hetzner-dns deleteDNSRecord (ownership-aware)', () => {
     const { deleteDNSRecord } = await import('../../../src/lib/hetzner-dns.js');
     const result = await deleteDNSRecord('token', 'zone-own-d', 'absent.example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [] });
+    expect(result).toEqual({ deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -252,7 +266,7 @@ describe('hetzner-dns deleteApexAndWildcard (uniform-contract twin)', () => {
     const { deleteApexAndWildcard } = await import('../../../src/lib/hetzner-dns.js');
     const result = await deleteApexAndWildcard('token', 'zone-pair-a', 'example.com', ['1.2.3.4']);
 
-    expect(result).toEqual({ deletedAny: true, preservedTargets: [] });
+    expect(result).toEqual({ deletedAny: true, preservedTargets: [], failed: [] });
     const deleteCalls = fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE');
     expect(deleteCalls.map(([url]) => String(url).split('/rrsets/')[1]).sort()).toEqual([
       '*/A',

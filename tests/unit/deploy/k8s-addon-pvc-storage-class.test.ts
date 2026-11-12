@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +7,7 @@ import {
   renderK8sBase,
   renderK8sStorageClassPlaceholder,
 } from '../../../src/lib/deploy/k8s/k3s.js';
+import { adoptTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -91,7 +91,7 @@ describe('every shipped PVC pins its StorageClass', () => {
 
 describe('renderK8sStorageClassPlaceholder resolves nested addon trees', () => {
   const fixture = () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-sc-fixture-'));
+    const root = createTempDir('vc-sc-fixture-');
     mkdirSync(join(root, 'redis'), { recursive: true });
     writeFileSync(join(root, 'kustomization.yaml'), 'resources:\n  - redis/\n');
     writeFileSync(join(root, 'redis', 'pvc.yaml'), `spec:\n  storageClassName: ${PLACEHOLDER}\n`);
@@ -99,7 +99,7 @@ describe('renderK8sStorageClassPlaceholder resolves nested addon trees', () => {
   };
 
   it('substitutes inside SUBDIRECTORIES (the addon layout `add` produces)', () => {
-    const rendered = renderK8sStorageClassPlaceholder(fixture(), 'provider-csi');
+    const rendered = adoptTempDir(renderK8sStorageClassPlaceholder(fixture(), 'provider-csi'));
     const pvc = readFileSync(join(rendered, 'redis', 'pvc.yaml'), 'utf-8');
     expect(pvc).toContain('storageClassName: provider-csi');
     expect(pvc).not.toContain(PLACEHOLDER);
@@ -109,7 +109,7 @@ describe('renderK8sStorageClassPlaceholder resolves nested addon trees', () => {
 
   it('leaves the source tree untouched (never dirties the operator git tree)', () => {
     const src = fixture();
-    renderK8sStorageClassPlaceholder(src, 'provider-csi');
+    adoptTempDir(renderK8sStorageClassPlaceholder(src, 'provider-csi'));
     expect(readFileSync(join(src, 'redis', 'pvc.yaml'), 'utf-8')).toContain(PLACEHOLDER);
   });
 
@@ -127,7 +127,7 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
       walArchiveSha: 'abc',
     });
   const baseWithDb = () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-base-'));
+    const root = createTempDir('vc-base-');
     mkdirSync(join(root, 'db'), { recursive: true });
     writeFileSync(
       join(root, 'db', 'statefulset.yaml'),
@@ -140,7 +140,7 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
     const root = baseWithDb();
     mkdirSync(join(root, 'n8n'), { recursive: true });
     writeFileSync(join(root, 'n8n', 'pvc.yaml'), `storageClassName: ${PLACEHOLDER}\n`);
-    const out = renderK8sBase(root, values(), undefined, TEST_TLS);
+    const out = adoptTempDir(renderK8sBase(root, values(), undefined, TEST_TLS));
     expect(out).not.toBe(root);
     expect(readFileSync(join(out, 'n8n', 'pvc.yaml'), 'utf-8')).toContain('provider-csi');
     expect(readFileSync(join(out, 'db', 'statefulset.yaml'), 'utf-8')).toContain(
@@ -151,7 +151,7 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
   });
 
   it('refuses a base that predates the db StatefulSet (nothing would create the database)', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-base-old-'));
+    const root = createTempDir('vc-base-old-');
     writeFileSync(join(root, 'kustomization.yaml'), 'resources: []\n');
     expect(() => renderK8sBase(root, values(), undefined, TEST_TLS)).toThrow(
       /predates the db StatefulSet/,

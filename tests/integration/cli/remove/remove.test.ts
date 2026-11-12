@@ -1,18 +1,10 @@
 /**
  * vibecarbon remove — comprehensive matrix against a real project.
  */
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
   assertSuccess,
@@ -109,7 +101,7 @@ describe('vibecarbon remove', () => {
       assertSuccess(runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
       // volumes/prometheus becomes a link to a directory outside the project
       // holding a file of the same name.
-      const outside = mkdtempSync(join(tmpdir(), 'vc-remove-outside-'));
+      const outside = createTempDir('vc-remove-outside-');
       writeFileSync(join(outside, 'prometheus.yml'), 'outside\n');
       rmSync(join(project, 'volumes', 'prometheus'), { recursive: true, force: true });
       symlinkSync(outside, join(project, 'volumes', 'prometheus'));
@@ -121,7 +113,7 @@ describe('vibecarbon remove', () => {
 
     it('skips a whole-directory mapping that is a symlink', () => {
       assertSuccess(runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
-      const outside = mkdtempSync(join(tmpdir(), 'vc-remove-outside-'));
+      const outside = createTempDir('vc-remove-outside-');
       writeFileSync(join(outside, 'kustomization.yaml'), 'outside\n');
       rmSync(join(project, 'k8s', 'base', 'observability'), { recursive: true, force: true });
       symlinkSync(outside, join(project, 'k8s', 'base', 'observability'));

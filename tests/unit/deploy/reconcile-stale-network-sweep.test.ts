@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ exit 0
 }
 
 function runRendered(script: string): { dir: string; stdout: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'reconcile-sweep-'));
+  const dir = createTempDir('reconcile-sweep-');
   writeDockerStub(dir);
   // The rendered script cd's into /opt/<project>, which doesn't exist in a
   // test sandbox — repoint PROJECT_DIR at the temp dir. Everything else runs

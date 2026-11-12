@@ -13,8 +13,7 @@
  *   - every remote argv survives the remote shell through shJoin.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -37,6 +36,7 @@ import {
   runInPlaceStage,
 } from '../../../src/lib/deploy/replication.js';
 import { shJoin } from '../../../src/lib/shell.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const ROLE_MOUNT = {
   name: 'data',
@@ -673,7 +673,7 @@ describe('the guard and stop scripts, executed under sh', () => {
     script: string,
     o: { marker: boolean | null; recovery: string; standbySignal?: boolean },
   ) => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-stop-'));
+    const dir = createTempDir('vc-stop-');
     const pgdata = join(dir, 'pgdata');
     mkdirSync(pgdata);
     if (o.standbySignal) writeFileSync(join(pgdata, 'standby.signal'), '');
@@ -765,7 +765,7 @@ describe('the guard and stop scripts, executed under sh', () => {
    * waits, so the bounded wait runs at full length instantly.
    */
   const runGuardExec = (readyOn: number) => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-guard-'));
+    const dir = createTempDir('vc-guard-');
     const guardFile = join(dir, 'db-guard.sh');
     writeFileSync(guardFile, `#!/bin/sh\n${DB_GUARD_PROTOCOL_MARKER}\n`);
     const calls = join(dir, 'isready-calls');
@@ -1026,7 +1026,7 @@ describe('shJoin: remote commands survive the remote shell (C13)', () => {
   // The exact string ssh hands the remote shell, run through sh -c with a stub
   // kubectl that prints each argument it received on its own line.
   const argvSeenRemotely = (argv: string[]) => {
-    const bin = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
+    const bin = createTempDir('vc-kubectl-');
     writeFileSync(join(bin, 'kubectl'), '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n');
     chmodSync(join(bin, 'kubectl'), 0o755);
     return spawnSync('sh', ['-c', shJoin(['kubectl', ...argv])], {

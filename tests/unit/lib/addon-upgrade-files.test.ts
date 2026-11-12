@@ -7,8 +7,7 @@
  * the grafana-tls certificate on every project that added it before the
  * one-certificate-per-name fix.
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -18,13 +17,14 @@ import {
   isContainedRelPath,
 } from '../../../src/lib/addon-upgrade-files.js';
 import { getAddonFilePolicy, getFilePolicy } from '../../../src/lib/upgrade-policy.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SERVICES = join(process.cwd(), 'services');
 const ROOT = '/srv/project';
 
 /** A throwaway services/ tree with one add-on. */
 function fakeServices(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-addon-upgrade-'));
+  const dir = createTempDir('vc-addon-upgrade-');
   const svc = join(dir, 'demo');
   mkdirSync(join(svc, 'compose'), { recursive: true });
   mkdirSync(join(svc, 'k8s', 'nested'), { recursive: true });
@@ -144,7 +144,7 @@ describe('addonOwnedPaths', () => {
 describe('containment', () => {
   /** A services/ tree whose one add-on maps `files`. */
   function servicesWith(files: Record<string, string>): string {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-addon-contain-'));
+    const dir = createTempDir('vc-addon-contain-');
     mkdirSync(join(dir, 'demo', 'k8s'), { recursive: true });
     writeFileSync(join(dir, 'demo', 'manifest.json'), JSON.stringify({ name: 'demo', files }));
     writeFileSync(join(dir, 'demo', 'k8s', 'a.yaml'), 'kind: X\n');

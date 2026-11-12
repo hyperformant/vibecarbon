@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
@@ -8,6 +7,7 @@ import {
   healLegacyDotenvQuoting,
   healLegacyDotenvText,
 } from '../../../src/lib/dotenv-heal.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('healLegacyDotenvText', () => {
   it("re-encodes POSIX '\\'' lines and leaves everything else byte-identical", () => {
@@ -69,7 +69,7 @@ describe('hasLegacyDotenvQuoting (read-only detection for status)', () => {
 
 describe('healLegacyDotenvQuoting (entry-point hook)', () => {
   it('rewrites .env and .env.local in place and reports per file', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'legacy-'));
+    const cwd = createTempDir('legacy-');
     writeFileSync(join(cwd, '.env'), "A='x'\\''y'\n");
     writeFileSync(join(cwd, '.env.local'), "B='ok'\n");
     const result = healLegacyDotenvQuoting(cwd);
@@ -78,7 +78,7 @@ describe('healLegacyDotenvQuoting (entry-point hook)', () => {
     expect(readFileSync(join(cwd, '.env.local'), 'utf-8')).toBe("B='ok'\n");
   });
   it('dryRun reports the same result but leaves both files byte-identical', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'legacy-dry-'));
+    const cwd = createTempDir('legacy-dry-');
     const env = "A='x'\\''y'\nBAD='mix '\\'' and \"'\n";
     const local = "C='c'\\''d'\n";
     writeFileSync(join(cwd, '.env'), env);
@@ -90,7 +90,7 @@ describe('healLegacyDotenvQuoting (entry-point hook)', () => {
     expect(readFileSync(join(cwd, '.env.local'), 'utf-8')).toBe(local);
   });
   it('is a no-op when neither file exists', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'legacy-none-'));
+    const cwd = createTempDir('legacy-none-');
     expect(healLegacyDotenvQuoting(cwd)).toEqual({ healed: [], skipped: [] });
   });
 });
