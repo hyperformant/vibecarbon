@@ -376,6 +376,36 @@ describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
   });
 });
 
+describe('docs/deploy-hetzner.md says where the token lives, in each mode', () => {
+  const doc = readFileSync(join(__dirname, '../../../docs/deploy-hetzner.md'), 'utf-8');
+  const prerequisite = doc.slice(
+    doc.indexOf('2. **A Hetzner Cloud API token**'),
+    doc.indexOf('3. **S3 credentials'),
+  );
+
+  it('k8s: every Secret the CLI writes it into, by name, the autoscaler’s too', () => {
+    const names = [
+      ...PROVIDERS.hetzner.k8sCloudSecrets({ token: TOKEN }).map(({ name }) => name),
+      'carbon-autoscaler-config',
+    ];
+    const flat = prerequisite.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      `each deploy writes it into ${names.length === 2 ? 'two' : names.length} \`kube-system\` Secrets`,
+    );
+    for (const name of names) expect(flat).toContain(`\`${name}\``);
+    expect(flat).toContain(
+      'On compose and compose-ha it stays on your machine, and the servers never hold it.',
+    );
+    expect(flat).toContain('except a master an earlier vibecarbon made');
+  });
+
+  it('never says the servers never hold it without saying which mode', () => {
+    expect(doc).not.toMatch(
+      /on your machine: the servers never hold it|Your DNS token stays on your machine; the servers never hold it/,
+    );
+  });
+});
+
 describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts made and the CLI no longer writes', () => {
   it('there is a record for every k8s provider', () => {
     expect(Object.keys(LEGACY_MASTER_INIT_SECRETS).sort()).toEqual(

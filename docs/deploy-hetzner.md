@@ -33,8 +33,16 @@ For exact, up-to-date figures, see
    (read + write). The deploy prompt asks for it on first run and can save it
    to the project's `.env.local`; scripted runs can pass it via the
    `HETZNER_API_TOKEN` environment variable instead. The same token drives
-   servers, firewalls, and DNS. No separate DNS token exists, and it stays
-   on your machine: the servers never hold it.
+   servers, firewalls, and DNS. No separate DNS token exists. Where it lives
+   depends on the mode. On compose and compose-ha it stays on your machine,
+   and the servers never hold it. On k8s and k8s-ha the cluster adds nodes
+   and attaches volumes with it, so each deploy writes it into two
+   `kube-system` Secrets: `hcloud`, which the cloud controller and CSI
+   driver read, and `carbon-autoscaler-config`, the cluster autoscaler's. No
+   server's user data carries it, except a master an earlier vibecarbon
+   made, which keeps that copy until the master is replaced, so rotate the
+   token once after upgrading
+   ([how](security.md#hetzner_api_token)).
 3. **S3 credentials for Hetzner Object Storage**: used for deploy state and
    `wal-g` database backups. The guided setup walks you through creating them.
 4. **A domain** you control, for the app URL and TLS certificates.
@@ -183,7 +191,7 @@ to your Object Storage bucket).
 
 ### Certificates
 
-Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, and there is no wildcard certificate. Your DNS token stays on your machine; the servers never hold it. On compose, the apex has its own certificate and `traefik.<domain>` shares one with grafana, n8n and metabase when you enable them. To add your own subdomain, give its Traefik router the label `traefik.http.routers.<name>.tls.certresolver=letsencrypt` and Traefik issues it a certificate of its own. On Kubernetes, routes are paths on your domain, so a new path needs nothing.
+Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, and there is no wildcard certificate. Certificates need no DNS token on the servers: on compose your Hetzner token stays on your machine, and on Kubernetes cert-manager never reads the copy the cluster holds for its controllers (see [Prerequisites](#prerequisites)). On compose, the apex has its own certificate and `traefik.<domain>` shares one with grafana, n8n and metabase when you enable them. To add your own subdomain, give its Traefik router the label `traefik.http.routers.<name>.tls.certresolver=letsencrypt` and Traefik issues it a certificate of its own. On Kubernetes, routes are paths on your domain, so a new path needs nothing.
 
 Your certificate is issued once and then reused. Right after a deploy finds it trusted, and on every scheduled backup after that, it is saved (with its key) to the environment's backup bucket. A restore, a scale onto new servers, or a failover puts that copy back instead of asking Let's Encrypt for a new one, so the new side serves your certificate as soon as it takes over and you stay clear of Let's Encrypt's rate limits. A plain `vibecarbon destroy` keeps the saved copy; `destroy -purge` removes it with the rest of the backups.
 
