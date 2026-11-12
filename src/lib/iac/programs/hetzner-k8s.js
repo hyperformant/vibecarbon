@@ -265,10 +265,11 @@ export function buildHetznerK8sProgram(config) {
     });
 
     // Master server — cloud-init script is rendered with the floating IP. No
-    // API token: user data sits in this stack's state in plain text, and the
-    // provider hands it to anything on the box. The cloud controller and CSI
-    // driver read the token from the `hcloud` kube-system Secret, which
-    // deployK3s applies from the operator's machine (applyCloudSecrets).
+    // API token: the provider keeps user data for the server's life and hands
+    // it to anything on the box, and the state's sealed copy opens with the
+    // state passphrase. The cloud controller and CSI driver read the token
+    // from the `hcloud` kube-system Secret, which deployK3s applies from the
+    // operator's machine (applyCloudSecrets).
     const masterUserData = floatingIp.ipAddress.apply((ip) =>
       renderScript(masterInitTemplate, {
         k3s_version: config.k3sVersion,

@@ -3,8 +3,9 @@
  *
  * A k8s cluster's cloud controller and CSI driver read the provider API token
  * from kube-system Secrets. The master's boot script used to be their only
- * source, which put the token in the master's user data, and Pulumi keeps user
- * data in its state in plaintext. deployK3s now applies the same Secrets
+ * source, which put the token in the master's user data: the provider keeps
+ * that for the server's life, and Pulumi kept it in its state in plaintext (it
+ * seals it now, lib/iac/state-seal.js). deployK3s now applies the same Secrets
  * itself (applyCloudSecrets), on every deploy, once the apiserver serves, so
  * the boot script can stop carrying the token.
  *
