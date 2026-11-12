@@ -1413,7 +1413,8 @@ export function resolveStateBucketName({
  *
  * GENERATION (2026-08-07): when the project carries a
  * `stateBucketGeneration`, it is embedded in the name and ROTATED when a
- * last-environment `destroy -purge` deletes the derived bucket — so the next
+ * last-environment `destroy -purge` deletes the derived bucket, or could not
+ * and left it for you to delete by hand — so the next
  * deploy derives a FRESH state-bucket name instead of recreating the deleted
  * one. A plain destroy keeps the bucket and leaves the generation alone. Hetzner Object Storage can ack
  * writes against a just-deleted-and-recreated same-name bucket and then lose

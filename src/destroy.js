@@ -1353,7 +1353,9 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
     // layers — observed on k8s teardown, where the storage bucket doubles as
     // the Pulumi state backend (slow/contended), blowing the 600s
     // final-destroy timeout and getting the whole step SIGKILLed. On timeout
-    // we leave the bucket for the orphan sweep / next destroy rather than hang.
+    // the bucket is left in place, as a leak whose hint gives the console
+    // steps: never a destroy rerun, which finds nothing once the environment
+    // has moved to destroyedEnvironments.
     const PURGE_TIMEOUT_MS = 180_000;
     const purgeAt = async (store) => {
       const { objectsRemoved } = await store.deletePrefix(bucketName, envBackupPrefix);
@@ -1374,7 +1376,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
           () =>
             reject(
               new Error(
-                `backup bucket purge exceeded ${PURGE_TIMEOUT_MS / 1000}s, left for the orphan sweep / a retried destroy`,
+                `backup bucket purge exceeded ${PURGE_TIMEOUT_MS / 1000}s, so it was left in place`,
               ),
             ),
           PURGE_TIMEOUT_MS,
@@ -1428,6 +1430,22 @@ function backupsLeakHint(providerName, { bucketName, envBackupPrefix, holders })
     return `Empty it via the ${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`;
   }
   return `Delete ${envBackupPrefix} in ${bucketName} via the ${providerName} Object Storage console, and leave the bucket: ${holders.join(', ')} ${holders.length === 1 ? 'keeps' : 'keep'} backups there.`;
+}
+
+/**
+ * What to do by hand about a derived Pulumi state bucket a last-environment
+ * -purge could not delete. Every environment of the project keeps its Pulumi
+ * stacks under `.pulumi/stacks/` in this one bucket, so that is the check
+ * before deleting it. It points to the console, never to a destroy rerun:
+ * the environment has already moved to destroyedEnvironments. Deleting it by
+ * hand is safe because the purge still rotates stateBucketGeneration
+ * (`abandoned`), so the next deploy derives a fresh name instead of
+ * recreating this one.
+ *
+ * @param {string} providerName
+ */
+function stateBucketLeakHint(providerName) {
+  return `Once .pulumi/stacks/ in it holds no stack (each environment of this project keeps its Pulumi state there), empty it via the ${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`;
 }
 
 /**
@@ -1532,9 +1550,11 @@ async function retainStateBucket(
   // finding, 2026-08-15: there was previously none at all), and it is safe
   // where the old always-delete was not: it runs only on explicit request,
   // after stack teardown, and a successful delete returns `purged`, which
-  // makes updateProjectConfig rotate stateBucketGeneration. The next deploy
-  // then derives a fresh name instead of recreating this one, which is the
-  // same-name recreate that lost acked writes on 2026-08-07.
+  // makes updateProjectConfig rotate stateBucketGeneration. A purge it could
+  // not finish returns `abandoned`, which rotates it too, since its hint
+  // tells you to delete the bucket by hand. The next deploy then derives a
+  // fresh name instead of recreating this one, which is the same-name
+  // recreate that lost acked writes on 2026-08-07.
   if (args?.purgeBackups) {
     // A purge carries nothing forward: drop any retained name whether or not
     // the delete below succeeds, so the next deploy never resolves to a
@@ -1554,9 +1574,9 @@ async function retainStateBucket(
           resourceClass: 'bucket',
           resource: describeResource({ name: stateBucket, region }),
           reason: 'purge requested (-purge) but no object-storage credentials were available',
-          hint: `Export the object-storage credentials and re-run, or delete it via the ${Provider.NAME} console.`,
+          hint: stateBucketLeakHint(Provider.NAME),
         });
-        return;
+        return { purged: false, abandoned: true };
       }
       const s3Provider = await getObjectStorageProvider(
         providerIdFor(envConfig),
@@ -1577,10 +1597,10 @@ async function retainStateBucket(
         resourceClass: 'bucket',
         resource: describeResource({ name: stateBucket, region }),
         reason: `purge failed: ${error.message}`,
-        hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket.`,
+        hint: stateBucketLeakHint(Provider.NAME),
       });
+      return { purged: false, abandoned: true };
     }
-    return;
   }
 
   // Keeping the bucket is only useful if the next deploy finds it. The
@@ -1824,7 +1844,10 @@ async function deleteAppBucketEffect(ctx) {
         resourceClass: 'bucket',
         resource: describeResource({ name: s3BucketName, region: s3Region }),
         reason: 'purge requested (-purge) but no object-storage credentials were available',
-        hint: `Run \`vibecarbon destroy\` again with credentials configured, or delete via the ${Provider.NAME} console.`,
+        // The environment has moved to destroyedEnvironments, so a destroy
+        // rerun finds nothing; and only this environment's own bucket gets
+        // here (ownsAppBucket), so deleting it by hand is safe.
+        hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,
       });
     }
   } catch (error) {
@@ -1951,6 +1974,10 @@ async function retainStateBucketEffect(ctx) {
     entryKeptReason(results, envConfig),
   );
   if (outcome?.purged) results.stateBucketPurged = true;
+  // A purge it could not finish leaves the bucket for you to delete by hand
+  // (stateBucketLeakHint); the generation rotates all the same, so the next
+  // deploy never recreates a name you may have just deleted.
+  if (outcome?.abandoned) results.stateBucketAbandoned = true;
   // What this destroy decided about retainedStateBucket, for the config write
   // (which patches the file as it is then, not this in-memory copy).
   if (projectConfig.retainedStateBucket !== before) {
@@ -2259,8 +2286,9 @@ function writeProjectLevelFields(updatedConfig, results) {
     if (results.retainedStateBucket.value === undefined) delete updatedConfig.retainedStateBucket;
     else updatedConfig.retainedStateBucket = results.retainedStateBucket.value;
   }
-  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
-  // deleted the derived state bucket (the last live environment). The next
+  // `stateBucketGeneration` rotates ONLY when this destroy's -purge deleted
+  // the derived state bucket (the last live environment), or meant to and
+  // left it for you to delete by hand (stateBucketAbandoned). The next
   // deploy then derives a FRESH state-bucket name rather than recreating the
   // one just deleted: Hetzner Object Storage can ack writes into a
   // just-recreated same-name bucket and lose them (e4 restore->failover,
@@ -2268,7 +2296,7 @@ function writeProjectLevelFields(updatedConfig, results) {
   // retainStateBucket), and rotating then would strand the warm bucket.
   //
   // The app bucket name stays stable; it is not rotated here.
-  if (results.stateBucketPurged) {
+  if (results.stateBucketPurged || results.stateBucketAbandoned) {
     updatedConfig.stateBucketGeneration = generateBucketSalt();
   }
 }

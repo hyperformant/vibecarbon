@@ -98,26 +98,17 @@ describe('destroy.js SPEC — teardown bullets derive from Provider.NAME (sancti
 describe('destroy.js console-hint + orphan-token strings — Provider.NAME/.TOKEN_ENV interpolation (sanctioned deviation)', () => {
   const DESTROY_SRC = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
 
-  // Shared by deleteStateBucket's no-credentials issue and
-  // deleteAppBucketEffect's no-credentials issue — identical template text.
-  const orDeleteViaConsoleHint =
+  // deleteAppBucketEffect's no-credentials issue. It used to say "Run
+  // `vibecarbon destroy` again", which cannot run: the environment has moved
+  // to destroyedEnvironments by then.
+  const appBucketNoCredentialsHint =
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${Provider.NAME} placeholder, not a JS template
-    'hint: `Run \\`vibecarbon destroy\\` again with credentials configured, or delete via the ${Provider.NAME} console.`,';
+    'hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,';
 
-  it('interpolates Provider.NAME at its one remaining call site (app bucket)', () => {
-    // Was 2 — the state-bucket deletion path carried the same hint. Destroy now
-    // KEEPS the state bucket (retainStateBucket), so that path and its hint are
-    // gone and only the app bucket can leave something the operator must remove
-    // by hand.
-    const occurrences = DESTROY_SRC.split(orDeleteViaConsoleHint).length - 1;
+  it('interpolates Provider.NAME in the app bucket no-credentials hint, which names no rerun', () => {
+    const occurrences = DESTROY_SRC.split(appBucketNoCredentialsHint).length - 1;
     expect(occurrences).toBe(1);
-  });
-
-  it('renders "...or delete via the Hetzner Cloud console." for Hetzner — not the old "...Hetzner console."', () => {
-    const rendered = `Run \`vibecarbon destroy\` again with credentials configured, or delete via the ${HetznerProvider.NAME} console.`;
-    expect(rendered).toBe(
-      'Run `vibecarbon destroy` again with credentials configured, or delete via the Hetzner Cloud console.',
-    );
+    expect(DESTROY_SRC).not.toContain('again with credentials configured');
   });
 
   // Was shared by the state-bucket and app-bucket error paths; the state bucket

@@ -9,7 +9,7 @@
  * only with the last environment. Destroy never touches the bucket's CORS
  * rule, which deploy owns.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -44,11 +44,15 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
     ...real,
     providerFor: () => ({
       NAME: 'Hetzner Cloud',
-      promptObjectStorageCredentials: async () => ({ accessKey: 'ak', secretKey: 'sk' }),
+      promptObjectStorageCredentials: async () => credentials.value,
     }),
     getObjectStorageProvider: async () => s3,
   };
 });
+
+/** What the object-storage credential prompt returns: null when none are available. */
+const KEYS = { accessKey: 'ak', secretKey: 'sk' };
+const credentials: { value: typeof KEYS | null } = { value: KEYS };
 
 const store = projectConfigStore();
 vi.mock('../../../src/lib/config.js', async (orig) => {
@@ -411,5 +415,48 @@ describe('destroyPreviewBucketFacts', () => {
       },
     };
     expect(destroyPreviewBucketFacts(withPurged, 'prod').backupBucketHeld).toBe(false);
+  });
+});
+
+describe('-purge with no object-storage credentials', () => {
+  // Every bucket survives, and the environment still moves to
+  // destroyedEnvironments, so `destroy prod` cannot run again: each hint
+  // says what you can do in the console instead.
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+    credentials.value = null;
+  });
+  afterEach(() => {
+    credentials.value = KEYS;
+  });
+
+  it('the last environment: every bucket hint points to the console, never to a rerun, and the state name rotates', async () => {
+    const { results } = await destroy(project(['prod']), 'prod', { purgeBackups: true }, [
+      ...ALL_BUCKET_STEPS,
+      'updateProjectConfig',
+    ]);
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(s3.deletePrefix).not.toHaveBeenCalled();
+    const entries = (results.leaks as ReturnType<typeof createLeakLedger>).entries;
+    const hintFor = (bucket: string) =>
+      entries.find((e) => String(e.resource).startsWith(bucket))?.hint;
+    expect(hintFor(PROD_BUCKET)).toBe(
+      'Empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
+    );
+    expect(hintFor(STATE)).toBe(
+      'Once .pulumi/stacks/ in it holds no stack (each environment of this project keeps its Pulumi state there), empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
+    );
+    expect(hintFor(BACKUPS)).toBe(
+      'Empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
+    );
+    expect(entries).toHaveLength(3);
+    for (const entry of entries) {
+      expect(entry.hint).not.toMatch(/re-?run|again|\u2014/i);
+    }
+    // You may delete the state bucket by hand, so the next deploy must not
+    // derive its name again.
+    const saved = store.lastWrite() as Record<string, unknown>;
+    expect(saved.stateBucketGeneration).toMatch(/^[0-9a-f]{6}$/);
+    expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
   });
 });

@@ -440,6 +440,32 @@ describe('handleBackupBucket with a backups bucket per storage region', () => {
   });
 });
 
+describe('handleBackupBucket when the purge runs out of time', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+    storageClients.length = 0;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('leaves the bucket in place with the console steps, never a retried destroy', async () => {
+    s3.deletePrefix.mockImplementationOnce(() => new Promise(() => {}));
+    const pending = destroy(project(['prod', 'staging']), 'staging', { purgeBackups: true });
+    await vi.advanceTimersByTimeAsync(180_000);
+    const { results } = await pending;
+    expect(results.backupsPurged).toBeUndefined();
+    const [entry] = results.leaks.entries;
+    expect(entry.reason).toBe(
+      'purge failed: backup bucket purge exceeded 180s, so it was left in place',
+    );
+    expect(entry.hint).toBe(
+      `Delete backups/myapp/staging/ in ${BACKUPS} via the Hetzner Cloud Object Storage console, and leave the bucket: prod keeps backups there.`,
+    );
+  });
+});
+
 describe('handleBackupBucket with no object-storage credentials', () => {
   // The bucket outlives the destroy, which still moves the environment to
   // destroyedEnvironments, so `destroy <env>` cannot run again: the hint
