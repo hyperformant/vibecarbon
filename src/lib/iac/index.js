@@ -1591,10 +1591,12 @@ function sealFailed(stackName, err) {
  * Clear the creates an earlier run left unfinished in `exported`, once
  * nothing they made is left running untracked (state-pending.js says how
  * that is decided), and return the state the seal goes on with; null when the
- * seal waits, after telling the user why. Under the stack's lock as the
- * seal's imports are. Only on a deploy (a ledger): scale and failover leave
- * it to the next deploy. Throws when the clear or the export after it fails;
- * the caller warns.
+ * seal waits, after telling the user why. The lookup and the decision run
+ * under no lock (sealStackState says why none spans the seal); only the clear
+ * runs past a stale lock (runPastStaleLock), as the seal's imports do. Only on
+ * a deploy (a ledger): scale and failover leave it to the next deploy. Throws
+ * when the deploy named no provider (the lookup would ask a guessed one), or
+ * when the clear or the export after it fails; the caller warns.
  * @param {import('@pulumi/pulumi/automation').Stack} stack
  * @param {{ deployment: { pending_operations: object[] } }} exported
  * @param {{ ledger?: object, provider?: string, providerToken?: string, onOutput?: (out: string) => void }} options
@@ -1610,7 +1612,15 @@ async function resolvePendingCreates(stack, exported, options) {
     );
     return null;
   }
-  const providerId = options.provider ?? 'hetzner';
+  // Every deploy's upStack names its provider (providerIdFor); one that
+  // doesn't would have the lookup ask another provider's API, whose empty
+  // answer reads as "nothing left running" and clears the record.
+  const providerId = options.provider;
+  if (!providerId) {
+    throw new Error(
+      `the deploy named no provider to ask which servers ${stack.name}'s unfinished creates left running`,
+    );
+  }
   const { servers, others } = classifyPendingCreates(exported, SERVER_RESOURCE_TYPES);
   let untracked = [];
   if (servers.length > 0) {

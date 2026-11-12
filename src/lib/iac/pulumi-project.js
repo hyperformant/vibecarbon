@@ -29,7 +29,7 @@ export function requirePulumiProject(options) {
   const name = options?.projectName;
   if (typeof name !== 'string' || name.trim() === '') {
     throw new Error(
-      'iac: options.projectName is required — Pulumi state keys are scoped per project ' +
+      'iac: options.projectName is required: Pulumi state keys are scoped per project ' +
         '(.pulumi/stacks/<projectName>/<stack>.json). Pass the vibecarbon projectName from ' +
         'projectConfig; a defaulted name would read a different key than the deploy wrote.',
     );

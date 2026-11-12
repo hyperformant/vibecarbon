@@ -976,6 +976,23 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     expect(stateSealRecorded(ledger, 'e1')).toBe(false);
   });
 
+  it('a deploy that names no provider: no lookup at a guessed one, nothing cleared, the seal warns and waits', async () => {
+    const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
+    const ledger = ledgerIn(ledgerDir);
+    // No token either: buildEnv refuses a token it can't place.
+    await upStack('e1', async () => ({}), { projectName: 'proj', ledger });
+
+    expect(lookup.made).toEqual([]);
+    expect(clears).toEqual([]);
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([
+      "Your servers in e1 are updated, but vibecarbon couldn't seal their user data in the Pulumi state: " +
+        "the deploy named no provider to ask which servers e1's unfinished creates left running. " +
+        'It stays in plain text in the state until the next successful deploy seals it.',
+    ]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+  });
+
   it('no ledger (scale, failover): no lookup, no clear, no warning; the next deploy resolves it', async () => {
     const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
 
