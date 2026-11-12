@@ -172,6 +172,7 @@ const { __resetStatePassphraseForTests, statePassphraseFingerprint } = await imp
 );
 const {
   DESTROY_EFFECTS,
+  entryKeptReason,
   passphraseMadeThisRunHint,
   passphraseRecoveryHint,
   settleUnreadableStacks,
@@ -236,11 +237,17 @@ type Ctx = ReturnType<typeof makeCtx>;
 const run = (effect: string, ctx: Ctx) =>
   (DESTROY_EFFECTS as Record<string, (c: unknown, a: unknown) => Promise<void>>)[effect](ctx, {});
 
-/** What the stack entries in the leak report say, if anything. */
+/**
+ * What the stack entries in the leak report say, if anything: a kept record
+ * (`pulumi-stack`) or one removed unread (`unreadable-stack`).
+ */
 const stackEntries = (ctx: Ctx) =>
   ctx.results.leaks.entries.filter(
-    (e: { resourceClass: string }) => e.resourceClass === 'pulumi-stack',
+    (e: { resourceClass: string }) =>
+      e.resourceClass === 'pulumi-stack' || e.resourceClass === 'unreadable-stack',
   );
+/** Why destroy keeps the environment's entry (the one keep rule), or null. */
+const entryKept = (ctx: Ctx) => entryKeptReason(ctx.results, ctx.envConfig);
 const removals = () => fakePulumi.calls.filter((c) => c.startsWith('removeStack:'));
 
 let dir: string;
@@ -458,14 +465,23 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
     const [entry, ...rest] = stackEntries(ctx);
     expect(rest).toEqual([]);
     expect(entry.severity).toBe('unverified');
+    expect(entry.resourceClass).toBe('unreadable-stack');
     expect(entry.reason).toContain("this project's passphrase doesn't decrypt it");
     expect(entry.reason).toContain('record was removed without being read');
-    expect(entry.hint).toContain('Hetzner console');
-    expect(entry.hint).toContain('their names start with proj-e1');
+    // The label sweep ran (deleteReservedIpsByLabels): the labelled IPs are
+    // not left to the console, and the hint says where any it missed are.
+    expect(entry.hint).toContain(
+      "Delete the stack's firewall, network, SSH key and placement group in the Hetzner console; their names start with proj-e1.",
+    );
+    expect(entry.hint).toContain(
+      "Its reserved IPs labelled for this stack were released, and any that weren't are listed in this report.",
+    );
     // No record left to retry against, so no retry is promised.
     expect(entry.hint).not.toContain('vibecarbon destroy');
-    // The environment entry goes; the exit code still says something may be left.
+    // The environment entry goes: a re-run can reach nothing the line names.
+    // The exit code still says something may be left.
     expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    expect(entryKept(ctx)).toBeNull();
     expect(ctx.results.leaks.exitCode()).not.toBe(0);
 
     // Pulumi's own line is logged once for diagnosis; the passphrase never is.
@@ -500,9 +516,11 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
     expect(removals()).toEqual([REMOVE('e1')]);
     const [entry] = stackEntries(ctx);
     expect(entry.hint).toContain('listed in this report');
-    // The sweeps alone removed this stack's servers and left something: the
-    // environment entry stays so a destroy retry runs them again.
-    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+    // The sweeps left the firewall, which a re-run deletes by name: its own
+    // line keeps the environment entry (ENTRY_KEEP_BY_CLASS), the removed
+    // record's does not.
+    expect(ctx.results.pulumiDestroyFailed).toBe(false);
+    expect(entryKept(ctx)).toMatchObject({ rerunnable: ['firewall'] });
     expect(ctx.results.leaks.exitCode()).not.toBe(0);
   });
 
@@ -523,7 +541,8 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
           e.resourceClass === 'server' && e.severity === 'unverified',
       ),
     ).toBe(true);
-    expect(ctx.results.pulumiDestroyFailed).toBe(true);
+    // The server scan's own line keeps the entry, so the retry can run.
+    expect(entryKept(ctx)).toMatchObject({ rerunnable: ['server'] });
 
     // The retry: the record is gone, so destroy finds no stack (a no-op, not
     // a failure) and the sweeps run again. This time they finish, and
@@ -536,6 +555,7 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
     expect(removals()).toEqual([]);
     expect(stackEntries(retry)).toEqual([]);
     expect(retry.results.pulumiDestroyFailed).toBe(false);
+    expect(entryKept(retry)).toBeNull();
   });
 });
 

@@ -2233,6 +2233,14 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
     keeps: true,
     why: 'the stack record in the state bucket, which the re-run destroys or removes',
   },
+  'unreadable-stack': {
+    keeps: false,
+    why:
+      'a k8s stack whose state no value this project has can decrypt, its record removed ' +
+      'unread once the API sweeps ran in place of `pulumi destroy` (settleUnreadableStacks): a ' +
+      're-run finds no record, and what the sweeps left is on lines of its own; the hint names ' +
+      'the console delete',
+  },
   'compose-ha teardown': { keeps: true, why: 'the re-run runs the whole HA teardown again' },
   'storage-key': {
     keeps: true,
@@ -2359,11 +2367,13 @@ export function keepsEntry(entry) {
  * `because` names the IPs in the provider's own word (`RESERVED_IP_NAME`:
  * Floating IP on Hetzner, flexible IP on Scaleway, reserved IP elsewhere).
  *
+ * Exported for unit testing.
+ *
  * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[], unsweptReservedIpScopes?: string[], leaks?: {entries: Array<{severity: string, resourceClass: string, resource: string}>}}} results
  * @param {object} envConfig - the environment, for its provider's word
  * @returns {{unverified: true, because: string} | {unreleased: string[], unswept: string[], rerunnable: string[], because: string} | null}
  */
-function entryKeptReason(results, envConfig) {
+export function entryKeptReason(results, envConfig) {
   if (results.pulumiDestroyFailed) {
     return { unverified: true, because: 'its Pulumi destroy was not verified' };
   }
@@ -3390,12 +3400,14 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  *       K8S_DESTROY_BACKSTOP provider's by-name sweeps cover the stack and
  *       the ledger is clean; otherwise kept, with how to get the value back.
  *
- * The environment entry stays (`pulumiDestroyFailed`) whenever the record is
- * kept, and under (a) whenever the sweeps left anything: they alone removed
- * the servers, and a destroy retry re-runs them (it finds no record, which
- * destroyStack answers with `{destroyed: false}`). Otherwise it goes as on
- * any destroy. Leftovers stay in the ledger either way, so the exit code says
- * something was left whenever it was.
+ * A kept record keeps the environment entry (`pulumiDestroyFailed`, and its
+ * `pulumi-stack` line): it is what a destroy with the right value opens. A
+ * removed record keeps nothing itself (its line is `unreadable-stack`, which
+ * ENTRY_KEEP_BY_CLASS says a re-run cannot act on); what the sweeps left
+ * keeps the entry or not by its own lines' classes, as on any destroy, and a
+ * retry that the entry allows re-runs them (it finds no record, which
+ * destroyStack answers with `{destroyed: false}`). Leftovers stay in the
+ * ledger either way, so the exit code says something was left whenever it was.
  *
  * Exported for unit testing.
  *
@@ -3406,6 +3418,10 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`.
  * @param {boolean} params.backstop - the provider's by-name sweeps ran for these stacks.
+ * @param {boolean} [params.reservedIpsSwept] - sweepK8sBackstopTargets released
+ *   the reserved IPs labelled for these stacks (its label sweep ran).
+ * @param {string} [params.reservedIpName] - the provider's word for them
+ *   (`RESERVED_IP_NAME`).
  * @param {boolean} params.backendResolved - false when the environment has an S3
  *   backend whose credentials could not be resolved: a removal would reach the
  *   local fallback backend and miss the real stack.
@@ -3422,6 +3438,8 @@ export async function settleUnreadableStacks({
   results,
   providerName,
   backstop,
+  reservedIpsSwept = false,
+  reservedIpName = 'reserved IP',
   backendResolved,
   passphraseProvenance = NOT_MADE_HERE,
   removeRecord,
@@ -3465,21 +3483,28 @@ export async function settleUnreadableStacks({
       continue;
     }
     s.stop(`Pulumi stack record removed: ${stackEnv}`);
-    // Under (a) the sweeps alone removed the servers: when they left
-    // anything, keep the environment entry so a destroy retry re-runs them.
-    if (!sweptClean) results.pulumiDestroyFailed = true;
+    // What the sweeps left keeps the environment entry through its own lines
+    // (ENTRY_KEEP_BY_CLASS); this record, gone now, keeps nothing.
     // The label and by-name sweeps cover what this provider's k8s program
     // makes that bills or blocks a redeploy (DigitalOcean's Tag does neither:
     // it is free and creating it again is a no-op, so nothing sweeps it), and
     // they left nothing behind.
     if (backstop && sweptClean) continue;
+    // The label sweep released the stack's labelled IPs, and named any it
+    // could not; only what no sweep reaches is left to the console.
+    const consoleList = reservedIpsSwept
+      ? 'firewall, network, SSH key and placement group'
+      : `firewall, network, ${reservedIpName}, SSH key and placement group`;
+    const swept = reservedIpsSwept
+      ? ` Its ${reservedIpName}s labelled for this stack were released, and any that weren't are listed in this report.`
+      : '';
     results.leaks.unverified({
-      resourceClass: 'pulumi-stack',
+      resourceClass: 'unreadable-stack',
       resource,
       reason: `its Pulumi state can't be read (${why}), so \`pulumi destroy\` did not run; its stack record was removed without being read`,
       hint: backstop
         ? `Nothing can reach what that state listed through Pulumi any more. Anything the ${providerName} API sweeps could not remove is listed in this report; delete it in the ${providerName} console.`
-        : `Nothing can reach what that state listed through Pulumi any more. Delete the stack's firewall, network, floating IP, SSH key and placement group in the ${providerName} console; their names start with ${projectName}-${stackEnv}.`,
+        : `Nothing can reach what that state listed through Pulumi any more. Delete the stack's ${consoleList} in the ${providerName} console; their names start with ${projectName}-${stackEnv}.${swept}`,
     });
   }
 }
@@ -4549,8 +4574,14 @@ async function destroyK8sTier({
     }
 
     const { destroyK8s: destroyK8sStack } = await import('./lib/deploy/k8s/index.js');
-    // Whether the by-name backstop below runs for these stacks.
+    // Whether the by-name backstop below runs for these stacks, and whether
+    // its label sweep releases their labelled reserved IPs
+    // (sweepK8sBackstopTargets' byName and byLabel).
     const backstop = Provider.K8S_DESTROY_BACKSTOP === true && !!providerToken;
+    const reservedIpsSwept =
+      !!providerToken &&
+      Boolean(projectConfig.projectName) &&
+      typeof provider.deleteReservedIpsByLabels === 'function';
     // Stacks whose state this project's passphrase cannot open: Pulumi never
     // ran a destroy for them, so the sweeps below are their teardown, and
     // settleUnreadableStacks decides about their records once those ran.
@@ -4774,6 +4805,8 @@ async function destroyK8sTier({
         results,
         providerName: Provider.NAME,
         backstop,
+        reservedIpsSwept,
+        reservedIpName: Provider.RESERVED_IP_NAME ?? 'reserved IP',
         backendResolved: !(envConfig.s3 && !destroyS3Config),
         // The project dir getOrCreateStack checked the passphrase in. Asks
         // git, so only here, once a stack has been refused.
