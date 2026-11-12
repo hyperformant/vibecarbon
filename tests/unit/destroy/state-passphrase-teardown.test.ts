@@ -22,6 +22,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { fakePulumi } from '../../_shared/fake-pulumi-workspace.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
@@ -676,6 +677,32 @@ describe('k8s, Pulumi refused a passphrase this run made: the real one may exist
 
     expect(removals()).toEqual([REMOVE('e1')]);
     expect(stackEntries(ctx)).toEqual([]);
+  });
+
+  it('the kept entry keeps the fingerprint this run recorded when destroy writes its project-level fields', async () => {
+    // ensure records the new fingerprint while the destroy runs; the config
+    // step writes onto the file as it is then (writeProjectLevelFields), so
+    // a kept entry never drops it.
+    project({ value: undefined, recorded: false });
+    const path = join(dir, '.vibecarbon.json');
+    writeFileSync(path, `${JSON.stringify({ projectName: 'proj', environments: { e1: {} } })}\n`);
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+    await run('retainStateBucket', ctx);
+    await run('updateProjectConfig', ctx);
+
+    expect(entryKept(ctx)).toMatchObject({ unverified: true });
+    const saved = JSON.parse(readFileSync(path, 'utf8'));
+    const made = parseDotenv(
+      readFileSync(join(dir, '.env.local'), 'utf8'),
+    ).VIBECARBON_STATE_PASSPHRASE;
+    expect(made).toBeTruthy();
+    expect(saved.stateEncryption).toEqual({ fingerprint: statePassphraseFingerprint(made ?? '') });
+    expect(saved.retainedStateBucket).toBe(S3.stateBucket);
+    expect(saved.environments.e1).toBeDefined();
   });
 });
 
