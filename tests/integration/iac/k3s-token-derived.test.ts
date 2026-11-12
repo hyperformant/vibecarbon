@@ -20,8 +20,13 @@
  *       derive the same token, so the rerun records the token the server
  *       booted with and never replaces it;
  *   (b) the derived token and the passphrase never reach a pulumi argv (a
- *       PATH shim records every invocation), a log line, the deploy ledger or
- *       any backend file in plain text.
+ *       PATH shim records every invocation), a log line, the ledger writes
+ *       upStack makes (the seal marker) or any backend file in plain text.
+ *       The deploy's own record of the up (k3s.js completeStep('k3s-infra',
+ *       outputs)) is not run here, and it does keep the token in plain text:
+ *       a deploy that skips an unchanged k3s-infra step reads it back from
+ *       .vibecarbon/deploy-state-<stack>.json for the carbon-autoscaler's
+ *       config (k3s-token.js says so too).
  *
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
@@ -259,9 +264,9 @@ describe.runIf(hasPulumi || process.env.CI)(
       const replay = await resolveStackK3sToken(programConfig, opts);
       expect(replay).toEqual({ k3sToken: expected, k3sTokenReplayed: true });
 
-      // (b) Neither secret in a pulumi argv, a log line, the ledger or the
-      // backend's files. Non-vacuous: the shim saw the ups, the backend holds
-      // the stack.
+      // (b) Neither secret in a pulumi argv, a log line, the ledger writes
+      // upStack made (the seal marker) or the backend's files. Non-vacuous:
+      // the shim saw the ups, the backend holds the stack.
       const argv = readFileSync(argvLog, 'utf8');
       expect(argv).toMatch(/^up\b/m);
       const ledgerFiles = existsSync(join(projectDir, '.vibecarbon'))

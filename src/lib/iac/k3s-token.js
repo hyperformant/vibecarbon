@@ -26,7 +26,19 @@
  * The derived token is no more exposed than a random one: the passphrase it
  * comes from already decrypts the state that records the token. Neither is
  * ever logged; the token travels to the program in-process and into the state
- * as a Pulumi secret, never in argv.
+ * as a Pulumi secret, never in argv. On the operator's machine the deploy
+ * ledger keeps it in plain text, as it kept a random one: the deploy records
+ * the up's outputs, this token among them, in
+ * .vibecarbon/deploy-state-<stack>.json (k3s.js
+ * completeStep('k3s-infra', outputs)), and a deploy that skips an unchanged
+ * k3s-infra step reads the token back from there for the carbon-autoscaler's
+ * config. The scaffold's .gitignore lists .vibecarbon/, and destroy's local
+ * cleanup deletes the file.
+ *
+ * The derivation has no per-cluster or random input: the same passphrase,
+ * project and stack always give the same token, so a cluster destroyed and
+ * deployed again under the same environment name gets its predecessor's
+ * token (docs/security.md, "The cluster's join token").
  */
 
 import { createHmac } from 'node:crypto';
