@@ -487,14 +487,21 @@ function args(restore: typeof RESTORE | null) {
     restore,
     apiToken: 'token',
     providerId: 'hetzner',
-    ProviderClass: {
-      PROVIDER_ID_PREFIX: 'hcloud://',
-      K8S_IMAGE: 'ubuntu-26.04',
-      K8S_STORAGE_CLASS: 'hcloud-volumes',
-      async getK8sWorkerUserData() {
+    // Instantiated only for the token check's read of the master.
+    ProviderClass: class {
+      static NAME = 'Hetzner Cloud';
+      static TOKEN_ENV = 'HETZNER_API_TOKEN';
+      static PROVIDER_ID_PREFIX = 'hcloud://';
+      static K8S_IMAGE = 'ubuntu-26.04';
+      static K8S_STORAGE_CLASS = 'hcloud-volumes';
+      static async getK8sWorkerUserData() {
         return '#cloud-config\n';
-      },
+      }
+      async getServer(id: string) {
+        return { id };
+      }
     },
+    masterId: '4242',
     region: 'nbg1',
     environment: 'prod',
     minWorkers: 1,

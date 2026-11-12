@@ -135,7 +135,6 @@ export function planK8sScaleChanges(parsed, _envConfig) {
  * @param {number|undefined} inputs.persistedMaxWorkers   envConfig.maxWorkers
  * @param {string} inputs.k3sVersion
  * @param {Record<string, string>} inputs.labels
- * @param {string} inputs.apiToken
  * @returns {object}
  */
 export function buildProgramConfig({
@@ -153,7 +152,6 @@ export function buildProgramConfig({
   persistedMaxWorkers,
   k3sVersion,
   labels,
-  apiToken,
 }) {
   return {
     projectName,
@@ -176,6 +174,5 @@ export function buildProgramConfig({
     maxWorkers: newValues.maxWorkers ?? persistedMaxWorkers ?? DEFAULT_WORKER_MAX,
     k3sVersion,
     labels,
-    apiToken,
   };
 }

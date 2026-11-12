@@ -19,7 +19,6 @@ import { gitSafeEnv } from '../../../src/lib/command.js';
 import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
-  seedOrgSecrets: vi.fn(async () => {}),
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
   triggerDeployWorkflow: vi.fn(async () => {}),
@@ -28,6 +27,7 @@ vi.mock('../../../src/lib/github-environments.js', () => ({
 
 const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environments.js');
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
+const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
 const work = mkdtempSync(join(tmpdir(), 'vc-gitops-backup-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
@@ -58,11 +58,10 @@ async function deployWith(
     domain: 'app.example.test',
     projectName: 'proj',
     kubeconfigPath: join(project, 'kubeconfig'),
-    networkId: '',
     dnsProvider: 'manual',
-    providerCreds: {},
     appStorage: { accessKey: 'a', secretKey: 'b' },
     githubOwner: 'acme',
+    ProviderClass: PROVIDERS.hetzner,
     backupConfig,
     ...extra,
   });

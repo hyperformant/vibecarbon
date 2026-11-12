@@ -458,6 +458,31 @@ export class LinodeProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'linode-block-storage-vibecarbon';
 
   /**
+   * The `linode` Secret (key `token`) the CSI driver reads. See
+   * BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [{ namespace: 'kube-system', name: 'linode', stringData: { token } }];
+  }
+
+  /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret, which held the
+   * operator's Hetzner Cloud token, if any. Nothing on a Linode cluster reads it.
+   * See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
+
+  /**
    * The VPC subnet the k8s Pulumi program (iac/programs/linode-k8s.js)
    * creates for the cluster's nodes.
    * @type {string}
@@ -474,13 +499,13 @@ export class LinodeProvider extends BaseProvider {
   // ── k8s boot user-data (carbon/cloud-init/k3s/linode-*-init.sh) ─────────
 
   /**
-   * Render the k3s master boot script. The Linode API token is the CSI
-   * driver's credential; project_tag is the project tag on every volume the
-   * CSI driver creates, `encodeLabel('project', projectName)`.
+   * Render the k3s master boot script. project_tag is the project tag on
+   * every volume the CSI driver creates, `encodeLabel('project',
+   * projectName)`. No API token: deployK3s hands the CSI driver's
+   * credential to the cluster itself (applyCloudSecrets).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   *   linode_token: string,
    *   project_tag: string,
    * }} vars - The template's complete var set.
    * @returns {Promise<string>}
@@ -1071,7 +1096,11 @@ export class LinodeProvider extends BaseProvider {
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       const reason = error.errors?.map((e) => e.reason).join('; ') || 'Unknown error';
-      throw new Error(`Failed to get server: ${reason}`);
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the instance (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${reason}`), {
+        status: response.status,
+      });
     }
     return response.json();
   }

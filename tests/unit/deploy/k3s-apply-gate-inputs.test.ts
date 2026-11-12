@@ -10,6 +10,7 @@ import { BUNDLED_K8S_DIR, buildK3sApplyInputs } from '../../../src/lib/deploy/k8
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 // @ts-expect-error — JS module without types
 import { activateImageSet, bundledImageSet } from '../../../src/lib/images.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Regression coverage for the `k3s-apply` gate hole found in the M3 follow-up
@@ -238,6 +239,78 @@ describe('buildK3sApplyInputs: where the buckets are is part of the gate', () =>
       inputs(app('fsn1'), backups('fsn1', 'proj-abc123-fsn1-backups')).storageTargets,
     ).not.toBe(inputs(app('fsn1'), backups('fsn1')).storageTargets);
     expect(inputs(app('fsn1'), backups('fsn1'))).toEqual(inputs(app('fsn1'), backups('fsn1')));
+  });
+});
+
+// The apply writes the provider API token into
+// kube-system/carbon-autoscaler-config and restarts the autoscaler when it
+// changed (applyK3sManifests). A skipped apply would leave the autoscaler on
+// a token the operator replaced, perhaps revoked, so the token is an input:
+// as a keyed digest, never the token, since the inputs are hashed into the
+// deploy-state file.
+describe('buildK3sApplyInputs — a replaced provider token opens the gate', () => {
+  const MARK = 'vc-sentinel-token-5e1b';
+  let dir: string;
+  let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = createTempDir('vc-k3s-gate-token-');
+    mkdirSync(join(dir, 'k8s', 'base'), { recursive: true });
+    writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: []\n');
+    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  });
+  afterEach(() => {
+    cwdSpy.mockRestore();
+    cleanupTempDir(dir);
+  });
+
+  const inputs = (apiToken?: string) =>
+    buildK3sApplyInputs({
+      imageTag: 'registry:5000/app:abc123',
+      dbImageTag: 'ghcr.io/o/db:v1',
+      projectDir: dir,
+      apiToken,
+    });
+  const deployed = (apiToken: string) => {
+    const t = new StateTracker('proj', 'prod');
+    t.startStep('k3s-apply', inputs(apiToken));
+    t.completeStep('k3s-apply');
+  };
+
+  it('a new token opens the gate', () => {
+    deployed(`${MARK}-old`);
+    expect(new StateTracker('proj', 'prod').shouldSkip('k3s-apply', inputs(`${MARK}-new`))).toBe(
+      false,
+    );
+  });
+
+  it('the same token keeps it shut', () => {
+    deployed(MARK);
+    expect(new StateTracker('proj', 'prod').shouldSkip('k3s-apply', inputs(MARK))).toBe(true);
+  });
+
+  it('neither the inputs nor the deploy-state file hold the token', () => {
+    const withToken = inputs(MARK);
+    expect(withToken.providerTokenDigest).toMatch(/^[0-9a-f]{16}$/);
+    expect(JSON.stringify(withToken)).not.toContain(MARK);
+    deployed(MARK);
+    const file = readFileSync(join(dir, '.vibecarbon', 'deploy-state-prod.json'), 'utf-8');
+    expect(file).not.toContain(MARK);
+    expect(file).not.toContain(withToken.providerTokenDigest);
+  });
+
+  it('no token digests as empty, as the app storage key does', () => {
+    expect(inputs(undefined).providerTokenDigest).toBe('');
+  });
+
+  it('deployK3s passes the deploy token to the gate', () => {
+    // process.cwd() is the temp dir here.
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
+    expect(gateCall.slice(0, gateCall.indexOf('});'))).toMatch(
+      /\n\s+apiToken: options\.apiToken,\n/,
+    );
   });
 });
 

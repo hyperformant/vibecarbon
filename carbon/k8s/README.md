@@ -94,11 +94,12 @@ kubectl create secret generic vibecarbon-infra-secrets \
 kubectl create secret generic vibecarbon-app-secrets \
   --namespace=vibecarbon \
   --from-literal=BETTER_AUTH_SECRET=<64 random characters>
-
-kubectl create secret generic hcloud-token \
-  --namespace=vibecarbon \
-  --from-literal=token=<your-hetzner-token>
 ```
+
+Your cloud provider's API token needs no Secret from you. `vibecarbon deploy`
+hands it to the cluster on every deploy (kube-system/hcloud on Hetzner) and
+restarts what reads it when it changes, so a rotated token takes effect on
+your next deploy.
 
 ### Step 4: Deploy to Primary Cluster
 
@@ -189,7 +190,7 @@ Trial Hetzner Cloud projects cap at ~50 servers across all resource types; verif
 
 **Token requirement: Read+Write**
 
-The Hetzner Cloud API token in your `hcloud-token` secret must have **Read+Write** permissions on the project. Read-only tokens cannot create servers, and CA scale-up will fail silently with permission errors in the cluster-autoscaler pod logs. Verify with:
+The Hetzner Cloud API token you deploy with (`HETZNER_API_TOKEN`) must have **Read+Write** permissions on the project. Read-only tokens cannot create servers, and CA scale-up will fail silently with permission errors in the cluster-autoscaler pod logs. Verify with:
 
 ```bash
 kubectl logs -n kube-system -l app=cluster-autoscaler --tail=200 | grep -i 'permission\|forbidden\|unauthor'

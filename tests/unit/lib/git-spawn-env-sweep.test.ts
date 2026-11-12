@@ -20,7 +20,6 @@ import { gitSafeEnv } from '../../../src/lib/command.js';
 // The consequential ones:
 //   - secret-scan.js `git ls-files` — the PRE-DEPLOY SECRET SCAN enumerates the
 //     host repo and reports the project clean. A silent security pass.
-//   - github.js `git checkout <branch>` — executes against the host repo.
 //   - upgrade.js `git status --porcelain` — the uncommitted-changes guard reads
 //     the wrong repo and reports clean, removing the only warning before
 //     upgrade rewrites template files.

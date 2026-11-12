@@ -33,6 +33,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
 
@@ -113,14 +114,31 @@ function balancedCall(src: string, open: number): string {
   return src.slice(open);
 }
 
-/** First argument text begins with a git command (see the file header). */
-function isGitInvocation(callText: string): boolean {
-  const args = callText.slice(1).trimStart();
+/** Text begins with a git command: a string, template or array naming git or gh. */
+function startsWithGitCommand(text: string): boolean {
   return (
-    /^(['"`])(?:git|gh)(\s|\1)/.test(args) || // 'git' / 'git init' / `git ${x}` / 'gh repo view'
-    /^\[\s*['"](?:git|gh)['"]/.test(args) || // ['git', ...] / ['gh', ...]
-    /^buildGitAddArgv\(/.test(args)
+    /^(['"`])(?:git|gh)(\s|\1)/.test(text) || // 'git' / 'git init' / `git ${x}` / 'gh repo view'
+    /^\[\s*['"](?:git|gh)['"]/.test(text) || // ['git', ...] / ['gh', ...]
+    /^buildGitAddArgv\(/.test(text)
   );
+}
+
+/**
+ * First argument is a git command (see the file header): written in the call,
+ * or a name the same file assigns one to (`const args = ['gh', 'secret',
+ * 'set', key]; runCommandAsync(args, ...)`), so building the argv first never
+ * hides a call from the census.
+ */
+function isGitInvocation(callText: string, fileSrc = ''): boolean {
+  const args = callText.slice(1).trimStart();
+  if (startsWithGitCommand(args)) return true;
+  const name = args.match(/^([\w$]+)\s*[,)]/)?.[1];
+  if (!name) return false;
+  const declared = new RegExp(`(?:const|let|var)\\s+${escapeRegExp(name)}\\s*=\\s*`, 'g');
+  for (const m of fileSrc.matchAll(declared)) {
+    if (startsWithGitCommand(fileSrc.slice((m.index ?? 0) + m[0].length))) return true;
+  }
+  return false;
 }
 
 const SCRUB_FNS = 'gitSafeEnv|gitScrubbedEnv';
@@ -166,7 +184,7 @@ function collectFromSource(rel: string, src: string, inTests: boolean): Site[] {
     const lineStart = src.lastIndexOf('\n', m.index ?? 0) + 1;
     if (/^\s*(\/\/|\*|\/\*)/.test(src.slice(lineStart, m.index))) continue; // prose, not a call
     const callText = balancedCall(src, open);
-    if (!isGitInvocation(callText)) continue;
+    if (!isGitInvocation(callText, src)) continue;
     if (inTests && !targetsTempRepo(callText)) continue;
     const line = src.slice(0, m.index).split('\n').length;
     const reason = Object.keys(ALLOWLIST).find(
@@ -247,6 +265,15 @@ describe('every git invocation scrubs the inherited git context', () => {
     expect(check("runCommand('gh repo view')")).toEqual([false]);
     expect(check("runCommand(['gh', 'repo', 'view'], { cleanEnv: true })")).toEqual([true]);
     expect(check("// runCommand('git init')\nfoo()")).toEqual([]);
+    // an argv built first is still a git call
+    expect(
+      check("const args = ['gh', 'secret', 'set', key];\nrunCommandAsync(args, { silent: true })"),
+    ).toEqual([false]);
+    expect(
+      check("const args = ['gh', 'variable', 'set'];\nrunCommandAsync(args, { cleanEnv: true })"),
+    ).toEqual([true]);
+    expect(check("const cmd = 'git status';\nrunCommand(cmd)")).toEqual([false]);
+    expect(check("const args = ['docker', 'ps'];\nrunCommand(args)")).toEqual([]);
   });
 
   it('in tests/, a temp repo is recognised by cwd (any spelling) or -C, a host-repo constant is not', () => {

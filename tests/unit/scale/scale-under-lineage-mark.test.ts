@@ -145,6 +145,12 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   return { ...actual, sshRun: contractSshRun(answerRoleWrite()), sshRunScript: async () => '' };
 });
 
+// server-floors.test.ts covers the check; here it would open a real SSH session.
+vi.mock('../../../src/lib/deploy/compose/server-floors.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  assertServerFloors: async () => {},
+}));
+
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 
 function makeCtx() {
@@ -152,7 +158,7 @@ function makeCtx() {
     createServer: vi.fn(async () => {
       return { id: 'new-id', server: { public_net: { ipv4: { ip: '9.9.9.9' } } } };
     }),
-    waitForServer: vi.fn(async () => ({})),
+    waitForServer: vi.fn(async () => ({ public_net: { ipv4: { ip: '9.9.9.9' } } })),
     deleteServer: vi.fn(async () => {}),
     apiRequest: vi.fn(async () => ({})),
   };

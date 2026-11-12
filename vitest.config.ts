@@ -69,6 +69,9 @@ export default defineConfig({
             'tests/e2e/**',
             'tests/_shared/**',
           ],
+          // Added to the root setupFiles (extends: true merges the lists):
+          // a unit test that runs a real ssh, scp or ssh-keyscan fails.
+          setupFiles: ['tests/setup/no-real-ssh.ts'],
           testTimeout: 5_000,
         },
       },

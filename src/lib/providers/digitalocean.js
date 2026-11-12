@@ -398,6 +398,33 @@ export class DigitalOceanProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'do-block-storage';
 
   /**
+   * The one `digitalocean` Secret (key `access-token`) both the CCM and the
+   * CSI driver read. See BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [
+      { namespace: 'kube-system', name: 'digitalocean', stringData: { 'access-token': token } },
+    ];
+  }
+
+  /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret, which held the
+   * operator's Hetzner Cloud token, if any. Nothing on a DigitalOcean cluster reads it.
+   * See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
+
+  /**
    * The FIXED-ERA VPC range — the literal every DO k8s stack provisioned
    * before the d4 lift (2026-08-28) actually holds. Used ONLY as
    * `deployK3s`'s (deploy/k8s/k3s.js) resume-compat fallback for a
@@ -454,11 +481,11 @@ export class DigitalOceanProvider extends BaseProvider {
    * assigned to the master after it already exists), no network-id var
    * (the DO CCM discovers VPC membership from metadata, not an injected
    * id), no project-name var (DO's CSI has no label-injection env to
-   * stamp it onto — see the template's own note).
+   * stamp it onto — see the template's own note), and no API token
+   * (deployK3s hands it to the cluster itself, applyCloudSecrets).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   *   do_token: string,
    * }} vars - Substituted into do-master-init.sh's `${...}` placeholders —
    *   this is the template's COMPLETE var set (unlike
    *   HetznerProvider.getK8sMasterUserData, every key here is actually
@@ -1083,8 +1110,12 @@ export class DigitalOceanProvider extends BaseProvider {
   async getServer(serverId) {
     const response = await this.apiRequest(`/droplets/${serverId}`);
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`Failed to get server: ${error.message || 'Unknown error'}`);
+      const error = await response.json().catch(() => ({}));
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the droplet (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${error.message || 'Unknown error'}`), {
+        status: response.status,
+      });
     }
     const { droplet } = await response.json();
     return droplet;

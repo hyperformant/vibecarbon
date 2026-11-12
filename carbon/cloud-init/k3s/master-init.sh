@@ -154,7 +154,13 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 # via loadCloudInit's @include, so the three copies cannot drift.
 # @include _private-net-guard.sh
 
-# Install k3s master with pre-shared token.
+# Install the k3s master.
+# The k3s token joins agents only: --agent-token, and no --token. It sits in
+# every node's user data and in the stack's state, so it must not be the
+# server token, which lets a machine join as another server and read the
+# datastore, CA keys included. k3s makes that one itself, at random, on this
+# box, and no second server ever joins
+# (tests/integration/docker/k3s-agent-token.test.ts).
 # --node-ip must be the PUBLIC IP so Hetzner CCM can match it against the Hetzner API
 # and remove the node.cloudprovider.kubernetes.io/uninitialized taint.
 # --flannel-iface routes pod-to-pod traffic over the private network.
@@ -188,7 +194,7 @@ for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server \
       --disable-default-registry-endpoint \
       --cluster-init \
-      --token "${k3s_token}" \
+      --agent-token "${k3s_token}" \
       --tls-san "$PUBLIC_IP" \
       --tls-san "${floating_ip}" \
       --tls-san "10.0.1.1" \
@@ -236,20 +242,14 @@ fi
 
 _m x
 
-# Marker for vibecarbon's deployK3s waiter - set AFTER hcloud Secret + CCM/CSI
-# install below complete (see end of script). Keeps the early-readiness signal
+# Marker for vibecarbon's deployK3s waiter - set AFTER the CCM/CSI install
+# below completes (see end of script). Keeps the early-readiness signal
 # distinct from "fully provisioned and ready for app install."
-
-# Create secret for Hetzner Cloud Controller Manager
-kubectl -n kube-system create secret generic hcloud \
-  --from-literal=token="${hcloud_token}" \
-  --from-literal=network="${network_id}" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# Create secret for Hetzner CSI Driver
-kubectl -n kube-system create secret generic hcloud-csi \
-  --from-literal=token="${hcloud_token}" \
-  --dry-run=client -o yaml | kubectl apply -f -
+#
+# No Secret here: the CCM and the CSI controller read the Hetzner API token
+# from kube-system/hcloud, which deployK3s applies from the operator's machine
+# once the apiserver serves (applyCloudSecrets), so the token never rides in
+# this user data. Their pods wait for it.
 
 # Install Hetzner Cloud Controller Manager
 # Use ccm.yaml (not ccm-networks.yaml) since k3s manages pod networking via flannel
@@ -298,7 +298,7 @@ echo "k3s master installation complete!"
 
 # Final marker: vibecarbon's deployK3s polls for /tmp/k3s-ready before fetching
 # kubeconfig + applying app manifests. Written here so the marker only fires
-# after k3s + hcloud secrets + CCM + CSI are all in place - i.e., the cluster
-# is ready for real workloads, not just "k3s daemon is up."
+# after k3s + CCM + CSI are all in place - i.e., the cluster is ready for the
+# token and real workloads, not just "k3s daemon is up."
 _m e
 touch /tmp/k3s-ready

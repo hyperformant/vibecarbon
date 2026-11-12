@@ -439,8 +439,7 @@ export class HetznerProvider extends BaseProvider {
   // shell.js (network env export + banner). See base.js K8S_ASSETS for
   // the field-by-consumer breakdown. `cloudSecretName` was in the original
   // plan sketch but dropped — no call site in these three consumers reads
-  // a k8s Secret name (that literal lives in carbon/cloud-init/k3s/master-init.sh,
-  // templated by iac/programs/hetzner-k8s.js, out of scope until Phase B).
+  // a k8s Secret name (k8sCloudSecrets below names the one deployK3s writes).
   static K8S_ASSETS = {
     csiNodeDaemonSet: 'daemonset/hcloud-csi-node',
     csiControllerSelector:
@@ -465,6 +464,29 @@ export class HetznerProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'hcloud-volumes';
 
   /**
+   * The `hcloud` Secret (key `token`) both the cloud controller and the CSI
+   * controller read. See BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [{ namespace: 'kube-system', name: 'hcloud', stringData: { token } }];
+  }
+
+  /**
+   * What master-init.sh created beside the `hcloud` token and nothing has
+   * read since the initial public release (CCM v1.20.0 and CSI v2.18.1
+   * onward read `hcloud`/`token` only, and ccm.yaml, unlike
+   * ccm-networks.yaml, reads no network): the `hcloud-csi` Secret, a second
+   * copy of the token, and the `network` key of `hcloud`. See
+   * BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    { namespace: 'kube-system', name: 'hcloud-csi' },
+    { namespace: 'kube-system', name: 'hcloud', keys: ['network'] },
+  ]);
+
+  /**
    * Matches hetzner-k8s.js's `image: 'ubuntu-26.04'` literal (the master,
    * db, and worker `hcloud.Server` resources all use the same slug —
    * lib/iac/programs/hetzner-k8s.js:243,283,318) exactly.
@@ -485,17 +507,16 @@ export class HetznerProvider extends BaseProvider {
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   *   hcloud_token: string,
-   *   network_id: string|number,
    *   floating_ip: string,
    *   project_name: string,
    *   cluster_name?: string,
    *   disable_traefik?: string,
    * }} vars - Passed straight through to renderScript; must match
    *   hetzner-k8s.js's own masterUserData renderScript call vars EXACTLY
-   *   for byte-identical output. Only k3s_version, k3s_token,
-   *   hcloud_token, network_id, floating_ip, and project_name are actually
-   *   substituted into master-init.sh's `${...}` placeholders —
+   *   for byte-identical output. Only k3s_version, k3s_token, floating_ip,
+   *   and project_name are actually substituted into master-init.sh's
+   *   `${...}` placeholders — no API token: deployK3s hands it to the
+   *   cluster itself (applyCloudSecrets);
    *   cluster_name/disable_traefik are accepted for call-site parity with
    *   hetzner-k8s.js but are unused by the template (same as today).
    * @returns {Promise<string>}
@@ -1232,8 +1253,13 @@ export class HetznerProvider extends BaseProvider {
     const response = await this.apiRequest(`/servers/${serverId}`);
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`Failed to get server: ${error.error?.message || 'Unknown error'}`);
+      const error = await response.json().catch(() => ({}));
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the server (assertTokenSeesCluster).
+      throw Object.assign(
+        new Error(`Failed to get server: ${error.error?.message || 'Unknown error'}`),
+        { status: response.status },
+      );
     }
 
     const data = await response.json();

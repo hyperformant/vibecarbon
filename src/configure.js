@@ -919,10 +919,11 @@ async function promptPlausible(env, ctx = {}) {
  * purely additive: it adds the git-push deploy path for compose, and lays
  * down GHA workflow files in the repo for teams that want them.
  *
- * Org-level secret seeding (Hetzner/Cloudflare/S3 tokens) is NOT done here —
- * the first push-mode compose deploy (or first `-mode k8s` deploy) still runs
- * `seedOrgSecrets` via `deployK8sGitOps`. Kept that way so secrets only land
- * in GitHub when the user actually deploys, not when they merely configure.
+ * No secret is seeded here: a k8s environment's GitHub Environment is seeded
+ * by `deployK8sGitOps`, so secrets only land in GitHub when the user layers
+ * GitOps onto a running cluster, not when they merely configure. The cloud
+ * provider token never goes to GitHub at all (`vibecarbon deploy` hands it to
+ * the cluster itself).
  */
 async function promptCicd() {
   p.log.info(c.bold('CI/CD (GitHub Actions)'));
@@ -1620,11 +1621,10 @@ export async function runConfigureCicd(envName) {
   // cluster. This is the body that orchestrator.js used to run inline when
   // --gitops was passed (deleted in PR 5).
   p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
-  const { deployK8sGitOps, gitopsTargets } = await import('./lib/deploy/k8s/gitops-deploy.js');
+  const { deployK8sGitOps, gitopsTargets, noteUnreadTokenSecrets } = await import(
+    './lib/deploy/k8s/gitops-deploy.js'
+  );
   const { getImageTag } = await import('./lib/ci-setup.js');
-  const providerCreds = {
-    hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
-  };
   const imageTag = getImageTag(cwd);
   // The app pod's object-storage pair, per environment: the env's own key
   // where the provider scopes one (security plan R2), never the infra pair
@@ -1634,7 +1634,8 @@ export async function runConfigureCicd(envName) {
   );
   const { getProviderClass } = await import('./lib/providers/index.js');
   const storageProviderId = (envConfig.provider || 'hetzner').toLowerCase();
-  const [accessEnv, secretEnv] = getProviderClass(storageProviderId).OBJECT_STORAGE_ENV;
+  const ProviderClass = getProviderClass(storageProviderId);
+  const [accessEnv, secretEnv] = ProviderClass.OBJECT_STORAGE_ENV;
   const infraStoragePair = {
     accessKey: (accessEnv && readOperatorVar(accessEnv).value) || '',
     secretKey: (secretEnv && readOperatorVar(secretEnv).value) || '',
@@ -1677,6 +1678,11 @@ export async function runConfigureCicd(envName) {
   // which stack is primary), as the CLI deploy renders it.
   const targets = gitopsTargets(envName, envConfig);
 
+  // Once per run, not per cluster: a token copy an earlier vibecarbon left
+  // at GitHub that no workflow reads any more. One a workflow still reads is
+  // deployK8sGitOps's refusal to name.
+  await noteUnreadTokenSecrets({ projectDir: cwd, ProviderClass });
+
   for (const target of targets) {
     const targetKubeconfig = localKubeconfigPath(cwd, target.envName);
     if (!existsSync(targetKubeconfig)) {
@@ -1693,13 +1699,12 @@ export async function runConfigureCicd(envName) {
       domain: subEnvConfig.domain || envConfig.domain,
       projectName: projectConfig.projectName,
       kubeconfigPath: targetKubeconfig,
-      networkId: subEnvConfig.networkId || envConfig.networkId,
-      providerCreds,
       appStorage,
       imageTag,
       backupConfig: subEnvConfig.backup || envConfig.backup,
       tlsSnapshotPrefix,
       role: target.role,
+      ProviderClass,
     });
   }
 

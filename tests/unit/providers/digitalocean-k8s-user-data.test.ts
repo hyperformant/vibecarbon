@@ -19,7 +19,6 @@ import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js
 const masterVars = {
   k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
-  do_token: 'dop_v1_test_token_1234',
 };
 
 const workerVars = {
@@ -50,7 +49,7 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
       expect(rendered).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     });
 
-    it('template var contract: do-master-init.sh placeholder set is EXACTLY {k3s_version, k3s_token, do_token}', () => {
+    it('template var contract: do-master-init.sh placeholder set is EXACTLY {k3s_version, k3s_token}', () => {
       const raw = loadCloudInit('do-master-init.sh');
       expect(templatePlaceholders(raw)).toEqual(new Set(Object.keys(masterVars)));
     });
@@ -67,15 +66,20 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
       expect(rendered).toContain('fetch_metadata "interfaces/private/0/ipv4/address"');
     });
 
-    it('includes the do_token value in the digitalocean secret create, not a placeholder', async () => {
+    it('creates no Secret: the CLI hands the DigitalOcean token to the cluster', async () => {
+      // applyCloudSecrets, on every deploy (tests/unit/deploy/k8s-cloud-secrets.test.ts).
       const rendered = await DigitalOceanProvider.getK8sMasterUserData(masterVars);
-      expect(rendered).toContain('--from-literal=access-token="dop_v1_test_token_1234"');
+      expect(rendered).not.toContain('create secret');
+      expect(rendered).not.toContain('--from-literal');
     });
 
-    it('substitutes k3s_version/k3s_token verbatim', async () => {
+    it('substitutes k3s_version verbatim, and k3s_token as the agent token only', async () => {
       const rendered = await DigitalOceanProvider.getK8sMasterUserData(masterVars);
       expect(rendered).toContain('INSTALL_K3S_VERSION="v1.37.2+k3s1"');
-      expect(rendered).toContain('--token "deadbeefcafe1234567890abcdef"');
+      expect(rendered).toContain('--agent-token "deadbeefcafe1234567890abcdef"');
+      // Commands only: the comment above the install says why there is no --token.
+      const commands = rendered.split('\n').filter((line) => !line.trimStart().startsWith('#'));
+      expect(commands.join('\n')).not.toMatch(/--token\b/);
     });
 
     it('carries zero hetzner|hcloud|floating|10.0.1. tokens (case-insensitive)', async () => {

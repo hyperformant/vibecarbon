@@ -16,8 +16,7 @@ import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 describe('M3 Task 3 — do-master-init.sh shape', () => {
   const master = loadCloudInit('do-master-init.sh');
 
-  it('installs the digitalocean secret before the CCM, the CCM before the CSI crds, the crds before the driver, and the ready marker last', () => {
-    const secretIdx = master.indexOf('create secret generic digitalocean');
+  it('installs the CCM before the CSI crds, the crds before the driver, and the ready marker last', () => {
     const ccmIdx = master.indexOf(
       'digitalocean-cloud-controller-manager/v0.1.72/releases/digitalocean-cloud-controller-manager/v0.1.72.yml',
     );
@@ -25,13 +24,18 @@ describe('M3 Task 3 — do-master-init.sh shape', () => {
     const driverIdx = master.indexOf('csi-digitalocean-v4.19.0/driver.yaml');
     const markerIdx = master.indexOf('touch /tmp/k3s-ready');
 
-    for (const idx of [secretIdx, ccmIdx, crdsIdx, driverIdx, markerIdx]) {
+    for (const idx of [ccmIdx, crdsIdx, driverIdx, markerIdx]) {
       expect(idx).toBeGreaterThan(-1);
     }
-    expect(secretIdx).toBeLessThan(ccmIdx);
     expect(ccmIdx).toBeLessThan(crdsIdx);
     expect(crdsIdx).toBeLessThan(driverIdx);
     expect(driverIdx).toBeLessThan(markerIdx);
+  });
+
+  it('creates no Secret: the CLI hands the DigitalOcean token to the cluster', () => {
+    // applyCloudSecrets, once the apiserver serves; the CCM and the CSI
+    // controller wait for it (tests/unit/deploy/k8s-cloud-secrets.test.ts).
+    expect(master).not.toContain('create secret');
   });
 
   it('pins the CCM to v0.1.72 and the CSI driver to v4.19.0 by tag (never `master`/`latest`)', () => {

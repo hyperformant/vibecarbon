@@ -28,7 +28,6 @@ import {
 } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
-  seedOrgSecrets: vi.fn(async () => {}),
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
   triggerDeployWorkflow: vi.fn(async () => {}),
@@ -39,6 +38,7 @@ const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environ
 const { deployK8sGitOps, gitopsTargets, refreshGitopsTlsVars } = await import(
   '../../../src/lib/deploy/k8s/gitops-deploy.js'
 );
+const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
@@ -179,11 +179,10 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
       domain: 'app.example.test',
       projectName: 'proj',
       kubeconfigPath: join(project, 'kubeconfig'),
-      networkId: '',
       dnsProvider: 'hetzner',
-      providerCreds: {},
       appStorage: { accessKey: 'a', secretKey: 'b' },
       githubOwner: 'acme',
+      ProviderClass: PROVIDERS.hetzner,
       ...extra,
     });
     const [, , vars] = vi.mocked(seedEnvironmentSecrets).mock.calls[0];

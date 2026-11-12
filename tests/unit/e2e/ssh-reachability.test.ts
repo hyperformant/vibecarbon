@@ -8,7 +8,10 @@
  * verify fan-out's own SSH saturation into hard failures.
  */
 
+import { chmodSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   continuityTargetSameAsOriginMessage,
   continuityTransportFailed,
@@ -149,11 +152,22 @@ describe('the continuity false-green guard', () => {
 });
 
 describe('the metrics path is memo-READ-only', () => {
-  // TEST-NET-1 (RFC 5737) — reserved for documentation and black-holed, so the
-  // connect attempt times out rather than resolving anywhere real.
+  // TEST-NET-1 (RFC 5737), reserved for documentation.
   const DEAD = '192.0.2.1';
 
   it('a metrics probe timeout does NOT condemn the host', async () => {
+    // The probe's `ssh` is a stand-in, first on PATH, that fails the way a
+    // black-holed :22 does: ssh's own connect-timeout line, exit 255. That is
+    // the exact signal a condemning path latches on, with no network involved
+    // (a real ssh at this address fails at once wherever the network rejects
+    // it, which is a different message).
+    const bin = createTempDir('vc-ssh-standin-');
+    writeFileSync(
+      join(bin, 'ssh'),
+      `#!/bin/sh\necho 'ssh: connect to host ${DEAD} port 22: Connection timed out' >&2\nexit 255\n`,
+    );
+    chmodSync(join(bin, 'ssh'), 0o755);
+    process.env.PATH = `${bin}${delimiter}${process.env.PATH ?? ''}`;
     expect(await collectResourceMetrics(DEAD, '/nonexistent-key')).toBeNull();
     // A single-shot 5s probe with no retry is far too weak an instrument to
     // latch a verdict the continuity check would then obey. One unlucky window

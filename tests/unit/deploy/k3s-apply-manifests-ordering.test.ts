@@ -214,6 +214,13 @@ function fakeChild({
   return child;
 }
 
+// What `kubectl -n kube-system get secret carbon-autoscaler-config
+// --ignore-not-found -o json` prints before the CA Secret apply, and what
+// `get deployments,statefulsets,daemonsets,cronjobs -o json` lists there. Default: no
+// Secret yet, as on a first deploy, so nothing restarts.
+let caSecretOut = '';
+let kubeSystemWorkloadsOut = '{"items":[]}';
+
 // `kubectl get nodes -o name` answer for the stale-worker reap (pilot
 // standby). Default: no nodes reported — every unrelated test sees an empty
 // cluster and the reap stays a no-op.
@@ -278,6 +285,14 @@ function installSpawnMock() {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
+    if (cmd === 'kubectl' && argv.includes('secret') && argv.includes('carbon-autoscaler-config')) {
+      return fakeChild({ stdout: caSecretOut, argv: full }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (cmd === 'kubectl' && argv.includes('deployments,statefulsets,daemonsets,cronjobs')) {
+      return fakeChild({ stdout: kubeSystemWorkloadsOut, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
     if (cmd === 'kubectl' && argv[0] === 'kustomize') {
       const target = String(argv[1]);
       if (target.endsWith('/cluster-autoscaler')) {
@@ -539,23 +554,40 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
   return dir;
 }
 
+/**
+ * The token check's reads of a server (getServer), with the token it was
+ * made with and how many spawn calls came before it; and how the fake
+ * provider answers one. Default: the server, as a token that sees it gets.
+ */
+let serverReads: { id: string; token: string; at: number }[] = [];
+let serverAnswer: (id: string) => Promise<object> = async (id) => ({ id });
+
 // Stand-in for a provider class — applyK3sManifests reads the
 // PROVIDER_ID_PREFIX/K8S_IMAGE statics off whatever ProviderClass the deploy
-// call site resolved (see providerFor() in lib/providers/index.js), never
-// instantiates it, and (M3 Task 5b) dispatches getK8sWorkerUserData(vars) on
-// it via renderCarbonAutoscalerConfig to render the CA worker-pool
-// cloud-init. K8S_IMAGE (M3 Task 2) and getK8sWorkerUserData mirror
-// HetznerProvider's real statics exactly (wraps worker-init.sh via
-// loadCloudInit/renderScript).
-const FakeHetznerProvider = {
-  PROVIDER_ID_PREFIX: 'hcloud://',
-  K8S_IMAGE: 'ubuntu-26.04',
-  K8S_STORAGE_CLASS: 'hcloud-volumes',
-  async getK8sWorkerUserData(vars: Record<string, unknown>) {
+// call site resolved (see providerFor() in lib/providers/index.js), and
+// (M3 Task 5b) dispatches getK8sWorkerUserData(vars) on it via
+// renderCarbonAutoscalerConfig to render the CA worker-pool cloud-init.
+// K8S_IMAGE (M3 Task 2) and getK8sWorkerUserData mirror HetznerProvider's
+// real statics exactly (wraps worker-init.sh via loadCloudInit/renderScript).
+// It is instantiated with the token only for the check that the token sees
+// this cluster's master (getServer).
+class FakeHetznerProvider {
+  static NAME = 'Hetzner Cloud';
+  static TOKEN_ENV = 'HETZNER_API_TOKEN';
+  static PROVIDER_ID_PREFIX = 'hcloud://';
+  static K8S_IMAGE = 'ubuntu-26.04';
+  static K8S_STORAGE_CLASS = 'hcloud-volumes';
+  static async getK8sWorkerUserData(vars: Record<string, unknown>) {
     const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');
     return renderScript(loadCloudInit('worker-init.sh'), vars);
-  },
-};
+  }
+  constructor(readonly token: string) {}
+  async getServer(id: string) {
+    serverReads.push({ id, token: this.token, at: cmdCalls.length });
+    return serverAnswer(id);
+  }
+}
+const MASTER_ID = '4242';
 
 function baseArgs(projectDir: string) {
   return {
@@ -575,6 +607,7 @@ function baseArgs(projectDir: string) {
     apiToken: 'hetzner-token',
     providerId: 'hetzner',
     ProviderClass: FakeHetznerProvider,
+    masterId: MASTER_ID,
     region: 'nbg1',
     environment: 'e2e',
     minWorkers: 1,
@@ -1189,6 +1222,271 @@ describe('applyK3sManifests deploy-time optimizations', () => {
  * all stay — failover needs the registry (CA-spawned workers pull from it)
  * and the serving master.
  */
+describe('a replaced provider token restarts the cluster autoscaler', () => {
+  // Its sidecar reads the token from carbon-autoscaler-config into an env var
+  // when it starts (deployment.yaml PROVIDER_API_TOKEN), and nothing else in
+  // the apply touches its pod template, so a new token reached the Secret and
+  // never the running autoscaler. config.json, the Secret's other key, is a
+  // file it reloads on its own.
+  const caSecret = (token: string, config = '{"nodeGroups":[]}') =>
+    JSON.stringify({
+      kind: 'Secret',
+      metadata: { name: 'carbon-autoscaler-config', namespace: 'kube-system' },
+      data: {
+        token: Buffer.from(token).toString('base64'),
+        'config.json': Buffer.from(config).toString('base64'),
+      },
+    });
+  const AUTOSCALER = {
+    kind: 'Deployment',
+    metadata: { name: 'cluster-autoscaler' },
+    spec: {
+      template: {
+        spec: {
+          containers: [
+            { name: 'cluster-autoscaler' },
+            {
+              name: 'carbon-autoscaler',
+              env: [
+                {
+                  name: 'PROVIDER_API_TOKEN',
+                  valueFrom: { secretKeyRef: { name: 'carbon-autoscaler-config', key: 'token' } },
+                },
+              ],
+            },
+          ],
+          volumes: [
+            { name: 'autoscaler-config', secret: { secretName: 'carbon-autoscaler-config' } },
+          ],
+        },
+      },
+    },
+  };
+  const COREDNS = {
+    kind: 'Deployment',
+    metadata: { name: 'coredns' },
+    spec: { template: { spec: { containers: [{ name: 'coredns' }] } } },
+  };
+
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    kubeSystemWorkloadsOut = JSON.stringify({ items: [AUTOSCALER, COREDNS] });
+    serverReads = [];
+    installSpawnMock();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+  afterEach(() => {
+    caSecretOut = '';
+    kubeSystemWorkloadsOut = '{"items":[]}';
+    vi.restoreAllMocks();
+  });
+
+  const restarts = () =>
+    cmdCalls.filter((a) => a[0] === 'kubectl' && a.includes('rollout') && a.includes('restart'));
+  const setImageAt = () =>
+    cmdCalls.findIndex(
+      (a) =>
+        a.includes('set') && a.includes('image') && a.includes('deployment/cluster-autoscaler'),
+    );
+  const rolloutAt = () =>
+    cmdCalls.findIndex(
+      (a) =>
+        a.includes('rollout') && a.includes('status') && a.includes('deploy/cluster-autoscaler'),
+    );
+
+  it('a token other than the one it holds restarts it, after the image pin, before the rollout wait', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(restarts()).toEqual([
+      ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/cluster-autoscaler'],
+    ]);
+    const restartAt = cmdCalls.indexOf(restarts()[0]);
+    expect(restartAt).toBeGreaterThan(setImageAt());
+    expect(restartAt).toBeLessThan(rolloutAt());
+    // One wait, the autoscaler's own with its diagnostics: the restart adds none.
+    expect(
+      cmdCalls.filter(
+        (a) =>
+          a.includes('rollout') &&
+          a.includes('status') &&
+          a.some((x) => x.endsWith('/cluster-autoscaler')),
+      ),
+    ).toHaveLength(1);
+    // Read before the Secret is applied: after it, the old token is gone.
+    const readAt = cmdCalls.findIndex(
+      (a) => a.includes('get') && a.includes('secret') && a.includes('carbon-autoscaler-config'),
+    );
+    const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+    expect(readAt).toBeGreaterThan(-1);
+    expect(readAt).toBeLessThan(Number(applied?.seq));
+  });
+
+  it('a token that cannot see this cluster never reaches the Secret: one read, then it refuses', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    serverAnswer = async () => {
+      throw Object.assign(new Error('Failed to get server: server not found'), { status: 404 });
+    };
+    try {
+      const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain(
+        "Your Hetzner Cloud API token can't see e2e's cluster: Hetzner Cloud answered HTTP 404 " +
+          `when this deploy read its master server (${MASTER_ID}) with it, so this deploy ` +
+          'stopped before writing it into kube-system/carbon-autoscaler-config, and left that ' +
+          'Secret as it was.',
+      );
+    } finally {
+      serverAnswer = async (id) => ({ id });
+    }
+    expect(serverReads.map(({ id, token }) => ({ id, token }))).toEqual([
+      { id: MASTER_ID, token: 'hetzner-token' },
+    ]);
+    expect(stdinCalls.some((c) => c.data.includes('name: carbon-autoscaler-config'))).toBe(false);
+    expect(restarts()).toEqual([]);
+  });
+
+  it('a token it does not hold yet is read against the master before the Secret is applied', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    for (const before of [caSecret('old-token'), '']) {
+      cmdCalls = [];
+      stdinCalls = [];
+      serverReads = [];
+      caSecretOut = before;
+      await applyK3sManifests(baseArgs(makeProjectDir()));
+      const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+      expect(serverReads).toHaveLength(1);
+      expect(serverReads[0].at).toBeGreaterThan(cmdCalls.findIndex(isSecretRead));
+      expect(serverReads[0].at).toBeLessThanOrEqual(Number(applied?.seq));
+    }
+  });
+
+  it("a token this deploy's cloud Secrets already checked is not read again for the autoscaler's", async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const { assertTokenSeesCluster, newTokenChecks } = await import(
+      '../../../src/lib/deploy/k8s/token-sees-cluster.js'
+    );
+    const tokenChecks = newTokenChecks();
+    // What applyCloudSecrets did first in the same deploy: one read, passed.
+    await assertTokenSeesCluster({
+      ProviderClass: FakeHetznerProvider as never,
+      token: baseArgs('').apiToken,
+      masterId: MASTER_ID,
+      readMasterNodeId: async () => undefined,
+      operatorEnv: 'e2e',
+      stackName: 'e2e',
+      secretNames: ['kube-system/hcloud'],
+      seen: tokenChecks,
+    });
+    expect(serverReads).toHaveLength(1);
+    serverReads = [];
+    caSecretOut = caSecret('old-token');
+    await applyK3sManifests({ ...baseArgs(makeProjectDir()), tokenChecks });
+    expect(serverReads).toEqual([]);
+    expect(stdinCalls.some((c) => c.data.includes('name: carbon-autoscaler-config'))).toBe(true);
+    // Another token, say one rotated between the two: read again.
+    serverReads = [];
+    cmdCalls = [];
+    stdinCalls = [];
+    await applyK3sManifests({
+      ...baseArgs(makeProjectDir()),
+      apiToken: 'hetzner-token-2',
+      tokenChecks,
+    });
+    expect(serverReads.map(({ token }) => token)).toEqual(['hetzner-token-2']);
+  });
+
+  it('the Secret already holding the token makes no call', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    serverReads = [];
+    caSecretOut = caSecret(baseArgs('').apiToken);
+    serverAnswer = async () => {
+      throw Object.assign(new Error('Failed to get server: server not found'), { status: 404 });
+    };
+    try {
+      await applyK3sManifests(baseArgs(makeProjectDir()));
+    } finally {
+      serverAnswer = async (id) => ({ id });
+    }
+    expect(serverReads).toEqual([]);
+  });
+
+  it('the same token restarts nothing, whatever config.json became', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret(baseArgs('').apiToken, '{"nodeGroups":["changed"]}');
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(restarts()).toEqual([]);
+  });
+
+  it('a Secret this apply creates restarts nothing', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = '';
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(restarts()).toEqual([]);
+    expect(cmdCalls.some((a) => a.includes('deployments,statefulsets,daemonsets,cronjobs'))).toBe(
+      false,
+    );
+  });
+
+  /** The spawn options of every call, by its argv's position in cmdCalls. */
+  const recordOptions = () => {
+    const options: { signal?: AbortSignal }[] = [];
+    const fake = vi.mocked(spawn).getMockImplementation();
+    vi.mocked(spawn).mockImplementation(((cmd: string, args: string[], opts: object) => {
+      options[cmdCalls.length] = opts ?? {};
+      return fake?.(cmd, args as never, opts as never);
+    }) as typeof spawn);
+    return options;
+  };
+  const isSecretRead = (a: string[]) =>
+    a.includes('get') && a.includes('secret') && a.includes('carbon-autoscaler-config');
+  const isWorkloadList = (a: string[]) =>
+    a.includes('deployments,statefulsets,daemonsets,cronjobs');
+
+  it('reads the Secret with no stop signal: a kill after kubectl wrote it would print it under CI', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    const options = recordOptions();
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const readAt = cmdCalls.findIndex(isSecretRead);
+    expect(readAt).toBeGreaterThan(-1);
+    expect(options[readAt]?.signal).toBeUndefined();
+    // What else the autoscaler chain runs still stops with a failed deploy.
+    expect(options[cmdCalls.findIndex(isWorkloadList)]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('finds what reads it before the Secret is applied, so a failed list leaves the old token in place', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const listAt = cmdCalls.findIndex(isWorkloadList);
+    const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+    expect(listAt).toBeGreaterThan(cmdCalls.findIndex(isSecretRead));
+    expect(listAt).toBeLessThan(Number(applied?.seq));
+
+    // The list answers with something that is not JSON: the deploy fails
+    // before the apply, and says to deploy again.
+    cmdCalls = [];
+    stdinCalls = [];
+    kubeSystemWorkloadsOut = 'not json';
+    const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String((err as Error).message)).toContain(
+      "Couldn't list the workloads in kube-system to find what reads " +
+        'kube-system/carbon-autoscaler-config, so this deploy left it as it was. ' +
+        'Deploy again to hand the new value over.',
+    );
+    expect(stdinCalls.some((c) => c.data.includes('name: carbon-autoscaler-config'))).toBe(false);
+    expect(restarts()).toEqual([]);
+  });
+});
+
 describe('applyK3sManifests pilot-standby role', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
@@ -1974,10 +2272,9 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
   // — same FakeHetznerProvider fixture the rest of this file uses for every
   // other ProviderClass-driven behavior, plus the one static this suite
   // exercises.
-  const FakeDigitalOceanProvider = {
-    ...FakeHetznerProvider,
-    getS3EgressExtraCidrs: (vpcCidr?: string) => (vpcCidr ? [vpcCidr] : []),
-  };
+  class FakeDigitalOceanProvider extends FakeHetznerProvider {
+    static getS3EgressExtraCidrs = (vpcCidr?: string) => (vpcCidr ? [vpcCidr] : []);
+  }
 
   function findS3EgressVpcApply() {
     return stdinCalls.find(

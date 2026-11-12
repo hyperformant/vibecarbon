@@ -333,7 +333,6 @@ export async function convergeClusterInfra({
     persistedMaxWorkers: envConfig.maxWorkers,
     k3sVersion: k3sVersion(),
     labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
-    apiToken,
   });
 
   // Probe prior stack outputs for the k3sToken so we can replay it into

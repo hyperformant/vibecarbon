@@ -187,18 +187,9 @@ jobs:
           | kubectl apply --server-side --force-conflicts \
               --field-manager=github-actions-deploy -f -
 
-      - name: Apply kube-system/hcloud Secret (CCM + CSI)
-        env:
-          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
-          HCLOUD_NETWORK_ID: ${{ vars.HCLOUD_NETWORK_ID }}
-        run: |
-          kubectl create secret generic hcloud \
-            --namespace=kube-system \
-            --from-literal=token="$HETZNER_API_TOKEN" \
-            --from-literal=network="$HCLOUD_NETWORK_ID" \
-            --dry-run=client -o yaml \
-          | kubectl apply --server-side --force-conflicts \
-              --field-manager=github-actions-deploy -f -
+      # No cloud provider Secret here: `vibecarbon deploy` hands the provider
+      # API token to the cluster itself on every deploy (kube-system/hcloud,
+      # digitalocean or linode), so GitHub keeps no copy of it.
 
   bootstrap-flux:
     # Phase 4.3b.C of the GitOps refactor: idempotently install Flux +
@@ -208,8 +199,8 @@ jobs:
     #
     # After this job succeeds, Flux is in charge of reconciling k8s/base/
     # from the main branch. The apply-secrets job is what keeps the
-    # per-env app / infra / hcloud Secrets in sync with GitHub
-    # Environment secrets.
+    # per-env app and infra Secrets in sync with GitHub Environment
+    # secrets.
     name: Bootstrap Flux + root Kustomization
     needs: apply-secrets
     runs-on: ubuntu-latest

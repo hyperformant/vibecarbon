@@ -130,6 +130,19 @@ describe('haK8sProvisionClusters pilot-light asymmetry', () => {
     expect(calls.find((o) => o.role === 'standby')?.restore).toBeNull();
   });
 
+  it("both clusters get the operator's API token: each hands it to its own CCM and CSI", async () => {
+    // deployK3s applies the cloud Secrets from options.apiToken on every
+    // deploy (applyCloudSecrets, k8s-cloud-secrets.test.ts), so the standby
+    // needs the token as much as the primary does.
+    const apiToken = 'vc-sentinel-token-fanout';
+    await runFanOut({ environment: 'e4', region: 'nbg1', secondaryRegion: 'hel1', apiToken });
+    const calls = deployK3s.mock.calls.map(([o]) => o as Record<string, unknown>);
+    expect(calls.map((o) => [o.role, o.apiToken]).sort()).toEqual([
+      ['primary', apiToken],
+      ['standby', apiToken],
+    ]);
+  });
+
   it('follows a persisted post-failover role mapping (stacks swapped)', async () => {
     const ctx = await runFanOut({
       environment: 'e4',

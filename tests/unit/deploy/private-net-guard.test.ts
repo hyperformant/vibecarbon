@@ -40,8 +40,6 @@ const masterVars = {
   k3s_token: 'deadbeefcafe1234567890abcdef',
   cluster_name: 'acme-prod',
   disable_traefik: 'true',
-  hcloud_token: 'htk_test_token_1234',
-  network_id: 12345,
   floating_ip: '203.0.113.10',
   project_name: 'acme',
 };

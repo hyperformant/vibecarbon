@@ -15,9 +15,12 @@
  * ever changes its timeout error construction, the shape test fails here
  * rather than silently re-killing the classifier.
  */
+import { chmodSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { runCommandAsync } from '../../../src/lib/command.js';
 import { isTransientSshCommandError } from '../../../src/lib/deploy/compose/index.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('runCommandAsync timeout error shape (the classifier contract)', () => {
   it('sets timedOut=true and a message WITHOUT the legacy execa wordings', async () => {
@@ -44,8 +47,15 @@ describe('sshRunAsync retries wrapper timeouts', () => {
     // via the module's exported behavior: monkey-patch is avoided — instead
     // reproduce the decision with the exact error object shape from the test
     // above and the classifier extracted by invocation. Simplest faithful
-    // probe: call sshRunAsync with retryable timings against a guaranteed-
-    // failing target and count attempts via the onRetry log.
+    // probe: call sshRunAsync with retryable timings and count attempts via
+    // the onRetry log. The `ssh` it spawns is a stand-in that sleeps, first
+    // on PATH, so every attempt is a live child the wrapper timer kills: the
+    // same shape a hung real ssh gives, with no network involved (a real ssh
+    // at an unroutable address fails at once wherever the network rejects it).
+    const bin = createTempDir('vc-ssh-standin-');
+    writeFileSync(join(bin, 'ssh'), '#!/bin/sh\nexec sleep 5\n');
+    chmodSync(join(bin, 'ssh'), 0o755);
+    process.env.PATH = `${bin}${delimiter}${process.env.PATH ?? ''}`;
     const { sshRunAsync } = await import('../../../src/lib/deploy/compose/index.js');
     const progress = await import('../../../src/lib/cli/progress.js');
     const logSpy = vi.spyOn(progress, 'progressLog').mockImplementation(() => {});

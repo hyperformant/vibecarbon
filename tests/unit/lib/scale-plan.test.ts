@@ -84,7 +84,6 @@ describe('buildProgramConfig', () => {
       persistedMaxWorkers: 3,
       k3sVersion: 'v1.30.0+k3s1',
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
-      apiToken: 'tok-123',
     });
     expect(out).toEqual({
       projectName: 'acme',
@@ -101,7 +100,6 @@ describe('buildProgramConfig', () => {
       maxWorkers: 3,
       k3sVersion: 'v1.30.0+k3s1',
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
-      apiToken: 'tok-123',
     });
   });
 
@@ -124,7 +122,6 @@ describe('buildProgramConfig', () => {
       persistedMaxWorkers: 3,
       k3sVersion: 'v1.30.0+k3s1',
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
-      apiToken: 'tok-123',
     });
     expect(out).toEqual({
       projectName: 'acme',
@@ -141,7 +138,6 @@ describe('buildProgramConfig', () => {
       maxWorkers: 6,
       k3sVersion: 'v1.30.0+k3s1',
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
-      apiToken: 'tok-123',
     });
   });
 
@@ -161,7 +157,6 @@ describe('buildProgramConfig', () => {
       persistedMaxWorkers: undefined,
       k3sVersion: 'v1.30.0+k3s1',
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
-      apiToken: 't',
     });
     expect(out.minWorkers).toBe(1);
     expect(out.maxWorkers).toBe(3);
