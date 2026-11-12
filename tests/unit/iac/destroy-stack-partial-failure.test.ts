@@ -54,7 +54,6 @@ const LEFT_BEHIND = [
 function failingStack() {
   return {
     exportStack: vi.fn(async () => ({ deployment: { resources: structuredClone(LEFT_BEHIND) } })),
-    importStack: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
     destroy: vi.fn(async () => {
       throw new Error(PULUMI_FAILURE);

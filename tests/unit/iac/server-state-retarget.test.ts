@@ -37,6 +37,7 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   },
 }));
 
+const { importingWorkspace } = await import('../../_shared/fake-stack-import.js');
 const { COMPOSE_SERVER_STATE, composeServerStateSpec, retargetServerResource, syncServerState } =
   await import('../../../src/lib/iac/server-state.js');
 const { ScalewayProvider } = await import('../../../src/lib/providers/scaleway.js');
@@ -196,9 +197,9 @@ describe('syncServerState', () => {
     selectStackMock.mockImplementation(async () => ({
       name: 'prod-primary',
       exportStack: async () => structuredClone(exported),
-      importStack: async (state: unknown) => {
+      workspace: importingWorkspace((state: unknown) => {
         imported.push(state);
-      },
+      }),
     }));
   });
 
@@ -321,12 +322,15 @@ describe('Scaleway: the IP is its own resource, and ids carry the zone', () => {
       vi.stubEnv('SCALEWAY_ACCESS_KEY', 'a');
       vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', 'p');
       selectStackMock.mockResolvedValue({
+        name: 'prod-primary',
         exportStack: async () => deployment(),
-        importStack: async (state: unknown) => {
-          imported = state;
-        },
         setConfig: async () => {},
-        workspace: { installPlugin: async () => {} },
+        workspace: importingWorkspace(
+          (state: unknown) => {
+            imported = state;
+          },
+          { installPlugin: async () => {} },
+        ),
       });
     });
     afterEach(() => {

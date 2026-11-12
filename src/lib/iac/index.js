@@ -20,7 +20,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
@@ -36,7 +36,11 @@ import {
   STATE_PASSPHRASE_KEY,
   statePassphraseGeneratedThisRun,
 } from '../state-passphrase.js';
-import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
+import {
+  createTimeoutError,
+  parseCreateTimeouts,
+  SERVER_RESOURCE_TYPES,
+} from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
@@ -51,6 +55,7 @@ import {
   isStatePassphraseFailure,
   StateMigrationError,
 } from './state-error.js';
+import { sealServerUserData } from './state-seal.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
 import { makeWorkspaceDir } from './workspace-dir.js';
 
@@ -242,9 +247,11 @@ export function buildEnv(options) {
   // that predates the flag rather than an error.
   env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS = 'true';
   // The project's state passphrase encrypts the values Pulumi marks secret in
-  // the state. It is NOT a blanket seal: a plain output (the k8s programs'
-  // `k3sToken`) and user data stay readable until a later change wraps them in
-  // pulumi.secret and re-seals existing state. SECURITY: never default to ''
+  // the state: every server's user data and the k8s programs' `k3sToken`
+  // output (the programs wrap both in pulumi.secret). A server made before
+  // that wrap keeps its user data plain (it is in ignoreChanges) until the
+  // seal after the next successful up rewrites it (sealStackState); anything
+  // a program hands Pulumi plain stays plain. SECURITY: never default to ''
   // (the empty passphrase every legacy stack was made with) and never let an
   // inherited PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE (a
   // shell export for another project) win over the project's own value.
@@ -896,6 +903,46 @@ async function verifyStateAfterHistoryWrite(stack) {
 }
 
 /**
+ * `pulumi stack import` of `state` into `stack`: the one way src writes a
+ * deployment back (tests/unit/iac/state-import.test.ts).
+ *
+ * The SDK's Stack.importStack (3.274.1) writes the whole deployment, with
+ * every secret in plain text (exportStack runs `stack export --show-secrets`),
+ * to `<os tmpdir>/automation-<6 digits>` with the default mode (0664 under a
+ * 002 umask, so every local user can read it) and deletes it only when the
+ * import succeeds: each failed import left one behind. This writes it to a
+ * 0600 file in a 0700 directory made inside the stack's workspace directory
+ * (workspace-dir.js: this process's own, removed at exit), runs the command
+ * the SDK runs, in the same workspace with the same environment, and removes
+ * the directory whether the import worked or not. A process.exit during the
+ * import (Ctrl-C) skips the finally; the workspace's exit hook removes the
+ * file then.
+ *
+ * No retry and no lock handling here: callers wrap it as they wrapped the SDK
+ * call (withStateBackendRetry, runPastStaleLock), and its failure is the
+ * SDK's CommandError, as before.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {object} state - a deployment, as exportStack returns it
+ * @returns {Promise<void>}
+ */
+export async function importStackState(stack, state) {
+  const { workspace } = stack;
+  const dir = mkdtempSync(join(workspace.workDir, 'state-import-'));
+  try {
+    const file = join(dir, 'deployment.json');
+    writeFileSync(file, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
+    await workspace.pulumiCommand.run(
+      ['stack', 'import', '--file', file, '--stack', stack.name],
+      workspace.workDir,
+      { ...(workspace.pulumiHome && { PULUMI_HOME: workspace.pulumiHome }), ...workspace.envVars },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * `vultr:index/firewallRule:FirewallRule` inputs the pre-up refresh poisons.
  *
  * `source` is WRITE-"" / READ-CIDR asymmetric on Vultr. terraform-provider-
@@ -940,7 +987,7 @@ const VULTR_RULE_SOURCE_VALID = new Set(['', 'cloudflare']);
  *
  * No-op on every other provider and on any stack that holds no Vultr
  * firewall rules, and a no-op when the inputs are already clean — the
- * expensive importStack only runs when something actually changed.
+ * expensive import only runs when something actually changed.
  *
  * Never throws: this is a repair on the way to `up`, and `up`'s own error is
  * always a better thing to surface than a failure inside the repair.
@@ -971,7 +1018,10 @@ export async function repairVultrFirewallRuleInputs(stack) {
       if (touched) repaired++;
     }
     if (repaired > 0) {
-      await withStateBackendRetry(() => stack.importStack(state), 'post-refresh state repair');
+      await withStateBackendRetry(
+        () => importStackState(stack, state),
+        'post-refresh state repair',
+      );
       progressLog(
         `[pulumi] repaired ${repaired} vultr firewall rule ${
           repaired === 1 ? 'input' : 'inputs'
@@ -1029,7 +1079,7 @@ export async function dropRetiredStackResources(stack, providerId, { recordAddre
     if (result.removed.length > 0) {
       if (recordAddresses && result.addresses.length > 0) await recordAddresses(result.addresses);
       await withStateBackendRetry(
-        () => runPastStaleLock(stack, () => stack.importStack(result.deployment)),
+        () => runPastStaleLock(stack, () => importStackState(stack, result.deployment)),
         'retired-resource import',
       );
     }
@@ -1288,6 +1338,9 @@ async function runUp(stack, options) {
       throw err;
     }
   }
+  // The update applied, so the state is the project passphrase's now: seal
+  // what an existing server still keeps plain. Never throws.
+  await perfAsync('state.seal', () => sealStackState(stack));
   // Flatten outputs: { foo: { value: 'bar', secret: false } } → { foo: 'bar' }
   const outputs = flattenOutputs(rawOutputs);
 
@@ -1307,6 +1360,88 @@ async function runUp(stack, options) {
     );
   }
   return { outputs, summary };
+}
+
+/**
+ * Seal the plain user data and k3s token a stack's existing servers still
+ * keep (state-seal.js says why they are plain), right after a successful up:
+ * a fresh export, sealServerUserData, and an import only when it sealed
+ * anything.
+ *
+ * After the up, never before it (R20). A legacy stack that holds no secret
+ * still carries the salt of the empty passphrase older versions used, and
+ * Pulumi refuses to import a secret into it ("failed to encrypt: incorrect
+ * passphrase", CLI 3.259.0). The refresh and the up write the state under the
+ * project's passphrase, so the export after them imports. A failed up seals
+ * nothing; the next successful one does.
+ *
+ * Imported twice when it sealed anything, the first time a stack is sealed:
+ * Pulumi keeps the checkpoint an import replaces as `<stack>.json.bak` beside
+ * the stack's file (file and S3 backends alike), so one import leaves the
+ * plain values in the .bak, and a second, identical one replaces it with the
+ * sealed checkpoint (proven on 3.259.0, file backend, 2026-11-11). Pulumi's
+ * history keeps a full checkpoint for every refresh and up
+ * (`.pulumi/history/<project>/<stack>/*.checkpoint.json`), so the copies
+ * made before the seal still hold them; no Pulumi command removes those.
+ *
+ * Logs how many values it sealed, a number only, on every up: a second
+ * deploy that seals any means a refresh handed them back plain.
+ *
+ * Never throws: the up has succeeded and the servers are as it left them. A
+ * failure says so and that the next successful deploy seals them, never the
+ * unrecoverable-state message: a passphrase refused here only means the
+ * values stay plain for now.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @returns {Promise<void>}
+ */
+async function sealStackState(stack) {
+  const importSealed = (deployment) =>
+    withStateBackendRetry(
+      () => runPastStaleLock(stack, () => importStackState(stack, deployment)),
+      `seal import ${stack.name}`,
+    );
+  let sealed;
+  try {
+    const exported = await withStateBackendRetry(
+      () => stack.exportStack(),
+      `seal export ${stack.name}`,
+    );
+    sealed = sealServerUserData(exported, SERVER_RESOURCE_TYPES);
+    if (sealed.count > 0) await importSealed(sealed.deployment);
+  } catch (err) {
+    progressLog(`[pulumi] state seal for ${stack.name} failed: ${summarizePulumiError(err)}`);
+    p.log.warn(sealFailed(stack.name, err));
+    return;
+  }
+  progressLog(
+    `[pulumi] sealed ${sealed.count} plain user data and k3s token values in ${stack.name}'s state`,
+  );
+  if (sealed.count === 0) return;
+  try {
+    await importSealed(sealed.deployment);
+  } catch (err) {
+    progressLog(
+      `[pulumi] ${stack.name}'s state is sealed, but its previous copy (.bak) keeps the plain values until the next deploy: ${summarizePulumiError(err)}`,
+    );
+  }
+}
+
+/**
+ * What the user reads when the seal after an up fails.
+ * @param {string} stackName
+ * @param {unknown} err
+ */
+function sealFailed(stackName, err) {
+  const what = isStatePassphraseFailure(err)
+    ? "Pulumi wouldn't encrypt it with this project's state passphrase"
+    : summarizePulumiError(err)
+        .replace(/^error:\s*/i, '')
+        .replace(/\.$/, '');
+  return (
+    `Your servers in ${stackName} are updated, but vibecarbon couldn't seal their user data in the Pulumi state: ${what}. ` +
+    'It stays in plain text in the state until the next successful deploy seals it.'
+  );
 }
 
 /** Flatten { foo: { value: 'bar' } } → { foo: 'bar' } (null-safe). */

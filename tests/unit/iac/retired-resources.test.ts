@@ -46,6 +46,7 @@ const { __resetStateProbesForTests, dropRetiredStackResources, upStack } = await
   '../../../src/lib/iac/index.js'
 );
 const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
+const { importingWorkspace } = await import('../../_shared/fake-stack-import.js');
 const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
@@ -258,17 +259,24 @@ describe('dropStackResources', () => {
   });
 });
 
-/** A stack whose state calls land in `order`. */
+/**
+ * A stack whose state calls land in `order`. Its `stack import` runs through
+ * the workspace (importStackState) into `importDeployment`, which a test can
+ * replace through `over`.
+ */
 function fakeStack(state: unknown, order: string[] = [], over: Record<string, unknown> = {}) {
+  const importDeployment =
+    (over.importDeployment as ReturnType<typeof vi.fn> | undefined) ??
+    vi.fn(async () => {
+      order.push('import');
+    });
   return {
     name: 'prod',
     exportStack: vi.fn(async () => {
       order.push('export');
       return structuredClone(state);
     }),
-    importStack: vi.fn(async () => {
-      order.push('import');
-    }),
+    workspace: importingWorkspace((deployment) => importDeployment(deployment)),
     refresh: vi.fn(async () => {
       order.push('refresh');
     }),
@@ -277,6 +285,7 @@ function fakeStack(state: unknown, order: string[] = [], over: Record<string, un
       return { outputs: { masterIp: { value: '198.51.100.7' } }, summary: {} };
     }),
     ...over,
+    importDeployment,
   };
 }
 
@@ -300,8 +309,8 @@ describe('dropRetiredStackResources', () => {
     );
     expect(removed.sort()).toEqual([ASSIGN, IP].sort());
     expect(addresses).toEqual(['203.0.113.9']);
-    expect(stack.importStack).toHaveBeenCalledOnce();
-    expect(urns(stack.importStack.mock.calls[0][0])).toEqual([
+    expect(stack.importDeployment).toHaveBeenCalledOnce();
+    expect(urns(stack.importDeployment.mock.calls[0][0])).toEqual([
       STACK,
       PROVIDER,
       FIREWALL,
@@ -309,7 +318,7 @@ describe('dropRetiredStackResources', () => {
       DB,
     ]);
     // The state as it now stands, for the caller to reuse.
-    expect(deployment).toEqual(stack.importStack.mock.calls[0][0]);
+    expect(deployment).toEqual(stack.importDeployment.mock.calls[0][0]);
     expect(progressLogMock.mock.calls.flat().join('\n')).toContain(
       'ingress and ingress-assignment',
     );
@@ -333,7 +342,7 @@ describe('dropRetiredStackResources', () => {
     await expect(
       dropRetiredStackResources(stack as never, 'digitalocean', { recordAddresses }),
     ).rejects.toThrow(/Pulumi was not run.*EACCES/s);
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(stack.importDeployment).not.toHaveBeenCalled();
   });
 
   it('nothing to remove: no import, no record, and the exported state comes back', async () => {
@@ -345,7 +354,7 @@ describe('dropRetiredStackResources', () => {
     });
     expect(result.removed).toEqual([]);
     expect(result.deployment).toEqual(state);
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(stack.importDeployment).not.toHaveBeenCalled();
     expect(recordAddresses).not.toHaveBeenCalled();
   });
 
@@ -371,7 +380,7 @@ describe('dropRetiredStackResources', () => {
       /Pulumi was not run.*Nothing changed in the cloud/s,
     );
     const unwritable = fakeStack(doCheckpoint(), [], {
-      importStack: vi.fn(async () => {
+      importDeployment: vi.fn(async () => {
         throw new Error('error: state file contains errors');
       }),
     });
@@ -382,24 +391,24 @@ describe('dropRetiredStackResources', () => {
 
   // The import takes the stack's lock, like every other write.
   it('a lock left by a dead run on this machine is cleared, and the surgery goes on', async () => {
-    const importStack = vi
+    const importDeployment = vi
       .fn()
       .mockRejectedValueOnce(lockedError(`u@${hostname()} (pid ${deadPid()})`))
       .mockResolvedValueOnce(undefined);
     const cancel = vi.fn(async () => {});
-    const stack = fakeStack(doCheckpoint(), [], { importStack, cancel });
+    const stack = fakeStack(doCheckpoint(), [], { importDeployment, cancel });
     const { removed } = await dropRetiredStackResources(stack as never, 'digitalocean');
     expect(removed.sort()).toEqual([ASSIGN, IP].sort());
     expect(cancel).toHaveBeenCalledOnce();
-    expect(importStack).toHaveBeenCalledTimes(2);
+    expect(importDeployment).toHaveBeenCalledTimes(2);
   });
 
   it('a lock a live run holds stops with StackHeldError, unchanged, and is never cleared', async () => {
-    const importStack = vi.fn(async () => {
+    const importDeployment = vi.fn(async () => {
       throw lockedError('someone@another-laptop (pid 123)');
     });
     const cancel = vi.fn(async () => {});
-    const stack = fakeStack(doCheckpoint(), [], { importStack, cancel });
+    const stack = fakeStack(doCheckpoint(), [], { importDeployment, cancel });
     const err = await dropRetiredStackResources(stack as never, 'digitalocean').catch((e) => e);
     expect(err).toBeInstanceOf(StackHeldError);
     expect(err.message).toMatch(/in use by another run: someone@another-laptop \(pid 123\)/);
@@ -447,7 +456,7 @@ describe('upStack runs the surgery before the refresh and the up', () => {
   it('a failed surgery stops before the refresh: Pulumi never runs', async () => {
     const order: string[] = [];
     const stack = fakeStack(doCheckpoint(), order, {
-      importStack: vi.fn(async () => {
+      importDeployment: vi.fn(async () => {
         throw new Error('error: state file contains errors');
       }),
     });
@@ -464,7 +473,7 @@ describe('upStack runs the surgery before the refresh and the up', () => {
     const stack = fakeStack(doCheckpoint(), order);
     selectStackMock.mockResolvedValue(stack);
     await upStack('prod', () => ({}), { projectName: 'acme', provider: 'hetzner' });
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(stack.importDeployment).not.toHaveBeenCalled();
     expect(order).toContain('up');
   });
 });

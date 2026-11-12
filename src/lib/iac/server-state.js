@@ -9,12 +9,12 @@
  *
  * The fix re-points the resource the program declares (logical name `server`,
  * same URN) at the replacement: the new provider id, the new size, the new IP,
- * through exportStack/importStack (the Automation API's documented way to edit
- * a stack's state). `pulumi import` is not used, on purpose: an import has no
- * prior state, so the inputs a provider never reads back (user data, SSH keys,
- * Linode's authorized keys and metadata) come in empty, and they are
- * replace-on-change on every provider here, so the next `up` would replace the
- * server. A re-pointed resource keeps them as the deploy wrote them (the
+ * through an export and `pulumi stack import` (importStackState in ./index.js;
+ * the Automation API's documented way to edit a stack's state). `pulumi import`
+ * is not used, on purpose: an import has no prior state, so the inputs a
+ * provider never reads back (user data, SSH keys, Linode's authorized keys and
+ * metadata) come in empty, and they are replace-on-change on every provider
+ * here, so the next `up` would replace the server. A re-pointed resource keeps them as the deploy wrote them (the
  * replacement was built from the same image, user data and key), and the
  * deploy's refresh reads every readable field from the new server.
  *
@@ -162,8 +162,13 @@ export async function syncServerState(stackName, target, options) {
   if (!spec) {
     throw new Error(`Pulumi state cannot follow a replaced compose server on ${options.provider}`);
   }
-  const { getOrCreateStack, resolveBackendUrl, takeProbedDeployment, withStateBackendRetry } =
-    await import('./index.js');
+  const {
+    getOrCreateStack,
+    importStackState,
+    resolveBackendUrl,
+    takeProbedDeployment,
+    withStateBackendRetry,
+  } = await import('./index.js');
   const { withStateLock } = await import('./state-lock.js');
   return withStateLock(
     resolveBackendUrl(options.s3Config, options.provider),
@@ -182,7 +187,10 @@ export async function syncServerState(stackName, target, options) {
         : target;
       const { deployment, changed } = retargetServerResource(state, spec, resolved, stackName);
       if (changed) {
-        await withStateBackendRetry(() => stack.importStack(deployment), 'server-state import');
+        await withStateBackendRetry(
+          () => importStackState(stack, deployment),
+          'server-state import',
+        );
       }
       return { changed };
     },
