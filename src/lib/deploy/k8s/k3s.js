@@ -1989,12 +1989,26 @@ async function dropLastApplied({ env, namespace, name }) {
 }
 
 /**
- * The Deployments, StatefulSets and DaemonSets in a `kubectl get -o json`
- * list whose pods read one of the named Secrets, as `kind/name`, sorted: an
- * env var or envFrom of a container (init and ephemeral ones too), or a
- * secret or projected volume.
+ * The pod spec a workload starts its pods from: a CronJob's is in its Job
+ * template, every other kind's in its own.
  *
- * @param {{items?: Array<{kind?: string, metadata?: {name?: string}, spec?: {template?: {spec?: object}}}>}} list
+ * @param {{kind?: string, spec?: {template?: {spec?: object}, jobTemplate?: {spec?: {template?: {spec?: object}}}}}} item
+ */
+function podSpecOf(item) {
+  return (
+    (item?.kind === 'CronJob'
+      ? item.spec?.jobTemplate?.spec?.template?.spec
+      : item?.spec?.template?.spec) ?? {}
+  );
+}
+
+/**
+ * The workloads in a `kubectl get -o json` list (WORKLOAD_KINDS) whose pods
+ * read one of the named Secrets, as `kind/name`, sorted: an env var or
+ * envFrom of a container (init and ephemeral ones too), or a secret or
+ * projected volume. A Job or a bare pod is not in the list.
+ *
+ * @param {{items?: Array<{kind?: string, metadata?: {name?: string}, spec?: object}>}} list
  * @param {string[]} secretNames
  * @returns {string[]}
  */
@@ -2002,7 +2016,7 @@ export function secretReaders(list, secretNames) {
   const names = new Set(secretNames);
   const readers = new Set();
   for (const item of list?.items ?? []) {
-    const pod = item?.spec?.template?.spec ?? {};
+    const pod = podSpecOf(item);
     const containers = [
       ...(pod.containers ?? []),
       ...(pod.initContainers ?? []),
@@ -2027,14 +2041,14 @@ export function secretReaders(list, secretNames) {
 }
 
 /**
- * Of `keys` of Secret `secretName`, the ones a Deployment, StatefulSet or
- * DaemonSet in a `kubectl get -o json` list reads, each with its readers as
- * `kind/name`, sorted: an env var's secretKeyRef of the key, an envFrom of
+ * Of `keys` of Secret `secretName`, the ones a workload in a `kubectl get -o
+ * json` list (WORKLOAD_KINDS) reads, each with its readers as `kind/name`,
+ * sorted: an env var's secretKeyRef of the key, an envFrom of
  * the Secret (every key), or a secret or projected volume of it whose items
  * name the key, or that has none (it mounts every key). Containers, init
  * and ephemeral ones too, as secretReaders.
  *
- * @param {{items?: Array<{kind?: string, metadata?: {name?: string}, spec?: {template?: {spec?: object}}}>}} list
+ * @param {{items?: Array<{kind?: string, metadata?: {name?: string}, spec?: object}>}} list
  * @param {string} secretName
  * @param {string[]} keys
  * @returns {Record<string, string[]>} only the keys something reads
@@ -2045,7 +2059,7 @@ export function secretKeyReaders(list, secretName, keys) {
   const found = {};
   for (const item of list?.items ?? []) {
     if (!item?.kind || !item.metadata?.name) continue;
-    const pod = item.spec?.template?.spec ?? {};
+    const pod = podSpecOf(item);
     const read = new Set();
     const every = () => {
       for (const key of keys) read.add(key);
@@ -2133,21 +2147,27 @@ export const READER_ROLLOUT_TIMEOUT_S = 300;
  */
 
 /**
- * The Deployments, StatefulSets and DaemonSets in a namespace, as one
- * `kubectl get -o json` list: what secretReaders and secretKeyReaders read.
+ * The workload kinds whose pods the reader checks look at (listWorkloads):
+ * what keeps a pod running from a template, and CronJobs, which start one
+ * from theirs on schedule. A Job or a bare pod is not looked at: either has
+ * read what it reads once it runs, and none of vibecarbon's or upstream's
+ * readers is one.
+ */
+export const WORKLOAD_KINDS = 'deployments,statefulsets,daemonsets,cronjobs';
+
+/**
+ * The workloads in a namespace (WORKLOAD_KINDS), as one `kubectl get -o
+ * json` list: what secretReaders and secretKeyReaders read.
  *
  * @param {{env: NodeJS.ProcessEnv, namespace: string, signal?: AbortSignal}} args
  */
 async function listWorkloads({ env, namespace, signal }) {
-  const out = await runKubectlWithRetry(
-    ['-n', namespace, 'get', 'deployments,statefulsets,daemonsets', '-o', 'json'],
-    {
-      env,
-      captureStdout: true,
-      ...(signal && { signal }),
-      description: `list the workloads in ${namespace}`,
-    },
-  );
+  const out = await runKubectlWithRetry(['-n', namespace, 'get', WORKLOAD_KINDS, '-o', 'json'], {
+    env,
+    captureStdout: true,
+    ...(signal && { signal }),
+    description: `list the workloads in ${namespace}`,
+  });
   return parseKubectlJson(String(out ?? ''), `the workloads in ${namespace}`);
 }
 
@@ -2177,12 +2197,16 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
       { cause: err },
     );
   }
-  const readers = secretReaders(list, secretNames);
+  // A CronJob reads it each time it starts a Job, so it needs no restart
+  // (and `rollout restart` has none for it).
+  const restartable = (names) =>
+    secretReaders(list, names).filter((reader) => !reader.startsWith('cronjob/'));
+  const readers = restartable(secretNames);
   return {
     namespace,
     readers,
-    // The restart line names only the Secrets something reads.
-    read: secretNames.filter((name) => secretReaders(list, [name]).length > 0),
+    // The restart line names only the Secrets something it restarts reads.
+    read: secretNames.filter((name) => restartable([name]).length > 0),
     recreate: (list?.items ?? [])
       .filter(
         (item) =>
@@ -2437,8 +2461,9 @@ const TAKEOVER_DROPS_KEYS =
  * reads now (secretReaders, secretKeyReaders): the census holds the record
  * to what upstream's manifests read, and this holds it to what the cluster
  * runs, which an operator's own workload or an older controller may
- * differ from. One kept says what still reads it, and the next deploy
- * looks again. A list that fails keeps everything in its namespace and
+ * differ from. A Deployment, StatefulSet, DaemonSet or CronJob counts
+ * (WORKLOAD_KINDS); a Job or a bare pod does not. One kept says what still
+ * reads it, and the next deploy looks again. A list that fails keeps everything in its namespace and
  * says so; the deploy goes on either way.
  *
  * The apply itself may already have taken a retired key out

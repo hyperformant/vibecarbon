@@ -216,7 +216,7 @@ function fakeChild({
 
 // What `kubectl -n kube-system get secret carbon-autoscaler-config
 // --ignore-not-found -o json` prints before the CA Secret apply, and what
-// `get deployments,statefulsets,daemonsets -o json` lists there. Default: no
+// `get deployments,statefulsets,daemonsets,cronjobs -o json` lists there. Default: no
 // Secret yet, as on a first deploy, so nothing restarts.
 let caSecretOut = '';
 let kubeSystemWorkloadsOut = '{"items":[]}';
@@ -288,7 +288,7 @@ function installSpawnMock() {
     if (cmd === 'kubectl' && argv.includes('secret') && argv.includes('carbon-autoscaler-config')) {
       return fakeChild({ stdout: caSecretOut, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
-    if (cmd === 'kubectl' && argv.includes('deployments,statefulsets,daemonsets')) {
+    if (cmd === 'kubectl' && argv.includes('deployments,statefulsets,daemonsets,cronjobs')) {
       return fakeChild({ stdout: kubeSystemWorkloadsOut, argv: full }) as unknown as ReturnType<
         typeof spawn
       >;
@@ -1393,7 +1393,9 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
     caSecretOut = '';
     await applyK3sManifests(baseArgs(makeProjectDir()));
     expect(restarts()).toEqual([]);
-    expect(cmdCalls.some((a) => a.includes('deployments,statefulsets,daemonsets'))).toBe(false);
+    expect(cmdCalls.some((a) => a.includes('deployments,statefulsets,daemonsets,cronjobs'))).toBe(
+      false,
+    );
   });
 
   /** The spawn options of every call, by its argv's position in cmdCalls. */
@@ -1408,7 +1410,8 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
   };
   const isSecretRead = (a: string[]) =>
     a.includes('get') && a.includes('secret') && a.includes('carbon-autoscaler-config');
-  const isWorkloadList = (a: string[]) => a.includes('deployments,statefulsets,daemonsets');
+  const isWorkloadList = (a: string[]) =>
+    a.includes('deployments,statefulsets,daemonsets,cronjobs');
 
   it('reads the Secret with no stop signal: a kill after kubectl wrote it would print it under CI', async () => {
     const { applyK3sManifests } = await k3sPromise;

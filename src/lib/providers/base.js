@@ -345,8 +345,9 @@ export class BaseProvider {
   /**
    * Cloud Secrets, and keys of them, that an earlier vibecarbon wrote and
    * nothing reads any more. A deploy removes them once its apply has
-   * handed the token over, and keeps one a workload on the cluster still
-   * reads, saying what reads it (applyCloudSecrets): a server-side apply
+   * handed the token over, and keeps one a Deployment, StatefulSet,
+   * DaemonSet or CronJob on the cluster still reads, saying what reads it
+   * (applyCloudSecrets; a Job or a bare pod is not checked): a server-side apply
    * never deletes an object it stops sending, and never removes a data key
    * first set through stringData, so without this every existing cluster
    * would keep the copy for good. An entry with `keys`

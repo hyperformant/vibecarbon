@@ -72,13 +72,17 @@ let kubectlFails: Error | null = null;
 
 /** The Secrets the fake apiserver holds, `namespace/name` to decoded data. */
 const cluster = new Map<string, Record<string, string>>();
-/** A workload as `get deployments,statefulsets,daemonsets -o json` lists it. */
+/** A workload as `get deployments,statefulsets,daemonsets,cronjobs -o json` lists it. */
 type Workload = {
   kind: string;
   metadata: { name: string };
-  spec: { strategy?: Record<string, unknown>; template: { spec: Record<string, unknown> } };
+  spec: {
+    strategy?: Record<string, unknown>;
+    template?: { spec: Record<string, unknown> };
+    jobTemplate?: { spec: { template: { spec: Record<string, unknown> } } };
+  };
 };
-/** The pod templates `get deployments,statefulsets,daemonsets -o json` lists, per namespace. */
+/** The pod templates `get deployments,statefulsets,daemonsets,cronjobs -o json` lists, per namespace. */
 let workloads: Record<string, Workload[]> = {};
 /** What `get secret -o json` prints instead of the Secret, when set. */
 let secretOutput: string | null = null;
@@ -151,7 +155,11 @@ function fakeKubectl(args: string[], input?: string): string {
     }
     return '';
   }
-  if (args[0] === '-n' && args[2] === 'get' && args[3] === 'deployments,statefulsets,daemonsets') {
+  if (
+    args[0] === '-n' &&
+    args[2] === 'get' &&
+    args[3] === 'deployments,statefulsets,daemonsets,cronjobs'
+  ) {
     return JSON.stringify({ apiVersion: 'v1', kind: 'List', items: workloads[args[1]] ?? [] });
   }
   if (args[0] === '-n' && args[2] === 'rollout' && args[3] === 'restart') {
@@ -230,6 +238,7 @@ const {
   secretKeyReaders,
   secretReaders,
   takesHostPorts,
+  WORKLOAD_KINDS,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 const { runCommandAsync } = await import('../../../src/lib/command.js');
@@ -720,7 +729,7 @@ describe('applyCloudSecrets', () => {
         expectOneRead(Provider);
         expect(held(Provider)).toEqual(before);
         expect(applies()).toEqual([]);
-        expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+        expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
         expect(restarts()).toEqual([]);
         expect((err as Error).message).not.toContain(MARK);
         expect(logged.join('\n')).not.toContain(MARK);
@@ -941,7 +950,7 @@ describe('applyCloudSecrets', () => {
       readerPerSecret(Provider);
       await apply(Provider);
       expect(applies()).toHaveLength(1);
-      expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+      expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
       expect(restarts()).toEqual([]);
     });
 
@@ -972,7 +981,7 @@ describe('applyCloudSecrets', () => {
         expect(restartAt).toBeGreaterThan(applyAt);
         // Found before it: a list that fails must leave the old value in place.
         const listAt = calls.findIndex(({ argv }) =>
-          argv.includes('deployments,statefulsets,daemonsets'),
+          argv.includes('deployments,statefulsets,daemonsets,cronjobs'),
         );
         expect(listAt).toBeGreaterThan(-1);
         expect(listAt).toBeLessThan(applyAt);
@@ -982,7 +991,7 @@ describe('applyCloudSecrets', () => {
     it('a list of what reads it that fails changes nothing, and says to deploy again', async () => {
       holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
       readerPerSecret(PROVIDERS.linode);
-      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets /;
+      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets,cronjobs /;
       kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
         status: 1,
         stderr: 'error: deployments.apps is forbidden\n',
@@ -1008,7 +1017,7 @@ describe('applyCloudSecrets', () => {
         readerPerSecret(Provider);
         await apply(Provider);
         expect(applies()).toHaveLength(1);
-        expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+        expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
         expect(restarts()).toEqual([]);
         expect(logged).toEqual([
           `Handing your ${Provider.NAME} API token to the cluster (${Provider.k8sCloudSecrets({
@@ -1022,7 +1031,7 @@ describe('applyCloudSecrets', () => {
 
     it('a workload list that would fail cannot fail a first deploy: none is asked for', async () => {
       readerPerSecret(PROVIDERS.linode);
-      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets /;
+      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets,cronjobs /;
       kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
         status: 1,
         stderr: 'error: deployments.apps is forbidden\n',
@@ -1059,8 +1068,57 @@ describe('applyCloudSecrets', () => {
       holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
       workloads['kube-system'] = [...nonReaders];
       await apply(PROVIDERS.linode);
-      expect(kubectl('deployments,statefulsets,daemonsets')).toHaveLength(1);
+      expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toHaveLength(1);
       expect(restarts()).toEqual([]);
+    });
+
+    /** A CronJob whose Jobs' pods read `secret`'s `key` into their env. */
+    const cronReader = (name: string, secret: string, key = 'token'): Workload => ({
+      kind: 'CronJob',
+      metadata: { name },
+      spec: {
+        jobTemplate: {
+          spec: {
+            template: {
+              spec: {
+                containers: [
+                  {
+                    name: 'c',
+                    env: [{ name: 'T', valueFrom: { secretKeyRef: { name: secret, key } } }],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    it('a CronJob that reads a changed Secret is not restarted: its next Job reads the new value', async () => {
+      holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
+      workloads['kube-system'] = [
+        cronReader('reads-linode-nightly', 'linode'),
+        envReader('reads-linode', 'linode'),
+        ...nonReaders,
+      ];
+      await apply(PROVIDERS.linode);
+      expect(restarts()).toEqual([
+        ['kubectl', '-n', 'kube-system', 'rollout', 'restart', 'deployment/reads-linode'],
+      ]);
+      expect(waits().map((argv) => argv[5])).toEqual(['deployment/reads-linode']);
+      expect(logged.join('\n')).not.toContain('cronjob/');
+
+      // Read by a CronJob alone: nothing restarts, and nothing says so.
+      calls.length = 0;
+      logged = [];
+      holdAll(PROVIDERS.linode, 'vc-sentinel-token-older');
+      workloads['kube-system'] = [cronReader('reads-linode-nightly', 'linode'), ...nonReaders];
+      await apply(PROVIDERS.linode);
+      expect(restarts()).toEqual([]);
+      expect(waits()).toEqual([]);
+      expect(logged).toEqual([
+        'Handing your Linode API token to the cluster (kube-system/linode).',
+      ]);
     });
 
     it('says what restarts and why, in one line', async () => {
@@ -1421,7 +1479,7 @@ describe('applyCloudSecrets', () => {
       ]);
       expect(kubectl('patch')).toEqual([]);
       expect(kubectl('delete')).toEqual([]);
-      expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+      expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
       expect(kubectl('name')).toEqual([
         [
           'kubectl',
@@ -1586,7 +1644,7 @@ describe('applyCloudSecrets', () => {
 
       it('hetzner: a list that fails names the key as taken out, and keeps only what is left', async () => {
         holdLegacy(PROVIDERS.hetzner, TOKEN);
-        failWhen = /^-n kube-system get deployments,statefulsets,daemonsets/;
+        failWhen = /^-n kube-system get deployments,statefulsets,daemonsets,cronjobs/;
         kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
           status: 1,
           stderr: 'error: deployments.apps is forbidden\n',
@@ -1632,6 +1690,55 @@ describe('applyCloudSecrets', () => {
       });
     });
 
+    it('lists Deployments, StatefulSets, DaemonSets and CronJobs: a Job or a bare pod is not checked', async () => {
+      expect(WORKLOAD_KINDS).toBe('deployments,statefulsets,daemonsets,cronjobs');
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      await apply(PROVIDERS.hetzner);
+      expect(kubectl(WORKLOAD_KINDS)).toEqual([
+        ['kubectl', '-n', 'kube-system', 'get', WORKLOAD_KINDS, '-o', 'json'],
+      ]);
+      // And the docs say so.
+      expect(readFileSync(join(__dirname, '../../../docs/security.md'), 'utf-8')).toContain(
+        'keeping one while a Deployment, StatefulSet, DaemonSet or CronJob still reads it; ' +
+          "Jobs and bare pods aren't checked",
+      );
+    });
+
+    it('hetzner: a CronJob that still reads a retired Secret or key keeps it', async () => {
+      holdLegacy(PROVIDERS.hetzner, TOKEN);
+      const cron = (name: string, pod: Record<string, unknown>): Workload => ({
+        kind: 'CronJob',
+        metadata: { name },
+        spec: { jobTemplate: { spec: { template: { spec: pod } } } },
+      });
+      workloads['kube-system'] = [
+        cron('mounts-csi', {
+          containers: [{ name: 'c' }],
+          volumes: [{ name: 'v', secret: { secretName: 'hcloud-csi' } }],
+        }),
+        cron('reads-network', {
+          containers: [
+            {
+              name: 'c',
+              env: [{ name: 'N', valueFrom: { secretKeyRef: { name: 'hcloud', key: 'network' } } }],
+            },
+          ],
+        }),
+        ...nonReaders,
+      ];
+      await apply(PROVIDERS.hetzner);
+      expect(cluster.has('kube-system/hcloud-csi')).toBe(true);
+      expect(cluster.get('kube-system/hcloud')).toHaveProperty('network');
+      expect(logged).toContain(
+        'Kept kube-system/hcloud-csi, an extra copy of your Hetzner Cloud API token, because ' +
+          'cronjob/mounts-csi still reads it. The next deploy removes it once nothing does.',
+      );
+      expect(logged).toContain(
+        'Kept the network key in kube-system/hcloud, because cronjob/reads-network still reads ' +
+          'it. The next deploy removes it once nothing does.',
+      );
+    });
+
     it('hetzner: a volume that mounts other keys of the Secret keeps nothing', async () => {
       holdLegacy(PROVIDERS.hetzner, TOKEN);
       workloads['kube-system'] = [
@@ -1649,7 +1756,7 @@ describe('applyCloudSecrets', () => {
 
     it('hetzner: a list of what reads them that fails keeps both, says so, and the deploy goes on', async () => {
       holdLegacy(PROVIDERS.hetzner, TOKEN);
-      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets /;
+      failWhen = /^-n kube-system get deployments,statefulsets,daemonsets,cronjobs /;
       kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
         status: 1,
         stderr: 'error: deployments.apps is forbidden\n',
@@ -1896,6 +2003,35 @@ describe('secretKeyReaders', () => {
     kind,
     metadata: { name },
     spec: { template: { spec: pod } },
+  });
+
+  it("a CronJob's reads are its Job template's", () => {
+    const cron: Workload = {
+      kind: 'CronJob',
+      metadata: { name: 'nightly' },
+      spec: {
+        jobTemplate: {
+          spec: {
+            template: {
+              spec: {
+                containers: [
+                  {
+                    name: 'c',
+                    env: [
+                      { name: 'N', valueFrom: { secretKeyRef: { name: 's', key: 'network' } } },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    };
+    expect(secretKeyReaders(list(cron), 's', ['network', 'token'])).toEqual({
+      network: ['cronjob/nightly'],
+    });
+    expect(secretReaders(list(cron), ['s'])).toEqual(['cronjob/nightly']);
   });
 
   it('each way a pod reads a key, in every workload kind, each reader once', () => {

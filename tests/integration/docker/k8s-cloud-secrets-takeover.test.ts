@@ -503,6 +503,67 @@ describe.skipIf(SKIPPED)(
         LONG,
       );
 
+      it.runIf(Provider.K8S_RETIRED_CLOUD_SECRETS.some((r) => !r.keys))(
+        'a retired Secret a CronJob still reads is kept, and goes once nothing does',
+        async () => {
+          oldMaster();
+          // A CronJob reads through its Job template, which the list must
+          // reach on a real apiserver: suspended, so no Job runs.
+          const whole = Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys);
+          const crons = whole.map(({ namespace, name }) => ({
+            apiVersion: 'batch/v1',
+            kind: 'CronJob',
+            metadata: { name: `vctest-reads-${name}`, namespace },
+            spec: {
+              schedule: '0 0 1 1 *',
+              suspend: true,
+              jobTemplate: {
+                spec: {
+                  template: {
+                    spec: {
+                      restartPolicy: 'Never',
+                      containers: [
+                        {
+                          name: 'c',
+                          image: 'busybox',
+                          env: [{ name: 'T', valueFrom: { secretKeyRef: { name, key: 'token' } } }],
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          }));
+          kube(
+            ['apply', '-f', '-'],
+            JSON.stringify({ apiVersion: 'v1', kind: 'List', items: crons }),
+          );
+          try {
+            await hand(BOOT_TOKEN);
+            for (const { namespace, name } of whole) {
+              expect(holds(namespace, name), `${namespace}/${name}`).toBe(true);
+            }
+          } finally {
+            for (const { metadata } of crons) {
+              kube([
+                '-n',
+                metadata.namespace,
+                'delete',
+                'cronjob',
+                metadata.name,
+                '--ignore-not-found',
+              ]);
+            }
+          }
+          await hand(BOOT_TOKEN);
+          for (const { namespace, name } of whole) {
+            expect(holds(namespace, name), `${namespace}/${name}`).toBe(false);
+          }
+        },
+        LONG,
+      );
+
       it.runIf(Provider.K8S_RETIRED_CLOUD_SECRETS.some((r) => r.keys))(
         'a retired key the takeover drops is never called kept, though something reads it',
         async () => {
