@@ -136,9 +136,8 @@ function scrubs(callText: string, fileSrc: string): boolean {
   const m = callText.match(/\benv:\s*(?:\{\s*\.\.\.)?([\w$]+)/);
   if (!m) return false;
   if (new RegExp(`^(?:${SCRUB_FNS})$`).test(m[1])) return true;
-  return new RegExp(`\\b${m[1].replace(/\$/g, '\\$')}\\s*=[^;]*?\\b(?:${SCRUB_FNS})\\(`).test(
-    fileSrc,
-  );
+  const name = m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${name}\\s*=[^;]*?\\b(?:${SCRUB_FNS})\\(`).test(fileSrc);
 }
 
 /** tests/: only calls with a cwd that is not this checkout are temp-repo work. */
