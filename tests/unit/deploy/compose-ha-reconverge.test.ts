@@ -562,6 +562,9 @@ describe('haProvisionServers on a swapped env', () => {
   it('keeps each stack at its birth region and resolves the pair by role', async () => {
     const dir = createTempDir('reconverge-');
     const sshKeyPath = join(dir, 'key');
+    // Both halves, as the machine that deployed the pair keeps them
+    // (deploy-key.js refuses a recorded pair without them).
+    writeFileSync(sshKeyPath, 'PRIVATE', { mode: 0o600 });
     writeFileSync(`${sshKeyPath}.pub`, 'ssh-ed25519 AAAA test');
     const ctx = baseCtx({
       sshKeyPath,

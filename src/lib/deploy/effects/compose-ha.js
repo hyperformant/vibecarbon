@@ -72,6 +72,7 @@ import {
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { preserveSafetyFields } from '../env-safety-fields.js';
 import { readReplicaState } from '../failover-guard.js';
@@ -185,6 +186,9 @@ async function settleBothRegions(ups) {
 async function haProvisionServers(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { environment, sshKeyPath, region, apiToken, s3Config, imageRef, envConfig } = ctx;
+  // Servers on record and this machine lacks the key they trust: stop before
+  // the key below is made and handed to both stacks (deploy-key.js).
+  requireDeployKey({ environment, envConfig, keyPath: sshKeyPath });
   if (!imageRef) {
     throw new Error(
       'compose-ha deploy requires ctx.imageRef (ghcr.io/<owner>/<repo>:<tag>), build pipeline changed in Lever 1',
@@ -296,7 +300,7 @@ async function haProvisionServers(ctx) {
     if (message) p.log[message.level](message.line);
   }
 
-  // Generate SSH key pair
+  // Generate SSH key pair (required above when servers are on record).
   generateSSHKeyPair(sshKeyPath);
   const publicKey = readFileSync(`${sshKeyPath}.pub`, 'utf-8').trim();
 

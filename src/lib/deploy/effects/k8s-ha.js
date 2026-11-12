@@ -46,6 +46,7 @@ import { providerFor } from '../../providers/index.js';
 import { haClassMessage } from '../../sizing.js';
 import { sshKeyPathFor } from '../../ssh.js';
 import { createPrefixedTracker } from '../../tracker.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { copyAppImageToStandby } from '../k8s/ha/image-copy.js';
 import {
@@ -69,6 +70,13 @@ import { generateSSHKeyPair } from '../utils.js';
  */
 async function haK8sGenerateSshKey(ctx) {
   const options = ctx.options;
+  const sharedSshKeyPath = sshKeyPathFor(options.environment);
+  // Clusters on record and no key here: stop before a new key goes to them.
+  requireDeployKey({
+    environment: options.environment,
+    envConfig: options.envConfig,
+    keyPath: sharedSshKeyPath,
+  });
   // Prefer the orchestrator's tracker spinner (timing + log file); fall back to
   // the spinner-safe `spinner()` from cli/progress.js when no tracker is passed.
   const s = options.tracker ? options.tracker.spinner() : spinner();
@@ -81,7 +89,6 @@ async function haK8sGenerateSshKey(ctx) {
 
   // Generate shared SSH key for both clusters (avoids Hetzner duplicate fingerprint errors)
   s.start('Generating shared SSH key for HA clusters');
-  const sharedSshKeyPath = sshKeyPathFor(options.environment);
   const sharedSshPublicKey = generateSSHKeyPair(sharedSshKeyPath);
   s.stop('Shared SSH key generated');
   ctx.sharedSshKeyPath = sharedSshKeyPath;

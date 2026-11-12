@@ -104,6 +104,9 @@ beforeEach(() => {
   process.chdir(dir);
   mkdirSync(join(dir, '.vibecarbon'));
   keyPath = join(dir, 'key');
+  // Both halves, as the machine that deployed the pair keeps them
+  // (deploy-key.js refuses a recorded pair without them).
+  writeFileSync(keyPath, 'PRIVATE', { mode: 0o600 });
   setPublicKey('ssh-ed25519 AAAA-one');
   fake.standbyType = 'cpx22';
   fake.version = '1.2.3';

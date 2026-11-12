@@ -28,6 +28,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { queueBootTiming } from '../boot-timing.js';
 import { VC_COMPOSE } from '../compose/command.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
@@ -85,6 +86,8 @@ async function provisionServer(ctx) {
     sshKeyPath,
     envConfig,
   } = ctx;
+  // A server on record and no key here: stop before a new key replaces it.
+  requireDeployKey({ environment, envConfig, keyPath: sshKeyPath });
   generateSSHKeyPair(sshKeyPath);
   const { upStack } = await import('../../iac/index.js');
   // Resolved once per flow — see providerFor() in lib/providers/index.js.

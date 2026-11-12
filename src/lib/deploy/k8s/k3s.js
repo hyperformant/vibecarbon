@@ -121,6 +121,7 @@ import {
   POD_EXEC_QUERY_MS,
   standbyDbRebuildHint,
 } from '../db-workload.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
 import { waitForRemoteMarker } from '../remote-marker.js';
@@ -5091,6 +5092,16 @@ async function deployK3sSteps(options, inFlight) {
   const spin = options.tracker ? options.tracker.spinner.bind(options.tracker) : spinner;
   const s = spin();
   const projectDir = process.cwd();
+  // A cluster on record and no key here: stop before ensureSshKey makes a new
+  // one and the up installs it (deploy-key.js). HA clusters share the key
+  // haK8sGenerateSshKey already required.
+  if (!options.sharedSshKeyPath) {
+    requireDeployKey({
+      environment: options.environment,
+      envConfig: options.envConfig,
+      keyPath: sshKeyPathFor(options.environment, projectDir),
+    });
+  }
   // perfPrefix tags all internal sub-stage perf timings. Default 'k3s' for
   // single-cluster (`deploy.k3s.iac.upStack` etc); HA passes 'k3s.primary' /
   // 'k3s.standby' so the perf_substep table can attribute primary/standby
