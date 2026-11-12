@@ -410,6 +410,21 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret, which held the
+   * operator's Hetzner Cloud token, if any. Nothing on a DigitalOcean cluster reads it.
+   * See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
+
+  /**
    * The FIXED-ERA VPC range — the literal every DO k8s stack provisioned
    * before the d4 lift (2026-08-28) actually holds. Used ONLY as
    * `deployK3s`'s (deploy/k8s/k3s.js) resume-compat fallback for a

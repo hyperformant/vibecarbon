@@ -21,7 +21,11 @@
  * is held to the census's record of it (tests/_shared/cloud-secret-readers.ts).
  * Then each test starts from what an old master has: the old boot script's
  * Secret commands (tests/_shared/legacy-master-init-secrets.ts) run on the
- * node, and no workload carries a restart. applyCloudSecrets runs from here.
+ * node, and no workload carries a restart. The tests of what a deploy
+ * removes also run the old GitOps deploy.yml's step
+ * (tests/_shared/legacy-gitops-secrets.ts) with this machine's kubectl, as a
+ * runner did, on every provider: it wrote kube-system/hcloud whatever the
+ * provider, and nothing on a DigitalOcean or Linode cluster reads it. applyCloudSecrets runs from here.
  * It must take the Secrets over with exactly the keys it writes, delete the
  * Secrets it no longer writes (and never call a retired key kept that the
  * takeover itself dropped, though something reads it), and leave no
@@ -54,6 +58,7 @@ import {
   manifestUrls,
   type SecretRef,
 } from '../../_shared/cloud-secret-readers.js';
+import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 
@@ -276,6 +281,7 @@ describe.skipIf(SKIPPED)(
       let script: string;
       let installed: Workload[];
       const legacy = masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[providerId]);
+      const gitops = legacyGitopsSecrets();
 
       // What the boot script installs besides the Secrets: upstream's cloud
       // controller and CSI driver, from the URLs it applies them from.
@@ -302,6 +308,15 @@ describe.skipIf(SKIPPED)(
         const scalable = installed.filter((w) => w.kind !== 'DaemonSet').map(id);
         if (scalable.length > 0) {
           kube(['-n', 'kube-system', 'scale', ...scalable, '--replicas=0']);
+        }
+      }, LONG);
+
+      // Each provider's cluster runs only its own controllers: Hetzner's
+      // read kube-system/hcloud, which a DigitalOcean or Linode deploy must
+      // find nothing reading before it removes the old deploy.yml's copy.
+      afterAll(() => {
+        if (installed?.length > 0) {
+          kube(['-n', 'kube-system', 'delete', ...installed.map(id), '--ignore-not-found']);
         }
       }, LONG);
 
@@ -340,7 +355,7 @@ describe.skipIf(SKIPPED)(
        * no restart stamped on any workload, whatever the test before left.
        */
       const oldMaster = () => {
-        for (const { namespace, name } of [...legacy, ...expected(BOOT_TOKEN)]) {
+        for (const { namespace, name } of [...legacy, ...gitops, ...expected(BOOT_TOKEN)]) {
           kube(['-n', namespace, 'delete', 'secret', name, '--ignore-not-found']);
         }
         for (const w of workloads()) {
@@ -366,6 +381,27 @@ describe.skipIf(SKIPPED)(
           expect(read(namespace, name).managers).toEqual(['kubectl-client-side-apply:Update']);
         }
         expect(restarted()).toEqual([]);
+      };
+
+      /**
+       * What the old GitOps deploy.yml's step left in the cluster: its shell,
+       * run with this machine's kubectl as a runner ran it, the repo secret
+       * holding the boot token and the network variable the network id, so a
+       * Secret the CLI writes keeps its values and nothing restarts.
+       */
+      const oldGitopsStep = () => {
+        for (const { env, run: shell } of gitops) {
+          const values = Object.fromEntries(
+            Object.entries(env).map(([variable, from]) => [
+              variable,
+              from.startsWith('secrets.') ? BOOT_TOKEN : NETWORK,
+            ]),
+          );
+          must('sh', ['-eu'], shell, { ...process.env, KUBECONFIG: kubeconfig, ...values });
+        }
+        for (const { namespace, name } of gitops) {
+          expect(read(namespace, name).managers).toContain('github-actions-deploy:Apply');
+        }
       };
 
       it('what upstream reads is what the census records', () => {
@@ -482,6 +518,8 @@ describe.skipIf(SKIPPED)(
               ),
             })),
           );
+          // And a project on GitOps: the old deploy.yml's step ran too.
+          oldGitopsStep();
           // The premise: an apply of only what the CLI writes now leaves both.
           ssa(expected(BOOT_TOKEN));
           const retired = Provider.K8S_RETIRED_CLOUD_SECRETS;
@@ -507,6 +545,7 @@ describe.skipIf(SKIPPED)(
         'a retired Secret a CronJob still reads is kept, and goes once nothing does',
         async () => {
           oldMaster();
+          oldGitopsStep();
           // A CronJob reads through its Job template, which the list must
           // reach on a real apiserver: suspended, so no Job runs.
           const whole = Provider.K8S_RETIRED_CLOUD_SECRETS.filter((r) => !r.keys);

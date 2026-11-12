@@ -468,6 +468,21 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret, which held the
+   * operator's Hetzner Cloud token, if any. Nothing on a Linode cluster reads it.
+   * See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
+
+  /**
    * The VPC subnet the k8s Pulumi program (iac/programs/linode-k8s.js)
    * creates for the cluster's nodes.
    * @type {string}

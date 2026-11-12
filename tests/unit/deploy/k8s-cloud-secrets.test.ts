@@ -15,8 +15,10 @@
  *     tests/_shared/cloud-secret-readers.ts, held to the URLs the script
  *     applies), each holding the token, and every reference reads one of
  *     them; K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts made
- *     (tests/_shared/legacy-master-init-secrets.ts) less that, and nothing
- *     reads it; the cluster autoscaler reads only its own Secret; a provider
+ *     (tests/_shared/legacy-master-init-secrets.ts) and the old GitOps
+ *     deploy.yml wrote on every provider (tests/_shared/legacy-gitops-secrets.ts)
+ *     less that, a Secret only deploy.yml wrote named as a copy of the
+ *     Actions secret it came from, and nothing reads it; the cluster autoscaler reads only its own Secret; a provider
  *     without a k8s tier hands over nothing;
  *   - applyCloudSecrets: one `kubectl apply --server-side --force-conflicts
  *     --field-manager=vibecarbon-cli -f -`, with every Secret on stdin; the
@@ -61,6 +63,7 @@ import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-readers.js';
+import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 
@@ -406,23 +409,76 @@ describe('docs/deploy-hetzner.md says where the token lives, in each mode', () =
   });
 });
 
-describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts made and the CLI no longer writes', () => {
+describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml made and the CLI no longer writes', () => {
   it('there is a record for every k8s provider', () => {
     expect(Object.keys(LEGACY_MASTER_INIT_SECRETS).sort()).toEqual(
       K8S_PROVIDERS.map(([id]) => id).sort(),
     );
   });
 
+  it("the old deploy.yml's record is one Secret, holding a repo secret, and the template writes it no more", () => {
+    const made = legacyGitopsSecrets();
+    expect(made.map(({ namespace, name }) => `${namespace}/${name}`)).toEqual([
+      'kube-system/hcloud',
+    ]);
+    expect(Object.values(made[0].keys)).toContain('secrets.HETZNER_API_TOKEN');
+    const template = readFileSync(
+      join(__dirname, '../../../carbon/.github/workflows/deploy.yml'),
+      'utf-8',
+    );
+    for (const { name } of made)
+      expect(template).not.toMatch(new RegExp(`create secret generic ${name}\\b`));
+  });
+
   it.each(K8S_PROVIDERS)('%s: the old Secrets and keys less the current ones', (id, Provider) => {
     const written = Provider.k8sCloudSecrets({ token: TOKEN });
-    const expected: { namespace: string; name: string; keys?: string[] }[] = [];
+    // What an earlier vibecarbon made on this provider's clusters: its boot
+    // script's Secrets, and the old deploy.yml's, which ran on every provider.
+    const made = new Map<
+      string,
+      { namespace: string; name: string; keys: Set<string>; boot: boolean; repoSecret?: string }
+    >();
+    const add = (
+      namespace: string,
+      name: string,
+      keys: string[],
+      boot: boolean,
+      repoSecret?: string,
+    ) => {
+      const at = made.get(`${namespace}/${name}`);
+      if (at) {
+        for (const key of keys) at.keys.add(key);
+        at.boot ||= boot;
+      } else
+        made.set(`${namespace}/${name}`, {
+          namespace,
+          name,
+          keys: new Set(keys),
+          boot,
+          repoSecret,
+        });
+    };
     for (const { namespace, name, keys } of masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id])) {
+      add(namespace, name, Object.keys(keys), true);
+    }
+    for (const { namespace, name, keys } of legacyGitopsSecrets()) {
+      const from = Object.values(keys).find((e) => e.startsWith('secrets.'));
+      add(namespace, name, Object.keys(keys), false, from?.slice('secrets.'.length));
+    }
+    const expected: { namespace: string; name: string; keys?: string[]; copyOf?: string }[] = [];
+    for (const { namespace, name, keys, boot, repoSecret } of made.values()) {
       const kept = written.find((w) => w.namespace === namespace && w.name === name);
       if (!kept) {
-        expected.push({ namespace, name });
+        // Only deploy.yml made it: a copy of the repo secret, not of this
+        // provider's token, and the lines that remove or keep it say so.
+        expected.push({
+          namespace,
+          name,
+          ...(!boot && { copyOf: `your repo's ${repoSecret} Actions secret` }),
+        });
         continue;
       }
-      const gone = Object.keys(keys).filter((key) => !(key in kept.stringData));
+      const gone = [...keys].filter((key) => !(key in kept.stringData));
       if (gone.length > 0) expected.push({ namespace, name, keys: gone });
     }
     expect([...Provider.K8S_RETIRED_CLOUD_SECRETS].sort(byName)).toEqual(expected.sort(byName));
@@ -592,6 +648,33 @@ describe('applyCloudSecrets', () => {
       lastApplied.set(`${namespace}/${name}`, { ...data });
     }
   };
+  /** The Hetzner token an operator had set when an earlier `configure cicd` seeded the repo. */
+  const GITOPS_HETZNER_TOKEN = 'vc-sentinel-token-gitops-hetzner';
+  /**
+   * What the old GitOps deploy.yml's step wrote into a cluster, on every
+   * provider: its Secret's keys, the repo secret's value and the network
+   * variable, merged into what is there, as a server-side apply does.
+   */
+  const holdLegacyGitops = () => {
+    for (const { namespace, name, keys } of legacyGitopsSecrets()) {
+      const data = Object.fromEntries(
+        Object.entries(keys).map(([key, from]) => [
+          key,
+          from.startsWith('secrets.') ? GITOPS_HETZNER_TOKEN : NETWORK,
+        ]),
+      );
+      cluster.set(`${namespace}/${name}`, { ...cluster.get(`${namespace}/${name}`), ...data });
+    }
+  };
+  /** The k8s providers whose cluster reads none of what the old deploy.yml wrote. */
+  const GITOPS_UNREAD = K8S_PROVIDERS.filter(([, P]) =>
+    legacyGitopsSecrets().every(
+      ({ namespace, name }) =>
+        !P.k8sCloudSecrets({ token: TOKEN }).some(
+          (w) => w.namespace === namespace && w.name === name,
+        ),
+    ),
+  );
   /** A provider whose token goes into two Secrets in one namespace. */
   class TwoSecrets extends BaseProvider {
     static NAME = 'Two Secrets Cloud';
@@ -653,6 +736,8 @@ describe('applyCloudSecrets', () => {
   it('says whose token goes where, naming every Secret', async () => {
     const lines: Record<string, string> = {};
     for (const [id, Provider] of K8S_PROVIDERS) {
+      // Each provider's own cluster: none holds another's Secrets.
+      cluster.clear();
       logged = [];
       await apply(Provider);
       lines[id] = logged.join('');
@@ -1458,6 +1543,110 @@ describe('applyCloudSecrets', () => {
   });
 
   describe('removes what an earlier vibecarbon wrote and nothing reads', () => {
+    it.each(K8S_PROVIDERS)(
+      '%s: an old master the old deploy.yml also wrote to ends with exactly the Secrets and keys the CLI writes',
+      async (id, Provider) => {
+        holdLegacy(Provider, 'vc-sentinel-token-old');
+        holdLegacyGitops();
+        readerPerSecret(Provider);
+        await apply(Provider);
+        const written = Provider.k8sCloudSecrets({ token: TOKEN });
+        const made = [
+          ...masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]),
+          ...legacyGitopsSecrets(),
+        ];
+        for (const { namespace, name } of made) {
+          const kept = written.find((w) => w.namespace === namespace && w.name === name);
+          expect(cluster.get(`${namespace}/${name}`), `${namespace}/${name}`).toEqual(
+            kept?.stringData,
+          );
+        }
+        for (const { argv } of calls) expect(argv.join(' ')).not.toContain('vc-sentinel-token');
+        expect(logged.join('\n')).not.toContain('vc-sentinel-token');
+      },
+    );
+
+    it('the old deploy.yml wrote to a cluster that reads none of it on some providers', () => {
+      expect(GITOPS_UNREAD.map(([id]) => id).sort()).toEqual(['digitalocean', 'linode']);
+    });
+
+    it.each(GITOPS_UNREAD)(
+      "%s: removes the old deploy.yml's hcloud Secret, naming the repo secret it copied, once",
+      async (_id, Provider) => {
+        holdLegacyGitops();
+        await apply(Provider);
+        expect(cluster.has('kube-system/hcloud')).toBe(false);
+        expect(logged).toEqual([
+          `Handing your ${Provider.NAME} API token to the cluster (${Provider.k8sCloudSecrets({
+            token: TOKEN,
+          })
+            .map(({ namespace, name }) => `${namespace}/${name}`)
+            .join(', ')}).`,
+          "Removed kube-system/hcloud, an extra copy of your repo's HETZNER_API_TOKEN Actions " +
+            'secret that nothing reads.',
+        ]);
+        expect(logged.join('\n')).not.toContain(GITOPS_HETZNER_TOKEN);
+        // The next deploy finds it gone: one quiet look by name, nothing else.
+        calls.length = 0;
+        logged = [];
+        await apply(Provider);
+        expect(logged).toHaveLength(1);
+        expect(kubectl('delete')).toEqual([]);
+        expect(kubectl('deployments,statefulsets,daemonsets,cronjobs')).toEqual([]);
+        expect(kubectl('name')).toEqual([
+          [
+            'kubectl',
+            '-n',
+            'kube-system',
+            'get',
+            'secret',
+            'hcloud',
+            '--ignore-not-found',
+            '-o',
+            'name',
+          ],
+        ]);
+      },
+    );
+
+    it.each(GITOPS_UNREAD)(
+      "%s: keeps the old deploy.yml's hcloud Secret while something reads it, and says what",
+      async (_id, Provider) => {
+        holdLegacyGitops();
+        workloads['kube-system'] = [envReader('my-hetzner-tool', 'hcloud'), ...nonReaders];
+        await apply(Provider);
+        expect(cluster.has('kube-system/hcloud')).toBe(true);
+        expect(kubectl('delete')).toEqual([]);
+        expect(logged).toContain(
+          "Kept kube-system/hcloud, an extra copy of your repo's HETZNER_API_TOKEN Actions " +
+            'secret, because deployment/my-hetzner-tool still reads it. The next deploy removes ' +
+            'it once nothing does.',
+        );
+        workloads['kube-system'] = [...nonReaders];
+        logged = [];
+        await apply(Provider);
+        expect(cluster.has('kube-system/hcloud')).toBe(false);
+      },
+    );
+
+    it.each(GITOPS_UNREAD)(
+      "%s: a failed look for the old deploy.yml's hcloud Secret names the repo secret and goes on",
+      async (_id, Provider) => {
+        holdLegacyGitops();
+        failWhen = /get secret hcloud --ignore-not-found -o name/;
+        kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
+          status: 1,
+          stderr: 'error: You must be logged in to the server (Unauthorized)\n',
+        });
+        await apply(Provider);
+        expect(cluster.has('kube-system/hcloud')).toBe(true);
+        expect(logged.join('\n')).toContain(
+          "Couldn't look for kube-system/hcloud, an extra copy of your repo's HETZNER_API_TOKEN " +
+            'Actions secret an earlier vibecarbon made; the next deploy looks again.',
+        );
+      },
+    );
+
     it.each(K8S_PROVIDERS)(
       '%s: an old master ends with exactly the Secrets and keys the CLI writes',
       async (id, Provider) => {

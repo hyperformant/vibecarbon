@@ -14,7 +14,9 @@
  *
  * Every secret is per environment. The last repo-level one, the Hetzner
  * Cloud API token deploy.yml once wrote into kube-system/hcloud, went with
- * that step.
+ * that step; a repo an earlier vibecarbon seeded may still hold it, and
+ * `configure cicd` says so (listRepoSecretNames, noteUnreadTokenSecrets in
+ * src/lib/deploy/k8s/gitops-deploy.js) but never deletes it.
  *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, APP_DB_PASSWORD, BETTER_AUTH_SECRET,
  *                    S3_ACCESS_KEY / S3_SECRET_KEY (the env app's own storage
  *                    key, from appStorageCredential's resolution; never the
@@ -75,6 +77,24 @@ export async function listEnvironmentVariables(envName, { timeout } = {}) {
     if (/HTTP 404|Not Found/i.test(String(err?.stderr ?? ''))) return [];
     throw err;
   }
+}
+
+/**
+ * The names of the repo's own Actions secrets, never their values (GitHub
+ * never returns one). Any failure throws.
+ *
+ * @param {{ timeout?: number }} [options] - for the gh call, in ms
+ * @returns {Promise<string[]>}
+ */
+export async function listRepoSecretNames({ timeout } = {}) {
+  const out = await runCommandAsync(['gh', 'secret', 'list', '--json', 'name', '-q', '.[].name'], {
+    silent: true,
+    timeout,
+  });
+  return String(out ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 /**

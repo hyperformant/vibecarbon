@@ -2368,17 +2368,29 @@ export async function restartSecretReaders({
 }
 
 /**
+ * What a retired whole Secret is a copy of, for the lines that look for,
+ * remove or keep it: the entry's own `copyOf` (one an earlier deploy.yml
+ * wrote from a GitHub secret), else this provider's API token.
+ *
+ * @param {typeof import('../../providers/base.js').BaseProvider} ProviderClass
+ * @param {{copyOf?: string}} retired
+ */
+function retiredCopyOf(ProviderClass, retired) {
+  return retired.copyOf ?? `your ${ProviderClass.NAME} API token`;
+}
+
+/**
  * Delete a cloud Secret an earlier vibecarbon wrote that nothing reads any
- * more (ProviderClass.K8S_RETIRED_CLOUD_SECRETS), one more copy of the
+ * more (ProviderClass.K8S_RETIRED_CLOUD_SECRETS), one more copy of a
  * token, once removeRetired has found it there and no workload reading it.
  * `--ignore-not-found`, and kubectl prints a line only when it deleted one,
  * and only then does this say so. A failure warns and the deploy goes on:
  * nothing reads it, and the next deploy tries again.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, namespace: string, name: string}} args
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, namespace: string, name: string, copyOf?: string}} args
  */
-async function deleteRetiredSecret({ env, ProviderClass, namespace, name }) {
-  const what = `${namespace}/${name}, an extra copy of your ${ProviderClass.NAME} API token that nothing reads`;
+async function deleteRetiredSecret({ env, ProviderClass, namespace, name, copyOf }) {
+  const what = `${namespace}/${name}, an extra copy of ${retiredCopyOf(ProviderClass, { copyOf })} that nothing reads`;
   let out;
   try {
     out = await runKubectlWithRetry(
@@ -2474,7 +2486,7 @@ const TAKEOVER_DROPS_KEYS =
  * read: the one that takes an old master's Secrets over, or one while
  * something still reads the key.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, whole: Array<{namespace: string, name: string}>, keyed: Array<{namespace: string, name: string, keys: string[]}>}} args
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, whole: Array<{namespace: string, name: string, copyOf?: string}>, keyed: Array<{namespace: string, name: string, keys: string[]}>}} args
  */
 async function removeRetired({ env, ProviderClass, whole, keyed }) {
   const kubeconfig = env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>';
@@ -2532,13 +2544,13 @@ async function removeRetired({ env, ProviderClass, whole, keyed }) {
         `Kept ${what}, because ${listing(readers)} still ${readers.length === 1 ? 'reads' : 'read'} ` +
           'it. The next deploy removes it once nothing does.',
       );
-    for (const { name } of secrets) {
+    for (const { name, copyOf } of secrets) {
       const readers = secretReaders(list, [name]);
       if (readers.length === 0) {
-        await deleteRetiredSecret({ env, ProviderClass, namespace, name });
+        await deleteRetiredSecret({ env, ProviderClass, namespace, name, copyOf });
       } else {
         kept(
-          `${namespace}/${name}, an extra copy of your ${ProviderClass.NAME} API token`,
+          `${namespace}/${name}, an extra copy of ${retiredCopyOf(ProviderClass, { copyOf })}`,
           readers,
         );
       }
@@ -2723,11 +2735,12 @@ export async function applyCloudSecrets({
       ),
     ),
     Promise.all(
-      retiredWhole.map(({ namespace, name }) =>
-        secretExists({ env, namespace, name }).catch((err) => {
+      retiredWhole.map((r) =>
+        secretExists({ env, namespace: r.namespace, name: r.name }).catch((err) => {
           progressLog(
-            `Couldn't look for ${namespace}/${name}, an extra copy of your ${ProviderClass.NAME} ` +
-              `API token an earlier vibecarbon made; the next deploy looks again.\n${err.message}`,
+            `Couldn't look for ${r.namespace}/${r.name}, an extra copy of ` +
+              `${retiredCopyOf(ProviderClass, r)} an earlier vibecarbon made; the next deploy ` +
+              `looks again.\n${err.message}`,
           );
           return false;
         }),

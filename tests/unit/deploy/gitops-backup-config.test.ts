@@ -27,6 +27,7 @@ vi.mock('../../../src/lib/github-environments.js', () => ({
 
 const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environments.js');
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
+const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
 const work = mkdtempSync(join(tmpdir(), 'vc-gitops-backup-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
@@ -60,6 +61,7 @@ async function deployWith(
     dnsProvider: 'manual',
     appStorage: { accessKey: 'a', secretKey: 'b' },
     githubOwner: 'acme',
+    ProviderClass: PROVIDERS.hetzner,
     backupConfig,
     ...extra,
   });

@@ -352,9 +352,11 @@ export class BaseProvider {
    * first set through stringData, so without this every existing cluster
    * would keep the copy for good. An entry with `keys`
    * names keys of a Secret the deploy still applies; one without names the
-   * whole Secret. Drop an entry once no cluster made before its removal is
-   * left.
-   * @type {ReadonlyArray<{namespace: string, name: string, keys?: string[]}>}
+   * whole Secret. `copyOf` says what a whole Secret is a copy of when that is
+   * not this provider's own API token (a Secret an earlier deploy.yml wrote
+   * from a GitHub secret, say), for the lines that remove or keep it. Drop an
+   * entry once no cluster made before its removal is left.
+   * @type {ReadonlyArray<{namespace: string, name: string, keys?: string[], copyOf?: string}>}
    */
   static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([]);
 
