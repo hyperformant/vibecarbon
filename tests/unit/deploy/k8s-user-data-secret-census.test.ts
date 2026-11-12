@@ -1,9 +1,11 @@
 /**
  * Census: no k8s node's user data carries the provider API token.
  *
- * User data is not a secret store. Pulumi keeps it in the stack's state as
- * plain text, the provider keeps it for the server's life, and its metadata
- * service hands it to anything on the box that asks. The k3s masters used to
+ * User data is not a secret store. Pulumi keeps it in the stack's state,
+ * sealed with the project's state passphrase (tests/unit/iac/state-secret-
+ * census.test.ts), so anyone with the passphrase reads it; the provider keeps
+ * it for the server's life, and its metadata service hands it to anything on
+ * the box that asks. The k3s masters used to
  * render the provider API token into theirs, for the kube-system Secrets the
  * cloud controller and CSI driver read; deployK3s now applies those Secrets
  * from the operator's machine on every deploy (applyCloudSecrets,
@@ -16,18 +18,24 @@
  *     credential is `k3s_token`, and no boot script creates a Secret;
  *   - programs: each k8s program, RUN under Pulumi's mock runtime (no cloud)
  *     with a sentinel apiToken, records no resource input that holds it, user
- *     data included, and renders every node's user data with no placeholder
- *     left.
+ *     data included and read through its secret wrapper, and renders every
+ *     node's user data with no placeholder left, sealed, and carrying the k3s
+ *     token it was given.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
+import * as rpc from '@pulumi/pulumi/runtime/rpc.js';
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
+import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
 
 const K3S_DIR = join(__dirname, '../../../carbon/cloud-init/k3s');
 const SENTINEL = 'vc-sentinel-api-token-5e1d';
+// The join token the CLI hands every program (lib/iac/k3s-token.js): a
+// program refuses to build without one.
+const K3S_SENTINEL = 'vc-sentinel-k3s-token-7a2c';
 
 let counter = 0;
 /** Every resource the current program run registered, with its inputs. */
@@ -66,17 +74,31 @@ type K8sProvider = {
   getK8sProgram: (config: object) => Promise<() => Promise<Record<string, unknown>>>;
 };
 
+/** Whether a mock input arrived as a secret (`pulumi.secret`). */
+function sealed(value: unknown): boolean {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    (value as Record<string, unknown>)[rpc.specialSigKey] === rpc.specialSecretSig
+  );
+}
+
 /**
- * A server's user data as it boots with it: `userData` (Hetzner, DigitalOcean)
- * or Linode's base64 `metadatas[].userData`, decoded. null for a resource
- * that carries none.
+ * A server's user data as it boots with it, read through its secret wrapper:
+ * `userData` (Hetzner, DigitalOcean) or Linode's base64
+ * `metadatas[].userData`, decoded. `sealed` is whether the program handed it
+ * over as a secret. null for a resource that carries none.
  */
-function userDataOf(inputs: Record<string, unknown>): string | null {
-  if (typeof inputs.userData === 'string') return inputs.userData;
-  const metadatas = inputs.metadatas as { userData?: string }[] | undefined;
+function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: boolean } | null {
+  const userData = unsealMockInput(inputs.userData);
+  if (typeof userData === 'string') return { text: userData, sealed: sealed(inputs.userData) };
+  const metadatas = unsealMockInput<{ userData?: string }[] | undefined>(inputs.metadatas);
   const encoded = metadatas?.map((m) => m.userData).filter((u) => typeof u === 'string');
   if (!encoded?.length) return null;
-  return encoded.map((u) => Buffer.from(String(u), 'base64').toString('utf-8')).join('\n');
+  return {
+    text: encoded.map((u) => Buffer.from(String(u), 'base64').toString('utf-8')).join('\n'),
+    sealed: sealed(inputs.metadatas),
+  };
 }
 
 const k8sProviders = Object.entries(PROVIDERS as unknown as Record<string, K8sProvider>).filter(
@@ -137,6 +159,7 @@ describe('the k8s programs record no provider API token', () => {
       // Programs no longer take it; one that read it again would put it in
       // its resources.
       apiToken: SENTINEL,
+      k3sToken: K3S_SENTINEL,
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
       allowedSshIps: ['203.0.113.5/32'],
       allowedK8sApiIps: ['203.0.113.5/32'],
@@ -153,14 +176,19 @@ describe('the k8s programs record no provider API token', () => {
       .map(({ name, inputs }) => ({ name, userData: userDataOf(inputs) }))
       .filter(({ userData }) => userData !== null);
     expect(servers.length, 'master, db and a worker carry user data').toBeGreaterThanOrEqual(3);
+    // A secret input is serialized with its value: this reads through it.
     for (const { type, name, inputs } of registered) {
       expect(JSON.stringify(inputs), `${type} ${name}`).not.toContain(SENTINEL);
     }
     expect(JSON.stringify(outputs)).not.toContain(SENTINEL);
     for (const { name, userData } of servers) {
-      expect(userData, `${name} user data`).not.toContain(SENTINEL);
+      const { text, sealed: isSealed } = userData as { text: string; sealed: boolean };
+      expect(text, `${name} user data`).not.toContain(SENTINEL);
       // Rendered all the way: an unfilled ${...} would boot with it empty.
-      expect(userData, `${name} user data`).not.toMatch(/\$\{\w+\}/);
+      expect(text, `${name} user data`).not.toMatch(/\$\{\w+\}/);
+      // The join token is the one credential left, so the state keeps it sealed.
+      expect(text, `${name} user data`).toContain(K3S_SENTINEL);
+      expect(isSealed, `${name} user data is a secret`).toBe(true);
     }
   });
 });

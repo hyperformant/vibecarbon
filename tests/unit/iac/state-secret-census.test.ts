@@ -13,7 +13,10 @@ import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
  * successful up rewrites it (lib/iac/state-seal.js, upStack).
  *
  * A server's user data is the rendered cloud-init. On the k8s programs it holds
- * the provider token and the k3s join token; the compose cloud-init
+ * the k3s join token (the provider token left it: deployK3s hands that to the
+ * cluster itself, and tests/unit/deploy/k8s-user-data-secret-census.test.ts
+ * holds every k8s program to that), and a master an older version made still
+ * holds the provider token too; the compose cloud-init
  * (carbon/cloud-init/docker-ce-setup.yaml) carries no credential, and a test
  * below holds every compose program to that. A single-server compose deploy
  * never runs an up on the server it already has (deploy/plan/steps.js
@@ -205,11 +208,13 @@ describe('secrets in Pulumi state (census)', () => {
   });
 
   it.each(Object.keys(PROGRAMS).filter((f) => 'k3sToken' in PROGRAMS[f].config))(
-    '%s: the tokens reach its servers, so the walk below would see a plain copy',
+    '%s: the k3s token reaches its servers, so the walk below would see a plain copy, and the provider token does not',
     async (file) => {
       // Positive control for the walk: a config key renamed in a program
-      // would leave the sentinels out of every resource, and the walk would
-      // pass on nothing. When the tokens leave user data, this changes too.
+      // would leave the sentinel out of every resource, and the walk would
+      // pass on nothing. The provider token left user data (deployK3s hands
+      // it to the cluster, applyCloudSecrets), so no server carries it, and
+      // the walk's provider-token check guards against its return.
       const { resources } = await runProgram(file);
       const userData = await Promise.all(
         resources
@@ -233,7 +238,7 @@ describe('secrets in Pulumi state (census)', () => {
       expect(
         decoded.some((u) => u.includes(API_TOKEN)),
         `${file}: provider token`,
-      ).toBe(true);
+      ).toBe(false);
     },
   );
 
