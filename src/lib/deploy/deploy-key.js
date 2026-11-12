@@ -40,17 +40,31 @@ export class DeployKeyMissingError extends Error {
    */
   constructor({ environment, missing, keyName }) {
     const files = missing.join(' and ');
-    // The command ends the message, so a double-click copies it whole
-    // (tests/unit/lib/copyable-command-census.test.ts).
+    // Each command on its own line, nothing after it, so a double-click
+    // copies it whole (tests/unit/lib/copyable-command-census.test.ts).
+    // Destroy needs no key: it skips the SSH steps without one, deletes the
+    // env's servers through the provider (by id or name, then a sweep of
+    // every server the env owns), and keeps the backups bucket unless
+    // -purge. Its backup first needs the key, so -force (src/destroy.js
+    // preDestroyBackup).
     super(
-      `Your ${environment} environment already has servers, but this machine ` +
-        `doesn't have the deploy key they trust: ${files} ` +
-        `${missing.length > 1 ? 'are' : 'is'} missing. vibecarbon stops here instead ` +
-        "of making a new key, because a new key can't log in to those servers, and on " +
-        'some providers putting it in place would replace them, and the data on them. ' +
+      [
+        `Your ${environment} environment already has servers, but this machine ` +
+          `doesn't have the deploy key they trust: ${files} ` +
+          `${missing.length > 1 ? 'are' : 'is'} missing. vibecarbon stops here instead ` +
+          "of making a new key, because a new key can't log in to those servers, and on " +
+          'some providers putting it in place would replace them and lose the data on them.',
         `The key lives in the .vibecarbon folder of the project on the machine that ` +
-        `deployed ${environment}. Copy ${keyName} and ${keyName}.pub from there into ` +
-        `this project's .vibecarbon folder, then deploy again: vibecarbon deploy ${environment}`,
+          `deployed ${environment}. Copy ${keyName} and ${keyName}.pub from there into ` +
+          "this project's .vibecarbon folder, then deploy again:",
+        `  vibecarbon deploy ${environment}`,
+        'If that key is gone for good, or those servers no longer exist, destroy the ' +
+          `environment instead. Destroy works without the key and deletes every server of ` +
+          `${environment} that is still running, and the data on it. It can't back up the ` +
+          'database first without the key, so it needs -force, and the backups already in ' +
+          'your bucket stay. The next deploy then starts fresh, with a new key:',
+        `  vibecarbon destroy ${environment} -force`,
+      ].join('\n'),
     );
     this.name = 'DeployKeyMissingError';
     this.environment = environment;

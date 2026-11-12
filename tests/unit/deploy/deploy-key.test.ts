@@ -63,21 +63,41 @@ describe('requireDeployKey', () => {
     ).not.toThrow();
   });
 
-  it('an env with servers and no key here stops, naming the file, where it lives, and the rerun', () => {
+  /** The refusal's message for `environment`, the key missing in a fresh project. */
+  const refusal = (environment = 'prod') => {
     const { dir, keyPath } = project();
     let caught: Error | undefined;
     try {
-      requireDeployKey({ environment: 'prod', envConfig: composeEnv, keyPath, cwd: dir });
+      requireDeployKey({ environment, envConfig: composeEnv, keyPath, cwd: dir });
     } catch (err) {
       caught = err as Error;
     }
     expect(caught).toBeInstanceOf(DeployKeyMissingError);
-    const message = String(caught?.message);
+    return String(caught?.message);
+  };
+
+  it('an env with servers and no key here stops, naming the file, where it lives, and the rerun', () => {
+    const message = refusal();
     expect(message).toContain('.vibecarbon/deploy_key_prod');
     expect(message).toContain('.vibecarbon/deploy_key_prod.pub');
     expect(message).toMatch(/machine that deployed prod/);
-    expect(message).toMatch(/then deploy again: vibecarbon deploy prod$/);
+    expect(message).toContain('would replace them and lose the data on them');
     expect(message).not.toContain('—');
+  });
+
+  it('names the way out when the key is gone for good or the servers are: a destroy, which works without the key, removes what still runs, and keeps the backups', () => {
+    const lines = refusal().split('\n');
+    // Each command on its own line, nothing after it, so each copies whole.
+    expect(lines).toContain('  vibecarbon deploy prod');
+    expect(lines.at(-1)).toBe('  vibecarbon destroy prod -force');
+    const prose = lines.filter((l) => !l.startsWith('  ')).join(' ');
+    expect(prose).toMatch(/If that key is gone for good, or those servers no longer exist/);
+    expect(prose).toMatch(/Destroy works without the key/);
+    expect(prose).toMatch(/deletes every server of prod that is still running, and the data on it/);
+    // Without the key there is no backup first, which -force allows.
+    expect(prose).toMatch(/can't back up the database first without the key, so it needs -force/);
+    expect(prose).toMatch(/the backups already in your bucket stay/);
+    expect(prose).toMatch(/The next deploy then starts fresh, with a new key/);
   });
 
   it('k8s-ha: the recorded master address alone is enough to stop', () => {
@@ -112,6 +132,6 @@ describe('requireDeployKey', () => {
     const { dir, keyPath } = project();
     expect(() =>
       requireDeployKey({ environment: 'prod-primary', envConfig: k8sHaEnv, keyPath, cwd: dir }),
-    ).toThrow(/then deploy again: vibecarbon deploy prod$/);
+    ).toThrow(/\n {2}vibecarbon deploy prod\n[\s\S]*\n {2}vibecarbon destroy prod -force$/);
   });
 });
