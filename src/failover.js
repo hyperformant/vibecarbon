@@ -1637,13 +1637,15 @@ async function _provisionStandbyCapacityImpl({
 
     return { provisioned: true };
   } catch (err) {
-    // The converge's k3s token probe couldn't read the standby stack, and it
-    // stops before building anything (R22): nothing to revert, and a revert
-    // would probe the same stack again and report leftovers never made. By
-    // name: this module takes no top-level iac/index.js import. The lines the
-    // failover prints under its own "Failover aborted" line carry only the
-    // probe's reason, so the run says it once.
-    if (err?.name === 'K3sTokenProbeError') {
+    // The converge stopped before it opened the standby stack: its k3s token
+    // probe couldn't read the stack (R22), or the standby's program refused to
+    // build from the project's config (ConvergeBuildError). Nothing to revert,
+    // and a revert would probe or build the same way again and report
+    // leftovers never made. By name: this module takes no top-level
+    // iac/index.js or converge-cluster.js import. The lines the failover
+    // prints under its own "Failover aborted" line carry only the converge's
+    // reason, so the run says it once.
+    if (err?.name === 'K3sTokenProbeError' || err?.name === 'ConvergeBuildError') {
       throw new AbortProvisioningError(
         `Failover aborted, the primary is untouched. ${err.message}`,
         { cause: err, logLines: [err.message] },

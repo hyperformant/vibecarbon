@@ -39,6 +39,7 @@ import {
   waitForWorkersReady,
 } from '../../../src/failover.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
+import { ConvergeBuildError } from '../../../src/lib/iac/converge-cluster.js';
 import { K3sTokenProbeError } from '../../../src/lib/iac/index.js';
 import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
@@ -360,6 +361,40 @@ describe('provisionStandbyCapacity', () => {
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  // A program that refuses to build stops the converge before the stack opens
+  // (operatorCidrs emptied by hand in .vibecarbon.json): nothing was made, so
+  // there is nothing to revert, and a revert would build the same program
+  // again and report leftover workers never made.
+  it('a converge whose program refused to build: aborts with its reason, no revert, no leftovers', async () => {
+    const kubectl = vi.fn();
+    const stopped = new ConvergeBuildError(
+      'e4-standby',
+      new Error('allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json)'),
+    );
+    const converge = vi.fn().mockRejectedValue(stopped);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    try {
+      const err = await provisionStandbyCapacity({
+        ...base,
+        deps: { converge, kubectl },
+      }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(AbortProvisioningError);
+      expect(err.cause).toBe(stopped);
+      expect(err.message).toBe(`Failover aborted, the primary is untouched. ${stopped.message}`);
+      expect(err.logLines).toEqual([stopped.message]);
+      expect(converge).toHaveBeenCalledTimes(1);
+      expect(kubectl).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      const said = JSON.stringify([err.logLines, warn.mock.calls, error.mock.calls]);
+      expect(said).not.toMatch(/Leftover|Revert to 0 workers|Converging the standby back/);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
     }
   });
 

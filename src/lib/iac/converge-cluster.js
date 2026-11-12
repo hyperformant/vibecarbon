@@ -40,6 +40,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
+import { summarizeCommandError } from '../cli/error-line.js';
 import { spinner } from '../cli/progress.js';
 import { haSshKeyName as haSshKeyNameFor } from '../deploy/k8s/ha-ssh-key.js';
 import { recordRetiredReservedIps } from '../deploy/k8s/retired-reserved-ip.js';
@@ -62,6 +63,34 @@ function abort(lines) {
   );
   err.logLines = lines;
   return err;
+}
+
+/**
+ * The cluster's program refused to build from the project's config (an
+ * operatorCidrs list emptied by hand in .vibecarbon.json, a name too long for a
+ * node name), so the converge stopped before it opened the stack, previewed or
+ * changed any server. An abort like the others here, `logLines` included.
+ * Failover checks it by name and skips its revert: a revert would build the
+ * same program again and report leftover workers that were never made.
+ */
+export class ConvergeBuildError extends Error {
+  /**
+   * @param {string} stackName the stack the program was for
+   * @param {unknown} cause what the build threw
+   */
+  constructor(stackName, cause) {
+    const reason = summarizeCommandError(
+      cause instanceof Error ? cause.message : String(cause),
+    ).replace(/\.$/, '');
+    super(
+      `Couldn't build the Pulumi program for ${stackName} from your project's config: ${reason}. ` +
+        `vibecarbon stopped before it previewed or changed any of the cluster's servers, so you can fix what it names and run this again.`,
+      { cause },
+    );
+    this.name = 'ConvergeBuildError';
+    /** @type {string[]} */
+    this.logLines = [this.message];
+  }
 }
 
 /**
@@ -370,7 +399,7 @@ export async function convergeClusterInfra({
       // the preview's stack open below (requireExisting) refuses, and the run
       // stops there.
       p.log.warn(
-        `${label}: ${probe.reason}. \`vibecarbon ${action}\` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating anything.`,
+        `${label}: ${probe.reason}. \`vibecarbon ${action}\` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating any servers.`,
       );
       break;
     default:
@@ -388,14 +417,21 @@ export async function convergeClusterInfra({
   });
 
   const priorMaster = priorMasterFrom(probeOutputs);
-  const program = await Provider.getK8sProgram({
-    ...programConfig,
-    // The recorded token, replayed, so userData hashes match and Pulumi
-    // plans an in-place server-type change rather than a destructive replace
-    // of every node; the derived one for a stack that records none.
-    ...stackToken,
-    ...(priorMaster && { priorMaster }),
-  });
+  // A refusal here comes before the stack opens: nothing of the cluster's has
+  // changed, and the error says so by name (ConvergeBuildError).
+  let program;
+  try {
+    program = await Provider.getK8sProgram({
+      ...programConfig,
+      // The recorded token, replayed, so userData hashes match and Pulumi
+      // plans an in-place server-type change rather than a destructive replace
+      // of every node; the derived one for a stack that records none.
+      ...stackToken,
+      ...(priorMaster && { priorMaster }),
+    });
+  } catch (err) {
+    throw new ConvergeBuildError(clusterEnv, err);
+  }
 
   // Defense in depth: run a Pulumi preview and refuse to proceed if any
   // resource with role=master is scheduled for replacement. The k3sToken

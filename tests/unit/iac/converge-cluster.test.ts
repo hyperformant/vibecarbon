@@ -59,7 +59,9 @@ vi.mock('../../../src/lib/deploy/k8s/retired-reserved-ip.js', () => ({
   recordRetiredReservedIps: (...a: unknown[]) => recordRetiredMock(...a),
 }));
 
-const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
+const { convergeClusterInfra, ConvergeBuildError } = await import(
+  '../../../src/lib/iac/converge-cluster.js'
+);
 const { deriveK3sToken } = await import('../../../src/lib/iac/k3s-token.js');
 /** The token a stack of project `proj` with no recorded one is built with. */
 const DERIVED = deriveK3sToken({
@@ -466,6 +468,46 @@ describe('convergeClusterInfra', () => {
     expect(stack.preview).not.toHaveBeenCalled();
     expect(upStackMock).not.toHaveBeenCalled();
   });
+
+  // A program that refuses to build (operatorCidrs emptied by hand in
+  // .vibecarbon.json) stops the converge before the stack is opened. The
+  // error says so by name: failover skips its revert for it, which would only
+  // build the same program again and report leftover workers never made.
+  it('(j) a program that refuses to build: a ConvergeBuildError naming the refusal, before the stack opens', async () => {
+    const refusal = new Error(
+      'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
+    );
+    const { Provider } = makeProvider();
+    Provider.getK8sProgram.mockRejectedValueOnce(refusal);
+
+    const err = await convergeClusterInfra({ ...baseArgs(), Provider }).catch((e: Error) => e);
+
+    expect(err).toBeInstanceOf(ConvergeBuildError);
+    expect((err as Error).name).toBe('ConvergeBuildError');
+    expect((err as Error).cause).toBe(refusal);
+    expect((err as Error).message).toBe(
+      "Couldn't build the Pulumi program for unit-cluster-xyz from your project's config: " +
+        'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...). ' +
+        "vibecarbon stopped before it previewed or changed any of the cluster's servers, so you can fix what it names and run this again.",
+    );
+    expect((err as Error & { logLines: string[] }).logLines).toEqual([(err as Error).message]);
+    expect(getOrCreateStackMock).not.toHaveBeenCalled();
+    expect(upStackMock).not.toHaveBeenCalled();
+  });
+
+  it('(j2) a refusal that ends in a sentence keeps one full stop', async () => {
+    const { Provider } = makeProvider();
+    Provider.getK8sProgram.mockRejectedValueOnce(
+      new Error('Use a shorter project or environment name.\n    at buildLinodeK8sProgram'),
+    );
+
+    const err = await convergeClusterInfra({ ...baseArgs(), Provider }).catch((e: Error) => e);
+
+    expect((err as Error).message).toContain(
+      "config: Use a shorter project or environment name. vibecarbon stopped before it previewed or changed any of the cluster's servers",
+    );
+    expect((err as Error).message).not.toContain('buildLinodeK8sProgram');
+  });
 });
 
 /**
@@ -625,7 +667,7 @@ describe('convergeClusterInfra — the k3s token probe builds only with a record
       expect(programCalls[0].k3sToken).toBe(DERIVED);
       expect(programCalls[0].k3sTokenReplayed).toBe(false);
       expect(warn).toHaveBeenCalledWith(
-        "unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet. `vibecarbon scale` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating anything.",
+        "unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet. `vibecarbon scale` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating any servers.",
       );
       const said = JSON.stringify(warn.mock.calls);
       expect(said).not.toContain(DERIVED);
@@ -648,7 +690,7 @@ describe('convergeClusterInfra — the k3s token probe builds only with a record
     try {
       await convergeClusterInfra({ ...baseArgs(), Provider, action: 'failover' });
       expect(warn).toHaveBeenCalledWith(
-        "unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet. `vibecarbon failover` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating anything.",
+        "unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet. `vibecarbon failover` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating any servers.",
       );
     } finally {
       warn.mockRestore();
