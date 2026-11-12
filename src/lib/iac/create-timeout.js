@@ -54,6 +54,13 @@ export const SERVER_CREATE_TIMEOUT = `${SERVER_CREATE_TIMEOUT_MINUTES}m`;
 export const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIMEOUT });
 
 /**
+ * The label every program sets on everything it creates, servers included,
+ * beside `project` and `environment`: what tells a server vibecarbon made from
+ * one of the same name that it didn't (lib/iac/state-pending.js).
+ */
+export const SERVER_OWNER_LABELS = Object.freeze({ 'managed-by': 'vibecarbon' });
+
+/**
  * Server-class Pulumi type tokens, with the noun the message uses and the
  * input that holds the resource's location.
  *
@@ -66,11 +73,17 @@ export const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIME
  * `nameInput` is the input the programs set the server's name in, the one its
  * provider's findServersByName matches: the seal looks a server up by it when
  * an earlier run left the server's create unfinished (lib/iac/state-pending.js).
+ * `labelsInput` holds its labels: a map on Hetzner, `key:value` tags on the
+ * others, each provider applying them in the create request itself. The seal
+ * reads the ownership labels a create recorded there (SERVER_OWNER_LABELS,
+ * `project`, `environment`) and counts a server by that name as vibecarbon's
+ * only when it carries the same.
  */
 export const SERVER_RESOURCE_TYPES = Object.freeze({
   'hcloud:index/server:Server': {
     noun: 'server',
     nameInput: 'name',
+    labelsInput: 'labels',
     locationInput: 'location',
     userDataInput: 'userData',
     imageInput: 'image',
@@ -78,6 +91,7 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
   'digitalocean:index/droplet:Droplet': {
     noun: 'droplet',
     nameInput: 'name',
+    labelsInput: 'tags',
     locationInput: 'region',
     userDataInput: 'userData',
     imageInput: 'image',
@@ -89,6 +103,7 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
   'vultr:index/instance:Instance': {
     noun: 'instance',
     nameInput: 'label',
+    labelsInput: 'tags',
     locationInput: 'region',
     userDataInput: 'userData',
     imageInput: 'osId',
@@ -96,6 +111,7 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
   'linode:index/instance:Instance': {
     noun: 'instance',
     nameInput: 'label',
+    labelsInput: 'tags',
     locationInput: 'region',
     userDataInput: 'metadatas',
     imageInput: 'image',
@@ -103,6 +119,7 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
   'scaleway:instance/server:Server': {
     noun: 'server',
     nameInput: 'name',
+    labelsInput: 'tags',
     locationInput: 'zone',
     userDataInput: 'userData',
     imageInput: 'image',

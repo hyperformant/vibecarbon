@@ -40,7 +40,11 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../providers/linode.js';
-import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
+import {
+  SERVER_OWNER_LABELS,
+  serverResourceOptions,
+  workerResourceOptions,
+} from '../create-timeout.js';
 
 const VPC_CIDR = LinodeProvider.DEFAULT_VPC_CIDR;
 const MASTER_IP = '10.0.1.2';
@@ -117,9 +121,12 @@ function pulumiAddresses(cidrs) {
  */
 export function buildLinodeK8sProgram(config) {
   const clusterName = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   if (!config.allowedSshIps?.length) {

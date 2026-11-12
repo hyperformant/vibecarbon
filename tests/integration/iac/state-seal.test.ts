@@ -78,6 +78,7 @@ vi.mock('../../../src/lib/iac/create-timeout.js', async (orig) => {
       'fakecloud:index:Server': {
         noun: 'server',
         nameInput: 'name',
+        labelsInput: 'labels',
         locationInput: 'size',
         userDataInput: 'userData',
         imageInput: 'size',
@@ -86,15 +87,17 @@ vi.mock('../../../src/lib/iac/create-timeout.js', async (orig) => {
   };
 });
 
-// The provider the seal asks whether an unfinished create left a server.
+// The provider the seal asks whether an unfinished create left a server: it
+// lists one by that name that someone else made (no ownership labels).
 const lookup = vi.hoisted(() => ({ calls: [] as string[] }));
 vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
   ...(await orig<typeof import('../../../src/lib/providers/index.js')>()),
   getProvider: () => ({
     findServersByName: async (name: string) => {
       lookup.calls.push(name);
-      return [];
+      return [{ id: 'not-ours-1', labels: { team: 'web' } }];
     },
+    serverLabels: (server: { labels?: Record<string, string> }) => server.labels ?? {},
   }),
 }));
 
@@ -347,7 +350,7 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
     expect(leftovers).toEqual([]);
   });
 
-  it('(d) an unfinished server create on a legacy stack: no server by that name, so the deploy clears the record and seals', async () => {
+  it("(d) an unfinished server create on a legacy stack: the only server by that name isn't ours, so the deploy leaves it alone, clears the record and seals", async () => {
     await writeLegacyStack('e4');
     // An earlier run's create of a second server, interrupted: Pulumi keeps
     // it under pending_operations, plain user data and all.
@@ -364,7 +367,13 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
           urn: server.urn.replace(/::server$/, '::ghost'),
           custom: true,
           type: server.type,
-          inputs: { name: 'sealtest-e4-ghost', size: 'small', userData: USER_DATA },
+          inputs: {
+            name: 'sealtest-e4-ghost',
+            size: 'small',
+            userData: USER_DATA,
+            // The ownership labels every program sets on its servers.
+            labels: { project: 'sealtest', environment: 'e4', 'managed-by': 'vibecarbon' },
+          },
           parent: server.parent,
           provider: server.provider,
         },
@@ -384,6 +393,9 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
 
     expect(lookup.calls).toEqual(['sealtest-e4-ghost']);
     expect(warnings).toEqual([]);
+    expect(logged).toContain(
+      "[pulumi] state seal for e4 leaves alone sealtest-e4-ghost (id not-ours-1): same name, but without this environment's ownership labels, so not vibecarbon's",
+    );
     expect(logged).toContain(
       "[pulumi] cleared 1 unfinished create from e4's state: sealtest-e4-ghost",
     );

@@ -99,7 +99,11 @@ import { randomBytes } from 'node:crypto';
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
-import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
+import {
+  SERVER_OWNER_LABELS,
+  serverResourceOptions,
+  workerResourceOptions,
+} from '../create-timeout.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -208,9 +212,12 @@ export function vpcCidrForCluster(clusterName) {
  */
 export function buildDigitalOceanK8sProgram(config) {
   const clusterName = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   // Operator-IP firewall lock (H-2) — byte-parity with hetzner-k8s.js and

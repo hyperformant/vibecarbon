@@ -1,7 +1,7 @@
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
-import { serverResourceOptions } from '../create-timeout.js';
+import { SERVER_OWNER_LABELS, serverResourceOptions } from '../create-timeout.js';
 import { spliceDockerInstall } from '../docker-install.js';
 
 /**
@@ -42,9 +42,12 @@ export function loadHetznerComposeUserData() {
  */
 export function buildHetznerComposeProgram(config) {
   const name = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   // Operator-IP firewall lock (H-2). The deploy flow populates this from

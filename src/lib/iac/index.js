@@ -1609,12 +1609,19 @@ async function resolvePendingCreates(stack, exported, options) {
   let untracked = [];
   if (servers.length > 0) {
     try {
-      untracked = await untrackedServers(
+      const listed = await untrackedServers(
         servers,
         exported,
         SERVER_RESOURCE_TYPES,
         getProvider(providerId, options.providerToken),
       );
+      untracked = listed.ours;
+      if (listed.foreign.length > 0) {
+        const foreign = listed.foreign.map((s) => `${s.name} (id ${s.id})`).join(', ');
+        progressLog(
+          `[pulumi] state seal for ${stack.name} leaves alone ${foreign}: same name, but without this environment's ownership labels, so not vibecarbon's`,
+        );
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       progressLog(
@@ -1628,7 +1635,7 @@ async function resolvePendingCreates(stack, exported, options) {
     progressLog(
       `[pulumi] state seal for ${stack.name} waits on ${creates}: ${[
         ...untracked.map((s) => `${s.name} (id ${s.id}) running untracked`),
-        ...others.map((o) => `${o.what} ${o.name}, which vibecarbon can't look up`),
+        ...others.map((o) => `${o.what} ${o.name}, which vibecarbon can't confirm`),
       ].join(', ')}`,
     );
     if (others.length > 0) recordPendingReported(ledger, stack.name, others);

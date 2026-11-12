@@ -6,7 +6,7 @@ import {
   transliterateCloudInitToAscii,
 } from '../../providers/scaleway.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
-import { serverResourceOptions } from '../create-timeout.js';
+import { SERVER_OWNER_LABELS, serverResourceOptions } from '../create-timeout.js';
 import { spliceDockerInstall } from '../docker-install.js';
 
 // SBS root-volume size — MUST byte-match
@@ -61,9 +61,12 @@ export function loadScalewayComposeUserData() {
  */
 export function buildScalewayComposeProgram(config) {
   const name = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   // Operator-IP firewall lock (H-2 guard, all sibling programs).

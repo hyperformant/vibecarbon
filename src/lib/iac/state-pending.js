@@ -11,29 +11,84 @@
  * it with only a warning (Task 7 review). So the seal never imports over one.
  * The deploy clears them with the SDK's refresh({ clearPendingCreates: true })
  * once nothing they may have made is left running untracked:
- *   - a server is looked up by the name the program gave it (`nameInput`).
- *     When the provider lists no server by that name that the state doesn't
- *     track, the create made nothing that survived. One it does list is
- *     running untracked and billing, and the user deletes it in the console;
- *   - vibecarbon has no lookup for any other resource, so the user is told to
- *     check the console, and the deploy after the one that said so clears it.
- *     The ledger keeps what was reported (pendingReported), so "then deploy
- *     again" is what clears it.
+ *   - a server is looked up by the name the program gave it (`nameInput`),
+ *     and one the provider lists is vibecarbon's only when it carries the
+ *     ownership labels the create recorded (`labelsInput`: SERVER_OWNER_LABELS,
+ *     `project`, `environment`, which every program sets on its servers at
+ *     create time). One of ours the state doesn't track is running untracked
+ *     and billing, and the user deletes it in the console. A same-name server
+ *     without those labels isn't ours: it's left alone and never named as one
+ *     to delete. When none of ours is listed, the create made nothing that
+ *     survived;
+ *   - vibecarbon has no lookup for any other resource, nor a way to tell a
+ *     server it made from another of the same name when the create recorded
+ *     no ownership labels. The user is told to check the console, and the
+ *     deploy after the one that said so clears it. The ledger keeps what was
+ *     reported (pendingReported), so "then deploy again" is what clears it.
  *
  * Never logs or prints an input value beyond a resource's name.
  */
 
+import { SERVER_OWNER_LABELS } from './create-timeout.js';
+
 /**
- * @typedef {{ urn: string, noun: string, name: string }} PendingServer
- * @typedef {{ urn: string, what: string, name: string }} PendingOther
- * @typedef {PendingServer & { id: string }} UntrackedServer
+ * @typedef {Record<string, string>} Ownership
+ * @typedef {{ urn: string, noun: string, name: string, owner: Ownership }} PendingServer
+ * @typedef {{ urn: string, what: string, name: string, billing: boolean }} PendingOther
+ * @typedef {PendingServer & { id: string }} ListedServer
  */
+
+/**
+ * The labels that make a server vibecarbon's, as the destroy sweep's
+ * isEnvironmentOwnedServer reads them too.
+ */
+export const OWNERSHIP_KEYS = Object.freeze([
+  ...Object.keys(SERVER_OWNER_LABELS),
+  'project',
+  'environment',
+]);
+
+/**
+ * The ownership labels a create recorded in its `labelsInput`: a map on
+ * Hetzner, `key:value` tags on the others, split on the first `:` as each
+ * provider's decodeLabels does (a tag's characters and Linode's squeeze are
+ * the same on the server the create made, so the two compare as written).
+ * Null unless it recorded every ownership key and SERVER_OWNER_LABELS' values.
+ * @param {Record<string, unknown> | undefined} inputs
+ * @param {string | undefined} labelsInput
+ * @returns {Ownership | null}
+ */
+export function recordedOwnership(inputs, labelsInput) {
+  const raw = labelsInput ? inputs?.[labelsInput] : undefined;
+  /** @type {Record<string, unknown>} */
+  const labels = {};
+  if (Array.isArray(raw)) {
+    for (const tag of raw) {
+      if (typeof tag !== 'string') continue;
+      const sep = tag.indexOf(':');
+      if (sep > 0) labels[tag.slice(0, sep)] = tag.slice(sep + 1);
+    }
+  } else if (raw && typeof raw === 'object') {
+    Object.assign(labels, raw);
+  }
+  /** @type {Ownership} */
+  const owner = {};
+  for (const key of OWNERSHIP_KEYS) {
+    const value = labels[key];
+    if (typeof value !== 'string' || !value) return null;
+    owner[key] = value;
+  }
+  for (const [key, value] of Object.entries(SERVER_OWNER_LABELS)) {
+    if (owner[key] !== value) return null;
+  }
+  return owner;
+}
 
 /**
  * `deployment`'s pending operations, split into the server creates the
  * provider can be asked about and everything else.
  * @param {{ deployment?: { pending_operations?: Array<{ type?: string, resource?: { urn?: string, type?: string, inputs?: Record<string, unknown> } }> } }} deployment
- * @param {Readonly<Record<string, { noun: string, nameInput: string }>>} types - SERVER_RESOURCE_TYPES
+ * @param {Readonly<Record<string, { noun: string, nameInput: string, labelsInput: string }>>} types - SERVER_RESOURCE_TYPES
  * @returns {{ servers: PendingServer[], others: PendingOther[] }}
  */
 export function classifyPendingCreates(deployment, types) {
@@ -44,23 +99,42 @@ export function classifyPendingCreates(deployment, types) {
     const urn = String(resource.urn ?? '');
     const serverClass = types[resource.type];
     const name = serverClass ? resource.inputs?.[serverClass.nameInput] : undefined;
-    if (op?.type === 'creating' && serverClass && typeof name === 'string' && name) {
-      servers.push({ urn, noun: serverClass.noun, name });
+    const owner = serverClass ? recordedOwnership(resource.inputs, serverClass.labelsInput) : null;
+    if (op?.type === 'creating' && serverClass && typeof name === 'string' && name && owner) {
+      servers.push({ urn, noun: serverClass.noun, name, owner });
     } else {
-      others.push({ urn, what: kindOf(resource.type), name: nameOf(resource, urn) });
+      others.push({
+        urn,
+        what: serverClass?.noun ?? kindOf(resource.type),
+        name: nameOf(resource, urn),
+        billing: Boolean(serverClass) || bills(resource.type),
+      });
     }
   }
   return { servers, others };
 }
 
-/** `hcloud:index/firewall:Firewall` → `firewall`, `ReservedIpAssignment` → `reserved ip assignment`. */
+/** The class name in a Pulumi type token: `hcloud:index/floatingIp:FloatingIp` → `FloatingIp`. */
+const classOf = (type) =>
+  String(type ?? '')
+    .split(':')
+    .pop() || 'resource';
+
+/** Words a type token spells in camel case that read as acronyms. */
+const ACRONYMS = new Set(['ip', 'ssh', 'vpc']);
+
+/** `hcloud:index/floatingIp:FloatingIp` → `floating IP`, `vultr:index/sSHKey:SSHKey` → `SSH key`. */
 function kindOf(type) {
-  const cls =
-    String(type ?? '')
-      .split(':')
-      .pop() || 'resource';
-  return cls.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  return classOf(type)
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(' ')
+    .map((word) => (ACRONYMS.has(word.toLowerCase()) ? word.toUpperCase() : word.toLowerCase()))
+    .join(' ');
 }
+
+/** Whether a resource of `type` is billed while it exists: volumes, IPs, load balancers, buckets. */
+const bills = (type) => /(Volume|Ip|LoadBalancer|Bucket)$/.test(classOf(type));
 
 /** The provider-side name a resource was given, else its name in the program. */
 function nameOf(resource, urn) {
@@ -74,16 +148,18 @@ function nameOf(resource, urn) {
 const bareId = (id) => String(id).split('/').pop();
 
 /**
- * The servers a pending create may have left running: each one the provider
- * lists under a pending create's name whose id no server in the state has.
+ * The servers the provider lists under a pending create's name that no server
+ * in the state has the id of, split by whether each carries the ownership
+ * labels the create recorded (`ours`: running untracked, the create's own) or
+ * not (`foreign`: someone else's server that shares the name, left alone).
  * Rejects when the provider can't list every server (findServersByName's
  * strict mode): an empty answer then would drop the record of a server that
  * may exist.
  * @param {PendingServer[]} servers
  * @param {{ deployment?: { resources?: Array<{ type?: string, id?: unknown }> } }} deployment
  * @param {Readonly<Record<string, object>>} types - SERVER_RESOURCE_TYPES
- * @param {{ findServersByName: (name: string, options: { strict: boolean }) => Promise<Array<{ id: unknown }>> }} client
- * @returns {Promise<UntrackedServer[]>}
+ * @param {{ findServersByName: (name: string, options: { strict: boolean }) => Promise<Array<{ id: unknown }>>, serverLabels: (server: object) => Record<string, string> }} client
+ * @returns {Promise<{ ours: ListedServer[], foreign: ListedServer[] }>}
  */
 export async function untrackedServers(servers, deployment, types, client) {
   const tracked = new Set(
@@ -91,15 +167,20 @@ export async function untrackedServers(servers, deployment, types, client) {
       .filter((r) => r?.type in types && r.id != null && r.id !== '')
       .map((r) => bareId(r.id)),
   );
-  /** @type {Map<string, UntrackedServer>} */
-  const found = new Map();
+  /** @type {Map<string, ListedServer>} */
+  const ours = new Map();
+  /** @type {Map<string, ListedServer>} */
+  const foreign = new Map();
   for (const server of servers) {
     for (const listed of await client.findServersByName(server.name, { strict: true })) {
       const id = bareId(listed.id);
-      if (!tracked.has(id) && !found.has(id)) found.set(id, { ...server, id });
+      if (tracked.has(id) || ours.has(id) || foreign.has(id)) continue;
+      const labels = client.serverLabels(listed) ?? {};
+      const mine = OWNERSHIP_KEYS.every((key) => labels[key] === server.owner[key]);
+      (mine ? ours : foreign).set(id, { ...server, id });
     }
   }
-  return [...found.values()];
+  return { ours: [...ours.values()], foreign: [...foreign.values()] };
 }
 
 /** The ledger step that records which unfinished creates of `stackName` the user was told about. */
@@ -147,22 +228,23 @@ function listing(items) {
   return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
 
+/** `the floating IP p-e1-ip`: a resource by its type and name. */
+const theOther = (o) => `the ${o.what} ${o.name}`;
+
 const opening = (stackName) =>
   `Your servers in ${stackName} are updated, but vibecarbon left their user data in plain text in the Pulumi state.`;
 
 /**
  * What the user reads when unfinished creates may have left something in
- * their account: servers the provider lists untracked, and resources
- * vibecarbon can't look up. Each needs the console, then another deploy,
- * which clears the records and seals.
+ * their account: servers of ours the provider lists untracked, and resources
+ * vibecarbon can't tell were made, naming each one that bills while it
+ * exists. Each needs the console, then another deploy, which clears the
+ * records and seals. A server that only shares a name is never in it.
  * @param {string} stackName
- * @param {{ untracked: UntrackedServer[], others: PendingOther[], providerName: string }} found
+ * @param {{ untracked: ListedServer[], others: PendingOther[], providerName: string }} found
  */
 export function pendingCreatesBlock(stackName, { untracked, others, providerName }) {
-  const items = [
-    ...untracked.map((s) => `the ${s.noun} ${s.name}`),
-    ...others.map((o) => `the ${o.what} ${o.name}`),
-  ];
+  const items = [...untracked.map((s) => `the ${s.noun} ${s.name}`), ...others.map(theOther)];
   const many = items.length > 1;
   const sentences = [
     opening(stackName),
@@ -177,8 +259,13 @@ export function pendingCreatesBlock(stackName, { untracked, others, providerName
   if (others.length > 0) {
     const them = others.length > 1;
     sentences.push(
-      `Nothing in vibecarbon can look up ${listing(others.map((o) => `the ${o.what} ${o.name}`))}, so check your ${providerName} console for ${them ? 'them' : 'it'} and delete ${them ? 'any that are' : "it if it's"} there.`,
+      `vibecarbon can't tell whether ${them ? 'those creates' : 'that create'} made ${listing(others.map(theOther))}, so check your ${providerName} console for ${them ? 'them' : 'it'} and delete ${them ? "any that are this project's" : "it if it's this project's"}.`,
     );
+    const billing = others.filter((o) => o.billing);
+    if (billing.length > 0) {
+      const sentence = `${listing(billing.map(theOther))} may be billing you while ${billing.length > 1 ? 'they exist' : 'it exists'}.`;
+      sentences.push(sentence[0].toUpperCase() + sentence.slice(1));
+    }
   }
   sentences.push(
     `Then deploy again: the next deploy clears ${many ? 'the records' : 'the record'} and seals the state.`,
