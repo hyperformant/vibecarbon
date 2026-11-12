@@ -107,3 +107,45 @@ describe('provisionServer output gate', () => {
     await expect(EFFECTS.provisionServer(ctx)).rejects.toThrow(/no serverIp output/);
   });
 });
+
+describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
+  const warmCtx = (): Record<string, unknown> => ({
+    projectConfig: { projectName: 'testapp', operatorCidrs: [{ cidr: '1.2.3.4/32' }] },
+    environment: 'production',
+    region: 'nbg1',
+    serverType: undefined,
+    apiToken: 'test-token',
+    s3Config: { bucket: 'b', region: 'nbg1' },
+    sshKeyPath: '/tmp/never-created',
+    envConfig: { provider: 'hetzner' },
+    state: { ledger: 'the deploy ledger' },
+    // A server the env already records: a warm deploy whose stack isn't sealed yet.
+    serverIp: '203.0.113.10',
+    providerServerId: '4242',
+    stateSealed: false,
+  });
+
+  it("hands upStack the deploy's ledger, where the seal records its marker", async () => {
+    const ctx = warmCtx();
+    upStackMock.mockRejectedValueOnce(new Error('STOP_AFTER_UPSTACK_CALL'));
+    await expect(EFFECTS.provisionServer(ctx)).rejects.toThrow('STOP_AFTER_UPSTACK_CALL');
+    const [, , options] = upStackMock.mock.calls.at(-1) as [
+      unknown,
+      unknown,
+      Record<string, unknown>,
+    ];
+    expect(options.ledger).toBe(ctx.state);
+  });
+
+  it('a warm up that leaves the server where it was changes nothing else: no SSH wait, no new pin, no record', async () => {
+    upStackMock.mockResolvedValueOnce({
+      outputs: { serverIp: '203.0.113.10', serverId: '4242', firewallId: 'fw-1' },
+    } as never);
+    const ctx = warmCtx();
+    const before = { ...ctx };
+    // A reached SSH wait or key scan would fail on the never-created key.
+    await expect(EFFECTS.provisionServer(ctx)).resolves.toBeUndefined();
+    expect(ctx).toEqual(before);
+    expect(ctx.serverProvisioned).toBeUndefined();
+  });
+});

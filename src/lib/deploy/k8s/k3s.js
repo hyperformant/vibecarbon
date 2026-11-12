@@ -58,6 +58,7 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
+import { infraStepSkips } from '../../iac/state-seal.js';
 import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
@@ -5156,7 +5157,11 @@ async function deployK3sSteps(options, inFlight) {
     maxWorkers,
     k3sVersion: k3sVersion(),
   };
-  if (!state.shouldSkip('k3s-infra', infraInputs)) {
+  // Gated on its inputs and on the seal marker (lib/iac/state-seal.js): a
+  // cluster deployed before its state was sealed runs this up once, whose
+  // seal and history cleanup set the marker; until they finish, every deploy
+  // runs it again.
+  if (!infraStepSkips(state, 'k3s-infra', infraInputs, [options.environment])) {
     state.startStep('k3s-infra', infraInputs);
     const { upStack } = await import('../../iac/index.js');
 
@@ -5219,6 +5224,8 @@ async function deployK3sSteps(options, inFlight) {
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
+        // Where the seal records its marker.
+        ledger: state,
         // A DigitalOcean cluster made before 2026-11: the reserved IP the up
         // takes out of this stack goes onto the environment's record, where
         // the release and destroy find it (k8s/retired-reserved-ip.js).

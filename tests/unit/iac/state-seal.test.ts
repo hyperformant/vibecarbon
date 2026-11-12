@@ -4,13 +4,20 @@
  * on a fresh export, importing only when it sealed anything, and twice then,
  * so the checkpoint Pulumi keeps as `<stack>.json.bak` is the sealed one too.
  *
- * The real engine's answer (a legacy sentinel gone from the stack file and
- * its .bak, a second deploy sealing 0) is
+ * With a deploy's ledger it also removes the history copies that still hold
+ * plain values, and only then records the seal marker the k8s and compose-ha
+ * gates read (infraStepSkips); never with pending operations.
+ *
+ * The real engine's answer (a legacy sentinel gone from the stack file, its
+ * .bak and its history, a second deploy sealing 0) is
  * tests/integration/iac/state-seal.test.ts.
  */
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as rpc from '@pulumi/pulumi/runtime/rpc.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakePulumi } from '../../_shared/fake-pulumi-workspace.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { STATE_ERROR_CORPUS } from './fixtures/state-error-corpus.js';
 
 vi.mock('@pulumi/pulumi/automation/index.js', async () =>
@@ -32,9 +39,17 @@ vi.mock('../../../src/lib/cli/progress.js', () => ({
   progressLog: (m: string) => logged.push(m),
 }));
 
-const { SECRET_SIG, SECRET_SIG_KEY, sealServerUserData } = await import(
-  '../../../src/lib/iac/state-seal.js'
-);
+const {
+  SECRET_SIG,
+  SECRET_SIG_KEY,
+  infraStepSkips,
+  plainValueCount,
+  recordStateSeal,
+  sealServerUserData,
+  stateSealRecorded,
+} = await import('../../../src/lib/iac/state-seal.js');
+// @ts-expect-error: JS module without types
+const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { SERVER_RESOURCE_TYPES } = await import('../../../src/lib/iac/create-timeout.js');
 const { __resetStateProbesForTests, upStack } = await import('../../../src/lib/iac/index.js');
 
@@ -188,7 +203,53 @@ describe('sealServerUserData', () => {
     expect(deployment.deployment.resources[2]).toEqual(state.deployment.resources[2]);
     expect('userData' in serverOf(deployment).outputs).toBe(false);
   });
+
+  it('a secret whose plaintext is not JSON is left alone, and nothing quotes it', () => {
+    // V8's parse error quotes the text it choked on; the seal never parses
+    // its way into a message. Only a secret inside the value is parsed (one
+    // at the top is already sealed), so it sits in Linode's metadatas.
+    const broken = { [SECRET_SIG_KEY]: SECRET_SIG, plaintext: `#cloud-config ${TOKEN}` };
+    const value = [{ userData: broken }];
+    const state = legacyState('linode:index/instance:Instance', value);
+    let result: ReturnType<typeof sealServerUserData> | undefined;
+    expect(() => {
+      result = sealServerUserData(state, SERVER_RESOURCE_TYPES);
+    }).not.toThrow();
+    expect(result?.count).toBe(0);
+    expect(serverOf(result?.deployment as typeof state).inputs.metadatas).toEqual(value);
+  });
+
+  it('plainValueCount counts the user data a pending operation still carries', () => {
+    const sealed = sealServerUserData(
+      legacyState('hcloud:index/server:Server', CLOUD_INIT),
+      SERVER_RESOURCE_TYPES,
+    ).deployment;
+    expect(plainValueCount(sealed, SERVER_RESOURCE_TYPES)).toBe(0);
+    const pending = withPending(sealed, CLOUD_INIT);
+    expect(plainValueCount(pending, SERVER_RESOURCE_TYPES)).toBe(1);
+    // The resources alone: the seal itself never wraps an operation's inputs.
+    expect(sealServerUserData(pending, SERVER_RESOURCE_TYPES).count).toBe(0);
+  });
 });
+
+/** `state` with a server create an earlier run left pending, user data `userData`. */
+function withPending(state: ReturnType<typeof legacyState>, userData: unknown) {
+  const next = structuredClone(state) as ReturnType<typeof legacyState> & {
+    deployment: { pending_operations?: unknown[] };
+  };
+  next.deployment.pending_operations = [
+    {
+      type: 'creating',
+      resource: {
+        urn: 'urn:pulumi:e1::proj::hcloud:index/server:Server::worker-1',
+        custom: true,
+        type: 'hcloud:index/server:Server',
+        inputs: { name: 'proj-e1-worker-1', userData },
+      },
+    },
+  ];
+  return next;
+}
 
 /** A legacy Hetzner compose stack, as every export of it reads before the seal. */
 const LEGACY = legacyState('hcloud:index/server:Server', CLOUD_INIT);
@@ -320,5 +381,251 @@ describe('upStack seals the state after a successful up', () => {
     expect(logged.join('\n')).toContain(
       "[pulumi] e1's state is sealed, but its previous copy (.bak) keeps the plain values until the next deploy",
     );
+  });
+});
+
+/** A real StateTracker in its own directory, as a deploy's ledger. */
+function ledgerIn(dir: string, environment = 'e1') {
+  const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  try {
+    return new StateTracker('proj', environment);
+  } finally {
+    cwd.mockRestore();
+  }
+}
+
+/** Write `latest` as one of e1's history checkpoints, with its sidecar, as Pulumi does. */
+function writeHistory(backendDir: string, name: string, latest: unknown) {
+  const dir = join(backendDir, '.pulumi/history/proj/e1');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${name}.checkpoint.json`);
+  writeFileSync(file, JSON.stringify({ version: 3, checkpoint: { stack: 'e1', latest } }));
+  writeFileSync(`${file}.attrs`, '{"user.cache_control":""}');
+  writeFileSync(join(dir, `${name}.history.json`), '{"kind":"update","result":"succeeded"}');
+  return file;
+}
+
+/** LEGACY as the backend writes it after the seal: user data in ciphertext. */
+const CIPHERTEXT = { [SECRET_SIG_KEY]: SECRET_SIG, ciphertext: 'v1:c2VhbGVk:c2VhbGVk' };
+const SEALED_LATEST = legacyState('hcloud:index/server:Server', CIPHERTEXT).deployment;
+
+describe('with a ledger: the history copies, then the seal marker', () => {
+  let backendDir: string;
+  let ledgerDir: string;
+  beforeEach(() => {
+    fakePulumi.reset();
+    __resetStateProbesForTests();
+    warnings.length = 0;
+    logged.length = 0;
+    backendDir = createTempDir('seal-backend-');
+    ledgerDir = createTempDir('seal-ledger-');
+    // Never the developer's own ~/.vibecarbon/pulumi-state.
+    process.env.PULUMI_BACKEND_URL = `file://${backendDir}`;
+    fakePulumi.behaviour.exportStack = () => structuredClone(LEGACY);
+  });
+  afterEach(() => {
+    const dir = join(backendDir, '.pulumi/history/proj/e1');
+    if (existsSync(dir)) chmodSync(dir, 0o755);
+  });
+
+  it('a legacy stack: sealed, the history copy that held plain values removed with its sidecar, the rest kept, the marker set', async () => {
+    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    const sealed = writeHistory(backendDir, 'e1-2000', SEALED_LATEST);
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(fakePulumi.imports).toHaveLength(2);
+    expect(existsSync(plain)).toBe(false);
+    expect(existsSync(`${plain}.attrs`)).toBe(false);
+    expect(existsSync(sealed)).toBe(true);
+    expect(existsSync(`${sealed}.attrs`)).toBe(true);
+    for (const name of ['e1-1000', 'e1-2000']) {
+      expect(existsSync(join(backendDir, '.pulumi/history/proj/e1', `${name}.history.json`))).toBe(
+        true,
+      );
+    }
+    expect(logged).toContain(
+      "[pulumi] removed 1 of 2 history copies of e1's state that held plain values",
+    );
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+    // On disk: the next process's ledger reads it.
+    expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(true);
+  });
+
+  it('a marked stack: no history read at all', async () => {
+    fakePulumi.behaviour.exportStack = () =>
+      sealServerUserData(structuredClone(LEGACY), SERVER_RESOURCE_TYPES).deployment;
+    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    const ledger = ledgerIn(ledgerDir);
+    recordStateSeal(ledger, 'e1');
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(existsSync(plain)).toBe(true);
+    expect(logged.filter((l) => l.includes('history'))).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+  });
+
+  it('a marked stack whose up found plain values again: sealed, and the plain history copies of this deploy go too', async () => {
+    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    const ledger = ledgerIn(ledgerDir);
+    recordStateSeal(ledger, 'e1');
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(fakePulumi.imports).toHaveLength(2);
+    expect(existsSync(plain)).toBe(false);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+  });
+
+  it('no ledger (scale, failover): sealed, history untouched, nothing recorded', async () => {
+    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+
+    await upStack('e1', async () => ({}), BASE);
+
+    expect(fakePulumi.imports).toHaveLength(2);
+    expect(existsSync(plain)).toBe(true);
+  });
+
+  it('a seal that fails sets no marker, and clears one a ledger had', async () => {
+    fakePulumi.behaviour.importStack = () => {
+      throw encryptRefusal();
+    };
+    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    const fresh = ledgerIn(ledgerDir, 'e1');
+    await upStack('e1', async () => ({}), { ...BASE, ledger: fresh });
+    expect(stateSealRecorded(fresh, 'e1')).toBe(false);
+    expect(existsSync(plain), 'no history cleanup before the stack is sealed').toBe(true);
+
+    const marked = ledgerIn(ledgerDir, 'e1');
+    recordStateSeal(marked, 'e1');
+    await upStack('e1', async () => ({}), { ...BASE, ledger: marked });
+    expect(stateSealRecorded(marked, 'e1')).toBe(false);
+  });
+
+  it('a second import that fails sets no marker: the .bak still holds the plain values', async () => {
+    let imports = 0;
+    fakePulumi.behaviour.importStack = () => {
+      imports++;
+      if (imports > 1) throw new Error(STORE_FAULT);
+    };
+    const ledger = ledgerIn(ledgerDir);
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+  });
+
+  it('a history cleanup that fails: the deploy stands, the warning says the next deploy tries again, no marker', async () => {
+    writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    chmodSync(join(backendDir, '.pulumi/history/proj/e1'), 0o000);
+    const ledger = ledgerIn(ledgerDir);
+
+    await expect(upStack('e1', async () => ({}), { ...BASE, ledger })).resolves.toBeDefined();
+
+    expect(sealLines()).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(
+      /^Your servers in e1 are updated and their user data is sealed in the Pulumi state, but vibecarbon couldn't remove the older copies of that state Pulumi keeps in its history, which still hold it in plain text: .*EACCES.*\. The next deploy tries again\.$/,
+    );
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+  });
+
+  it('pending operations with a plain value left: no import, a warning that says why and what clears it, no marker', async () => {
+    fakePulumi.behaviour.exportStack = () => withPending(structuredClone(LEGACY), CLOUD_INIT);
+    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([
+      "Your servers in e1 are updated, but vibecarbon left their user data in plain text in the Pulumi state: it still records an operation an earlier run didn't finish (creating worker-1), " +
+        'and sealing rewrites the state without that record, the only trace of a server that may be running in your account. ' +
+        'Check your provider for that server, then clear the record with `pulumi refresh --clear-pending-creates --stack e1`. ' +
+        'The next deploy seals the state.',
+    ]);
+    expect(logged).toContain(
+      '[pulumi] state seal for e1 skipped: its state lists 1 pending operation',
+    );
+    expect(sealLines()).toEqual([]);
+    expect(existsSync(plain)).toBe(true);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+    expect(`${warnings.join('\n')}\n${logged.join('\n')}`).not.toContain(TOKEN);
+  });
+
+  it('pending operations with nothing plain anywhere: nothing to import, so the stack counts as sealed', async () => {
+    const sealed = sealServerUserData(structuredClone(LEGACY), SERVER_RESOURCE_TYPES).deployment;
+    fakePulumi.behaviour.exportStack = () => withPending(sealed, CIPHERTEXT);
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+  });
+});
+
+describe('the k8s and compose-ha gates read the seal marker (infraStepSkips)', () => {
+  const INFRA = { region: 'fsn1', masterType: 'cx23', k3sVersion: 'v1.31.0+k3s1' };
+  let ledgerDir: string;
+  beforeEach(() => {
+    fakePulumi.reset();
+    __resetStateProbesForTests();
+    warnings.length = 0;
+    logged.length = 0;
+    ledgerDir = createTempDir('seal-gate-');
+    process.env.PULUMI_BACKEND_URL = `file://${createTempDir('seal-gate-backend-')}`;
+    fakePulumi.behaviour.exportStack = () => structuredClone(LEGACY);
+  });
+
+  /** A ledger an older version wrote: the infra step done with these inputs, no marker. */
+  function upgradedLedger() {
+    const ledger = ledgerIn(ledgerDir);
+    ledger.startStep('k3s-infra', INFRA);
+    ledger.completeStep('k3s-infra', { masterIp: '198.51.100.7' });
+    return ledger;
+  }
+
+  it('a redeploy with unchanged infra after the upgrade runs the up and seals; the next one skips', async () => {
+    const ledger = upgradedLedger();
+    // What the gate alone would say, and what it says with the marker.
+    expect(ledger.shouldSkip('k3s-infra', INFRA)).toBe(true);
+    expect(infraStepSkips(ledger, 'k3s-infra', INFRA, ['e1'])).toBe(false);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+    expect(sealLines()).toEqual([
+      "[pulumi] sealed 2 plain user data and k3s token values in e1's state",
+    ]);
+
+    // The next deploy, a new process: unchanged inputs, marker set, skipped.
+    expect(infraStepSkips(ledgerIn(ledgerDir), 'k3s-infra', INFRA, ['e1'])).toBe(true);
+  });
+
+  it('a seal that fails leaves the marker unset, so the next deploy runs the up again', async () => {
+    fakePulumi.behaviour.importStack = () => {
+      throw encryptRefusal();
+    };
+    const ledger = upgradedLedger();
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(infraStepSkips(ledgerIn(ledgerDir), 'k3s-infra', INFRA, ['e1'])).toBe(false);
+  });
+
+  it('a step with two stacks (compose-ha) skips only when both are marked', () => {
+    const ledger = upgradedLedger();
+    recordStateSeal(ledger, 'e1-primary');
+    expect(infraStepSkips(ledger, 'k3s-infra', INFRA, ['e1-primary', 'e1-standby'])).toBe(false);
+    recordStateSeal(ledger, 'e1-standby');
+    expect(infraStepSkips(ledger, 'k3s-infra', INFRA, ['e1-primary', 'e1-standby'])).toBe(true);
+    // Changed inputs still run the up, marker or not.
+    expect(
+      infraStepSkips(ledger, 'k3s-infra', { ...INFRA, masterType: 'cx33' }, [
+        'e1-primary',
+        'e1-standby',
+      ]),
+    ).toBe(false);
   });
 });

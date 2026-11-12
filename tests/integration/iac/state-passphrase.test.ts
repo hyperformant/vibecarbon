@@ -276,7 +276,8 @@ describe.runIf(hasPulumi || process.env.CI)('legacy empty-passphrase stacks (rea
       { stackName: 'legacy-e', projectName: PROJECT, program: async () => ({}) },
       rawWorkspace(PASSPHRASE),
     );
-    await expect(raw.outputs()).resolves.toHaveProperty('serverId');
+    const before = await raw.outputs();
+    expect(before).toHaveProperty('serverId');
     await expect(raw.exportStack()).rejects.toThrow(/incorrect passphrase/);
     const serversBefore = servers().length;
 
@@ -284,10 +285,10 @@ describe.runIf(hasPulumi || process.env.CI)('legacy empty-passphrase stacks (rea
 
     expect(outputs.serverId).toEqual(expect.any(String));
     expect(infos).toEqual([migratedLine('legacy-e')]);
-    // Still one server. (The fake cloud replaces a server whose user data is
-    // a secret on every second up, migrated or not: its diff sees the secret
-    // wrapper. Bridged providers compare the values.)
+    // The same server: the fake cloud's diff compares the revealed user data,
+    // as bridged providers do, so the migrated up replaces nothing.
     expect(servers().length).toBe(serversBefore);
+    expect(outputs.serverId).toBe(before.serverId.value);
     await expect(exportWith('legacy-e', '')).rejects.toThrow(/incorrect passphrase/);
   });
 

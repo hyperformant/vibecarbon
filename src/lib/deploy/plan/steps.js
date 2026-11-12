@@ -15,9 +15,18 @@
 import { hasAutomatedDns } from '../../dns-provider.js';
 import { defineStep } from './step.js';
 
-/** Provision a fresh Hetzner VPS — only when no server IP is known yet. */
+/**
+ * Provision a fresh VPS when no server IP is known yet, and run the same up on
+ * a known server whose stack the ledger doesn't mark sealed
+ * (`ctx.stateSealed`, lib/iac/state-seal.js): the seal runs after an up, so a
+ * warm deploy that skipped it would never seal.
+ */
 export const provisionServerStep = () =>
-  defineStep({ name: 'provision-server', effect: 'provisionServer', when: (ctx) => !ctx.serverIp });
+  defineStep({
+    name: 'provision-server',
+    effect: 'provisionServer',
+    when: (ctx) => !ctx.serverIp || !ctx.stateSealed,
+  });
 
 /** Wait for cloud-init (and, for local/direct modes, dockerd) to be ready. */
 export const setupServerStep = () => defineStep({ name: 'setup-server', effect: 'setupServer' });

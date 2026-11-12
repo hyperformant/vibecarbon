@@ -36,6 +36,7 @@ import { c, link } from '../../colors.js';
 import { loadProjectConfig, registerProject, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import { infraStepSkips } from '../../iac/state-seal.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { haClassMessage, haStandbyType } from '../../sizing.js';
@@ -358,8 +359,15 @@ async function haProvisionServers(ctx) {
     cliVersion: VERSION,
   };
   const state = ctx.state;
+  // The seal marker is part of the decision (lib/iac/state-seal.js): a pair
+  // deployed before its state was sealed runs both ups once more.
   const recorded =
-    !ctx.reconverge && state?.shouldSkip(COMPOSE_HA_INFRA_STEP, infraInputs)
+    !ctx.reconverge &&
+    state &&
+    infraStepSkips(state, COMPOSE_HA_INFRA_STEP, infraInputs, [
+      `${environment}-primary`,
+      `${environment}-standby`,
+    ])
       ? state.getStepResult(COMPOSE_HA_INFRA_STEP)
       : null;
   // The ledger is not trusted over reality. It is reused only when every
@@ -387,6 +395,7 @@ async function haProvisionServers(ctx) {
               providerToken: apiToken,
               s3Config,
               projectName,
+              ledger: state,
               // Recover stale-EMPTY outputs reads in place (read-only poll inside
               // upStack); the hard gate below stays the loud last resort. This
               // path is the MOST exposed member of the class: two parallel ups
@@ -401,6 +410,7 @@ async function haProvisionServers(ctx) {
               providerToken: apiToken,
               s3Config,
               projectName,
+              ledger: state,
               requiredOutputs: ['serverIp'],
             }),
           ),

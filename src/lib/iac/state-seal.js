@@ -17,7 +17,20 @@
  * and imports the result when it sealed anything (lib/iac/index.js
  * sealStackState says why after the up and not before). The `k3sToken` Stack
  * output is covered too, though an up of the current program already writes
- * it sealed.
+ * it sealed. Pulumi's history copies of the state from before the seal are
+ * removed after it (state-history.js).
+ *
+ * THE SEAL MARKER. A deploy records, in its step ledger
+ * (`.vibecarbon/deploy-state-<env>.json`, lib/deploy/state.js), that a stack
+ * is sealed and its history holds no plain copy, once both are done. Every
+ * mode's warm deploy skips Pulumi when nothing about its servers changed (the
+ * k8s `k3s-infra` and compose-ha `compose-ha-infra` steps, compose's
+ * `provision-server` on a recorded server), and the marker is part of that
+ * decision (infraStepSkips; `ctx.stateSealed` for compose): without it the
+ * first deploy after an upgrade would skip the up, so nothing would seal. A
+ * seal or a history cleanup that didn't finish records no marker, so the next
+ * deploy runs the up and tries again; once recorded, it costs nothing. The
+ * ledger is per machine, so a teammate's first deploy runs the up once too.
  */
 
 /**
@@ -57,7 +70,15 @@ function opened(value) {
   if (isSecret(value)) {
     const { plaintext } = /** @type {{ plaintext?: unknown }} */ (value);
     if (typeof plaintext !== 'string') return null;
-    return opened(JSON.parse(plaintext));
+    // V8 quotes the start of a string it can't parse in the error, and that
+    // string is the secret: left alone rather than ever reaching a log.
+    let inner;
+    try {
+      inner = JSON.parse(plaintext);
+    } catch {
+      return null;
+    }
+    return opened(inner);
   }
   if (Array.isArray(value)) {
     const items = [];
@@ -126,4 +147,78 @@ export function sealServerUserData(state, types) {
     for (const side of ['inputs', 'outputs']) if (seal(resource[side], field)) count++;
   }
   return { deployment: next, count };
+}
+
+/**
+ * How many plain values the seal would wrap in `state`: in its resources and
+ * in the resources its pending operations carry (a server create an earlier
+ * run left unfinished records the inputs it was given, user data included).
+ * @param {{ deployment?: { resources?: object[], pending_operations?: Array<{ resource?: object }> } }} state
+ * @param {Readonly<Record<string, { userDataInput: string }>>} types
+ */
+export function plainValueCount(state, types) {
+  const pending = (state?.deployment?.pending_operations ?? []).map((op) => op?.resource);
+  return (
+    sealServerUserData(state, types).count +
+    sealServerUserData({ deployment: { resources: pending.filter(Boolean) } }, types).count
+  );
+}
+
+/**
+ * The version of the seal a marker records. Bump it when the seal covers a
+ * new value, so every stack's next deploy runs it again.
+ */
+const STATE_SEAL_VERSION = 1;
+
+/** The ledger step that marks `stackName` sealed, one per stack. */
+export function stateSealStep(stackName) {
+  return `state-seal ${stackName}`;
+}
+
+/**
+ * Whether the ledger records `stackName` as sealed, its history included.
+ * @param {{ shouldSkip: (step: string, inputs: object) => boolean }} ledger - a StateTracker
+ * @param {string} stackName
+ */
+export function stateSealRecorded(ledger, stackName) {
+  return ledger.shouldSkip(stateSealStep(stackName), { version: STATE_SEAL_VERSION });
+}
+
+/**
+ * Record `stackName` as sealed. Only after the seal and the history cleanup
+ * both finished (lib/iac/index.js sealStackState).
+ * @param {{ startStep: (step: string, inputs: object) => void, completeStep: (step: string, result?: object) => void }} ledger
+ * @param {string} stackName
+ */
+export function recordStateSeal(ledger, stackName) {
+  ledger.startStep(stateSealStep(stackName), { version: STATE_SEAL_VERSION });
+  ledger.completeStep(stateSealStep(stackName), {});
+}
+
+/**
+ * Forget that `stackName` was sealed, so the next deploy runs the up and the
+ * seal again: for a seal that found plain values on a stack the ledger called
+ * sealed and couldn't finish.
+ * @param {{ invalidateStep: (step: string) => void }} ledger
+ * @param {string} stackName
+ */
+export function forgetStateSeal(ledger, stackName) {
+  ledger.invalidateStep(stateSealStep(stackName));
+}
+
+/**
+ * Whether a deploy may skip the Pulumi up a ledger step gates: the step ran
+ * with these inputs, and each of the step's stacks is marked sealed. The
+ * marker is part of the decision so the first deploy after the seal shipped
+ * runs one up, which re-salts a legacy stack (index.js sealStackState says
+ * why the seal needs it) and seals it.
+ * @param {{ shouldSkip: (step: string, inputs: object) => boolean }} ledger - a StateTracker
+ * @param {string} stepId
+ * @param {object} inputs
+ * @param {readonly string[]} stackNames - the stacks the step's up writes
+ */
+export function infraStepSkips(ledger, stepId, inputs, stackNames) {
+  return (
+    ledger.shouldSkip(stepId, inputs) && stackNames.every((name) => stateSealRecorded(ledger, name))
+  );
 }

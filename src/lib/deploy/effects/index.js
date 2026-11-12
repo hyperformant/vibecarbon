@@ -34,7 +34,10 @@ import { K8S_HA_EFFECTS } from './k8s-ha.js';
  * Provision one Hetzner VPS via Pulumi, wait for SSH, and seed the trusted
  * host key. Sets ctx.serverIp / providerServerId / providerServerName so the
  * downstream effects (and the orchestrator's return value) can read them.
- * Gated by `when: !ctx.serverIp` — a warm redeploy skips it.
+ * Gated by `when: !ctx.serverIp || !ctx.stateSealed` — a warm redeploy skips
+ * it once its stack is sealed. Before that, a warm redeploy runs the up once
+ * for the seal (lib/iac/state-seal.js), and a server the up left where it
+ * was keeps its SSH pin and its record: nothing about it changed.
  */
 async function provisionServer(ctx) {
   const {
@@ -68,8 +71,10 @@ async function provisionServer(ctx) {
   // no per-step UI (the plan runner is silent; effects own their own spinners).
   // spinner() registers as active so any retry chatter fired underneath updates
   // the line cleanly instead of corrupting it.
+  // A server the env already records: this up is the seal's (see above).
+  const knownIp = ctx.serverIp ?? null;
   const s = spinner();
-  s.start(`Provisioning VPS in ${region}...`);
+  s.start(knownIp ? `Checking VPS ${knownIp} with Pulumi...` : `Provisioning VPS in ${region}...`);
   try {
     const result = await perfAsync('deploy.iac.upStack', () =>
       upStack(environment, program, {
@@ -78,6 +83,8 @@ async function provisionServer(ctx) {
         providerToken: apiToken,
         s3Config,
         projectName: projectConfig.projectName,
+        // Where the seal records its marker, which this step's gate reads.
+        ledger: ctx.state,
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays as the loud last resort.
         requiredOutputs: ['serverIp'],
@@ -97,6 +104,10 @@ async function provisionServer(ctx) {
           'Re-run the deploy; if it persists, inspect `pulumi stack output` ' +
           `for env '${environment}'.`,
       );
+    }
+    if (knownIp && result.outputs.serverIp === knownIp) {
+      s.stop(`VPS unchanged: ${knownIp} (${region})`);
+      return;
     }
     ctx.serverIp = result.outputs.serverIp;
     // This deploy created (or converged) the server: persist-provisioned-server

@@ -11,9 +11,16 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { importStackState } from '../../../src/lib/iac/index.js';
+import { describe, expect, it, vi } from 'vitest';
 import { createTempDir } from '../../_shared/temp-dir.js';
+
+const logged = vi.hoisted(() => [] as string[]);
+vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/cli/progress.js')>()),
+  progressLog: (m: string) => logged.push(m),
+}));
+
+const { importStackState } = await import('../../../src/lib/iac/index.js');
 
 const SENTINEL = 'SENTINEL-import-secret-5a1b';
 const DEPLOYMENT = {
@@ -105,6 +112,27 @@ describe('importStackState', () => {
     expect(seen).toHaveLength(1);
     expect(existsSync(seen[0].file)).toBe(false);
     expect(readdirSync(workDir)).toEqual([]);
+  });
+
+  it('what the import says it dropped (a pending operation) reaches the log, line by line', async () => {
+    logged.length = 0;
+    const { stack } = workspaceStack(() => ({
+      code: 0,
+      stdout: '',
+      stderr:
+        "warning: removing pending operation 'creating' on 'urn:pulumi:e1::p::hcloud:index/server:Server::worker-1' from snapshot\n\n",
+    }));
+    await importStackState(stack as never, DEPLOYMENT);
+    expect(logged).toEqual([
+      "[pulumi] stack import e1: warning: removing pending operation 'creating' on 'urn:pulumi:e1::p::hcloud:index/server:Server::worker-1' from snapshot",
+    ]);
+  });
+
+  it('a quiet import logs nothing', async () => {
+    logged.length = 0;
+    const { stack } = workspaceStack(() => ({ code: 0, stdout: '', stderr: '' }));
+    await importStackState(stack as never, DEPLOYMENT);
+    expect(logged).toEqual([]);
   });
 
   it('the deployment never reaches the OS temp dir', async () => {
