@@ -1154,9 +1154,11 @@ async function describeDestroyFailure(stack, stackName, err) {
  *
  * `force: true` on the remove is deliberate: the state record still LISTS
  * resources (a non-forced remove refuses a non-empty stack), but the caller
- * only invokes this after the out-of-band teardown verified every one of
- * them deleted (clean leak ledger — see removePulumiStackStateEffect in
- * destroy.js, which retains the stack as evidence on any other outcome).
+ * only invokes this after every stack-resident resource is verified deleted:
+ * removePulumiStackStateEffect in destroy.js removes the stack exactly when
+ * the environment's entry goes (entryKeptReason, ENTRY_KEEP_BY_CLASS). A
+ * leak a re-run cannot act on, such as a DNS record or a health check,
+ * keeps neither; any line a re-run can act on keeps both.
  *
  * Idempotent: a durably-absent stack resolves `{ removed: false }`. Any
  * other select failure (backend/credential errors) propagates — silently
