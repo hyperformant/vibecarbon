@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash, scryptSync } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -43,6 +44,7 @@ import {
   statePassphraseGeneratedThisRun,
   statePassphraseProvenance,
 } from '../../../src/lib/state-passphrase.js';
+import { sanitizeError } from '../../../src/lib/telemetry/sanitize.js';
 
 const KEY = 'VIBECARBON_STATE_PASSPHRASE';
 
@@ -71,13 +73,38 @@ describe('state passphrase', () => {
       JSON.stringify({ stateEncryption: { fingerprint: fp } }),
     );
 
-  it('generates a 256-bit base64url value and a stable sha256:16hex fingerprint', () => {
+  it('generates a 256-bit base64url value and a stable scrypt:16hex fingerprint', () => {
     const a = generateStatePassphrase();
     expect(a).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(generateStatePassphrase()).not.toBe(a);
-    expect(statePassphraseFingerprint(a)).toMatch(/^sha256:[0-9a-f]{16}$/);
+    expect(statePassphraseFingerprint(a)).toMatch(/^scrypt:[0-9a-f]{16}$/);
     expect(statePassphraseFingerprint(a)).toBe(statePassphraseFingerprint(a));
     expect(statePassphraseFingerprint('x')).not.toBe(statePassphraseFingerprint('y'));
+  });
+
+  // The fingerprint is committed, so a guess at the passphrase can be checked
+  // against it offline: it must be the slow KDF, and every clone and release
+  // must derive the same one from the same value.
+  describe('the fingerprint is scrypt, never a fast hash, and stable', () => {
+    const v = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ';
+
+    it('matches the pinned value: scrypt N=2^15 r=8 p=1 over the v1 domain salt, 8 bytes as hex', () => {
+      expect(statePassphraseFingerprint(v)).toBe('scrypt:c89ab9e13026e761');
+      const derived = scryptSync(v, 'vibecarbon-state-passphrase-fingerprint-v1', 8, {
+        N: 2 ** 15,
+        r: 8,
+        p: 1,
+        maxmem: 64 * 1024 * 1024,
+      });
+      expect(statePassphraseFingerprint(v)).toBe(`scrypt:${derived.toString('hex')}`);
+    });
+
+    it('is not the plain or the domain-separated sha256 of the passphrase', () => {
+      const hex = statePassphraseFingerprint(v).split(':')[1];
+      for (const input of [v, `vibecarbon-state-passphrase\0${v}`]) {
+        expect(createHash('sha256').update(input).digest('hex')).not.toContain(hex);
+      }
+    });
   });
 
   it('resolveStatePassphrase reads only the environment', () => {
@@ -165,8 +192,10 @@ describe('state passphrase', () => {
       const err = await ensureStatePassphrase(dir).catch((e) => e);
       expect(err).toBeInstanceOf(StatePassphraseError);
       expect(err.reason).toBe('mismatch');
-      expect(err.message).toContain(statePassphraseFingerprint(theirs));
-      expect(err.message).toContain(statePassphraseFingerprint(mine));
+      // No fingerprint in the message: it reaches crash telemetry.
+      expect(err.message).not.toContain(statePassphraseFingerprint(theirs));
+      expect(err.message).not.toContain(statePassphraseFingerprint(mine));
+      expect(err.message).not.toContain('scrypt:');
       expect(err.message).not.toContain(mine);
       // The record keeps the winner's fingerprint, and nothing was memoized:
       // the next look refuses this value the same way.
@@ -184,31 +213,41 @@ describe('state passphrase', () => {
     });
   });
 
-  it('case 3: a mismatch throws, naming both fingerprints and the source', async () => {
+  it('case 3: a mismatch throws, naming the source and neither fingerprint', async () => {
     const v = generateStatePassphrase();
     process.env[KEY] = v;
-    writeManifest('sha256:0000000000000000');
+    writeManifest('scrypt:0000000000000000');
     const err = await ensureStatePassphrase(dir).catch((e) => e);
     expect(err).toBeInstanceOf(StatePassphraseError);
     expect(err.reason).toBe('mismatch');
-    expect(err.message).toContain('sha256:0000000000000000');
-    expect(err.message).toContain(statePassphraseFingerprint(v));
+    expect(err.message).toContain(
+      "doesn't match the fingerprint .vibecarbon.json records for this project",
+    );
+    // An error's message reaches crash telemetry, and a fingerprint is
+    // derived from a passphrase: neither the recorded one nor the value's.
+    expect(err.message).not.toContain('scrypt:0000000000000000');
+    expect(err.message).not.toContain(statePassphraseFingerprint(v));
+    // What crash telemetry would send for it: no fingerprint, no value.
+    const payload = JSON.stringify(sanitizeError(err));
+    expect(payload).not.toContain('scrypt:');
+    expect(payload).not.toContain(statePassphraseFingerprint(v).split(':')[1]);
+    expect(payload).not.toContain(v);
     expect(err.message).toContain('your shell environment');
     expect(err.source).toBe('shell');
     expect(err.message).not.toContain(v);
   });
 
-  it('case 4: a fingerprint without a value throws missing', async () => {
-    writeManifest('sha256:abcdabcdabcdabcd');
+  it('case 4: a fingerprint without a value throws missing, without the fingerprint', async () => {
+    writeManifest('scrypt:abcdabcdabcdabcd');
     const err = await ensureStatePassphrase(dir).catch((e) => e);
     expect(err).toBeInstanceOf(StatePassphraseError);
     expect(err.reason).toBe('missing');
-    expect(err.message).toContain('sha256:abcdabcdabcdabcd');
+    expect(err.message).not.toContain('scrypt:abcdabcdabcdabcd');
     expect(err.message).toContain(STATE_PASSPHRASE_KEY);
   });
 
   it('case 4: missing also says what to do when the passphrase is lost for good', async () => {
-    writeManifest('sha256:abcdabcdabcdabcd');
+    writeManifest('scrypt:abcdabcdabcdabcd');
     const err = await ensureStatePassphrase(dir).catch((e) => e);
     // A teammate has it; otherwise back up, delete the fingerprint, then
     // destroy and redeploy what the old value deployed: destroy removes a
@@ -339,13 +378,13 @@ describe('state passphrase', () => {
   it('is memoized per project dir', async () => {
     const v = await ensureStatePassphrase(dir);
     // Corrupt the fingerprint: the memo means no re-check this process.
-    writeManifest('sha256:0000000000000000');
+    writeManifest('scrypt:0000000000000000');
     expect(await ensureStatePassphrase(dir)).toBe(v);
     const other = createTempDir('vc-state-pass-');
     try {
       writeFileSync(
         join(other, '.vibecarbon.json'),
-        JSON.stringify({ stateEncryption: { fingerprint: 'sha256:1111111111111111' } }),
+        JSON.stringify({ stateEncryption: { fingerprint: 'scrypt:1111111111111111' } }),
       );
       await expect(ensureStatePassphrase(other)).rejects.toMatchObject({ reason: 'mismatch' });
     } finally {
@@ -475,7 +514,7 @@ describe('state passphrase', () => {
         thisRun: false,
         head: 'uncommitted',
       });
-      committing({ stateEncryption: { fingerprint: 'sha256:0123456789abcdef' } });
+      committing({ stateEncryption: { fingerprint: 'scrypt:0123456789abcdef' } });
       expect(statePassphraseProvenance(dir)).toEqual({
         madeHere: true,
         thisRun: false,
@@ -599,18 +638,18 @@ console.log('RESULT ' + v);
     });
 
     it.each([
-      ['missing', () => writeManifest('sha256:abcdabcdabcdabcd')],
+      ['missing', () => writeManifest('scrypt:abcdabcdabcdabcd')],
       [
         'mismatch',
         () => {
-          writeManifest('sha256:0000000000000000');
+          writeManifest('scrypt:0000000000000000');
           process.env[KEY] = generateStatePassphrase();
         },
       ],
       [
         'invalid',
         () => {
-          writeManifest('sha256:0000000000000000');
+          writeManifest('scrypt:0000000000000000');
           process.env[KEY] = 'short-but-urlsafe';
         },
       ],
@@ -632,7 +671,7 @@ console.log('RESULT ' + v);
       ['mismatch', () => generateStatePassphrase()],
       ['invalid', () => 'short-but-urlsafe'],
     ])('%s only in .env.local: the same verdict and words as ensure', async (reason, make) => {
-      writeManifest('sha256:0000000000000000');
+      writeManifest('scrypt:0000000000000000');
       // This process started before .env.local had the value: its startup
       // bootstrap loaded nothing (and forgets an earlier test's provenance).
       bootstrapOperatorEnv(dir);

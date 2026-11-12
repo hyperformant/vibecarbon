@@ -698,7 +698,7 @@ describe("k8s in a git checkout: a refused passphrase whose fingerprint isn't co
     nextProcess();
     gitHead = () => ({
       state: 'committed',
-      content: JSON.stringify({ stateEncryption: { fingerprint: 'sha256:0123456789abcdef' } }),
+      content: JSON.stringify({ stateEncryption: { fingerprint: 'scrypt:0123456789abcdef' } }),
     });
     const rerun = makeCtx('k8s', dir);
     await run('destroyK8sInfra', rerun);

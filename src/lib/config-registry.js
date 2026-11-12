@@ -797,9 +797,11 @@ export const CONFIG_KEYS = [
     feature: 'providers',
     kind: 'secret',
     optional: true,
-    // SECURITY: the fingerprint is committed and is a fast unsalted hash, so
-    // only a high-entropy value is allowed: the generated shape (32 random
-    // bytes, base64url), which cannot be brute-forced from the fingerprint.
+    // SECURITY: the fingerprint is committed, so a guess at the value can be
+    // checked against it offline. It is scrypt (state-passphrase.js), which
+    // makes each guess slow, and this rule asks for the generated value's
+    // length and alphabet (32 random bytes, base64url). It checks length and
+    // alphabet only: a long value a person typed passes, entropy or not.
     shape: {
       regex: /^[A-Za-z0-9_-]{43,}$/,
       describe: 'at least 43 letters, digits, dashes or underscores',

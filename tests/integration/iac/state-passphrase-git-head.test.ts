@@ -84,14 +84,14 @@ describe('readProjectConfigAtHead', () => {
 
   it("committed: HEAD's copy, not the working copy's", () => {
     const dir = repo('committed');
-    writeManifest(dir, { stateEncryption: { fingerprint: 'sha256:aaaaaaaaaaaaaaaa' } });
+    writeManifest(dir, { stateEncryption: { fingerprint: 'scrypt:aaaaaaaaaaaaaaaa' } });
     git(dir, 'add', '.vibecarbon.json');
     git(dir, 'commit', '-q', '-m', 'project');
-    writeManifest(dir, { stateEncryption: { fingerprint: 'sha256:bbbbbbbbbbbbbbbb' } });
+    writeManifest(dir, { stateEncryption: { fingerprint: 'scrypt:bbbbbbbbbbbbbbbb' } });
     const read = readProjectConfigAtHead(dir);
     expect(read.state).toBe('committed');
     expect(JSON.parse((read as { content: string }).content)).toEqual({
-      stateEncryption: { fingerprint: 'sha256:aaaaaaaaaaaaaaaa' },
+      stateEncryption: { fingerprint: 'scrypt:aaaaaaaaaaaaaaaa' },
     });
   });
 
@@ -99,18 +99,18 @@ describe('readProjectConfigAtHead', () => {
     const top = repo('mono');
     const dir = join(top, 'apps', 'site');
     mkdirSync(dir, { recursive: true });
-    writeManifest(top, { stateEncryption: { fingerprint: 'sha256:1111111111111111' } });
-    writeManifest(dir, { stateEncryption: { fingerprint: 'sha256:2222222222222222' } });
+    writeManifest(top, { stateEncryption: { fingerprint: 'scrypt:1111111111111111' } });
+    writeManifest(dir, { stateEncryption: { fingerprint: 'scrypt:2222222222222222' } });
     git(top, 'add', '-A');
     git(top, 'commit', '-q', '-m', 'both');
     const read = readProjectConfigAtHead(dir) as { state: string; content: string };
     expect(read.state).toBe('committed');
-    expect(JSON.parse(read.content).stateEncryption.fingerprint).toBe('sha256:2222222222222222');
+    expect(JSON.parse(read.content).stateEncryption.fingerprint).toBe('scrypt:2222222222222222');
   });
 
   it('an inherited GIT_DIR (a git hook) never redirects it to another repository', () => {
     const other = repo('other');
-    writeManifest(other, { stateEncryption: { fingerprint: 'sha256:3333333333333333' } });
+    writeManifest(other, { stateEncryption: { fingerprint: 'scrypt:3333333333333333' } });
     git(other, 'add', '-A');
     git(other, 'commit', '-q', '-m', 'other');
     const dir = repo('mine');
@@ -121,7 +121,7 @@ describe('readProjectConfigAtHead', () => {
 
   it("git fails some other way (HEAD's blob is missing): unknown, with git's line", () => {
     const dir = repo('broken');
-    writeManifest(dir, { stateEncryption: { fingerprint: 'sha256:4444444444444444' } });
+    writeManifest(dir, { stateEncryption: { fingerprint: 'scrypt:4444444444444444' } });
     git(dir, 'add', '.vibecarbon.json');
     git(dir, 'commit', '-q', '-m', 'project');
     const blob = git(dir, 'rev-parse', 'HEAD:.vibecarbon.json').trim();

@@ -289,7 +289,7 @@ describe('state passphrase census: every decrypting entry point carries the pass
     }
     // The check ran: the project recorded its fingerprint.
     const manifest = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf8'));
-    expect(manifest.stateEncryption?.fingerprint).toMatch(/^sha256:[0-9a-f]{16}$/);
+    expect(manifest.stateEncryption?.fingerprint).toMatch(/^scrypt:[0-9a-f]{16}$/);
   }
 
   it('upStack', async () => {

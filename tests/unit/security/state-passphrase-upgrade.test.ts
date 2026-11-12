@@ -118,7 +118,7 @@ describe('upgrade backfills the state passphrase', () => {
   it('a recorded fingerprint whose value is missing is a warning, not a new passphrase', async () => {
     writeFileSync(
       join(dir, '.vibecarbon.json'),
-      JSON.stringify({ stateEncryption: { fingerprint: 'sha256:0123456789abcdef' } }),
+      JSON.stringify({ stateEncryption: { fingerprint: 'scrypt:0123456789abcdef' } }),
     );
 
     await expect(ensureStatePassphraseForUpgrade(dir)).resolves.toBe('problem');

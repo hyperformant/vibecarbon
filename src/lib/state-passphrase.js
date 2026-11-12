@@ -6,13 +6,15 @@
  * - The passphrase lives in `VIBECARBON_STATE_PASSPHRASE` (an operator secret:
  *   `.env.local` only, never `.env`, never bundled, never on a server).
  * - The fingerprint (`stateEncryption.fingerprint`) is committed; it cannot
- *   be reversed into the passphrase.
+ *   be reversed into the passphrase, and it is a slow hash (scrypt), so
+ *   guessing a passphrase from it costs a guesser scrypt's work per guess.
+ *   No error, log line or telemetry field carries it.
  *
  * `resolveStatePassphrase()` is the sync, environment-only read.
  * `ensureStatePassphrase(projectDir)` is the full check-or-create.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes, scryptSync } from 'node:crypto';
 import { resolve } from 'node:path';
 import * as p from '@clack/prompts';
 import { readProjectConfigFile, updateProjectConfig } from './config.js';
@@ -138,14 +140,41 @@ export function generateStatePassphrase() {
 }
 
 /**
- * `sha256:` plus 16 hex chars of a domain-separated hash of the passphrase.
+ * The fingerprint's KDF. The salt is fixed and versioned, not random: every
+ * clone must derive the same fingerprint from the same passphrase to compare
+ * it with the committed one, and the domain string keeps it from matching any
+ * other scrypt use. N = 2^15, r = 8, p = 1 takes 32 MiB and about 45 ms
+ * per call (up to about 110 ms on a cold CPU) on a Ryzen AI 9 365 laptop;
+ * maxmem leaves room above the 32 MiB Node allows by default. A change to any of these is a new fingerprint
+ * format: bump the version in the salt and the prefix together.
+ */
+const FINGERPRINT_PREFIX = 'scrypt:';
+const FINGERPRINT_SALT = 'vibecarbon-state-passphrase-fingerprint-v1';
+const FINGERPRINT_SCRYPT = Object.freeze({ N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+/** Bytes of the derived key kept: 64 bits, as hex. */
+const FINGERPRINT_BYTES = 8;
+
+/**
+ * Fingerprints this process derived, by passphrase: one command compares the
+ * same value more than once (the first look, case 2's re-check, destroy's
+ * problem check), and each derivation costs scrypt's work. The passphrases
+ * are the ones this process already holds in process.env.
+ * @type {Map<string, string>}
+ */
+const fingerprints = new Map();
+
+/**
+ * `scrypt:` plus 16 hex chars of the passphrase's scrypt key under the
+ * domain salt. Stable across clones and processes.
  * @param {string} passphrase
  */
 export function statePassphraseFingerprint(passphrase) {
-  const hex = createHash('sha256')
-    .update(`vibecarbon-state-passphrase\0${passphrase}`)
-    .digest('hex');
-  return `sha256:${hex.slice(0, 16)}`;
+  const known = fingerprints.get(passphrase);
+  if (known) return known;
+  const key = scryptSync(passphrase, FINGERPRINT_SALT, FINGERPRINT_BYTES, FINGERPRINT_SCRYPT);
+  const fingerprint = `${FINGERPRINT_PREFIX}${key.toString('hex')}`;
+  fingerprints.set(passphrase, fingerprint);
+  return fingerprint;
 }
 
 /**
@@ -186,24 +215,24 @@ function invalidError(from) {
   );
 }
 
-/** @param {string} expected the recorded fingerprint */
-function missingError(expected) {
+/**
+ * The errors below name no fingerprint, the recorded one or the value's: an
+ * error's message reaches crash telemetry (telemetry/sanitize.js), and a
+ * fingerprint is derived from a passphrase.
+ */
+function missingError() {
   return new StatePassphraseError(
     'missing',
-    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json expects fingerprint ${expected}). Copy it into .env.local from where you saved it (a teammate who deployed this project has it too), then run this again. If it's lost for good, first run \`vibecarbon backup\` for each environment you deployed with it, to keep a copy of its database. Then delete the \`stateEncryption\` entry from .vibecarbon.json; vibecarbon makes a new passphrase the next time it needs one. Run \`vibecarbon destroy\` (once more if it asks) and deploy again for each of those environments: their state can't be read any more, so destroy removes the record.`,
+    `This project's state passphrase isn't set. vibecarbon needs ${STATE_PASSPHRASE_KEY} to read your Pulumi state (.vibecarbon.json records the fingerprint of the one this project uses). Copy it into .env.local from where you saved it (a teammate who deployed this project has it too), then run this again. If it's lost for good, first run \`vibecarbon backup\` for each environment you deployed with it, to keep a copy of its database. Then delete the \`stateEncryption\` entry from .vibecarbon.json; vibecarbon makes a new passphrase the next time it needs one. Run \`vibecarbon destroy\` (once more if it asks) and deploy again for each of those environments: their state can't be read any more, so destroy removes the record.`,
   );
 }
 
-/**
- * @param {string} expected the recorded fingerprint
- * @param {string} actual the value's fingerprint
- * @param {{ source: 'shell' | 'env-local', where: string }} from
- */
-function mismatchError(expected, actual, from) {
+/** @param {{ source: 'shell' | 'env-local', where: string }} from */
+function mismatchError(from) {
   const wins = from.source === 'shell' ? ', which wins over .env.local' : '';
   return new StatePassphraseError(
     'mismatch',
-    `Your ${STATE_PASSPHRASE_KEY} (from ${from.where}${wins}) doesn't match this project. .vibecarbon.json expects ${expected} and yours is ${actual}. Fix the value, then run this again.`,
+    `Your ${STATE_PASSPHRASE_KEY} (from ${from.where}${wins}) doesn't match the fingerprint .vibecarbon.json records for this project. Fix the value, then run this again.`,
     from.source,
   );
 }
@@ -256,12 +285,12 @@ function inspectStatePassphrase(dir, expected) {
   }
   const fromDisk = read === 'disk';
   if (!found.value) {
-    return { value: null, fromDisk, problem: expected ? missingError(expected) : null };
+    return { value: null, fromDisk, problem: expected ? missingError() : null };
   }
   if (found.problem) return { value: null, fromDisk, problem: invalidError(sourceOf(read)) };
   const actual = statePassphraseFingerprint(found.value);
   if (expected && actual !== expected) {
-    return { value: null, fromDisk, problem: mismatchError(expected, actual, sourceOf(read)) };
+    return { value: null, fromDisk, problem: mismatchError(sourceOf(read)) };
   }
   return { value: found.value, fromDisk, problem: null };
 }
@@ -317,11 +346,7 @@ export async function ensureStatePassphrase(projectDir) {
       // passphrase the record doesn't hold.
       const now = recordedFingerprint(dir);
       if (now !== actual) {
-        throw mismatchError(
-          now ?? 'no fingerprint',
-          actual,
-          sourceOf(fromDisk ? 'disk' : 'environment'),
-        );
+        throw mismatchError(sourceOf(fromDisk ? 'disk' : 'environment'));
       }
       if (recorded) p.log.info(recordedLine(dir, value));
     }
