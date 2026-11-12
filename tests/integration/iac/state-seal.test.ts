@@ -32,6 +32,12 @@
  *       tracks it at the same URN, and the record stays, so the user is told
  *       that IP's id as the one to keep and asked only about another by its
  *       name. The deploy after clears the record, never the IP, and seals.
+ *   (f) the compose deploy's seal up on a recorded server
+ *       (refuseServerReplace): a plan that would replace the server (its
+ *       user data changed and not ignored), delete it (the program no longer
+ *       declares it) or create one (a stack that lost it) never applies, the
+ *       cloud keeps its server, nothing is sealed and the ledger gets no
+ *       marker. The clean plan seals.
  *
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
@@ -61,6 +67,7 @@ import {
   importStackState,
   upStack,
 } from '../../../src/lib/iac/index.js';
+import { ServerReplaceRefusedError } from '../../../src/lib/iac/server-replace-guard.js';
 import {
   SECRET_SIG,
   SECRET_SIG_KEY,
@@ -511,5 +518,49 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
     expect(ips(), 'the IP to keep was kept').toEqual([ipId]);
     expect(sentinelFiles()).toEqual([]);
     expect(stateSealRecorded(ledgerFor('e5'), 'e5')).toBe(true);
+  });
+  it('(f) the seal up on a recorded server: a plan that would replace, delete or create a server never applies; the clean plan seals', async () => {
+    await writeLegacyStack('e6');
+    const before = cloudServers();
+    const ledger = ledgerFor('e6');
+    const refusing = { ...opts, ledger, refuseServerReplace: true };
+    /** The refusal upStack throws, read back. */
+    const refusal = async (stack: string, prog: () => Promise<unknown>) => {
+      const err = await upStack(stack, prog as never, refusing).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ServerReplaceRefusedError);
+      return (err as InstanceType<typeof ServerReplaceRefusedError>).removals.map(
+        (r: { op: string; urn: string }) => `${r.op} ${r.urn.split('::').pop()}`,
+      );
+    };
+
+    // Replace: changed user data the program no longer ignores.
+    const replacing = async () => {
+      const server = new FakeServer('server', {
+        size: 'small',
+        userData: pulumi.secret(`${USER_DATA}# changed\n`),
+      });
+      return { serverId: server.id };
+    };
+    expect(await refusal('e6', replacing)).toContain('replace server');
+    // Delete: the program no longer declares the server.
+    expect(await refusal('e6', async () => ({}))).toEqual(['delete server']);
+    // Create: a stack that holds no server, as one that lost the record would.
+    expect(await refusal('e6-lost', program(true))).toEqual(['create server']);
+
+    expect(cloudServers(), 'the cloud kept its one server, unchanged').toEqual(before);
+    expect(sealCounts(), 'no up ran, so no seal').toEqual([]);
+    expect(stateSealRecorded(ledger, 'e6')).toBe(false);
+    expect(holdsSentinel(checkpoint('e6')), 'the state stays as it was').toBe(true);
+
+    // The clean plan: the up runs and seals.
+    await upStack('e6', program(true), refusing);
+    expect(sealCounts()).toEqual(['e6:2']);
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e6')).toBe(true);
+    expect(holdsSentinel(checkpoint('e6'))).toBe(false);
+    expect(cloudServers()).toEqual(before);
   });
 });

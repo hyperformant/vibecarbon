@@ -68,6 +68,8 @@ const { EFFECTS, composeServerRecord } = await import('../../../src/lib/deploy/e
 const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { recordStateSeal, stateSealRecorded } = await import('../../../src/lib/iac/state-seal.js');
 const { hasPinnedHostKey, knownHostsPathForKey } = await import('../../../src/lib/host-keys.js');
+const { ServerReplaceRefusedError } = await import('../../../src/lib/iac/server-replace-guard.js');
+const p = await import('@clack/prompts');
 
 /** A ledger that holds nothing: these tests stop at or before the up. */
 const noLedger = () => ({ invalidateStep: () => {} });
@@ -323,13 +325,142 @@ describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
     expect(seedKnownHostsMock).toHaveBeenCalledWith(knownHostsPathForKey(KEY), IP);
   });
 
-  it('an env record without a server id: a new machine as far as anyone can tell, so scanned', async () => {
+  it("an env record without a server id names no machine to compare: the pinned key stays, SSH checks against it, and this run's id goes on the record", async () => {
     const state = ledger();
     pinFor4242();
+    sealingUp(state, '4242');
+    let pinnedAtWait: string | undefined;
+    waitForSSHMock.mockImplementationOnce(async () => {
+      pinnedAtWait = knownHosts();
+      return true;
+    });
+    const ctx = { ...warmCtx(state), providerServerId: null };
+
+    await EFFECTS.provisionServer(ctx);
+
+    expect(pinnedAtWait).toContain(PINNED);
+    expect(seedKnownHostsMock).not.toHaveBeenCalled();
+    expect(knownHosts()).toBe(`${OTHER}\n${PINNED}\n`);
+    // persist-provisioned-server writes it, so a later new id is caught.
+    expect(ctx.serverProvisioned).toBe(true);
+    expect(composeServerRecord({ ...ctx, region: 'nbg1', serverType: 'cpx22' })).toMatchObject({
+      id: '4242',
+      ip: IP,
+    });
+  });
+
+  it('an env record without a server id and no key pinned for its IP: scanned, as a first pin', async () => {
+    const state = ledger();
     sealingUp(state, '4242');
 
     await EFFECTS.provisionServer({ ...warmCtx(state), providerServerId: null });
 
     expect(seedKnownHostsMock).toHaveBeenCalledWith(knownHostsPathForKey(KEY), IP);
+  });
+});
+
+describe("provisionServer: the seal's up never replaces the recorded server (iac/server-replace-guard.js)", () => {
+  const IP = '203.0.113.10';
+  const removal = (action: string) => ({
+    op: action,
+    action,
+    urn: 'urn:pulumi:production::testapp::hcloud:index/server:Server::server',
+    noun: 'server',
+    name: 'testapp-production',
+  });
+  let warn: ReturnType<typeof vi.spyOn>;
+  afterEach(() => {
+    warn?.mockRestore();
+    waitForSSHMock.mockReset();
+    seedKnownHostsMock.mockReset();
+  });
+
+  const ctxWith = (state: unknown, over: Record<string, unknown> = {}) => ({
+    projectConfig: { projectName: 'testapp', operatorCidrs: [{ cidr: '1.2.3.4/32' }] },
+    environment: 'production',
+    region: 'nbg1',
+    serverType: undefined,
+    apiToken: 'test-token',
+    s3Config: { bucket: 'b', region: 'nbg1' },
+    sshKeyPath: '/tmp/never-created',
+    envConfig: { provider: 'hetzner' },
+    state,
+    ...over,
+  });
+
+  /** The seal's up on a recorded server, with a ledger that marks it sealed. */
+  function recordedCtx() {
+    const dir = createTempDir('provision-refuse-');
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    const state = new StateTracker('testapp', 'production');
+    cwd.mockRestore();
+    for (const step of ['compose-setup-server', 'compose-setup-files']) {
+      state.startStep(step, { serverIp: IP });
+      state.completeStep(step, { serverIp: IP });
+    }
+    recordStateSeal(state, 'production');
+    return ctxWith(state, {
+      serverIp: IP,
+      providerServerId: '4242',
+      providerServerName: 'testapp-production',
+      providerFirewallId: 'fw-1',
+      stateSealed: false,
+    }) as Record<string, unknown> & { state: InstanceType<typeof StateTracker> };
+  }
+
+  it('asks upStack to refuse a server replacement only when the env records a server', async () => {
+    upStackMock.mockRejectedValueOnce(new Error('STOP_AFTER_UPSTACK_CALL'));
+    await expect(EFFECTS.provisionServer(recordedCtx())).rejects.toThrow('STOP_AFTER_UPSTACK_CALL');
+    expect(upStackMock.mock.calls.at(-1)?.[2]).toMatchObject({ refuseServerReplace: true });
+
+    upStackMock.mockRejectedValueOnce(new Error('STOP_AFTER_UPSTACK_CALL'));
+    await expect(EFFECTS.provisionServer(ctxWith(noLedger()))).rejects.toThrow(
+      'STOP_AFTER_UPSTACK_CALL',
+    );
+    expect(upStackMock.mock.calls.at(-1)?.[2]).not.toHaveProperty('refuseServerReplace');
+  });
+
+  for (const action of ['replace', 'delete', 'create']) {
+    it(`a plan that would ${action} it: no up, the seal skipped with a warning, the deploy goes on with the server as it is`, async () => {
+      const ctx = recordedCtx();
+      warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+      upStackMock.mockRejectedValueOnce(
+        new ServerReplaceRefusedError('production', [removal(action)]),
+      );
+
+      await expect(EFFECTS.provisionServer(ctx)).resolves.toBeUndefined();
+
+      // The marker stays unset, so the next deploy checks again.
+      expect(stateSealRecorded(ctx.state, 'production')).toBe(false);
+      // Nothing re-provisions or re-sets-up: the server as the record has it.
+      expect(ctx.serverProvisioned).toBeUndefined();
+      expect(ctx.serverIp).toBe(IP);
+      expect(ctx.providerServerId).toBe('4242');
+      expect(ctx.providerFirewallId).toBe('fw-1');
+      expect(ctx.state.shouldSkip('compose-setup-server', { serverIp: IP })).toBe(true);
+      expect(ctx.state.shouldSkip('compose-setup-files', { serverIp: IP })).toBe(true);
+      expect(waitForSSHMock).not.toHaveBeenCalled();
+      expect(seedKnownHostsMock).not.toHaveBeenCalled();
+      const [message] = warn.mock.calls.at(-1) as [string];
+      expect(message).toContain(
+        'Your production server testapp-production (203.0.113.10) was left as it is.',
+      );
+      expect(message).toMatch(
+        action === 'create'
+          ? /create a new server in its place/
+          : new RegExp(`${action} the server, and the database on it`),
+      );
+      expect(message).toContain('The next deploy checks again');
+      expect(message).not.toContain('\u2014');
+    });
+  }
+
+  it('a first deploy (no server on record) never asks, so a refusal there is just an error', async () => {
+    upStackMock.mockRejectedValueOnce(
+      new ServerReplaceRefusedError('production', [removal('replace')]),
+    );
+    await expect(EFFECTS.provisionServer(ctxWith(noLedger()))).rejects.toBeInstanceOf(
+      ServerReplaceRefusedError,
+    );
   });
 });

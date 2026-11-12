@@ -44,6 +44,7 @@ import {
 import { requirePulumiProject } from './pulumi-project.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
+import { ServerReplaceRefusedError, serverRemovalOf } from './server-replace-guard.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
 import { runPastStaleLock, StackHeldError } from './stack-lock.js';
 import {
@@ -1110,6 +1111,9 @@ export async function dropRetiredStackResources(stack, providerId, { recordAddre
  * optional `onOutput` sink so callers can forward progress to a spinner.
  * `options.recordRetiredAddresses` records the addresses the retired-resource
  * surgery takes out of the stack (dropRetiredStackResources).
+ * `options.refuseServerReplace` previews after the refresh and throws
+ * ServerReplaceRefusedError, before the up, when the plan would replace or
+ * delete a server (refuseServerRemoval).
  */
 async function upStackImpl(stackName, program, options = {}) {
   // `options.perfStem` is the caller's own perf timer name (e.g.
@@ -1118,7 +1122,39 @@ async function upStackImpl(stackName, program, options = {}) {
   const prepare = options.perfStem ? perfTimer(`${options.perfStem}.prepare`) : null;
   const stack = await prepareStackForUp(stackName, program, options);
   prepare?.end();
+  if (options.refuseServerReplace) await refuseServerRemoval(stack, options);
   return runUp(stack, options);
+}
+
+/**
+ * Preview the up and stop before it when its plan would replace or delete a
+ * server (server-replace-guard.js says who asks and why). Runs after the
+ * refresh, so it plans what the up itself would.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ onOutput?: (out: string) => void }} options
+ * @throws {ServerReplaceRefusedError}
+ */
+async function refuseServerRemoval(stack, options) {
+  let removals = [];
+  recordStateOp('preview');
+  await withStateBackendRetry(
+    () =>
+      runPastStaleLock(stack, () => {
+        // A retried preview reports its whole plan again.
+        removals = [];
+        return stack.preview({
+          onOutput: options.onOutput,
+          color: 'never',
+          onEvent: (event) => {
+            const removal = serverRemovalOf(event, SERVER_RESOURCE_TYPES);
+            if (removal) removals.push(removal);
+          },
+        });
+      }),
+    'pre-up preview',
+  );
+  if (removals.length > 0) throw new ServerReplaceRefusedError(stack.name, removals);
 }
 
 /**

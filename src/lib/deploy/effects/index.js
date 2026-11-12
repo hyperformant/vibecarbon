@@ -15,13 +15,14 @@
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { backupStorageConfig } from '../../backups-bucket.js';
-import { spinner } from '../../cli/progress.js';
+import { progressLog, spinner } from '../../cli/progress.js';
 import {
   forgetHostKey,
   hasPinnedHostKey,
   knownHostsPathForKey,
   seedKnownHosts,
 } from '../../host-keys.js';
+import { ServerReplaceRefusedError } from '../../iac/server-replace-guard.js';
 import { forgetStateSeal } from '../../iac/state-seal.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
@@ -71,9 +72,19 @@ const SERVER_SETUP_STEPS = Object.freeze([
  * the provider's word for which machine answers at the IP, the IP isn't. The
  * same id as the env records keeps its pinned key, and SSH checks against
  * it, so a stack that runs this every deploy (one that never seals) never
- * re-pins by keyscan. A new id, or no key pinned for the IP, drops the old
- * key before the wait (accept-new would refuse the new machine, not trust
- * it) and scans the new one after, as a fresh provision does.
+ * re-pins by keyscan. A new id drops the old key before the wait (accept-new
+ * would refuse the new machine, not trust it) and scans the new one after, as
+ * a fresh provision does. A record with no id names no machine to compare:
+ * its pinned key stays, so SSH still checks the server against it, and the
+ * id this up reports goes on the record (persist-provisioned-server), so a
+ * later replacement shows as a new id. No key pinned for the IP is scanned.
+ *
+ * An env that records a server (the seal's up, since a warm deploy that is
+ * sealed skips this step) previews first: a plan that would replace or delete
+ * that server, or create one in its place, never runs
+ * (iac/server-replace-guard.js). The deploy then warns,
+ * leaves the seal marker unset and goes on with the server as it is, as warm
+ * deploys before the seal did: nothing here re-runs the server's setup.
  */
 async function provisionServer(ctx) {
   const {
@@ -112,22 +123,41 @@ async function provisionServer(ctx) {
   const s = spinner();
   s.start(`Provisioning VPS in ${region}...`);
   const khPath = knownHostsPathForKey(sshKeyPath);
+  // The server the env records, if any: this run is then the seal's up on it.
+  const recordedServer = ctx.serverIp
+    ? {
+        ip: ctx.serverIp,
+        name: ctx.providerServerName || `${projectConfig.projectName}-${environment}`,
+      }
+    : null;
   let reseed = true;
   try {
-    const result = await perfAsync('deploy.iac.upStack', () =>
-      upStack(environment, program, {
-        perfStem: 'deploy.iac.upStack',
-        provider: providerIdFor(envConfig),
-        providerToken: apiToken,
-        s3Config,
-        projectName: projectConfig.projectName,
-        // Where the seal records its marker, which this step's gate reads.
-        ledger: ctx.state,
-        // Recover stale-EMPTY outputs reads in place (read-only poll inside
-        // upStack) — the hard gate below stays as the loud last resort.
-        requiredOutputs: ['serverIp'],
-      }),
-    );
+    let result;
+    try {
+      result = await perfAsync('deploy.iac.upStack', () =>
+        upStack(environment, program, {
+          perfStem: 'deploy.iac.upStack',
+          provider: providerIdFor(envConfig),
+          providerToken: apiToken,
+          s3Config,
+          projectName: projectConfig.projectName,
+          // Where the seal records its marker, which this step's gate reads.
+          ledger: ctx.state,
+          // Recover stale-EMPTY outputs reads in place (read-only poll inside
+          // upStack) — the hard gate below stays as the loud last resort.
+          requiredOutputs: ['serverIp'],
+          // Never replace or delete the server the env records.
+          ...(recordedServer && { refuseServerReplace: true }),
+        }),
+      );
+    } catch (err) {
+      if (!(recordedServer && err instanceof ServerReplaceRefusedError)) throw err;
+      s.stop(`VPS kept as it is: ${recordedServer.ip} (${region})`);
+      progressLog(`[pulumi] ${err.message}`);
+      forgetStateSeal(ctx.state, environment);
+      p.log.warn(sealSkippedWarning(environment, recordedServer, err));
+      return;
+    }
     // Hard gate: a stale S3 state read after a throttled stack-create can
     // return a "successful" up with EMPTY outputs (same family as the
     // stale-CHECKPOINT/stale-stack-select fixes in lib/iac). Without this,
@@ -150,12 +180,14 @@ async function provisionServer(ctx) {
     for (const step of SERVER_SETUP_STEPS) ctx.state.invalidateStep(step);
     const recordedServerId = ctx.providerServerId;
     ctx.providerServerId = result.outputs.serverId || null;
-    const sameMachine =
+    // Only two ids that differ say the machine changed; a record without one
+    // keeps its pin, and gets this run's id.
+    const newMachine =
       recordedServerId != null &&
       ctx.providerServerId != null &&
-      String(recordedServerId) === String(ctx.providerServerId);
-    if (!sameMachine) forgetHostKey(khPath, ctx.serverIp);
-    reseed = !sameMachine || !hasPinnedHostKey(khPath, ctx.serverIp);
+      String(recordedServerId) !== String(ctx.providerServerId);
+    if (newMachine) forgetHostKey(khPath, ctx.serverIp);
+    reseed = newMachine || !hasPinnedHostKey(khPath, ctx.serverIp);
     ctx.providerServerName = `${projectConfig.projectName}-${environment}`;
     // Both compose programs export firewallId; nothing used to read it, so
     // `vibecarbon scale` built its blue-green replacement with `firewalls: []`
@@ -182,6 +214,32 @@ async function provisionServer(ctx) {
   if (reseed && !(await seedKnownHosts(khPath, ctx.serverIp))) {
     forgetStateSeal(ctx.state, environment);
   }
+}
+
+/**
+ * Why the seal's up was skipped: its plan would have taken out the server
+ * the env records, and the database with it.
+ *
+ * @param {string} environment
+ * @param {{ ip: string, name: string }} server
+ * @param {ServerReplaceRefusedError} refusal
+ * @returns {string}
+ */
+function sealSkippedWarning(environment, server, refusal) {
+  const actions = new Set(refusal.removals.map((r) => r.action));
+  const change = actions.has('replace')
+    ? 'replace the server, and the database on it'
+    : actions.has('delete')
+      ? 'delete the server, and the database on it'
+      : 'create a new server in its place, without the database this one holds';
+  return (
+    `Your ${environment} server ${server.name} (${server.ip}) was left as it is. ` +
+    'This version runs one Pulumi up on each existing server to encrypt the values its ' +
+    `stack state keeps in plain text, and the plan for that up would ${change}, ` +
+    "so the up didn't run. The deploy goes on with the server " +
+    'unchanged, and those values stay unencrypted until an up can run. The next deploy ' +
+    "checks again, and the deploy log lists the plan's steps."
+  );
 }
 
 /**
