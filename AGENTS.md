@@ -83,7 +83,11 @@ tiers it keeps the Pulumi stack state, which is removed exactly when the entry
 is. Under `-purge` it keeps the app bucket and the environment's backups as
 well: a kept entry is a live environment, and another environment's fenced
 deploy stops on a live record whose bucket is gone. Its kept lines name the
-`-purge` rerun, and that clean `-purge` deletes them. A line a re-run cannot act on
+`-purge` rerun, and that clean `-purge` deletes them. Every line destroy prints
+that names a rerun spells it through `retryDestroyCommand`
+(`src/lib/destroy/retry-command.js`), which carries `-purge` exactly when the
+destroy had it: a plain rerun would move the entry and strand the kept buckets
+(census: `retry-command-census.test.ts`). A line a re-run cannot act on
 (a DNS record, a health check, a bucket) keeps neither, and its hint names the
 by-hand step. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see
