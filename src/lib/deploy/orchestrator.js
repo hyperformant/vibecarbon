@@ -31,7 +31,7 @@ import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-ba
 import { readSshVersion } from '../runtime-floors.js';
 import { mintAttemptId } from '../services/addon-start.js';
 import { sshKeyPathFor } from '../ssh.js';
-import { removeTempDir, sweepStaleSecretTempDirs } from '../temp-dir.js';
+import { removeTempDir, startStaleSecretSweep } from '../temp-dir.js';
 import { createTracker } from '../tracker.js';
 import { resolveDeployImageSet } from '../version-channel.js';
 import {
@@ -1053,10 +1053,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // The whole deploy, start to success outro: the e2e cold-deploy budgets
   // (tests/e2e/checks/deploy-budget.ts) read it, minus the TLS first look.
   const deployTotalTimer = perfTimer('deploy.total');
-  // Deploy bundles and other dirs with secrets in them that earlier versions
-  // left in the OS temp dir: removed in the background (temp-dir.js), so the
-  // deploy never waits on them. It prints one line only when it removed some.
-  void sweepStaleSecretTempDirs({ report: (line) => p.log.info(line) });
+  // Deploy bundles and other temp dirs and files with secrets in them that
+  // earlier runs left in the OS temp dir: removed in the background
+  // (temp-dir.js), so the deploy never waits on them. Its one line, when it
+  // removed some, waits for a quiet point (flushed before the outro), so it
+  // never breaks a spinner's line.
+  const staleSecretSweep = startStaleSecretSweep();
   const {
     projectConfig,
     envConfig,
@@ -3093,6 +3095,7 @@ export async function executeDeployment(args, gatheredConfig) {
     }),
   );
 
+  await staleSecretSweep.flush((line) => p.log.info(line));
   const { formatted: timeStr } = tracker.finish();
   deployTotalTimer.end();
   p.log.success(`Deployment to ${c.bold(environment)} complete! ${c.dim(`(${timeStr})`)}`);

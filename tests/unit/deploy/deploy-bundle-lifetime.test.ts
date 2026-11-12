@@ -447,7 +447,11 @@ describe('a k8s deploy', () => {
 });
 
 describe('a deploy and the bundles earlier versions left', () => {
-  it('removes an old one in the background and says so once', async () => {
+  // The sweep settles about a second in, mid-spinner, so it prints nothing
+  // then: its line waits for the outro, or the exit of a deploy that stops
+  // first (temp-dir.js startStaleSecretSweep, tested in
+  // tests/unit/lib/stale-secret-temp-sweep.test.ts).
+  it('removes an old one in the background, and prints nothing while the deploy runs', async () => {
     // A bundle an earlier version left two days ago, in this file's temp dir.
     const stale = join(tmpdir(), 'vc-deploy-bundle-stale');
     mkdirSync(stale);
@@ -459,9 +463,8 @@ describe('a deploy and the bundles earlier versions left', () => {
       'STOP_AFTER_PLAN',
     );
     await vi.waitFor(() => expect(existsSync(stale)).toBe(false));
-    expect(clackMock.log.info).toHaveBeenCalledWith(
-      `removed 1 old vibecarbon temp dir from ${tmpdir()}: earlier versions left them there, with deploy secrets in them`,
-    );
+    const printed = clackMock.log.info.mock.calls.flat().join('\n');
+    expect(printed).not.toContain('old vibecarbon temp');
   });
 });
 

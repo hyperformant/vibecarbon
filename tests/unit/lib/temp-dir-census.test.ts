@@ -25,13 +25,20 @@
  *   4. every temp-dir prefix src/ makes is either one the stale sweep removes
  *      (STALE_SECRET_PREFIXES: it held secrets, so a leftover from an earlier
  *      version or a killed run must go) or listed below with why it never
- *      holds one.
- * Each rule has a bite test below.
+ *      holds one. A secret-bearing name src/ no longer makes is swept only as
+ *      a legacy entry (LEGACY_SECRET_TEMP), which must name the versions that
+ *      made it and its shape.
+ *   5. the temp-dir.js functions are called by their own names: never
+ *      imported under another name or passed by reference, which rules 3 and
+ *      4 could not follow.
+ * A call is credited to the innermost top-level function holding it (an
+ * expression-bodied arrow has no closing brace of its own, so its range is
+ * cut at the next function). Each rule has a bite test below.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
+import { LEGACY_SECRET_TEMP, STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
 import { CODE, lexMask } from '../helpers/js-call-scan.js';
 
 const HELPER = join('src', 'lib', 'temp-dir.js');
@@ -100,30 +107,41 @@ type Fn = { name: string; start: number; end: number };
 /**
  * The file's top-level functions: a declaration (`function f(`, exported or
  * async) or an arrow/function `const` at column 0, up to the first line that
- * is only `}` (or `};`) at column 0. Biome formats every file, so that line
- * is the function's own closing brace.
+ * is only `}` (or `};`) at column 0, or the next function's header if that
+ * comes first. Biome formats every file, so that line is the function's own
+ * closing brace; an expression-bodied arrow (`const f = (s) => s.trim();`)
+ * has none, and without the cut its range would run over the functions
+ * after it.
  */
 function topLevelFunctions(text: string, mask: Uint8Array): Fn[] {
   const header =
     /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*(\w+)\s*\(|^(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\(|\w+\s*=>)/gm;
+  const headers = codeMatchesOf(text, mask, header);
   const fns: Fn[] = [];
-  for (const m of codeMatchesOf(text, mask, header)) {
+  headers.forEach((m, i) => {
     const start = m.index ?? 0;
+    const next = headers[i + 1]?.index ?? text.length;
     // A line that is only the closing brace: `}) {` at column 0 closes a
     // destructured parameter list, not the function.
     const close = /^};?$/gm;
     close.lastIndex = start;
-    let end = text.length;
-    for (let c = close.exec(text); c; c = close.exec(text)) {
+    let end = next;
+    for (let c = close.exec(text); c && c.index < next; c = close.exec(text)) {
       if (mask[c.index] === CODE) {
         end = c.index;
         break;
       }
     }
     fns.push({ name: m[1] ?? m[2], start, end });
-  }
+  });
   return fns;
 }
+
+/**
+ * The top-level function holding `at`, if any. The ranges never overlap
+ * (each ends by the next header), so this is the innermost one.
+ */
+const fnAt = (src: { fns: Fn[] }, at: number) => src.fns.find((f) => at >= f.start && at < f.end);
 
 type Source = { file: string; text: string; mask: Uint8Array; fns: Fn[] };
 
@@ -163,7 +181,7 @@ function returningMakers(sources: Source[]): Set<string> {
       for (const maker of [...makers]) {
         for (const m of callsOf(src, maker)) {
           const at = m.index ?? 0;
-          const fn = src.fns.find((f) => at >= f.start && at < f.end);
+          const fn = fnAt(src, at);
           if (!fn || makers.has(fn.name)) continue;
           const v = returnsDirectly(src.text, at) ? null : heldIn(src.text, at);
           const returned =
@@ -178,6 +196,78 @@ function returningMakers(sources: Source[]): Set<string> {
     }
   }
   return makers;
+}
+
+/** The temp-dir.js functions src/ calls; rule 5 holds them to their own names. */
+const TEMP_DIR_FNS = ['makeTempDir', 'removeTempDir', 'withTempDir', 'withTempDirSync'];
+
+/**
+ * Rule 5: every code mention of a temp-dir.js function is a call by its own
+ * name, or a plain name in a static `import { ... } from '.../temp-dir.js'`.
+ */
+function aliasViolations(file: string, text: string, mask: Uint8Array): string[] {
+  const imports = codeMatchesOf(
+    text,
+    mask,
+    /^import\s*\{[^}]*\}\s*from\s*['"][^'"]*\btemp-dir\.js['"]/gm,
+  ).map((m) => ({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  const bad: string[] = [];
+  const mention = new RegExp(`\\b(${TEMP_DIR_FNS.join('|')})\\b`, 'g');
+  for (const m of codeMatchesOf(text, mask, mention)) {
+    const at = m.index ?? 0;
+    const after = text.slice(at + m[0].length);
+    const where = `${file}:${lineOf(text, at)} ${m[0]}`;
+    if (/^\s*\(/.test(after)) continue;
+    if (imports.some((r) => at >= r.start && at < r.end)) {
+      if (/^\s+as\b/.test(after)) {
+        bad.push(
+          `${where} is imported under another name; import it by its own name so the census can follow its calls`,
+        );
+      }
+      continue;
+    }
+    bad.push(
+      `${where} is used without being called (aliased or passed on); call it by its own name so the census can follow it`,
+    );
+  }
+  return bad;
+}
+
+/**
+ * Rule 4's legacy half: each LEGACY_SECRET_TEMP entry names the versions that
+ * made it (the only reason a name src/ no longer makes may be swept) and an
+ * exact shape: a dir prefix src/ no longer makes, or an anchored file name.
+ */
+function legacyViolations(
+  entries: ReadonlyArray<Record<string, unknown>>,
+  found: Map<string, string>,
+): string[] {
+  const bad: string[] = [];
+  for (const entry of entries) {
+    const id = String(entry.prefix ?? entry.name);
+    if (!/\bv\d+\.\d+\.\d+\b/.test(String(entry.versions ?? ''))) {
+      bad.push(`${id}: no version range; a legacy entry names the versions that made it`);
+    }
+    if (String(entry.held ?? '').length <= 20)
+      bad.push(`${id}: says too little about what it held`);
+    if (entry.shape === 'dir') {
+      if (typeof entry.prefix !== 'string' || entry.prefix.length === 0) {
+        bad.push(`${id}: a dir entry needs its prefix`);
+      } else if (found.has(entry.prefix)) {
+        bad.push(
+          `${id}: src/ still makes it (${found.get(entry.prefix)}), so it belongs in STALE_SECRET_PREFIXES`,
+        );
+      }
+    } else if (entry.shape === 'file') {
+      const name = entry.name;
+      if (!(name instanceof RegExp) || !name.source.startsWith('^') || !name.source.endsWith('$')) {
+        bad.push(`${id}: a file entry needs an exact name pattern (^...$)`);
+      }
+    } else {
+      bad.push(`${id}: shape must be 'dir' or 'file'`);
+    }
+  }
+  return bad;
 }
 
 /** What `files` (path to source) do that the census forbids. */
@@ -199,6 +289,10 @@ function tempViolations(files: Record<string, string>): string[] {
       }
     }
   }
+  for (const { file, text, mask } of sources) {
+    if (file === HELPER) continue;
+    bad.push(...aliasViolations(file, text, mask));
+  }
   const makers = returningMakers(sources);
   for (const src of sources) {
     if (src.file === HELPER) continue;
@@ -206,7 +300,7 @@ function tempViolations(files: Record<string, string>): string[] {
       for (const m of callsOf(src, maker)) {
         const at = m.index ?? 0;
         const where = `${src.file}:${lineOf(src.text, at)} ${maker}()`;
-        const fn = src.fns.find((f) => at >= f.start && at < f.end);
+        const fn = fnAt(src, at);
         if (!fn) {
           bad.push(`${where} is outside any top-level function, so nothing is seen to remove it`);
           continue;
@@ -272,6 +366,9 @@ describe('temp dir census (src/)', () => {
     }
     for (const prefix of STALE_SECRET_PREFIXES) expect(prefix in NO_SECRET_PREFIXES).toBe(false);
     for (const why of Object.values(NO_SECRET_PREFIXES)) expect(why.length).toBeGreaterThan(20);
+    // A name src/ no longer makes is swept only with the versions that made it.
+    expect(LEGACY_SECRET_TEMP.length).toBeGreaterThan(0);
+    expect(legacyViolations(LEGACY_SECRET_TEMP, found)).toEqual([]);
   });
 
   it('every allowed file still calls tmpdir(), and says why', () => {
@@ -371,6 +468,89 @@ describe('the census bites', () => {
         '{x}-`, f);\nwithTempDirSync("c-", f);\nmakeTempDir(D_PREFIX, { parent });\n// makeTempDir(\'comment-\');\n',
     });
     expect([...found.keys()]).toEqual(['a-', 'b-', 'c-', 'D_PREFIX']);
+  });
+
+  // An expression-bodied arrow has no closing brace of its own: credited to
+  // the outermost range, the maker below was the arrow's, so `render` was
+  // never a maker and its caller was never checked.
+  it('a one-line arrow before a maker does not take its calls', () => {
+    const maker =
+      "const first = (s) => s.trim();\nexport function render() {\n  const d = makeTempDir('r-');\n  try {\n    w(d);\n  } catch (e) {\n    removeTempDir(d);\n    throw e;\n  }\n  return d;\n}\n";
+    const caller = 'export function deploy() {\n  const out = render();\n  use(out);\n}\n';
+    expect(tempViolations({ 'src/a.js': maker, 'src/b.js': caller })).toEqual([
+      expect.stringMatching(/src\/b\.js:2 render\(\) in deploy: out is never removed/),
+    ]);
+    const sources = [source('src/a.js', maker)];
+    expect([...returningMakers(sources)]).toEqual(['makeTempDir', 'render']);
+    // And a dir a function keeps is named against that function.
+    expect(
+      one(
+        "const first = (s) => s.trim();\nfunction g() {\n  const d = makeTempDir('x-');\n  use(d);\n}\n",
+      ),
+    ).toEqual([expect.stringMatching(/makeTempDir\(\) in g: d is never removed/)]);
+  });
+
+  // A multi-line expression-bodied arrow closes on an indented line, so
+  // uncut, its range ran into the next function and that function's removal
+  // counted for the arrow's dir.
+  it("a removal in the next function never counts for an arrow's dir", () => {
+    expect(
+      one(
+        "const f = async () =>\n  withLock(async () => {\n    const d = makeTempDir('x-');\n    use(d);\n  });\nfunction g(d) {\n  removeTempDir(d);\n}\n",
+      ),
+    ).toEqual([expect.stringMatching(/makeTempDir\(\) in f: d is never removed/)]);
+  });
+
+  it('a temp-dir.js function under another name, or passed on uncalled', () => {
+    expect(
+      one(
+        "import { makeTempDir as mk } from './temp-dir.js';\nfunction f() {\n  const d = mk('x-');\n  use(d);\n}\n",
+      ),
+    ).toEqual([expect.stringMatching(/:1 makeTempDir is imported under another name/)]);
+    expect(one("import { makeTempDir } from './temp-dir.js';\nconst mk = makeTempDir;\n")).toEqual([
+      expect.stringMatching(/:2 makeTempDir is used without being called/),
+    ]);
+    expect(one("const { removeTempDir: rm } = await import('./temp-dir.js');\n")).toEqual([
+      expect.stringMatching(/:1 removeTempDir is used without being called/),
+    ]);
+    expect(one('dirs.forEach(removeTempDir);\n')).toEqual([
+      expect.stringMatching(/removeTempDir is used without being called/),
+    ]);
+    // The plain import, and calls by name, are fine.
+    expect(
+      one(
+        "import { makeTempDir, removeTempDir } from '../temp-dir.js';\nfunction f() {\n  const d = makeTempDir('x-');\n  removeTempDir(d);\n}\n",
+      ),
+    ).toEqual([]);
+  });
+
+  it('a legacy entry without its versions, still made, or without an exact shape', () => {
+    const found = new Map([['vc-made-', 'src/a.js:1']]);
+    const held = 'a secret that a released version wrote here';
+    expect(
+      legacyViolations(
+        [
+          { shape: 'dir', prefix: 'vc-old-', versions: 'up to v0.50.1', held },
+          { shape: 'file', name: /^vc-old-\d+\.yaml$/, versions: 'up to v0.49.0', held },
+        ],
+        found,
+      ),
+    ).toEqual([]);
+    expect(
+      legacyViolations([{ shape: 'dir', prefix: 'vc-old-', versions: 'old ones', held }], found),
+    ).toEqual([expect.stringMatching(/vc-old-: no version range/)]);
+    expect(
+      legacyViolations(
+        [{ shape: 'dir', prefix: 'vc-made-', versions: 'up to v0.50.1', held }],
+        found,
+      ),
+    ).toEqual([expect.stringMatching(/src\/ still makes it \(src\/a\.js:1\)/)]);
+    expect(
+      legacyViolations(
+        [{ shape: 'file', name: /vc-old-\d+\.yaml/, versions: 'up to v0.49.0', held }],
+        found,
+      ),
+    ).toEqual([expect.stringMatching(/exact name pattern/)]);
   });
 
   it('the helper itself and an allowed file are exempt where stated', () => {

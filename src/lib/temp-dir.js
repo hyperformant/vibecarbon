@@ -10,9 +10,9 @@
  * process.exit(130) and no finally block runs. A kill that skips exit
  * handlers (SIGKILL, a terminal hang-up) still leaves a dir behind.
  *
- * Earlier versions left the deploy bundle (and other dirs with secrets in
- * them) behind on every deploy. sweepStaleSecretTempDirs removes those, once
- * per deploy, in the background.
+ * Earlier versions left the deploy bundle (and other dirs and files with
+ * secrets in them) behind on every deploy. startStaleSecretSweep removes
+ * those, once per deploy, in the background.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { lstat, readdir, rm } from 'node:fs/promises';
@@ -127,51 +127,160 @@ export const STALE_SECRET_PREFIXES = Object.freeze([
   'vb-sshscript-',
 ]);
 
+/**
+ * Secret-bearing temp names that released versions made and src/ no longer
+ * does, each with the versions that made it and its shape: a dir by prefix,
+ * or a file by its exact name pattern. The census
+ * (tests/unit/lib/temp-dir-census.test.ts) takes an entry here only with its
+ * version range.
+ *
+ * @type {ReadonlyArray<Readonly<{shape: 'dir', prefix: string, versions: string, held: string}
+ *   | {shape: 'file', name: RegExp, versions: string, held: string}>>}
+ */
+export const LEGACY_SECRET_TEMP = Object.freeze([
+  Object.freeze({
+    shape: 'dir',
+    prefix: 'vibecarbon-repl-',
+    versions: 'up to v0.50.1',
+    held: 'primary-init.sql with the k8s-ha replication password, while it was copied to the primary',
+  }),
+  Object.freeze({
+    shape: 'file',
+    // The old k8s deploy's values file, vibecarbon-<stack>-values-<pid>-<ms>.yaml.
+    // The stack's name is a retired word (tests/unit/lib/terminology-census.test.ts),
+    // so the pattern takes any word there; no other file of this shape was made.
+    name: /^vibecarbon-[a-z]+-values-\d+-\d+\.yaml$/,
+    versions: 'up to v0.49.0',
+    held: 'the Helm values with the admin password, for the whole `helm upgrade --wait`',
+  }),
+  Object.freeze({
+    shape: 'file',
+    name: /^vc-deploy-[a-z0-9-]+-[0-9A-Za-z_]+-\d+-[0-9a-f]{12}\.tar\.gz$/,
+    versions: 'up to v0.52.0',
+    held: "the deploy bundle's tarball with the app's .env, which tar made readable by every local user under the usual umask",
+  }),
+]);
+
 /** How old a leftover must be before the sweep takes it: no live run is that old. */
 export const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Remove the secret-bearing temp dirs earlier runs left: each entry of the OS
- * temp dir (one readdir) with a STALE_SECRET_PREFIXES prefix that is a real
- * directory (lstat: a symlink is never followed), owned by this user, and
- * last changed more than 24 h ago. Best effort: an entry that fails is
- * skipped, a sweep that fails stops, and it never rejects. Runs in the
- * background, one removal at a time, so a deploy never waits on it. Reports
- * one line only when it removed something.
+ * What a temp dir entry named `name` is, if it is one the stale sweep takes:
+ * 'dir' for a secret-bearing dir prefix (current or legacy), 'file' for a
+ * legacy file name, null for anything else.
+ * @param {string} name
+ * @returns {'dir' | 'file' | null}
+ */
+function staleShape(name) {
+  if (STALE_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix))) return 'dir';
+  for (const entry of LEGACY_SECRET_TEMP) {
+    if (entry.shape === 'dir' ? name.startsWith(entry.prefix) : entry.name.test(name)) {
+      return entry.shape;
+    }
+  }
+  return null;
+}
+
+/**
+ * Remove the secret-bearing temp dirs and files earlier runs left: each entry
+ * of the OS temp dir (one readdir) that staleShape names, of exactly that
+ * shape (lstat: a dir must be a real directory, a file a regular file, and a
+ * symlink is never followed), owned by this user, and last changed more than
+ * 24 h ago. Best effort: an entry that fails is skipped, a sweep that fails
+ * stops, and it never rejects. One removal at a time, and it prints nothing:
+ * startStaleSecretSweep holds its line for a quiet point.
  *
- * @param {{ dir?: string, now?: number, uid?: number | null, report?: (line: string) => void }} [opts]
- * @returns {Promise<number>} how many it removed
+ * @param {{ dir?: string, now?: number, uid?: number | null }} [opts]
+ * @returns {Promise<{dir: string, dirs: number, files: number}>} what it removed
  */
 export async function sweepStaleSecretTempDirs({
   dir = tmpdir(),
   now = Date.now(),
   uid = process.getuid?.() ?? null,
-  report = (line) => process.stderr.write(`${line}\n`),
 } = {}) {
   // With no user id to compare (null: Windows has no process.getuid), no
   // entry's owner matches, so nothing goes.
-  let removed = 0;
+  const removed = { dir, dirs: 0, files: 0 };
   try {
     for (const name of await readdir(dir)) {
-      if (!STALE_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
+      const shape = staleShape(name);
+      if (!shape) continue;
       const path = join(dir, name);
       try {
         const st = await lstat(path);
-        if (!st.isDirectory() || st.uid !== uid || now - st.mtimeMs <= STALE_AFTER_MS) continue;
-        await rm(path, { recursive: true, force: true });
-        removed += 1;
+        const isShape = shape === 'dir' ? st.isDirectory() : st.isFile();
+        if (!isShape || st.uid !== uid || now - st.mtimeMs <= STALE_AFTER_MS) continue;
+        await rm(path, { recursive: shape === 'dir', force: true });
+        if (shape === 'dir') removed.dirs += 1;
+        else removed.files += 1;
       } catch {
         // Gone already, or not ours to remove: the next deploy looks again.
       }
-    }
-    if (removed > 0) {
-      report(
-        `removed ${removed} old vibecarbon temp ${removed === 1 ? 'dir' : 'dirs'} from ${dir}: ` +
-          'earlier versions left them there, with deploy secrets in them',
-      );
     }
   } catch {
     // Best effort: an unreadable temp dir costs the deploy nothing.
   }
   return removed;
+}
+
+/**
+ * The one line a stale sweep prints, or null when it removed nothing.
+ * @param {{dir: string, dirs: number, files: number}} removed
+ * @returns {string | null}
+ */
+export function staleSweepLine({ dir, dirs, files }) {
+  const total = dirs + files;
+  if (total === 0) return null;
+  const plural = (n, noun) => (n === 1 ? noun : `${noun}s`);
+  const what =
+    dirs > 0 && files > 0
+      ? `${dirs} old vibecarbon temp ${plural(dirs, 'dir')} and ${files} ${plural(files, 'file')}`
+      : dirs > 0
+        ? `${dirs} old vibecarbon temp ${plural(dirs, 'dir')}`
+        : `${files} old vibecarbon temp ${plural(files, 'file')}`;
+  const why =
+    total === 1
+      ? 'an earlier run left it, and it can hold deploy secrets'
+      : 'earlier runs left them, and they can hold deploy secrets';
+  return `removed ${what} from ${dir}: ${why}`;
+}
+
+/**
+ * Start the stale sweep in the background, so a deploy never waits on it,
+ * and hold its line for a quiet point: a line written while a spinner
+ * animates breaks the spinner's line (progress.js). The deploy prints it
+ * with `flush` before its outro. A process that exits first (a failed
+ * deploy, a Ctrl-C) prints it on its way out, on a line of its own.
+ *
+ * @param {{ dir?: string, now?: number, uid?: number | null,
+ *   proc?: { once: Function, off: Function } | null,
+ *   write?: (text: string) => void }} [opts]
+ *   `proc`: where the exit print hooks in; null (the default under vitest,
+ *   like the deploy completion guard) hooks nothing.
+ * @returns {{ flush: (print: (line: string) => void) => Promise<void> }}
+ */
+export function startStaleSecretSweep({
+  proc = process.env.VITEST ? null : process,
+  write = (text) => process.stderr.write(text),
+  ...sweepOpts
+} = {}) {
+  let line = null;
+  const atExit = () => {
+    const pending = line;
+    line = null;
+    if (pending) write(`\n${pending}\n`);
+  };
+  const settled = sweepStaleSecretTempDirs(sweepOpts).then((removed) => {
+    line = staleSweepLine(removed);
+    if (line) proc?.once('exit', atExit);
+  });
+  return {
+    async flush(print) {
+      await settled;
+      proc?.off('exit', atExit);
+      const pending = line;
+      line = null;
+      if (pending) print(pending);
+    },
+  };
 }
