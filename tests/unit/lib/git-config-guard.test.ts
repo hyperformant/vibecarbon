@@ -72,6 +72,50 @@ describe('git config guard comparison', () => {
     expect(diffConfigSnapshots(base, after)).toHaveLength(1);
   });
 
+  it('fails worded as a change during the run, with the key and both values', () => {
+    const after = parseConfigList(
+      list('core.bare\ntrue', 'remote.origin.url\ngit@example.test:o/r.git'),
+    );
+    const err = (() => {
+      try {
+        assertConfigUnchanged(base, after);
+      } catch (e) {
+        return String(e);
+      }
+      return '';
+    })();
+    expect(err).toContain('changed during the run:\n  core.bare: ["false"] -> ["true"]');
+    // Another session in the shared checkout is a writer too: the suite is
+    // not blamed outright.
+    expect(err).toContain('another session working in this checkout');
+    expect(err).not.toContain('—');
+  });
+
+  it.each([
+    ['core.hooksPath', 'core.hooksPath\n/tmp/hooks'],
+    ['user.signingkey', 'user.signingkey\nABC123'],
+    ['a second remote url', 'remote.fork.url\ngit@example.test:f/r.git'],
+  ])('%s added counts', (_, record) => {
+    const after = parseConfigList(
+      list('core.bare\nfalse', 'remote.origin.url\ngit@example.test:o/r.git', record),
+    );
+    expect(diffConfigSnapshots(base, after)).toHaveLength(1);
+  });
+
+  // Keys other tools write while a suite runs, often from another session in
+  // another worktree. None changes who commits, where pushes go, or bareness.
+  it.each([
+    ['gh repo set-default', 'remote.origin.gh-resolved\nbase'],
+    ['git maintenance start', 'maintenance.auto\nfalse'],
+    ['git maintenance start (strategy)', 'maintenance.strategy\nincremental'],
+    ['a remote fetch refspec', 'remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*'],
+  ])('%s is not a change', (_, record) => {
+    const after = parseConfigList(
+      list('core.bare\nfalse', 'remote.origin.url\ngit@example.test:o/r.git', record),
+    );
+    expect(diffConfigSnapshots(base, after)).toEqual([]);
+  });
+
   it('branch.* churn (git push -u in another worktree) is not a change', () => {
     const after = parseConfigList(
       list(

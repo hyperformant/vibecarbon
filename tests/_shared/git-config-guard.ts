@@ -13,18 +13,23 @@
  * the keys, when they differ. It restores nothing: a changed key is evidence
  * of a bug somewhere, and quietly repairing it would hide the culprit.
  *
- * `branch.*` keys are left out of the comparison: git itself rewrites them on
- * push -u, branch -u and branch deletion, and other sessions do that in other
- * worktrees while a suite runs. They cannot change who commits or whether the
- * repo is bare, which is what the guard is for.
+ * Only the keys a test could plausibly write and that matter are compared
+ * (WATCHED_KEY): `core.*` (core.bare among them), `user.*` (who commits) and
+ * `remote.<name>.url` (where pushes go). Everything else is left out, because
+ * other tools write it in normal operation while a suite runs, often from
+ * another session in another worktree: git itself rewrites `branch.*` on
+ * push -u, branch -u and branch deletion, `gh repo set-default` writes
+ * `remote.<name>.gh-resolved`, and `git maintenance start` writes
+ * `maintenance.*`. None of those can change who commits, where pushes go, or
+ * whether the repo is bare, which is what the guard is for.
  */
 import { execFileSync } from 'node:child_process';
 import { gitScrubbedEnv } from './git-env.js';
 
 export type ConfigSnapshot = ReadonlyMap<string, string[]>;
 
-/** Keys git rewrites in normal operation; see the file header. */
-const IGNORED_KEY = /^branch\./;
+/** The keys the guard compares; see the file header. */
+const WATCHED_KEY = /^(core\.|user\.|remote\..+\.url$)/;
 
 /** Parse `git config --list -z` output (`key\nvalue\0` records) into key -> values. */
 export function parseConfigList(output: string): Map<string, string[]> {
@@ -34,7 +39,7 @@ export function parseConfigList(output: string): Map<string, string[]> {
     const nl = record.indexOf('\n');
     const key = nl < 0 ? record : record.slice(0, nl);
     const value = nl < 0 ? '' : record.slice(nl + 1);
-    if (IGNORED_KEY.test(key)) continue;
+    if (!WATCHED_KEY.test(key)) continue;
     map.set(key, [...(map.get(key) ?? []), value]);
   }
   return map;
@@ -69,9 +74,10 @@ export function assertConfigUnchanged(before: ConfigSnapshot, after: ConfigSnaps
   const changed = diffConfigSnapshots(before, after);
   if (changed.length === 0) return;
   throw new Error(
-    `the shared git config (.git/config, used by every worktree) changed during this test run:\n  ${changed.join('\n  ')}\n` +
-      'A test or the code under test wrote it, probably a git call that ran without a scrubbed ' +
-      'environment (GIT_DIR inherited from a hook) or without `--global`. Nothing was restored: ' +
-      'repair the keys above by hand, then find the writer.',
+    `the shared git config (.git/config, used by every worktree) changed during the run:\n  ${changed.join('\n  ')}\n` +
+      'Something wrote it while the suites ran: a test, the code under test, or another session ' +
+      'working in this checkout. Nothing was restored, so check each key above and repair it by ' +
+      'hand if the change is unwanted. A test that writes it usually runs git without a scrubbed ' +
+      'environment (GIT_DIR inherited from a hook) or without `--global`.',
   );
 }
