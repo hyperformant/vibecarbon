@@ -66,6 +66,7 @@ import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-r
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
+import { escapeRegExp } from '../../_shared/regexp.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 type Call = { argv: string[]; input?: string; env?: NodeJS.ProcessEnv };
@@ -428,7 +429,7 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
       'utf-8',
     );
     for (const { name } of made)
-      expect(template).not.toMatch(new RegExp(`create secret generic ${name}\\b`));
+      expect(template).not.toMatch(new RegExp(`create secret generic ${escapeRegExp(name)}\\b`));
   });
 
   it.each(K8S_PROVIDERS)('%s: the old Secrets and keys less the current ones', (id, Provider) => {

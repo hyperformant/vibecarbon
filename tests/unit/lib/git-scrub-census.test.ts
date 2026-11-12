@@ -33,6 +33,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
 
@@ -133,8 +134,8 @@ function isGitInvocation(callText: string, fileSrc = ''): boolean {
   if (startsWithGitCommand(args)) return true;
   const name = args.match(/^([\w$]+)\s*[,)]/)?.[1];
   if (!name) return false;
-  const escaped = name.replace(/[$]/g, '\\$&');
-  for (const m of fileSrc.matchAll(new RegExp(`(?:const|let|var)\\s+${escaped}\\s*=\\s*`, 'g'))) {
+  const declared = new RegExp(`(?:const|let|var)\\s+${escapeRegExp(name)}\\s*=\\s*`, 'g');
+  for (const m of fileSrc.matchAll(declared)) {
     if (startsWithGitCommand(fileSrc.slice((m.index ?? 0) + m[0].length))) return true;
   }
   return false;
