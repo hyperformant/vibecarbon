@@ -352,7 +352,9 @@ describe('provisionStandbyCapacity', () => {
       expect(err).toBeInstanceOf(AbortProvisioningError);
       expect(err.cause).toBe(stopped);
       expect(err.message).toBe(`Failover aborted, the primary is untouched. ${stopped.message}`);
-      expect(err.logLines).toEqual([err.message]);
+      // What the failover prints under its own "Failover aborted" line: the
+      // probe's reason, not a second "Failover aborted".
+      expect(err.logLines).toEqual([stopped.message]);
       expect(converge).toHaveBeenCalledTimes(1);
       expect(kubectl).not.toHaveBeenCalled();
       expect(warn).not.toHaveBeenCalled();
@@ -1076,6 +1078,36 @@ describe('failoverHA step order', () => {
   it('threads preflight-resolved creds into provisioning (single S3 prompt per failover)', async () => {
     const { captured } = await runFailoverHA({ primaryReachable: true });
     expect(captured.provisionCreds).toEqual({ apiToken: 'threaded-token' });
+  });
+
+  // The probe that couldn't read the standby's k3s token: the run says
+  // "Failover aborted" once, then the probe's reason, in second person.
+  it('a provisioning abort from the k3s token probe says "Failover aborted" once', async () => {
+    const stopped = new K3sTokenProbeError(
+      'e4-standby',
+      new Error('NoSuchBucket: state backend gone'),
+    );
+    const abort = await provisionStandbyCapacity({
+      ...base,
+      deps: { converge: vi.fn().mockRejectedValue(stopped), kubectl: vi.fn() },
+    }).catch((e) => e);
+    const lines: string[] = [];
+    const spies = (['error', 'warn', 'info', 'message', 'step', 'success'] as const).map((level) =>
+      vi.spyOn(p.log, level).mockImplementation((m: string) => {
+        lines.push(m);
+      }),
+    );
+    try {
+      const { order } = await runFailoverHA({ primaryReachable: true, provisionThrows: abort });
+      expect(order).toEqual(['preflight', 'provision', 'exit(1)']);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    const printed = lines.join('\n');
+    expect(printed.match(/Failover aborted/g)).toHaveLength(1);
+    expect(printed).toContain(stopped.message);
+    expect(printed).toContain("Couldn't read your k3s join token for e4-standby");
+    expect(printed).not.toContain('—');
   });
 
   it('provisioning abort is a clean exit: primary untouched, no promote/scale/dns/swap', async () => {

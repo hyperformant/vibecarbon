@@ -76,8 +76,10 @@ const k8s = {
   workerServerType: 'cx23',
   minWorkers: 2,
   apiToken: 'test-token',
-  // An existing cluster's token, replayed. A first deploy mints its own.
+  // An existing cluster's token, replayed. A first deploy gets one derived
+  // from the state passphrase (lib/iac/k3s-token.js), not replayed.
   k3sToken: 'replayed-token',
+  k3sTokenReplayed: true,
 };
 
 const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown> }> = {
@@ -333,15 +335,20 @@ describe('server-class create timeouts (census)', () => {
   // first deploy has no worker to protect, and a trigger that arrives on the
   // second deploy replaces nothing but counts from then on (proved on real
   // Pulumi, 2026-11-05: 7 of 7 transitions), so it waits for a token to replay.
-  // Linode's workers take a fixed VPC address too (10.0.1.2 for the master),
-  // so the same holds there.
+  // A first deploy still has a token, the derived one: only a replayed token
+  // says there is a cluster to protect. Linode's workers take a fixed VPC
+  // address too (10.0.1.2 for the master), so the same holds there.
   it.each([
     ['hetzner-k8s.js', 'userData'],
     ['linode-k8s.js', 'metadatas'],
   ])(
     '%s: a first deploy starts its workers with the master, not after it',
     async (file, scriptInput) => {
-      const { k3sToken: _existing, ...fresh } = PROGRAMS[file].config;
+      const fresh = {
+        ...PROGRAMS[file].config,
+        k3sToken: 'derived-token',
+        k3sTokenReplayed: false,
+      };
       const resources = await runProgram(file, fresh);
       const workers = resources.filter(
         (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
@@ -446,7 +453,11 @@ describe('server-class create timeouts (census)', () => {
   });
 
   it('digitalocean-k8s.js: a first deploy keeps the trigger, its workers wait on the master anyway', async () => {
-    const { k3sToken: _existing, ...fresh } = PROGRAMS['digitalocean-k8s.js'].config;
+    const fresh = {
+      ...PROGRAMS['digitalocean-k8s.js'].config,
+      k3sToken: 'derived-token',
+      k3sTokenReplayed: false,
+    };
     const resources = await runProgram('digitalocean-k8s.js', fresh);
     const workers = resources.filter(
       (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),

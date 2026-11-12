@@ -82,6 +82,7 @@ describe('k8s program outputs match K8S_FLOATING_IP', () => {
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
       allowedSshIps: ['203.0.113.5/32'],
       allowedK8sApiIps: ['203.0.113.5/32'],
+      k3sToken: 'SENTINEL-k3s-token',
     });
     const outputs = await program();
     expect(Object.keys(outputs)).toContain('masterIp');

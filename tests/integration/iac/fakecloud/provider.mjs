@@ -5,7 +5,10 @@
  * fakecloud:index:Server (server-state-follows-scale.test.ts) behaves like the
  * bridged providers where it matters:
  *   - read of a server that is gone returns nothing (refresh drops it);
- *   - read never returns userData: the last known value is kept;
+ *   - read never returns userData: the last known value is kept. The cloud
+ *     file records the user data a server was created with (`bootedWith`),
+ *     as a real server keeps what it booted with whatever the state says
+ *     later (k3s-token-derived.test.ts reads it);
  *   - a changed userData replaces the server, a changed size updates it. The
  *     engine hands a provider that accepts secrets a secret value wrapped, a
  *     new object on every call, so userData is compared by its value, as the
@@ -88,7 +91,11 @@ const fakecloud = {
     const type = typeOf(urn);
     if (type === SERVER) {
       const id = String(n);
-      cloud.servers[id] = { size: inputs.size, ip: `10.0.0.${id}` };
+      cloud.servers[id] = {
+        size: inputs.size,
+        ip: `10.0.0.${id}`,
+        bootedWith: revealed(inputs.userData),
+      };
       save(cloud);
       return { id, outs: { ...inputs, ip: cloud.servers[id].ip } };
     }

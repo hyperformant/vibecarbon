@@ -29,7 +29,6 @@
  * floatingIp, networkId, sshKeyId, k3sToken, clusterName, vpcCidr.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as linode from '@pulumi/linode';
 import * as pulumi from '@pulumi/pulumi';
 import {
@@ -45,6 +44,7 @@ import {
   serverResourceOptions,
   workerResourceOptions,
 } from '../create-timeout.js';
+import { requireK3sToken } from '../k3s-token.js';
 
 const VPC_CIDR = LinodeProvider.DEFAULT_VPC_CIDR;
 const MASTER_IP = '10.0.1.2';
@@ -88,7 +88,11 @@ function assertLabelsFit(labels) {
  * @property {string} environment
  * @property {string} sshPublicKey       OpenSSH-format public key
  * @property {string} [existingSshKeyId] k8s-ha's shared key: reuse, create nothing
- * @property {string} [k3sToken]         Auto-generated if omitted
+ * @property {string} k3sToken          The stack's recorded token, or one
+ *                                       derived from the state passphrase.
+ *                                       Required.
+ * @property {boolean} [k3sTokenReplayed] The token is the stack's recorded
+ *                                       one (a cluster exists to protect).
  * @property {{id: string, privateIp: string}} [priorMaster] The master as the
  *   prior state records it. Set only by converge-cluster.js (scale and
  *   failover), whose preview refuses any plan that replaces the master; the
@@ -158,7 +162,9 @@ export function buildLinodeK8sProgram(config) {
         `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
     );
   }
-  const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
+  // Always the CLI's: the stack's recorded token or the one derived from the
+  // state passphrase (lib/iac/k3s-token.js). Never made here.
+  const k3sToken = requireK3sToken(config, 'buildLinodeK8sProgram');
   const image = LinodeProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;
   const world = { ipv4s: ['0.0.0.0/0'], ipv6s: ['::/0'] };
@@ -330,7 +336,7 @@ export function buildLinodeK8sProgram(config) {
             // would hold a worker back until the master finished. With no
             // token to replay it has nothing to protect yet: see
             // workerResourceOptions.
-            omitJoinTrigger: !config.k3sToken,
+            omitJoinTrigger: !config.k3sTokenReplayed,
             joinTarget: {
               // A scale or failover names the master from prior state, so the
               // worker resizes alongside it: see priorMasterFrom.

@@ -85,6 +85,8 @@ const baseConfig = {
   allowedSshIps: ['203.0.113.5/32', '2001:db8::1/128'],
   allowedK8sApiIps: ['203.0.113.6/32'],
   labels: { 'managed-by': 'vibecarbon' },
+  // The CLI always passes one (lib/iac/k3s-token.js). Sentinel only.
+  k3sToken: 'SENTINEL-k3s-token',
 };
 const CLUSTER = 'acme-prod';
 

@@ -95,7 +95,6 @@
  * all — its S3 endpoints resolve to public IPs and never need it.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
@@ -104,6 +103,7 @@ import {
   serverResourceOptions,
   workerResourceOptions,
 } from '../create-timeout.js';
+import { requireK3sToken } from '../k3s-token.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -113,8 +113,12 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  * @property {string} sshPublicKey     OpenSSH-format public key
  * @property {string} [existingSshKeyId]  If set, skip creating a new SSH key
  *                                        (HA case: shared key across clusters)
- * @property {string} [k3sToken]          Pre-shared k3s node-join token
- *                                        (auto-generated if omitted)
+ * @property {string} k3sToken           k3s node-join token: the stack's
+ *                                        recorded one, or one derived from
+ *                                        the state passphrase. Required.
+ * @property {boolean} [k3sTokenReplayed] The token is the stack's recorded
+ *                                        one. Unused here: every worker
+ *                                        keeps its join trigger.
  * @property {{id: string, privateIp: string}} [priorMaster] The master as the
  *   prior state records it. Set only by converge-cluster.js (scale and
  *   failover), whose preview refuses any plan that replaces the master; the
@@ -236,7 +240,9 @@ export function buildDigitalOceanK8sProgram(config) {
   }
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
-  const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
+  // Always the CLI's: the stack's recorded token or the one derived from the
+  // state passphrase (lib/iac/k3s-token.js). Never made here.
+  const k3sToken = requireK3sToken(config, 'buildDigitalOceanK8sProgram');
   const vpcIpRange = config.vpcIpRange ?? vpcCidrForCluster(clusterName);
   const image = config.image ?? DigitalOceanProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;

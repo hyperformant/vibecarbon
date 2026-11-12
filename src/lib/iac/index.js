@@ -41,6 +41,7 @@ import {
   parseCreateTimeouts,
   SERVER_RESOURCE_TYPES,
 } from './create-timeout.js';
+import { requirePulumiProject } from './pulumi-project.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
@@ -81,38 +82,6 @@ import { makeWorkspaceDir } from './workspace-dir.js';
 // implementation, not two copies drifting apart.
 export { failingPulumiCommandVerb };
 
-/**
- * The Pulumi PROJECT scopes state keys: the DIY backend stores every checkpoint
- * as `.pulumi/stacks/<project>/<stack>.json`. This used to be the constant
- * 'vibecarbon', which made state keys collide the moment two vibecarbon
- * projects shared one state bucket — exactly what the project-level
- * `stateBucket` pin and the e2e shared bucket introduced. Two projects pinned
- * to one bucket with an env name in common would silently ADOPT each other's
- * live state: select succeeds on the other project's stack file, URNs match
- * (program logical names are constants), and `up` reconciles someone else's
- * servers. (Review finding, 2026-08-15.)
- *
- * So the project name is now the vibecarbon PROJECT'S name, required
- * explicitly: state keys become `.pulumi/stacks/<projectName>/<stack>.json`,
- * distinct per project, and a shared bucket is safe by construction.
- *
- * REQUIRED, never defaulted: a call site that fell back to a constant would
- * read a DIFFERENT key than the one the deploy wrote, see "no stack", and take
- * the create-or-orphan paths — the silent-split failure mode is strictly worse
- * than a loud throw. Pre-release, so no migration shim for state written under
- * the old constant key.
- */
-function requirePulumiProject(options) {
-  const name = options?.projectName;
-  if (typeof name !== 'string' || name.trim() === '') {
-    throw new Error(
-      'iac: options.projectName is required — Pulumi state keys are scoped per project ' +
-        '(.pulumi/stacks/<projectName>/<stack>.json). Pass the vibecarbon projectName from ' +
-        'projectConfig; a defaulted name would read a different key than the deploy wrote.',
-    );
-  }
-  return name.trim();
-}
 const LOCAL_STATE_DIR = join(homedir(), '.vibecarbon', 'pulumi-state');
 
 // Pulumi's file:// backend requires the target directory to exist before
@@ -2127,8 +2096,8 @@ export async function getStackOutputs(stackName, program, options = {}) {
 /**
  * A k3s token probe that couldn't read the stack: it may exist, holding the
  * join token its live cluster runs with, so the command stops instead of
- * minting a new one (R22). Names the stack and the first line of what failed;
- * the full error is the cause.
+ * building with another one (R22). Names the stack and the first line of what
+ * failed; the full error is the cause.
  */
 export class K3sTokenProbeError extends Error {
   /**
@@ -2137,9 +2106,9 @@ export class K3sTokenProbeError extends Error {
    */
   constructor(stackName, cause) {
     super(
-      `Couldn't read the k3s join token for ${stackName} from its Pulumi state: ${summarizePulumiError(cause).replace(/\.$/, '')}. ` +
-        'vibecarbon stopped before creating or changing any of its servers, because a new token would leave new nodes unable to join the cluster. ' +
-        'Running this again is safe.',
+      `Couldn't read your k3s join token for ${stackName} from its Pulumi state: ${summarizePulumiError(cause).replace(/\.$/, '')}. ` +
+        'vibecarbon stopped before creating or changing any of its servers, because a different token would leave new nodes unable to join your cluster. ' +
+        'You can run this again safely.',
       { cause },
     );
     this.name = 'K3sTokenProbeError';
@@ -2159,15 +2128,18 @@ export class K3sTokenProbeError extends Error {
  *   - `recovered`: outputs has a non-empty k3sToken: replay it.
  *   - `empty`:     the stack exists but its outputs lack the token: a stack
  *                  created whose first up never finished, or outputs that
- *                  dropped the key. The caller mints one; the master-replace
- *                  defense catches the destructive case.
+ *                  dropped the key. The caller uses the token derived from
+ *                  the state passphrase (k3s-token.js), the one that first
+ *                  up's servers booted with; the master-replace defense
+ *                  catches the destructive case.
  *   - `missing`:   the state backend has no such stack (getOrCreateStack's
  *                  requireExisting answer, `stackNotFound`): a first deploy.
- *                  The caller mints one.
+ *                  The caller uses the derived token too.
  *
  * Every other probe failure throws, because the stack may exist and hold the
- * token its live cluster runs with, unread. A minted token would reach every
- * node made from then on, and none of them could join (R22):
+ * token its live cluster runs with, unread (an older version recorded a
+ * random one). Any other token would reach every node made from then on, and
+ * none of them could join (R22):
  *
  *   - a passphrase failure (isStatePassphraseFailure), a StateMigrationError
  *     (the one-time legacy migration stopped) and a StackHeldError (another

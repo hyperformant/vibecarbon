@@ -19,7 +19,6 @@
  * networkId, sshKeyId, k3sToken.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { loadCloudInit, renderScript } from '../cloud-init.js';
@@ -28,6 +27,7 @@ import {
   serverResourceOptions,
   workerResourceOptions,
 } from '../create-timeout.js';
+import { requireK3sToken } from '../k3s-token.js';
 
 // Hetzner location → private-network zone. Single source of truth: this is
 // the ONLY place that derives a networkZone, and it's derived here — inside
@@ -66,8 +66,11 @@ export function networkZoneFor(location) {
  * @property {string} sshPublicKey     OpenSSH-format public key
  * @property {string} [existingSshKeyId]  If set, skip creating a new SSH key
  *                                        (HA case: shared key across clusters)
- * @property {string} [k3sToken]          Pre-shared k3s node-join token
- *                                        (auto-generated if omitted)
+ * @property {string} k3sToken           k3s node-join token: the stack's
+ *                                        recorded one, or one derived from
+ *                                        the state passphrase. Required.
+ * @property {boolean} [k3sTokenReplayed] The token is the stack's recorded
+ *                                        one (a cluster exists to protect).
  * @property {{id: string, privateIp: string}} [priorMaster] The master as the
  *   prior state records it. Set only by converge-cluster.js (scale and
  *   failover), whose preview refuses any plan that replaces the master; the
@@ -125,7 +128,9 @@ export function buildHetznerK8sProgram(config) {
   }
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
-  const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
+  // Always the CLI's: the stack's recorded token or the one derived from the
+  // state passphrase (lib/iac/k3s-token.js). Never made here.
+  const k3sToken = requireK3sToken(config, 'buildHetznerK8sProgram');
   const privateNetworkRange = config.privateNetworkRange ?? '10.0.0.0/8';
   const subnetRange = config.subnetRange ?? '10.0.1.0/24';
   const minWorkers = config.minWorkers ?? 1;
@@ -388,7 +393,7 @@ export function buildHetznerK8sProgram(config) {
             // The master's address is static, so only the join trigger would
             // hold a worker back until the master finished. With no token to
             // replay it has nothing to protect yet: see workerResourceOptions.
-            omitJoinTrigger: !config.k3sToken,
+            omitJoinTrigger: !config.k3sTokenReplayed,
             joinTarget: {
               // A scale or failover names the master from prior state, so the
               // worker resizes alongside it: see priorMasterFrom.
