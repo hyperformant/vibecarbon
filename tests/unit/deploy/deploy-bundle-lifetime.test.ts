@@ -171,19 +171,31 @@ vi.mock('../../../src/lib/deploy/app-storage-credential.js', async (orig) => ({
   })),
   syncHetznerFences: vi.fn(),
 }));
-vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  getObjectStorageProvider: async () => ({
+/**
+ * One store in hel1. A create names the bucket's region and endpoint, and
+ * forRegion reaches a region, as every S3 provider does (the S3 contract).
+ */
+const hel1Store = {
+  region: 'hel1',
+  endpoint: 'https://hel1.your-objectstorage.com',
+  getEndpoint: () => 'https://hel1.your-objectstorage.com',
+  createBucket: async (name: string) => ({
+    name,
+    created: false,
+    ready: true,
     region: 'hel1',
     endpoint: 'https://hel1.your-objectstorage.com',
-    getEndpoint: () => 'https://hel1.your-objectstorage.com',
-    createBucket: async (name: string) => ({ name, created: false, ready: true }),
-    hasObjectsWithPrefix: async () => false,
-    bucketExists: async () => true,
-    setBucketCors: async () => {},
-    getBucketCorsOrigins: async () => [],
-    bucketCreatedAt: async () => null,
   }),
+  forRegion: () => hel1Store,
+  hasObjectsWithPrefix: async () => false,
+  bucketExists: async () => true,
+  setBucketCors: async () => {},
+  getBucketCorsOrigins: async () => [],
+  bucketCreatedAt: async () => null,
+};
+vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  getObjectStorageProvider: async () => hel1Store,
 }));
 vi.mock('../../../src/lib/deploy/retired-fence.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),

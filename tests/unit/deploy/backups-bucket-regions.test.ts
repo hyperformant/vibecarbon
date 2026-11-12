@@ -16,7 +16,7 @@
  * `<project>-<salt>-<region>-backups` (src/lib/backups-bucket.js), and an
  * environment that already has a record keeps it.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -57,15 +57,24 @@ const clackMock = vi.hoisted(() => ({
 }));
 vi.mock('@clack/prompts', () => clackMock);
 
-// Every bundle the deploy stages, removed after its case.
+// Every bundle the deploy stages, removed after its case, and its server
+// `.env` and `app.env` as rendered: the deploy removes the bundle itself once
+// the plan settles, so they are read when it is made.
 const bundles = vi.hoisted(() => [] as string[]);
+const rendered = vi.hoisted(() => new Map<string, { env: string; app: string }>());
 vi.mock('../../../src/lib/deploy/bundle.js', async (orig) => {
   const real = (await orig()) as typeof import('../../../src/lib/deploy/bundle.js');
+  const { readFileSync: read } = await import('node:fs');
+  const { join: at } = await import('node:path');
   return {
     ...real,
     renderBundle: (...args: Parameters<typeof real.renderBundle>) => {
       const dir = real.renderBundle(...args);
       bundles.push(dir);
+      rendered.set(dir, {
+        env: read(at(dir, '.env'), 'utf-8'),
+        app: read(at(dir, 'app.env'), 'utf-8'),
+      });
       return dir;
     },
   };
@@ -253,10 +262,11 @@ async function deployToPlan(g: ReturnType<typeof gathered>) {
   return run.ctx as { s3Config: Record<string, unknown>; bundlePath: string };
 }
 
-/** The compose bundle's server `.env` and `app.env` (the bundle is removed after the case). */
+/** The compose bundle's server `.env` and `app.env`, as the deploy rendered them. */
 function bundleEnvs(bundlePath: string) {
-  const read = (file: string) => parseDotenv(readFileSync(join(bundlePath, file), 'utf-8'));
-  return { env: read('.env'), app: read('app.env') };
+  const files = rendered.get(bundlePath);
+  if (!files) throw new Error(`no bundle rendered at ${bundlePath}`);
+  return { env: parseDotenv(files.env), app: parseDotenv(files.app) };
 }
 
 const env = (name: string) => loadProjectConfig()?.environments?.[name];

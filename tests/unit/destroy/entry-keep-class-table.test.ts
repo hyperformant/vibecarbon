@@ -496,10 +496,24 @@ describe('ENTRY_KEEP_BY_CLASS census', () => {
 // ─────────────────────────── a step that throws ───────────────────────────
 
 describe('a destroy step that throws', () => {
-  /** A ctx every effect throws on before any I/O: no plan, config or cwd. */
+  /**
+   * A ctx every effect throws on before any I/O: no plan or cwd, and config
+   * that throws when read, so an effect that tolerates a missing record (the
+   * backups bucket's, read through backupsTargetOf) still throws.
+   */
   function throwingCtx() {
+    const unreadable = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('boom');
+        },
+      },
+    );
     return {
       environment: 'prod',
+      envConfig: unreadable,
+      projectConfig: unreadable,
       results: { leaks: createLeakLedger() },
       spinner: {
         start() {
