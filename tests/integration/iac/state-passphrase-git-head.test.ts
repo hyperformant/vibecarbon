@@ -9,8 +9,7 @@
  * only the process that made the passphrase counts.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { gitSafeEnv } from '../../../src/lib/command.js';
@@ -21,6 +20,7 @@ import {
   statePassphraseFingerprint,
   statePassphraseProvenance,
 } from '../../../src/lib/state-passphrase.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const PASSPHRASE = 'Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5';
 const KEY = 'VIBECARBON_STATE_PASSPHRASE';
@@ -48,12 +48,12 @@ function repo(name: string) {
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'vc-git-head-'));
+  root = createTempDir('vc-git-head-');
   __resetStatePassphraseForTests();
 });
 
 afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+  cleanupTempDir(root);
 });
 
 describe('readProjectConfigAtHead', () => {

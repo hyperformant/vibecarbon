@@ -29,8 +29,8 @@
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { hostname, tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
@@ -50,6 +50,7 @@ import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const hasPulumi = (() => {
   try {
@@ -66,7 +67,7 @@ const OTHER = 'b3RoZXJvdGhlcm90aGVyb3RoZXJvdGhlcm90aGVyb3Ro';
 const SENTINEL = 'integration-sentinel';
 const USER_DATA = '#cloud-config user-data-sentinel';
 
-const root = mkdtempSync(join(tmpdir(), 'vc-passphrase-migration-'));
+const root = createTempDir('vc-passphrase-migration-');
 const backend = join(root, 'state');
 const cloudFile = join(root, 'cloud.json');
 const projectDir = join(root, 'project');
@@ -175,7 +176,7 @@ describe.runIf(hasPulumi || process.env.CI)('legacy empty-passphrase stacks (rea
     writeFileSync(cloudFile, JSON.stringify({ next: 1, servers: {} }));
   });
   afterAll(() => {
-    rmSync(root, { recursive: true, force: true });
+    cleanupTempDir(root);
   });
   // Each test, not once: tests/setup/global-setup.ts resets process.env after
   // every test. The iac layer hands its workspaces process.env, so the

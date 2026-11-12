@@ -11,8 +11,7 @@
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -28,6 +27,7 @@ import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const hasPulumi = (() => {
   try {
@@ -41,7 +41,7 @@ const hasPulumi = (() => {
 const PROJECT = 'passphrasetest';
 const WRITER = 'd3JpdGVyd3JpdGVyd3JpdGVyd3JpdGVyd3JpdGVyd3Jp';
 const READER = 'cmVhZGVycmVhZGVycmVhZGVycmVhZGVycmVhZGVycmVh';
-const root = mkdtempSync(join(tmpdir(), 'vc-passphrase-destroy-'));
+const root = createTempDir('vc-passphrase-destroy-');
 const backend = join(root, 'state');
 const checkpoint = join(backend, '.pulumi/stacks', PROJECT, 'e1.json');
 
@@ -75,7 +75,7 @@ describe.runIf(hasPulumi || process.env.CI)('a stack the passphrase cannot open'
     expect(existsSync(checkpoint)).toBe(true);
   });
   afterAll(() => {
-    rmSync(root, { recursive: true, force: true });
+    cleanupTempDir(root);
   });
 
   it('every read under another passphrase is the typed error, and the checkpoint is untouched', async () => {

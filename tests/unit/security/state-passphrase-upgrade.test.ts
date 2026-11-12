@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +8,7 @@ import {
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
 import { ensureStatePassphraseForUpgrade } from '../../../src/upgrade.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * A project created before the per-project state passphrase gets one when
@@ -25,7 +25,7 @@ describe('upgrade backfills the state passphrase', () => {
     warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', undefined);
     __resetStatePassphraseForTests();
-    dir = mkdtempSync(join(tmpdir(), 'vc-spu-'));
+    dir = createTempDir('vc-spu-');
     writeFileSync(join(dir, '.vibecarbon.json'), '{"projectName":"demo"}\n');
     writeFileSync(join(dir, '.env.local'), 'PROJECT_NAME=demo\n');
     writeFileSync(join(dir, '.env'), 'PROJECT_NAME=demo\n');
@@ -33,7 +33,7 @@ describe('upgrade backfills the state passphrase', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
+    cleanupTempDir(dir);
   });
 
   const read = (file: string) => readFileSync(join(dir, file), 'utf-8');

@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('@clack/prompts', () => ({ log: { info: vi.fn(), warn: vi.fn() } }));
 
@@ -51,7 +51,7 @@ describe('state passphrase', () => {
   let savedEnv: string | undefined;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-state-pass-'));
+    dir = createTempDir('vc-state-pass-');
     savedEnv = process.env[KEY];
     delete process.env[KEY];
     __resetStatePassphraseForTests();
@@ -59,7 +59,7 @@ describe('state passphrase', () => {
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    cleanupTempDir(dir);
     if (savedEnv === undefined) delete process.env[KEY];
     else process.env[KEY] = savedEnv;
   });
@@ -341,7 +341,7 @@ describe('state passphrase', () => {
     // Corrupt the fingerprint: the memo means no re-check this process.
     writeManifest('sha256:0000000000000000');
     expect(await ensureStatePassphrase(dir)).toBe(v);
-    const other = mkdtempSync(join(tmpdir(), 'vc-state-pass-'));
+    const other = createTempDir('vc-state-pass-');
     try {
       writeFileSync(
         join(other, '.vibecarbon.json'),
@@ -349,7 +349,7 @@ describe('state passphrase', () => {
       );
       await expect(ensureStatePassphrase(other)).rejects.toMatchObject({ reason: 'mismatch' });
     } finally {
-      rmSync(other, { recursive: true, force: true });
+      cleanupTempDir(other);
     }
   });
 
@@ -390,11 +390,11 @@ describe('state passphrase', () => {
       expect(statePassphraseGeneratedThisRun(dir)).toBe(true);
       // The same project named another way is still the same project.
       expect(statePassphraseGeneratedThisRun(join(dir, '.'))).toBe(true);
-      const other = mkdtempSync(join(tmpdir(), 'vc-state-pass-'));
+      const other = createTempDir('vc-state-pass-');
       try {
         expect(statePassphraseGeneratedThisRun(other)).toBe(false);
       } finally {
-        rmSync(other, { recursive: true, force: true });
+        cleanupTempDir(other);
       }
     });
 
@@ -438,12 +438,12 @@ describe('state passphrase', () => {
       expect(gitHead.read).toHaveBeenCalledWith(resolve(dir));
 
       delete process.env[KEY];
-      const other = mkdtempSync(join(tmpdir(), 'vc-state-pass-'));
+      const other = createTempDir('vc-state-pass-');
       try {
         await ensureStatePassphrase(other); // case 5: made now
         expect(statePassphraseProvenance(other)).toMatchObject({ madeHere: true, thisRun: true });
       } finally {
-        rmSync(other, { recursive: true, force: true });
+        cleanupTempDir(other);
       }
     });
 
@@ -503,7 +503,7 @@ describe('state passphrase', () => {
   });
 
   it('separate processes racing on one project end with one value and one fingerprint', async () => {
-    const scriptDir = mkdtempSync(join(tmpdir(), 'vc-state-pass-script-'));
+    const scriptDir = createTempDir('vc-state-pass-script-');
     try {
       const script = join(scriptDir, 'ensure.mjs');
       const mod = pathToFileURL(resolve('src/lib/state-passphrase.js')).href;
@@ -528,7 +528,7 @@ console.log('RESULT ' + v);
         `# Local-only environment overrides (not committed to git)\n${KEY}=${v}\n`,
       );
     } finally {
-      rmSync(scriptDir, { recursive: true, force: true });
+      cleanupTempDir(scriptDir);
     }
   });
 
