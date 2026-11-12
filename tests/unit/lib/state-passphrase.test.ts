@@ -460,13 +460,27 @@ describe('state passphrase', () => {
         head: 'committed',
       });
 
-      // HEAD lacks the file, lacks the entry, or records another value's.
+      // HEAD lacks the file (gitignored, never added), lacks the entry, or
+      // records another value's. Only the first is a file no commit holds.
       gitHead.read.mockReturnValue({ state: 'absent' });
-      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'uncommitted' });
+      expect(statePassphraseProvenance(dir)).toEqual({
+        madeHere: true,
+        thisRun: false,
+        head: 'uncommitted',
+        untracked: true,
+      });
       committing({ projectName: 'x' });
-      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'uncommitted' });
+      expect(statePassphraseProvenance(dir)).toEqual({
+        madeHere: true,
+        thisRun: false,
+        head: 'uncommitted',
+      });
       committing({ stateEncryption: { fingerprint: 'sha256:0123456789abcdef' } });
-      expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: true, head: 'uncommitted' });
+      expect(statePassphraseProvenance(dir)).toEqual({
+        madeHere: true,
+        thisRun: false,
+        head: 'uncommitted',
+      });
     });
 
     it("git can't tell: counts as made here, and says what git said", async () => {

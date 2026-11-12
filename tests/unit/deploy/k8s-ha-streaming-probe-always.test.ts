@@ -6,9 +6,11 @@
  * streaming replica from being wiped on a redeploy, so a skip needs proof that
  * the standby cannot be streaming, and the deploy has none it can trust:
  *   - "this run minted the k3s token" was tried (63b9dd9) and is false proof.
- *     resolveStackK3sToken mints whenever the stack's token read fails
- *     ('errored') or comes back without one ('empty'): a state-bucket blip or
- *     stale outputs on a LIVE stack. And a minted token replaces nothing:
+ *     resolveStackK3sToken mints whenever the backend has no such stack
+ *     ('missing') or the stack's outputs lack the token ('empty'), and stale
+ *     outputs on a LIVE stack are the second. (A failed read stops the deploy
+ *     since R22, so a state-bucket blip no longer mints.) And a minted token
+ *     replaces nothing:
  *     every server ignores its user data (serverResourceOptions and
  *     workerResourceOptions, src/lib/iac/create-timeout.js), so the live
  *     standby and its database stay exactly as they were.

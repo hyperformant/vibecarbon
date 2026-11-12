@@ -3278,7 +3278,9 @@ export function passphraseRecoveryHint(error, environment) {
  * The way out when the passphrase that wrote the state is gone: in a git
  * checkout, commit .vibecarbon.json so the fingerprint is the project's, then
  * destroy again; outside one, the next run no longer counts as making it,
- * so a plain rerun removes the record.
+ * so a plain rerun removes the record. When no commit holds the file at all
+ * (`untracked`: .gitignore lists it, or it was never added), the hint says
+ * to take it out of .gitignore and commit it: the team relies on it.
  *
  * Exported for unit testing.
  *
@@ -3291,10 +3293,13 @@ export function passphraseMadeThisRunHint(environment, provenance) {
   const removes = 'that run removes the record.';
   const teammate = `If a teammate deployed this project, pull the latest .vibecarbon.json and copy their ${STATE_PASSPHRASE_KEY} into .env.local, then ${again}.`;
   if (provenance.thisRun) {
+    const commit = provenance.untracked
+      ? "take .vibecarbon.json out of .gitignore if it's listed there and commit it"
+      : 'commit .vibecarbon.json';
     const lost =
       provenance.head === 'no-git'
         ? `If it's lost for good, ${again} as it is: ${removes}`
-        : `If it's lost for good, commit .vibecarbon.json, then ${again}: ${removes}`;
+        : `If it's lost for good, ${commit}, then ${again}: ${removes}`;
     return `${passphraseMadeThisRunText('this state', again)} ${lost}`;
   }
   if (provenance.head === 'unknown') {
@@ -3304,10 +3309,20 @@ export function passphraseMadeThisRunHint(environment, provenance) {
       `If the passphrase that wrote this state is lost for good, fix what git reports and commit .vibecarbon.json, then ${again}: ${removes}`
     );
   }
+  const lost = `If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then ${again}: ${removes}`;
+  if (provenance.untracked) {
+    // No commit holds the file at all, so a commit can never make the
+    // fingerprint the project's until the file is tracked.
+    return (
+      "This clone's .vibecarbon.json isn't in any commit (.gitignore lists it, or it was never added), so the state passphrase fingerprint it records counts as made here, and that passphrase can't read this state. " +
+      `${teammate} ` +
+      'Your team relies on .vibecarbon.json: if .gitignore lists it, take it out, and commit the file once it records the passphrase your team uses. ' +
+      lost
+    );
+  }
   return (
     "This clone's .vibecarbon.json records a state passphrase fingerprint that isn't committed, so the passphrase was most likely made here, and it can't read this state. " +
-    `${teammate} ` +
-    `If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then ${again}: ${removes}`
+    `${teammate} ${lost}`
   );
 }
 

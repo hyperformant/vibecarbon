@@ -170,9 +170,12 @@ const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.
 const { __resetStatePassphraseForTests, statePassphraseFingerprint } = await import(
   '../../../src/lib/state-passphrase.js'
 );
-const { DESTROY_EFFECTS, passphraseRecoveryHint, settleUnreadableStacks } = await import(
-  '../../../src/destroy.js'
-);
+const {
+  DESTROY_EFFECTS,
+  passphraseMadeThisRunHint,
+  passphraseRecoveryHint,
+  settleUnreadableStacks,
+} = await import('../../../src/destroy.js');
 const { __resetStateProbesForTests } = await import('../../../src/lib/iac/index.js');
 
 const spinner = { start: () => {}, stop: () => {}, message: () => {} };
@@ -621,17 +624,23 @@ describe("k8s in a git checkout: a refused passphrase whose fingerprint isn't co
     expect(entry.reason).toContain(
       "the passphrase this clone made, whose fingerprint isn't committed, doesn't decrypt it",
     );
+    // HEAD has no .vibecarbon.json at all: gitignored, or never added. The
+    // hint names that, and says to commit the file the team relies on.
     expect(entry.hint).toContain(
-      "This clone's .vibecarbon.json records a state passphrase fingerprint that isn't committed, so the passphrase was most likely made here, and it can't read this state.",
+      "This clone's .vibecarbon.json isn't in any commit (.gitignore lists it, or it was never added), so the state passphrase fingerprint it records counts as made here, and that passphrase can't read this state.",
     );
     expect(entry.hint).toContain(
       'If a teammate deployed this project, pull the latest .vibecarbon.json and copy their VIBECARBON_STATE_PASSPHRASE into .env.local, then run `vibecarbon destroy e1` again.',
     );
     expect(entry.hint).toContain(
+      'Your team relies on .vibecarbon.json: if .gitignore lists it, take it out, and commit the file once it records the passphrase your team uses.',
+    );
+    expect(entry.hint).toContain(
       'If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then run `vibecarbon destroy e1` again: that run removes the record.',
     );
 
-    // HEAD records another fingerprint (a teammate's, say): still made here.
+    // HEAD records another fingerprint (a teammate's, say): still made here,
+    // and the file is tracked, so nothing about .gitignore.
     nextProcess();
     gitHead = () => ({
       state: 'committed',
@@ -639,7 +648,14 @@ describe("k8s in a git checkout: a refused passphrase whose fingerprint isn't co
     });
     const rerun = makeCtx('k8s', dir);
     await run('destroyK8sInfra', rerun);
-    stillKept(rerun);
+    const tracked = stillKept(rerun);
+    expect(tracked.hint).toContain(
+      "This clone's .vibecarbon.json records a state passphrase fingerprint that isn't committed, so the passphrase was most likely made here, and it can't read this state.",
+    );
+    expect(tracked.hint).not.toContain('.gitignore');
+    expect(tracked.hint).toContain(
+      'If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then run `vibecarbon destroy e1` again: that run removes the record.',
+    );
 
     // Committed as the project's: no value this project has reads it, and
     // the record goes.
@@ -1017,5 +1033,33 @@ describe('settleUnreadableStacks: a record it cannot remove is kept for the retr
     const [entry] = results.leaks.entries;
     expect(entry.reason).toContain('removing its stack record failed: SlowDown');
     expect(entry.hint).toContain('`vibecarbon destroy e1` again');
+  });
+});
+
+// The commit that lets a kept record go can't happen while .gitignore lists
+// the file: every hint that asks for it says so when no commit holds it.
+describe('passphraseMadeThisRunHint for a .vibecarbon.json no commit holds', () => {
+  it('made this run: the lost-for-good commit says to take it out of .gitignore first', () => {
+    const hint = passphraseMadeThisRunHint('e1', {
+      madeHere: true,
+      thisRun: true,
+      head: 'uncommitted',
+      untracked: true,
+    });
+    expect(hint).toContain(
+      "If it's lost for good, take .vibecarbon.json out of .gitignore if it's listed there and commit it, then run `vibecarbon destroy e1` again: that run removes the record.",
+    );
+  });
+
+  it('made this run, file tracked: the plain commit', () => {
+    const hint = passphraseMadeThisRunHint('e1', {
+      madeHere: true,
+      thisRun: true,
+      head: 'uncommitted',
+    });
+    expect(hint).toContain(
+      "If it's lost for good, commit .vibecarbon.json, then run `vibecarbon destroy e1` again: that run removes the record.",
+    );
+    expect(hint).not.toContain('.gitignore');
   });
 });

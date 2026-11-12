@@ -348,9 +348,16 @@ describe('convergeClusterInfra', () => {
     }
   });
 
-  it('(h3) leaves the program on the live master when the state read fails', async () => {
-    getStackOutputsMock.mockRejectedValue(new Error('backend down'));
-    classifyK3sTokenProbeMock.mockReturnValue({ status: 'errored', reason: 'backend down' });
+  it('(h3) a stack the backend does not have yet: no prior master either', async () => {
+    getStackOutputsMock.mockRejectedValue(
+      Object.assign(new Error('Pulumi stack "unit-cluster-xyz" was not found'), {
+        stackNotFound: true,
+      }),
+    );
+    classifyK3sTokenProbeMock.mockReturnValue({
+      status: 'missing',
+      reason: 'no stack unit-cluster-xyz in the state backend yet',
+    });
     const { Provider, programCalls } = makeProvider();
     await convergeClusterInfra({ ...baseArgs(), Provider });
     expect(programCalls[1]).not.toHaveProperty('priorMaster');
@@ -505,4 +512,72 @@ describe('convergeClusterInfra — a state the passphrase cannot read', () => {
       }
     },
   );
+});
+
+// The probe mints a token only for a stack the backend doesn't have (R22).
+// Any other failed read stops the converge: the stack may exist, and its
+// live cluster's token is what every new node needs to join. Scale and
+// failover reach the stack only through this seam.
+describe('convergeClusterInfra — the k3s token probe mints only for a missing stack', () => {
+  async function withRealClassifier() {
+    const real = await vi.importActual<typeof import('../../../src/lib/iac/index.js')>(
+      '../../../src/lib/iac/index.js',
+    );
+    classifyK3sTokenProbeMock.mockImplementation(real.classifyK3sTokenProbe);
+    return real;
+  }
+
+  it.each([
+    ['the state backend is unreachable', 'NoSuchBucket: state backend gone'],
+    [
+      'backpressure retries ran out',
+      'error: blob (code=Unknown): SlowDown: Please reduce your request rate.',
+    ],
+  ])('%s: stops before the real program, the preview and the up', async (_label, message) => {
+    const real = await withRealClassifier();
+    const cause = new Error(message);
+    getStackOutputsMock.mockRejectedValue(cause);
+    const { Provider, programCalls } = makeProvider();
+    vi.stubEnv('VIBECARBON_PLAIN', '1');
+    const p = await import('@clack/prompts');
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    try {
+      const err = await convergeClusterInfra({ ...baseArgs(), Provider }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(real.K3sTokenProbeError);
+      expect((err as Error).cause).toBe(cause);
+      expect((err as Error).message).toContain(
+        "Couldn't read the k3s join token for unit-cluster-xyz from its Pulumi state",
+      );
+      expect(programCalls).toHaveLength(1);
+      expect(getOrCreateStackMock).not.toHaveBeenCalled();
+      expect(upStackMock).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith("Prior cluster state can't be read (unit-cluster-xyz)");
+    } finally {
+      error.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('a stack the backend does not have: the fresh-stack path, a minted token, the preview and the up', async () => {
+    await withRealClassifier();
+    getStackOutputsMock.mockRejectedValue(
+      Object.assign(new Error('Pulumi stack "unit-cluster-xyz" was not found'), {
+        stackNotFound: true,
+      }),
+    );
+    const { Provider, programCalls } = makeProvider();
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      await convergeClusterInfra({ ...baseArgs(), Provider });
+      expect(programCalls).toHaveLength(2);
+      expect(programCalls[1].k3sToken).toBeUndefined();
+      expect(upStackMock).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet, so this run makes its k3s token.',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

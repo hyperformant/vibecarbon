@@ -1637,6 +1637,16 @@ async function _provisionStandbyCapacityImpl({
 
     return { provisioned: true };
   } catch (err) {
+    // The converge's k3s token probe couldn't read the standby stack, and it
+    // stops before building anything (R22): nothing to revert, and a revert
+    // would probe the same stack again and report leftovers never made. By
+    // name: this module takes no top-level iac/index.js import.
+    if (err?.name === 'K3sTokenProbeError') {
+      throw new AbortProvisioningError(
+        `Failover aborted, the primary is untouched. ${err.message}`,
+        { cause: err },
+      );
+    }
     // Generic abort: ANY provisioning failure converges the standby back to 0
     // workers (the primary is still serving and was never touched), then aborts.
     const cause = firstErrorLine(err);

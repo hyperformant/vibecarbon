@@ -168,6 +168,25 @@ describe('statePassphraseProvenance on real git', () => {
     expect(statePassphraseProvenance(dir)).toMatchObject({ madeHere: false, head: 'committed' });
   });
 
+  it('a gitignored .vibecarbon.json is in no commit: made here, and untracked', async () => {
+    const dir = repo('ignored');
+    writeFileSync(join(dir, '.gitignore'), '.vibecarbon.json\n');
+    git(dir, 'add', '.gitignore');
+    git(dir, 'commit', '-q', '-m', 'ignore the project file');
+    writeManifest(dir, {
+      stateEncryption: { fingerprint: statePassphraseFingerprint(PASSPHRASE) },
+    });
+    process.env[KEY] = PASSPHRASE;
+    await ensureStatePassphrase(dir);
+    expect(readProjectConfigAtHead(dir)).toEqual({ state: 'absent' });
+    expect(statePassphraseProvenance(dir)).toEqual({
+      madeHere: true,
+      thisRun: false,
+      head: 'uncommitted',
+      untracked: true,
+    });
+  });
+
   it('outside a git checkout: only the run that made it', async () => {
     const dir = join(root, 'plain-project');
     mkdirSync(dir);

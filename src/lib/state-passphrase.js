@@ -58,6 +58,9 @@ export function statePassphraseGeneratedThisRun(projectDir) {
  *   the file or its `stateEncryption`, or records another), unknown (git
  *   failed some other way, or HEAD's copy doesn't parse), no-git (not a git
  *   checkout, or git isn't installed)
+ * @property {true} [untracked] set only for an uncommitted fingerprint whose
+ *   .vibecarbon.json no commit at HEAD holds at all: .gitignore lists it, or
+ *   it was never added (the hint says to commit the file the team relies on)
  * @property {string} [detail] git's own line, for `unknown`
  */
 
@@ -86,9 +89,12 @@ export function statePassphraseProvenance(projectDir) {
   /** @type {StatePassphraseProvenance['head']} */
   let head;
   let detail;
+  let untracked = false;
   if (read.state === 'no-git') head = 'no-git';
-  else if (read.state === 'absent') head = 'uncommitted';
-  else if (read.state === 'unknown') {
+  else if (read.state === 'absent') {
+    head = 'uncommitted';
+    untracked = true;
+  } else if (read.state === 'unknown') {
     head = 'unknown';
     detail = read.detail;
   } else {
@@ -102,7 +108,13 @@ export function statePassphraseProvenance(projectDir) {
     head ??= recorded && committed === recorded ? 'committed' : 'uncommitted';
   }
   const madeHere = thisRun || head === 'uncommitted' || head === 'unknown';
-  return { madeHere, thisRun, head, ...(detail !== undefined && { detail }) };
+  return {
+    madeHere,
+    thisRun,
+    head,
+    ...(untracked && { untracked: true }),
+    ...(detail !== undefined && { detail }),
+  };
 }
 
 export class StatePassphraseError extends Error {

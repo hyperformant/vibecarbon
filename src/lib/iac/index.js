@@ -1757,49 +1757,76 @@ export async function getStackOutputs(stackName, program, options = {}) {
 }
 
 /**
+ * A k3s token probe that couldn't read the stack: it may exist, holding the
+ * join token its live cluster runs with, so the command stops instead of
+ * minting a new one (R22). Names the stack and the first line of what failed;
+ * the full error is the cause.
+ */
+export class K3sTokenProbeError extends Error {
+  /**
+   * @param {string} stackName
+   * @param {unknown} cause what the probe threw
+   */
+  constructor(stackName, cause) {
+    super(
+      `Couldn't read the k3s join token for ${stackName} from its Pulumi state: ${summarizePulumiError(cause).replace(/\.$/, '')}. ` +
+        'vibecarbon stopped before creating or changing any of its servers, because a new token would leave new nodes unable to join the cluster. ' +
+        'Running this again is safe.',
+      { cause },
+    );
+    this.name = 'K3sTokenProbeError';
+    this.stackName = stackName;
+  }
+}
+
+/**
  * Classify a prior-outputs probe for the k3sToken probe-and-replay path.
  *
- * `scale.js` reads the prior stack outputs before constructing the real
- * Pulumi program so it can replay the deploy-time `k3sToken` and avoid
- * destructive userData drift (see the master-replace defense). The probe
- * has three observable outcomes:
+ * deployK3s (resolveStackK3sToken) and the converge seam that scale and
+ * failover share read the prior stack outputs before building the real
+ * Pulumi program, so they can replay the cluster's `k3sToken`. Every node's
+ * user data carries it, and a node with another token can't join the
+ * cluster. The probe has three outcomes:
  *
- *   - `recovered`: outputs has a non-empty k3sToken — replay it
- *   - `empty`:     outputs object exists but k3sToken is missing or empty —
- *                  legitimate when the stack is fresh (no prior `up`), but
- *                  also what we'd see if the deploy somehow skipped the
- *                  output declaration. Caller must not silently mint a
- *                  fresh token; the master-replace defense catches the
- *                  destructive case.
- *   - `errored`:   the probe call itself threw — backend unreachable,
- *                  expired creds, etc. Caller should surface loudly.
+ *   - `recovered`: outputs has a non-empty k3sToken: replay it.
+ *   - `empty`:     the stack exists but its outputs lack the token: a stack
+ *                  created whose first up never finished, or outputs that
+ *                  dropped the key. The caller mints one; the master-replace
+ *                  defense catches the destructive case.
+ *   - `missing`:   the state backend has no such stack (getOrCreateStack's
+ *                  requireExisting answer, `stackNotFound`): a first deploy.
+ *                  The caller mints one.
  *
- * Three failures are none of the three: they are rethrown. Each leaves a
- * state that still holds the cluster's token unread, and each can clear on a
- * later open in the same run, so treating it as "no token" would have the
- * caller mint one that the up (which opens the stack again) then carries
- * onto a live cluster whose new nodes cannot join:
+ * Every other probe failure throws, because the stack may exist and hold the
+ * token its live cluster runs with, unread. A minted token would reach every
+ * node made from then on, and none of them could join (R22):
  *
- *   - a passphrase failure (isStatePassphraseFailure): the one-time legacy
- *     migration re-encrypts a legacy stack on its first open;
- *   - a StateMigrationError: that migration stopped, and the child may have
- *     re-encrypted the state before it exited non-zero;
- *   - a StackHeldError: another run held the lock the migration needs, and
- *     may have finished (or migrated the stack itself) by the up's open.
+ *   - a passphrase failure (isStatePassphraseFailure), a StateMigrationError
+ *     (the one-time legacy migration stopped) and a StackHeldError (another
+ *     run holds the stack) are rethrown as they are: their own messages say
+ *     what to do, and each can clear on a later open in the same run;
+ *   - anything else (the backend unreachable, backpressure retries run out,
+ *     a read the backend refused) is a K3sTokenProbeError naming the stack.
  *
  * No I/O; the Pulumi state read happens upstream.
  *
- * @param {{ outputs?: Record<string, unknown> | null, error?: Error | null }} probe
- * @returns {{ status: 'recovered' | 'empty' | 'errored', priorK3sToken?: string, reason: string }}
- * @throws the probe's own error when it is one of those three
+ * @param {{ outputs?: Record<string, unknown> | null, error?: Error | null, stackName?: string }} probe
+ * @returns {{ status: 'recovered' | 'empty' | 'missing', priorK3sToken?: string, reason: string }}
+ * @throws the probe's own error when it is one of those three, otherwise a
+ *   K3sTokenProbeError
  */
-export function classifyK3sTokenProbe({ outputs, error } = {}) {
+export function classifyK3sTokenProbe({ outputs, error, stackName } = {}) {
   if (error) {
     if (isStatePassphraseFailure(error) || isStackOpenInterrupted(error)) throw error;
-    // The probe reads Pulumi state, so its failures carry the same
-    // `code: N\nstdout:…` envelope — first-line-only would report `code: -2`
-    // as the reason a k3s-token recovery was refused.
-    return { status: 'errored', reason: `probe threw: ${summarizePulumiError(error)}` };
+    // Set only by getOrCreateStack, when the backend says the stack isn't
+    // there; a "no stack named" line anywhere else proves nothing.
+    if (error.stackNotFound === true) {
+      return {
+        status: 'missing',
+        reason: `no stack ${stackName ?? 'for this cluster'} in the state backend yet`,
+      };
+    }
+    throw new K3sTokenProbeError(stackName ?? 'this cluster', error);
   }
   if (!outputs || typeof outputs !== 'object') {
     return { status: 'empty', reason: 'no outputs returned' };

@@ -39,6 +39,7 @@ import {
   waitForWorkersReady,
 } from '../../../src/failover.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
+import { K3sTokenProbeError } from '../../../src/lib/iac/index.js';
 import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
@@ -328,6 +329,36 @@ describe('provisionStandbyCapacity', () => {
         }),
       );
     });
+  });
+
+  // The converge's k3s token probe stops before it builds anything when it
+  // can't read the standby stack (R22): there is nothing to revert, and a
+  // revert would only probe the same unreadable stack again and report
+  // leftovers that were never made.
+  it('a converge stopped by the k3s token probe: aborts with its reason, no revert, nothing touched', async () => {
+    const kubectl = vi.fn();
+    const stopped = new K3sTokenProbeError(
+      'e4-standby',
+      new Error('NoSuchBucket: state backend gone'),
+    );
+    const converge = vi.fn().mockRejectedValue(stopped);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      const err = await provisionStandbyCapacity({
+        ...base,
+        deps: { converge, kubectl },
+      }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(AbortProvisioningError);
+      expect(err.cause).toBe(stopped);
+      expect(err.message).toBe(`Failover aborted, the primary is untouched. ${stopped.message}`);
+      expect(err.logLines).toEqual([err.message]);
+      expect(converge).toHaveBeenCalledTimes(1);
+      expect(kubectl).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('revert failure reports leftover resources (stack + next command) and still throws', async () => {
@@ -1100,6 +1131,36 @@ describe('preflightPilotFailover exit branches', () => {
     // No ha.standbyWorkerSpec / scaleUpList / standby.stack → config-presence gate.
     await expect(preflightPilotFailover('e4', { ha: {} })).rejects.toThrow('__exit__');
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  // Failover has no fresh-stack path: a standby stack the backend doesn't
+  // have stops it here, before any converge could mint a k3s token.
+  it('exits(1) when the backend has no standby stack, before any converge', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const envConfig = {
+      ha: {
+        standbyWorkerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
+        standby: { stack: 'e4-standby' },
+      },
+    };
+    await expect(
+      preflightPilotFailover('e4', envConfig, {
+        resolveCreds: async () => ({ apiToken: 't', s3Creds: null }),
+        readStackOutputs: async () => {
+          throw Object.assign(
+            new Error('Pulumi stack "e4-standby" was not found in the configured state backend'),
+            { stackNotFound: true },
+          );
+        },
+      }),
+    ).rejects.toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(error.mock.calls.flat().join('\n')).toContain('nothing was changed');
   });
 
   it('exits(1) when the standby stack state backend is unreachable', async () => {

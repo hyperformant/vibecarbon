@@ -4975,23 +4975,19 @@ export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegi
 /**
  * Probe an existing Pulumi stack for its k3s token so a re-deploy replays it.
  *
- * Returns the stack's stored `k3sToken`, or undefined when the stack is
- * fresh/unreadable — the program then mints one exactly as before (cold
- * deploy path). Errors degrade the same way: an unreachable backend falls
- * back to cold behavior on a stack that, being unreachable, upStack will fail
- * on anyway with its own clearer error. So undefined does NOT mean the
- * cluster is new: a live stack whose read fails or whose outputs lack the
- * token gets a minted one too. See the call-site comment in deployK3s's
- * k3s-infra block for why replay is load-bearing (a minted token on a live
- * stack leaves new nodes unable to join).
+ * Returns the stack's stored `k3sToken`, or undefined when there is none to
+ * replay: the backend has no such stack (a first deploy), or the stack's
+ * outputs lack the token. The program then mints one exactly as before.
+ * See the call-site comment in deployK3s's k3s-infra block for why replay is
+ * load-bearing (a minted token on a live stack leaves new nodes unable to
+ * join).
  *
- * Three errors propagate, rethrown by classifyK3sTokenProbe: a passphrase
- * failure, a StateMigrationError (the one-time legacy migration stopped) and
- * a StackHeldError (another run holds the stack). Unlike an unreachable
- * backend, each can clear by the time the up that follows opens the stack
- * again (the migration re-encrypts it on first open, the child may have
- * finished before it exited non-zero, the other run ends), so a token minted
- * here would reach a live cluster.
+ * Any other failed read stops the deploy (classifyK3sTokenProbe, R22): the
+ * stack may exist, and a token minted here would reach a live cluster. A
+ * passphrase failure, a StateMigrationError (the one-time legacy migration
+ * stopped) and a StackHeldError (another run holds the stack) propagate as
+ * they are; anything else (the backend unreachable, its retries run out) is
+ * a K3sTokenProbeError naming the stack.
  *
  * @param {any} Provider  provider class (getK8sProgram static)
  * @param {Record<string, unknown>} programConfig  same config the real program uses
@@ -5003,19 +4999,23 @@ export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegi
 export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
   const log = opts.log ?? console.error;
   const { getStackOutputs, classifyK3sTokenProbe } = await import('../../iac/index.js');
+  const stackName = programConfig.environment;
   let probe;
   try {
     const probeProgram = await Provider.getK8sProgram(programConfig);
-    const outputs = await getStackOutputs(programConfig.environment, probeProgram, {
+    const outputs = await getStackOutputs(stackName, probeProgram, {
       provider: opts.provider,
       providerToken: opts.providerToken,
       s3Config: opts.s3Config,
       projectName: opts.projectName,
     });
-    probe = classifyK3sTokenProbe({ outputs });
+    probe = classifyK3sTokenProbe({ outputs, stackName });
   } catch (err) {
-    // Rethrows the three failures above instead of classifying them.
-    probe = classifyK3sTokenProbe({ error: err instanceof Error ? err : new Error(String(err)) });
+    // A missing stack comes back as `missing`; every other failure throws.
+    probe = classifyK3sTokenProbe({
+      error: err instanceof Error ? err : new Error(String(err)),
+      stackName,
+    });
   }
   if (probe.status !== 'recovered') {
     log(
