@@ -38,6 +38,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
@@ -346,9 +347,10 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
     expect(sentinelFiles()).toEqual([]);
     expect(cloudServers(), 'the server was neither replaced nor changed').toEqual(before);
 
-    // (c) Every workspace this file opened, with nothing an import wrote left in it.
-    const leftovers = __workspaceDirsForTests().flatMap((dir) =>
-      readdirSync(dir).filter((name) => name.startsWith('state-import-')),
+    // (c) Nothing an import wrote is left: not in this file's temp dir, where
+    // importStackState makes its dir, nor in any workspace this file opened.
+    const leftovers = [tmpdir(), ...__workspaceDirsForTests()].flatMap((dir) =>
+      readdirSync(dir).filter((name) => /^(vc-)?state-import-/.test(name)),
     );
     expect(leftovers).toEqual([]);
   });

@@ -20,7 +20,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
@@ -36,6 +36,7 @@ import {
   STATE_PASSPHRASE_KEY,
   statePassphraseGeneratedThisRun,
 } from '../state-passphrase.js';
+import { makeTempDir, removeTempDir } from '../temp-dir.js';
 import {
   createTimeoutError,
   parseCreateTimeouts,
@@ -909,12 +910,15 @@ async function verifyStateAfterHistoryWrite(stack) {
  * to `<os tmpdir>/automation-<6 digits>` with the default mode (0664 under a
  * 002 umask, so every local user can read it) and deletes it only when the
  * import succeeds: each failed import left one behind. This writes it to a
- * 0600 file in a 0700 directory made inside the stack's workspace directory
- * (workspace-dir.js: this process's own, removed at exit), runs the command
- * the SDK runs, in the same workspace with the same environment, and removes
- * the directory whether the import worked or not. A process.exit during the
- * import (Ctrl-C) skips the finally; the workspace's exit hook removes the
- * file then.
+ * 0600 file in a 0700 directory of its own (temp-dir.js makeTempDir), runs
+ * the command the SDK runs, in the stack's workspace with the same
+ * environment, and removes the directory whether the import worked or not.
+ * A process.exit during the import (Ctrl-C) skips the finally; the exit sweep
+ * removes the directory then, and a kill that skips even that leaves it to
+ * the stale sweep (`vc-state-import-` is in STALE_SECRET_PREFIXES). It sits
+ * in the OS temp dir, not in the workspace directory: the stale sweep reads
+ * only the temp dir's own entries, and a workspace directory holds no secret
+ * (tests/unit/lib/temp-dir-census.test.ts).
  *
  * No retry and no lock handling here: callers wrap it as they wrapped the SDK
  * call (withStateBackendRetry, runPastStaleLock), and its failure is the
@@ -926,7 +930,7 @@ async function verifyStateAfterHistoryWrite(stack) {
  */
 export async function importStackState(stack, state) {
   const { workspace } = stack;
-  const dir = mkdtempSync(join(workspace.workDir, 'state-import-'));
+  const dir = makeTempDir('vc-state-import-');
   try {
     const file = join(dir, 'deployment.json');
     writeFileSync(file, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
@@ -942,7 +946,7 @@ export async function importStackState(stack, state) {
       if (line.trim()) progressLog(`[pulumi] stack import ${stack.name}: ${line.trim()}`);
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 }
 
@@ -1346,8 +1350,11 @@ async function runUp(stack, options) {
     }
   }
   // The update applied, so the state is the project passphrase's now: seal
-  // what an existing server still keeps plain. Never throws.
-  await perfAsync('state.seal', () => sealStackState(stack, options));
+  // what an existing server still keeps plain. Never throws. Timed under the
+  // caller's perfStem, as every upStack marker is, and silent without one.
+  const sealTimer = options.perfStem ? perfTimer(`${options.perfStem}.seal`) : null;
+  await sealStackState(stack, options);
+  sealTimer?.end();
   // Flatten outputs: { foo: { value: 'bar', secret: false } } → { foo: 'bar' }
   const outputs = flattenOutputs(rawOutputs);
 

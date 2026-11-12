@@ -4,14 +4,16 @@
  * The SDK's Stack.importStack writes the whole deployment, secrets in plain
  * text, to `<os tmpdir>/automation-<6 digits>` readable by every local user,
  * and leaves it there whenever the import fails. The helper writes it to a
- * 0600 file in a 0700 directory inside the stack's own workspace directory,
- * and removes it whether the import works or not. The census below holds
- * every import in src to it.
+ * 0600 file in a 0700 directory of its own from temp-dir.js (on the exit
+ * sweep, and on the stale sweep by its secret-bearing prefix), runs the
+ * import in the stack's workspace, and removes the directory whether the
+ * import works or not. The census below holds every import in src to it.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const logged = vi.hoisted(() => [] as string[]);
@@ -23,6 +25,10 @@ vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
 const { importStackState } = await import('../../../src/lib/iac/index.js');
 
 const SENTINEL = 'SENTINEL-import-secret-5a1b';
+const PREFIX = 'vc-state-import-';
+
+/** Import dirs left in this file's temp dir. */
+const importDirsLeft = () => readdirSync(tmpdir()).filter((name) => name.startsWith(PREFIX));
 const DEPLOYMENT = {
   version: 3,
   deployment: {
@@ -77,7 +83,7 @@ function workspaceStack(answer: () => unknown = () => ({ code: 0 }), pulumiHome?
 }
 
 describe('importStackState', () => {
-  it("runs `stack import --file` from a 0600 file in a 0700 dir in the stack's workspace", async () => {
+  it("runs `stack import --file` from a 0600 file in a 0700 temp dir of its own, in the stack's workspace", async () => {
     const { stack, seen, workDir } = workspaceStack(undefined, '/home/u/.pulumi-alt');
 
     await importStackState(stack as never, DEPLOYMENT);
@@ -85,7 +91,8 @@ describe('importStackState', () => {
     expect(seen).toHaveLength(1);
     const [run] = seen;
     expect(run.args).toEqual(['stack', 'import', '--file', run.file, '--stack', 'e1']);
-    expect(dirname(dirname(run.file))).toBe(workDir);
+    expect(dirname(dirname(run.file))).toBe(tmpdir());
+    expect(basename(dirname(run.file)).startsWith(PREFIX)).toBe(true);
     expect(run.fileMode).toBe(0o600);
     expect(run.dirMode).toBe(0o700);
     expect(JSON.parse(run.content)).toEqual(DEPLOYMENT);
@@ -96,8 +103,9 @@ describe('importStackState', () => {
       PULUMI_CONFIG_PASSPHRASE: 'pass',
       PULUMI_BACKEND_URL: 'file:///x',
     });
-    // Nothing is left behind.
+    // Nothing is left behind, and nothing was written in the workspace.
     expect(existsSync(dirname(run.file))).toBe(false);
+    expect(importDirsLeft()).toEqual([]);
     expect(readdirSync(workDir)).toEqual([]);
   });
 
@@ -110,7 +118,8 @@ describe('importStackState', () => {
     await expect(importStackState(stack as never, DEPLOYMENT)).rejects.toBe(refusal);
 
     expect(seen).toHaveLength(1);
-    expect(existsSync(seen[0].file)).toBe(false);
+    expect(existsSync(dirname(seen[0].file))).toBe(false);
+    expect(importDirsLeft()).toEqual([]);
     expect(readdirSync(workDir)).toEqual([]);
   });
 
@@ -135,11 +144,13 @@ describe('importStackState', () => {
     expect(logged).toEqual([]);
   });
 
-  it('the deployment never reaches the OS temp dir', async () => {
+  it("the deployment never goes to the SDK's shared automation- file, and a leftover is one the stale sweep removes", async () => {
     const { stack, seen } = workspaceStack();
     await importStackState(stack as never, DEPLOYMENT);
     expect(seen[0].file.startsWith(join(tmpdir(), 'automation-'))).toBe(false);
-    expect(seen[0].file.startsWith(stack.workspace.workDir)).toBe(true);
+    // A kill that skips the exit sweep leaves the dir to the stale sweep,
+    // which takes it by this prefix.
+    expect(STALE_SECRET_PREFIXES).toContain(PREFIX);
   });
 });
 

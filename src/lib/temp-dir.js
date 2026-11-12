@@ -125,6 +125,9 @@ export const STALE_SECRET_PREFIXES = Object.freeze([
   'vibecarbon-envmerge-',
   // A script run over ssh (ssh.js), which can carry a token.
   'vb-sshscript-',
+  // A Pulumi state import (iac/index.js importStackState): the whole
+  // deployment with every secret in plain text, a provider token among them.
+  'vc-state-import-',
 ]);
 
 /**
