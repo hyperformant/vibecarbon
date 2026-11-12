@@ -189,16 +189,15 @@ export function createLeakLedger() {
  *     forbidden from deleting, and a red build nobody can act on stops being
  *     read.
  *
- *   risk — the S3-config/keys mismatch predicts a bucket leak; it does not
- *     observe one. The bucket-delete effects report the actual outcome for
- *     every bucket they touch (a skipped delete for missing credentials is
- *     recorded as a `leak` right there, which is what fails the exit code), so
- *     failing on the predictor as well would double-count and would wrongly
- *     fail the common, correct case: a destroy without `-purge`, where the
- *     backup bucket is deliberately preserved and its credentials are
- *     therefore irrelevant. The risk line's job is to be seen BEFORE the
- *     teardown starts, so the operator can supply the keys instead of
- *     discovering the stranded bucket afterwards.
+ *   risk — the S3-config/keys mismatch predicts a leak; it does not observe
+ *     one. The effects report the actual outcome for everything they touch (a
+ *     bucket delete skipped for missing credentials is a `leak` right there,
+ *     and a stack state the destroy could not open is `unverified`), which is
+ *     what fails the exit code, so failing on the predictor as well would
+ *     double-count, and would fail a destroy whose prompt then got the keys.
+ *     The risk line's job is to be seen BEFORE the teardown starts, so the
+ *     operator can supply the keys instead of discovering the stranded
+ *     bucket or the kept environment afterwards.
  *
  * @param {{ leak: number, unverified: number }} counts
  * @returns {number}

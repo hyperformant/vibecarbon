@@ -5,10 +5,14 @@
  * behind. It must now loud-warn BEFORE the teardown starts and feed the leak
  * tally as a leak-RISK line.
  *
- * Only for what this destroy will touch: nothing without -purge, and under
- * -purge the environment's own app bucket and its backups bucket. The hint
- * gives by-hand steps, never a destroy rerun: by the time the leak report
- * shows it, the environment has moved to destroyedEnvironments.
+ * Only for what this destroy will touch:
+ * - On every destroy, the Pulumi stack state in object storage: without the
+ *   keys it stays, the entry is kept, and the rerun the hint names can run.
+ * - Under -purge, the environment's own app bucket and its backups bucket,
+ *   or only its folder there while other environments keep backups in it.
+ *   Those hints give by-hand steps, never a destroy rerun: a delete is
+ *   skipped for want of keys only when the entry moves (a kept entry keeps
+ *   its buckets for the rerun).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -87,7 +91,7 @@ describe('checkS3CredentialMismatch', () => {
     expect(risk.hint).not.toMatch(/re-?run|\u2014/i);
   });
 
-  it('is silent on a plain destroy, which keeps every bucket and needs no keys', () => {
+  it('names no bucket on a plain destroy, which keeps every bucket', () => {
     const risks = checkS3CredentialMismatch({
       envConfig: {
         s3: { bucket: 'acme-prod', stateBucket: 'acme-prod-state', region: 'fsn1' },
@@ -248,6 +252,151 @@ describe('checkS3CredentialMismatch', () => {
   });
 });
 
+describe('the stack state every destroy opens', () => {
+  const STAGING = {
+    s3: { bucket: 'myapp-cd9ecc-staging-storage', stateBucket: 'myapp-state', region: 'fsn1' },
+    backupS3: { bucket: 'myapp-cd9ecc-backups', region: 'fsn1' },
+  };
+
+  it('warns a plain destroy that the stack state and the entry stay, and names the rerun', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: STAGING,
+      envKeys: HETZNER_KEYS,
+      env: {},
+      environment: 'staging',
+      stackEnvs: ['staging'],
+    });
+    expect(risks).toEqual([
+      {
+        resourceClass: 'pulumi-stack',
+        resource: 'staging',
+        reason:
+          'this environment keeps its Pulumi stack state in object storage but HETZNER_ACCESS_KEY ' +
+          "and HETZNER_SECRET_KEY are not set: destroy cannot open it, so the stack state and the environment's " +
+          'entry in .vibecarbon.json are kept for a rerun',
+        hint:
+          "Set HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY (shell or the project's .env.local) before " +
+          'the destroy, so it can open the stack state. If this one runs without them, set them and ' +
+          'run `vibecarbon destroy staging` again: the kept entry lets that rerun finish.',
+      },
+    ]);
+  });
+
+  it('names both stacks of an HA environment', () => {
+    const [risk] = checkS3CredentialMismatch({
+      envConfig: STAGING,
+      envKeys: HETZNER_KEYS,
+      env: {},
+      environment: 'prod',
+      stackEnvs: ['prod-primary', 'prod-standby'],
+    });
+    expect(risk.resource).toBe('prod-primary, prod-standby');
+  });
+
+  it('is silent with the keys set, with no object storage recorded, or with no stack to open', () => {
+    const base = { envKeys: HETZNER_KEYS, environment: 'staging' };
+    expect(
+      checkS3CredentialMismatch({
+        ...base,
+        envConfig: STAGING,
+        env: BOTH_SET,
+        stackEnvs: ['staging'],
+      }),
+    ).toEqual([]);
+    // No envConfig.s3: the state is in no bucket, so no key opens it.
+    expect(
+      checkS3CredentialMismatch({ ...base, envConfig: {}, env: {}, stackEnvs: ['staging'] }),
+    ).toEqual([]);
+    // An unrecorded deploy (planDestroyTargets) opens no stack.
+    expect(
+      checkS3CredentialMismatch({ ...base, envConfig: STAGING, env: {}, stackEnvs: [] }),
+    ).toEqual([]);
+  });
+
+  it('off a TTY under -purge, says the buckets stay for the -purge rerun, in that one line', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: STAGING,
+      envKeys: HETZNER_KEYS,
+      env: {},
+      environment: 'staging',
+      stackEnvs: ['staging'],
+      purgeBackups: true,
+    });
+    expect(risks.map((r) => r.resourceClass)).toEqual(['pulumi-stack']);
+    expect(risks[0].reason).toMatch(
+      /kept for a rerun; -purge keeps its buckets for that rerun too$/,
+    );
+    expect(risks[0].hint).toContain('run `vibecarbon destroy staging -purge` again');
+  });
+
+  it('on a TTY, keeps the bucket lines beside it: the prompt can get the keys and then be declined', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: STAGING,
+      envKeys: HETZNER_KEYS,
+      env: {},
+      environment: 'staging',
+      stackEnvs: ['staging'],
+      purgeBackups: true,
+      canPrompt: true,
+    });
+    expect(risks.map((r) => r.resource)).toEqual([
+      'staging',
+      'myapp-cd9ecc-staging-storage (fsn1)',
+      'myapp-cd9ecc-backups (fsn1)',
+    ]);
+    expect(risks[0].reason).toContain(
+      "declining the prompt keeps the stack state and the environment's entry in .vibecarbon.json for a rerun",
+    );
+    expect(risks[0].reason).not.toContain('-purge keeps its buckets');
+  });
+});
+
+describe('a backups bucket other environments keep backups in', () => {
+  const STAGING = { backupS3: { bucket: 'myapp-cd9ecc-backups', region: 'fsn1' } };
+
+  it("names only this environment's folder, which is all -purge deletes there", () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: STAGING,
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+      backupsHolders: ['prod'],
+      backupsPrefix: 'backups/myapp/staging/',
+    });
+    expect(risks).toEqual([
+      {
+        resourceClass: 'bucket',
+        resource: 'backups/myapp/staging/ in myapp-cd9ecc-backups (fsn1)',
+        reason:
+          'this environment keeps its backups in a bucket where prod keeps backups too, but ' +
+          'HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY are not set: the delete will be skipped and ' +
+          "this environment's backups stay there, still billing",
+        hint:
+          'If the delete is skipped, the leak report gives the console steps for it. Next time, set ' +
+          "HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY (shell or the project's .env.local) before the " +
+          "destroy, so it can delete this environment's backups itself.",
+      },
+    ]);
+    expect(risks[0].reason).not.toMatch(/bucket will survive/);
+  });
+
+  it('names every holder, and on a TTY says declining leaves the backups there', () => {
+    const [risk] = checkS3CredentialMismatch({
+      envConfig: STAGING,
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+      backupsHolders: ['prod', 'preview'],
+      backupsPrefix: 'backups/myapp/staging/',
+      canPrompt: true,
+    });
+    expect(risk.reason).toContain('where prod, preview keep backups too');
+    expect(risk.reason).toContain(
+      "declining the prompt leaves this environment's backups there, still billing",
+    );
+  });
+});
+
 describe('destroy wires the check to the app bucket rule it applies', () => {
   it('passes ownsAppBucket, the rule deleteAppBucketEffect deletes by', () => {
     const src = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
@@ -256,5 +405,28 @@ describe('destroy wires the check to the app bucket rule it applies', () => {
     const call = src.slice(at, src.indexOf('})', at));
     expect(call).toContain('appBucketOwned: ownsAppBucket(envConfig, projectConfig, envName),');
     expect(src.indexOf('checkS3CredentialMismatch({', at + 1)).toBe(-1);
+  });
+
+  it('passes the stacks the plan opens and the holders handleBackupBucket keeps the bucket for', () => {
+    const src = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
+    const at = src.indexOf('checkS3CredentialMismatch({');
+    const call = src.slice(at, src.indexOf('})) {', at));
+    expect(call).toContain('environment: envName,');
+    expect(call).toContain('stackEnvs: plan.stackEnvs,');
+    expect(call).toContain(
+      'backupsHolders: destroyPreviewBucketFacts(projectConfig, envName).backupBucketHolders,',
+    );
+    expect(call).toContain(
+      'backupsPrefix: envBackupPrefixFor(projectConfig.projectName, envName),',
+    );
+    // After the plan it reads, and before any step of it runs.
+    const planAt = src.indexOf(
+      'const plan = planDestroyTargets(envConfig, projectConfig, envName);',
+    );
+    expect(planAt).toBeGreaterThan(-1);
+    expect(planAt).toBeLessThan(at);
+    expect(
+      src.indexOf('await runPlan(planDestroy(plan.tier), ctx, DESTROY_EFFECTS);'),
+    ).toBeGreaterThan(at);
   });
 });

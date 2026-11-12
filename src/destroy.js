@@ -2261,9 +2261,10 @@ export function keepsEntry(entry) {
  * Why this destroy keeps the environment's entry in .vibecarbon.json, or null
  * when it removes it. The one predicate every reader shares: the config step
  * keeps the entry (updateProjectConfigEffect), the compose tiers keep their
- * Pulumi stack state (removePulumiStackStateEffect), and the state-bucket
- * step keeps the bucket the retry opens (retainStateBucket), so none of them
- * can disagree.
+ * Pulumi stack state (removePulumiStackStateEffect), the state-bucket step
+ * keeps the bucket the retry opens (retainStateBucket), and under -purge the
+ * app and backups bucket steps keep theirs (deleteAppBucketEffect,
+ * handleBackupBucket), so none of them can disagree.
  *
  *   - `unverified`: the Pulumi destroy could not be verified
  *     (recordPulumiDestroyOutcome, or destroyK8sTier's catch).
@@ -5139,26 +5140,6 @@ async function main(argv = []) {
     unreleasedReservedIps: [],
   };
 
-  // ========== PRE-TEARDOWN: S3-CONFIG / KEYS MISMATCH ==========
-  // Runs BEFORE anything is deleted, which is the whole point: if the config
-  // records a bucket and the environment has no object-storage credentials,
-  // the operator can export the keys (or Ctrl-C) while it is still cheap,
-  // instead of finding the stranded bucket in the leak report afterwards. The
-  // entries are leak-RISK — reported, not exit-failing; each bucket's ACTUAL
-  // outcome is recorded by its own delete effect later (see leak-ledger.js's
-  // destroyExitCode for the full reasoning).
-  for (const risk of checkS3CredentialMismatch({
-    envConfig,
-    envKeys: Provider.OBJECT_STORAGE_ENV,
-    purgeBackups: args.purgeBackups,
-    appBucketOwned: ownsAppBucket(envConfig, projectConfig, envName),
-    canPrompt: !!process.stdin.isTTY,
-  })) {
-    p.log.warn(`Object storage: ${risk.reason}`);
-    p.log.message(`  ${c.dim(risk.hint)}`);
-    results.leaks.risk(risk);
-  }
-
   // ========== TIER DISPATCH (step-plan) ==========
   // planDestroyTargets derives every teardown target from persisted config
   // (ownership-aware; HA → both stack envs). planDestroy(tier) yields the pure,
@@ -5168,6 +5149,35 @@ async function main(argv = []) {
   // ctx so the effects (thin wrappers over the hardened tier helpers) read them.
   const plan = planDestroyTargets(envConfig, projectConfig, envName);
   const isK8s = isK8sTier(plan.tier);
+
+  // ========== PRE-TEARDOWN: S3-CONFIG / KEYS MISMATCH ==========
+  // Runs BEFORE anything is deleted, which is the whole point: if the config
+  // records object storage this destroy reaches (the stack state of
+  // plan.stackEnvs on every destroy, the buckets under -purge) and the
+  // environment has no object-storage credentials, the operator can export
+  // the keys (or Ctrl-C) while it is still cheap, instead of finding the kept
+  // environment or the stranded bucket in the leak report afterwards. The
+  // entries are leak-RISK — reported, not exit-failing; each ACTUAL outcome
+  // is recorded by its own effect later (see leak-ledger.js's
+  // destroyExitCode for the full reasoning).
+  for (const risk of checkS3CredentialMismatch({
+    envConfig,
+    envKeys: Provider.OBJECT_STORAGE_ENV,
+    environment: envName,
+    stackEnvs: plan.stackEnvs,
+    purgeBackups: args.purgeBackups,
+    appBucketOwned: ownsAppBucket(envConfig, projectConfig, envName),
+    // The rule handleBackupBucket deletes by: only this environment's folder
+    // while another environment keeps backups in the bucket.
+    backupsHolders: destroyPreviewBucketFacts(projectConfig, envName).backupBucketHolders,
+    backupsPrefix: envBackupPrefixFor(projectConfig.projectName, envName),
+    canPrompt: !!process.stdin.isTTY,
+  })) {
+    p.log.warn(`Object storage: ${risk.reason}`);
+    p.log.message(`  ${c.dim(risk.hint)}`);
+    results.leaks.risk(risk);
+  }
+
   if (plan.tier === 'unrecorded') {
     p.log.warn(
       `No deployment is recorded for "${envName}" — its deploy never reached provisioning. ` +
