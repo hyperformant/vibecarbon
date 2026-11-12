@@ -26,6 +26,7 @@
 import { findProjectRoot, hasDockerCompose, loadProjectConfig } from '../config.js';
 import { operatorSecretKeys } from '../config-registry.js';
 import { loadEnvVariables } from '../project.js';
+import { STATE_PASSPHRASE_KEY } from '../state-passphrase.js';
 import { composeRunningServices } from '../status/compose-ps.js';
 
 /**
@@ -99,7 +100,11 @@ export async function detectProjectState(cwd = process.cwd(), deps = {}) {
     if (isConfigured) configuredFeatures.push(feature.label);
   }
 
+  // The state passphrase is in every project's .env.local from `create` on
+  // (lib/state-passphrase.js): vibecarbon made it, so it says nothing about
+  // credentials the user saved.
   const providers = operatorKeys().some((key) => {
+    if (key === STATE_PASSPHRASE_KEY) return false;
     const value = env[key];
     return typeof value === 'string' && value.trim() !== '';
   });

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { operatorSecretKeys } from '../../../../src/lib/config-registry.js';
 import { detectProjectState } from '../../../../src/lib/next/state.js';
 
 /** No-op stand-ins so a test never shells out to docker or loads configure.js. */
@@ -186,6 +187,22 @@ describe('detectProjectState', () => {
       baseDeps({ operatorKeys: () => ['HETZNER_API_TOKEN'] }),
     );
     expect((result as { configured: { providers: boolean } }).configured.providers).toBe(false);
+  });
+
+  // create writes the state passphrase into every new project's .env.local
+  // (lib/state-passphrase.js). vibecarbon made it, so it says nothing about
+  // credentials the user saved: counted, a fresh project skipped `up` and
+  // `configure` in the guide.
+  it('reports providers: false when the only operator key set is the state passphrase create made', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
+    writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
+    writeFileSync(
+      join(dir, '.env.local'),
+      'VIBECARBON_STATE_PASSPHRASE=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ\n',
+    );
+    const result = await detectProjectState(dir, baseDeps({ operatorKeys: operatorSecretKeys }));
+    expect(result).toMatchObject({ configured: { any: false, providers: false } });
   });
 
   it('includes only live environments, ignoring destroyedEnvironments, preserving order', async () => {
