@@ -3243,10 +3243,13 @@ export function unreadableStateReason(error) {
  *
  * @param {{ reason?: string, source?: string }} error
  * @param {string} environment
+ * @param {{purgeBackups?: boolean}} [args] - this destroy's flags, for the
+ *   rerun (retryDestroyCommand): a kept record keeps the entry, and with it
+ *   every bucket a -purge would delete.
  * @returns {string}
  */
-export function passphraseRecoveryHint(error, environment) {
-  const again = `run \`vibecarbon destroy ${environment}\` again`;
+export function passphraseRecoveryHint(error, environment, args) {
+  const again = `run \`${retryDestroyCommand(environment, args)}\` again`;
   const then = `then ${again}: Pulumi then removes whatever is left of this stack`;
   const inShell = error?.source === 'shell';
   const entry = 'the `stateEncryption` entry from .vibecarbon.json';
@@ -3296,10 +3299,12 @@ export function passphraseRecoveryHint(error, environment) {
  *
  * @param {string} environment
  * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} provenance
+ * @param {{purgeBackups?: boolean}} [args] - this destroy's flags, for the
+ *   rerun (retryDestroyCommand).
  * @returns {string}
  */
-export function passphraseMadeThisRunHint(environment, provenance) {
-  const again = `run \`vibecarbon destroy ${environment}\` again`;
+export function passphraseMadeThisRunHint(environment, provenance, args) {
+  const again = `run \`${retryDestroyCommand(environment, args)}\` again`;
   const removes = 'that run removes the record.';
   const teammate = `If a teammate deployed this project, pull the latest .vibecarbon.json and copy their ${STATE_PASSPHRASE_KEY} into .env.local, then ${again}.`;
   if (provenance.thisRun) {
@@ -3355,10 +3360,12 @@ const NOT_MADE_HERE = Object.freeze({ madeHere: false, thisRun: false, head: 'no
  * The sentence for a record left alone because the environment's
  * object-storage credentials did not resolve.
  * @param {string} environment
+ * @param {{purgeBackups?: boolean}} [args] - this destroy's flags, for the
+ *   rerun (retryDestroyCommand).
  * @returns {string}
  */
-function stateCredentialsHint(environment) {
-  return `This environment's object-storage credentials couldn't be resolved, so the record was left where it is; have them available when you run \`vibecarbon destroy ${environment}\` again.`;
+function stateCredentialsHint(environment, args) {
+  return `This environment's object-storage credentials couldn't be resolved, so the record was left where it is; have them available when you run \`${retryDestroyCommand(environment, args)}\` again.`;
 }
 
 /**
@@ -3414,6 +3421,9 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  * @param {object} params
  * @param {Array<{ stackEnv: string, dirLabel: string, error: unknown }>} params.stacks
  * @param {string} params.environment - the user-facing environment name.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags: every
+ *   rerun a kept record's line names carries -purge when this destroy had it
+ *   (retryDestroyCommand), since a kept entry keeps the buckets for it.
  * @param {string} params.projectName
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`.
@@ -3435,6 +3445,7 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
 export async function settleUnreadableStacks({
   stacks,
   environment,
+  args,
   projectName,
   results,
   providerName,
@@ -3458,9 +3469,11 @@ export async function settleUnreadableStacks({
     if (!backendResolved || ((precheck || madeNow) && !(backstop && sweptClean))) {
       results.pulumiDestroyFailed = true;
       const hints = [];
-      if (precheck) hints.push(passphraseRecoveryHint(precheck, environment));
-      else if (madeNow) hints.push(passphraseMadeThisRunHint(environment, passphraseProvenance));
-      if (!backendResolved) hints.push(stateCredentialsHint(environment));
+      if (precheck) hints.push(passphraseRecoveryHint(precheck, environment, args));
+      else if (madeNow) {
+        hints.push(passphraseMadeThisRunHint(environment, passphraseProvenance, args));
+      }
+      if (!backendResolved) hints.push(stateCredentialsHint(environment, args));
       results.leaks.unverified({
         resourceClass: 'pulumi-stack',
         resource,
@@ -3479,7 +3492,7 @@ export async function settleUnreadableStacks({
         resourceClass: 'pulumi-stack',
         resource,
         reason: `its Pulumi state can't be read (${why}), and removing its stack record failed: ${err.message}`,
-        hint: `Run \`vibecarbon destroy ${environment}\` again: it removes the record without reading it.`,
+        hint: `Run \`${retryDestroyCommand(environment, args)}\` again: it removes the record without reading it.`,
       });
       continue;
     }
@@ -4809,6 +4822,7 @@ async function destroyK8sTier({
       await settleUnreadableStacks({
         stacks: unreadableStacks,
         environment,
+        args,
         projectName: projectConfig.projectName,
         results,
         providerName: Provider.NAME,

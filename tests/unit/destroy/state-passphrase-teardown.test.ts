@@ -103,6 +103,8 @@ let labelListingFails = false;
  * after finding nothing or after finding the labelled server.
  */
 let serverListing: 'complete' | 'incomplete-empty' | 'incomplete-found' = 'complete';
+/** Whether the object-storage keys resolve (the shell, .env.local or a prompt). */
+let storageKeys = true;
 const LABELLED_SERVER = {
   id: 21,
   name: 'proj-e1-master',
@@ -165,13 +167,17 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   Object.assign(FakeProvider, {
     NAME: 'Hetzner',
     getPublicIP: () => '203.0.113.1',
-    promptObjectStorageCredentials: async () => ({ accessKey: 'AK', secretKey: 'SK' }),
+    promptObjectStorageCredentials: async () =>
+      storageKeys ? { accessKey: 'AK', secretKey: 'SK' } : null,
   });
   Object.defineProperty(FakeProvider, 'K8S_DESTROY_BACKSTOP', { get: () => backstop });
   return { ...real, providerFor: () => FakeProvider };
 });
 
 const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+const { checkS3CredentialMismatch } = await import(
+  '../../../src/lib/destroy/s3-credential-check.js'
+);
 const { __resetStatePassphraseForTests, statePassphraseFingerprint } = await import(
   '../../../src/lib/state-passphrase.js'
 );
@@ -287,6 +293,7 @@ beforeEach(() => {
   firewallDeleteFails = false;
   labelListingFails = false;
   serverListing = 'complete';
+  storageKeys = true;
   __resetStatePassphraseForTests();
   __resetStateProbesForTests();
   vi.stubEnv('HETZNER_ACCESS_KEY', 'AK');
@@ -338,6 +345,36 @@ describe('compose: provider API plus `stack rm --force`, whatever the passphrase
       });
     },
   );
+
+  it('no passphrase and no storage keys: the record is kept, and no line says it is removed', async () => {
+    // The pre-teardown line (checkS3CredentialMismatch) says the stack state
+    // and the entry are kept for a rerun; the passphrase warning, which says
+    // the record is removed without being read, must not contradict it.
+    project({ value: undefined });
+    storageKeys = false;
+    vi.stubEnv('HETZNER_ACCESS_KEY', '');
+    vi.stubEnv('HETZNER_SECRET_KEY', '');
+    const ctx = makeCtx('compose', dir);
+    const [before] = checkS3CredentialMismatch({
+      envConfig: ctx.envConfig,
+      envKeys: ['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY'],
+      environment: 'e1',
+      stackEnvs: ['e1'],
+    });
+    expect(before.reason).toContain('the stack state and the environment');
+    expect(before.reason).toContain('are kept for a rerun');
+
+    await run('destroyComposeServices', ctx);
+    await run('removePulumiStackState', ctx);
+
+    expect(removals()).toEqual([]);
+    expect(stackEntries(ctx).map((e: { resourceClass: string }) => e.resourceClass)).toEqual([
+      'pulumi-stack',
+    ]);
+    expect(entryKept(ctx)).not.toBeNull();
+    expect(warnings.join('\n')).not.toContain('removed without being read');
+    expect(warnings.join('\n')).not.toContain("can't read the Pulumi state");
+  });
 
   it('a healthy passphrase destroys exactly as before, with no warning', async () => {
     project({ value: PASSPHRASE });
@@ -1099,6 +1136,46 @@ describe('settleUnreadableStacks: a record it cannot remove is kept for the retr
     const [entry] = results.leaks.entries;
     expect(entry.reason).toContain('removing its stack record failed: SlowDown');
     expect(entry.hint).toContain('`vibecarbon destroy e1` again');
+  });
+
+  // A kept record keeps the entry, and under -purge the entry keeps every
+  // bucket for the rerun, so each rerun a kept record's line names carries
+  // -purge (retryDestroyCommand). The one-rule wiring through the bucket
+  // steps is in unreadable-stack-purge-buckets.test.ts.
+  describe('under -purge, every rerun a kept record names carries -purge', () => {
+    const purge = { args: { purgeBackups: true } };
+    const named = (hint: string) =>
+      [...hint.matchAll(/`(vibecarbon destroy[^`]*)`/g)].map((m) => m[1]);
+
+    it.each([
+      ['credentials unresolved', { backendResolved: false }],
+      ['the removal fails', { removeRecord: async () => Promise.reject(new Error('SlowDown')) }],
+      [
+        'refused before Pulumi ran, credentials unresolved',
+        { backendResolved: false, stacks: [{ stackEnv: 'e1', dirLabel: '', error: missing() }] },
+      ],
+      [
+        'refused before Pulumi ran, no backstop',
+        { backstop: false, stacks: [{ stackEnv: 'e1', dirLabel: '', error: missing() }] },
+      ],
+      [
+        'a passphrase this clone made',
+        {
+          backstop: false,
+          passphraseProvenance: { madeHere: true, thisRun: true, head: 'committed' },
+        },
+      ],
+    ])('%s', async (_, over) => {
+      const { results, removed, done } = settle({ ...purge, ...over });
+      await done;
+      expect(removed).toEqual([]);
+      expect(results.pulumiDestroyFailed).toBe(true);
+      const [entry] = results.leaks.entries;
+      expect(entry.resourceClass).toBe('pulumi-stack');
+      const reruns = named(entry.hint);
+      expect(reruns.length).toBeGreaterThan(0);
+      expect(new Set(reruns)).toEqual(new Set(['vibecarbon destroy e1 -purge']));
+    });
   });
 });
 
