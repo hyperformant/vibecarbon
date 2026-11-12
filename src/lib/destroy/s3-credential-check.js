@@ -35,8 +35,12 @@ import { readOperatorVar } from '../operator-env.js';
  *   is no mismatch to detect.
  * @param {Record<string, string|undefined>} [params.env] - environment to read
  *   (defaults to the process env inside the reader).
- * @param {boolean} [params.purgeBackups] - the `-purge` flag. Without it the
- *   backup bucket is deliberately preserved and its credentials are irrelevant.
+ * @param {boolean} [params.purgeBackups] - the `-purge` flag. Without it
+ *   destroy keeps every bucket (the app bucket with its uploads, the backups
+ *   and the state bucket), so no credentials are needed and nothing is at risk.
+ * @param {boolean} [params.appBucketOwned] - the app bucket is this
+ *   environment's own (ownsAppBucket): -purge deletes only that one, never a
+ *   pinned bucket or an older CLI's per-project one.
  * @param {boolean} [params.canPrompt] - true when an interactive prompt can
  *   still supply the keys (a real TTY). Changes the wording only.
  * @returns {Array<{ resourceClass: string, resource: string, reason: string, hint: string }>}
@@ -47,6 +51,7 @@ export function checkS3CredentialMismatch({
   envKeys,
   env,
   purgeBackups = false,
+  appBucketOwned = true,
   canPrompt = false,
 }) {
   const [accessKeyEnv, secretKeyEnv] = envKeys ?? [];
@@ -64,18 +69,22 @@ export function checkS3CredentialMismatch({
   const label = (name, bucketRegion) => (bucketRegion ? `${name} (${bucketRegion})` : name);
 
   /**
-   * Only buckets this destroy will actually TRY to delete. The dedicated
-   * Pulumi state bucket is deliberately absent: destroy KEEPS it now
-   * (retainStateBucket), so listing it here produced a false AT-RISK ledger
-   * entry — and wrong advice — on every credential-less destroy (review
-   * finding, 2026-08-15).
+   * Only buckets this destroy will actually TRY to delete, which is none
+   * without -purge. Under -purge: the app bucket when it is this
+   * environment's own, and the backups bucket when a region names the store
+   * to ask (one with none is refused before any store is asked). The
+   * dedicated Pulumi state bucket is absent: a plain destroy keeps it
+   * (retainStateBucket), and listing it produced a false AT-RISK entry on
+   * every credential-less destroy (review finding, 2026-08-15). A -purge of
+   * the last environment does delete it, under rules only retainStateBucket
+   * applies (a pin, the other environments, a kept entry), and that purge
+   * records its own leak, with the console steps, when it has no keys.
    */
+  if (!purgeBackups) return [];
   const targets = [];
   const appBucket = envConfig?.s3?.bucket;
-  if (appBucket) targets.push(label(appBucket, region));
-  if (purgeBackups && backups) {
-    targets.push(label(backups.bucket, backups.region || region));
-  }
+  if (appBucket && appBucketOwned) targets.push(label(appBucket, region));
+  if (backups?.region) targets.push(label(backups.bucket, backups.region));
   if (targets.length === 0) return [];
 
   const missingPhrase = `${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not set`;
@@ -87,6 +96,8 @@ export function checkS3CredentialMismatch({
     resourceClass: 'bucket',
     resource,
     reason: `this environment records an object-storage bucket but ${missingPhrase}: ${consequence}`,
-    hint: `Export ${missing.join(' and ')} (shell or the project's .env.local) and re-run the destroy.`,
+    // Never a destroy rerun: by the time the leak report shows this, the
+    // environment has moved to destroyedEnvironments and a rerun finds none.
+    hint: `If its delete is skipped, the leak report gives the console steps for it. Next time, set ${missing.join(' and ')} (shell or the project's .env.local) before the destroy, so it can delete the bucket itself.`,
   }));
 }

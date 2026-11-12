@@ -5091,6 +5091,7 @@ async function main(argv = []) {
     envConfig,
     envKeys: Provider.OBJECT_STORAGE_ENV,
     purgeBackups: args.purgeBackups,
+    appBucketOwned: ownsAppBucket(envConfig, projectConfig, envName),
     canPrompt: !!process.stdin.isTTY,
   })) {
     p.log.warn(`Object storage: ${risk.reason}`);

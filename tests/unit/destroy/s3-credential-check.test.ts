@@ -4,7 +4,14 @@
  * keys are absent, destroy used to proceed silently and could leave the bucket
  * behind. It must now loud-warn BEFORE the teardown starts and feed the leak
  * tally as a leak-RISK line.
+ *
+ * Only for what this destroy will touch: nothing without -purge, and under
+ * -purge the environment's own app bucket and its backups bucket. The hint
+ * gives by-hand steps, never a destroy rerun: by the time the leak report
+ * shows it, the environment has moved to destroyedEnvironments.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkS3CredentialMismatch } from '../../../src/lib/destroy/s3-credential-check.js';
 
@@ -17,6 +24,7 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
       envKeys: HETZNER_KEYS,
       env: BOTH_SET,
+      purgeBackups: true,
     });
     expect(risks).toEqual([]);
   });
@@ -26,6 +34,7 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
       envKeys: HETZNER_KEYS,
       env: { HETZNER_ACCESS_KEY: '"ak"\n', HETZNER_SECRET_KEY: ' sk ' },
+      purgeBackups: true,
     });
     expect(risks).toEqual([]);
   });
@@ -35,6 +44,7 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
       envKeys: HETZNER_KEYS,
       env: { HETZNER_ACCESS_KEY: '   ', HETZNER_SECRET_KEY: 'sk' },
+      purgeBackups: true,
     });
     expect(risks).toHaveLength(1);
     expect(risks[0].reason).toContain('HETZNER_ACCESS_KEY is not set');
@@ -45,22 +55,72 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: {},
       envKeys: HETZNER_KEYS,
       env: {},
+      purgeBackups: true,
     });
     expect(risks).toEqual([]);
   });
 
-  it('flags the app bucket when both keys are missing, naming both vars', () => {
+  it('flags the app bucket -purge deletes when both keys are missing, naming both vars', () => {
     const risks = checkS3CredentialMismatch({
       envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
       envKeys: HETZNER_KEYS,
       env: {},
+      purgeBackups: true,
     });
     expect(risks).toHaveLength(1);
     expect(risks[0].resourceClass).toBe('bucket');
     expect(risks[0].resource).toBe('acme-prod (fsn1)');
     expect(risks[0].reason).toContain('HETZNER_ACCESS_KEY');
     expect(risks[0].reason).toContain('HETZNER_SECRET_KEY');
-    expect(risks[0].hint).toBeTruthy();
+  });
+
+  it('gives by-hand steps, never a destroy rerun, which finds no environment by the time the report shows', () => {
+    const [risk] = checkS3CredentialMismatch({
+      envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+    });
+    expect(risk.hint).toBe(
+      "If its delete is skipped, the leak report gives the console steps for it. Next time, set HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY (shell or the project's .env.local) before the destroy, so it can delete the bucket itself.",
+    );
+    expect(risk.hint).not.toMatch(/re-?run|\u2014/i);
+  });
+
+  it('is silent on a plain destroy, which keeps every bucket and needs no keys', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: {
+        s3: { bucket: 'acme-prod', stateBucket: 'acme-prod-state', region: 'fsn1' },
+        backupS3: { bucket: 'acme-backups', region: 'fsn1' },
+      },
+      envKeys: HETZNER_KEYS,
+      env: {},
+    });
+    expect(risks).toEqual([]);
+  });
+
+  it('leaves out an app bucket -purge keeps (pinned, or an older per-project one)', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: {
+        s3: { bucket: 'acme-storage', region: 'fsn1' },
+        backupS3: { bucket: 'acme-backups', region: 'fsn1' },
+      },
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+      appBucketOwned: false,
+    });
+    expect(risks.map((r) => r.resource)).toEqual(['acme-backups (fsn1)']);
+  });
+
+  it('leaves out a backups record with no region anywhere: the purge refuses it before asking a store', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: { backupS3: { bucket: 'acme-backups' } },
+      envKeys: HETZNER_KEYS,
+      env: {},
+      purgeBackups: true,
+    });
+    expect(risks).toEqual([]);
   });
 
   it('flags a HALF-configured pair — one missing key is the same leak', () => {
@@ -68,22 +128,24 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod' } },
       envKeys: HETZNER_KEYS,
       env: { HETZNER_ACCESS_KEY: 'ak' },
+      purgeBackups: true,
     });
     expect(risks).toHaveLength(1);
     expect(risks[0].reason).toContain('HETZNER_SECRET_KEY');
     expect(risks[0].reason).not.toContain('HETZNER_ACCESS_KEY is');
   });
 
-  it('never flags the state bucket — destroy keeps it, so it is not at risk', () => {
+  it('never flags the state bucket: a plain destroy keeps it, and a -purge that deletes it records its own leak', () => {
     // Inverted 2026-08-15: destroy retains the dedicated Pulumi state bucket
-    // (retainStateBucket), so a credential-less destroy will not try to delete
-    // it and an AT-RISK entry for it was false — it made every credential-less
-    // destroy print 'with observations' and wrong billing advice for a bucket
-    // we keep on purpose.
+    // (retainStateBucket), so an AT-RISK entry for it was false on every
+    // credential-less plain destroy. A last-environment -purge deletes it
+    // under rules only retainStateBucket applies, and records a leak with
+    // the console steps when it has no keys.
     const risks = checkS3CredentialMismatch({
       envConfig: { s3: { bucket: 'acme-prod', stateBucket: 'acme-prod-state', region: 'fsn1' } },
       envKeys: HETZNER_KEYS,
       env: {},
+      purgeBackups: true,
     });
     expect(risks.map((r) => r.resource)).toEqual(['acme-prod (fsn1)']);
   });
@@ -93,6 +155,7 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod', stateBucket: 'acme-prod' } },
       envKeys: HETZNER_KEYS,
       env: {},
+      purgeBackups: true,
     });
     expect(risks).toHaveLength(1);
   });
@@ -149,12 +212,14 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod' } },
       envKeys: HETZNER_KEYS,
       env: {},
+      purgeBackups: true,
       canPrompt: false,
     });
     const [onTty] = checkS3CredentialMismatch({
       envConfig: { s3: { bucket: 'acme-prod' } },
       envKeys: HETZNER_KEYS,
       env: {},
+      purgeBackups: true,
       canPrompt: true,
     });
     expect(offTty.reason).toMatch(/will be skipped|survive/i);
@@ -166,6 +231,7 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod', region: 'sfo3' } },
       envKeys: ['DIGITALOCEAN_ACCESS_KEY', 'DIGITALOCEAN_SECRET_KEY'],
       env: {},
+      purgeBackups: true,
     });
     expect(risks[0].reason).toContain('DIGITALOCEAN_ACCESS_KEY');
     expect(risks[0].reason).not.toContain('HETZNER_ACCESS_KEY');
@@ -176,7 +242,19 @@ describe('checkS3CredentialMismatch', () => {
       envConfig: { s3: { bucket: 'acme-prod' } },
       envKeys: [],
       env: {},
+      purgeBackups: true,
     });
     expect(risks).toEqual([]);
+  });
+});
+
+describe('destroy wires the check to the app bucket rule it applies', () => {
+  it('passes ownsAppBucket, the rule deleteAppBucketEffect deletes by', () => {
+    const src = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
+    const at = src.indexOf('checkS3CredentialMismatch({');
+    expect(at).toBeGreaterThan(-1);
+    const call = src.slice(at, src.indexOf('})', at));
+    expect(call).toContain('appBucketOwned: ownsAppBucket(envConfig, projectConfig, envName),');
+    expect(src.indexOf('checkS3CredentialMismatch({', at + 1)).toBe(-1);
   });
 });
