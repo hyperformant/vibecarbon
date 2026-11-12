@@ -55,7 +55,10 @@ export function deleteFailure(providerName, status) {
  * `except` is skipped (the caller handled it). The method throws when the
  * listing cannot be read whole (a partial one would read as "nothing left"),
  * and before any read when a label is missing (sweepLabels).
- * @typedef {{deleted: string[], failed: Array<{address: string, held: true|null, reason: string}>}} TaggedReservedIpSweep
+ * `serverTerminating` marks an address held by a server this process asked
+ * to terminate that was still terminating (Scaleway), which the next destroy
+ * releases.
+ * @typedef {{deleted: string[], failed: Array<{address: string, held: true|null, reason: string, serverTerminating?: true}>}} TaggedReservedIpSweep
  */
 
 /**

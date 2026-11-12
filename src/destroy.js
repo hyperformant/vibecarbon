@@ -3350,7 +3350,11 @@ export async function sweepTaggedReservedIps({
       const entry = {
         resourceClass: 'reserved-ip',
         resource: failure.address,
-        hint: reservedIpRetryHint(environment, Provider),
+        hint: failure.serverTerminating
+          ? `Run \`vibecarbon destroy ${environment}\` again once the server is gone: the ` +
+            'environment stays in .vibecarbon.json, and that destroy releases it. Or release it ' +
+            `in the ${Provider.NAME} console after the server is deleted.`
+          : reservedIpRetryHint(environment, Provider),
       };
       if (failure.held) {
         results.leaks.leak({

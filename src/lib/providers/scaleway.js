@@ -84,6 +84,22 @@ const WG_PORT = 51821;
 const GB = 1_000_000_000;
 
 /**
+ * How long deleteServer waits for a terminated server's record to go.
+ */
+const TERMINATE_WAIT_MS = 120_000;
+
+/**
+ * Servers this process asked Scaleway to terminate that were still there
+ * when deleteServer stopped waiting (TERMINATE_WAIT_MS). Module-level, not
+ * per instance: destroy deletes servers and sweeps flexible IPs through
+ * different provider instances (compose-ha). The label sweep reads it, so an
+ * IP still attached to one is reported as waiting on a termination the next
+ * destroy finds finished, not as held by a server nobody deleted.
+ * @type {Set<string>}
+ */
+const serversStillTerminating = new Set();
+
+/**
  * Encode a label key/value pair into a Scaleway tag string — same
  * `key:value` wire encoding as the DO/Linode/Vultr tag-based providers
  * (byte-compatible so the destroy-sweep/listing matchers behave
@@ -1161,7 +1177,9 @@ export class ScalewayProvider extends BaseProvider {
 
     // 3. Wait for the record to disappear — the detached-SBS deletes below
     // are only valid once termination completes, in EITHER mode (see doc).
-    await pollUntil(
+    // A server still there when the wait runs out is noted, so the label
+    // sweep can say its flexible IP waits on the termination.
+    const terminated = await pollUntil(
       async () => {
         const probe = await fetch(
           `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/servers/${serverId}`,
@@ -1170,12 +1188,17 @@ export class ScalewayProvider extends BaseProvider {
         return probe.status === 404;
       },
       {
-        budgetMs: 120_000,
+        budgetMs: TERMINATE_WAIT_MS,
         initialDelayMs: 2_000,
         backoffFactor: 1,
         description: `server ${serverId} termination`,
       },
-    ).catch(() => {});
+    ).then(
+      () => true,
+      () => false,
+    );
+    if (terminated) serversStillTerminating.delete(String(serverId));
+    else serversStillTerminating.add(String(serverId));
 
     // 4. Delete the detached SBS volumes (Block Storage API — a different
     // product than the Instance API's legacy volumes endpoint). Brief
@@ -1842,7 +1865,10 @@ export class ScalewayProvider extends BaseProvider {
    * between leaves the IP attached to nothing and named nowhere but here.
    * Filters client-side over every zone's listing. A label without a value
    * is refused (sweepLabels). One still attached to a server is left alone: destroy runs
-   * after the server deletes, so that server is one they did not delete.
+   * after the server deletes, so that server is one they did not delete, or
+   * one this process asked to terminate that was still terminating when
+   * deleteServer stopped waiting (`serverTerminating`: the next destroy finds
+   * it gone and releases the IP).
    * @param {Object<string,string>} labels
    * @param {{except?: string[]}} [options] - addresses the caller already handled
    * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
@@ -1864,11 +1890,23 @@ export class ScalewayProvider extends BaseProvider {
     for (const ip of items) {
       if (!wanted.every((tag) => (ip.tags ?? []).includes(tag)) || skip.has(ip.address)) continue;
       if (ip.server) {
-        failed.push({
-          address: ip.address,
-          held: true,
-          reason: `it is still attached to server ${ip.server.name ?? ip.server.id}, which was not deleted`,
-        });
+        const server = ip.server.name ?? ip.server.id;
+        if (serversStillTerminating.has(String(ip.server.id))) {
+          failed.push({
+            address: ip.address,
+            held: true,
+            serverTerminating: true,
+            reason:
+              `it is still attached to server ${server}, which was still terminating when ` +
+              `vibecarbon stopped waiting after ${TERMINATE_WAIT_MS / 60_000} minutes`,
+          });
+        } else {
+          failed.push({
+            address: ip.address,
+            held: true,
+            reason: `it is still attached to server ${server}, which was not deleted`,
+          });
+        }
         continue;
       }
       const res = await fetchWithRetry(
