@@ -1081,7 +1081,7 @@ describe('applyCloudSecrets', () => {
       );
     });
 
-    it('a restart that fails says how to restart by hand, since the next deploy will not', async () => {
+    it('a restart that fails says how to restart by hand, then to deploy again before revoking', async () => {
       holdAll(PROVIDERS.linode, 'vc-sentinel-token-old');
       readerPerSecret(PROVIDERS.linode);
       failWhen = /^-n kube-system rollout restart /;
@@ -1093,9 +1093,12 @@ describe('applyCloudSecrets', () => {
       expect(err).toBeInstanceOf(Error);
       expect(err.message).toBe(
         "kube-system/linode changed, but restarting deployment/reads-linode didn't go through, " +
-          "so it still runs with the old value, and the next deploy won't restart it: the Secret " +
-          `already matches. Run \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout restart ` +
-          'deployment/reads-linode`.\nrestart deployment/reads-linode failed with exit 1: ' +
+          'so it still runs with the old value. A deploy restarts only what reads a Secret it ' +
+          'changes, and kube-system/linode already holds the new value, so restart it by hand: ' +
+          `run \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout restart ` +
+          'deployment/reads-linode`. Then deploy again and let it finish before you revoke the ' +
+          'old token: this deploy stopped partway, so the cluster autoscaler may still hold the ' +
+          'old one.\nrestart deployment/reads-linode failed with exit 1: ' +
           'error: deployments.apps "reads-linode" is forbidden',
       );
       expect(logged.join('\n')).not.toContain(MARK);
@@ -1232,7 +1235,7 @@ describe('applyCloudSecrets', () => {
       expect(restarts()).toHaveLength(1);
     });
 
-    it('a strategy patch that fails restarts nothing and says what to run, since the next deploy will not', async () => {
+    it('a strategy patch that fails restarts nothing, says what to run, then to deploy again before revoking', async () => {
       holdAll(PROVIDERS.digitalocean, 'vc-sentinel-token-old');
       workloads['kube-system'] = [
         readerLike('digitalocean-cloud-controller-manager', 'digitalocean', {
@@ -1252,10 +1255,13 @@ describe('applyCloudSecrets', () => {
         'kube-system/digitalocean changed, but moving deployment/digitalocean-cloud-controller-manager ' +
           "to the Recreate strategy didn't go through, so this deploy restarted nothing and " +
           'deployment/digitalocean-cloud-controller-manager and statefulset/csi-do-controller still ' +
-          "run with the old value. The next deploy won't restart them: the Secret already matches. " +
-          `Run \`${kc} patch deployment/digitalocean-cloud-controller-manager --type=merge -p ` +
+          'run with the old value. A deploy restarts only what reads a Secret it changes, and ' +
+          'kube-system/digitalocean already holds the new value, so restart them by hand: run ' +
+          `\`${kc} patch deployment/digitalocean-cloud-controller-manager --type=merge -p ` +
           `'{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'\`, then \`${kc} rollout ` +
-          'restart deployment/digitalocean-cloud-controller-manager statefulset/csi-do-controller`.\n' +
+          'restart deployment/digitalocean-cloud-controller-manager statefulset/csi-do-controller`. ' +
+          'Then deploy again and let it finish before you revoke the old token: this deploy ' +
+          'stopped partway, so the cluster autoscaler may still hold the old one.\n' +
           'move deployment/digitalocean-cloud-controller-manager to the Recreate strategy failed ' +
           'with exit 1: error: deployments.apps "digitalocean-cloud-controller-manager" is forbidden',
       );
@@ -1264,7 +1270,7 @@ describe('applyCloudSecrets', () => {
       expect(logged.join('\n')).not.toContain(MARK);
     });
 
-    it('a reader that does not finish restarting fails the deploy, by name, and says not to revoke the old token yet', async () => {
+    it('a reader that does not finish restarting fails the deploy, by name, and says to deploy again before revoking', async () => {
       holdAll(PROVIDERS.hetzner, 'vc-sentinel-token-old');
       workloads['kube-system'] = [
         envReader('hcloud-cloud-controller-manager', 'hcloud'),
@@ -1279,11 +1285,12 @@ describe('applyCloudSecrets', () => {
       expect(err).toBeInstanceOf(Error);
       expect(err.message).toBe(
         "deployment/hcloud-csi-controller in kube-system didn't finish restarting within 300 s, " +
-          "so it may still run with the old kube-system/hcloud, and the next deploy won't restart " +
-          "it again: the Secret already matches. Don't revoke your old token until it has. See " +
-          `where it stands with \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout status ` +
-          'deployment/hcloud-csi-controller`.\nwait for deployment/hcloud-csi-controller to restart ' +
-          'failed with exit 1: error: timed out waiting for the condition',
+          'so it may still run with the old kube-system/hcloud. See where it stands with ' +
+          `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout status ` +
+          'deployment/hcloud-csi-controller`; once it has restarted, deploy again and let it ' +
+          'finish before you revoke the old token: this deploy stopped partway, so the cluster ' +
+          'autoscaler may still hold the old one.\nwait for deployment/hcloud-csi-controller to ' +
+          'restart failed with exit 1: error: timed out waiting for the condition',
       );
       // Each was waited for, the one that finished too: one stuck reader
       // never hides another.
@@ -1314,11 +1321,24 @@ describe('applyCloudSecrets', () => {
       expect(err.message.split('\n')[0]).toBe(
         'deployment/hcloud-cloud-controller-manager and deployment/hcloud-csi-controller in ' +
           "kube-system didn't finish restarting within 300 s, so they may still run with the old " +
-          "kube-system/hcloud, and the next deploy won't restart them again: the Secret already " +
-          "matches. Don't revoke your old token until they have. See where they stand with " +
+          'kube-system/hcloud. See where they stand with ' +
           `\`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system rollout status ` +
-          'deployment/hcloud-cloud-controller-manager deployment/hcloud-csi-controller`.',
+          'deployment/hcloud-cloud-controller-manager deployment/hcloud-csi-controller`; once ' +
+          'they have restarted, deploy again and let it finish before you revoke the old token: ' +
+          'this deploy stopped partway, so the cluster autoscaler may still hold the old one.',
       );
+    });
+
+    it('docs/security.md says the same: deploy again and let it finish before revoking', () => {
+      const doc = readFileSync(join(__dirname, '../../../docs/security.md'), 'utf-8');
+      const step = doc
+        .split('\n')
+        .find((line) => line.startsWith('5. Once that deploy has succeeded'));
+      expect(step).toContain(
+        'then deploy again and let it finish before you revoke the old token: a deploy that ' +
+          'stopped partway may have left the cluster autoscaler on the old one.',
+      );
+      expect(doc).not.toMatch(/deploying again won't|the next deploy won't restart/i);
     });
 
     it('wait: false restarts and leaves the wait to its caller', async () => {

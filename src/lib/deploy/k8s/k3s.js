@@ -2226,11 +2226,23 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
  *
  * A patch, restart or wait that fails leaves them on the old value, and the
  * next deploy finds the Secret already matching and restarts nothing, so
- * the error says what to run by hand, and not to revoke the old token yet.
+ * the error says what to run by hand. Each also says to deploy again and
+ * let it finish before revoking the old token (FINISH_BEFORE_REVOKE): a
+ * deploy that stops here in applyCloudSecrets never reaches the
+ * autoscaler's Secret, which still holds the old one.
  *
  * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal, wait?: boolean}} args
  * @returns {Promise<string[]>} what it restarted, as `kind/name`
  */
+/**
+ * What every rotation error ends with (restartSecretReaders): a deploy that
+ * stopped partway left something on the old token, and only a deploy that
+ * finishes hands the new one to all of it.
+ */
+export const FINISH_BEFORE_REVOKE =
+  'deploy again and let it finish before you revoke the old token: this deploy stopped ' +
+  'partway, so the cluster autoscaler may still hold the old one.';
+
 export async function restartSecretReaders({
   env,
   namespace,
@@ -2246,6 +2258,10 @@ export async function restartSecretReaders({
   const kubeconfig = env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>';
   const kubectl = `KUBECONFIG=${kubeconfig} kubectl -n ${namespace}`;
   const restartByHand = `\`${kubectl} rollout restart ${readers.join(' ')}\``;
+  const byHand =
+    `A deploy restarts only what reads a Secret it changes, and ${secrets} ` +
+    `${read.length === 1 ? 'already holds' : 'already hold'} the new value, so restart ` +
+    `${one ? 'it' : 'them'} by hand`;
   const opts = (description) => ({
     env,
     captureStdout: true,
@@ -2278,9 +2294,9 @@ export async function restartSecretReaders({
         throw new Error(
           `${secrets} changed, but moving ${workload} to the Recreate strategy didn't go through, ` +
             `so this deploy restarted nothing and ${listing(readers)} ` +
-            `${one ? 'still runs' : 'still run'} with the old value. The next deploy won't ` +
-            `restart ${one ? 'it' : 'them'}: the Secret already matches. ` +
-            `Run ${listing(patches)}, then ${restartByHand}.\n${err.message}`,
+            `${one ? 'still runs' : 'still run'} with the old value. ${byHand}: run ` +
+            `${listing(patches)}, then ${restartByHand}. Then ${FINISH_BEFORE_REVOKE}\n` +
+            err.message,
           { cause: err },
         );
       }
@@ -2294,9 +2310,8 @@ export async function restartSecretReaders({
   } catch (err) {
     throw new Error(
       `${secrets} changed, but restarting ${listing(readers)} didn't go through, so ` +
-        `${one ? 'it still runs' : 'they still run'} with the old value, and the next deploy ` +
-        `won't restart ${one ? 'it' : 'them'}: the Secret already matches. Run ${restartByHand}.\n` +
-        err.message,
+        `${one ? 'it still runs' : 'they still run'} with the old value. ${byHand}: run ` +
+        `${restartByHand}. Then ${FINISH_BEFORE_REVOKE}\n${err.message}`,
       { cause: err },
     );
   }
@@ -2318,10 +2333,9 @@ export async function restartSecretReaders({
     throw new Error(
       `${listing(stuck)} in ${namespace} didn't finish restarting within ` +
         `${READER_ROLLOUT_TIMEOUT_S} s, so ${s1 ? 'it' : 'they'} may still run with the old ` +
-        `${secrets}, and the next deploy won't restart ${s1 ? 'it' : 'them'} again: the Secret ` +
-        `already matches. Don't revoke your old token until ${s1 ? 'it has' : 'they have'}. See ` +
-        `where ${s1 ? 'it stands' : 'they stand'} with ` +
-        `\`${kubectl} rollout status ${stuck.join(' ')}\`.\n` +
+        `${secrets}. See where ${s1 ? 'it stands' : 'they stand'} with ` +
+        `\`${kubectl} rollout status ${stuck.join(' ')}\`; once ` +
+        `${s1 ? 'it has' : 'they have'} restarted, ${FINISH_BEFORE_REVOKE}\n` +
         reasons.join('\n'),
       { cause: results.find((r) => r.status === 'rejected')?.reason },
     );
