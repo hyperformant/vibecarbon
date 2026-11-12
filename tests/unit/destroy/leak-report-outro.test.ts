@@ -169,8 +169,11 @@ describe('finish-then-report wrapper (DESTROY_EFFECTS)', () => {
     expect(entry.resourceClass).toBe('destroy-step');
     expect(entry.resource).toBe('cleanup-local-files');
     expect(entry.reason).toMatch(/step threw/);
-    // The compute and its A records are kept together, so the hint says both.
-    expect(entry.hint).toContain('and its DNS records');
+    // A step that runs after the entry is decided keeps nothing, so its hint
+    // is the by-hand step, never a re-run (ENTRY_KEEP_BY_CLASS's destroy-step
+    // row; the keeping steps are covered in entry-keep-class-table.test.ts).
+    expect(entry.hint).toContain('under .vibecarbon/ by hand');
+    expect(entry.hint).not.toMatch(/vibecarbon destroy/);
     // Non-zero, so the caller still learns the teardown was not clean.
     expect(ctx.results.leaks.exitCode()).toBe(2);
   });

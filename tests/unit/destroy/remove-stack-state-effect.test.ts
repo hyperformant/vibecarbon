@@ -14,13 +14,16 @@
  * the thing that deleted the resources also removes the stack record.
  *
  * The GATES matter as much as the removal:
- *   - a teardown with leak/unverified entries RETAINS the stack — its state
- *     is the only record of what may still be deployed (717d49e7's evidence
- *     principle);
- *   - recorded s3 backend + unresolvable credentials RETAINS the stack —
- *     removing against the file:// fallback would "succeed" against the
- *     wrong backend while the real stale stack lives on;
- *   - foreign/risk-only ledgers still remove — our own teardown is verified
+ *   - the stack is kept exactly when the environment's entry is
+ *     (entryKeptReason, ENTRY_KEEP_BY_CLASS): a line a re-run can act on (a
+ *     server, a firewall) keeps both, and a line it cannot (a refused DNS
+ *     delete) keeps neither, so no stack outlives its entry (final review
+ *     I1, 2026-11-11);
+ *   - recorded s3 backend + unresolvable credentials RETAINS the stack, as an
+ *     unverified line that keeps the entry too: removing against the file://
+ *     fallback would "succeed" against the wrong backend while the real
+ *     stale stack lives on;
+ *   - foreign/risk-only ledgers still remove: our own teardown is verified
  *     clean (mirrors destroyExitCode's policy).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -66,6 +69,8 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+const { keepsEntry } = await import('../../../src/destroy.js');
 
 async function runEffect(ctx: ReturnType<typeof makeCtx>) {
   const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
@@ -144,6 +149,21 @@ describe('removePulumiStackState effect', () => {
     expect(removeStackStateMock).not.toHaveBeenCalled();
   });
 
+  it('REMOVES the stack when the only leak is one a re-run cannot act on (a refused DNS delete)', async () => {
+    // The entry goes (a DNS line keeps nothing), so the stack must go with it:
+    // a stack that outlives its entry is picked up by the next deploy of the
+    // name and fails its refresh on the deleted resources (e2e 32309395314).
+    const ctx = makeCtx();
+    ctx.results.leaks.leak({
+      resourceClass: 'dns-record',
+      resource: '*.civ1.example.com → 1.2.3.4 (Cloudflare zone z1)',
+      reason: 'delete refused: HTTP 403',
+    });
+    await runEffect(ctx);
+
+    expect(removeStackStateMock).toHaveBeenCalledTimes(1);
+  });
+
   it('still removes when the ledger holds only foreign/risk entries (our teardown is clean)', async () => {
     const ctx = makeCtx();
     ctx.results.leaks.foreign({
@@ -170,7 +190,17 @@ describe('removePulumiStackState effect', () => {
     // Removing against the file:// fallback would "succeed" against the
     // wrong backend — the stale stack in the real bucket would live on.
     expect(removeStackStateMock).not.toHaveBeenCalled();
-    expect(ctx.spinner.messages.join('\n')).toMatch(/retained|credentials/i);
+    expect(ctx.spinner.messages.join('\n')).toMatch(/credentials could not be resolved/i);
+    // Kept as a line that keeps the entry, so the re-run it names can run.
+    const [line] = ctx.results.leaks.entries;
+    expect(line).toMatchObject({
+      severity: 'unverified',
+      resourceClass: 'pulumi-stack',
+      resource: 'civ1',
+    });
+    expect(keepsEntry(line)).toBe(true);
+    expect(line.hint).toContain('Set HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY');
+    expect(line.hint).toContain('`vibecarbon destroy civ1` again');
   });
 
   it('records an unverified pulumi-stack entry when a removal throws (a retained stale stack fails the next re-deploy)', async () => {

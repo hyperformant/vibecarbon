@@ -262,11 +262,13 @@ describe('cleanupDnsRecords: a refused record delete', () => {
     expect(leaks[0].resource).toContain('*.e1.example.com');
     expect(leaks[0].resource).toContain('1.2.3.4');
     expect(leaks[0].reason).toMatch(/403/);
-    // The step that works, and no claim about a re-run: whether destroy keeps
-    // the environment's entry is not this record's to say.
+    // The step that works, and no re-run: a DNS line never keeps the
+    // environment's entry (ENTRY_KEEP_BY_CLASS), so a re-run could not find it.
+    // "No longer uses", not "released": the address may be a reserved IP this
+    // destroy could not release.
     expect(leaks[0].hint).toBe(
       'Delete *.e1.example.com in your Cloudflare DNS settings. It points at an address this ' +
-        'destroy released, and a stale record shadows the next deploy.',
+        'environment no longer uses, and a stale record shadows the next deploy.',
     );
     expect(leaks[0].hint).not.toMatch(/off the record|will not retry|destroy again/);
     expect(stops[0]).toMatch(/\*\.e1\.example\.com/);

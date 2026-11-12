@@ -55,6 +55,7 @@ import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js'
 import { sweepEnvironmentServers } from './lib/destroy/server-sweep.js';
 import {
   DNS_PROVIDERS,
+  dnsRecordsByHandHint,
   dnsRefusedHint,
   findZoneForDomain,
   getDnsProvider,
@@ -1885,10 +1886,185 @@ function joinAddresses(addresses) {
 }
 
 /**
+ * Does a LEAK or UNVERIFIED line of this class keep the environment's entry
+ * in .vibecarbon.json? Yes exactly when a re-run of `vibecarbon destroy <env>`
+ * can still find and remove what the line names, because the entry is the
+ * only way to run that destroy again. Everything that keeps the entry keeps
+ * the state the re-run opens with it (entryKeptReason's readers): the compose
+ * tiers' Pulumi stack state, and the state bucket under -purge.
+ *
+ * FOREIGN and AT-RISK lines never keep it: our own teardown left nothing
+ * there (destroyExitCode's policy). A class with no row keeps it, and so does
+ * a destroy step with no row (keepsEntry): an entry kept by mistake costs one
+ * more destroy, and one removed by mistake strands whatever a re-run would
+ * have found, with no CLI path back to it.
+ *
+ * Every class a ledger call in src/ can emit has a row
+ * (tests/unit/destroy/entry-keep-class-table.test.ts walks src/ for them).
+ * `keeps` is a boolean, or, for `destroy-step`, one verdict per plan step:
+ * the step that threw names what it had not finished. A step that keeps
+ * nothing says what to finish by hand (`byHand`).
+ *
+ * The compose plans remove the stack state after the last step that can add
+ * a line that keeps the entry (destroy-plan.js composeTail), so the stack
+ * state stays exactly when the entry does.
+ */
+export const ENTRY_KEEP_BY_CLASS = Object.freeze({
+  server: {
+    keeps: true,
+    why: 'the re-run deletes it by id or name, and its server sweeps list the account again',
+  },
+  firewall: { keeps: true, why: 'the re-run deletes it by its name' },
+  'ssh-key': { keeps: true, why: 'the re-run deletes it by its name' },
+  network: { keeps: true, why: "the re-run's k8s backstop deletes the VPC by its name" },
+  'load-balancer': {
+    keeps: true,
+    why: "the re-run's load-balancer cleanup finds it by the cluster's name and labels",
+  },
+  'reserved-ip': {
+    keeps: true,
+    why:
+      'the re-run releases it by its recorded address or its labels (keepUnreleased and ' +
+      'unsweptReservedIpScopes name it on the kept-config line)',
+  },
+  'floating-ip': {
+    keeps: true,
+    why: "a resource still in a stack whose Pulumi destroy failed: the re-run's Pulumi destroy deletes it",
+  },
+  volume: {
+    keeps: true,
+    why:
+      'a CSI volume of ours not confirmed deleted, or a volume listing or sweep that did not ' +
+      "finish: the re-run lists the region's volumes again",
+  },
+  'volume-identity': {
+    keeps: false,
+    why:
+      "the cluster's PersistentVolume capture or server pre-scan failed; this destroy tears the " +
+      'cluster down, so a re-run has nothing left to capture and would keep the entry forever. ' +
+      'The volume lines name what is left',
+  },
+  'volume-deferred': {
+    keeps: false,
+    why:
+      'a pvc-* volume that only looks like ours, left because its owner cannot be proven; a ' +
+      're-run cannot prove it either while another server runs in that region, so keeping the ' +
+      'entry would keep it for as long as that server lives',
+  },
+  'pulumi-stack': {
+    keeps: true,
+    why: 'the stack record in the state bucket, which the re-run destroys or removes',
+  },
+  'compose-ha teardown': { keeps: true, why: 'the re-run runs the whole HA teardown again' },
+  'storage-key': {
+    keeps: true,
+    why:
+      'its id is recorded only in this entry; the re-run revokes it, and a key already ' +
+      'deleted by hand counts as revoked',
+  },
+  'dns-record': {
+    keeps: false,
+    why:
+      'DNS records live outside the Pulumi stack, and keeping the entry for one would keep a ' +
+      'stack whose resources are gone, which the next deploy of the name picks up (e2e run ' +
+      '32309395314); the hint names the by-hand delete',
+  },
+  'health-check': {
+    keeps: false,
+    why: 'outside the Pulumi stack like a DNS record; the hint names the by-hand delete',
+  },
+  bucket: {
+    keeps: false,
+    why:
+      'buckets live outside the Pulumi stack and go only under -purge; a bucket leak still ' +
+      'records the environment under destroyedEnvironments, and the hints name the console',
+  },
+  'project-config': {
+    keeps: true,
+    why: "written only when the entry is kept: it is that keep's own line",
+  },
+  resource: {
+    keeps: true,
+    why: "the ledger's stand-in for a line that names no class: nothing says a re-run cannot act on it",
+  },
+  'destroy-step': {
+    why: 'a step that threw left undone whatever it had not reached; the step says what that is',
+    keeps: {
+      'destroy-compose-services': true,
+      'destroy-compose-ha': true,
+      'destroy-k8s-infra': true,
+      'remove-stack-state': true,
+      'revoke-app-storage-key': true,
+      'delete-app-bucket': {
+        byHand: () =>
+          "If you asked for -purge, empty and delete the environment's app bucket in your " +
+          "provider's object storage console; it keeps billing until removed.",
+      },
+      'retain-state-bucket': {
+        byHand: () =>
+          'If you asked for -purge and no other environment is left, empty and delete the ' +
+          "Pulumi state bucket in your provider's object storage console.",
+      },
+      'handle-backup-bucket': {
+        byHand: () =>
+          "If you asked for -purge, delete this environment's backups in your provider's " +
+          'object storage console; they keep billing until removed.',
+      },
+      'delete-github-env': {
+        byHand: (env) =>
+          `Delete the GitHub environment ${env} in the repository's settings if it is still there.`,
+      },
+      'update-project-config': {
+        byHand: (env) =>
+          `If .vibecarbon.json still lists ${env}, run \`vibecarbon destroy ${env}\` again ` +
+          'to remove it.',
+      },
+      'cleanup-local-files': {
+        byHand: (env) =>
+          `Delete ${env}'s SSH keys, kubeconfigs and deploy-state files under .vibecarbon/ by hand.`,
+      },
+      'print-summary': {
+        byHand: () => 'Nothing is left to do in the cloud: only the summary failed to print.',
+      },
+      'finish-outro': {
+        byHand: () => 'Nothing is left to do in the cloud: only the report failed to print.',
+      },
+    },
+  },
+});
+
+/**
+ * The verdict ENTRY_KEEP_BY_CLASS gives one ledger line: `true` when it keeps
+ * the environment's entry, or the by-hand step when it does not.
+ * @param {{severity: string, resourceClass: string, resource: string}} entry
+ * @returns {true | {byHand: (env: string) => string} | false}
+ */
+function entryVerdict({ severity, resourceClass, resource }) {
+  if (severity !== 'leak' && severity !== 'unverified') return false;
+  if (!Object.hasOwn(ENTRY_KEEP_BY_CLASS, resourceClass)) return true;
+  const { keeps } = ENTRY_KEEP_BY_CLASS[resourceClass];
+  if (typeof keeps === 'boolean') return keeps;
+  if (!Object.hasOwn(keeps, resource)) return true;
+  return keeps[resource] === true ? true : keeps[resource];
+}
+
+/**
+ * Does this ledger line keep the environment's entry (ENTRY_KEEP_BY_CLASS)?
+ * Unknown classes and unknown steps do: fail closed.
+ * @param {{severity: string, resourceClass: string, resource: string}} entry
+ * @returns {boolean}
+ */
+export function keepsEntry(entry) {
+  return entryVerdict(entry) === true;
+}
+
+/**
  * Why this destroy keeps the environment's entry in .vibecarbon.json, or null
- * when it removes it. The one predicate both readers share: the config step
- * keeps the entry (updateProjectConfigEffect) and the state-bucket step keeps
- * the bucket the retry needs (retainStateBucket), so the two cannot disagree.
+ * when it removes it. The one predicate every reader shares: the config step
+ * keeps the entry (updateProjectConfigEffect), the compose tiers keep their
+ * Pulumi stack state (removePulumiStackStateEffect), and the state-bucket
+ * step keeps the bucket the retry opens (retainStateBucket), so none of them
+ * can disagree.
  *
  *   - `unverified`: the Pulumi destroy could not be verified
  *     (recordPulumiDestroyOutcome, or destroyK8sTier's catch).
@@ -1898,13 +2074,15 @@ function joinAddresses(addresses) {
  *   - `unswept`: the stacks whose label listing could not be read
  *     (sweepTaggedReservedIps), so an IP no record names may be left. The
  *     entry is what lets `vibecarbon destroy <env>` run that sweep again.
+ *   - `rerunnable`: the classes of the leak and unverified lines a re-run can
+ *     still find and remove (keepsEntry, ENTRY_KEEP_BY_CLASS), each once.
  *
  * `because` names the IPs in the provider's own word (`RESERVED_IP_NAME`:
  * Floating IP on Hetzner, flexible IP on Scaleway, reserved IP elsewhere).
  *
- * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[], unsweptReservedIpScopes?: string[]}} results
+ * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[], unsweptReservedIpScopes?: string[], leaks?: {entries: Array<{severity: string, resourceClass: string, resource: string}>}}} results
  * @param {object} envConfig - the environment, for its provider's word
- * @returns {{unverified: true, because: string} | {unreleased: string[], unswept: string[], because: string} | null}
+ * @returns {{unverified: true, because: string} | {unreleased: string[], unswept: string[], rerunnable: string[], because: string} | null}
  */
 function entryKeptReason(results, envConfig) {
   if (results.pulumiDestroyFailed) {
@@ -1912,17 +2090,31 @@ function entryKeptReason(results, envConfig) {
   }
   const unreleased = [...new Set(results.unreleasedReservedIps ?? [])];
   const unswept = [...new Set(results.unsweptReservedIpScopes ?? [])];
-  if (unreleased.length === 0 && unswept.length === 0) return null;
-  const noun = providerFor(envConfig).RESERVED_IP_NAME ?? 'reserved IP';
+  const rerunnable = [
+    ...new Set(
+      (results.leaks?.entries ?? []).filter(keepsEntry).map((entry) => entry.resourceClass),
+    ),
+  ];
+  if (unreleased.length === 0 && unswept.length === 0 && rerunnable.length === 0) return null;
   const reasons = [];
-  if (unreleased.length === 1) reasons.push(`the ${noun} ${unreleased[0]} is not released yet`);
-  if (unreleased.length > 1) {
-    reasons.push(`the ${noun}s ${joinAddresses(unreleased)} are not released yet`);
+  if (unreleased.length > 0 || unswept.length > 0) {
+    const noun = providerFor(envConfig).RESERVED_IP_NAME ?? 'reserved IP';
+    if (unreleased.length === 1) reasons.push(`the ${noun} ${unreleased[0]} is not released yet`);
+    if (unreleased.length > 1) {
+      reasons.push(`the ${noun}s ${joinAddresses(unreleased)} are not released yet`);
+    }
+    if (unswept.length > 0) {
+      reasons.push(`the ${noun}s labelled for ${joinAddresses(unswept)} could not be listed`);
+    }
   }
-  if (unswept.length > 0) {
-    reasons.push(`the ${noun}s labelled for ${joinAddresses(unswept)} could not be listed`);
+  // The IP reasons above already name every reserved-ip line they come with.
+  const named = reasons.length > 0 ? rerunnable.filter((c) => c !== 'reserved-ip') : rerunnable;
+  if (named.length > 0) {
+    reasons.push(
+      `the leak report lists what a re-run can still find and remove (${named.join(', ')})`,
+    );
   }
-  return { unreleased, unswept, because: reasons.join(', and ') };
+  return { unreleased, unswept, rerunnable, because: reasons.join(', and ') };
 }
 
 /**
@@ -1994,9 +2186,10 @@ async function updateProjectConfigEffect(ctx) {
   }
   // A reserved IP of ours that the backstop could not prove released
   // (sweepK8sBackstopTargets, sweepTaggedReservedIps) is named nowhere but
-  // this entry, and a label listing that could not be read is retried only
-  // through it: kept, as above, so the next destroy retries. The backstop's
-  // own leak line says so; this adds none.
+  // this entry, a label listing that could not be read is retried only
+  // through it, and so is every other line a re-run can still act on
+  // (ENTRY_KEEP_BY_CLASS): kept, as above, so the next destroy retries.
+  // Each of those lines is in the leak report already; this adds none.
   if (kept) {
     spinner.start('Updating project configuration');
     writeProjectLevelOnly();
@@ -2114,8 +2307,10 @@ function recordPreservedDnsRecords(leaks, preservedTargets, domain, dnsProviderN
 
 /**
  * DNS records whose delete the API refused: each still points at an address
- * this destroy releases, so each is our leak, named by record. A 404 never
- * lands here (the backends read it as already gone).
+ * this environment no longer uses, so each is our leak, named by record. A
+ * 404 never lands here (the backends read it as already gone). A DNS line
+ * never keeps the environment's entry (ENTRY_KEEP_BY_CLASS), so the hint is
+ * the by-hand delete.
  *
  * @param {ReturnType<typeof createLeakLedger>} leaks
  * @param {Array<{name: string, target: string, reason: string}>} failed
@@ -2182,7 +2377,7 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
       resourceClass: 'dns-record',
       resource: `${envConfig.domain} (${row.name})`,
       reason: `no ${row.tokenEnv} available for DNS cleanup`,
-      hint: `Set ${row.tokenEnv} and re-run destroy, or remove the apex and wildcard A records by hand; they point at a released IP.`,
+      hint: dnsRecordsByHandHint(envConfig.domain, row.name),
     });
     return;
   }
@@ -2234,7 +2429,7 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
       resourceClass: 'dns-record',
       resource: `${envConfig.domain} (${row.name} zone ${zoneId})`,
       reason: `delete failed: ${error.message}`,
-      hint: 'Remove the apex and wildcard records by hand; they now point at a released IP, and a stale record shadows the next deploy.',
+      hint: dnsRecordsByHandHint(envConfig.domain, row.name),
     });
   }
 
@@ -2257,7 +2452,7 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
         resourceClass: 'health-check',
         resource: `${healthCheckName} (${row.name} zone ${zoneId})`,
         reason: `delete failed: ${error.message}`,
-        hint: 'Delete it in the Cloudflare dashboard (Traffic → Health Checks); it keeps probing a released IP.',
+        hint: 'Delete it in the Cloudflare dashboard (Traffic → Health Checks); it keeps probing an address this environment no longer uses.',
       });
     }
   }
@@ -3453,9 +3648,11 @@ async function destroyK8sTier({
       // PROVE which volumes were this environment's, and the backstop that
       // replaces it is deliberately conservative. Silence here is exactly how
       // "No orphaned volumes found" got printed over five stranded volumes.
+      // `volume-identity` keeps nothing: every re-run fails this capture
+      // once the cluster is gone (ENTRY_KEEP_BY_CLASS).
       const failed = captures.filter(({ capture }) => !capture.ok);
       results.leaks.unverified({
-        resourceClass: 'volume',
+        resourceClass: 'volume-identity',
         resource: `PersistentVolume capture: ${failed.map(({ stackEnv }) => stackEnv).join(', ')}`,
         reason: `CSI volume identity capture failed for ${failed.length} cluster(s): ${failed
           .map(({ stackEnv, capture }) => `${stackEnv} (${capture.reason})`)
@@ -3521,7 +3718,7 @@ async function destroyK8sTier({
       );
       if (!identityComplete) {
         results.leaks.unverified({
-          resourceClass: 'volume',
+          resourceClass: 'volume-identity',
           resource: `cluster volume pre-scan: ${clusterNames.join(', ')}`,
           reason: `pre-scan failed (${error.message}) and no PersistentVolume capture was available; this environment has no identity source left`,
           hint: `Check the ${Provider.NAME} console (Volumes) for unattached pvc-* volumes; they bill until deleted.`,
@@ -3802,7 +3999,7 @@ async function destroyK8sTier({
                 region: provider.serverRegion(sv),
               }),
               reason: `orphaned server delete failed: ${error.message}`,
-              hint: `Delete it via the ${Provider.NAME} console; it is outside Pulumi state, so no destroy retry will reach it.`,
+              hint: `Run \`vibecarbon destroy ${environment}\` again to retry: the environment stays in .vibecarbon.json, and the re-run's orphaned-server sweep finds it by its labels. Or delete it via the ${Provider.NAME} console; it is outside Pulumi state.`,
             });
           }
         }
@@ -3999,10 +4196,12 @@ async function destroyK8sTier({
     // from a COMPLETE capture of our own PersistentVolumes is proven not ours
     // (foreign — reported, exit-neutral), while one blocked only by a live
     // foreign server in the region, with our capture incomplete, is genuinely
-    // unknown and may be ours (unverified — exit-failing).
+    // unknown and may be ours (unverified — exit-failing). Their own class,
+    // `volume-deferred`, keeps nothing: a re-run cannot prove the owner
+    // either while that server lives (ENTRY_KEEP_BY_CLASS).
     for (const volume of deferred) {
       const entry = {
-        resourceClass: 'volume',
+        resourceClass: 'volume-deferred',
         resource: describeResource({ name: volume.name, id: volume.id, region: volume.region }),
         reason: `left in place (${volume.match} match only): ${volume.blocked}`,
         hint: `Confirm no live cluster owns it, then delete via the ${Provider.NAME} console (Volumes) or run scripts/sweep-hetzner.js once the project is quiet.`,
@@ -4089,13 +4288,17 @@ async function destroyComposeServicesEffect(ctx) {
  * deleted the resources.
  *
  * Two retention gates, both deliberate:
- *   - leak/unverified in the ledger → the stack state is the only record of
- *     what may still be deployed; keep the evidence (same principle that
- *     retains the state bucket). foreign/risk do NOT retain — our own
- *     teardown is verified clean (mirrors destroyExitCode's policy).
+ *   - the environment's entry is kept (entryKeptReason, the one predicate)
+ *     → keep the stack state with it: it is the record of what may still be
+ *     deployed, and the re-run the entry allows removes it once the teardown
+ *     runs clean. Removed exactly when the entry is, so the next deploy of
+ *     the name never selects a stack whose entry is gone (I1, 2026-11-11: a
+ *     refused DNS delete kept the stack and removed the entry). Lines a re-run
+ *     cannot act on (a DNS record, a FOREIGN volume) keep neither.
  *   - recorded s3 backend but unresolvable credentials → removing would run
  *     against the file:// fallback, "succeed" against the wrong backend,
- *     and leave the real stale stack alive. Skip loudly instead.
+ *     and leave the real stale stack alive. Kept, as an `unverified
+ *     pulumi-stack` line, which keeps the entry so the re-run can remove it.
  *
  * Per-stack failures land as `unverified pulumi-stack` ledger entries (a
  * retained stale stack fails the next re-deploy on the vultr class), and
@@ -4104,12 +4307,12 @@ async function destroyComposeServicesEffect(ctx) {
 async function removePulumiStackStateEffect(ctx) {
   const { plan, envConfig, projectConfig, environment, results, spinner: s } = ctx;
 
-  const counts = results.leaks.counts();
-  if (counts.leak + counts.unverified > 0) {
+  const kept = entryKeptReason(results, envConfig);
+  if (kept) {
     p.log.warn(
-      `Pulumi stack state retained for ${plan.stackEnvs.join(', ')}: the teardown recorded ` +
-        `${counts.leak} leak(s) / ${counts.unverified} unverified — the state file is the ` +
-        'record of what may still be deployed. It is removed by the next clean destroy.',
+      `Pulumi stack state kept for ${plan.stackEnvs.join(', ')}: this destroy keeps the ` +
+        `environment's entry because ${kept.because}. The state records what may still be ` +
+        `deployed, and the next \`vibecarbon destroy ${environment}\` that runs clean removes it.`,
     );
     return;
   }
@@ -4128,12 +4331,25 @@ async function removePulumiStackStateEffect(ctx) {
     },
   );
   if (envConfig.s3 && !s3Config) {
+    const keys =
+      (Provider.OBJECT_STORAGE_ENV ?? []).join(' and ') || 'the object-storage credentials';
     s.start('Pulumi stack state');
     s.stop(
-      'Pulumi stack state retained: state-backend credentials could not be resolved, and ' +
-        'removing against the local fallback backend would miss the real stack. Re-run ' +
-        `\`vibecarbon destroy ${environment}\` with object-storage credentials available.`,
+      'Pulumi stack state kept: the state-backend credentials could not be resolved, and ' +
+        'removing it against the local fallback backend would miss the real stack.',
     );
+    for (const stackEnv of plan.stackEnvs) {
+      results.leaks.unverified({
+        resourceClass: 'pulumi-stack',
+        resource: stackEnv,
+        reason:
+          'stack-state removal skipped: no object-storage credentials for its state backend, ' +
+          'so the stack still describes the deleted resources',
+        hint:
+          `Set ${keys}, then run \`vibecarbon destroy ${environment}\` again to remove it: the ` +
+          'environment stays in .vibecarbon.json until its stack state is removed.',
+      });
+    }
     return;
   }
 
@@ -4160,9 +4376,10 @@ async function removePulumiStackStateEffect(ctx) {
         resource: stackEnv,
         reason: `stack-state removal failed: ${error.message}`,
         hint:
-          'The retained stack still describes deleted resources; the next deploy of this ' +
-          'environment may fail deleting them (provider 404s). Re-run ' +
-          `\`vibecarbon destroy ${environment}\` to reconcile.`,
+          `Run \`vibecarbon destroy ${environment}\` again to remove it: the environment stays ` +
+          'in .vibecarbon.json until its stack state is removed. The kept stack still describes ' +
+          'deleted resources, and a deploy of this environment that selects it may fail ' +
+          'deleting them (provider 404s).',
       });
     }
   }
@@ -4213,6 +4430,10 @@ async function destroyK8sInfraEffect(ctx) {
  * `finishOutro` is deliberately NOT wrapped: it is the reporter, it runs last,
  * and swallowing its failure would leave a silent exit 0 — the exact defect
  * this whole change removes. A throw there propagates to cli.js's catch → 1.
+ *
+ * Whether the line keeps the environment's entry depends on the step
+ * (ENTRY_KEEP_BY_CLASS's `destroy-step` row), and the hint follows it: a re-run
+ * only when the entry stays for one, the by-hand step otherwise.
  */
 function finishThenReport(stepLabel, effect) {
   return async (ctx, args) => {
@@ -4220,11 +4441,22 @@ function finishThenReport(stepLabel, effect) {
       await effect(ctx, args);
     } catch (error) {
       p.log.error(`Destroy step "${stepLabel}" failed: ${error.message}`);
-      ctx.results.leaks.unverified({
+      const entry = {
         resourceClass: 'destroy-step',
         resource: stepLabel,
         reason: `step threw: ${error.message}, anything it had not yet deleted is unaccounted for`,
-        hint: `Re-run \`vibecarbon destroy ${ctx.environment}\` once the cause is addressed; the remaining teardown steps still ran. A step that stopped early can leave the environment's compute and its DNS records in place, and the re-run removes both.`,
+      };
+      const verdict = entryVerdict({ ...entry, severity: 'unverified' });
+      ctx.results.leaks.unverified({
+        ...entry,
+        hint:
+          verdict === true
+            ? `Run \`vibecarbon destroy ${ctx.environment}\` again once the cause is addressed: ` +
+              'the environment stays in .vibecarbon.json, and the re-run runs this step again ' +
+              'to finish what it left. The remaining steps still ran.'
+            : ['The remaining steps still ran.', verdict?.byHand?.(ctx.environment)]
+                .filter(Boolean)
+                .join(' '),
       });
     }
   };
@@ -4708,6 +4940,7 @@ export {
   cleanupOrphanedVolumes,
   loadProjectConfig,
   main,
+  PULUMI_TYPE_RESOURCE_CLASS,
   retainStateBucket,
   SPEC,
   VERSION,

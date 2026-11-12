@@ -39,18 +39,24 @@ import { defineStep } from './step.js';
 // `print-summary` were k8s-only in finishDestroy (the deleteGithubEnv/showSummary
 // booleans), so they appear only in the k8s tail.
 const composeTail = () => [
-  // Stack-state reconciliation, FIRST in the tail: the compose teardown reaps
-  // its Pulumi-provisioned resources via direct provider APIs (no `pulumi
-  // destroy`), and the retained state bucket would otherwise carry a stack
-  // file describing deleted infra into the next deploy of this environment —
-  // which fails on providers whose refresh cannot prune deleted resources
-  // (vultr firewall rules, e2e run 32309395314). The effect itself gates on a
-  // clean leak ledger, so it sits immediately after the teardown whose
-  // verdict it reads. The k8s tail needs no twin: destroyStack already runs
-  // `pulumi destroy` + `removeStack` per stackEnv.
-  defineStep({ name: 'remove-stack-state', effect: 'removePulumiStackState' }),
-  // The env's app storage key goes before its bucket, on every destroy.
+  // The env's app storage key goes before its bucket, on every destroy, and
+  // before the stack state below: a key that is not revoked keeps the
+  // environment's entry (its id is recorded nowhere else), so it must be
+  // decided before the stack state is.
   defineStep({ name: 'revoke-app-storage-key', effect: 'revokeAppStorageKey' }),
+  // Stack-state reconciliation: the compose teardown reaps its
+  // Pulumi-provisioned resources via direct provider APIs (no `pulumi
+  // destroy`), and the retained state bucket would otherwise carry a stack
+  // file describing deleted infra into the next deploy of this environment,
+  // which fails on providers whose refresh cannot prune deleted resources
+  // (vultr firewall rules, e2e run 32309395314). The effect keeps the stack
+  // exactly when the environment's entry is kept (entryKeptReason in
+  // src/destroy.js), so it sits after the last step that can add a line that
+  // keeps the entry; the steps after it only add lines that keep nothing
+  // (ENTRY_KEEP_BY_CLASS), so the entry and the stack state cannot disagree.
+  // The k8s tail needs no twin: destroyStack already runs `pulumi destroy` +
+  // `removeStack` per stackEnv.
+  defineStep({ name: 'remove-stack-state', effect: 'removePulumiStackState' }),
   defineStep({ name: 'delete-app-bucket', effect: 'deleteAppBucket' }),
   defineStep({ name: 'retain-state-bucket', effect: 'retainStateBucket' }),
   defineStep({ name: 'handle-backup-bucket', effect: 'handleBackupBucket' }),
@@ -69,9 +75,10 @@ const k8sTail = () => [
   // same run that failed to verify a teardown destroyed the evidence alongside
   // the failure. The step must still run on such a destroy: it is where the
   // bucket is reported kept. The effect itself keeps the bucket, -purge or
-  // not, whenever this destroy keeps the environment's entry (an unverified
-  // Pulumi destroy or an unreleased reserved IP; entryKeptReason in
-  // src/destroy.js), so the retry finds it; only a clean -purge deletes it.
+  // not, whenever this destroy keeps the environment's entry
+  // (entryKeptReason in src/destroy.js; which lines keep it is the class
+  // table ENTRY_KEEP_BY_CLASS there), so the retry finds it; only a clean
+  // -purge deletes it.
   defineStep({ name: 'retain-state-bucket', effect: 'retainStateBucket' }),
   defineStep({ name: 'handle-backup-bucket', effect: 'handleBackupBucket' }),
   defineStep({ name: 'delete-github-env', effect: 'deleteGithubEnv' }),

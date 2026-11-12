@@ -18,6 +18,7 @@ import { environmentServerNames } from '../../destroy/server-naming.js';
 import { waitForDNSPropagation } from '../../dns-propagation.js';
 import {
   DNS_PROVIDERS,
+  dnsRecordsByHandHint,
   dnsRefusedHint,
   findZoneForDomain,
   getDnsProvider,
@@ -1203,6 +1204,7 @@ export async function destroyComposeHA(options) {
             'dns-record',
             `${envConfig.domain} (${row.name})`,
             `no ${row.tokenEnv} available for DNS cleanup`,
+            dnsRecordsByHandHint(envConfig.domain, row.name),
           );
           return;
         }
@@ -1242,6 +1244,7 @@ export async function destroyComposeHA(options) {
             'dns-record',
             `${envConfig.domain} (${row.name} zone ${zoneId})`,
             `delete failed: ${error.message}`,
+            dnsRecordsByHandHint(envConfig.domain, row.name),
           );
         }
       })(),

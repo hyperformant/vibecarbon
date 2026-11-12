@@ -12,8 +12,8 @@ describe('destroy plan snapshot', () => {
     expect(planStepNames(planDestroy('compose', {}))).toMatchInlineSnapshot(`
       [
         "destroy-compose-services",
-        "remove-stack-state",
         "revoke-app-storage-key",
+        "remove-stack-state",
         "delete-app-bucket",
         "retain-state-bucket",
         "handle-backup-bucket",
@@ -28,8 +28,8 @@ describe('destroy plan snapshot', () => {
     expect(planStepNames(planDestroy('compose-ha', {}))).toMatchInlineSnapshot(`
       [
         "destroy-compose-ha",
-        "remove-stack-state",
         "revoke-app-storage-key",
+        "remove-stack-state",
         "delete-app-bucket",
         "retain-state-bucket",
         "handle-backup-bucket",

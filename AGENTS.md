@@ -69,9 +69,14 @@ plain destroy and deleted by `-purge`. The derived state bucket is project-level
 only with the last live environment, then clears the record and rotates
 `stateBucketGeneration` so the next deploy derives a fresh name instead of
 recreating the deleted one. A destroy that keeps the environment's entry
-(`entryKeptReason`: an unverified Pulumi destroy or an unreleased reserved IP)
-keeps the state bucket too, `-purge` or not, because the retry opens its stacks
-there; the next clean `-purge` deletes it. destroy also records the environment's
+(`entryKeptReason`: an unverified Pulumi destroy, or a leak or unverified line
+a re-run of `vibecarbon destroy <env>` can still find and remove, per the class
+table `ENTRY_KEEP_BY_CLASS` in `src/destroy.js`) keeps the state bucket too,
+`-purge` or not, because the retry opens its stacks there, and on the compose
+tiers it keeps the Pulumi stack state, which is removed exactly when the entry
+is; the next clean `-purge` deletes the bucket. A line a re-run cannot act on
+(a DNS record, a health check, a bucket) keeps neither, and its hint names the
+by-hand step. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see
 `lib/env-identity.js`) under `destroyedEnvironments.<env>`; `deploy` seeds a
 same-named environment from it and clears it once the env is live. A sibling
