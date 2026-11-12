@@ -168,6 +168,10 @@ describe('census: every _send call site', () => {
     const defaults = calls.filter((c) => !/maxAttempts: 1|terminal/.test(c));
     // Reviewed 2026-11-11: list/delete/copy/policy/cors writes. Each is a
     // definite answer on 4xx and retried only on 408/429/5xx/network.
-    expect(defaults.length).toBe(16);
+    // Reviewed 2026-11-12: the state history cleanup's list, read and batch
+    // delete (listObjectKeys, getObjectBytes, deleteObjectKeys; lib/iac/
+    // state-history.js). A 4xx there fails the cleanup at once, which warns
+    // and leaves the seal marker unset, so the next deploy tries again.
+    expect(defaults.length).toBe(19);
   });
 });
