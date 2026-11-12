@@ -6,7 +6,7 @@
  * keeps backups in it (backupsBucketHolders). Plain destroy keeps everything
  * for recovery.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -41,7 +41,8 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
     ...real,
     providerFor: () => ({
       NAME: 'Hetzner Cloud',
-      promptObjectStorageCredentials: async () => ({ accessKey: 'ak', secretKey: 'sk' }),
+      OBJECT_STORAGE_ENV: ['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY'],
+      promptObjectStorageCredentials: async () => credentials.value,
     }),
     getObjectStorageProvider: async (...args: unknown[]) => {
       storageClients.push(args[3] as string);
@@ -51,6 +52,9 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
 });
 /** The region of every storage client the destroy built, in order. */
 const storageClients: string[] = [];
+/** What the object-storage credential prompt returns: null when none are available. */
+const KEYS = { accessKey: 'ak', secretKey: 'sk' };
+const credentials: { value: typeof KEYS | null } = { value: KEYS };
 
 const store = projectConfigStore();
 const saved = { configs: store.state.writes };
@@ -432,6 +436,56 @@ describe('handleBackupBucket with a backups bucket per storage region', () => {
     );
     expect(entry.hint).toBe(
       `Delete backups/myapp/prod/ in ${BACKUPS} via the Hetzner Cloud Object Storage console, and the bucket once no other environment keeps backups there; it keeps billing until removed.`,
+    );
+  });
+});
+
+describe('handleBackupBucket with no object-storage credentials', () => {
+  // The bucket outlives the destroy, which still moves the environment to
+  // destroyedEnvironments, so `destroy <env>` cannot run again: the hint
+  // points to the console, and only at what is this environment's to remove.
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+    storageClients.length = 0;
+    credentials.value = null;
+  });
+  afterEach(() => {
+    credentials.value = KEYS;
+  });
+
+  it('prod keeps backups in the bucket: the hint removes this folder only and leaves the bucket', async () => {
+    const { results, messages } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(storageClients).toEqual([]);
+    expect(s3.deletePrefix).not.toHaveBeenCalled();
+    expect(results.backupsPurged).toBeUndefined();
+    expect(messages).toContain('stop:Backup bucket purge skipped (no credentials available)');
+    const [entry] = results.leaks.entries;
+    expect(entry).toMatchObject({ resourceClass: 'bucket', resource: `${BACKUPS} (fsn1)` });
+    expect(entry.reason).toBe(
+      'purge requested (-purge) but no object-storage credentials were available',
+    );
+    expect(entry.hint).toBe(
+      `Delete backups/myapp/staging/ in ${BACKUPS} via the Hetzner Cloud Object Storage console, and leave the bucket: prod keeps backups there.`,
+    );
+    expect(entry.hint).not.toMatch(/re-?run|DeleteBucket|\u2014/);
+  });
+
+  it('every holder, live and destroyed with its backups kept, is named', async () => {
+    const config = project(['prod', 'dev'], {
+      staging: { provider: 'hetzner', backupS3: { bucket: BACKUPS, region: 'fsn1' } },
+    });
+    const { results } = await destroy(config, 'dev', { purgeBackups: true });
+    expect(results.leaks.entries[0]?.hint).toBe(
+      `Delete backups/myapp/dev/ in ${BACKUPS} via the Hetzner Cloud Object Storage console, and leave the bucket: prod, staging keep backups there.`,
+    );
+  });
+
+  it('the last holder: the hint empties and deletes the bucket in the console', async () => {
+    const { results } = await destroy(project(['prod']), 'prod', { purgeBackups: true });
+    expect(results.leaks.entries[0]?.hint).toBe(
+      'Empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
     );
   });
 });

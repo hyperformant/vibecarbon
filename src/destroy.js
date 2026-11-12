@@ -210,7 +210,7 @@ const SPEC = {
       name: 'purge',
       boolean: true,
       description:
-        'Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved)',
+        "Also delete this environment's backups and uploads, and the backup and state buckets once nothing else uses them (default: all kept)",
     },
     {
       name: 'force',
@@ -234,7 +234,7 @@ const SPEC = {
     },
     {
       command: 'vibecarbon destroy prod -y -purge',
-      description: 'also delete the backup bucket',
+      description: 'also delete its backups and uploads',
     },
     {
       command: 'vibecarbon destroy prod -y -confirm myapp-prod',
@@ -1336,7 +1336,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
         resourceClass: 'bucket',
         resource: describeResource({ name: bucketName, region }),
         reason: 'purge requested (-purge) but no object-storage credentials were available',
-        hint: `Export ${(Provider.OBJECT_STORAGE_ENV ?? []).join(' and ') || 'the object-storage credentials'} and re-run, or delete it via the ${Provider.NAME} console — it keeps billing until removed.`,
+        hint: backupsLeakHint(Provider.NAME, { bucketName, envBackupPrefix, holders }),
       });
       return { purged: false };
     }
@@ -1406,14 +1406,28 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       resourceClass: 'bucket',
       resource: describeResource({ name: bucketName, region: ran.region }),
       reason: `purge failed: ${error.message}`,
-      // Only this environment's folder is ours to remove when another
-      // environment keeps backups in the bucket.
-      hint: deleteBucket
-        ? `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`
-        : `Delete ${envBackupPrefix} in ${bucketName} via the ${Provider.NAME} Object Storage console, and leave the bucket: ${holders.join(', ')} ${holders.length === 1 ? 'keeps' : 'keep'} backups there.`,
+      hint: backupsLeakHint(Provider.NAME, { bucketName, envBackupPrefix, holders }),
     });
     return { purged: false };
   }
+}
+
+/**
+ * What to do by hand about a backups bucket -purge left behind. Only this
+ * environment's folder is ours to remove while another environment keeps
+ * backups in the bucket; the bucket itself goes only with its last holder.
+ * It points to the console, never to a destroy rerun: a bucket leak still
+ * moves the environment to destroyedEnvironments, so `destroy <env>`
+ * afterwards finds nothing to run against.
+ *
+ * @param {string} providerName
+ * @param {{ bucketName: string, envBackupPrefix: string, holders: string[] }} o
+ */
+function backupsLeakHint(providerName, { bucketName, envBackupPrefix, holders }) {
+  if (holders.length === 0) {
+    return `Empty it via the ${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`;
+  }
+  return `Delete ${envBackupPrefix} in ${bucketName} via the ${providerName} Object Storage console, and leave the bucket: ${holders.join(', ')} ${holders.length === 1 ? 'keeps' : 'keep'} backups there.`;
 }
 
 /**
@@ -1512,9 +1526,9 @@ async function retainStateBucket(
     return { purged: false };
   }
 
-  // -purge of the last environment means "leave nothing behind": with backups
-  // it already deletes the backup bucket, and the state bucket follows the
-  // same rule. This is the ONE deletion path for the retained bucket (review
+  // -purge of the last environment means "leave nothing behind": it already
+  // deletes the backups bucket once no environment keeps backups there, and
+  // the state bucket follows the same rule. This is the ONE deletion path for the retained bucket (review
   // finding, 2026-08-15: there was previously none at all), and it is safe
   // where the old always-delete was not: it runs only on explicit request,
   // after stack teardown, and a successful delete returns `purged`, which
@@ -1944,7 +1958,8 @@ async function retainStateBucketEffect(ctx) {
   }
 }
 
-// 3. Backup bucket: preserved by default, deleted with -purge.
+// 3. Backup bucket: preserved by default; -purge deletes this environment's
+//    backups, and the bucket with its last holder (backupsBucketHolders).
 async function handleBackupBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
   const outcome = await handleBackupBucket(

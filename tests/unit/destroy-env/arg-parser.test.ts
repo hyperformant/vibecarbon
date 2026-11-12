@@ -36,6 +36,17 @@ describe('destroy SPEC + parseFlags integration', () => {
     expect(parseFlags(['-y'], SPEC).values.purge).toBe(false);
   });
 
+  it('-purge says the shared buckets go only once nothing else uses them', () => {
+    // Backups and state buckets are shared by a project's environments, so
+    // help must never promise that one environment's -purge deletes them.
+    const purge = SPEC.flags.find((f: { name: string }) => f.name === 'purge');
+    expect(purge?.description).toBe(
+      "Also delete this environment's backups and uploads, and the backup and state buckets once nothing else uses them (default: all kept)",
+    );
+    const example = SPEC.examples.find((e: { command: string }) => e.command.endsWith('-purge'));
+    expect(example?.description).toBe('also delete its backups and uploads');
+  });
+
   it('handles multiple flags together', () => {
     const r = parseFlags(['prod', '-y', '-purge'], SPEC);
     expect(r.errors).toEqual([]);
