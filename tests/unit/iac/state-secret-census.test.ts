@@ -6,19 +6,25 @@ import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
 
 /**
  * Census: everything a provider program hands the Pulumi engine that carries a
- * credential is a secret Output, so the state file seals it with the project's
- * state passphrase instead of keeping it as plain text.
+ * credential is a secret Output, so Pulumi writes it into the state sealed with
+ * the project's state passphrase instead of as plain text. That holds for
+ * servers created from then on. A server that already exists keeps the user
+ * data its state holds (the next paragraph says why) until the seal after a
+ * successful up rewrites it (lib/iac/state-seal.js, upStack).
  *
- * A server's user data is the rendered cloud-init, which holds the provider
- * token, the S3 keys and (k8s) the k3s join token. Server user data sits in
- * `ignoreChanges` (create-timeout.js), so wrapping it replaces no existing
- * server; the first test pins that pairing.
+ * A server's user data is the rendered cloud-init. On the k8s programs it holds
+ * the provider token and the k3s join token; the compose cloud-init
+ * (carbon/cloud-init/docker-ce-setup.yaml) carries no credential. Server user
+ * data sits in `ignoreChanges` (create-timeout.js), so wrapping it replaces no
+ * existing server; the first test pins that pairing.
  *
  * Same harness as server-create-timeouts-census.test.ts: each provider SDK is a
  * recorder, every program runs, and the arguments of every resource are read
- * back. The server classes come from SERVER_RESOURCE_TYPES and the programs
- * from the directory, so a new server type or program without a wrap fails
- * here rather than being skipped.
+ * back. The programs come from the directory and the server classes from
+ * SERVER_RESOURCE_TYPES, so a registered server type without a wrap fails here.
+ * A VM type missing from SERVER_RESOURCE_TYPES is skipped here, and caught by
+ * server-create-timeouts-census.test.ts ("every VM-shaped class is a known
+ * server class").
  */
 
 const { created } = vi.hoisted(() => ({
@@ -129,7 +135,25 @@ async function plainStrings(value: unknown, out: string[] = []): Promise<string[
   return out;
 }
 
-const K8S = Object.keys(PROGRAMS).filter((f) => f.endsWith('-k8s.js'));
+/** `value` resolved through every Output, secret ones included. */
+async function revealed(value: unknown): Promise<unknown> {
+  if (pulumi.Output.isInstance(value)) {
+    const inner = await new Promise((resolve) =>
+      (value as pulumi.Output<unknown>).apply((x) => {
+        resolve(x);
+        return x;
+      }),
+    );
+    return revealed(inner);
+  }
+  if (Array.isArray(value)) return Promise.all(value.map(revealed));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      await Promise.all(Object.entries(value).map(async ([k, v]) => [k, await revealed(v)])),
+    );
+  }
+  return value;
+}
 
 describe('secrets in Pulumi state (census)', () => {
   it('every program in src/lib/iac/programs has a row in this census', () => {
@@ -159,17 +183,54 @@ describe('secrets in Pulumi state (census)', () => {
     },
   );
 
-  it.each(K8S)('%s: the k3sToken export is a secret Output carrying the token', async (file) => {
-    const { outputs } = await runProgram(file);
-    expect(await isSecret(outputs.k3sToken)).toBe(true);
-    const plain = await new Promise((resolve) =>
-      (outputs.k3sToken as pulumi.Output<string>).apply((x) => {
-        resolve(x);
-        return x;
-      }),
-    );
-    expect(plain).toBe(K3S_TOKEN);
+  it('every program that exports a k3sToken exports it as a secret Output carrying the token', async () => {
+    const exporting: string[] = [];
+    for (const file of Object.keys(PROGRAMS)) {
+      const { outputs } = await runProgram(file);
+      if (!('k3sToken' in outputs)) continue;
+      exporting.push(file);
+      expect(await isSecret(outputs.k3sToken), `${file}: k3sToken`).toBe(true);
+      expect(await revealed(outputs.k3sToken), `${file}: k3sToken`).toBe(K3S_TOKEN);
+    }
+    // Every program fed a k3s token hands it back, or the scale and failover
+    // that replay it would mint a new one.
+    const fed = Object.keys(PROGRAMS).filter((f) => 'k3sToken' in PROGRAMS[f].config);
+    expect(fed.length).toBeGreaterThan(0);
+    expect(exporting.sort()).toEqual(fed.sort());
   });
+
+  it.each(Object.keys(PROGRAMS).filter((f) => 'k3sToken' in PROGRAMS[f].config))(
+    '%s: the tokens reach its servers, so the walk below would see a plain copy',
+    async (file) => {
+      // Positive control for the walk: a config key renamed in a program
+      // would leave the sentinels out of every resource, and the walk would
+      // pass on nothing. When the tokens leave user data, this changes too.
+      const { resources } = await runProgram(file);
+      const userData = await Promise.all(
+        resources
+          .filter((r) => r.token in SERVER_RESOURCE_TYPES)
+          .map(async (r) => {
+            const input =
+              SERVER_RESOURCE_TYPES[r.token as keyof typeof SERVER_RESOURCE_TYPES].userDataInput;
+            return JSON.stringify(await revealed((r.args as Record<string, unknown>)[input]));
+          }),
+      );
+      const decoded = userData.map((u) =>
+        // Linode carries user data base64-encoded in its metadata.
+        u.replace(/"userData":"([A-Za-z0-9+/=]+)"/g, (_m, b64) =>
+          Buffer.from(b64, 'base64').toString('utf8'),
+        ),
+      );
+      expect(
+        decoded.some((u) => u.includes(K3S_TOKEN)),
+        `${file}: k3s token`,
+      ).toBe(true);
+      expect(
+        decoded.some((u) => u.includes(API_TOKEN)),
+        `${file}: provider token`,
+      ).toBe(true);
+    },
+  );
 
   it.each(Object.keys(PROGRAMS))(
     '%s: no plain string anywhere in a resource carries the provider token or the k3s token',
