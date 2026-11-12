@@ -83,6 +83,13 @@ let workloads: Record<string, Workload[]> = {};
 /** What `get secret -o json` prints instead of the Secret, when set. */
 let secretOutput: string | null = null;
 /**
+ * The server-side apply as kubectl 1.26 and later run it: taking over a
+ * Secret the boot script's client-side apply made (one with its
+ * last-applied record) drops every key it does not send, and the record.
+ * Off, it leaves them, as 1.24 and 1.25 do.
+ */
+let applyTakesOver = false;
+/**
  * The Secrets that carry kubectl's last-applied annotation, `namespace/name`
  * to the values it records, as the boot script's client-side apply leaves
  * them. The server-side apply leaves it alone, as kubectl 1.24 and 1.25 do.
@@ -135,7 +142,12 @@ function fakeKubectl(args: string[], input?: string): string {
       stringData: Record<string, string>;
     }[]) {
       const key = `${doc.metadata.namespace}/${doc.metadata.name}`;
-      cluster.set(key, { ...cluster.get(key), ...doc.stringData });
+      const takeover = applyTakesOver && lastApplied.has(key);
+      cluster.set(
+        key,
+        takeover ? { ...doc.stringData } : { ...cluster.get(key), ...doc.stringData },
+      );
+      if (takeover) lastApplied.delete(key);
     }
     return '';
   }
@@ -409,6 +421,7 @@ describe('applyCloudSecrets', () => {
     secretOutput = null;
     failWhen = null;
     kubectlFails = null;
+    applyTakesOver = false;
     apiStatus = 200;
     apiServerId = MASTER_ID;
     apiThrows = null;
@@ -1529,6 +1542,94 @@ describe('applyCloudSecrets', () => {
       );
       // hcloud-csi, which nothing reads, still goes.
       expect(cluster.has('kube-system/hcloud-csi')).toBe(false);
+    });
+
+    describe('a key the apply took out is never called kept (kubectl 1.26 and later)', () => {
+      const TOOK_OUT =
+        "kubectl 1.26 and later drop a key an earlier vibecarbon's boot script set once a deploy " +
+        'takes its Secret over';
+      beforeEach(() => {
+        applyTakesOver = true;
+      });
+
+      it('hetzner: nothing reads it: removed, by the apply, with no patch', async () => {
+        holdLegacy(PROVIDERS.hetzner, TOKEN);
+        await apply(PROVIDERS.hetzner);
+        expect(cluster.get('kube-system/hcloud')).toEqual({ token: TOKEN });
+        expect(kubectl('patch')).toEqual([]);
+        expect(logged).toContain(
+          'Removed the network key from kube-system/hcloud: nothing reads it any more.',
+        );
+      });
+
+      it('hetzner: something still reads it: the line says it is gone and who reads it', async () => {
+        holdLegacy(PROVIDERS.hetzner, TOKEN);
+        workloads['kube-system'] = [
+          readerLike('reads-network', 'hcloud', {
+            container: {
+              env: [{ name: 'N', valueFrom: { secretKeyRef: { name: 'hcloud', key: 'network' } } }],
+            },
+          }),
+          ...nonReaders,
+        ];
+        await apply(PROVIDERS.hetzner);
+        expect(cluster.get('kube-system/hcloud')).not.toHaveProperty('network');
+        expect(logged.join('\n')).not.toMatch(/Kept the network key/);
+        expect(logged).toContain(
+          `The apply took the network key out of kube-system/hcloud (${TOOK_OUT}), and ` +
+            'deployment/reads-network still reads it: it gets no value for it when it starts ' +
+            `again. To give it one, run \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system ` +
+            `patch secret hcloud --type=merge -p '{"stringData":{"network":"<value>"}}'\`.`,
+        );
+        expect(kubectl('patch')).toEqual([]);
+      });
+
+      it('hetzner: a list that fails names the key as taken out, and keeps only what is left', async () => {
+        holdLegacy(PROVIDERS.hetzner, TOKEN);
+        failWhen = /^-n kube-system get deployments,statefulsets,daemonsets/;
+        kubectlFails = Object.assign(new Error('Command failed: kubectl get'), {
+          status: 1,
+          stderr: 'error: deployments.apps is forbidden\n',
+        });
+        await apply(PROVIDERS.hetzner);
+        expect(logged).toContain(
+          `The apply took the network key out of kube-system/hcloud: ${TOOK_OUT}.`,
+        );
+        expect(logged).toContain(
+          "Couldn't check what reads kube-system/hcloud-csi, so this deploy kept it; the next " +
+            'deploy tries again.\nlist the workloads in kube-system failed with exit 1: ' +
+            'error: deployments.apps is forbidden',
+        );
+        expect(logged.join('\n')).not.toMatch(/network key in kube-system\/hcloud, so/);
+      });
+
+      it('hetzner: a read of what the apply left that fails says so, and does nothing more with it', async () => {
+        holdLegacy(PROVIDERS.hetzner, TOKEN);
+        // The read before the apply answers; the one after it fails.
+        let reads = 0;
+        const fake = vi.mocked(runCommandAsync).getMockImplementation();
+        vi.mocked(runCommandAsync).mockImplementation(async (argv, opts) => {
+          if (argv.slice(1, 6).join(' ') === '-n kube-system get secret hcloud' && ++reads === 2) {
+            calls.push({ argv });
+            throw Object.assign(new Error('Command failed: kubectl get'), {
+              status: 1,
+              stderr: 'error: secrets "hcloud" is forbidden\n',
+            });
+          }
+          return fake?.(argv, opts as never) as never;
+        });
+        await apply(PROVIDERS.hetzner);
+        expect(reads).toBe(2);
+        expect(logged).toContain(
+          "Couldn't check what the apply left of the network key in kube-system/hcloud, so this " +
+            'deploy did nothing more with it; the next deploy looks again.\n' +
+            'read Secret kube-system/hcloud failed with exit 1: error: secrets "hcloud" is forbidden',
+        );
+        expect(logged.join('\n')).not.toMatch(/Kept the network key|Removed the network key/);
+        expect(kubectl('patch')).toEqual([]);
+        // hcloud-csi, which nothing reads, still goes.
+        expect(cluster.has('kube-system/hcloud-csi')).toBe(false);
+      });
     });
 
     it('hetzner: a volume that mounts other keys of the Secret keeps nothing', async () => {

@@ -23,7 +23,9 @@
  * Secret commands (tests/_shared/legacy-master-init-secrets.ts) run on the
  * node, and no workload carries a restart. applyCloudSecrets runs from here.
  * It must take the Secrets over with exactly the keys it writes, delete the
- * Secrets it no longer writes, and leave no last-applied annotation, a copy
+ * Secrets it no longer writes (and never call a retired key kept that the
+ * takeover itself dropped, though something reads it), and leave no
+ * last-applied annotation, a copy
  * of the token the boot script applied, whatever the kubectl (run it with an
  * older one first on PATH to check one). It must leave an unchanged Secret
  * alone, resourceVersion included, since it runs on every deploy, replace a
@@ -497,6 +499,75 @@ describe.skipIf(SKIPPED)(
             expect(read(namespace, name).data).toEqual(stringData);
           }
           expect(restarted()).toEqual([]);
+        },
+        LONG,
+      );
+
+      it.runIf(Provider.K8S_RETIRED_CLOUD_SECRETS.some((r) => r.keys))(
+        'a retired key the takeover drops is never called kept, though something reads it',
+        async () => {
+          oldMaster();
+          // An operator's own workload reading each retired key, at zero
+          // replicas: removeRetired keeps a key something reads, but the
+          // takeover apply may already have dropped it.
+          const keyed = Provider.K8S_RETIRED_CLOUD_SECRETS.flatMap(({ namespace, name, keys }) =>
+            (keys ?? []).map((key) => ({ namespace, name, key, app: `vctest-reads-${key}` })),
+          );
+          const readers = keyed.map(({ namespace, name, key, app }) => ({
+            apiVersion: 'apps/v1',
+            kind: 'Deployment',
+            metadata: { name: app, namespace },
+            spec: {
+              replicas: 0,
+              selector: { matchLabels: { app } },
+              template: {
+                metadata: { labels: { app } },
+                spec: {
+                  containers: [
+                    {
+                      name: 'c',
+                      image: 'busybox',
+                      env: [{ name: 'V', valueFrom: { secretKeyRef: { name, key } } }],
+                    },
+                  ],
+                },
+              },
+            },
+          }));
+          kube(
+            ['apply', '-f', '-'],
+            JSON.stringify({ apiVersion: 'v1', kind: 'List', items: readers }),
+          );
+          const lines: string[] = [];
+          vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+            lines.push(args.map(String).join(' '));
+          });
+          try {
+            await hand(BOOT_TOKEN);
+          } finally {
+            for (const { namespace, app } of keyed) {
+              kube(['-n', namespace, 'delete', 'deployment', app, '--ignore-not-found']);
+            }
+          }
+          // kubectl 1.26 and later drop it in the takeover; 1.24 and 1.25 leave it.
+          const minor = Number(
+            JSON.parse(must('kubectl', ['version', '--client', '-o', 'json'])).clientVersion.minor,
+          );
+          for (const { namespace, name, key, app } of keyed) {
+            const kept = `Kept the ${key} key in ${namespace}/${name}`;
+            expect(key in read(namespace, name).data).toBe(minor < 26);
+            if (key in read(namespace, name).data) {
+              // kubectl 1.24 and 1.25 leave it: it stays while read.
+              expect(lines.join('\n')).toContain(kept);
+            } else {
+              expect(lines.join('\n')).not.toContain(kept);
+              expect(lines.join('\n')).toContain(
+                `The apply took the ${key} key out of ${namespace}/${name} (kubectl 1.26 and ` +
+                  "later drop a key an earlier vibecarbon's boot script set once a deploy takes " +
+                  `its Secret over), and deployment/${app} still reads it`,
+              );
+            }
+          }
         },
         LONG,
       );

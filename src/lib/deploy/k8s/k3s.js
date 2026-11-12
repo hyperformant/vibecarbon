@@ -2423,6 +2423,14 @@ async function secretExists({ env, namespace, name }) {
 }
 
 /**
+ * Why a retired key can be gone after the apply although no patch removed
+ * it (removeRetiredKeys says how this was measured).
+ */
+const TAKEOVER_DROPS_KEYS =
+  "kubectl 1.26 and later drop a key an earlier vibecarbon's boot script set once a deploy " +
+  'takes its Secret over';
+
+/**
  * Remove what an earlier vibecarbon wrote that this deploy found, the whole
  * Secrets (`whole`, deleteRetiredSecret) and the keys of Secrets it applies
  * (`keyed`, removeRetiredKeys), and only what no workload in its namespace
@@ -2433,25 +2441,61 @@ async function secretExists({ env, namespace, name }) {
  * looks again. A list that fails keeps everything in its namespace and
  * says so; the deploy goes on either way.
  *
+ * The apply itself may already have taken a retired key out
+ * (TAKEOVER_DROPS_KEYS), so each Secret with one is read again first, and
+ * what is gone is said as such: never "kept" for a key the apply removed,
+ * and a reader of a key that is gone is named, since it gets no value for
+ * it when it next starts. Only a deploy that found a retired key makes that
+ * read: the one that takes an old master's Secrets over, or one while
+ * something still reads the key.
+ *
  * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, whole: Array<{namespace: string, name: string}>, keyed: Array<{namespace: string, name: string, keys: string[]}>}} args
  */
 async function removeRetired({ env, ProviderClass, whole, keyed }) {
+  const kubeconfig = env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : '<kubeconfig>';
+  const theKeys = (keys) => `the ${listing(keys)} ${keys.length === 1 ? 'key' : 'keys'}`;
   const namespaces = [...new Set([...whole, ...keyed].map(({ namespace }) => namespace))];
   for (const namespace of namespaces) {
     const secrets = whole.filter((r) => r.namespace === namespace);
-    const keys = keyed.filter((r) => r.namespace === namespace);
+    /** Each Secret's retired keys as the apply left them: `left` still there, `gone` not. */
+    const keys = [];
+    for (const r of keyed.filter((k) => k.namespace === namespace)) {
+      let after;
+      try {
+        after = await readSecretFingerprints({ env, namespace, name: r.name, keys: r.keys });
+      } catch (err) {
+        progressLog(
+          `Couldn't check what the apply left of ${theKeys(r.keys)} in ${namespace}/${r.name}, ` +
+            `so this deploy did nothing more with ${r.keys.length === 1 ? 'it' : 'them'}; the ` +
+            `next deploy looks again.\n${err.message}`,
+        );
+        continue;
+      }
+      keys.push({
+        name: r.name,
+        left: r.keys.filter((key) => after?.fingerprints[key]),
+        gone: r.keys.filter((key) => !after?.fingerprints[key]),
+      });
+    }
     let list;
     try {
       list = await listWorkloads({ env, namespace });
     } catch (err) {
+      for (const { name, gone } of keys) {
+        if (gone.length > 0) {
+          progressLog(
+            `The apply took ${theKeys(gone)} out of ${namespace}/${name}: ${TAKEOVER_DROPS_KEYS}.`,
+          );
+        }
+      }
       const what = [
         ...secrets.map(({ name }) => `${namespace}/${name}`),
-        ...keys.map(
-          (r) =>
-            `the ${listing(r.keys)} ${r.keys.length === 1 ? 'key' : 'keys'} in ${namespace}/${r.name}`,
-        ),
+        ...keys
+          .filter(({ left }) => left.length > 0)
+          .map(({ name, left }) => `${theKeys(left)} in ${namespace}/${name}`),
       ];
-      const one = secrets.length + keys.reduce((n, r) => n + r.keys.length, 0) === 1;
+      if (what.length === 0) continue;
+      const one = secrets.length + keys.reduce((n, r) => n + r.left.length, 0) === 1;
       progressLog(
         `Couldn't check what reads ${listing(what)}, so this deploy kept ${one ? 'it' : 'them'}; ` +
           `the next deploy tries again.\n${err.message}`,
@@ -2474,12 +2518,30 @@ async function removeRetired({ env, ProviderClass, whole, keyed }) {
         );
       }
     }
-    for (const { name, keys: these } of keys) {
-      const read = secretKeyReaders(list, name, these);
-      for (const key of these) {
+    for (const { name, left, gone } of keys) {
+      const read = secretKeyReaders(list, name, [...left, ...gone]);
+      for (const key of left) {
         if (read[key]) kept(`the ${key} key in ${namespace}/${name}`, read[key]);
       }
-      const unread = these.filter((key) => !read[key]);
+      for (const key of gone) {
+        if (!read[key]) continue;
+        const r1 = read[key].length === 1;
+        progressLog(
+          `The apply took the ${key} key out of ${namespace}/${name} (${TAKEOVER_DROPS_KEYS}), ` +
+            `and ${listing(read[key])} still ${r1 ? 'reads' : 'read'} it: ` +
+            `${r1 ? 'it gets' : 'they get'} no value for it when ${r1 ? 'it starts' : 'they start'} ` +
+            `again. To give ${r1 ? 'it' : 'them'} one, run \`KUBECONFIG=${kubeconfig} kubectl -n ` +
+            `${namespace} patch secret ${name} --type=merge -p '{"stringData":{"${key}":"<value>"}}'\`.`,
+        );
+      }
+      const goneUnread = gone.filter((key) => !read[key]);
+      if (goneUnread.length > 0) {
+        progressLog(
+          `Removed ${theKeys(goneUnread)} from ${namespace}/${name}: nothing reads ` +
+            `${goneUnread.length === 1 ? 'it' : 'them'} any more.`,
+        );
+      }
+      const unread = left.filter((key) => !read[key]);
       if (unread.length > 0) await removeRetiredKeys({ env, namespace, name, keys: unread });
     }
   }
