@@ -88,6 +88,7 @@ export async function listEnvironmentVariables(envName, { timeout } = {}) {
  */
 export async function listRepoSecretNames({ timeout } = {}) {
   const out = await runCommandAsync(['gh', 'secret', 'list', '--json', 'name', '-q', '.[].name'], {
+    cleanEnv: true,
     silent: true,
     timeout,
   });
