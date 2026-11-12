@@ -93,6 +93,7 @@ function destroyCtx({ kept = false, purge = true, unverified = false } = {}) {
   const stops: string[] = [];
   return {
     ctx: {
+      plan: { tier: 'compose', stackEnvs: ['staging'] },
       envConfig: projectConfig.environments.staging,
       projectConfig,
       environment: 'staging',
@@ -198,6 +199,24 @@ describe('a -purge destroy that keeps the entry keeps its buckets for the rerun'
     expect(s3.deletePrefix).not.toHaveBeenCalled();
     const config = ctx.results.leaks.entries.find((e) => e.resourceClass === 'project-config');
     expect(config?.hint).toContain('re-run `vibecarbon destroy staging -purge`;');
+  });
+
+  it('with no keys, the stack state step keeps the entry, so -purge keeps both buckets and asks no more', async () => {
+    // What the pre-teardown line off a TTY says (checkS3CredentialMismatch):
+    // the stack state and the entry stay, and -purge keeps the buckets for
+    // that rerun too.
+    promptCreds.mockResolvedValueOnce(null);
+    const { ctx } = destroyCtx();
+    await DESTROY_EFFECTS.removePulumiStackState(ctx);
+    await bucketTail(ctx);
+
+    expect(promptCreds).toHaveBeenCalledTimes(1);
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(s3.deletePrefix).not.toHaveBeenCalled();
+    expect(ctx.results.leaks.entries.map((e) => [e.severity, e.resourceClass])).toEqual([
+      ['unverified', 'pulumi-stack'],
+    ]);
+    expect(onDisk().environments.staging).toBeDefined();
   });
 
   it('a plain destroy that keeps the entry names a plain rerun', async () => {
