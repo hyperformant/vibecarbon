@@ -9,16 +9,6 @@ import { spinner } from './lib/cli/progress.js';
 import { checkDependency, runCommand } from './lib/command.js';
 import { loadProjectConfig } from './lib/config.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
-import {
-  checkExistingRepo,
-  checkGitHubAuth,
-  checkGitRemote,
-  commitAndPush,
-  createGitBranch,
-  createGitHubRepository,
-  getGitHubUsername,
-  monitorDeployment,
-} from './lib/deploy/github.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
 import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
 import {
@@ -418,9 +408,9 @@ async function main(values, positional) {
       process.exit(1);
     }
 
-    // Stage it. Deploy pushes tracked files to GitHub for CI and GitOps, and
-    // commitAndPush only stages the workflow file — an untracked lockfile would
-    // be present locally yet missing from the repo the runner builds from.
+    // Stage it. CI and GitOps build from what the repo tracks: an untracked
+    // lockfile would be present locally yet missing from the repo the runner
+    // builds from.
     if (generated) {
       runCommand(buildGitAddArgv(cwd, [lockfile]), {
         silent: true,
@@ -464,19 +454,12 @@ export {
   buildLegacyArgs,
   COMPOSE_MIN_RAM_GB,
   checkDependency,
-  checkExistingRepo,
-  checkGitHubAuth,
-  checkGitRemote,
-  commitAndPush,
-  createGitBranch,
-  createGitHubRepository,
   DEFAULT_WORKER_MAX,
   DEFAULT_WORKER_MIN,
   detectCurrentProfile,
   detectPackageManager,
   generateSSHKeyPair,
   getBranchName,
-  getGitHubUsername,
   getProvider,
   getProviderClass,
   HetznerS3Provider,
@@ -484,7 +467,6 @@ export {
   listProviders,
   loadProjectConfig,
   main,
-  monitorDeployment,
   normalizeEnvName,
   resolveDeployMode,
   runCommand,

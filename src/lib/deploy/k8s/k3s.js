@@ -6075,7 +6075,7 @@ async function deployK3sSteps(options, inFlight) {
   for (const tool of ['docker', 'ssh', 'kubectl']) {
     // checkDependency does a pure in-process PATH lookup (no child process),
     // so there's nothing to make async here — matches the same preflight
-    // idiom used in deploy.js / github.js / ci-setup.js.
+    // idiom used in deploy.js / ci-setup.js.
     if (!checkDependency(tool)) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
