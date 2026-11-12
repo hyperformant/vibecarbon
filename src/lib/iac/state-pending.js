@@ -210,8 +210,14 @@ export function pendingLabel(create) {
   return create.name ? `${what} ${create.name}` : `unnamed ${what}`;
 }
 
-/** A provider id as the state and the API both spell it: Scaleway's state adds `<zone>/`. */
-const bareId = (id) => String(id).split('/').pop();
+/**
+ * A provider id as the API and its console spell it. Scaleway's state puts the
+ * resource's zone (`fr-par-1/`) or region (`fr-par/`) in front, and only that
+ * goes: another provider's id keeps every `/` of its own, as Hetzner's subnet
+ * id `<network id>-10.0.1.0/24` does.
+ */
+const SCALEWAY_LOCALITY_PREFIX = /^[a-z]{2}-[a-z]{3}(?:-\d+)?\//;
+const bareId = (id) => String(id).replace(SCALEWAY_LOCALITY_PREFIX, '');
 
 /**
  * The servers the provider lists under a pending create's name that no server

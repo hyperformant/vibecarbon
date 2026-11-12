@@ -576,6 +576,34 @@ describe('what the user reads', () => {
     expect(text).not.toContain('fr-par-1/');
   });
 
+  // Only a Scaleway zone or region in front of an id goes. Hetzner's subnet id
+  // is `<network id>-<ip range>`, and the range's own `/` is part of it: cut
+  // there, the user would read "id 24".
+  it("a kept resource's id loses a Scaleway zone or region, and nothing of its own", () => {
+    const SUBNET_TYPE = 'hcloud:index/networkSubnet:NetworkSubnet';
+    const PN_TYPE = 'scaleway:network/privateNetwork:PrivateNetwork';
+    const SUBNET = `urn:pulumi:e1::proj::${SUBNET_TYPE}::subnet`;
+    const PN = `urn:pulumi:e1::proj::${PN_TYPE}::pn`;
+    const { others } = classifyPendingCreates(
+      withOps(
+        [create(SUBNET_TYPE, 'subnet', {}), create(PN_TYPE, 'pn', { tags: OWNER_TAGS })],
+        [
+          { urn: SUBNET, type: SUBNET_TYPE, id: '4711-10.0.1.0/24', outputs: {} },
+          // A regional resource: the state puts the region, not a zone, first.
+          { urn: PN, type: PN_TYPE, id: 'nl-ams/9c2d-uuid', outputs: {} },
+        ],
+      ),
+      SERVER_RESOURCE_TYPES,
+    );
+    expect(others.map((o) => o.kept)).toEqual([
+      { id: '4711-10.0.1.0/24', name: null },
+      { id: '9c2d-uuid', name: null },
+    ]);
+    const text = pendingCreatesBlock('e1', { untracked: [], others, providerName: 'Hetzner' });
+    expect(text).toContain('(id 4711-10.0.1.0/24)');
+    expect(text).not.toMatch(/\(id 24\)|besides id 24\b/);
+  });
+
   it('never a raw pulumi command, never an em dash', () => {
     const texts = [
       pendingCreatesBlock('e1', {
