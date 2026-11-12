@@ -80,7 +80,10 @@ a re-run of `vibecarbon destroy <env>` can still find and remove, per the class
 table `ENTRY_KEEP_BY_CLASS` in `src/destroy.js`) keeps the state bucket too,
 `-purge` or not, because the retry opens its stacks there, and on the compose
 tiers it keeps the Pulumi stack state, which is removed exactly when the entry
-is; the next clean `-purge` deletes the bucket. A line a re-run cannot act on
+is. Under `-purge` it keeps the app bucket and the environment's backups as
+well: a kept entry is a live environment, and another environment's fenced
+deploy stops on a live record whose bucket is gone. Its kept lines name the
+`-purge` rerun, and that clean `-purge` deletes them. A line a re-run cannot act on
 (a DNS record, a health check, a bucket) keeps neither, and its hint names the
 by-hand step. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see

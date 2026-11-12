@@ -1279,7 +1279,15 @@ const notFoundLine = (what, searched) =>
  * this environment's backups (used by e2e tests, which require a clean tear-down);
  * the bucket itself goes only when no other environment keeps backups in it.
  */
-async function handleBackupBucket(envConfig, projectConfig, environment, args, spinner, leaks) {
+async function handleBackupBucket(
+  envConfig,
+  projectConfig,
+  environment,
+  args,
+  spinner,
+  leaks,
+  entryKept = null,
+) {
   // The bucket, its region and its endpoint, as every reader takes them.
   const target = backupsTargetOf(envConfig);
   if (!target) return { purged: false };
@@ -1301,6 +1309,23 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
   const envBackupPrefix = envBackupPrefixFor(projectConfig.projectName, environment);
   const holders = backupsBucketHolders(projectConfig, { bucket: bucketName, except: environment });
   const deleteBucket = holders.length === 0;
+  // A destroy that keeps the environment's entry (entryKeptReason) leaves
+  // the environment live for the rerun, and a live environment keeps its
+  // backups: it still holds the bucket (backupsHoldings), and another
+  // environment's fenced deploy looks for every live record's buckets and
+  // stops when one is gone. So -purge keeps them this time, as
+  // retainStateBucket keeps the state bucket. The keep rule is final by now:
+  // the steps after this one add only lines that keep nothing. The next
+  // clean -purge deletes them and records backupsPurged.
+  if (entryKept) {
+    spinner.start('Backup bucket');
+    spinner.stop(
+      `Backups kept: ${envBackupPrefix} in ${bucketName}. This destroy keeps ${environment}'s ` +
+        `entry because ${entryKept.because}, and a kept environment keeps its backups; a clean ` +
+        `\`vibecarbon destroy ${environment} -purge\` deletes them then.`,
+    );
+    return { purged: false };
+  }
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   // A record with no region, beside uploads with none either, names no store
@@ -1755,7 +1780,8 @@ export function destroyPreviewBucketFacts(projectConfig, environment) {
 //    uploads, the same way it keeps this env's backups, and the destroyed
 //    env's seed names it so a redeploy lands on it again. -purge empties and
 //    deletes it only when it is this env's own (ownsAppBucket): never a
-//    pinned bucket, never a legacy per-project bucket other envs share.
+//    pinned bucket, never a legacy per-project bucket other envs share, and
+//    not while this destroy keeps the env's entry (entryKeptReason).
 async function deleteAppBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, results, spinner } = ctx;
   const s3BucketName = envConfig.s3?.bucket;
@@ -1781,6 +1807,24 @@ async function deleteAppBucketEffect(ctx) {
     spinner.start('S3 bucket');
     spinner.stop(
       `S3 bucket kept: ${s3BucketName}. It is the legacy per-project bucket, which other environments may still use; delete it manually if nothing uses it anymore.`,
+    );
+    return;
+  }
+  // A destroy that keeps the environment's entry (entryKeptReason) leaves
+  // the environment live for the rerun, and a live record's bucket must
+  // stay: another environment's fenced deploy looks for it and stops when it
+  // is gone. So -purge keeps it this time, as retainStateBucket keeps the
+  // state bucket. The keep rule is final by now: the teardown, the key
+  // revoke and the stack state ran first, and the steps after this one add
+  // only lines that keep nothing. The next clean -purge deletes it and
+  // records appBucketPurged.
+  const entryKept = entryKeptReason(results, envConfig);
+  if (entryKept) {
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept with its uploads: ${s3BucketName}. This destroy keeps ${environment}'s ` +
+        `entry because ${entryKept.because}, and a kept environment keeps its uploads; a clean ` +
+        `\`vibecarbon destroy ${environment} -purge\` deletes it then.`,
     );
     return;
   }
@@ -1986,7 +2030,8 @@ async function retainStateBucketEffect(ctx) {
 }
 
 // 3. Backup bucket: preserved by default; -purge deletes this environment's
-//    backups, and the bucket with its last holder (backupsBucketHolders).
+//    backups, and the bucket with its last holder (backupsBucketHolders),
+//    unless this destroy keeps the environment's entry (entryKeptReason).
 async function handleBackupBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
   const outcome = await handleBackupBucket(
@@ -1996,6 +2041,7 @@ async function handleBackupBucketEffect(ctx) {
     args,
     spinner,
     results.leaks,
+    entryKeptReason(results, envConfig),
   );
   if (outcome?.purged) results.backupsPurged = true;
 }
@@ -2052,7 +2098,8 @@ function joinAddresses(addresses) {
  *
  * The compose plans remove the stack state after the last step that can add
  * a line that keeps the entry (destroy-plan.js composeTail), so the stack
- * state stays exactly when the entry does.
+ * state stays exactly when the entry does. The bucket steps come later in
+ * every plan, so under -purge they keep their buckets exactly when it does.
  */
 export const ENTRY_KEEP_BY_CLASS = Object.freeze({
   server: {
@@ -2331,9 +2378,22 @@ function decidedProjectLevelFields(results) {
   );
 }
 
+/**
+ * The destroy that retries this one: with -purge when this one had it, so
+ * the retry also deletes what this one kept for it (a kept entry keeps its
+ * buckets under -purge: deleteAppBucketEffect, handleBackupBucket,
+ * retainStateBucket). A retry without it would move the entry and leave
+ * those buckets, with no destroy left that can reach them.
+ * @param {string} environment
+ * @param {{purgeBackups?: boolean}} [args]
+ */
+function retryDestroyCommand(environment, args) {
+  return `vibecarbon destroy ${environment}${args?.purgeBackups ? ' -purge' : ''}`;
+}
+
 // 5. Remove the destroyed environment from project config.
 async function updateProjectConfigEffect(ctx) {
-  const { projectConfig, environment, spinner, results } = ctx;
+  const { projectConfig, environment, args, spinner, results } = ctx;
   // Both keep branches below keep the environment's entry, and still write
   // the project-level fields (writeProjectLevelFields): the purge of the
   // last environment runs before this step whether or not the entry stays.
@@ -2363,7 +2423,7 @@ async function updateProjectConfigEffect(ctx) {
       resource: `.vibecarbon.json → environments.${environment}`,
       reason:
         "entry KEPT because this environment's Pulumi destroy could not be verified — retrying needs it",
-      hint: `Once you've verified/cleaned up any leftover resources, re-run \`vibecarbon destroy ${environment}\`; it will target this environment normally instead of falling through to orphan-stack handling.`,
+      hint: `Once you've verified/cleaned up any leftover resources, re-run \`${retryDestroyCommand(environment, args)}\`; it will target this environment normally instead of falling through to orphan-stack handling.`,
     });
     return;
   }
@@ -2378,7 +2438,7 @@ async function updateProjectConfigEffect(ctx) {
     writeProjectLevelOnly();
     spinner.stop(
       `Configuration kept: ${kept.because}, ` +
-        `so the next \`vibecarbon destroy ${environment}\` can retry`,
+        `so the next \`${retryDestroyCommand(environment, args)}\` can retry`,
     );
     return;
   }

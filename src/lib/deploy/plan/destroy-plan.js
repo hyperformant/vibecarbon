@@ -57,6 +57,9 @@ const composeTail = () => [
   // The k8s tail needs no twin: destroyStack already runs `pulumi destroy` +
   // `removeStack` per stackEnv.
   defineStep({ name: 'remove-stack-state', effect: 'removePulumiStackState' }),
+  // Under -purge the three bucket steps keep their buckets while this
+  // destroy keeps the entry (entryKeptReason), so the rerun finds them; they
+  // too sit after every step that can add a line that keeps it.
   defineStep({ name: 'delete-app-bucket', effect: 'deleteAppBucket' }),
   defineStep({ name: 'retain-state-bucket', effect: 'retainStateBucket' }),
   defineStep({ name: 'handle-backup-bucket', effect: 'handleBackupBucket' }),
@@ -67,6 +70,8 @@ const composeTail = () => [
 
 const k8sTail = () => [
   defineStep({ name: 'revoke-app-storage-key', effect: 'revokeAppStorageKey' }),
+  // As in the compose tail: under -purge the bucket steps keep their buckets
+  // while this destroy keeps the entry, after every step that can keep it.
   defineStep({ name: 'delete-app-bucket', effect: 'deleteAppBucket' }),
   // Ungated, unlike the deletion it replaces. That step carried
   // `when: (ctx) => !ctx.results.pulumiDestroyFailed` (M3 Task 9f round 1),
