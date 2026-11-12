@@ -2272,12 +2272,15 @@ function entryKeptReason(results, envConfig) {
 /**
  * The project-level fields this destroy decided, written whether or not the
  * environment's entry is removed: the retained state-bucket name
- * (retainStateBucket) and, after a -purge deleted the state bucket, a fresh
- * stateBucketGeneration. A kept entry must not lose them: a -purge of the
- * last environment deletes the state bucket whether or not the entry stays,
- * and the next deploy or destroy must then derive a fresh name rather than
- * recreate the deleted one (the same-name recreate that lost acked writes on
- * 2026-08-07).
+ * (retainStateBucket); after a -purge deleted the state bucket, or left it
+ * for you to delete by hand, a fresh stateBucketGeneration; and what the app
+ * key fence found about destroyed environments' buckets (recordFenceFindings).
+ * A kept entry must not lose them: a -purge of the last environment deletes
+ * the state bucket whether or not the entry stays, and the next deploy or
+ * destroy must then derive a fresh name rather than recreate the deleted one
+ * (the same-name recreate that lost acked writes on 2026-08-07); and the
+ * fence's findings are about other environments' records, which a kept entry
+ * does not change.
  * @param {object} updatedConfig - the file as it is now
  * @param {object} results
  */
@@ -2299,6 +2302,33 @@ function writeProjectLevelFields(updatedConfig, results) {
   if (results.stateBucketPurged || results.stateBucketAbandoned) {
     updatedConfig.stateBucketGeneration = generateBucketSalt();
   }
+  // What the fence found about destroyed environments' buckets: one in no
+  // region is marked not found, one read again is cleared, and one found
+  // in another region has it written into the record (recordFenceFindings).
+  // Never appBucketPurged: that is only for a delete this destroy
+  // confirmed, when the entry moves (updateProjectConfigEffect).
+  recordFenceFindings(updatedConfig, {
+    gone: results.fenceGone ?? [],
+    found: results.fenceFound ?? [],
+    located: results.fenceLocated ?? [],
+  });
+}
+
+/**
+ * Did this destroy decide any project-level field (writeProjectLevelFields)?
+ * A kept entry writes the file only then.
+ * @param {object} results
+ * @returns {boolean}
+ */
+function decidedProjectLevelFields(results) {
+  return Boolean(
+    results.retainedStateBucket ||
+      results.stateBucketPurged ||
+      results.stateBucketAbandoned ||
+      results.fenceGone?.length ||
+      results.fenceFound?.length ||
+      results.fenceLocated?.length,
+  );
 }
 
 // 5. Remove the destroyed environment from project config.
@@ -2308,7 +2338,7 @@ async function updateProjectConfigEffect(ctx) {
   // the project-level fields (writeProjectLevelFields): the purge of the
   // last environment runs before this step whether or not the entry stays.
   const writeProjectLevelOnly = () => {
-    if (!results.retainedStateBucket && !results.stateBucketPurged) return;
+    if (!decidedProjectLevelFields(results)) return;
     updateProjectConfig((updatedConfig) => writeProjectLevelFields(updatedConfig, results));
   };
   // M3 Task 9f fix round 2: keep the environment's config entry when its
@@ -2358,16 +2388,6 @@ async function updateProjectConfigEffect(ctx) {
   // environment's record saved since must survive.
   updateProjectConfig((updatedConfig) => {
     writeProjectLevelFields(updatedConfig, results);
-    // What the fence found about destroyed environments' buckets: one in no
-    // region is marked not found, one read again is cleared, and one found
-    // in another region has it written into the record (recordFenceFindings).
-    // Never appBucketPurged: that is only for a delete this destroy
-    // confirmed, below.
-    recordFenceFindings(updatedConfig, {
-      gone: results.fenceGone ?? [],
-      found: results.fenceFound ?? [],
-      located: results.fenceLocated ?? [],
-    });
     if (updatedConfig.environments) {
       // Keep what the environment WAS (placement, domain, DNS, backup bucket,
       // sizing) under a sibling key `deploy` reads when this name is deployed
