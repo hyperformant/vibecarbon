@@ -37,16 +37,7 @@
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
 import { execFileSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
@@ -72,6 +63,7 @@ import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 // The fake cloud's server is a server class, as each provider's is.
 vi.mock('../../../src/lib/iac/create-timeout.js', async (orig) => {
@@ -121,7 +113,7 @@ const PASSPHRASE = 'c2VhbHNlYWxzZWFsc2VhbHNlYWxzZWFsc2VhbHNlYWxz';
 const SENTINEL = 'legacy-user-data-sentinel-3c8f';
 const USER_DATA = `#cloud-config\n# token ${SENTINEL}\n`;
 
-const root = mkdtempSync(join(tmpdir(), 'vc-state-seal-'));
+const root = createTempDir('vc-state-seal-');
 const backend = join(root, 'state');
 const cloudFile = join(root, 'cloud.json');
 const projectDir = join(root, 'project');
@@ -236,7 +228,7 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
     writeFileSync(cloudFile, JSON.stringify({ next: 1, servers: {} }));
   });
   afterAll(() => {
-    rmSync(root, { recursive: true, force: true });
+    cleanupTempDir(root);
   });
   // Each test, not once: tests/setup/global-setup.ts resets process.env after
   // every test, and the iac layer hands its workspaces process.env.

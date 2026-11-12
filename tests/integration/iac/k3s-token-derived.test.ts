@@ -36,13 +36,10 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
@@ -61,6 +58,7 @@ import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const realPulumi = (() => {
   try {
@@ -77,7 +75,7 @@ const STACK = 'k1';
 const PASSPHRASE = 'c2VudGluZWwtazNzLXRva2VuLWRlcml2ZWQtcGFzc3BocmFzZQ';
 const ADDRESS = '203.0.113.50';
 
-const root = mkdtempSync(join(tmpdir(), 'vc-k3s-token-'));
+const root = createTempDir('vc-k3s-token-');
 const backend = join(root, 'state');
 const cloudFile = join(root, 'cloud.json');
 const projectDir = join(root, 'project');
@@ -177,7 +175,7 @@ describe.runIf(hasPulumi || process.env.CI)(
       chmodSync(shim, 0o755);
     });
     afterAll(() => {
-      rmSync(root, { recursive: true, force: true });
+      cleanupTempDir(root);
     });
     // Each test, not once: tests/setup/global-setup.ts resets process.env after
     // every test, and the iac layer hands its workspaces process.env.
