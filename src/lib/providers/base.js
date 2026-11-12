@@ -62,6 +62,12 @@ export function deleteFailure(providerName, status) {
  */
 
 /**
+ * A billed resource a server delete left behind, shaped as a destroy ledger
+ * line (leak-ledger.js): `deleteServer`'s `onLeftover` receives it.
+ * @typedef {{resourceClass: string, resource: string, reason: string, hint: string}} ServerLeftover
+ */
+
+/**
  * The labels a `deleteReservedIpsByLabels` sweep is scoped by, refused unless
  * there is at least one and every one has a value. A sweep without its full
  * scope never runs: an undefined value would read as the literal tag
@@ -652,8 +658,13 @@ export class BaseProvider {
    *     provider's own asynchronous teardown (a recreate-before-drained
    *     race can otherwise collide on a "name already in use" error).
    *
+   * `options.onLeftover`: a provider whose server delete can leave a billed
+   * resource behind that nothing else finds (Scaleway's detached SBS
+   * volumes) hands it to this, as a ledger line, instead of only warning.
+   * Every destroy-side call passes it (tests/unit/destroy/entry-keep-class-table.test.ts).
+   *
    * @param {string|number} serverId - Server ID
-   * @param {{waitUntilGone?: boolean}} [options]
+   * @param {{waitUntilGone?: boolean, onLeftover?: (line: ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>} void in default mode; in
    *   waitUntilGone mode, true if the server was present at delete time
    *   (poll attempted), false if it was already gone.

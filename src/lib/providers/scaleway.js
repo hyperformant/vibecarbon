@@ -88,6 +88,9 @@ const GB = 1_000_000_000;
  */
 const TERMINATE_WAIT_MS = 120_000;
 
+/** How long deleteServer keeps trying to delete a detached SBS volume. */
+const SBS_DELETE_WAIT_MS = 60_000;
+
 /**
  * Servers this process asked Scaleway to terminate that were still there
  * when deleteServer stopped waiting (TERMINATE_WAIT_MS). Module-level, not
@@ -1136,11 +1139,16 @@ export class ScalewayProvider extends BaseProvider {
    * the volumes are only deletable after termination completes, so
    * returning early would trade scale-path latency for an unbounded
    * billing leak. `waitUntilGone` only selects the return value.
+   *
+   * An SBS volume step 4 cannot delete is reported through `onLeftover`
+   * (destroy turns it into a ledger leak), or warned on stderr when no one
+   * asked. Nothing finds it again: a later deleteServer finds the server
+   * gone and reads no volumes, so the line names the console delete.
    * @param {string} serverId
-   * @param {{waitUntilGone?: boolean}} [options]
+   * @param {{waitUntilGone?: boolean, onLeftover?: (line: import('./base.js').ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>}
    */
-  async deleteServer(serverId, { waitUntilGone = false } = {}) {
+  async deleteServer(serverId, { waitUntilGone = false, onLeftover } = {}) {
     const zone = await this._findServerZone(serverId);
     if (!zone) return waitUntilGone ? false : undefined; // already gone
 
@@ -1204,25 +1212,41 @@ export class ScalewayProvider extends BaseProvider {
     // product than the Instance API's legacy volumes endpoint). Brief
     // retry: the detach can trail the server 404 by a few seconds.
     for (const volumeId of sbsVolumeIds) {
+      let lastStatus;
       await pollUntil(
         async () => {
           const res = await fetchWithRetry(
             `${ScalewayProvider.API_BASE}/block/v1/zones/${zone}/volumes/${volumeId}`,
             { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
           );
+          lastStatus = res.status;
           return res.ok || res.status === 404;
         },
         {
-          budgetMs: 60_000,
+          budgetMs: SBS_DELETE_WAIT_MS,
           initialDelayMs: 2_000,
           backoffFactor: 1,
           description: `SBS volume ${volumeId} deletion`,
         },
-      ).catch(() => {
-        console.warn(
-          `Warning: Scaleway SBS volume ${volumeId} (zone ${zone}) could not be deleted; it ` +
-            'bills until removed. Delete it in the console or re-run destroy.',
-        );
+      ).catch((err) => {
+        const lastAnswer =
+          lastStatus === undefined
+            ? `no answer: ${err?.cause?.message ?? err?.message ?? err}`
+            : `last answer HTTP ${lastStatus}`;
+        const leftover = {
+          resourceClass: 'detached-volume',
+          resource: `SBS volume ${volumeId} (${zone})`,
+          reason:
+            `server ${serverId}'s delete left it behind, and deleting it failed for ` +
+            `${SBS_DELETE_WAIT_MS / 1000} s (${lastAnswer})` +
+            (terminated ? '' : ', while the server was still terminating'),
+          hint:
+            `Delete it in the Scaleway console under Block Storage, Volumes (zone ${zone}); it ` +
+            'bills until removed. Running destroy again does not find it: the server it ' +
+            'belonged to is gone.',
+        };
+        if (onLeftover) onLeftover(leftover);
+        else console.warn(`Warning: ${leftover.resource}: ${leftover.reason}. ${leftover.hint}`);
       });
     }
 

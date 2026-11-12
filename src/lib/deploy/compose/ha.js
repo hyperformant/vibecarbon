@@ -1092,7 +1092,14 @@ export async function destroyComposeHA(options) {
     onProgress('Waiting for VPS deletion to complete...');
   }
   const serverOutcomes = await Promise.allSettled(
-    serversToDelete.map((server) => provider.deleteServer(server.id, { waitUntilGone: true })),
+    serversToDelete.map((server) =>
+      provider.deleteServer(server.id, {
+        waitUntilGone: true,
+        // A billed resource the delete left behind (Scaleway's detached SBS
+        // volumes) is a leak line like the rest.
+        onLeftover: (line) => leaks.push(line),
+      }),
+    ),
   );
   serverOutcomes.forEach((outcome, index) => {
     if (outcome.status !== 'rejected') return;

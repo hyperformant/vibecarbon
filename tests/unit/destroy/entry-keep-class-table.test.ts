@@ -29,7 +29,7 @@
  *     keep it, so the two cannot disagree.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Config, projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -64,7 +64,7 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
 
 /** What the fake clouds answer; each test sets the parts it needs. */
 const world = {
-  serverDelete: 'gone' as 'gone' | 'deleted' | 'throws',
+  serverDelete: 'gone' as 'gone' | 'deleted' | 'throws' | 'leaves-volume',
   refusedDns: [] as string[],
   haTeardown: 'clean' as 'clean' | 'throws',
   removedStacks: [] as string[],
@@ -76,8 +76,22 @@ function FakeProvider() {
       if (typeof prop !== 'string' || prop === 'then') return undefined;
       if (prop === 'constructor') return FakeProvider;
       if (prop === 'deleteServer') {
-        return async () => {
+        return async (
+          _id: unknown,
+          options?: { onLeftover?: (line: Record<string, string>) => void },
+        ) => {
           if (world.serverDelete === 'throws') throw new Error('server is locked (HTTP 423)');
+          if (world.serverDelete === 'leaves-volume') {
+            // What Scaleway's deleteServer hands over for a detached SBS
+            // volume it could not delete.
+            options?.onLeftover?.({
+              resourceClass: 'detached-volume',
+              resource: 'SBS volume vol-9 (fr-par-1)',
+              reason: "server 11's delete left it behind, and deleting it failed for 60 s",
+              hint: 'Delete it in the FakeCloud console under Volumes; it bills until removed.',
+            });
+            return true;
+          }
           return world.serverDelete === 'deleted';
         };
       }
@@ -233,18 +247,132 @@ const DYNAMIC_CLASS_SOURCES: Record<string, string> = {
   'entry.resourceClass': 'leak-ledger.js rendering',
 };
 
-describe('ENTRY_KEEP_BY_CLASS census', () => {
+/**
+ * Every bare `resourceClass` (not `resourceClass: 'x'`, not `x: expr`, not a
+ * read like `entry.resourceClass`) in src/, by file and line text: a
+ * shorthand property (`{ resourceClass }`), a parameter or a variable. A
+ * shorthand can hand the ledger a class no literal names, so a new one fails
+ * the census until it is named here with where its class comes from.
+ */
+const BARE_CLASS_SITES: Record<string, string> = {
+  'src/destroy.js :: function entryVerdict({ severity, resourceClass, resource }) {':
+    "entryVerdict's parameter: it reads a line's class",
+  'src/destroy.js :: if (!Object.hasOwn(ENTRY_KEEP_BY_CLASS, resourceClass)) return true;':
+    'entryVerdict reads it',
+  'src/destroy.js :: const { keeps } = ENTRY_KEEP_BY_CLASS[resourceClass];':
+    'entryVerdict reads it',
+  'src/lib/deploy/compose/ha.js :: const noteLeak = (resourceClass, resource, reason, hint) =>':
+    "noteLeak's parameter: its callers pass literals, which the census reads",
+  'src/lib/deploy/compose/ha.js :: leaks.push({ resourceClass, resource, reason, ...(hint && { hint }) });':
+    "noteLeak's write of that parameter",
+};
+
+/** An expression up to its end: a depth-0 `,` `;` `)` `]` `}` or newline. */
+function expressionAt(text: string): string {
+  let depth = 0;
+  let i = 0;
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    if ('([{'.includes(ch)) depth += 1;
+    else if (')]}'.includes(ch)) {
+      if (depth === 0) break;
+      depth -= 1;
+    } else if ((ch === ',' || ch === ';' || ch === '\n') && depth === 0) break;
+  }
+  return text.slice(0, i).trim();
+}
+
+/**
+ * Every code mention of `resourceClass` in `files` (path to code), sorted by
+ * how it is written. A read (`x.resourceClass`, `x?.resourceClass`) is
+ * skipped; an assignment to one (`x.resourceClass = expr`) is dynamic.
+ */
+function classMentions(files: Record<string, string>) {
   const literal = new Set<string>();
   const dynamic = new Set<string>();
-  for (const path of jsFiles(SRC)) {
-    const code = codeOf(path);
-    for (const m of code.matchAll(/resourceClass:\s*'([^']+)'/g)) literal.add(m[1]);
-    for (const m of code.matchAll(/noteLeak\(\s*'([^']+)'/g)) literal.add(m[1]);
-    for (const m of code.matchAll(/resourceClass:\s*([^'\s][^,\n]*?)\s*,?\s*$/gm)) {
-      dynamic.add(m[1].replace(/,$/, ''));
+  const bare = new Set<string>();
+  for (const [file, code] of Object.entries(files)) {
+    for (const m of code.matchAll(/\bresourceClass\b/g)) {
+      const at = m.index ?? 0;
+      const before = code.slice(0, at);
+      const after = code.slice(at + m[0].length);
+      if (/\??\.\s*$/.test(before)) {
+        const assigned = after.match(/^\s*=(?![=>])\s*/);
+        if (assigned) dynamic.add(expressionAt(after.slice(assigned[0].length)));
+        continue;
+      }
+      const lit = after.match(/^\s*:\s*'([^']+)'/);
+      if (lit) {
+        literal.add(lit[1]);
+        continue;
+      }
+      const colon = after.match(/^\s*:\s*/);
+      if (colon) {
+        dynamic.add(expressionAt(after.slice(colon[0].length)));
+        continue;
+      }
+      const lineStart = code.lastIndexOf('\n', at) + 1;
+      const lineEnd = code.indexOf('\n', at);
+      bare.add(`${file} :: ${code.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).trim()}`);
     }
+    for (const m of code.matchAll(/noteLeak\(\s*'([^']+)'/g)) literal.add(m[1]);
     for (const m of code.matchAll(/noteLeak\(\s*([^'\s)][^,]*)/g)) dynamic.add(`noteLeak(${m[1]}`);
   }
+  return { literal, dynamic, bare };
+}
+
+/** The text inside the parentheses of the call whose `(` is at `open`. */
+function callArgs(code: string, open: number): string {
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '(') depth += 1;
+    else if (code[i] === ')') {
+      depth -= 1;
+      if (depth === 0) return code.slice(open + 1, i);
+    }
+  }
+  return code.slice(open + 1);
+}
+
+/** The destroy side: every server delete in these reports what it left. */
+const DESTROY_SIDE = /^src\/(destroy\.js|lib\/destroy\/|lib\/deploy\/compose\/ha\.js)/;
+
+/**
+ * Server deletes on the destroy side that drop what a delete left behind
+ * (Scaleway's detached SBS volumes): every `deleteServer(` call there passes
+ * `onLeftover`, and so does every call of a function that takes it and
+ * passes it on.
+ */
+function leftoverViolations(files: Record<string, string>): string[] {
+  const forwarders = new Set<string>();
+  for (const code of Object.values(files)) {
+    for (const m of code.matchAll(/function\s+(\w+)\s*\(([^)]*)\)/g)) {
+      if (/\bonLeftover\b/.test(m[2])) forwarders.add(m[1]);
+    }
+  }
+  const bad: string[] = [];
+  for (const [file, code] of Object.entries(files)) {
+    const names = DESTROY_SIDE.test(file) ? ['deleteServer', ...forwarders] : [...forwarders];
+    for (const name of names) {
+      for (const m of code.matchAll(new RegExp(`(?<!function\\s+)\\b${name}\\s*\\(`, 'g'))) {
+        const open = (m.index ?? 0) + m[0].length - 1;
+        if (name === 'deleteServer' && !/\.\s*$/.test(code.slice(0, m.index))) continue;
+        if (!/\bonLeftover\b/.test(callArgs(code, open))) {
+          bad.push(
+            `${file}:${code.slice(0, m.index).split('\n').length} ${name}() without onLeftover`,
+          );
+        }
+      }
+    }
+  }
+  return bad;
+}
+
+describe('ENTRY_KEEP_BY_CLASS census', () => {
+  const files = Object.fromEntries(
+    jsFiles(SRC).map((path) => [`src/${relative(SRC, path)}`, codeOf(path)]),
+  );
+  const { literal, dynamic, bare } = classMentions(files);
 
   it('finds the emitters (the walk is not vacuous)', () => {
     for (const cls of ['server', 'dns-record', 'pulumi-stack', 'destroy-step', 'volume']) {
@@ -254,6 +382,47 @@ describe('ENTRY_KEEP_BY_CLASS census', () => {
 
   it('every class not written as a literal comes from a source named here', () => {
     expect([...dynamic].sort()).toEqual(Object.keys(DYNAMIC_CLASS_SOURCES).sort());
+    expect([...bare].sort()).toEqual(Object.keys(BARE_CLASS_SITES).sort());
+  });
+
+  // Final review N1: the walk read a non-literal class only at the end of its
+  // line, so these escaped it.
+  it('a class on one line with the rest, a shorthand, or an assignment is never missed', () => {
+    const planted = classMentions({
+      'src/a.js':
+        "leaks.leak({ resourceClass: cls, resource: r });\nconst line = { resourceClass, resource };\nline.resourceClass = next;\nleaks.leak({ resourceClass: 'server', resource: x });\nif (entry.resourceClass === 'x') use(entry?.resourceClass);\n",
+    });
+    expect([...planted.literal]).toEqual(['server']);
+    expect([...planted.dynamic].sort()).toEqual(['cls', 'next']);
+    expect([...planted.bare]).toEqual(['src/a.js :: const line = { resourceClass, resource };']);
+  });
+
+  it('every destroy-side server delete reports what it left behind', () => {
+    expect(leftoverViolations(files)).toEqual([]);
+    // Not vacuous: the walk sees the calls and the forwarder.
+    const calls = Object.entries(files)
+      .filter(([file]) => DESTROY_SIDE.test(file))
+      .flatMap(([, code]) => [...code.matchAll(/\.deleteServer\s*\(/g)]);
+    expect(calls.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('a destroy-side server delete, or a forwarder call, without onLeftover is refused', () => {
+    expect(
+      leftoverViolations({
+        'src/destroy.js':
+          'async function f() {\n  await provider.deleteServer(id, { waitUntilGone: true });\n}\n',
+      }),
+    ).toEqual(['src/destroy.js:2 deleteServer() without onLeftover']);
+    expect(
+      leftoverViolations({
+        'src/lib/destroy/x.js':
+          'async function reap(p, { onLeftover } = {}) {\n  await p.deleteServer(1, { onLeftover });\n}\nawait reap(p);\n',
+      }),
+    ).toEqual(['src/lib/destroy/x.js:4 reap() without onLeftover']);
+    // Scale deletes are not destroy's, and warn on their own.
+    expect(leftoverViolations({ 'src/scale.js': 'await provider.deleteServer(id);\n' })).toEqual(
+      [],
+    );
   });
 
   it('every class a ledger call in src/ can emit has a row', () => {
@@ -570,6 +739,24 @@ describe('through the destroy plan', () => {
     await DESTROY_EFFECTS.updateProjectConfig(ctx, {});
 
     expect((store.state.disk as Config).environments.prod).toBeUndefined();
+  });
+
+  // A volume the server's delete left behind bills on, and a re-run cannot
+  // find it: a leak (exit 2) with the console step, keeping neither.
+  it('compose: a volume the server delete left behind is a leak, and keeps nothing', async () => {
+    deployed('compose');
+    world.serverDelete = 'leaves-volume';
+
+    const run = await destroyOnce('compose');
+
+    const leaks = run.entries.filter((e) => e.severity === 'leak');
+    expect(leaks.map((e) => e.resourceClass)).toEqual(['detached-volume']);
+    expect(leaks[0].resource).toBe('SBS volume vol-9 (fr-par-1)');
+    expect(leaks[0].hint).toContain('console');
+    expect(run.exitCode).toBe(2);
+    expect(run.entryKept).toBe(false);
+    expect(run.removedStacks).toEqual(['prod']);
+    expect(allText()).not.toMatch(/vibecarbon destroy prod/);
   });
 
   it('compose: a server delete that fails keeps both; the re-run once it is gone removes both', async () => {

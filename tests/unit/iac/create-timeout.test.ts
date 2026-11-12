@@ -340,7 +340,10 @@ describe('destroy after a stalled create', () => {
       deployMode: 'compose-ha',
     });
 
-    expect(deleteServer).toHaveBeenCalledWith(118207654, { waitUntilGone: true });
+    expect(deleteServer).toHaveBeenCalledWith(118207654, {
+      waitUntilGone: true,
+      onLeftover: expect.any(Function),
+    });
     expect(result.deleted).toEqual(['acme-e2-standby']);
     expect(leaks.isClean()).toBe(true);
   });

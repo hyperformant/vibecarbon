@@ -607,6 +607,92 @@ describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volu
   });
 });
 
+// terminate only DETACHES an SBS volume, and deleteServer deletes it after.
+// One it cannot delete in 60 s bills on, and nothing finds it again: a later
+// deleteServer finds the server gone (404) and reads no volumes. So it is a
+// ledger line for destroy (onLeftover), with the console delete as its step.
+describe('an SBS volume deleteServer cannot delete', () => {
+  function wire() {
+    let serverGone = false;
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (/\/zones\/fr-par-1\/servers\/srv-v$/.test(url) && method === 'GET') {
+        return serverGone
+          ? jsonResp({}, 404)
+          : jsonResp({
+              server: {
+                id: 'srv-v',
+                volumes: { '0': { id: 'vol-9', volume_type: 'sbs_volume' } },
+                public_ips: [],
+              },
+            });
+      }
+      if (url.endsWith('/servers/srv-v/action') && method === 'POST') {
+        serverGone = true;
+        return jsonResp({ task: { id: 't1' } });
+      }
+      // Scaleway refuses the volume delete for the whole window.
+      if (url.includes('/block/v1/zones/fr-par-1/volumes/vol-9') && method === 'DELETE') {
+        return jsonResp({ message: 'resource is in a transient state' }, 409);
+      }
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function deleteWithClock(options: Record<string, unknown>) {
+    vi.useFakeTimers();
+    wire();
+    const done = new ScalewayProvider('tok').deleteServer('srv-v', options);
+    await vi.advanceTimersByTimeAsync(70_000);
+    return done;
+  }
+
+  it('hands destroy a leak line with the volume id and zone, and the console delete', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const leftovers: Array<Record<string, string>> = [];
+    const result = await deleteWithClock({
+      waitUntilGone: true,
+      onLeftover: (line: Record<string, string>) => leftovers.push(line),
+    });
+    expect(result).toBe(true);
+    expect(leftovers).toEqual([
+      {
+        resourceClass: 'detached-volume',
+        resource: 'SBS volume vol-9 (fr-par-1)',
+        reason:
+          "server srv-v's delete left it behind, and deleting it failed for 60 s (last answer HTTP 409)",
+        hint:
+          'Delete it in the Scaleway console under Block Storage, Volumes (zone fr-par-1); it ' +
+          'bills until removed. Running destroy again does not find it: the server it belonged ' +
+          'to is gone.',
+      },
+    ]);
+    // The ledger has it: nothing on stderr to break a spinner's line.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns with the same console step when nobody asked for the line (scale)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await deleteWithClock({});
+    expect(warn).toHaveBeenCalledOnce();
+    const [text] = warn.mock.calls[0] as [string];
+    expect(text).toContain('SBS volume vol-9 (fr-par-1)');
+    expect(text).toContain('Block Storage, Volumes (zone fr-par-1)');
+    // The old line promised a re-run that cannot find it.
+    expect(text).not.toMatch(/re-run destroy/);
+  });
+});
+
 // deleteServer waits 120 s for a terminated server's record to go, then
 // moves on. Its flexible IP stays attached until the termination finishes,
 // so the label sweep that runs next finds it held. That server was deleted,

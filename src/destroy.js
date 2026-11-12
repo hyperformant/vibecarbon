@@ -742,7 +742,7 @@ async function cleanupLoadBalancers(provider, projectName, envName) {
  *   `pulumi destroy` then fails the network delete with "still in use", so the
  *   silence cost two diagnoses at once.
  */
-async function cleanupAutoscalerWorkers(provider, clusterName) {
+async function cleanupAutoscalerWorkers(provider, clusterName, { onLeftover } = {}) {
   // Find the cluster's private network by name (matches Pulumi resource name).
   const networks = await provider.listNetworks();
   const clusterNetwork = networks.find((n) => n.name === `${clusterName}-network`);
@@ -782,7 +782,7 @@ async function cleanupAutoscalerWorkers(provider, clusterName) {
   const failed = [];
   for (const server of caServers) {
     try {
-      const ok = await provider.deleteServer(server.id, { waitUntilGone: true });
+      const ok = await provider.deleteServer(server.id, { waitUntilGone: true, onLeftover });
       if (ok) deleted.push(server.name);
     } catch (error) {
       // Continue with remaining servers — best-effort cleanup. The
@@ -1951,6 +1951,13 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
       're-run cannot prove it either while another server runs in that region, so keeping the ' +
       'entry would keep it for as long as that server lives',
   },
+  'detached-volume': {
+    keeps: false,
+    why:
+      "a block volume a server's delete left behind and could not delete (Scaleway SBS): the " +
+      're-run finds the server gone and reads no volumes, so nothing it does reaches it; the ' +
+      'hint names the console delete',
+  },
   'pulumi-stack': {
     keeps: true,
     why: 'the stack record in the state bucket, which the re-run destroys or removes',
@@ -2624,7 +2631,10 @@ async function destroyComposeTier({
   if (serverId && providerToken) {
     s.start(`Deleting VPS (${serverIp})...`);
     try {
-      const deleted = await provider.deleteServer(serverId, { waitUntilGone: true });
+      const deleted = await provider.deleteServer(serverId, {
+        waitUntilGone: true,
+        onLeftover: (line) => results.leaks.leak(line),
+      });
       s.stop(deleted ? 'VPS deleted' : 'VPS not found');
     } catch (error) {
       // THE 2026-07-22 INCIDENT, exactly here: the throw was swallowed, the
@@ -2646,7 +2656,10 @@ async function destroyComposeTier({
     try {
       const [server] = await provider.findServersByName(providerServerName);
       if (server) {
-        const deleted = await provider.deleteServer(server.id, { waitUntilGone: true });
+        const deleted = await provider.deleteServer(server.id, {
+          waitUntilGone: true,
+          onLeftover: (line) => results.leaks.leak(line),
+        });
         s.stop(deleted ? 'VPS deleted' : 'VPS not found');
       } else {
         s.stop('VPS not found');
@@ -3871,7 +3884,9 @@ async function destroyK8sTier({
         const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
         const caClusterName = `${projectConfig.projectName}-${stackEnv}`;
         try {
-          const caResult = await cleanupAutoscalerWorkers(provider, caClusterName);
+          const caResult = await cleanupAutoscalerWorkers(provider, caClusterName, {
+            onLeftover: (line) => results.leaks.leak(line),
+          });
           if (caResult.deleted.length > 0) {
             console.log(
               `  Deleted ${caResult.deleted.length} CA-spawned worker(s)${dirLabel}: ${caResult.deleted.join(', ')}`,
@@ -4000,7 +4015,10 @@ async function destroyK8sTier({
         for (const sv of orphanedServers) {
           s.start(`Deleting orphaned server: ${sv.name} (${Provider.getPublicIP(sv) || sv.id})`);
           try {
-            await provider.deleteServer(sv.id, { waitUntilGone: true });
+            await provider.deleteServer(sv.id, {
+              waitUntilGone: true,
+              onLeftover: (line) => results.leaks.leak(line),
+            });
             results.servers.push(sv.name);
             s.stop(`Deleted ${sv.name}`);
           } catch (error) {

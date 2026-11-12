@@ -117,7 +117,10 @@ export async function sweepEnvironmentServers({
     const label = server.name || `id ${server.id}`;
     onProgress(`Deleting surviving server: ${label}`);
     try {
-      await provider.deleteServer(server.id, { waitUntilGone: true });
+      await provider.deleteServer(server.id, {
+        waitUntilGone: true,
+        onLeftover: (line) => leaks.leak(line),
+      });
       deleted.push(server.name ?? String(server.id));
     } catch (error) {
       leaks.leak({
