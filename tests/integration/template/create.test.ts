@@ -1,4 +1,4 @@
-import { execSync, spawnSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -37,8 +37,20 @@ describe('create-vibecarbon E2E', () => {
   describe('a state passphrase exported in the shell', () => {
     it('belongs to another project: create makes its own and records that one', () => {
       const other = 'x'.repeat(43);
-      const out = execSync(
-        `node ${join(process.cwd(), 'src/cli.js')} create shell-pass -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile`,
+      // No shell: the path and arguments go to node as they are.
+      const out = execFileSync(
+        'node',
+        [
+          join(process.cwd(), 'src/cli.js'),
+          'create',
+          'shell-pass',
+          '-y',
+          '-admin-email',
+          'test@e2e.local',
+          '-admin-password',
+          'testpass123',
+          '-skip-lockfile',
+        ],
         {
           cwd: tempDir,
           encoding: 'utf-8',
