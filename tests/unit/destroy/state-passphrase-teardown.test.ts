@@ -96,6 +96,8 @@ vi.mock('../../../src/lib/csi-volumes.js', async (orig) => ({
 const cloudCalls: string[] = [];
 let backstop = true;
 let firewallDeleteFails = false;
+/** Whether the reserved-IP label listing answers or throws. */
+let labelListingFails = false;
 /**
  * How the server listing answers: whole, or cut short (a soft-failed page)
  * after finding nothing or after finding the labelled server.
@@ -135,7 +137,10 @@ const SPECIFIC: Record<string, (...args: unknown[]) => unknown> = {
     cloudCalls.push(`deleteNetworkByName:${name}`);
     return { deleted: true, apiError: null };
   },
-  deleteReservedIpsByLabels: async () => ({ deleted: [], failed: [] }),
+  deleteReservedIpsByLabels: async () => {
+    if (labelListingFails) throw new Error('listing floating IPs: 503 Service Unavailable');
+    return { deleted: [], failed: [] };
+  },
 };
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
@@ -280,6 +285,7 @@ beforeEach(() => {
   backstop = true;
   gitHead = () => ({ state: 'no-git' });
   firewallDeleteFails = false;
+  labelListingFails = false;
   serverListing = 'complete';
   __resetStatePassphraseForTests();
   __resetStateProbesForTests();
@@ -474,7 +480,7 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
       "Delete the stack's firewall, network, SSH key and placement group in the Hetzner console; their names start with proj-e1.",
     );
     expect(entry.hint).toContain(
-      "Its reserved IPs labelled for this stack were released, and any that weren't are listed in this report.",
+      "Its reserved IPs labelled for this stack, if any, were released; any that weren't are listed in this report.",
     );
     // No record left to retry against, so no retry is promised.
     expect(entry.hint).not.toContain('vibecarbon destroy');
@@ -489,6 +495,34 @@ describe('k8s, Pulumi refused the passphrase: the record goes on every provider'
     expect(logged.match(/refused the state passphrase/g)).toHaveLength(1);
     expect(logged).toContain('failed to decrypt: incorrect passphrase');
     expect(logged).not.toContain(PASSPHRASE);
+  });
+
+  it('no backstop and the label listing failed: the reserved IP stays on the console list, and the hint says the check failed', async () => {
+    project({ value: PASSPHRASE });
+    fakePulumi.refuseReads(passphraseRefusal);
+    backstop = false;
+    labelListingFails = true;
+    const ctx = makeCtx('k8s', dir);
+
+    await run('destroyK8sInfra', ctx);
+
+    expect(removals()).toEqual([REMOVE('e1')]);
+    const [entry, ...rest] = stackEntries(ctx);
+    expect(rest).toEqual([]);
+    expect(entry.resourceClass).toBe('unreadable-stack');
+    expect(entry.hint).toContain(
+      "Delete the stack's firewall, network, reserved IP, SSH key and placement group in the Hetzner console; their names start with proj-e1.",
+    );
+    expect(entry.hint).toContain(
+      'The check for reserved IPs labelled for this stack failed (this report says why), so one may still be there.',
+    );
+    expect(entry.hint).not.toContain('were released');
+    // The failed listing has its own line, and keeps the entry so a re-run
+    // can list again.
+    expect(ctx.results.leaks.entries).toContainEqual(
+      expect.objectContaining({ resourceClass: 'reserved-ip', severity: 'unverified' }),
+    );
+    expect(entryKept(ctx)).toMatchObject({ unswept: ['e1'] });
   });
 
   it('backstop sweeps left nothing: the record goes and the destroy is clean', async () => {
@@ -967,6 +1001,18 @@ describe('settleUnreadableStacks: a record it cannot remove is kept for the retr
     });
     return { results, removed, done };
   };
+
+  it('no label sweep for this provider: the reserved IP is on the console list, and no release is claimed', async () => {
+    const { results, removed, done } = settle({ backstop: false, providerName: 'Vultr' });
+    await done;
+    expect(removed).toEqual(['e1']);
+    const [entry] = results.leaks.entries;
+    expect(entry.resourceClass).toBe('unreadable-stack');
+    expect(entry.hint).toContain(
+      "Delete the stack's firewall, network, reserved IP, SSH key and placement group in the Vultr console; their names start with proj-e1.",
+    );
+    expect(entry.hint).not.toMatch(/released|label/);
+  });
 
   it('state-backend credentials unresolved: nothing is removed against the local fallback', async () => {
     const { results, removed, done } = settle({ backendResolved: false });

@@ -3418,8 +3418,9 @@ export function warnUnreadableStackState({ error, stackEnv, providerName, backst
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`.
  * @param {boolean} params.backstop - the provider's by-name sweeps ran for these stacks.
- * @param {boolean} [params.reservedIpsSwept] - sweepK8sBackstopTargets released
- *   the reserved IPs labelled for these stacks (its label sweep ran).
+ * @param {boolean} [params.reservedIpsSwept] - sweepK8sBackstopTargets' label
+ *   sweep ran for these stacks; a stack whose listing failed is in
+ *   `results.unsweptReservedIpScopes`.
  * @param {string} [params.reservedIpName] - the provider's word for them
  *   (`RESERVED_IP_NAME`).
  * @param {boolean} params.backendResolved - false when the environment has an S3
@@ -3490,21 +3491,28 @@ export async function settleUnreadableStacks({
     // it is free and creating it again is a no-op, so nothing sweeps it), and
     // they left nothing behind.
     if (backstop && sweptClean) continue;
-    // The label sweep released the stack's labelled IPs, and named any it
-    // could not; only what no sweep reaches is left to the console.
-    const consoleList = reservedIpsSwept
+    // Whether the label sweep came back for this stack: it ran
+    // (reservedIpsSwept) and its listing did not fail (sweepTaggedReservedIps
+    // records a failed one in unsweptReservedIpScopes). When it did, it
+    // released the stack's labelled IPs and named any it could not, so only
+    // what no sweep reaches is left to the console.
+    const labelChecked =
+      reservedIpsSwept && !(results.unsweptReservedIpScopes ?? []).includes(stackEnv);
+    const consoleList = labelChecked
       ? 'firewall, network, SSH key and placement group'
       : `firewall, network, ${reservedIpName}, SSH key and placement group`;
-    const swept = reservedIpsSwept
-      ? ` Its ${reservedIpName}s labelled for this stack were released, and any that weren't are listed in this report.`
-      : '';
+    const ipNote = labelChecked
+      ? ` Its ${reservedIpName}s labelled for this stack, if any, were released; any that weren't are listed in this report.`
+      : reservedIpsSwept
+        ? ` The check for ${reservedIpName}s labelled for this stack failed (this report says why), so one may still be there.`
+        : '';
     results.leaks.unverified({
       resourceClass: 'unreadable-stack',
       resource,
       reason: `its Pulumi state can't be read (${why}), so \`pulumi destroy\` did not run; its stack record was removed without being read`,
       hint: backstop
         ? `Nothing can reach what that state listed through Pulumi any more. Anything the ${providerName} API sweeps could not remove is listed in this report; delete it in the ${providerName} console.`
-        : `Nothing can reach what that state listed through Pulumi any more. Delete the stack's ${consoleList} in the ${providerName} console; their names start with ${projectName}-${stackEnv}.${swept}`,
+        : `Nothing can reach what that state listed through Pulumi any more. Delete the stack's ${consoleList} in the ${providerName} console; their names start with ${projectName}-${stackEnv}.${ipNote}`,
     });
   }
 }
