@@ -203,9 +203,8 @@ _m x
 # once the apiserver serves (applyCloudSecrets), so the token never rides in
 # this user data. Every node boots tainted
 # node.cloudprovider.kubernetes.io/uninitialized until the CCM reconciles it
-# (M3 dossier SS1), and the CCM waits for that Secret, so deployK3s restarts
-# it the moment the Secret exists instead of leaving it to Kubernetes' own
-# retry.
+# (M3 dossier SS1), and the CCM waits for that Secret; the kubelet starts it
+# on its own retry once deployK3s applies it.
 
 # Install the DigitalOcean Cloud Controller Manager, pinned to v0.1.72. The URL
 # is the git tag, so neither the version nor the path can move underneath us.
