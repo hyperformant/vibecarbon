@@ -554,23 +554,40 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
   return dir;
 }
 
+/**
+ * The token check's reads of a server (getServer), with the token it was
+ * made with and how many spawn calls came before it; and how the fake
+ * provider answers one. Default: the server, as a token that sees it gets.
+ */
+let serverReads: { id: string; token: string; at: number }[] = [];
+let serverAnswer: (id: string) => Promise<object> = async (id) => ({ id });
+
 // Stand-in for a provider class — applyK3sManifests reads the
 // PROVIDER_ID_PREFIX/K8S_IMAGE statics off whatever ProviderClass the deploy
-// call site resolved (see providerFor() in lib/providers/index.js), never
-// instantiates it, and (M3 Task 5b) dispatches getK8sWorkerUserData(vars) on
-// it via renderCarbonAutoscalerConfig to render the CA worker-pool
-// cloud-init. K8S_IMAGE (M3 Task 2) and getK8sWorkerUserData mirror
-// HetznerProvider's real statics exactly (wraps worker-init.sh via
-// loadCloudInit/renderScript).
-const FakeHetznerProvider = {
-  PROVIDER_ID_PREFIX: 'hcloud://',
-  K8S_IMAGE: 'ubuntu-26.04',
-  K8S_STORAGE_CLASS: 'hcloud-volumes',
-  async getK8sWorkerUserData(vars: Record<string, unknown>) {
+// call site resolved (see providerFor() in lib/providers/index.js), and
+// (M3 Task 5b) dispatches getK8sWorkerUserData(vars) on it via
+// renderCarbonAutoscalerConfig to render the CA worker-pool cloud-init.
+// K8S_IMAGE (M3 Task 2) and getK8sWorkerUserData mirror HetznerProvider's
+// real statics exactly (wraps worker-init.sh via loadCloudInit/renderScript).
+// It is instantiated with the token only for the check that the token sees
+// this cluster's master (getServer).
+class FakeHetznerProvider {
+  static NAME = 'Hetzner Cloud';
+  static TOKEN_ENV = 'HETZNER_API_TOKEN';
+  static PROVIDER_ID_PREFIX = 'hcloud://';
+  static K8S_IMAGE = 'ubuntu-26.04';
+  static K8S_STORAGE_CLASS = 'hcloud-volumes';
+  static async getK8sWorkerUserData(vars: Record<string, unknown>) {
     const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');
     return renderScript(loadCloudInit('worker-init.sh'), vars);
-  },
-};
+  }
+  constructor(readonly token: string) {}
+  async getServer(id: string) {
+    serverReads.push({ id, token: this.token, at: cmdCalls.length });
+    return serverAnswer(id);
+  }
+}
+const MASTER_ID = '4242';
 
 function baseArgs(projectDir: string) {
   return {
@@ -590,6 +607,7 @@ function baseArgs(projectDir: string) {
     apiToken: 'hetzner-token',
     providerId: 'hetzner',
     ProviderClass: FakeHetznerProvider,
+    masterId: MASTER_ID,
     region: 'nbg1',
     environment: 'e2e',
     minWorkers: 1,
@@ -1257,6 +1275,7 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
     deliverGate = null;
     deliverError = null;
     kubeSystemWorkloadsOut = JSON.stringify({ items: [AUTOSCALER, COREDNS] });
+    serverReads = [];
     installSpawnMock();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -1306,6 +1325,60 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
     const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
     expect(readAt).toBeGreaterThan(-1);
     expect(readAt).toBeLessThan(Number(applied?.seq));
+  });
+
+  it('a token that cannot see this cluster never reaches the Secret: one read, then it refuses', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caSecretOut = caSecret('old-token');
+    serverAnswer = async () => {
+      throw Object.assign(new Error('Failed to get server: server not found'), { status: 404 });
+    };
+    try {
+      const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain(
+        "Your Hetzner Cloud API token can't see e2e's cluster: Hetzner Cloud answered HTTP 404 " +
+          `when this deploy read its master server (${MASTER_ID}) with it, so this deploy ` +
+          'stopped before handing it over, and the cluster still holds the token it had.',
+      );
+    } finally {
+      serverAnswer = async (id) => ({ id });
+    }
+    expect(serverReads.map(({ id, token }) => ({ id, token }))).toEqual([
+      { id: MASTER_ID, token: 'hetzner-token' },
+    ]);
+    expect(stdinCalls.some((c) => c.data.includes('name: carbon-autoscaler-config'))).toBe(false);
+    expect(restarts()).toEqual([]);
+  });
+
+  it('a token it does not hold yet is read against the master before the Secret is applied', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    for (const before of [caSecret('old-token'), '']) {
+      cmdCalls = [];
+      stdinCalls = [];
+      serverReads = [];
+      caSecretOut = before;
+      await applyK3sManifests(baseArgs(makeProjectDir()));
+      const applied = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+      expect(serverReads).toHaveLength(1);
+      expect(serverReads[0].at).toBeGreaterThan(cmdCalls.findIndex(isSecretRead));
+      expect(serverReads[0].at).toBeLessThanOrEqual(Number(applied?.seq));
+    }
+  });
+
+  it('the Secret already holding the token makes no call', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    serverReads = [];
+    caSecretOut = caSecret(baseArgs('').apiToken);
+    serverAnswer = async () => {
+      throw Object.assign(new Error('Failed to get server: server not found'), { status: 404 });
+    };
+    try {
+      await applyK3sManifests(baseArgs(makeProjectDir()));
+    } finally {
+      serverAnswer = async (id) => ({ id });
+    }
+    expect(serverReads).toEqual([]);
   });
 
   it('the same token restarts nothing, whatever config.json became', async () => {
@@ -2160,10 +2233,9 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
   // — same FakeHetznerProvider fixture the rest of this file uses for every
   // other ProviderClass-driven behavior, plus the one static this suite
   // exercises.
-  const FakeDigitalOceanProvider = {
-    ...FakeHetznerProvider,
-    getS3EgressExtraCidrs: (vpcCidr?: string) => (vpcCidr ? [vpcCidr] : []),
-  };
+  class FakeDigitalOceanProvider extends FakeHetznerProvider {
+    static getS3EgressExtraCidrs = (vpcCidr?: string) => (vpcCidr ? [vpcCidr] : []);
+  }
 
   function findS3EgressVpcApply() {
     return stdinCalls.find(

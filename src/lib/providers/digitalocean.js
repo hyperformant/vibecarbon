@@ -1095,8 +1095,12 @@ export class DigitalOceanProvider extends BaseProvider {
   async getServer(serverId) {
     const response = await this.apiRequest(`/droplets/${serverId}`);
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`Failed to get server: ${error.message || 'Unknown error'}`);
+      const error = await response.json().catch(() => ({}));
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the droplet (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${error.message || 'Unknown error'}`), {
+        status: response.status,
+      });
     }
     const { droplet } = await response.json();
     return droplet;

@@ -1081,7 +1081,11 @@ export class LinodeProvider extends BaseProvider {
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       const reason = error.errors?.map((e) => e.reason).join('; ') || 'Unknown error';
-      throw new Error(`Failed to get server: ${reason}`);
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the instance (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${reason}`), {
+        status: response.status,
+      });
     }
     return response.json();
   }

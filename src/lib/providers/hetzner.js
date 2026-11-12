@@ -1253,8 +1253,13 @@ export class HetznerProvider extends BaseProvider {
     const response = await this.apiRequest(`/servers/${serverId}`);
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`Failed to get server: ${error.error?.message || 'Unknown error'}`);
+      const error = await response.json().catch(() => ({}));
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the server (assertTokenSeesCluster).
+      throw Object.assign(
+        new Error(`Failed to get server: ${error.error?.message || 'Unknown error'}`),
+        { status: response.status },
+      );
     }
 
     const data = await response.json();

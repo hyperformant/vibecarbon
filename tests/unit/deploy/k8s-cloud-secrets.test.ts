@@ -22,6 +22,12 @@
  *     --field-manager=vibecarbon-cli -f -`, with every Secret on stdin; the
  *     token never on argv, never in a log line or the error; no token
  *     refuses before kubectl runs, saying what to do next;
+ *   - the token check: a token the Secrets don't hold yet (a rotation, or a
+ *     first deploy) is read against the cluster's master with each k8s
+ *     provider's own getServer, once, before anything is listed or applied;
+ *     a 401, 403 or 404, another server, a failed read or no master id
+ *     refuses with every Secret as it was, naming the variable and where it
+ *     came from; Secrets that already hold the token make no call;
  *   - restarts: each Secret is read before the apply, its values kept as
  *     keyed digests and never printed; a Secret this deploy changes restarts
  *     exactly the workloads that read it (found from their pod templates,
@@ -49,7 +55,8 @@
  * leaves of the retired ones, needs a real apiserver:
  * tests/integration/docker/k8s-cloud-secrets-takeover.test.ts.
  */
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -213,6 +220,8 @@ const {
   takesHostPorts,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
+const { runCommandAsync } = await import('../../../src/lib/command.js');
+const { formatDotenvLine } = await import('../../../src/lib/dotenv.js');
 const { BaseProvider } = await import('../../../src/lib/providers/base.js');
 
 /** Marks every place the token could leak; the rest makes it YAML-hostile. */
@@ -220,6 +229,37 @@ const MARK = 'vc-sentinel-token-7f3a';
 const TOKEN = `${MARK}: "dq" 'sq' #hash \\bs {x}`;
 const NETWORK = '4210337';
 const KUBECONFIG = '/tmp/vc-test-kubeconfig';
+/** The cluster's master server, as the provisioning recorded it. */
+const MASTER_ID = '4242';
+
+/**
+ * The provider's API as the token check reaches it (each provider's own
+ * getServer, through fetch): `apiStatus` for every read, a body with
+ * `apiServerId` as the server on a 200 (each provider's shape at once), its
+ * error otherwise. `apiThrows` makes fetch itself fail. Each read is kept,
+ * with whether it carried the token this deploy hands over.
+ */
+let apiStatus = 200;
+let apiServerId = MASTER_ID;
+let apiThrows: Error | null = null;
+const apiReads: { url: string; bearer: string | null }[] = [];
+async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> {
+  apiReads.push({ url: String(input), bearer: new Headers(init?.headers).get('authorization') });
+  if (apiThrows) throw apiThrows;
+  const id = Number(apiServerId);
+  const body =
+    apiStatus === 200
+      ? { server: { id }, droplet: { id }, id }
+      : {
+          error: { message: 'server not found' },
+          message: 'The resource you were accessing could not be found.',
+          errors: [{ reason: 'Not found' }],
+        };
+  return new Response(JSON.stringify(body), {
+    status: apiStatus,
+    headers: { 'content-type': 'application/json' },
+  });
+}
 
 const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
   P.SUPPORTED_TIERS.includes('k8s'),
@@ -369,6 +409,11 @@ describe('applyCloudSecrets', () => {
     secretOutput = null;
     failWhen = null;
     kubectlFails = null;
+    apiStatus = 200;
+    apiServerId = MASTER_ID;
+    apiThrows = null;
+    apiReads.length = 0;
+    vi.stubGlobal('fetch', fakeFetch);
     logged = [];
     const record = (...args: unknown[]) => {
       logged.push(args.map(String).join(' '));
@@ -387,14 +432,18 @@ describe('applyCloudSecrets', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  /** applyCloudSecrets with TOKEN, or with the token given, undefined included. */
+  /** applyCloudSecrets with TOKEN, or with the token given, undefined included, on prod's cluster. */
   const apply = (Provider: typeof BaseProvider, ...token: [string?]) =>
     applyCloudSecrets({
       env: { ...process.env, KUBECONFIG },
       ProviderClass: Provider,
       token: token.length > 0 ? token[0] : TOKEN,
+      masterId: MASTER_ID,
+      environment: 'prod',
+      operatorEnv: 'prod',
     });
   const kubectl = (verb: string) =>
     calls.filter(({ argv }) => argv.includes(verb)).map(({ argv }) => argv);
@@ -501,6 +550,9 @@ describe('applyCloudSecrets', () => {
         { namespace: 'kube-system', name: 'two', stringData: { token } },
       ];
     }
+    async getServer(id: string) {
+      return { id };
+    }
   }
 
   it.each(K8S_PROVIDERS)(
@@ -592,6 +644,282 @@ describe('applyCloudSecrets', () => {
     await apply(Provider);
     expect(calls).toHaveLength(0);
     expect(logged).toEqual([]);
+  });
+
+  describe('refuses a token that cannot see this cluster, before it reaches the cluster', () => {
+    const OLD = 'vc-sentinel-token-old';
+    /** What each provider's API says for a server the token cannot see, as its getServer words it. */
+    const NOT_FOUND: Record<string, string> = {
+      hetzner: 'Failed to get server: server not found',
+      digitalocean: 'Failed to get server: The resource you were accessing could not be found.',
+      linode: 'Failed to get server: Not found',
+    };
+    /** Each Secret's data as the cluster holds it now. */
+    const held = (Provider: typeof BaseProvider) =>
+      Provider.k8sCloudSecrets({ token: TOKEN }).map(({ namespace, name }) =>
+        cluster.get(`${namespace}/${name}`),
+      );
+    /** The cluster as an earlier deploy left it, with OLD, and one reader per Secret. */
+    const rotation = (Provider: typeof BaseProvider) => {
+      holdAll(Provider, OLD);
+      readerPerSecret(Provider);
+    };
+    /** The read the check made: one, of the master, with the token it checks. */
+    const expectOneRead = (Provider: typeof BaseProvider) => {
+      expect(apiReads).toHaveLength(1);
+      expect(apiReads[0].url.startsWith(`${Provider.API_BASE}/`)).toBe(true);
+      expect(apiReads[0].url.endsWith(`/${MASTER_ID}`)).toBe(true);
+      expect(apiReads[0].bearer).toBe(`Bearer ${TOKEN}`);
+    };
+    const tokenEnv = (Provider: typeof BaseProvider) => Provider.TOKEN_ENV;
+
+    beforeEach(() => {
+      for (const [, P] of K8S_PROVIDERS) vi.stubEnv(tokenEnv(P), TOKEN);
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('every k8s provider reads a server with its own API, not the base class', () => {
+      for (const [, Provider] of K8S_PROVIDERS) {
+        expect(Provider.prototype.getServer).not.toBe(BaseProvider.prototype.getServer);
+      }
+    });
+
+    it.each(K8S_PROVIDERS)(
+      '%s: a token from another project or account refuses, and every Secret stays as it was',
+      async (id, Provider) => {
+        rotation(Provider);
+        const before = structuredClone(held(Provider));
+        apiStatus = 404;
+        const err = await apply(Provider).catch((e: Error) => e);
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toBe(
+          `Your ${Provider.NAME} API token can't see prod's cluster: ${Provider.NAME} answered ` +
+            `HTTP 404 when this deploy read its master server (${MASTER_ID}) with it, so this ` +
+            'deploy stopped before handing it over, and the cluster still holds the token it ' +
+            `had. It came from ${Provider.TOKEN_ENV} in your shell environment, which wins over ` +
+            ".env.local; it may be another project's or account's token. Set " +
+            `${Provider.TOKEN_ENV} to a token that can see prod's cluster's servers, with read ` +
+            'and write access (the cluster uses it to add nodes and attach volumes), then ' +
+            `deploy prod again.\n${NOT_FOUND[id]}`,
+        );
+        expectOneRead(Provider);
+        expect(held(Provider)).toEqual(before);
+        expect(applies()).toEqual([]);
+        expect(kubectl('deployments,statefulsets,daemonsets')).toEqual([]);
+        expect(restarts()).toEqual([]);
+        expect((err as Error).message).not.toContain(MARK);
+        expect(logged.join('\n')).not.toContain(MARK);
+      },
+    );
+
+    it.each(K8S_PROVIDERS)(
+      '%s: a first deploy is checked too: a new Secret is a hand-over',
+      async (_id, Provider) => {
+        apiStatus = 404;
+        await expect(apply(Provider)).rejects.toThrow("API token can't see prod's cluster");
+        expectOneRead(Provider);
+        expect(applies()).toEqual([]);
+        expect(cluster.size).toBe(0);
+      },
+    );
+
+    it.each(K8S_PROVIDERS)(
+      '%s: a token that sees the master is handed over, after one read',
+      async (_id, Provider) => {
+        rotation(Provider);
+        await apply(Provider);
+        expectOneRead(Provider);
+        for (const data of held(Provider)) {
+          for (const value of Object.values(data ?? {})) expect(value).toBe(TOKEN);
+        }
+        expect(restarts()).toHaveLength(1);
+      },
+    );
+
+    it.each(K8S_PROVIDERS)(
+      '%s: Secrets that already hold the token make no call',
+      async (_id, Provider) => {
+        holdAll(Provider, TOKEN);
+        apiStatus = 404;
+        await apply(Provider);
+        expect(apiReads).toEqual([]);
+        expect(applies()).toHaveLength(1);
+      },
+    );
+
+    it.each([401, 403])('HTTP %i refuses the same way', async (status) => {
+      rotation(PROVIDERS.hetzner);
+      apiStatus = status;
+      await expect(apply(PROVIDERS.hetzner)).rejects.toThrow(
+        `Your Hetzner Cloud API token can't see prod's cluster: Hetzner Cloud answered HTTP ${status} `,
+      );
+      expect(applies()).toEqual([]);
+    });
+
+    it('an answer that is not the master refuses', async () => {
+      rotation(PROVIDERS.linode);
+      apiServerId = '9999';
+      await expect(apply(PROVIDERS.linode)).rejects.toThrow(
+        "Your Linode API token can't see prod's cluster: Linode didn't answer with that server " +
+          `when this deploy read its master server (${MASTER_ID}) with it, so this deploy stopped`,
+      );
+      expect(applies()).toEqual([]);
+    });
+
+    it('any other failure refuses too, and says the check could not run', async () => {
+      for (const fail of [
+        () => {
+          apiStatus = 400;
+        },
+        () => {
+          apiThrows = new TypeError('Invalid URL');
+        },
+      ]) {
+        cluster.clear();
+        calls.length = 0;
+        apiReads.length = 0;
+        apiStatus = 200;
+        apiThrows = null;
+        rotation(PROVIDERS.digitalocean);
+        fail();
+        const err = await apply(PROVIDERS.digitalocean).catch((e: Error) => e);
+        expect((err as Error).message).toMatch(
+          new RegExp(
+            "^Couldn't check that your DigitalOcean API token can see prod's cluster: reading " +
+              `its master server \\(${MASTER_ID}\\) with it failed, so this deploy stopped ` +
+              'before handing it over, and the cluster still holds the token it had. Deploy ' +
+              'prod again to check once more.\n',
+          ),
+        );
+        expect(applies()).toEqual([]);
+        expect(held(PROVIDERS.digitalocean)).toEqual([{ 'access-token': OLD }]);
+      }
+    });
+
+    it('names where the token came from: the shell, .env.local, or neither', async () => {
+      const source = async (token = TOKEN) => {
+        cluster.clear();
+        apiStatus = 404;
+        const err = await apply(PROVIDERS.hetzner, token).catch((e: Error) => e);
+        return (err as Error).message.match(/had\. (.*?); it may be/)?.[1];
+      };
+      expect(await source()).toBe(
+        'It came from HETZNER_API_TOKEN in your shell environment, which wins over .env.local',
+      );
+      vi.stubEnv('HETZNER_API_TOKEN', 'vc-sentinel-another-token');
+      expect(await source()).toBe('It is the token you entered for this deploy');
+      vi.stubEnv('HETZNER_API_TOKEN', undefined);
+      expect(await source()).toBe('It is the token you entered for this deploy');
+
+      const { bootstrapOperatorEnv } = await import('../../../src/lib/project.js');
+      const dir = mkdtempSync(join(tmpdir(), 'vc-token-source-'));
+      const plain = 'vc-sentinel-plain-token';
+      try {
+        writeFileSync(join(dir, '.env.local'), `${formatDotenvLine('HETZNER_API_TOKEN', plain)}\n`);
+        delete process.env.HETZNER_API_TOKEN;
+        bootstrapOperatorEnv(dir);
+        expect(await source(plain)).toBe(
+          "It came from HETZNER_API_TOKEN in your project's .env.local",
+        );
+      } finally {
+        bootstrapOperatorEnv(join(dir, 'none'));
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a k8s-ha cluster is named by its stack', async () => {
+      apiStatus = 404;
+      const err = await applyCloudSecrets({
+        env: { ...process.env, KUBECONFIG },
+        ProviderClass: PROVIDERS.hetzner,
+        token: TOKEN,
+        masterId: MASTER_ID,
+        environment: 'prod-standby',
+        operatorEnv: 'prod',
+      }).catch((e: Error) => e);
+      expect((err as Error).message).toMatch(
+        /^Your Hetzner Cloud API token can't see prod's prod-standby cluster: /,
+      );
+      expect((err as Error).message).toContain('then deploy prod again.');
+    });
+
+    describe("without a recorded id, the master node's", () => {
+      let nodeIds: string;
+      beforeEach(() => {
+        nodeIds = '';
+        const fake = vi.mocked(runCommandAsync).getMockImplementation();
+        vi.mocked(runCommandAsync).mockImplementation(async (argv, opts) => {
+          if (argv[1] === 'get' && argv[2] === 'nodes') {
+            calls.push({ argv, env: opts?.env });
+            if (failWhen?.test(argv.slice(1).join(' ')) && kubectlFails) throw kubectlFails;
+            return nodeIds;
+          }
+          return fake?.(argv, opts as never) as never;
+        });
+      });
+      const applyUnrecorded = (Provider: typeof BaseProvider) =>
+        applyCloudSecrets({
+          env: { ...process.env, KUBECONFIG },
+          ProviderClass: Provider,
+          token: TOKEN,
+          environment: 'prod',
+          operatorEnv: 'prod',
+        });
+
+      it.each(K8S_PROVIDERS)(
+        '%s: reads it from the control-plane node, by its provider prefix',
+        async (_id, Provider) => {
+          nodeIds = `${Provider.PROVIDER_ID_PREFIX}${MASTER_ID}`;
+          rotation(Provider);
+          await applyUnrecorded(Provider);
+          expect(kubectl('nodes')).toEqual([
+            [
+              'kubectl',
+              'get',
+              'nodes',
+              '-l',
+              'node-role.kubernetes.io/control-plane',
+              '-o',
+              'jsonpath={.items[*].spec.providerID}',
+            ],
+          ]);
+          expectOneRead(Provider);
+        },
+      );
+
+      it('none there refuses, before any read, and says what to look at', async () => {
+        for (const ids of ['', 'hcloud://1 hcloud://2', 'digitalocean://4242']) {
+          nodeIds = ids;
+          cluster.clear();
+          rotation(PROVIDERS.hetzner);
+          await expect(applyUnrecorded(PROVIDERS.hetzner)).rejects.toThrow(
+            "Couldn't check that your Hetzner Cloud API token can see prod's cluster: this " +
+              "deploy's record has no id for its master server (vibecarbon 0.50 and older " +
+              "didn't keep one), and the master node names none either, which the cluster's " +
+              'cloud controller sets once it runs. So this deploy stopped before handing the ' +
+              'token over, and the cluster still holds the one it had. See whether the ' +
+              `controller runs with \`KUBECONFIG='${KUBECONFIG}' kubectl -n kube-system get pods\`.`,
+          );
+        }
+        expect(apiReads).toEqual([]);
+        expect(applies()).toEqual([]);
+      });
+
+      it('a node read that fails refuses', async () => {
+        failWhen = /^get nodes/;
+        kubectlFails = new Error('Unable to connect to the server');
+        rotation(PROVIDERS.hetzner);
+        await expect(applyUnrecorded(PROVIDERS.hetzner)).rejects.toThrow(
+          "Couldn't check that your Hetzner Cloud API token can see prod's cluster: reading " +
+            'which server its master is from the cluster failed, so this deploy stopped before ' +
+            'handing it over, and the cluster still holds the token it had.',
+        );
+        expect(apiReads).toEqual([]);
+        expect(applies()).toEqual([]);
+      });
+    });
   });
 
   describe('restarts what reads a changed Secret, and nothing else', () => {
@@ -1676,9 +2004,17 @@ describe('deployK3s hands the token over on every deploy', () => {
 
   it('applyCloudSecrets runs in its own span with the deploy token and this cluster', () => {
     const { text } = span('cloudSecrets');
-    expect(text).toContain(
-      'applyCloudSecrets({ env: kubeEnv, ProviderClass: Provider, token: options.apiToken })',
+    expect(text.replace(/\s+/g, ' ')).toContain(
+      'applyCloudSecrets({ env: kubeEnv, ProviderClass: Provider, token: options.apiToken, ' +
+        'masterId: infraOutputs.masterId, environment: options.environment, ' +
+        'operatorEnv: options.operatorEnv ?? options.environment, })',
     );
+  });
+
+  it("applyK3sManifests gets this cluster's master id too, for the autoscaler's Secret", () => {
+    const at = BODY.indexOf('applyK3sManifests({');
+    const call = BODY.slice(at, BODY.indexOf('\n      }),\n', at));
+    expect(call).toContain('masterId: infraOutputs.masterId,');
   });
 
   it('after the control-plane gate and the marker read, before the k3s-apply gate', () => {

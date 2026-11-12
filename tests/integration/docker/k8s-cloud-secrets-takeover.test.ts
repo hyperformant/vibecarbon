@@ -303,11 +303,21 @@ describe.skipIf(SKIPPED)(
         }
       }, LONG);
 
+      // Its API answered here: every token sees the master. The check that a
+      // token sees the cluster is the unit tests' (k8s-cloud-secrets.test.ts);
+      // this file reaches no provider.
+      const Seeing = class extends Provider {
+        async getServer(id: string) {
+          return { id };
+        }
+      };
       const hand = (token: string) =>
         applyCloudSecrets({
           env: { ...process.env, KUBECONFIG: kubeconfig },
-          ProviderClass: Provider,
+          ProviderClass: Seeing,
           token,
+          masterId: '4242',
+          environment: 'test',
         });
       const expected = (token: string) => Provider.k8sCloudSecrets({ token });
       /** Whether the cluster holds a Secret. */

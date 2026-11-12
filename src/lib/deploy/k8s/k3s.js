@@ -180,6 +180,7 @@ import {
 import { recordRetiredReservedIps } from './retired-reserved-ip.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
 import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
+import { assertTokenSeesCluster } from './token-sees-cluster.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2471,6 +2472,65 @@ async function removeRetired({ env, ProviderClass, whole, keyed }) {
 }
 
 /**
+ * The provider's id for the cluster's master server as the master node
+ * carries it: its spec.providerID less ProviderClass.PROVIDER_ID_PREFIX,
+ * which the cloud controller sets when it first initializes the node. For a
+ * deploy whose record predates the masterId output (vibecarbon 0.50 and
+ * older); undefined unless exactly one control-plane node names one.
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider}} args
+ */
+async function masterNodeServerId({ env, ProviderClass }) {
+  const out = await runKubectlWithRetry(
+    [
+      'get',
+      'nodes',
+      '-l',
+      'node-role.kubernetes.io/control-plane',
+      '-o',
+      'jsonpath={.items[*].spec.providerID}',
+    ],
+    { env, captureStdout: true, description: "read the master node's server id" },
+  );
+  const prefix = ProviderClass.PROVIDER_ID_PREFIX;
+  const ids = String(out ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter((id) => prefix && id.startsWith(prefix) && id.length > prefix.length)
+    .map((id) => id.slice(prefix.length));
+  return ids.length === 1 ? ids[0] : undefined;
+}
+
+/**
+ * Refuse a token that can't see this cluster before it reaches a Secret
+ * (assertTokenSeesCluster): one read with it of the cluster's master, by
+ * the id the provisioning recorded (`masterId`, the k3s-infra step's
+ * output) or, without one, the id the master node carries
+ * (masterNodeServerId). Its callers run it only when a Secret that carries
+ * the token is about to be created or to change.
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string}} args
+ */
+function assertTokenSeesThisCluster({
+  env,
+  ProviderClass,
+  token,
+  masterId,
+  environment,
+  operatorEnv,
+}) {
+  return assertTokenSeesCluster({
+    ProviderClass,
+    token,
+    masterId,
+    readMasterNodeId: () => masterNodeServerId({ env, ProviderClass }),
+    operatorEnv: operatorEnv ?? environment ?? 'this environment',
+    stackName: environment,
+    kubeconfig: env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : undefined,
+  });
+}
+
+/**
  * Hand the provider API token to the cluster: the Secrets its cloud
  * controller and CSI driver read it from (ProviderClass.k8sCloudSecrets), in
  * one server-side apply from this machine. deployK3s runs it on every deploy
@@ -2512,14 +2572,27 @@ async function removeRetired({ env, ProviderClass, whole, keyed }) {
  * (dropLastApplied): once, on the deploy that takes the Secret over, and
  * never on one that finds none.
  *
+ * A token the Secrets don't hold yet (one is new, or now gets other
+ * values) is first read against the cluster's master
+ * (assertTokenSeesThisCluster): a token that can't see it, or a read that
+ * fails, refuses before anything is listed or applied. A deploy whose
+ * Secrets already hold the token makes no call.
+ *
  * The token travels on kubectl's stdin only: never argv, which a process
  * listing and a failed command's message show, never a log line, never a
  * file. No token refuses before kubectl runs: applying an empty one would
  * take a working one away from the controllers.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string}} args
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string}} args
  */
-export async function applyCloudSecrets({ env, ProviderClass, token }) {
+export async function applyCloudSecrets({
+  env,
+  ProviderClass,
+  token,
+  masterId,
+  environment,
+  operatorEnv,
+}) {
   const secrets = ProviderClass.k8sCloudSecrets({ token });
   if (secrets.length === 0) return;
   if (typeof token !== 'string' || token === '') {
@@ -2566,6 +2639,16 @@ export async function applyCloudSecrets({ env, ProviderClass, token }) {
     if (!secretDataChanged(live[i], stringData)) return;
     changed.set(namespace, [...(changed.get(namespace) ?? []), name]);
   });
+  if (changed.size > 0 || live.some((found) => found === null)) {
+    await assertTokenSeesThisCluster({
+      env,
+      ProviderClass,
+      token,
+      masterId,
+      environment,
+      operatorEnv,
+    });
+  }
   const readers = [];
   for (const [namespace, secretNames] of changed) {
     readers.push(await findSecretReaders({ env, namespace, secretNames }));
@@ -4265,6 +4348,10 @@ export async function applyK3sManifests({
   // The environment as the operator names it (HA clusters deploy under their
   // stack names), for the commands an error prints.
   operatorEnv,
+  // The provider's id for this cluster's master server (the k3s-infra step's
+  // masterId output): a token the autoscaler's Secret doesn't hold yet is
+  // read against it first (assertTokenSeesThisCluster).
+  masterId,
   // Where this registers what it runs alongside its main chain (the CA
   // rollout), so deployK3s can stop and settle it when the deploy fails.
   inFlight = {},
@@ -4469,6 +4556,19 @@ export async function applyK3sManifests({
         name: 'carbon-autoscaler-config',
         keys: ['token'],
       });
+      // A token it doesn't hold yet is read against this cluster's master
+      // first, so one that can't see it never reaches the autoscaler, which
+      // adds and removes servers with it.
+      if (caTokenBefore === null || secretDataChanged(caTokenBefore, { token: apiToken })) {
+        await assertTokenSeesThisCluster({
+          env,
+          ProviderClass,
+          token: apiToken,
+          masterId,
+          environment,
+          operatorEnv,
+        });
+      }
       const caReaders = secretDataChanged(caTokenBefore, { token: apiToken })
         ? await findSecretReaders({
             env,
@@ -6250,10 +6350,19 @@ async function deployK3sSteps(options, inFlight) {
     //     skipped k3s-apply, `deploy -restore` and the k8s-ha standby hand it
     //     over too. A changed token restarts the controllers that read it;
     //     a new one restarts nothing (the kubelet starts what waited for it).
-    //     After the marker read, so a refused deploy changes nothing on the
-    //     cluster.
+    //     A token the Secrets don't hold yet is first read against the
+    //     master this provisioning recorded, and one that can't see it
+    //     refuses here. After the marker read, so a refused deploy changes
+    //     nothing on the cluster.
     await perfAsync(`deploy.${perfPrefix}.cloudSecrets`, () =>
-      applyCloudSecrets({ env: kubeEnv, ProviderClass: Provider, token: options.apiToken }),
+      applyCloudSecrets({
+        env: kubeEnv,
+        ProviderClass: Provider,
+        token: options.apiToken,
+        masterId: infraOutputs.masterId,
+        environment: options.environment,
+        operatorEnv: options.operatorEnv ?? options.environment,
+      }),
     );
   }
 
@@ -6334,6 +6443,7 @@ async function deployK3sSteps(options, inFlight) {
         backupConfig: options.backupConfig,
         restore: options.restore,
         operatorEnv: options.operatorEnv ?? options.environment,
+        masterId: infraOutputs.masterId,
         // Phase 5: cluster-autoscaler wiring. apiToken (the Hetzner Cloud
         // token CCM/CSI/Pulumi already use) flows in here under its own
         // name to make the CA Secret apply unambiguous; the k3sToken

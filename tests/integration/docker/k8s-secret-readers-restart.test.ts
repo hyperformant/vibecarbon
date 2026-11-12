@@ -88,15 +88,32 @@ const waitFor = (what: string, probe: () => boolean, timeoutMs: number) => {
   throw new Error(`timed out waiting for ${what}`);
 };
 
-/** A provider whose token goes into one Secret in NS, named `secret`. */
-const providerFor = (secret: string) =>
-  class extends BaseProvider {
-    static NAME = 'Test Cloud';
-    static TOKEN_ENV = 'VCTEST_TOKEN';
-    static k8sCloudSecrets({ token }: { token: string }) {
-      return [{ namespace: NS, name: secret, stringData: { token } }];
+/** The cluster's master, as the provisioning recorded it. */
+const MASTER_ID = '4242';
+
+/**
+ * `Provider` with its API answered here: every token sees the master. The
+ * check that a token sees the cluster (assertTokenSeesCluster) is the unit
+ * tests'; this file reaches no provider.
+ */
+const seeing = <P extends typeof BaseProvider>(Provider: P) =>
+  class extends Provider {
+    async getServer(id: string) {
+      return { id };
     }
   };
+
+/** A provider whose token goes into one Secret in NS, named `secret`. */
+const providerFor = (secret: string) =>
+  seeing(
+    class extends BaseProvider {
+      static NAME = 'Test Cloud';
+      static TOKEN_ENV = 'VCTEST_TOKEN';
+      static k8sCloudSecrets({ token }: { token: string }) {
+        return [{ namespace: NS, name: secret, stringData: { token } }];
+      }
+    },
+  );
 
 type Pod = {
   metadata: { name: string; uid: string; deletionTimestamp?: string };
@@ -120,7 +137,13 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
   const workload = (id: string, ns = NS) => JSON.parse(kube(['-n', ns, 'get', id, '-o', 'json']));
   const template = (id: string) => workload(id).spec.template;
   const handTo = (ProviderClass: typeof BaseProvider, token: string) =>
-    applyCloudSecrets({ env: { ...process.env, KUBECONFIG: kubeconfig }, ProviderClass, token });
+    applyCloudSecrets({
+      env: { ...process.env, KUBECONFIG: kubeconfig },
+      ProviderClass,
+      token,
+      masterId: MASTER_ID,
+      environment: 'test',
+    });
   const hand = (secret: string, token: string) => handTo(providerFor(secret), token);
 
   /**
@@ -477,7 +500,7 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
           },
         },
       };
-      const DigitalOcean = PROVIDERS.digitalocean;
+      const DigitalOcean = seeing(PROVIDERS.digitalocean);
       await handTo(DigitalOcean, TOKEN_A);
       applyJson([standIn]);
       const ns = ccm?.metadata.namespace;
