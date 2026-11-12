@@ -1,14 +1,14 @@
 /**
  * GitHub Integration & Workflows
- * Logic for repository setup, environment secrets, and CI/CD generation
+ * Logic for repository setup, branches and pushes, and watching a deploy's
+ * workflow run
  */
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
-import { c } from '../colors.js';
-import { checkDependency, runCommand } from '../command.js';
+import { runCommand } from '../command.js';
 import { buildGitAddArgv } from '../project.js';
 
 /**
@@ -234,136 +234,6 @@ export async function monitorDeployment(_repoName, timeout = 600000) {
 
   s.stop('Deployment monitoring timed out');
   return { success: false, timedOut: true };
-}
-
-/**
- * Orchestrate GitHub integration setup
- * @param {object} projectConfig
- * @param {string} _branchName
- * @param {object} options
- * @returns {Promise<object>}
- */
-export async function setupGitHubIntegration(projectConfig, _branchName, options = {}) {
-  const { defaultCreate = true, isPublic = false, skipPrompts = false } = options;
-
-  // Check if gh CLI is available and authenticated
-  if (!checkDependency('gh', 'GitHub CLI')) {
-    p.log.warn('GitHub CLI (gh) not installed - skipping automatic GitHub setup');
-    return { skipped: true, reason: 'gh_not_installed' };
-  }
-
-  if (!checkGitHubAuth()) {
-    p.log.warn('GitHub CLI not authenticated');
-    p.log.info('Run: gh auth login');
-    return { skipped: true, reason: 'not_authenticated' };
-  }
-
-  // Check for existing repo
-  const existingRepo = checkExistingRepo();
-  const existingRemote = checkGitRemote();
-
-  if (existingRepo) {
-    p.log.info(`Using existing repository: ${c.bold(existingRepo)}`);
-    return { existing: true, repoName: existingRepo };
-  }
-
-  if (existingRemote && !existingRemote.includes('github.com')) {
-    p.log.warn(`Git remote points to non-GitHub URL: ${existingRemote}`);
-    if (!skipPrompts) {
-      const replace = await p.confirm({
-        message: 'Replace with GitHub remote?',
-        initialValue: false,
-      });
-      if (!replace) {
-        return { skipped: true, reason: 'non_github_remote' };
-      }
-      runCommand('git remote remove origin', { silent: true, ignoreError: true, cleanEnv: true });
-    } else {
-      return { skipped: true, reason: 'non_github_remote' };
-    }
-  }
-
-  // Prompt for repo creation
-  let shouldCreate = defaultCreate;
-  if (!skipPrompts) {
-    shouldCreate = await p.confirm({
-      message: 'Create GitHub repository for auto deployment (CI/CD)?',
-      initialValue: true,
-    });
-  }
-
-  if (!shouldCreate) {
-    return { skipped: true, reason: 'user_declined' };
-  }
-
-  // Ask about visibility
-  let repoIsPublic = isPublic;
-  if (!skipPrompts && shouldCreate) {
-    const visibility = await p.select({
-      message: 'Repository visibility',
-      options: [
-        { value: 'private', label: 'Private', hint: 'recommended' },
-        { value: 'public', label: 'Public' },
-      ],
-      initialValue: 'private',
-    });
-    repoIsPublic = visibility === 'public';
-  }
-
-  // Create the repository
-  const result = await createGitHubRepository(projectConfig.projectName, {
-    isPublic: repoIsPublic,
-  });
-
-  if (result.success) {
-    return { created: true, repoName: projectConfig.projectName, url: result.url };
-  }
-
-  p.log.error(`Failed to create repository: ${result.error}`);
-  return { skipped: true, reason: 'creation_failed', error: result.error };
-}
-
-/**
- * Setup GitHub environment and secrets
- * @param {string} _projectName
- * @param {string} envName
- * @param {object} secrets
- * @returns {Promise<boolean>}
- */
-export async function setupGitHubEnvironment(_projectName, envName, secrets) {
-  const s = spinner();
-  s.start(`Setting up GitHub environment: ${envName}`);
-
-  try {
-    const repoInfo = runCommand('gh repo view --json nameWithOwner -q .nameWithOwner', {
-      cleanEnv: true,
-      silent: true,
-    }).trim();
-
-    // Create environment
-    runCommand(['gh', 'api', `repos/${repoInfo}/environments/${envName}`, '-X', 'PUT'], {
-      cleanEnv: true,
-      silent: true,
-      ignoreError: true,
-    });
-
-    // Set secrets for the environment
-    for (const [key, value] of Object.entries(secrets)) {
-      if (value && typeof value === 'string' && value.length > 0) {
-        runCommand(['gh', 'secret', 'set', key, '--env', envName, '--body', value], {
-          cleanEnv: true,
-          silent: true,
-          ignoreError: true,
-        });
-      }
-    }
-
-    s.stop(`GitHub environment '${envName}' configured`);
-    return true;
-  } catch (error) {
-    s.stop(`Failed to setup GitHub environment: ${error.message}`);
-    return false;
-  }
 }
 
 /**

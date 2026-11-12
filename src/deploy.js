@@ -18,8 +18,6 @@ import {
   createGitHubRepository,
   getGitHubUsername,
   monitorDeployment,
-  setupGitHubEnvironment,
-  setupGitHubIntegration,
 } from './lib/deploy/github.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
 import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
@@ -492,8 +490,6 @@ export {
   runCommand,
   SPEC,
   sanitizeBucketName,
-  setupGitHubEnvironment,
-  setupGitHubIntegration,
   VERSION,
   waitForSSH,
 };
