@@ -11,6 +11,8 @@
  * mocking upStack itself (via a throwing sentinel) to both capture the call
  * args and stop the test before any real provisioning/SSH work.
  */
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
@@ -19,10 +21,11 @@ const upStackMock = vi.fn(async () => {
 });
 
 // The SSH wait and the host-key seed, recorded: a test that gets past the up
-// reaches them.
+// reaches them. Each answers as the real one does: true when the server
+// answered or the scan landed, false when it ran out (neither throws).
 const { waitForSSHMock, seedKnownHostsMock } = vi.hoisted(() => ({
-  waitForSSHMock: vi.fn(async () => {}),
-  seedKnownHostsMock: vi.fn(async () => {}),
+  waitForSSHMock: vi.fn(async (_ip: string, _key: string, _attempts: number) => true),
+  seedKnownHostsMock: vi.fn(async (_khPath: string, _ip: string) => true),
 }));
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -64,7 +67,7 @@ const { EFFECTS, composeServerRecord } = await import('../../../src/lib/deploy/e
 // @ts-expect-error: JS module without types
 const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { recordStateSeal, stateSealRecorded } = await import('../../../src/lib/iac/state-seal.js');
-const { knownHostsPathForKey } = await import('../../../src/lib/host-keys.js');
+const { hasPinnedHostKey, knownHostsPathForKey } = await import('../../../src/lib/host-keys.js');
 
 /** A ledger that holds nothing: these tests stop at or before the up. */
 const noLedger = () => ({ invalidateStep: () => {} });
@@ -135,7 +138,9 @@ describe('provisionServer output gate', () => {
 
 describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
   const IP = '203.0.113.10';
-  const KEY = '/tmp/never-created';
+  // The deploy key in a project's own .vibecarbon/, so its known_hosts_production
+  // beside it is this test's to read.
+  let KEY = '';
   let cwd: ReturnType<typeof vi.spyOn> | undefined;
   afterEach(() => {
     cwd?.mockRestore();
@@ -146,7 +151,9 @@ describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
 
   /** A real ledger in a temp project dir, as the deploy's own. */
   function ledger() {
-    cwd = vi.spyOn(process, 'cwd').mockReturnValue(createTempDir('provision-ledger-'));
+    const dir = createTempDir('provision-ledger-');
+    KEY = join(dir, 'deploy_key_production');
+    cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
     return new StateTracker('testapp', 'production');
   }
 
@@ -168,6 +175,7 @@ describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
   });
 
   it("hands upStack the deploy's ledger, where the seal records its marker", async () => {
+    KEY = '/tmp/never-created';
     const ctx = warmCtx(noLedger());
     upStackMock.mockRejectedValueOnce(new Error('STOP_AFTER_UPSTACK_CALL'));
     await expect(EFFECTS.provisionServer(ctx)).rejects.toThrow('STOP_AFTER_UPSTACK_CALL');
@@ -210,17 +218,118 @@ describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
     expect(state.shouldSkip('compose-setup-files', { serverIp: IP })).toBe(false);
   });
 
-  it('a run that fails after its up forgets the marker that up recorded, so the next deploy provisions again', async () => {
-    const state = ledger();
+  /** An up whose seal records the marker, as upStack's does, and returns server `serverId` at IP. */
+  const sealingUp = (state: unknown, serverId: string) =>
     upStackMock.mockImplementationOnce((async () => {
-      // The seal inside the up recorded the marker.
       recordStateSeal(state, 'production');
-      return { outputs: { serverIp: IP, serverId: '9999', firewallId: 'fw-2' } };
+      return { outputs: { serverIp: IP, serverId, firewallId: 'fw-1' } };
     }) as never);
-    waitForSSHMock.mockRejectedValueOnce(new Error('SSH never came up'));
 
-    await expect(EFFECTS.provisionServer(warmCtx(state))).rejects.toThrow('SSH never came up');
+  it('a run whose up throws forgets the marker, so the next deploy provisions again', async () => {
+    const state = ledger();
+    recordStateSeal(state, 'production');
+    upStackMock.mockRejectedValueOnce(new Error('the up failed'));
+
+    await expect(EFFECTS.provisionServer(warmCtx(state))).rejects.toThrow('the up failed');
 
     expect(stateSealRecorded(state, 'production')).toBe(false);
+  });
+
+  it('an SSH wait that runs out (waitForSSH answers false) counts as a failed run: the marker the up recorded is forgotten', async () => {
+    const state = ledger();
+    sealingUp(state, '9999');
+    waitForSSHMock.mockResolvedValueOnce(false);
+
+    await EFFECTS.provisionServer(warmCtx(state));
+
+    expect(waitForSSHMock).toHaveBeenCalledTimes(1);
+    expect(stateSealRecorded(state, 'production')).toBe(false);
+  });
+
+  it('a host-key scan that finds nothing (seedKnownHosts answers false) counts as a failed run: the marker is forgotten', async () => {
+    const state = ledger();
+    sealingUp(state, '9999');
+    seedKnownHostsMock.mockResolvedValueOnce(false);
+
+    await EFFECTS.provisionServer(warmCtx(state));
+
+    expect(seedKnownHostsMock).toHaveBeenCalledTimes(1);
+    expect(stateSealRecorded(state, 'production')).toBe(false);
+  });
+
+  it('SSH answered and the scan landed: the marker the up recorded stays', async () => {
+    const state = ledger();
+    sealingUp(state, '9999');
+
+    await EFFECTS.provisionServer(warmCtx(state));
+
+    expect(stateSealRecorded(state, 'production')).toBe(true);
+  });
+
+  /** known_hosts as the last deploy pinned server 4242 at IP, beside another host's key. */
+  const PINNED = `${IP} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLDKEY4242`;
+  const OTHER = '198.51.100.7 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOTHERHOST';
+  const pinFor4242 = () => {
+    writeFileSync(knownHostsPathForKey(KEY), `${OTHER}\n${PINNED}\n`, { mode: 0o600 });
+  };
+  const knownHosts = () => readFileSync(knownHostsPathForKey(KEY), 'utf8');
+
+  it('the same server id at the same IP is the same machine: its pinned key stays, SSH checks against it, no keyscan', async () => {
+    const state = ledger();
+    pinFor4242();
+    sealingUp(state, '4242');
+    let pinnedAtWait: string | undefined;
+    waitForSSHMock.mockImplementationOnce(async () => {
+      pinnedAtWait = knownHosts();
+      return true;
+    });
+
+    await EFFECTS.provisionServer(warmCtx(state));
+
+    expect(waitForSSHMock).toHaveBeenCalledWith(IP, KEY, 30);
+    expect(pinnedAtWait).toContain(PINNED);
+    expect(seedKnownHostsMock).not.toHaveBeenCalled();
+    expect(knownHosts()).toBe(`${OTHER}\n${PINNED}\n`);
+    expect(stateSealRecorded(state, 'production')).toBe(true);
+  });
+
+  it('a new server id at the same IP is a new machine: the old key is dropped before the wait, and the new one scanned after', async () => {
+    const state = ledger();
+    pinFor4242();
+    sealingUp(state, '9999');
+    let pinnedAtWait: string | undefined;
+    waitForSSHMock.mockImplementationOnce(async () => {
+      pinnedAtWait = knownHosts();
+      return true;
+    });
+
+    await EFFECTS.provisionServer(warmCtx(state));
+
+    // accept-new trusts the new machine on first connect, as on a fresh
+    // provision, instead of refusing it on the old machine's key.
+    expect(pinnedAtWait).not.toContain(PINNED);
+    expect(pinnedAtWait).toContain(OTHER);
+    expect(seedKnownHostsMock).toHaveBeenCalledWith(knownHostsPathForKey(KEY), IP);
+  });
+
+  it('the same server id with no key pinned for its IP: scanned, as a first pin', async () => {
+    const state = ledger();
+    sealingUp(state, '4242');
+
+    expect(hasPinnedHostKey(knownHostsPathForKey(KEY), IP)).toBe(false);
+
+    await EFFECTS.provisionServer(warmCtx(state));
+
+    expect(seedKnownHostsMock).toHaveBeenCalledWith(knownHostsPathForKey(KEY), IP);
+  });
+
+  it('an env record without a server id: a new machine as far as anyone can tell, so scanned', async () => {
+    const state = ledger();
+    pinFor4242();
+    sealingUp(state, '4242');
+
+    await EFFECTS.provisionServer({ ...warmCtx(state), providerServerId: null });
+
+    expect(seedKnownHostsMock).toHaveBeenCalledWith(knownHostsPathForKey(KEY), IP);
   });
 });

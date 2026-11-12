@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -12,11 +13,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  forgetHostKey,
+  hasPinnedHostKey,
   knownHostsPath,
   knownHostsPathForKey,
   pinHostKey,
   seedKnownHosts,
 } from '../../../src/lib/host-keys.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 describe('knownHostsPath', () => {
   it('returns .vibecarbon/known_hosts_<env> under cwd', () => {
@@ -192,5 +196,94 @@ describe('seedKnownHosts', () => {
     const ok = await seedKnownHosts(khPath, '1.2.3.4', { keyscan, sleep });
     expect(ok).toBe(true);
     expect(keyscan).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Lines `ssh-keygen -H` wrote (OpenSSH 9.6) for 203.0.113.10 and 198.51.100.7,
+// as ssh's own accept-new connect writes them wherever HashKnownHosts is on
+// (Debian and Ubuntu's /etc/ssh/ssh_config). The keys are made up.
+const HASHED_10 =
+  '|1|IteXkElvCaKX4nzrM+veZZBce5E=|JbGLWcMhDFcRf0FvCjoG70bDP+A= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEKEYFORTESTONLYxxxxxxxxxxxxxxxxxxxxxxxx';
+const HASHED_7 =
+  '|1|byw+8vQD3k1n0QIqNO+OvDhpl3A=|VY8RIy2AuyUc4q2FYE4evIwlpoE= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOTHERHOSTKEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+
+const hasSshKeygen = (() => {
+  try {
+    execFileSync('ssh-keygen', ['-?'], { stdio: 'ignore' });
+    return true;
+  } catch (err) {
+    // `-?` exits 1 with its usage; only a missing binary is ENOENT.
+    return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+})();
+
+describe('hasPinnedHostKey and forgetHostKey', () => {
+  let tmp: string;
+  let khPath: string;
+
+  beforeEach(() => {
+    tmp = createTempDir('vb-pin-');
+    khPath = join(tmp, '.vibecarbon', 'known_hosts_prod');
+    mkdirSync(join(tmp, '.vibecarbon'), { recursive: true, mode: 0o700 });
+  });
+
+  afterEach(() => {
+    cleanupTempDir(tmp);
+  });
+
+  it('no file, or no line for the IP: nothing pinned', () => {
+    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
+    writeFileSync(khPath, '198.51.100.7 ssh-ed25519 OTHER\n203.0.113.100 ssh-ed25519 NEAR\n');
+    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
+  });
+
+  it('a plain line pins its IP, alone or among several hosts on one line', () => {
+    writeFileSync(khPath, '198.51.100.7,203.0.113.10 ssh-ed25519 KEY\n');
+    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(true);
+    expect(hasPinnedHostKey(khPath, '198.51.100.7')).toBe(true);
+  });
+
+  it('a hashed line pins only the IP it was hashed from', () => {
+    writeFileSync(khPath, `${HASHED_10}\n`);
+    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(true);
+    expect(hasPinnedHostKey(khPath, '198.51.100.7')).toBe(false);
+    writeFileSync(khPath, '|1|broken ssh-ed25519 KEY\n');
+    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
+  });
+
+  it.runIf(hasSshKeygen)("matches a line this machine's ssh-keygen hashes now", () => {
+    writeFileSync(khPath, '192.0.2.44 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIVEKEY\n');
+    execFileSync('ssh-keygen', ['-H', '-f', khPath], { stdio: 'ignore' });
+    expect(readFileSync(khPath, 'utf-8')).toMatch(/^\|1\|/);
+    expect(hasPinnedHostKey(khPath, '192.0.2.44')).toBe(true);
+    expect(hasPinnedHostKey(khPath, '192.0.2.45')).toBe(false);
+  });
+
+  it('forgetHostKey drops every key for the IP, plain or hashed, and keeps the other hosts', () => {
+    writeFileSync(
+      khPath,
+      `${HASHED_10}\n203.0.113.10 ssh-ed25519 PLAIN\n${HASHED_7}\n198.51.100.7 ssh-ed25519 OTHER\n`,
+    );
+    forgetHostKey(khPath, '203.0.113.10');
+    expect(readFileSync(khPath, 'utf-8')).toBe(`${HASHED_7}\n198.51.100.7 ssh-ed25519 OTHER\n`);
+    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
+    expect(statSync(khPath).mode & 0o077).toBe(0);
+  });
+
+  it('forgetHostKey leaves a file without that IP, or no file, as it is', () => {
+    forgetHostKey(khPath, '203.0.113.10');
+    expect(existsSync(khPath)).toBe(false);
+    writeFileSync(khPath, '198.51.100.7 ssh-ed25519 OTHER\n');
+    chmodSync(khPath, 0o644);
+    forgetHostKey(khPath, '203.0.113.10');
+    // Not rewritten: the mode a rewrite enforces is not applied.
+    expect(statSync(khPath).mode & 0o777).toBe(0o644);
+  });
+
+  it('seedKnownHosts drops the hashed line ssh added for the IP too, so the re-pin replaces every old key', async () => {
+    writeFileSync(khPath, `${HASHED_10}\n${HASHED_7}\n`);
+    const keyscan = vi.fn().mockResolvedValue('203.0.113.10 ssh-ed25519 FRESH\n');
+    await seedKnownHosts(khPath, '203.0.113.10', { keyscan });
+    expect(readFileSync(khPath, 'utf-8')).toBe(`${HASHED_7}\n203.0.113.10 ssh-ed25519 FRESH\n`);
   });
 });

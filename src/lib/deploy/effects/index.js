@@ -16,7 +16,12 @@ import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { backupStorageConfig } from '../../backups-bucket.js';
 import { spinner } from '../../cli/progress.js';
-import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import {
+  forgetHostKey,
+  hasPinnedHostKey,
+  knownHostsPathForKey,
+  seedKnownHosts,
+} from '../../host-keys.js';
 import { forgetStateSeal } from '../../iac/state-seal.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
@@ -54,10 +59,20 @@ const SERVER_SETUP_STEPS = Object.freeze([
  * Every run takes the whole path, a known server included: an up can put a
  * new server at the IP the env records (Scaleway's flexible IP outlives its
  * server, Hetzner reissues addresses), so the same IP proves nothing. The
- * SSH wait, the host-key re-seed, the record persist-provisioned-server
- * writes and the server's own setup steps all run again. A run that fails
- * after its up forgets the seal marker that up recorded, so the next deploy
- * provisions again instead of skipping to a server it never reached.
+ * SSH wait, the record persist-provisioned-server writes and the server's
+ * own setup steps all run again. A run that fails after its up forgets the
+ * seal marker that up recorded, so the next deploy provisions again instead
+ * of skipping to a server it never reached: a throw, an SSH wait that ran
+ * out (waitForSSH answers false) and a host-key scan that found nothing
+ * (seedKnownHosts answers false) all count.
+ *
+ * The host key is re-pinned only for a new machine: the up's server id is
+ * the provider's word for which machine answers at the IP, the IP isn't. The
+ * same id as the env records keeps its pinned key, and SSH checks against
+ * it, so a stack that runs this every deploy (one that never seals) never
+ * re-pins by keyscan. A new id, or no key pinned for the IP, drops the old
+ * key before the wait (accept-new would refuse the new machine, not trust
+ * it) and scans the new one after, as a fresh provision does.
  */
 async function provisionServer(ctx) {
   const {
@@ -93,6 +108,8 @@ async function provisionServer(ctx) {
   // the line cleanly instead of corrupting it.
   const s = spinner();
   s.start(`Provisioning VPS in ${region}...`);
+  const khPath = knownHostsPathForKey(sshKeyPath);
+  let reseed = true;
   try {
     const result = await perfAsync('deploy.iac.upStack', () =>
       upStack(environment, program, {
@@ -128,7 +145,14 @@ async function provisionServer(ctx) {
     // records it before anything points DNS at it.
     ctx.serverProvisioned = true;
     for (const step of SERVER_SETUP_STEPS) ctx.state.invalidateStep(step);
+    const recordedServerId = ctx.providerServerId;
     ctx.providerServerId = result.outputs.serverId || null;
+    const sameMachine =
+      recordedServerId != null &&
+      ctx.providerServerId != null &&
+      String(recordedServerId) === String(ctx.providerServerId);
+    if (!sameMachine) forgetHostKey(khPath, ctx.serverIp);
+    reseed = !sameMachine || !hasPinnedHostKey(khPath, ctx.serverIp);
     ctx.providerServerName = `${projectConfig.projectName}-${environment}`;
     // Both compose programs export firewallId; nothing used to read it, so
     // `vibecarbon scale` built its blue-green replacement with `firewalls: []`
@@ -138,18 +162,23 @@ async function provisionServer(ctx) {
     ctx.providerFirewallId = result.outputs.firewallId || null;
     const { waitForSSH } = await import('../compose/index.js');
     s.message(`Waiting for SSH on ${ctx.serverIp}...`);
-    await perfAsync('deploy.iac.waitForSSH', () => waitForSSH(ctx.serverIp, sshKeyPath, 30));
+    const reached = await perfAsync('deploy.iac.waitForSSH', () =>
+      waitForSSH(ctx.serverIp, sshKeyPath, 30),
+    );
+    if (!reached) forgetStateSeal(ctx.state, environment);
   } catch (err) {
     s.stop('Provisioning failed', 1);
     forgetStateSeal(ctx.state, environment);
     throw err;
   }
   s.stop(`VPS provisioned: ${ctx.serverIp} (${region})`);
-  // Trusted host-key seed on fresh provision — captures the new VPS's host
-  // key via ssh-keyscan into the per-env known_hosts so the pinned SSH opts
+  // Trusted host-key seed for a new machine: captures its host key via
+  // ssh-keyscan into the per-env known_hosts so the pinned SSH opts
   // (accept-new) become a strict pin. Re-seeding cleanly re-pins a Hetzner-
   // recycled IP (destroy → redeploy). Best-effort: falls back to accept-new.
-  await seedKnownHosts(knownHostsPathForKey(sshKeyPath), ctx.serverIp);
+  if (reseed && !(await seedKnownHosts(khPath, ctx.serverIp))) {
+    forgetStateSeal(ctx.state, environment);
+  }
 }
 
 /**
