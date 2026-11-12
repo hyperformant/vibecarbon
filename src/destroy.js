@@ -3113,7 +3113,10 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry tags (Linode: `reservedIpLabelMatch`) is asked, and only
  * an IP carrying this project's tags and those of one of `stackEnvs` (the
- * labels the k8s program stamps) counts as ours.
+ * labels the k8s program stamps) counts as ours. One of ours that is still
+ * assigned (to a Linode, or any entity) is `held`: this runs after the
+ * teardown, so whatever holds it is something the teardown did not delete,
+ * and an address is never taken off a running server.
  *
  * DigitalOcean reserved IPs carry no tags, so DO is asked where the address
  * is assigned (`reservedIpAssignment`). This runs after the teardown, so
@@ -3129,7 +3132,8 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * @param {string|undefined} projectName
  * @param {string[]} stackEnvs - the stacks the address may be (two for a k8s-ha environment-level one)
  * @returns {Promise<{verdict: 'ours'} | {verdict: 'released'} | {verdict: 'foreign', tags: string[]}
- *   | {verdict: 'assigned' | 'held', droplet: {id: number, name: string}}>}
+ *   | {verdict: 'assigned', droplet: {id: number, name: string}} | {verdict: 'held', holder: string}>}
+ *   `holder` names what still holds an address of ours, as a phrase
  * @throws when the address cannot be read, or there is no project name to check tags against
  */
 async function savedReservedIpOwner(provider, address, projectName, stackEnvs) {
@@ -3146,7 +3150,12 @@ async function savedReservedIpOwner(provider, address, projectName, stackEnvs) {
           `it is assigned to droplet ${read.droplet.name}, and there is no project name to check its tags against`,
         );
       }
-      if (read.matches) return { verdict: 'held', droplet: read.droplet };
+      if (read.matches) {
+        return {
+          verdict: 'held',
+          holder: `this cluster's droplet ${read.droplet.name} (${read.droplet.id})`,
+        };
+      }
       droplet = read.droplet;
     }
     return { verdict: 'assigned', droplet };
@@ -3157,7 +3166,9 @@ async function savedReservedIpOwner(provider, address, projectName, stackEnvs) {
   for (const stackEnv of stackEnvs) {
     const match = await provider.reservedIpLabelMatch(address, labelsFor(stackEnv));
     if (!match.found) return { verdict: 'released' };
-    if (match.matches) return { verdict: 'ours' };
+    if (match.matches) {
+      return match.holder ? { verdict: 'held', holder: match.holder } : { verdict: 'ours' };
+    }
     tags = match.tags;
   }
   return { verdict: 'foreign', tags };
@@ -3241,16 +3252,15 @@ async function releaseRecordedReservedIp({
         hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
       });
     } else if (owner.verdict === 'held') {
-      // Still assigned to a droplet of this cluster that the teardown did
-      // not delete (its own line above says so). Ours, so it stays on
-      // record, but never deleted out from under a running droplet.
-      const droplet = `${owner.droplet.name} (${owner.droplet.id})`;
-      s.stop(`Reserved IP ${address} left alone: this cluster's droplet ${droplet} still holds it`);
+      // Ours, and still assigned to something the teardown did not delete
+      // (its own line above says so). It stays on record, but is never
+      // deleted out from under a running server.
+      s.stop(`Reserved IP ${address} left alone: ${owner.holder} still holds it`);
       keepUnreleased(results, address);
       results.leaks.leak({
         resourceClass: 'reserved-ip',
         resource: address,
-        reason: `not released: it is still assigned to this cluster's droplet ${droplet}, which was not deleted`,
+        reason: `not released: it is still assigned to ${owner.holder}, which was not deleted`,
         hint: retry,
       });
     } else {

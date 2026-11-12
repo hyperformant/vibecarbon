@@ -43,7 +43,14 @@ const tags = (project: string, environment: string) => [
   encodeLabel('environment', environment),
 ];
 /** GET /networking/reserved/ips answers with `data`; a DELETE succeeds. */
-const reservedIpsListing = (data: Array<{ address: string; tags: string[] }>) =>
+const reservedIpsListing = (
+  data: Array<{
+    address: string;
+    tags: string[];
+    linode_id?: number | null;
+    assigned_entity?: { id: number; label?: string; type?: string } | null;
+  }>,
+) =>
   fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) => {
     if (init?.method === 'DELETE') return { ok: true, status: 204 };
     return { ok: true, status: 200, json: async () => ({ page: 1, pages: 1, data }) };
@@ -185,6 +192,35 @@ describe('a saved reserved IP address is released only while it is still ours', 
     // Somebody else's address: nothing of ours to retry.
     expect(results.unreleasedReservedIps).toEqual([]);
   });
+
+  // Tags say the address is ours; an assignment says something still holds
+  // it. This runs after the teardown, so that something was not deleted, and
+  // releasing the address would take it off a running server.
+  it.each([
+    ['a Linode', { linode_id: 4242 }, 'Linode 4242'],
+    [
+      'another entity',
+      { linode_id: null, assigned_entity: { id: 31, label: 'edge-lb', type: 'nodebalancer' } },
+      'nodebalancer edge-lb',
+    ],
+  ])(
+    'Linode: an address of ours still assigned to %s is never released, and keeps the record',
+    async (_, assignment, holder) => {
+      reservedIpsListing([
+        { address: '203.0.113.7', tags: tags('proj', 'prod-primary'), ...assignment },
+      ]);
+      const results = makeResults();
+      await sweep(linode(), results);
+      expect(deleteUrls()).toEqual([]);
+      expect(severities(results)).toEqual(['leak:reserved-ip']);
+      const [entry] = results.leaks.entries;
+      expect(entry.reason).toBe(
+        `not released: it is still assigned to ${holder}, which was not deleted`,
+      );
+      expect(entry.hint).toContain('Run `vibecarbon destroy prod` again');
+      expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
+    },
+  );
 
   it('Linode: an address no longer reserved on the account is already released', async () => {
     // The account holds another project's address only.

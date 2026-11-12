@@ -137,6 +137,22 @@ function fnv1a32hex(input) {
 }
 
 /**
+ * What a reserved IPv4 is assigned to, as a phrase, or null when it is
+ * unassigned. Either field means assigned: `linode_id` names a Linode, and
+ * `assigned_entity` any entity the address is assigned to, so an address held
+ * by something other than a Linode counts too.
+ * @param {{ linode_id?: number|null, assigned_entity?: {id: number, label?: string, type?: string}|null }} ip
+ * @returns {string|null}
+ */
+function reservedIpHolder(ip) {
+  if (ip.linode_id != null) return `Linode ${ip.linode_id}`;
+  if (ip.assigned_entity != null) {
+    return `${ip.assigned_entity.type ?? 'entity'} ${ip.assigned_entity.label ?? ip.assigned_entity.id}`;
+  }
+  return null;
+}
+
+/**
  * Deterministically squeeze a logical resource name into Linode's firewall
  * label cap: identity when it already fits, otherwise a truncated stem plus
  * an 8-hex FNV-1a hash of the FULL name (so near-identical long names —
@@ -1629,14 +1645,17 @@ export class LinodeProvider extends BaseProvider {
 
   /**
    * Whether the reserved IPv4 at `address` still carries ALL of `labels` as
-   * tags (the encodeLabel encoding the k8s program tags with). Destroy asks
-   * before it releases an address saved at deploy time: Linode reissues a
-   * released address within minutes, so by destroy time the saved address
-   * can be another project's. Empty labels match nothing.
+   * tags (the encodeLabel encoding the k8s program tags with), and what it
+   * is assigned to. Destroy asks before it releases an address saved at
+   * deploy time: Linode reissues a released address within minutes, so by
+   * destroy time the saved address can be another project's, and one of
+   * ours still assigned to a Linode the teardown did not delete must never
+   * be taken off it. Empty labels match nothing.
    * @param {string} address
    * @param {Object<string,string>} labels
-   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[] }>}
-   *   found is false when the account holds no reserved IP at that address
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
+   *   found is false when the account holds no reserved IP at that address;
+   *   holder names what the address is assigned to, null when unassigned
    * @throws when the listing cannot be read
    */
   async reservedIpLabelMatch(address, labels) {
@@ -1648,6 +1667,7 @@ export class LinodeProvider extends BaseProvider {
       found: true,
       matches: wanted.length > 0 && wanted.every((t) => tags.includes(t)),
       tags,
+      holder: reservedIpHolder(ip),
     };
   }
 
@@ -1675,14 +1695,8 @@ export class LinodeProvider extends BaseProvider {
     const deleted = [];
     const failed = [];
     for (const ip of matches) {
-      // Either field means assigned: `linode_id` names a Linode, and
-      // `assigned_entity` any entity the address is assigned to, so an
-      // address held by something other than a Linode is left alone too.
-      if (ip.linode_id != null || ip.assigned_entity != null) {
-        const holder =
-          ip.linode_id != null
-            ? `Linode ${ip.linode_id}`
-            : `${ip.assigned_entity.type ?? 'entity'} ${ip.assigned_entity.label ?? ip.assigned_entity.id}`;
+      const holder = reservedIpHolder(ip);
+      if (holder) {
         failed.push({
           address: ip.address,
           held: true,
