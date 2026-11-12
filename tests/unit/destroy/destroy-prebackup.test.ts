@@ -93,7 +93,7 @@ describe('preDestroyBackup', () => {
     await expect(preDestroyBackup(opts(k8sHa()), deps)).rejects.toThrow(new Exit(1));
     expect(logs).toContainEqual([
       'error',
-      'backup skipped (standby-role); destroy stopped; rerun with -force to destroy anyway',
+      'backup skipped (standby-role); destroy stopped; run `vibecarbon destroy prod -force` to destroy anyway',
     ]);
   });
 
@@ -132,7 +132,7 @@ describe('preDestroyBackup', () => {
     await expect(preDestroyBackup(opts(compose()), deps)).rejects.toThrow(new Exit(1));
     expect(logs).toContainEqual([
       'error',
-      'backup failed (Command failed: ssh …); destroy stopped; rerun with -force to destroy anyway',
+      'backup failed (Command failed: ssh …); destroy stopped; run `vibecarbon destroy prod -force` to destroy anyway',
     ]);
   });
 
@@ -155,7 +155,7 @@ describe('preDestroyBackup', () => {
     await expect(preDestroyBackup(opts(env), deps)).rejects.toThrow(new Exit(1));
     const err = logs.find(([k]) => k === 'error')?.[1] ?? '';
     expect(err).toMatch(
-      /^backup skipped \(the primary is unknown: prod: .*\); destroy stopped; rerun with -force to destroy anyway$/,
+      /^backup skipped \(the primary is unknown: prod: .*\); destroy stopped; run `vibecarbon destroy prod -force` to destroy anyway$/,
     );
     expect(deps.triggerBackupJob).not.toHaveBeenCalled();
 
@@ -169,7 +169,7 @@ describe('preDestroyBackup', () => {
     await expect(preDestroyBackup(opts(compose()), deps)).rejects.toThrow(new Exit(1));
     expect(logs).toContainEqual([
       'error',
-      'backup failed (SSH key not found: /k); destroy stopped; rerun with -force to destroy anyway',
+      'backup failed (SSH key not found: /k); destroy stopped; run `vibecarbon destroy prod -force` to destroy anyway',
     ]);
   });
 

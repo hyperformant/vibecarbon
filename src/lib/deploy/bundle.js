@@ -336,6 +336,17 @@ export async function withBundle(projectName, options, fn) {
  * @returns {string} The path to the staged bundle directory
  */
 export function renderBundle(projectName, options = {}) {
+  // app.env is built from options.s3, else from options.appEnvReplay, else
+  // from the server .env below, whose S3_ENDPOINT / S3_REGION a backupTarget
+  // sets to the backups bucket's. A backupTarget with neither would hand the
+  // app the backups bucket's host. The deploy always passes s3 with a target
+  // and a scale replay passes no target; refuse the third shape before the
+  // stage dir is made.
+  if (options.backupTarget && !options.s3 && !options.appEnvReplay) {
+    throw new Error(
+      'renderBundle: a backupTarget needs options.s3 or options.appEnvReplay, so app.env keeps the uploads bucket instead of the backups one',
+    );
+  }
   const stageDir = makeTempDir('vc-deploy-bundle-');
   try {
     writeBundle(stageDir, projectName, options);
@@ -434,8 +445,19 @@ function writeBundle(stageDir, projectName, options) {
   if (options.environment) {
     envOverrides.VC_ENV = options.environment;
   }
-  if (options.backupS3) {
-    envOverrides.S3_BACKUP_BUCKET = options.backupS3.bucket;
+  // The backups bucket, at its own region and endpoint. On a server only the
+  // db service reads `.env`'s S3_ENDPOINT / S3_REGION (wal-g's AWS_ENDPOINT /
+  // AWS_REGION, docker-compose.yml), and every wal-g caller and
+  // backup/tls-snapshot.sh run there; the app reads `app.env`, written below
+  // from `options.s3` by buildAppRuntimeEnv. So these follow the backups
+  // bucket, which an environment an older CLI put in another region keeps.
+  // Set after `options.s3`, and S3_BACKUP_BUCKET in the place it always had,
+  // so a same-region environment's `.env` is byte-identical to before (the
+  // db container is not recreated).
+  if (options.backupTarget) {
+    envOverrides.S3_BACKUP_BUCKET = options.backupTarget.bucket;
+    envOverrides.S3_ENDPOINT = options.backupTarget.endpoint;
+    envOverrides.S3_REGION = options.backupTarget.region;
   }
   // Where backup/tls-snapshot.sh saves acme.json (tlsSnapshotS3Prefix), read
   // through the traefik service env (docker-compose.prod.yml).

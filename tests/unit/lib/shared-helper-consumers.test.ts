@@ -145,6 +145,67 @@ const REGISTRY = [
       'tests/unit/failover/server-identification.test.ts',
     ],
   },
+  {
+    // Every S3 call to the backups bucket used to spread the uploads config
+    // with only the bucket swapped (`{ ...s3Config, bucket }`), so a backups
+    // bucket in another region was asked at the uploads bucket's host. One
+    // builder now takes the region and endpoint from the backups target;
+    // census (c) in the deep test catches a spread coming back anywhere.
+    helper: 'backupStorageConfig',
+    definition: 'src/lib/backups-bucket.js',
+    consumers: [
+      'src/lib/deploy/orchestrator.js', // k8s TLS snapshot, deploy -restore point, lineage listing
+      'src/lib/deploy/effects/index.js', // compose TLS restore
+      'src/lib/deploy/k8s/k3s.js', // k8s TLS restore
+    ],
+    deepTests: [
+      'tests/unit/deploy/backups-bucket-choice.test.ts',
+      'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts',
+    ],
+  },
+  {
+    // Every command read `environments.<env>.backupS3` its own way: restore
+    // through a raw config loader, destroy with an `'fsn1'` guess for a missing
+    // region, the credential check and the e2e checks each with their own
+    // fallbacks. One reader now gives the bucket, its region (the uploads
+    // region for a record an old CLI wrote without one) and its endpoint (the
+    // uploads endpoint only when the regions match); census (a) in the deep
+    // test catches a raw read coming back anywhere.
+    helper: 'backupsTargetOf',
+    definition: 'src/lib/backups-bucket.js',
+    consumers: [
+      'src/lib/walg/restore-base.js', // restore, backup, status, failover, scale, compose TLS restore
+      'src/destroy.js', // -purge and its holders, the preview facts
+      'src/lib/destroy/preview.js', // the preview's backups line
+      'src/lib/destroy/s3-credential-check.js', // the pre-teardown credential check
+      'src/configure.js', // the GitOps TLS snapshot prefix
+      'src/lib/deploy/app-storage-credential.js', // unfenced-bucket marks
+      'src/lib/deploy/orchestrator.js', // the deploy's skeleton record
+      'tests/e2e/checks/backup-evidence.ts', // the e2e backup checks
+    ],
+    deepTests: [
+      'tests/unit/deploy/backups-bucket-choice.test.ts',
+      'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts',
+    ],
+  },
+  {
+    // The Hetzner app key fence built its backups targets from the live
+    // records alone, so once the last environment in a region was destroyed,
+    // the backups bucket it kept there dropped out of the fence and a key
+    // pasted later was never denied on it. Every backups bucket that holds
+    // backups, a destroyed environment's and an older CLI's base bucket
+    // included, now comes from the one list destroy -purge and the backups
+    // bucket choice already count holders with.
+    helper: 'backupsHoldings',
+    definition: 'src/lib/backups-bucket.js',
+    consumers: [
+      'src/lib/deploy/hetzner-app-key-fence.js', // the fence's backups targets
+    ],
+    deepTests: [
+      'tests/unit/deploy/backups-bucket-choice.test.ts',
+      'tests/unit/deploy/hetzner-app-key-fence.test.ts',
+    ],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');

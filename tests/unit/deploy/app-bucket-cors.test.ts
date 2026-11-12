@@ -236,12 +236,12 @@ describe('orchestrator call site', () => {
   });
 
   it('a new app bucket gets its rule before the first read, and only the app bucket does', () => {
-    const creates = [...src.matchAll(/s3Provider\.createBucket\(([^\n]*)/g)].map((m) => m[1]);
-    expect(creates).toEqual([
-      's3Config.bucket, { beforeFirstRead });',
-      'backupS3Config.bucket);',
-      'stateBucket);',
-    ]);
+    // Every createBucket call, whichever client it goes through (a bucket in
+    // another region gets its own, s3Provider.forRegion).
+    const creates = [...src.matchAll(/\.createBucket\(([^)]*)\)/g)].map((m) => m[1].trim());
+    expect(creates.length).toBe(3);
+    const withHook = creates.filter((args) => /beforeFirstRead/.test(args));
+    expect(withHook).toEqual(['s3Config.bucket, { beforeFirstRead }']);
     const hook = src.match(/const beforeFirstRead = \(\) =>\s+[^;]*;/)?.[0];
     expect(hook, 'the hook the app bucket create passes').toBeTruthy();
     expect(hook).toMatch(

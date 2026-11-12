@@ -111,9 +111,12 @@ describe('deploy wizard HA standby', () => {
       providerWrites.push('createServer');
       return {} as never;
     });
-    vi.spyOn(S3CompatibleProvider.prototype, 'createBucket').mockImplementation(async () => {
+    vi.spyOn(S3CompatibleProvider.prototype, 'createBucket').mockImplementation(async function (
+      this: { region: string; endpoint: string },
+      name: string,
+    ) {
       providerWrites.push('createBucket');
-      return {} as never;
+      return { name, created: true, ready: true, region: this.region, endpoint: this.endpoint };
     });
     vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
       valid: true,

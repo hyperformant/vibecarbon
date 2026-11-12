@@ -8,6 +8,8 @@
  * name: Hetzner Object Storage can ack writes into a just-recreated same-name
  * bucket and lose them (e4 restore->failover, 2026-08-07). The purge therefore
  * rotates `stateBucketGeneration`, so the next derivation names a fresh bucket.
+ * A purge it could not finish rotates it too: the hint tells you to delete
+ * the bucket by hand, and the next deploy must not recreate that name.
  * Nothing else rotates it: a kept bucket must stay findable.
  *
  * A destroy that keeps the environment's entry (its Pulumi destroy was not
@@ -21,6 +23,8 @@ import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const STATE = 'myapp-cd9ecc-storage-pulumi-state-aaaaaa';
+const STATE_HINT =
+  'Once .pulumi/stacks/ in it holds no stack (each environment of this project keeps its Pulumi state there), empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.';
 
 const store = projectConfigStore();
 const promptCreds = vi.fn(async () => ({ accessKey: 'ak', secretKey: 'sk' }));
@@ -132,6 +136,31 @@ describe('derived state bucket under -purge', () => {
     expect(saved.retainedStateBucket).toBeUndefined();
   });
 
+  it('no credentials on the last environment: the console steps, never a rerun, and the generation rotates', async () => {
+    promptCreds.mockResolvedValueOnce(null as never);
+    const { ctx, saved } = await destroy(project(['prod']), 'prod');
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    const [entry] = ctx.results.leaks.entries;
+    expect(entry).toMatchObject({ resourceClass: 'bucket', resource: `${STATE} (fsn1)` });
+    expect(entry.reason).toBe(
+      'purge requested (-purge) but no object-storage credentials were available',
+    );
+    expect(entry.hint).toBe(STATE_HINT);
+    expect(entry.hint).not.toMatch(/re-?run|again|\u2014/i);
+    expect(saved.stateBucketGeneration).toMatch(/^[0-9a-f]{6}$/);
+    expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
+    expect(saved.retainedStateBucket).toBeUndefined();
+  });
+
+  it('a purge that fails gives the same console steps and rotates the generation', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(new Error('AccessDenied'));
+    const { ctx, saved } = await destroy(project(['prod']), 'prod');
+    const [entry] = ctx.results.leaks.entries;
+    expect(entry.reason).toBe('purge failed: AccessDenied');
+    expect(entry.hint).toBe(STATE_HINT);
+    expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
+  });
+
   it('does not rotate when the last environment purge found no bucket to delete', async () => {
     s3.emptyAndDeleteBucket.mockResolvedValueOnce({ deleted: false, objectsRemoved: 0 });
     const { saved } = await destroy(project(['prod']), 'prod');
@@ -173,8 +202,10 @@ describe('the last environment under -purge, when its entry is kept', () => {
     const line = messages.find((m) => m.startsWith('stop:Pulumi state bucket kept'));
     expect(line).toContain(STATE);
     expect(line).toMatch(why);
-    expect(line).toContain('`vibecarbon destroy prod`');
-    expect(line).toContain('`vibecarbon destroy prod -purge`');
+    // Only the -purge rerun: a plain one would move the entry and keep the
+    // bucket where no destroy reaches it (retryDestroyCommand).
+    expect(line).toContain('your next `vibecarbon destroy prod -purge` needs this bucket to retry');
+    expect(line).not.toContain('`vibecarbon destroy prod`');
     expect(line).not.toMatch(/\u2014/);
   });
 

@@ -9,8 +9,9 @@
  * only with the last environment. Destroy never touches the bucket's CORS
  * rule, which deploy owns.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const PROD_BUCKET = 'myapp-cd9ecc-prod-storage';
 const STAGING_BUCKET = 'myapp-cd9ecc-staging-storage';
@@ -26,7 +27,16 @@ const s3 = {
   })),
   getBucketCorsOrigins: vi.fn(async (_b: string) => [] as string[]),
   setBucketCors: vi.fn(async (_b: string, _o: string[]) => {}),
+  // Every region these Hetzner keys address is asked (S3CompatibleProvider.locateBucket).
+  locateBucket: vi.fn(async (_b: string): Promise<string | null> => null),
+  addressableRegions: vi.fn(() => ['fsn1', 'nbg1', 'hel1']),
+  forRegion: vi.fn((_region: string) => s3),
 };
+const noSuchBucket = () =>
+  Object.assign(new Error('The specified bucket does not exist'), {
+    name: 'NoSuchBucket',
+    $metadata: { httpStatusCode: 404 },
+  });
 
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
@@ -34,9 +44,23 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
     ...real,
     providerFor: () => ({
       NAME: 'Hetzner Cloud',
-      promptObjectStorageCredentials: async () => ({ accessKey: 'ak', secretKey: 'sk' }),
+      promptObjectStorageCredentials: async () => credentials.value,
     }),
     getObjectStorageProvider: async () => s3,
+  };
+});
+
+/** What the object-storage credential prompt returns: null when none are available. */
+const KEYS = { accessKey: 'ak', secretKey: 'sk' };
+const credentials: { value: typeof KEYS | null } = { value: KEYS };
+
+const store = projectConfigStore();
+vi.mock('../../../src/lib/config.js', async (orig) => {
+  const real = (await orig()) as Record<string, unknown>;
+  return {
+    ...real,
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+      store.updateProjectConfig(fn),
   };
 });
 
@@ -72,13 +96,15 @@ async function destroy(
   projectConfig: ReturnType<typeof project>,
   environment: string,
   args: Record<string, unknown> = {},
-  steps: Array<'deleteAppBucket' | 'retainStateBucket' | 'handleBackupBucket'> = [
-    'deleteAppBucket',
-  ],
+  steps: Array<
+    'deleteAppBucket' | 'retainStateBucket' | 'handleBackupBucket' | 'updateProjectConfig'
+  > = ['deleteAppBucket'],
   isK8s = false,
 ) {
   const messages: string[] = [];
   const results: Record<string, unknown> = { leaks: createLeakLedger(), s3Bucket: null };
+  // The file as the destroy loaded it, for the record the last step writes.
+  store.reset(structuredClone(projectConfig));
   const ctx = {
     envConfig: projectConfig.environments[environment],
     projectConfig,
@@ -134,7 +160,11 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
     expect(s3.deletePrefix).not.toHaveBeenCalled();
     expect(text).toContain(STAGING_BUCKET);
     expect(text).toContain('kept');
-    expect(text).toContain('-purge');
+    // The destroy moves staging's entry, so `destroy staging -purge` would
+    // stop at "not found": the line gives the console, not a -purge.
+    expect(text).toContain('A redeploy of staging reuses it');
+    expect(text).toContain('Object Storage console, then DeleteBucket');
+    expect(text).not.toContain('-purge');
     expect(results.s3Bucket).toBeNull();
     noSurvivors(results);
   });
@@ -234,6 +264,133 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
   });
 });
 
+describe('the destroyed record says when -purge deleted the app bucket', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+  });
+  const recordAfter = async (
+    names: Array<'prod' | 'staging'>,
+    args: Record<string, unknown>,
+    tweak: (cfg: ReturnType<typeof project>) => void = () => {},
+  ) => {
+    const cfg = project(names);
+    tweak(cfg);
+    await destroy(cfg, 'staging', args, ['deleteAppBucket', 'updateProjectConfig']);
+    return store.lastWrite()?.destroyedEnvironments?.staging;
+  };
+
+  it('a deleted bucket is marked, so the app key fence never asks about it again', async () => {
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).toMatchObject({
+      s3: { bucket: STAGING_BUCKET },
+      appBucketPurged: true,
+    });
+  });
+
+  it('a bucket emptied but left as a shell for the orphan sweep is not marked: it still exists, so the fence keeps it', async () => {
+    s3.emptyAndDeleteBucket.mockResolvedValueOnce({
+      deleted: false,
+      shellDeferred: true,
+      objectsRemoved: 4,
+      warnings: [],
+    } as never);
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).not.toHaveProperty(
+      'appBucketPurged',
+    );
+  });
+
+  it('a bucket no region has is not marked: nothing was deleted', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    expect(await recordAfter(['prod', 'staging'], { purgeBackups: true })).not.toHaveProperty(
+      'appBucketPurged',
+    );
+    expect(s3.locateBucket).toHaveBeenCalledWith(STAGING_BUCKET);
+  });
+
+  it('a plain destroy, and a -purge that keeps a pinned bucket, are not marked', async () => {
+    expect(await recordAfter(['prod', 'staging'], {})).not.toHaveProperty('appBucketPurged');
+    expect(
+      await recordAfter(['prod', 'staging'], { purgeBackups: true }, (cfg) => {
+        Object.assign(cfg.environments.staging.s3, { bucketPin: true });
+      }),
+    ).not.toHaveProperty('appBucketPurged');
+  });
+});
+
+describe('-purge finds an app bucket its record puts in the wrong region (the old bug, before a redeploy)', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+  });
+
+  it('deletes it where it is, says where, and marks the record', async () => {
+    // staging's record says fsn1; its uploads bucket is in nbg1.
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    const { results, text } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(s3.forRegion).toHaveBeenCalledWith('nbg1');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledTimes(2);
+    expect(results.appBucketPurged).toBe(true);
+    expect(results.s3Bucket).toBe(STAGING_BUCKET);
+    expect(text).toContain(
+      'S3 bucket deleted in nbg1, not fsn1 as its record said (2 objects removed)',
+    );
+    expect(text).not.toContain('not found');
+  });
+
+  it('says not found only when no region has it', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    const { results, text } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(s3.locateBucket).toHaveBeenCalledWith(STAGING_BUCKET);
+    expect(s3.forRegion).not.toHaveBeenCalled();
+    expect(results.appBucketPurged).toBeUndefined();
+    expect(text).toContain('S3 bucket not found in any region (already deleted or never created)');
+  });
+
+  it('a region search that cannot answer leaves it, as a leak naming the region, never marked', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockRejectedValueOnce(
+      new Error(
+        `hel1 answered "AccessDenied" when asked whether it holds bucket ${STAGING_BUCKET}, so where the bucket is cannot be told`,
+      ),
+    );
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(results.appBucketPurged).toBeUndefined();
+    const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
+    expect(ledger.entries[0]?.reason).toContain(`hel1 answered "AccessDenied"`);
+    expect(ledger.entries[0]?.resource).toBe(`${STAGING_BUCKET} (fsn1)`);
+  });
+
+  it('N2: a delete that fails where the bucket was found is reported in that region', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(new Error('Failed to abort multipart uploads'));
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(results.appBucketPurged).toBeUndefined();
+    const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
+    expect(ledger.entries[0]?.resource).toBe(`${STAGING_BUCKET} (nbg1)`);
+  });
+
+  it('N3: a store answering two ways points to the console, never to a destroy rerun', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('fsn1');
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
+    expect(ledger.entries[0]?.reason).not.toMatch(/destroy again/i);
+    expect(ledger.entries[0]?.reason).toContain(
+      'look at it in the Object Storage console before deleting anything by hand',
+    );
+  });
+});
+
 describe('destroyPreviewBucketFacts', () => {
   it('names the environment’s own bucket as owned, and a legacy or pinned one as not', () => {
     const config = project(['prod', 'staging']);
@@ -262,5 +419,48 @@ describe('destroyPreviewBucketFacts', () => {
       },
     };
     expect(destroyPreviewBucketFacts(withPurged, 'prod').backupBucketHeld).toBe(false);
+  });
+});
+
+describe('-purge with no object-storage credentials', () => {
+  // Every bucket survives, and the environment still moves to
+  // destroyedEnvironments, so `destroy prod` cannot run again: each hint
+  // says what you can do in the console instead.
+  beforeEach(() => {
+    for (const fn of Object.values(s3)) fn.mockClear();
+    credentials.value = null;
+  });
+  afterEach(() => {
+    credentials.value = KEYS;
+  });
+
+  it('the last environment: every bucket hint points to the console, never to a rerun, and the state name rotates', async () => {
+    const { results } = await destroy(project(['prod']), 'prod', { purgeBackups: true }, [
+      ...ALL_BUCKET_STEPS,
+      'updateProjectConfig',
+    ]);
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(s3.deletePrefix).not.toHaveBeenCalled();
+    const entries = (results.leaks as ReturnType<typeof createLeakLedger>).entries;
+    const hintFor = (bucket: string) =>
+      entries.find((e) => String(e.resource).startsWith(bucket))?.hint;
+    expect(hintFor(PROD_BUCKET)).toBe(
+      'Empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
+    );
+    expect(hintFor(STATE)).toBe(
+      'Once .pulumi/stacks/ in it holds no stack (each environment of this project keeps its Pulumi state there), empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
+    );
+    expect(hintFor(BACKUPS)).toBe(
+      'Empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
+    );
+    expect(entries).toHaveLength(3);
+    for (const entry of entries) {
+      expect(entry.hint).not.toMatch(/re-?run|again|\u2014/i);
+    }
+    // You may delete the state bucket by hand, so the next deploy must not
+    // derive its name again.
+    const saved = store.lastWrite() as Record<string, unknown>;
+    expect(saved.stateBucketGeneration).toMatch(/^[0-9a-f]{6}$/);
+    expect(saved.stateBucketGeneration).not.toBe('aaaaaa');
   });
 });

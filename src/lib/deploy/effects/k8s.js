@@ -19,7 +19,7 @@
  *     options = the deploymentConfig object deployK3s consumes (projectName,
  *               environment, region, master/database/worker server types,
  *               min/maxWorkers, apiToken, s3Config, state, tracker, domain,
- *               restore, dnsProvider, dnsToken, backupBucketName, …)
+ *               restore, dnsProvider, dnsToken, backupTarget, …)
  *               — passed through UNCHANGED so deployK3s receives byte-for-byte
  *               the same options object it got from the former dispatch table.
  *   Filled in by the effect:

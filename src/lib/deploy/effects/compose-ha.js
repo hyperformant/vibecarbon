@@ -479,6 +479,14 @@ async function haProvisionServers(ctx) {
  * Persist server info immediately (status:'deploying') so `destroy` can clean
  * up if deploy fails later. Loads the on-disk projectConfig ONCE and stashes it
  * (+ the pending env entry) on ctx for the finalize effect to reuse.
+ *
+ * `ctx.backupS3Config` is the backups target the deploy's s3-setup settled on
+ * (settleBackupsBucket), exactly the shape of `backupS3`, so it is recorded
+ * as is.
+ *
+ * @param {Record<string, any> & {
+ *   backupS3Config: import('../../backups-bucket.js').BackupsTarget | null,
+ * }} ctx
  */
 async function haPersistPendingConfig(ctx) {
   const projectName = ctx.projectConfig.projectName;

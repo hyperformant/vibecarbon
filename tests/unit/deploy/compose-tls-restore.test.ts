@@ -527,7 +527,9 @@ describe('effects: one shared effect per step for both compose tiers', () => {
       endpoint: 'https://e',
       bucket: 'state',
     },
-    backupS3Config: { bucket: 'myapp-backups' },
+    // The backups bucket in another region than the uploads bucket (an
+    // environment an older CLI put in another region's bucket keeps it).
+    backupS3Config: { bucket: 'myapp-backups', region: 'nbg1', endpoint: 'https://nbg1.e' },
     ...over,
   });
 
@@ -537,8 +539,15 @@ describe('effects: one shared effect per step for both compose tiers', () => {
     H.read.mockResolvedValue({ text: VALID });
     await EFFECTS.restoreTlsSnapshot(ctx({ primary: { ip: '10.0.0.9' } }));
     expect(calls.map((c) => c.ip)).toEqual(['10.0.0.9', '10.0.0.9']);
+    // The backups bucket at its own region and endpoint, never the uploads store's.
     expect(H.read).toHaveBeenCalledWith(
-      expect.objectContaining({ bucket: 'myapp-backups', accessKey: 'AK', secretKey: 'SK' }),
+      {
+        accessKey: 'AK',
+        secretKey: 'SK',
+        bucket: 'myapp-backups',
+        region: 'nbg1',
+        endpoint: 'https://nbg1.e',
+      },
       'backups/myapp/production/tls/staging/compose-acme.json',
     );
     expect(info).toHaveBeenCalledTimes(1);

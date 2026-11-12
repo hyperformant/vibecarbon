@@ -55,7 +55,7 @@ describe('app bucket single resolver census', () => {
   });
 
   it('(a) deriveProjectBucketName( is limited to the backups and state derivations', () => {
-    const allowed = new Set(['src/lib/providers/s3-base.js', 'src/lib/deploy/prompts.js']);
+    const allowed = new Set(['src/lib/providers/s3-base.js', 'src/lib/backups-bucket.js']);
     const offenders = srcFiles
       .filter((f) => /deriveProjectBucketName\(/.test(readFileSync(f, 'utf-8')))
       .map(rel)
@@ -64,10 +64,11 @@ describe('app bucket single resolver census', () => {
       offenders,
       `read the app bucket through resolveEnvStorage: ${offenders.join(', ')}`,
     ).toEqual([]);
-    // prompts.js may derive only the backups bucket; the app bucket never
-    // comes from the per-project derivation.
-    const prompts = readFileSync(join(ROOT, 'src/lib/deploy/prompts.js'), 'utf-8');
-    const calls = [...prompts.matchAll(/deriveProjectBucketName\(([^)]*)\)/g)].map((m) => m[1]);
+    // backups-bucket.js may derive only the backups bucket; the app bucket
+    // never comes from the per-project derivation.
+    const chooser = readFileSync(join(ROOT, 'src/lib/backups-bucket.js'), 'utf-8');
+    const calls = [...chooser.matchAll(/deriveProjectBucketName\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(calls.length).toBeGreaterThan(0);
     expect(calls.filter((c) => !/'backups'/.test(c))).toEqual([]);
   });
 

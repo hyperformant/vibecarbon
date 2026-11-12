@@ -90,6 +90,19 @@ export class LinodeObjectStorageProvider extends S3CompatibleProvider {
   static appKeyScoping = 'mint';
 
   /**
+   * A key holds a list of regions, set when it is made (POST
+   * /object-storage/keys `regions`, linode-api-docs), and the account is
+   * assigned ONE cluster per region, not always `-1` (live, 2026-08-08; see
+   * the header), while ENDPOINTS lists every cluster. A cluster outside both
+   * answers an access error for any bucket, so only the store's own cluster
+   * is asked. "Bucket names must be unique within the Object Storage
+   * cluster" (linode docs), so the old region flip (BucketAlreadyExists from
+   * another region's bucket) has no path to a wrong Linode record; only a
+   * hand edit could make one.
+   */
+  static keyRegions = 'own';
+
+  /**
    * Mint the env's app key: `read_write` on `bucket` only, never an
    * account-wide key. The key's region is the one Linode lists for this
    * endpoint's cluster (`GET /object-storage/endpoints`). One POST, never

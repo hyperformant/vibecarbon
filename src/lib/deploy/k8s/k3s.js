@@ -53,6 +53,7 @@ import {
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
 import { writeCertManagerKustomization } from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
+import { backupStorageConfig } from '../../backups-bucket.js';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
@@ -417,8 +418,17 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * patched image on the channel would be skipped on a warm deploy. An unchanged
  * set hashes the same, so it costs nothing.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number} }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, imageSetDigest: string, manifestDigest: string, bundledManifestDigest: string }}
+ * `storageTargets` is where the app bucket and the backups bucket are, each
+ * as `<bucket>@<region>@<endpoint>` (`s3Config` and `backupTarget`). Both are
+ * rendered into the applied Secrets (the app Secret's S3_*, the infra
+ * Secret's S3_BACKUP_BUCKET) and the db StatefulSet (wal-g's endpoint and
+ * region), and no manifest digest sees them: without this key a deploy that
+ * corrected an environment's uploads region (s3-setup finds the bucket where
+ * it really is) skipped the apply, and the app Secret kept the wrong region.
+ * Adding it re-applies every k8s environment once (unchanged content).
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number}, s3Config?: {bucket?: string, region?: string, endpoint?: string}|null, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, storageTargets: string, imageSetDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -429,6 +439,8 @@ export function buildK3sApplyInputs({
   role,
   appStorageAccessKey,
   backupConfig,
+  s3Config,
+  backupTarget,
 }) {
   const backup = resolveBackupSettings(backupConfig);
   return {
@@ -445,6 +457,9 @@ export function buildK3sApplyInputs({
     // cluster's is not (renderK8sBase): a different db, so a different gate.
     replicationHostPort: rendersReplicationHostPort(role),
     appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
+    storageTargets: [s3Config, backupTarget]
+      .map((t) => `${t?.bucket ?? ''}@${t?.region ?? ''}@${t?.endpoint ?? ''}`)
+      .join(' '),
     imageSetDigest: createHash('sha256').update(JSON.stringify(currentImageSet())).digest('hex'),
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
@@ -1765,10 +1780,10 @@ export function buildAppSecretData({ envLocal, s3Config }) {
  * leaves a restore's patched keys alone. Clearing is the restore's own patch
  * once the restored database is proven, never this. Pure.
  *
- * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string}|null}} args
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null, restore?: {backup: string, target: string, recoveryConf: string}|null}} args
  * @returns {Record<string,string>}
  */
-export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, restore }) {
+export function buildInfraSecretData({ envLocal, s3Config, backupTarget, restore }) {
   /** @type {Record<string,string>} */
   const stringData = {};
   for (const key of INFRA_SECRET_KEYS) {
@@ -1783,8 +1798,8 @@ export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, res
     // volume in k8s/base/db/statefulset.yaml.
     stringData.S3_CREDENTIALS_INI = `[default]\naws_access_key_id=${s3Config.accessKey}\naws_secret_access_key=${s3Config.secretKey}\n`;
   }
-  if (backupBucketName) {
-    stringData.S3_BACKUP_BUCKET = backupBucketName;
+  if (backupTarget?.bucket) {
+    stringData.S3_BACKUP_BUCKET = backupTarget.bucket;
   }
   if (restore) Object.assign(stringData, restoreMarkerStringData({ ...restore, origin: 'deploy' }));
   return stringData;
@@ -1858,10 +1873,11 @@ function secretManifest(name, stringData) {
  * Must run BEFORE the base/ kustomization apply, because the app Deployment
  * (envFrom) and the db StatefulSet (secretKeyRef) reference them.
  *
- * `backupBucketName` is the dedicated backup bucket (separate from the
- * storage bucket in s3Config.bucket); without it, backup.sh falls back to
- * the storage bucket and uploads dumps next to user files (observed
- * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
+ * `backupTarget` is the dedicated backups bucket (separate from the storage
+ * bucket in s3Config.bucket), with its region and endpoint; without it,
+ * backup.sh falls back to the storage bucket and uploads dumps next to user
+ * files (observed 2026-04-27 k8s-ha matrix #6 — restore couldn't find
+ * backups).
  *
  * `restore` (a resolved `deploy -restore` point) writes the restore marker
  * into the infra Secret, see buildInfraSecretData.
@@ -1872,13 +1888,13 @@ function secretManifest(name, stringData) {
  * role file on every start, so it has to exist before base/ creates the pod.
  * `kubectl apply`, so a cluster that predates it gets it created.
  *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string}|null, walgRole: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null, restore?: {backup: string, target: string, recoveryConf: string}|null, walgRole: 'primary'|'standby'}} args
  */
 export async function applyVibecarbonSecrets({
   kubeconfig,
   envLocal,
   s3Config,
-  backupBucketName,
+  backupTarget,
   restore,
   walgRole,
 }) {
@@ -1902,7 +1918,7 @@ export async function applyVibecarbonSecrets({
     'vibecarbon-infra-secrets': buildInfraSecretData({
       envLocal,
       s3Config,
-      backupBucketName,
+      backupTarget,
       restore,
     }),
   };
@@ -2440,7 +2456,9 @@ function localKubectlReader(env) {
  * @param {object} o
  * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
  * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
- * @param {string|null} [o.backupBucketName]
+ * @param {import('../../backups-bucket.js').BackupsTarget|null} [o.backupTarget] - the
+ *   backups bucket with its region and endpoint (null: the legacy path, wal-g
+ *   archives into the storage bucket)
  * @param {string} o.storageClass - `ProviderClass.K8S_STORAGE_CLASS`
  * @param {string} o.walArchiveSha - sha of k8s/base/backup/configmap-walg.yaml
  * @returns {Record<string, string>}
@@ -2448,7 +2466,7 @@ function localKubectlReader(env) {
 export function buildDbManifestValues({
   dbImageTag,
   s3Config,
-  backupBucketName,
+  backupTarget,
   storageClass,
   walArchiveSha,
 }) {
@@ -2479,7 +2497,13 @@ export function buildDbManifestValues({
   // never WRITE here) is enforced by the wal-g role WRITE-GUARD: the role file
   // (walg-role.js), which wal-archive.sh and the backup CronJob read through
   // walg-env.sh. Neither archives unless it says primary.
-  const walgBucket = backupBucketName || s3Config?.bucket || '';
+  //
+  // wal-g talks to the bucket it archives into at THAT bucket's endpoint and
+  // region (the statefulset's S3_ENDPOINT / S3_REGION tokens): the backups
+  // target's own when there is one, which an environment an older CLI put in
+  // another region's bucket keeps; else the storage bucket's.
+  const walgStore = backupTarget?.bucket ? backupTarget : s3Config;
+  const walgBucket = walgStore?.bucket || '';
   // The path inside the bucket is resolveEnvStorage's per-environment
   // `backups/<project>/<env>/walg`. Without it two environments would archive
   // into one stream, so a bucket with no prefix is an error, not a default.
@@ -2493,8 +2517,8 @@ export function buildDbManifestValues({
     DB_IMAGE: dbImageTag.slice(0, lastColon),
     DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
     WALG_S3_PREFIX_BASE: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
-    S3_ENDPOINT: s3Config?.endpoint ?? '',
-    S3_REGION: s3Config?.region ?? '',
+    S3_ENDPOINT: walgStore?.endpoint ?? '',
+    S3_REGION: walgStore?.region ?? '',
     K8S_STORAGE_CLASS: storageClass,
     WAL_ARCHIVE_SHA: walArchiveSha || 'none',
   };
@@ -3421,7 +3445,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, sshKeyName?: string, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, sshKeyName?: string, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
  *   src/lib/walg/restore-base.js). With it the restore marker goes into the
  *   infra Secret before the db StatefulSet applies, so the db pod's
@@ -3443,7 +3467,7 @@ export async function applyK3sManifests({
   envLocal,
   domain,
   s3Config,
-  backupBucketName,
+  backupTarget,
   backupConfig,
   // Phase 5: cluster-autoscaler wiring. `apiToken` is the compute provider's
   // API token (CCM/CSI/CA).
@@ -4031,7 +4055,7 @@ export async function applyK3sManifests({
   // standby. The S3 prefix itself stays canonical.
   const walgRole = role === 'standby' ? 'standby' : 'primary';
   await perfAsync(`deploy.${perfPrefix}.secrets`, () =>
-    applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore, walgRole }),
+    applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupTarget, restore, walgRole }),
   );
   onNamespaceReady?.();
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
@@ -4074,9 +4098,9 @@ export async function applyK3sManifests({
   }
   // Where the backup CronJob saves the vibecarbon-tls Secret: the env backup
   // bucket (none: no snapshot) under backups/<project>/<env>/tls/<ca>.
-  const tlsSnapshotPrefix = backupBucketName
+  const tlsSnapshotPrefix = backupTarget?.bucket
     ? tlsSnapshotS3Prefix({
-        backupBucket: backupBucketName,
+        backupBucket: backupTarget.bucket,
         projectName,
         envName: operatorEnv,
         ca: caSlug(issuerName),
@@ -4088,7 +4112,7 @@ export async function applyK3sManifests({
       ...buildDbManifestValues({
         dbImageTag,
         s3Config,
-        backupBucketName,
+        backupTarget,
         storageClass,
         walArchiveSha: walArchiveConfigSha(projectDir),
       }),
@@ -4123,10 +4147,11 @@ export async function applyK3sManifests({
     // matches it and does not issue (tls-restore.js holds the overwrite rule).
     // The issuing cluster only: a pilot standby serves its self-signed
     // certificate until a failover promotes it. Never fails the deploy.
+    // Read from the backups bucket at its own region and endpoint.
     if (!pilotStandby) {
       const tlsRestore = await perfAsync(`deploy.${perfPrefix}.tlsRestore`, () =>
         restoreK8sTlsSecret({
-          s3Config: s3Config ? { ...s3Config, bucket: backupBucketName } : null,
+          s3Config: backupStorageConfig(s3Config, backupTarget),
           projectName,
           envName: operatorEnv,
           ca: caSlug(issuerName),
@@ -5464,6 +5489,10 @@ async function deployK3sSteps(options, inFlight) {
     appStorageAccessKey: options.s3Config?.appCredential?.accessKey,
     // The schedule and retention rendered into the backup CronJob/ConfigMap.
     backupConfig: options.backupConfig,
+    // Where the app bucket and the backups bucket are, rendered into the
+    // Secrets and the db StatefulSet.
+    s3Config: options.s3Config,
+    backupTarget: options.backupTarget,
   });
   const skipApply = await shouldSkipK3sApply({
     state,
@@ -5491,7 +5520,7 @@ async function deployK3sSteps(options, inFlight) {
         envLocal,
         domain: options.domain || 'localhost',
         s3Config: options.s3Config,
-        backupBucketName: options.backupBucketName,
+        backupTarget: options.backupTarget,
         backupConfig: options.backupConfig,
         restore: options.restore,
         operatorEnv: options.operatorEnv ?? options.environment,

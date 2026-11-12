@@ -6,6 +6,9 @@
  * storage setup, and a first deploy into a state bucket that already exists,
  * pay nothing.
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -113,12 +116,22 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
     region: 'hel1',
     endpoint: 'https://hel1.your-objectstorage.com',
     getEndpoint: () => 'https://hel1.your-objectstorage.com',
+    // One region here: every bucket is in hel1.
+    forRegion() {
+      return this;
+    },
     createBucket: async (name: string) => {
       run.buckets.push(name);
       // The app and backup buckets are always new here, so only the state
       // bucket's own answer can decide.
       const created = name.includes('pulumi-state') ? run.stateBucketCreated : true;
-      return { name, created, ready: true };
+      return {
+        name,
+        created,
+        ready: true,
+        region: 'hel1',
+        endpoint: 'https://hel1.your-objectstorage.com',
+      };
     },
     hasObjectsWithPrefix: async () => false,
     bucketExists: async () => true,
@@ -167,11 +180,6 @@ function gathered(deployMode: string) {
     dnsZoneId: null,
     dnsToken: null,
     s3Config: S3,
-    backupS3Config: {
-      bucket: 'wireapp-abc123-prod-backups',
-      region: 'hel1',
-      endpoint: S3.endpoint,
-    },
     backupConfig: {},
     services: {},
     branchName: 'main',
@@ -189,7 +197,12 @@ async function planCtx(deployMode: string) {
 const MODES = ['compose-ha', 'kubernetes'];
 
 describe('the HA plan asks to open the state backend', () => {
+  // Each case runs in a scratch project dir: the deploy's command log goes to
+  // <cwd>/.vibecarbon/logs, never the repo's.
+  let scratch = '';
   beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'vc-open-state-wiring-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(scratch);
     store.current = projectConfigStore({
       projectName: 'wireapp',
       bucketSalt: 'abc123',
@@ -200,7 +213,10 @@ describe('the HA plan asks to open the state backend', () => {
     run.skipStorageSetup = false;
     run.buckets.length = 0;
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(scratch, { recursive: true, force: true });
+  });
 
   it.each(MODES)('%s: when this run created the state bucket', async (mode) => {
     const ctx = await planCtx(mode);

@@ -33,6 +33,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { backupsTargetOf, relocateBackupsRecord } from '../backups-bucket.js';
 import { parseDotenv } from '../dotenv.js';
 import { APP_STORAGE_SECRET_PREFIX, setEnvVar } from '../project.js';
 import { getProviderClass, resolveProviderToken } from '../providers/index.js';
@@ -374,12 +375,86 @@ export function markUnfencedBuckets(projectConfig, skipped) {
   const missing = new Set(skipped);
   for (const e of Object.values(projectConfig.environments ?? {})) {
     if (!e?.s3) continue;
-    const hits = [e.s3.bucket, e.s3.stateBucket, e.backupS3?.bucket].filter(
+    const hits = [e.s3.bucket, e.s3.stateBucket, backupsTargetOf(e)?.bucket].filter(
       (b, i, all) => b && missing.has(b) && all.indexOf(b) === i,
     );
     if (hits.length > 0) e.s3.unfencedBuckets = hits;
     else delete e.s3.unfencedBuckets;
   }
+  return projectConfig;
+}
+
+/**
+ * What one fence run found about the buckets destroyed environments name,
+ * written onto their records (destroyedEnvironments), so the next run reads
+ * the right region and does not repeat itself:
+ *   - `gone` (applyHetznerFences): no region has the bucket. Each destroyed
+ *     record naming it as its app bucket gets `appBucketNotFound`, and each
+ *     naming it as the backups bucket it kept gets `backupsNotFound`, with the
+ *     date it was first found so (a later run keeps that date).
+ *   - `found`: the fence read a marked bucket again; both marks are cleared.
+ *   - `located`: the bucket was found in another region than its record
+ *     says. A destroyed record naming it as its app bucket gets that region
+ *     in `s3.region`, and one naming it as the backups bucket it kept gets
+ *     the region and that region's endpoint in `backupS3` (the endpoint too,
+ *     or the stale one would still win in backupsTargetOf; with none known,
+ *     the stale one is dropped and the reader derives it from the region).
+ *     The next run reads the bucket there with no search and no line. (A
+ *     live record is corrected by its own deploy, and the line says so.)
+ * A not-found mark only keeps the "nothing to fence" line from repeating:
+ * the fence still reads the bucket on every run, looks in every region after
+ * a NoSuchBucket, and fences it wherever it turns up. Neither mark is ever
+ * `appBucketPurged` (only a delete `-purge` confirmed writes that, and it
+ * ends the bucket's fence) or `backupsPurged` (which ends the hold): one
+ * wrong "no region has it" must not do either. A bucket a live environment
+ * names is never in `gone`.
+ * @param {{ destroyedEnvironments?: Record<string, any> }} projectConfig - changed in place
+ * @param {{ gone?: string[], found?: string[],
+ *   located?: { bucket: string, region: string, endpoint?: string|null }[] }} seen - what the run found
+ * @param {string} [at] - ISO date for a new mark
+ */
+export function recordFenceFindings(
+  projectConfig,
+  { gone = [], found = [], located = [] },
+  at = new Date().toISOString(),
+) {
+  const missing = new Set(gone);
+  const back = new Set(found);
+  const moved = new Map(located.map((l) => [l.bucket, l]));
+  for (const entry of Object.values(projectConfig.destroyedEnvironments ?? {})) {
+    if (!entry) continue;
+    const app = entry.s3?.bucket;
+    if (app) {
+      if (back.has(app)) delete entry.appBucketNotFound;
+      else if (missing.has(app) && !entry.appBucketNotFound) entry.appBucketNotFound = at;
+      if (moved.has(app)) entry.s3.region = moved.get(app).region;
+    }
+    const backups = entry.backupsPurged ? null : backupsTargetOf(entry)?.bucket;
+    if (backups) {
+      if (back.has(backups)) delete entry.backupsNotFound;
+      else if (missing.has(backups) && !entry.backupsNotFound) entry.backupsNotFound = at;
+      const to = moved.get(backups);
+      if (to) relocateBackupsRecord(entry, to);
+    }
+  }
+  return projectConfig;
+}
+
+/**
+ * What a deploy's fence sync leaves on record, applied to the file as it is
+ * at the save: the unfenced marks `status` shows (markUnfencedBuckets), and
+ * what the run found about destroyed environments' buckets
+ * (recordFenceFindings).
+ * @param {object} projectConfig - changed in place
+ * @param {{ fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[],
+ *   fenceLocated?: { bucket: string, region: string, endpoint?: string|null }[] }} final - what finish() returned
+ */
+export function recordFenceOutcome(
+  projectConfig,
+  { fenceSkipped, fenceGone = [], fenceFound = [], fenceLocated = [] },
+) {
+  if (fenceSkipped) markUnfencedBuckets(projectConfig, fenceSkipped);
+  recordFenceFindings(projectConfig, { gone: fenceGone, found: fenceFound, located: fenceLocated });
   return projectConfig;
 }
 
@@ -430,13 +505,16 @@ export async function waitForAppKeyReady({
  * (deploy) or for its removal (`leaving: true`, destroy), and verify each
  * written fence with every pasted key stored on this machine.
  *
+ * `s3` and each probe may be built at any one region: the fence reaches each
+ * bucket at its own region through their `forRegion` (applyHetznerFences).
+ *
  * @param {object} args
  * @param {object} args.projectConfig - with the env's current `s3.appKey` record
  * @param {string} args.environment
  * @param {boolean} [args.leaving]
  * @param {object} args.s3 - the infra key's HetznerS3Provider
  * @param {{ get(key: string): string|undefined }} args.secrets
- * @param {(accessKey: string, secretKey: string) => Promise<{ isDeniedOn(b: string): Promise<boolean> }>} args.createProbe
+ * @param {(accessKey: string, secretKey: string) => Promise<{ isDeniedOn(b: string): Promise<boolean>, forRegion?: (region: string) => object }>} args.createProbe
  * @param {(ms: number) => Promise<void>} [args.sleep]
  * @param {() => number} [args.now]
  */

@@ -2,9 +2,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { sanitizeBucketName } from '../../../src/lib/providers/hetzner-s3.js';
+import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import {
+  assertBucketPin,
   deriveEnvAppBucketName,
   deriveProjectBucketName,
+  deriveRegionBackupsBucketName,
 } from '../../../src/lib/providers/s3-base.js';
 import { generateBucketSalt } from '../../../src/lib/secrets.js';
 
@@ -149,6 +152,119 @@ describe('deriveEnvAppBucketName (one app bucket per environment)', () => {
     it('is identical across two calls', () => {
       expect(deriveEnvAppBucketName(project, envA)).toBe(deriveEnvAppBucketName(project, envA));
     });
+  });
+});
+
+describe('deriveRegionBackupsBucketName (a backups bucket per further storage region)', () => {
+  const project = { projectName: 'myapp', bucketSalt: 'ab12cd' };
+  /** Passes assertBucketPin's rule (it throws otherwise) and returns the name. */
+  const valid = (name: string) => assertBucketPin(name, 'derived name', 'test');
+
+  it('builds <project>-<salt>-<region>-backups', () => {
+    expect(deriveRegionBackupsBucketName(project, 'fsn1')).toBe('myapp-ab12cd-fsn1-backups');
+  });
+
+  it('keeps an unsalted project unsalted', () => {
+    expect(deriveRegionBackupsBucketName({ projectName: 'myapp' }, 'fsn1')).toBe(
+      'myapp-fsn1-backups',
+    );
+  });
+
+  it('gives two regions two buckets', () => {
+    expect(deriveRegionBackupsBucketName(project, 'fsn1')).not.toBe(
+      deriveRegionBackupsBucketName(project, 'nbg1'),
+    );
+  });
+
+  it('yields a valid name ending -backups for every storage region of every registered store', async () => {
+    const regions = (
+      await Promise.all(
+        Object.values(PROVIDERS).map(async (P) =>
+          Object.keys((await P.getObjectStorageProviderClass()).ENDPOINTS),
+        ),
+      )
+    ).flat();
+    // Not vacuous: five stores, more than twenty regions between them.
+    expect(regions.length).toBeGreaterThan(20);
+    const names = regions.map((region) => deriveRegionBackupsBucketName(project, region));
+    for (const name of names) {
+      expect(valid(name)).toBe(name);
+      expect(name).toMatch(/-backups$/);
+    }
+    // Linode's us-iad-1 and us-iad-10 never fold together.
+    expect(new Set(names).size).toBe(new Set(regions).size);
+  });
+
+  it("fits Linode's longest slug, us-southeast-1, whole", () => {
+    expect(deriveRegionBackupsBucketName(project, 'us-southeast-1')).toBe(
+      'myapp-ab12cd-us-southeast-1-backups',
+    );
+    // An e2e-length project name (39 characters) overflows into the hash form.
+    const e2e = { projectName: 'testapp-compose-ha-1731000000000-abc123', bucketSalt: 'abc123' };
+    const name = deriveRegionBackupsBucketName(e2e, 'us-southeast-1');
+    expect(name.length).toBeLessThanOrEqual(63);
+    expect(name).toMatch(/-abc123-us-southeast-1-[0-9a-f]{8}-backups$/);
+    expect(valid(name)).toBe(name);
+  });
+
+  describe('the 63-character boundary', () => {
+    // <project>-<salt>-fsn1-backups is 43 + 1 + 6 + 1 + 4 + 8 = 63 characters.
+    it('keeps the short form at exactly 63 characters', () => {
+      const name = deriveRegionBackupsBucketName(
+        { projectName: 'a'.repeat(43), bucketSalt: 'ab12cd' },
+        'fsn1',
+      );
+      expect(name).toBe(`${'a'.repeat(43)}-ab12cd-fsn1-backups`);
+    });
+
+    it('switches to the hash form at 64 characters', () => {
+      const name = deriveRegionBackupsBucketName(
+        { projectName: 'a'.repeat(44), bucketSalt: 'ab12cd' },
+        'fsn1',
+      );
+      expect(name.length).toBeLessThanOrEqual(63);
+      expect(name).toMatch(/-ab12cd-fsn1-[0-9a-f]{8}-backups$/);
+    });
+  });
+
+  describe('a 63-character project name', () => {
+    const long = { projectName: `p${'a'.repeat(62)}`, bucketSalt: 'ab12cd' };
+
+    it('takes the hash form, keeps the salt and region whole, and stays within 63', () => {
+      expect(long.projectName).toHaveLength(63);
+      const name = deriveRegionBackupsBucketName(long, 'us-southeast-1');
+      expect(name.length).toBeLessThanOrEqual(63);
+      expect(name).toMatch(/^paaa[a-z]*-ab12cd-us-southeast-1-[0-9a-f]{8}-backups$/);
+      expect(valid(name)).toBe(name);
+    });
+
+    it('differs for two long names that share a 40-character prefix', () => {
+      const prefix = 'q'.repeat(40);
+      const a = deriveRegionBackupsBucketName(
+        { projectName: `${prefix}${'a'.repeat(23)}`, bucketSalt: 'ab12cd' },
+        'fsn1',
+      );
+      const b = deriveRegionBackupsBucketName(
+        { projectName: `${prefix}${'b'.repeat(23)}`, bucketSalt: 'ab12cd' },
+        'fsn1',
+      );
+      expect(a).not.toBe(b);
+      expect(a.length).toBeLessThanOrEqual(63);
+      expect(b.length).toBeLessThanOrEqual(63);
+    });
+  });
+
+  it('uses the hash form when the region needed sanitizing, so folded slugs stay apart', () => {
+    const folded = deriveRegionBackupsBucketName(project, 'FSN1');
+    expect(folded).toMatch(/-[0-9a-f]{8}-backups$/);
+    expect(folded).not.toBe(deriveRegionBackupsBucketName(project, 'fsn1'));
+    expect(valid(folded)).toBe(folded);
+  });
+
+  it("e2e guard: the FIRST region's name still starts with the project name (the per-run sweeps' match)", () => {
+    const projectName = 'testapp-compose-ha-1731000000000-abc123';
+    const name = deriveProjectBucketName({ projectName, bucketSalt: 'abc123' }, 'backups');
+    expect(name.startsWith(projectName)).toBe(true);
   });
 });
 

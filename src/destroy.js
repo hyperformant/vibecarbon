@@ -11,6 +11,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { backupsBucketHolders, backupsTargetOf } from './lib/backups-bucket.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { runCommand } from './lib/command.js';
@@ -35,9 +36,11 @@ import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js'
 import {
   appStorageSecretKeys,
   localAppStorageSecrets,
+  recordFenceFindings,
   revokeAppStorageCredential,
   syncHetznerFences,
 } from './lib/deploy/app-storage-credential.js';
+import { fenceInfoLines } from './lib/deploy/hetzner-app-key-fence.js';
 import { haSshKeyName as haSshKeyNameFor } from './lib/deploy/k8s/ha-ssh-key.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
@@ -51,6 +54,7 @@ import {
 import { fallbackCsiVolumeIds, runCsiDetachStep } from './lib/destroy/csi-detach.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
+import { ORPHANS_DESTROY_COMMAND, retryDestroyCommand } from './lib/destroy/retry-command.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
 import { sweepEnvironmentServers } from './lib/destroy/server-sweep.js';
 import {
@@ -207,7 +211,7 @@ const SPEC = {
       name: 'purge',
       boolean: true,
       description:
-        'Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved)',
+        "Also delete this environment's backups and uploads, and the backup and state buckets once nothing else uses them (default: all kept)",
     },
     {
       name: 'force',
@@ -231,7 +235,7 @@ const SPEC = {
     },
     {
       command: 'vibecarbon destroy prod -y -purge',
-      description: 'also delete the backup bucket',
+      description: 'also delete its backups and uploads',
     },
     {
       command: 'vibecarbon destroy prod -y -confirm myapp-prod',
@@ -433,7 +437,7 @@ export async function preDestroyBackup(
         'Finish the scale, or roll it back if DNS never moved, then destroy:',
         `  vibecarbon scale ${envName}`,
         'Or destroy without a backup:',
-        `  vibecarbon destroy ${envName} -force`,
+        `  ${retryDestroyCommand(envName, { purgeBackups: purge }, ['-force'])}`,
       ].join('\n'),
     );
     exit(1);
@@ -451,15 +455,17 @@ export async function preDestroyBackup(
       log.error(
         [
           `backup ${what} (${why}); destroy stopped: a backup is running; wait for it and rerun`,
-          `  vibecarbon destroy ${envName}`,
+          `  ${retryDestroyCommand(envName, { purgeBackups: purge })}`,
           'Or destroy without a backup:',
-          `  vibecarbon destroy ${envName} -force`,
+          `  ${retryDestroyCommand(envName, { purgeBackups: purge }, ['-force'])}`,
         ].join('\n'),
       );
       exit(1);
       return;
     }
-    log.error(`backup ${what} (${why}); destroy stopped; rerun with -force to destroy anyway`);
+    log.error(
+      `backup ${what} (${why}); destroy stopped; run \`${retryDestroyCommand(envName, { purgeBackups: purge }, ['-force'])}\` to destroy anyway`,
+    );
     exit(1);
   };
 
@@ -1203,15 +1209,92 @@ function deleteGitHubEnvironment(envName) {
 // BACKUP BUCKET CLEANUP
 // ============================================================================
 
+/** True when an S3 error says the bucket does not exist. */
+function isNoSuchBucket(err) {
+  return (
+    err?.name === 'NoSuchBucket' ||
+    err?.Code === 'NoSuchBucket' ||
+    err?.$metadata?.httpStatusCode === 404
+  );
+}
+
+/**
+ * Run `op` on a bucket at its recorded region, and when that region says the
+ * bucket does not exist, look for it in every region these keys can address
+ * before concluding anything (locateBucket; keys made for one cluster, as on
+ * Vultr and Linode, address only that one). A record can name the wrong
+ * region: an environment that hit the old bug and was not deployed since, or
+ * a deploy that died before its final save. A store asked in the wrong region
+ * answers "no such bucket" for a bucket full of data, so that answer alone
+ * never means gone where the keys reach other regions.
+ *
+ * Returns where `op` ran, or `{ gone: true, searched }` only when every
+ * region asked said not found (`searched`, how many were asked, words the
+ * line). A region that answers anything else throws (locateBucket names the
+ * bucket and the region), and so does a store that says NoSuchBucket where the
+ * search then finds the bucket: the caller keeps it and records why.
+ * `ran.region` is where `op` is running, set before each run starts, so a
+ * caller whose op fails or times out at a found region reports that region.
+ * @template T
+ * @param {{ forRegion: (region: string) => any, locateBucket: (bucket: string) => Promise<string|null>, addressableRegions: () => string[] }} store
+ *   the client at `region`
+ * @param {string} bucket
+ * @param {string} region - where the record says the bucket is
+ * @param {(store: any) => Promise<T>} op
+ * @param {{ region?: string }} [ran] - written: where `op` runs
+ * @returns {Promise<{ result: T, region: string, gone?: false } | { gone: true, searched: number }>}
+ */
+async function atBucketRegion(store, bucket, region, op, ran = {}) {
+  ran.region = region;
+  try {
+    return { result: await op(store), region };
+  } catch (err) {
+    if (!isNoSuchBucket(err)) throw err;
+    const found = await store.locateBucket(bucket);
+    if (found === null) return { gone: true, searched: store.addressableRegions().length };
+    if (found === region) {
+      throw new Error(
+        `${bucket} answered NoSuchBucket in ${region}, but a HeadBucket there finds it: the store is answering two ways, so it was left in place; look at it in the Object Storage console before deleting anything by hand`,
+      );
+    }
+    ran.region = found;
+    return { result: await op(store.forRegion(found)), region: found };
+  }
+}
+
+/** ` in fsn1, not nbg1 as its record said` when the bucket was found elsewhere. */
+const foundElsewhere = (ran, recorded) =>
+  ran && ran !== recorded ? ` in ${ran}, not ${recorded} as its record said` : '';
+
+/**
+ * The line for a bucket that no region these keys reach has. "In any region"
+ * only when more than one was asked: keys for one cluster asked just that
+ * one, and the line reads as it always did there.
+ * @param {string} what - "Backup bucket" or "S3 bucket"
+ * @param {number} searched - how many regions were asked
+ */
+const notFoundLine = (what, searched) =>
+  `${what} not found${searched > 1 ? ' in any region' : ''} (already deleted or never created)`;
+
 /**
  * Handle the backup S3 bucket at the end of destroy. Default behavior is to
  * preserve the bucket for recovery (production users); --purge-backups deletes
  * this environment's backups (used by e2e tests, which require a clean tear-down);
- * the bucket itself goes only with the last live environment.
+ * the bucket itself goes only when no other environment keeps backups in it.
  */
-async function handleBackupBucket(envConfig, projectConfig, environment, args, spinner, leaks) {
-  if (!envConfig.backupS3?.bucket) return { purged: false };
-  const bucketName = envConfig.backupS3.bucket;
+async function handleBackupBucket(
+  envConfig,
+  projectConfig,
+  environment,
+  args,
+  spinner,
+  leaks,
+  entryKept = null,
+) {
+  // The bucket, its region and its endpoint, as every reader takes them.
+  const target = backupsTargetOf(envConfig);
+  if (!target) return { purged: false };
+  const bucketName = target.bucket;
 
   // Not a leak: preservation is the DEFAULT and the whole point of the flag.
   // Nothing was asked of us, so nothing survived that shouldn't have.
@@ -1220,16 +1303,51 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
     return { purged: false };
   }
 
-  const region = envConfig.backupS3.region || envConfig.s3?.region || 'fsn1';
-  // Every environment archives under its own backups/<project>/<env>/ prefix,
-  // so -purge removes this environment's backups and the bucket itself only
-  // goes with the last live environment.
+  // Every environment archives under its own backups/<project>/<env>/ prefix
+  // in its storage region's backups bucket (one per project and region), so
+  // -purge removes this environment's backups, and the bucket itself only
+  // when no other environment keeps backups in it: live, destroyed with its
+  // backups kept, or deployed by an older CLI with no record
+  // (backupsBucketHolders).
   const envBackupPrefix = envBackupPrefixFor(projectConfig.projectName, environment);
-  const preservedHolders = preservedBackupHolders(projectConfig, environment, bucketName);
-  const deleteBucket =
-    otherEnvironmentNames(projectConfig, environment).length === 0 && preservedHolders.length === 0;
+  const holders = backupsBucketHolders(projectConfig, { bucket: bucketName, except: environment });
+  const deleteBucket = holders.length === 0;
+  // A destroy that keeps the environment's entry (entryKeptReason) leaves
+  // the environment live for the rerun, and a live environment keeps its
+  // backups: it still holds the bucket (backupsHoldings), and another
+  // environment's fenced deploy looks for every live record's buckets and
+  // stops when one is gone. So -purge keeps them this time, as
+  // retainStateBucket keeps the state bucket. The keep rule is final by now:
+  // the steps after this one add only lines that keep nothing. The next
+  // clean -purge deletes them and records backupsPurged.
+  if (entryKept) {
+    spinner.start('Backup bucket');
+    spinner.stop(
+      `Backups kept: ${envBackupPrefix} in ${bucketName}. This destroy keeps ${environment}'s ` +
+        `entry because ${entryKept.because}, and a kept environment keeps its backups; a clean ` +
+        `\`${retryDestroyCommand(environment, args)}\` deletes them then.`,
+    );
+    return { purged: false };
+  }
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
+  // A record with no region, beside uploads with none either, names no store
+  // to ask. The bucket is never guessed into a region: a store asked in the
+  // wrong one answers "no such bucket", and the purge would say it is gone.
+  if (!target.region) {
+    leaks.leak({
+      resourceClass: 'bucket',
+      resource: describeResource({ name: bucketName }),
+      reason:
+        'purge requested (-purge) but the backups bucket has no region on record, so destroy cannot tell which store holds it',
+      hint: `Delete ${envBackupPrefix} in ${bucketName} via the ${Provider.NAME} Object Storage console, and the bucket once no other environment keeps backups there; it keeps billing until removed.`,
+    });
+    return { purged: false };
+  }
+  const region = target.region;
+  // Where the purge is running: the recorded region, or where the bucket was
+  // found. A failure is reported there, the region whose console holds it.
+  const ran = { region };
   spinner.start(`Purging backup bucket: ${bucketName}`);
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
@@ -1246,7 +1364,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
         resourceClass: 'bucket',
         resource: describeResource({ name: bucketName, region }),
         reason: 'purge requested (-purge) but no object-storage credentials were available',
-        hint: `Export ${(Provider.OBJECT_STORAGE_ENV ?? []).join(' and ') || 'the object-storage credentials'} and re-run, or delete it via the ${Provider.NAME} console — it keeps billing until removed.`,
+        hint: backupsLeakHint(Provider.NAME, { bucketName, envBackupPrefix, holders }),
       });
       return { purged: false };
     }
@@ -1256,86 +1374,106 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       s3Creds.secretKey,
       region,
     );
-    try {
-      // Bound the purge so a slow/contended S3 endpoint can't consume the whole
-      // destroy budget. The Hetzner resources are already freed (Pulumi destroy
-      // ran before this), but a single S3 op can hang up to ~9 min under the
-      // SDK (maxAttempts 3 × 60s socketTimeout) × _send (maxAttempts 3) retry
-      // layers — observed on k8s teardown, where the storage bucket doubles as
-      // the Pulumi state backend (slow/contended), blowing the 600s
-      // final-destroy timeout and getting the whole step SIGKILLed. On timeout
-      // we leave the bucket for the orphan sweep / next destroy rather than hang.
-      const PURGE_TIMEOUT_MS = 180_000;
-      const purge = async () => {
-        const { objectsRemoved } = await s3Provider.deletePrefix(bucketName, envBackupPrefix);
-        if (!deleteBucket) return { kept: true, objectsRemoved };
-        return s3Provider.emptyAndDeleteBucket(bucketName);
-      };
-      const result = await Promise.race([
-        purge(),
-        new Promise((_, reject) => {
-          // Detach the timer from the event loop so a fast purge win doesn't
-          // leave it holding the process open — handle-probe evidence
-          // (2026-08-23 matrix) showed every destroy lingering ~175s past its
-          // completion banner on exactly this handle. A detached timer still
-          // fires if the purge genuinely hangs; it just stops blocking exit.
-          const t = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `backup bucket purge exceeded ${PURGE_TIMEOUT_MS / 1000}s, left for the orphan sweep / a retried destroy`,
-                ),
+    // Bound the purge so a slow/contended S3 endpoint can't consume the whole
+    // destroy budget. The Hetzner resources are already freed (Pulumi destroy
+    // ran before this), but a single S3 op can hang up to ~9 min under the
+    // SDK (maxAttempts 3 × 60s socketTimeout) × _send (maxAttempts 3) retry
+    // layers — observed on k8s teardown, where the storage bucket doubles as
+    // the Pulumi state backend (slow/contended), blowing the 600s
+    // final-destroy timeout and getting the whole step SIGKILLed. On timeout
+    // the bucket is left in place, as a leak whose hint gives the console
+    // steps: never a destroy rerun, which finds nothing once the environment
+    // has moved to destroyedEnvironments.
+    const PURGE_TIMEOUT_MS = 180_000;
+    const purgeAt = async (store) => {
+      const { objectsRemoved } = await store.deletePrefix(bucketName, envBackupPrefix);
+      if (!deleteBucket) return { kept: true, objectsRemoved };
+      return store.emptyAndDeleteBucket(bucketName);
+    };
+    // Where the record says, else wherever the bucket really is: a wrong
+    // region on record must never read as "purged" while the folder stays.
+    const outcome = await Promise.race([
+      atBucketRegion(s3Provider, bucketName, region, purgeAt, ran),
+      new Promise((_, reject) => {
+        // Detach the timer from the event loop so a fast purge win doesn't
+        // leave it holding the process open — handle-probe evidence
+        // (2026-08-23 matrix) showed every destroy lingering ~175s past its
+        // completion banner on exactly this handle. A detached timer still
+        // fires if the purge genuinely hangs; it just stops blocking exit.
+        const t = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `backup bucket purge exceeded ${PURGE_TIMEOUT_MS / 1000}s, so it was left in place`,
               ),
-            PURGE_TIMEOUT_MS,
-          );
-          if (typeof t?.unref === 'function') t.unref();
-        }),
-      ]);
-      spinner.stop(
-        result.kept
-          ? `Backups under ${envBackupPrefix} purged (${result.objectsRemoved} objects removed); bucket kept for the other environments${preservedHolders.length > 0 ? ` (preserved backups of ${preservedHolders.map(([n]) => n).join(', ')})` : ''}`
-          : result.deleted
-            ? result.objectsRemoved > 0
-              ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
-              : 'Backup bucket purged'
-            : result.shellDeferred
-              ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
-              : 'Backup bucket not found',
-      );
+            ),
+          PURGE_TIMEOUT_MS,
+        );
+        if (typeof t?.unref === 'function') t.unref();
+      }),
+    ]);
+    if (outcome.gone) {
+      spinner.stop(notFoundLine('Backup bucket', outcome.searched));
       return { purged: true };
-    } catch (bucketError) {
-      if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
-        spinner.stop('Backup bucket not found (already deleted or never created)');
-        return { purged: true };
-      }
-      throw bucketError;
     }
+    const { result } = outcome;
+    const where = foundElsewhere(outcome.region, region);
+    spinner.stop(
+      result.kept
+        ? `Backups under ${envBackupPrefix} purged${where} (${result.objectsRemoved} objects removed); bucket kept for ${holders.join(', ')}, which ${holders.length === 1 ? 'keeps' : 'keep'} backups there`
+        : result.deleted
+          ? result.objectsRemoved > 0
+            ? `Backup bucket purged${where} (${result.objectsRemoved} objects removed)`
+            : `Backup bucket purged${where}`
+          : result.shellDeferred
+            ? `Backup bucket emptied${where} (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
+            : 'Backup bucket not found',
+    );
+    return { purged: true };
   } catch (error) {
     spinner.stop(`Backup bucket purge failed: ${error.message}`);
     leaks.leak({
       resourceClass: 'bucket',
-      resource: describeResource({ name: bucketName, region }),
+      resource: describeResource({ name: bucketName, region: ran.region }),
       reason: `purge failed: ${error.message}`,
-      hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,
+      hint: backupsLeakHint(Provider.NAME, { bucketName, envBackupPrefix, holders }),
     });
     return { purged: false };
   }
 }
 
 /**
- * Destroyed environments whose backups still sit in `bucketName`. A plain
- * destroy keeps an environment's backups for recovery and records it under
- * destroyedEnvironments with its backupS3, so it holds the bucket just as a
- * live environment does. A -purge that removed the environment's backup
- * folder records `backupsPurged`, and such an entry holds nothing.
+ * What to do by hand about a backups bucket -purge left behind. Only this
+ * environment's folder is ours to remove while another environment keeps
+ * backups in the bucket; the bucket itself goes only with its last holder.
+ * It points to the console, never to a destroy rerun: a bucket leak still
+ * moves the environment to destroyedEnvironments, so `destroy <env>`
+ * afterwards finds nothing to run against.
  *
- * @returns {Array<[string, any]>}
+ * @param {string} providerName
+ * @param {{ bucketName: string, envBackupPrefix: string, holders: string[] }} o
  */
-function preservedBackupHolders(projectConfig, environment, bucketName) {
-  return Object.entries(projectConfig.destroyedEnvironments ?? {}).filter(
-    ([name, entry]) =>
-      name !== environment && !entry?.backupsPurged && entry?.backupS3?.bucket === bucketName,
-  );
+function backupsLeakHint(providerName, { bucketName, envBackupPrefix, holders }) {
+  if (holders.length === 0) {
+    return `Empty it via the ${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`;
+  }
+  return `Delete ${envBackupPrefix} in ${bucketName} via the ${providerName} Object Storage console, and leave the bucket: ${holders.join(', ')} ${holders.length === 1 ? 'keeps' : 'keep'} backups there.`;
+}
+
+/**
+ * What to do by hand about a derived Pulumi state bucket a last-environment
+ * -purge could not delete. Every environment of the project keeps its Pulumi
+ * stacks under `.pulumi/stacks/` in this one bucket, so that is the check
+ * before deleting it. It points to the console, never to a destroy rerun:
+ * the environment has already moved to destroyedEnvironments. Deleting it by
+ * hand is safe because the purge still rotates stateBucketGeneration
+ * (`abandoned`), so the next deploy derives a fresh name instead of
+ * recreating this one.
+ *
+ * @param {string} providerName
+ */
+function stateBucketLeakHint(providerName) {
+  return `Once .pulumi/stacks/ in it holds no stack (each environment of this project keeps its Pulumi state there), empty it via the ${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`;
 }
 
 /**
@@ -1427,22 +1565,23 @@ async function retainStateBucket(
     spinner.start('Pulumi state bucket');
     spinner.stop(
       `Pulumi state bucket kept: ${stateBucket}. This destroy keeps ${environment}'s entry ` +
-        `because ${entryKept.because}, and your next \`vibecarbon destroy ${environment}\` ` +
-        `needs this bucket to retry; a clean \`vibecarbon destroy ${environment} -purge\` ` +
-        'deletes it then.',
+        `because ${entryKept.because}, and your next \`${retryDestroyCommand(environment, args)}\` ` +
+        'needs this bucket to retry, and deletes it once it runs clean.',
     );
     return { purged: false };
   }
 
-  // -purge of the last environment means "leave nothing behind": with backups
-  // it already deletes the backup bucket, and the state bucket follows the
-  // same rule. This is the ONE deletion path for the retained bucket (review
+  // -purge of the last environment means "leave nothing behind": it already
+  // deletes the backups bucket once no environment keeps backups there, and
+  // the state bucket follows the same rule. This is the ONE deletion path for the retained bucket (review
   // finding, 2026-08-15: there was previously none at all), and it is safe
   // where the old always-delete was not: it runs only on explicit request,
   // after stack teardown, and a successful delete returns `purged`, which
-  // makes updateProjectConfig rotate stateBucketGeneration. The next deploy
-  // then derives a fresh name instead of recreating this one, which is the
-  // same-name recreate that lost acked writes on 2026-08-07.
+  // makes updateProjectConfig rotate stateBucketGeneration. A purge it could
+  // not finish returns `abandoned`, which rotates it too, since its hint
+  // tells you to delete the bucket by hand. The next deploy then derives a
+  // fresh name instead of recreating this one, which is the same-name
+  // recreate that lost acked writes on 2026-08-07.
   if (args?.purgeBackups) {
     // A purge carries nothing forward: drop any retained name whether or not
     // the delete below succeeds, so the next deploy never resolves to a
@@ -1462,9 +1601,9 @@ async function retainStateBucket(
           resourceClass: 'bucket',
           resource: describeResource({ name: stateBucket, region }),
           reason: 'purge requested (-purge) but no object-storage credentials were available',
-          hint: `Export the object-storage credentials and re-run, or delete it via the ${Provider.NAME} console.`,
+          hint: stateBucketLeakHint(Provider.NAME),
         });
-        return;
+        return { purged: false, abandoned: true };
       }
       const s3Provider = await getObjectStorageProvider(
         providerIdFor(envConfig),
@@ -1485,10 +1624,10 @@ async function retainStateBucket(
         resourceClass: 'bucket',
         resource: describeResource({ name: stateBucket, region }),
         reason: `purge failed: ${error.message}`,
-        hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket.`,
+        hint: stateBucketLeakHint(Provider.NAME),
       });
+      return { purged: false, abandoned: true };
     }
-    return;
   }
 
   // Keeping the bucket is only useful if the next deploy finds it. The
@@ -1502,7 +1641,8 @@ async function retainStateBucket(
   spinner.start('Pulumi state bucket');
   spinner.stop(
     `Pulumi state bucket kept for reuse: ${stateBucket} (recorded as retainedStateBucket; ` +
-      'the next deploy resumes this warm state backend; delete with -purge)',
+      'the next deploy resumes this warm state backend). ' +
+      keptStateBucketNext(environment, entryKept, others),
   );
   // Deliberately NOT a ledger entry. All four severities mean something this
   // is not: leak/unverified feed `survivors` and fail the exit code, `foreign`
@@ -1598,6 +1738,67 @@ function otherEnvironmentNames(projectConfig, environment) {
 }
 
 /**
+ * What deletes the app bucket a plain destroy keeps. The keep rule is final
+ * when the bucket steps run (entryKeptReason), so the line knows whether the
+ * environment stays listed. While it does, a clean -purge of it deletes the
+ * bucket. Once this destroy moves it to destroyedEnvironments, `destroy <env>`
+ * stops at "not found", and no command deletes a destroyed environment's
+ * bucket (-orphans removes Pulumi stacks only): a redeploy reuses it, and the
+ * console deletes it.
+ *
+ * @param {string} environment
+ * @param {{ because: string } | null} entryKept - entryKeptReason's verdict
+ * @param {string} providerName
+ */
+function keptAppBucketNext(environment, entryKept, providerName) {
+  if (entryKept) {
+    return (
+      `This destroy keeps ${environment}'s entry because ${entryKept.because}, so a clean ` +
+      `\`${retryDestroyCommand(environment, { purgeBackups: true })}\` deletes it.`
+    );
+  }
+  return (
+    `A redeploy of ${environment} reuses it. This destroy moves ${environment} out of your ` +
+    'environments, so no later destroy reaches the bucket: to delete it, empty it via the ' +
+    `${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`
+  );
+}
+
+/**
+ * What deletes the derived Pulumi state bucket a plain destroy keeps. Every
+ * environment of the project keeps its stacks in it, and only a -purge of
+ * the project's last environment deletes it (retainStateBucket). While this
+ * environment stays listed and is the only one, that is a clean -purge of it.
+ * With no environment left, nothing is there to destroy until a deploy
+ * resumes the bucket. The line never sends you to the console: a plain
+ * destroy records the name (retainedStateBucket) without rotating
+ * stateBucketGeneration, so the next deploy would recreate a bucket you just
+ * deleted, the same-name recreate that lost acked writes on 2026-08-07.
+ *
+ * @param {string} environment
+ * @param {{ because: string } | null} entryKept - entryKeptReason's verdict
+ * @param {string[]} others - the project's other live environments
+ */
+function keptStateBucketNext(environment, entryKept, others) {
+  if (others.length > 0) {
+    return (
+      `${others.join(', ')} still ${others.length === 1 ? 'uses' : 'use'} it, so a -purge ` +
+      "destroy of the project's last environment deletes it."
+    );
+  }
+  if (entryKept) {
+    return (
+      `This destroy keeps ${environment}'s entry because ${entryKept.because}, so a clean ` +
+      `\`${retryDestroyCommand(environment, { purgeBackups: true })}\` deletes it.`
+    );
+  }
+  return (
+    'No environment is left to destroy, so it waits for your next deploy; a -purge destroy ' +
+    "of the project's last environment deletes it then."
+  );
+}
+
+/**
  * Is the environment's recorded app bucket its OWN: the per-environment name
  * deriveEnvAppBucketName gives it, and not pinned? Only such a bucket is this
  * environment's alone. An env still on an older CLI's per-project bucket
@@ -1620,19 +1821,21 @@ function ownsAppBucket(envConfig, projectConfig, environment) {
  * What the destroy preview needs to know about the buckets, decided by the
  * same rules the teardown applies (deleteAppBucketEffect, handleBackupBucket),
  * so the preview never promises a deletion the destroy will not do.
+ * `backupBucketHolders` names the environments that keep backups in this
+ * environment's backups bucket (backupsBucketHolders), so -purge keeps it.
  *
- * @returns {{ appBucketOwned: boolean, backupBucketHeld: boolean }}
+ * @returns {{ appBucketOwned: boolean, backupBucketHeld: boolean, backupBucketHolders: string[] }}
  */
 export function destroyPreviewBucketFacts(projectConfig, environment) {
   const envConfig = projectConfig.environments?.[environment] ?? {};
-  const backupBucket = envConfig.backupS3?.bucket;
+  const backups = backupsTargetOf(envConfig);
+  const holders = backups
+    ? backupsBucketHolders(projectConfig, { bucket: backups.bucket, except: environment })
+    : [];
   return {
     appBucketOwned: ownsAppBucket(envConfig, projectConfig, environment),
-    backupBucketHeld:
-      otherEnvironmentNames(projectConfig, environment).length > 0 ||
-      (backupBucket
-        ? preservedBackupHolders(projectConfig, environment, backupBucket).length > 0
-        : false),
+    backupBucketHeld: holders.length > 0,
+    backupBucketHolders: holders,
   };
 }
 
@@ -1641,21 +1844,17 @@ export function destroyPreviewBucketFacts(projectConfig, environment) {
 //    uploads, the same way it keeps this env's backups, and the destroyed
 //    env's seed names it so a redeploy lands on it again. -purge empties and
 //    deletes it only when it is this env's own (ownsAppBucket): never a
-//    pinned bucket, never a legacy per-project bucket other envs share.
+//    pinned bucket, never a legacy per-project bucket other envs share, and
+//    not while this destroy keeps the env's entry (entryKeptReason).
 async function deleteAppBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, results, spinner } = ctx;
   const s3BucketName = envConfig.s3?.bucket;
   if (!s3BucketName) return;
-  if (!args?.purgeBackups) {
-    // Kept by design, so not a ledger entry (see retainStateBucket).
-    spinner.start('S3 bucket');
-    spinner.stop(`S3 bucket kept with its uploads: ${s3BucketName} (delete with -purge)`);
-    return;
-  }
   // A PINNED bucket (envConfig.s3.bucketPin, the E6 escape hatch) may be the
   // old per-project bucket that several environments pin, so -purge on one
   // of them must not delete the others' uploads. Kept always, like a pinned
-  // state bucket in retainStateBucket.
+  // state bucket in retainStateBucket, and the line says so on a plain
+  // destroy too: no -purge deletes it.
   if (envConfig.s3?.bucketPin) {
     spinner.start('S3 bucket');
     spinner.stop(
@@ -1670,9 +1869,39 @@ async function deleteAppBucketEffect(ctx) {
     );
     return;
   }
+  // A destroy that keeps the environment's entry (entryKeptReason) leaves
+  // the environment live for the rerun, and a live record's bucket must
+  // stay: another environment's fenced deploy looks for it and stops when it
+  // is gone. So -purge keeps it this time, as retainStateBucket keeps the
+  // state bucket. The keep rule is final by now: the teardown, the key
+  // revoke and the stack state ran first, and the steps after this one add
+  // only lines that keep nothing. The next clean -purge deletes it and
+  // records appBucketPurged. A plain destroy keeps it either way, and the
+  // same verdict tells its line what can delete it (keptAppBucketNext).
+  const entryKept = entryKeptReason(results, envConfig);
+  if (!args?.purgeBackups) {
+    // Kept by design, so not a ledger entry (see retainStateBucket).
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept with its uploads: ${s3BucketName}. ` +
+        keptAppBucketNext(environment, entryKept, providerFor(envConfig).NAME),
+    );
+    return;
+  }
+  if (entryKept) {
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept with its uploads: ${s3BucketName}. This destroy keeps ${environment}'s ` +
+        `entry because ${entryKept.because}, and a kept environment keeps its uploads; a clean ` +
+        `\`${retryDestroyCommand(environment, args)}\` deletes it then.`,
+    );
+    return;
+  }
   const s3Region = envConfig.s3?.region || 'fsn1';
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
+  // Where the delete is running: a failure is reported in that region.
+  const ran = { region: s3Region };
   spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
@@ -1686,30 +1915,41 @@ async function deleteAppBucketEffect(ctx) {
         s3Creds.secretKey,
         s3Region,
       );
-      try {
-        const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
-        if (result.deleted) {
-          results.s3Bucket = s3BucketName;
-          spinner.stop(
-            result.objectsRemoved > 0
-              ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
-              : 'S3 bucket deleted',
-          );
-        } else if (result.shellDeferred) {
-          results.s3Bucket = s3BucketName;
-          spinner.stop(
-            `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
-          );
-        } else {
-          spinner.stop('S3 bucket not found');
-        }
-      } catch (bucketError) {
-        // NoSuchBucket means it was already deleted or never created — not an error
-        if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
-          spinner.stop('S3 bucket not found (already deleted or never created)');
-        } else {
-          throw bucketError;
-        }
+      // Where the record says, else wherever the bucket really is: an
+      // environment that hit the old bug records its uploads under the wrong
+      // region until its next deploy, and its uploads are still there.
+      const outcome = await atBucketRegion(
+        s3Provider,
+        s3BucketName,
+        s3Region,
+        (store) => store.emptyAndDeleteBucket(s3BucketName),
+        ran,
+      );
+      if (outcome.gone) {
+        spinner.stop(notFoundLine('S3 bucket', outcome.searched));
+        return;
+      }
+      const result = outcome.result;
+      const where = foundElsewhere(outcome.region, s3Region);
+      if (result.deleted) {
+        results.s3Bucket = s3BucketName;
+        // The destroyed record says so, and the app key fence never asks
+        // about this bucket again. Only a delete confirmed here counts:
+        // "not found" anywhere is not a delete, and an emptied shell still
+        // exists, so the fence keeps both.
+        results.appBucketPurged = true;
+        spinner.stop(
+          result.objectsRemoved > 0
+            ? `S3 bucket deleted${where} (${result.objectsRemoved} objects removed)`
+            : `S3 bucket deleted${where}`,
+        );
+      } else if (result.shellDeferred) {
+        results.s3Bucket = s3BucketName;
+        spinner.stop(
+          `S3 bucket emptied${where} (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
+        );
+      } else {
+        spinner.stop('S3 bucket not found');
       }
     } else {
       spinner.stop('S3 bucket skipped (no credentials available)');
@@ -1717,14 +1957,17 @@ async function deleteAppBucketEffect(ctx) {
         resourceClass: 'bucket',
         resource: describeResource({ name: s3BucketName, region: s3Region }),
         reason: 'purge requested (-purge) but no object-storage credentials were available',
-        hint: `Run \`vibecarbon destroy\` again with credentials configured, or delete via the ${Provider.NAME} console.`,
+        // The environment has moved to destroyedEnvironments, so a destroy
+        // rerun finds nothing; and only this environment's own bucket gets
+        // here (ownsAppBucket), so deleting it by hand is safe.
+        hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,
       });
     }
   } catch (error) {
     spinner.stop(`S3 deletion failed: ${error.message}`);
     results.leaks.leak({
       resourceClass: 'bucket',
-      resource: describeResource({ name: s3BucketName, region: s3Region }),
+      resource: describeResource({ name: s3BucketName, region: ran.region }),
       reason: `not deleted: ${error.message}`,
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });
@@ -1793,7 +2036,7 @@ async function revokeAppStorageKeyEffect(ctx) {
         s3Creds.secretKey,
         s3Region,
       );
-      await syncHetznerFences({
+      const fenced = await syncHetznerFences({
         projectConfig,
         environment,
         leaving: true,
@@ -1803,6 +2046,16 @@ async function revokeAppStorageKeyEffect(ctx) {
           getObjectStorageProvider(providerId, accessKey, secretKey, s3Region),
       });
       spinner.stop(`App storage key ${record.id} retired; it stays denied in every bucket fence`);
+      for (const line of fenceInfoLines(fenced)) p.log.info(line);
+      // Marked (or cleared) in this destroy's config write, so the line
+      // prints once.
+      results.fenceGone = fenced.gone ?? [];
+      results.fenceFound = (fenced.found ?? []).map((f) => f.bucket);
+      results.fenceLocated = (fenced.located ?? []).map(({ bucket, region, endpoint }) => ({
+        bucket,
+        region,
+        endpoint,
+      }));
     } else {
       spinner.stop(
         `App storage key ${record.id} retired; the bucket fences were not updated (no object storage keys here), and they still deny it`,
@@ -1834,6 +2087,10 @@ async function retainStateBucketEffect(ctx) {
     entryKeptReason(results, envConfig),
   );
   if (outcome?.purged) results.stateBucketPurged = true;
+  // A purge it could not finish leaves the bucket for you to delete by hand
+  // (stateBucketLeakHint); the generation rotates all the same, so the next
+  // deploy never recreates a name you may have just deleted.
+  if (outcome?.abandoned) results.stateBucketAbandoned = true;
   // What this destroy decided about retainedStateBucket, for the config write
   // (which patches the file as it is then, not this in-memory copy).
   if (projectConfig.retainedStateBucket !== before) {
@@ -1841,7 +2098,9 @@ async function retainStateBucketEffect(ctx) {
   }
 }
 
-// 3. Backup bucket: preserved by default, deleted with -purge.
+// 3. Backup bucket: preserved by default; -purge deletes this environment's
+//    backups, and the bucket with its last holder (backupsBucketHolders),
+//    unless this destroy keeps the environment's entry (entryKeptReason).
 async function handleBackupBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
   const outcome = await handleBackupBucket(
@@ -1851,6 +2110,7 @@ async function handleBackupBucketEffect(ctx) {
     args,
     spinner,
     results.leaks,
+    entryKeptReason(results, envConfig),
   );
   if (outcome?.purged) results.backupsPurged = true;
 }
@@ -1907,7 +2167,8 @@ function joinAddresses(addresses) {
  *
  * The compose plans remove the stack state after the last step that can add
  * a line that keeps the entry (destroy-plan.js composeTail), so the stack
- * state stays exactly when the entry does.
+ * state stays exactly when the entry does. The bucket steps come later in
+ * every plan, so under -purge they keep their buckets exactly when it does.
  */
 export const ENTRY_KEEP_BY_CLASS = Object.freeze({
   server: {
@@ -2022,9 +2283,9 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
           `Delete the GitHub environment ${env} in the repository's settings if it is still there.`,
       },
       'update-project-config': {
-        byHand: (env) =>
-          `If .vibecarbon.json still lists ${env}, run \`vibecarbon destroy ${env}\` again ` +
-          'to remove it.',
+        byHand: (env, args) =>
+          `If .vibecarbon.json still lists ${env}, run \`${retryDestroyCommand(env, args)}\` ` +
+          'again to remove it.',
       },
       'cleanup-local-files': {
         byHand: (env) =>
@@ -2044,7 +2305,7 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
  * The verdict ENTRY_KEEP_BY_CLASS gives one ledger line: `true` when it keeps
  * the environment's entry, or the by-hand step when it does not.
  * @param {{severity: string, resourceClass: string, resource: string}} entry
- * @returns {true | {byHand: (env: string) => string} | false}
+ * @returns {true | {byHand: (env: string, args?: {purgeBackups?: boolean}) => string} | false}
  */
 function entryVerdict({ severity, resourceClass, resource }) {
   if (severity !== 'leak' && severity !== 'unverified') return false;
@@ -2069,9 +2330,10 @@ export function keepsEntry(entry) {
  * Why this destroy keeps the environment's entry in .vibecarbon.json, or null
  * when it removes it. The one predicate every reader shares: the config step
  * keeps the entry (updateProjectConfigEffect), the compose tiers keep their
- * Pulumi stack state (removePulumiStackStateEffect), and the state-bucket
- * step keeps the bucket the retry opens (retainStateBucket), so none of them
- * can disagree.
+ * Pulumi stack state (removePulumiStackStateEffect), the state-bucket step
+ * keeps the bucket the retry opens (retainStateBucket), and under -purge the
+ * app and backups bucket steps keep theirs (deleteAppBucketEffect,
+ * handleBackupBucket), so none of them can disagree.
  *
  *   - `unverified`: the Pulumi destroy could not be verified
  *     (recordPulumiDestroyOutcome, or destroyK8sTier's catch).
@@ -2127,12 +2389,15 @@ function entryKeptReason(results, envConfig) {
 /**
  * The project-level fields this destroy decided, written whether or not the
  * environment's entry is removed: the retained state-bucket name
- * (retainStateBucket) and, after a -purge deleted the state bucket, a fresh
- * stateBucketGeneration. A kept entry must not lose them: a -purge of the
- * last environment deletes the state bucket whether or not the entry stays,
- * and the next deploy or destroy must then derive a fresh name rather than
- * recreate the deleted one (the same-name recreate that lost acked writes on
- * 2026-08-07).
+ * (retainStateBucket); after a -purge deleted the state bucket, or left it
+ * for you to delete by hand, a fresh stateBucketGeneration; and what the app
+ * key fence found about destroyed environments' buckets (recordFenceFindings).
+ * A kept entry must not lose them: a -purge of the last environment deletes
+ * the state bucket whether or not the entry stays, and the next deploy or
+ * destroy must then derive a fresh name rather than recreate the deleted one
+ * (the same-name recreate that lost acked writes on 2026-08-07); and the
+ * fence's findings are about other environments' records, which a kept entry
+ * does not change.
  * @param {object} updatedConfig - the file as it is now
  * @param {object} results
  */
@@ -2141,8 +2406,9 @@ function writeProjectLevelFields(updatedConfig, results) {
     if (results.retainedStateBucket.value === undefined) delete updatedConfig.retainedStateBucket;
     else updatedConfig.retainedStateBucket = results.retainedStateBucket.value;
   }
-  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
-  // deleted the derived state bucket (the last live environment). The next
+  // `stateBucketGeneration` rotates ONLY when this destroy's -purge deleted
+  // the derived state bucket (the last live environment), or meant to and
+  // left it for you to delete by hand (stateBucketAbandoned). The next
   // deploy then derives a FRESH state-bucket name rather than recreating the
   // one just deleted: Hetzner Object Storage can ack writes into a
   // just-recreated same-name bucket and lose them (e4 restore->failover,
@@ -2150,19 +2416,46 @@ function writeProjectLevelFields(updatedConfig, results) {
   // retainStateBucket), and rotating then would strand the warm bucket.
   //
   // The app bucket name stays stable; it is not rotated here.
-  if (results.stateBucketPurged) {
+  if (results.stateBucketPurged || results.stateBucketAbandoned) {
     updatedConfig.stateBucketGeneration = generateBucketSalt();
   }
+  // What the fence found about destroyed environments' buckets: one in no
+  // region is marked not found, one read again is cleared, and one found
+  // in another region has it written into the record (recordFenceFindings).
+  // Never appBucketPurged: that is only for a delete this destroy
+  // confirmed, when the entry moves (updateProjectConfigEffect).
+  recordFenceFindings(updatedConfig, {
+    gone: results.fenceGone ?? [],
+    found: results.fenceFound ?? [],
+    located: results.fenceLocated ?? [],
+  });
+}
+
+/**
+ * Did this destroy decide any project-level field (writeProjectLevelFields)?
+ * A kept entry writes the file only then.
+ * @param {object} results
+ * @returns {boolean}
+ */
+function decidedProjectLevelFields(results) {
+  return Boolean(
+    results.retainedStateBucket ||
+      results.stateBucketPurged ||
+      results.stateBucketAbandoned ||
+      results.fenceGone?.length ||
+      results.fenceFound?.length ||
+      results.fenceLocated?.length,
+  );
 }
 
 // 5. Remove the destroyed environment from project config.
 async function updateProjectConfigEffect(ctx) {
-  const { projectConfig, environment, spinner, results } = ctx;
+  const { projectConfig, environment, args, spinner, results } = ctx;
   // Both keep branches below keep the environment's entry, and still write
   // the project-level fields (writeProjectLevelFields): the purge of the
   // last environment runs before this step whether or not the entry stays.
   const writeProjectLevelOnly = () => {
-    if (!results.retainedStateBucket && !results.stateBucketPurged) return;
+    if (!decidedProjectLevelFields(results)) return;
     updateProjectConfig((updatedConfig) => writeProjectLevelFields(updatedConfig, results));
   };
   // M3 Task 9f fix round 2: keep the environment's config entry when its
@@ -2187,7 +2480,7 @@ async function updateProjectConfigEffect(ctx) {
       resource: `.vibecarbon.json → environments.${environment}`,
       reason:
         "entry KEPT because this environment's Pulumi destroy could not be verified — retrying needs it",
-      hint: `Once you've verified/cleaned up any leftover resources, re-run \`vibecarbon destroy ${environment}\`; it will target this environment normally instead of falling through to orphan-stack handling.`,
+      hint: `Once you've verified/cleaned up any leftover resources, re-run \`${retryDestroyCommand(environment, args)}\`; it will target this environment normally instead of falling through to orphan-stack handling.`,
     });
     return;
   }
@@ -2202,7 +2495,7 @@ async function updateProjectConfigEffect(ctx) {
     writeProjectLevelOnly();
     spinner.stop(
       `Configuration kept: ${kept.because}, ` +
-        `so the next \`vibecarbon destroy ${environment}\` can retry`,
+        `so the next \`${retryDestroyCommand(environment, args)}\` can retry`,
     );
     return;
   }
@@ -2227,8 +2520,12 @@ async function updateProjectConfigEffect(ctx) {
           [environment]: {
             ...identity,
             // This env's backup folder is gone, so it no longer holds the
-            // backup bucket (preservedBackupHolders).
+            // backup bucket (backupsHoldings), and a rebuild's seed carries
+            // no backups record (resolveEnvSeed).
             ...(results.backupsPurged && { backupsPurged: true }),
+            // This env's app bucket is deleted, as this destroy's -purge
+            // confirmed: nothing left there for the app key fence to guard.
+            ...(results.appBucketPurged && { appBucketPurged: true }),
             destroyedAt: new Date().toISOString(),
           },
         };
@@ -2469,6 +2766,7 @@ async function destroyComposeHATier({
   envConfig,
   projectConfig,
   environment,
+  args,
   providerToken,
   results,
   tracker,
@@ -2515,7 +2813,7 @@ async function destroyComposeHATier({
       resourceClass: 'compose-ha teardown',
       resource: `${projectConfig.projectName}-${environment}`,
       reason: `teardown threw before completing: ${error.message}, servers/firewalls/SSH key/DNS have no verdict`,
-      hint: `Check the ${Provider.NAME} console for surviving servers and firewalls, then re-run \`vibecarbon destroy ${environment}\`.`,
+      hint: `Check the ${Provider.NAME} console for surviving servers and firewalls, then re-run \`${retryDestroyCommand(environment, args)}\`.`,
     });
   }
 
@@ -2534,6 +2832,7 @@ async function destroyComposeHATier({
     leaks: results.leaks,
     projectName: projectConfig.projectName,
     environment,
+    args,
     deployMode: 'compose-ha',
     roles: (envConfig.servers || []).map((sv) => sv.role),
     alreadyHandledIds: handledServerIds,
@@ -2570,6 +2869,7 @@ async function destroyComposeHATier({
         results,
         s: tracker.spinner(),
         environment,
+        args,
       });
     }
   }
@@ -2584,6 +2884,7 @@ async function destroyComposeTier({
   envConfig,
   projectConfig,
   environment,
+  args,
   providerToken,
   results,
   spinner: s,
@@ -2689,6 +2990,7 @@ async function destroyComposeTier({
       leaks: results.leaks,
       projectName: projectConfig.projectName,
       environment,
+      args,
       deployMode: envConfig.deployMode,
       roles: (envConfig.servers || []).map((sv) => sv.role),
       alreadyHandledIds: (envConfig.servers || []).map((sv) => sv.id).filter(Boolean),
@@ -2722,6 +3024,7 @@ async function destroyComposeTier({
       results,
       s,
       environment,
+      args,
     });
   }
 
@@ -2837,8 +3140,10 @@ function pulumiResourceClass(type) {
  * @param {string} params.stackEnv
  * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
  * @param {string} params.environment - the user-facing environment name.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags, for
+ *   the default finish command (retryDestroyCommand).
  * @param {string} [params.finishCommand] - the command that finishes the
- *   teardown; defaults to `vibecarbon destroy <environment>`.
+ *   teardown; defaults to retryDestroyCommand(environment, args).
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`, for the hint.
  */
@@ -2847,12 +3152,13 @@ export function recordPulumiDestroyFailure({
   stackEnv,
   dirLabel,
   environment,
+  args,
   finishCommand,
   results,
   providerName,
 }) {
   results.pulumiDestroyFailed = true;
-  const finish = finishCommand ?? `vibecarbon destroy ${environment}`;
+  const finish = finishCommand ?? retryDestroyCommand(environment, args);
   const hint = `Run \`${finish}\` again to finish; it refreshes the stack and deletes what is left. If it fails the same way, delete it in the ${providerName} console, then run it once more.`;
   const remaining = Array.isArray(error?.remainingResources) ? error.remainingResources : null;
   if (remaining && remaining.length > 0) {
@@ -2924,6 +3230,9 @@ export function recordPulumiDestroyFailure({
  * @param {object} params.envConfig
  * @param {string} params.stackEnv
  * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
+ * @param {string} [params.environment] - the user-facing environment name, for
+ *   the retry command; the stack's own name when absent.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags.
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`, for the issue hint.
  * @returns {boolean} true if recorded as a verified success.
@@ -2933,6 +3242,8 @@ export function recordPulumiDestroyOutcome({
   envConfig,
   stackEnv,
   dirLabel,
+  environment = stackEnv,
+  args,
   results,
   providerName,
 }) {
@@ -2956,8 +3267,8 @@ export function recordPulumiDestroyOutcome({
         'state-backend mismatch (the wrong, empty stack was found). Pulumi state was preserved.',
       hint:
         `Verify directly in the ${providerName} console (servers, firewall, VPC/network, ` +
-        'SSH key, reserved/floating IP), then re-run `vibecarbon destroy` to retry against ' +
-        'the same Pulumi state.',
+        `SSH key, reserved/floating IP), then re-run \`${retryDestroyCommand(environment, args)}\` ` +
+        'to retry against the same Pulumi state.',
     });
     return false;
   }
@@ -3203,12 +3514,13 @@ function keepUnreleased(results, address) {
 /**
  * The retry line every reserved IP of ours that is not released carries.
  * @param {string} environment - as the operator names it
+ * @param {{purgeBackups?: boolean} | undefined} args - this destroy's flags
  * @param {{NAME: string, RESERVED_IP_NAME?: string}} Provider
  */
-function reservedIpRetryHint(environment, Provider) {
+function reservedIpRetryHint(environment, args, Provider) {
   const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
   return (
-    `Run \`vibecarbon destroy ${environment}\` again to retry it: the environment ` +
+    `Run \`${retryDestroyCommand(environment, args)}\` again to retry it: the environment ` +
     'stays in .vibecarbon.json until it is released. Or release it in the ' +
     `${Provider.NAME} console, where it is listed with your ${noun}s.`
   );
@@ -3328,10 +3640,11 @@ async function releaseRecordedReservedIp({
  * kept on record like any other of ours, so the next destroy retries it.
  * Exported for unit testing.
  *
- * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string}} args
+ * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string, args?: {purgeBackups?: boolean}}} params
  *   `stackEnv`: the stack's environment label (k8s-ha: `<env>-primary` or
  *   `<env>-standby`; compose and single k8s: the environment).
- *   `environment`: as the operator names it, for the retry line.
+ *   `environment`: as the operator names it, and `args`, this destroy's
+ *   flags, for the retry line (retryDestroyCommand).
  */
 export async function sweepTaggedReservedIps({
   provider,
@@ -3341,6 +3654,7 @@ export async function sweepTaggedReservedIps({
   results,
   s,
   environment,
+  args,
 }) {
   const Provider = provider.constructor;
   const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
@@ -3364,10 +3678,10 @@ export async function sweepTaggedReservedIps({
         resourceClass: 'reserved-ip',
         resource: failure.address,
         hint: failure.serverTerminating
-          ? `Run \`vibecarbon destroy ${environment}\` again once the server is gone: the ` +
+          ? `Run \`${retryDestroyCommand(environment, args)}\` again once the server is gone: the ` +
             'environment stays in .vibecarbon.json, and that destroy releases it. Or release it ' +
             `in the ${Provider.NAME} console after the server is deleted.`
-          : reservedIpRetryHint(environment, Provider),
+          : reservedIpRetryHint(environment, args, Provider),
       };
       if (failure.held) {
         results.leaks.leak({
@@ -3392,7 +3706,7 @@ export async function sweepTaggedReservedIps({
       resource: `${noun}s labelled ${scope}`,
       reason: `the listing failed: ${error.message}, so vibecarbon could not confirm none is left`,
       hint:
-        `Run \`vibecarbon destroy ${environment}\` again to retry the check: the environment ` +
+        `Run \`${retryDestroyCommand(environment, args)}\` again to retry the check: the environment ` +
         `stays in .vibecarbon.json until it runs clean. Or look in the ${Provider.NAME} console ` +
         `for a ${noun} labelled ${scope}; it keeps billing until it is released.`,
     });
@@ -3415,8 +3729,9 @@ export async function sweepTaggedReservedIps({
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
- * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string}} args
- *   `environment`: the environment as the operator names it, for the retry line.
+ * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string, args?: {purgeBackups?: boolean}}} params
+ *   `environment`: the environment as the operator names it, and `args`,
+ *   this destroy's flags, for the retry line (retryDestroyCommand).
  */
 export async function sweepK8sBackstopTargets({
   provider,
@@ -3425,6 +3740,7 @@ export async function sweepK8sBackstopTargets({
   s,
   projectName,
   environment,
+  args,
 }) {
   const Provider = provider.constructor;
   const byName = Provider.K8S_DESTROY_BACKSTOP === true;
@@ -3434,7 +3750,9 @@ export async function sweepK8sBackstopTargets({
   // (or reported) twice.
   const recorded = byName ? targets.flatMap((t) => t.reservedIps.map((r) => r.address)) : [];
   for (const target of targets) {
-    if (byName) await sweepByName({ provider, target, results, s, projectName, environment });
+    if (byName) {
+      await sweepByName({ provider, target, results, s, projectName, environment, args });
+    }
     if (byLabel) {
       await sweepTaggedReservedIps({
         provider,
@@ -3444,6 +3762,7 @@ export async function sweepK8sBackstopTargets({
         results,
         s,
         environment,
+        args,
       });
     }
     if (byName) await deleteBackstopNetwork({ provider, target, results, s });
@@ -3453,9 +3772,9 @@ export async function sweepK8sBackstopTargets({
 /**
  * The name and address half of the backstop for one stack: firewall, SSH
  * key, then each recorded reserved IP.
- * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string}} args
+ * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string, args?: {purgeBackups?: boolean}}} params
  */
-async function sweepByName({ provider, target, results, s, projectName, environment }) {
+async function sweepByName({ provider, target, results, s, projectName, environment, args }) {
   const Provider = provider.constructor;
   // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
   const firewallName = target.firewallName;
@@ -3526,7 +3845,7 @@ async function sweepByName({ provider, target, results, s, projectName, environm
   // DigitalOcean's delete counts it released only once the read by address
   // answers 404 (DigitalOceanProvider.deleteReservedIpByAddress): DO has
   // answered a DELETE with success and kept the IP.
-  const retry = reservedIpRetryHint(environment, Provider);
+  const retry = reservedIpRetryHint(environment, args, Provider);
   for (const { address, stacks } of target.reservedIps) {
     await releaseRecordedReservedIp({ provider, address, stacks, projectName, results, s, retry });
   }
@@ -3582,6 +3901,7 @@ async function destroyK8sTier({
   envConfig,
   projectConfig,
   environment,
+  args,
   providerToken,
   results,
   spinner: s,
@@ -3968,6 +4288,8 @@ async function destroyK8sTier({
             envConfig,
             stackEnv,
             dirLabel,
+            environment,
+            args,
             results,
             providerName: Provider.NAME,
           });
@@ -3986,6 +4308,7 @@ async function destroyK8sTier({
             stackEnv,
             dirLabel,
             environment,
+            args,
             results,
             providerName: Provider.NAME,
           });
@@ -4031,7 +4354,7 @@ async function destroyK8sTier({
                 region: provider.serverRegion(sv),
               }),
               reason: `orphaned server delete failed: ${error.message}`,
-              hint: `Run \`vibecarbon destroy ${environment}\` again to retry: the environment stays in .vibecarbon.json, and the re-run's orphaned-server sweep finds it by its labels. Or delete it via the ${Provider.NAME} console; it is outside Pulumi state.`,
+              hint: `Run \`${retryDestroyCommand(environment, args)}\` again to retry: the environment stays in .vibecarbon.json, and the re-run's orphaned-server sweep finds it by its labels. Or delete it via the ${Provider.NAME} console; it is outside Pulumi state.`,
             });
           }
         }
@@ -4094,6 +4417,7 @@ async function destroyK8sTier({
         s,
         projectName: projectConfig.projectName,
         environment,
+        args,
       });
     }
 
@@ -4252,7 +4576,7 @@ async function destroyK8sTier({
         resource: `volume listing (${[...clusterLocations].join(', ') || 'all regions'})`,
         reason:
           'the provider volume listing came back incomplete, surviving pvc-* volumes cannot be ruled out',
-        hint: `Check the ${Provider.NAME} console (Volumes) for unattached pvc-* volumes in this environment's region(s), or re-run the destroy once the API settles.`,
+        hint: `Check the ${Provider.NAME} console (Volumes) for unattached pvc-* volumes in this environment's region(s), or run \`${retryDestroyCommand(environment, args)}\` again once the API settles.`,
       });
     }
   } catch (error) {
@@ -4291,6 +4615,7 @@ async function destroyComposeServicesEffect(ctx) {
     envConfig: ctx.envConfig,
     projectConfig: ctx.projectConfig,
     environment: ctx.environment,
+    args: ctx.args,
     providerToken: ctx.providerToken,
     results: ctx.results,
     spinner: ctx.spinner,
@@ -4337,14 +4662,14 @@ async function destroyComposeServicesEffect(ctx) {
  * the loop continues so compose-ha's second stack still gets reconciled.
  */
 async function removePulumiStackStateEffect(ctx) {
-  const { plan, envConfig, projectConfig, environment, results, spinner: s } = ctx;
+  const { plan, envConfig, projectConfig, environment, args, results, spinner: s } = ctx;
 
   const kept = entryKeptReason(results, envConfig);
   if (kept) {
     p.log.warn(
       `Pulumi stack state kept for ${plan.stackEnvs.join(', ')}: this destroy keeps the ` +
         `environment's entry because ${kept.because}. The state records what may still be ` +
-        `deployed, and the next \`vibecarbon destroy ${environment}\` that runs clean removes it.`,
+        `deployed, and the next \`${retryDestroyCommand(environment, args)}\` that runs clean removes it.`,
     );
     return;
   }
@@ -4378,7 +4703,7 @@ async function removePulumiStackStateEffect(ctx) {
           'stack-state removal skipped: no object-storage credentials for its state backend, ' +
           'so the stack still describes the deleted resources',
         hint:
-          `Set ${keys}, then run \`vibecarbon destroy ${environment}\` again to remove it: the ` +
+          `Set ${keys}, then run \`${retryDestroyCommand(environment, args)}\` again to remove it: the ` +
           'environment stays in .vibecarbon.json until its stack state is removed.',
       });
     }
@@ -4408,7 +4733,7 @@ async function removePulumiStackStateEffect(ctx) {
         resource: stackEnv,
         reason: `stack-state removal failed: ${error.message}`,
         hint:
-          `Run \`vibecarbon destroy ${environment}\` again to remove it: the environment stays ` +
+          `Run \`${retryDestroyCommand(environment, args)}\` again to remove it: the environment stays ` +
           'in .vibecarbon.json until its stack state is removed. The kept stack still describes ' +
           'deleted resources, and a deploy of this environment that selects it may fail ' +
           'deleting them (provider 404s).',
@@ -4423,6 +4748,7 @@ async function destroyComposeHaEffect(ctx) {
     envConfig: ctx.envConfig,
     projectConfig: ctx.projectConfig,
     environment: ctx.environment,
+    args: ctx.args,
     providerToken: ctx.providerToken,
     results: ctx.results,
     tracker: ctx.tracker,
@@ -4436,6 +4762,7 @@ async function destroyK8sInfraEffect(ctx) {
     envConfig: ctx.envConfig,
     projectConfig: ctx.projectConfig,
     environment: ctx.environment,
+    args: ctx.args,
     providerToken: ctx.providerToken,
     results: ctx.results,
     spinner: ctx.spinner,
@@ -4483,10 +4810,10 @@ function finishThenReport(stepLabel, effect) {
         ...entry,
         hint:
           verdict === true
-            ? `Run \`vibecarbon destroy ${ctx.environment}\` again once the cause is addressed: ` +
+            ? `Run \`${retryDestroyCommand(ctx.environment, ctx.args)}\` again once the cause is addressed: ` +
               'the environment stays in .vibecarbon.json, and the re-run runs this step again ' +
               'to finish what it left. The remaining steps still ran.'
-            : ['The remaining steps still ran.', verdict?.byHand?.(ctx.environment)]
+            : ['The remaining steps still ran.', verdict?.byHand?.(ctx.environment, ctx.args)]
                 .filter(Boolean)
                 .join(' '),
       });
@@ -4691,7 +5018,7 @@ async function main(argv = []) {
             stackEnv: orphan.name,
             dirLabel: '',
             environment: orphan.name,
-            finishCommand: 'vibecarbon destroy -orphans',
+            finishCommand: ORPHANS_DESTROY_COMMAND,
             results: orphanResults,
             providerName: orphanProvider.NAME,
           });
@@ -4899,25 +5226,6 @@ async function main(argv = []) {
     unreleasedReservedIps: [],
   };
 
-  // ========== PRE-TEARDOWN: S3-CONFIG / KEYS MISMATCH ==========
-  // Runs BEFORE anything is deleted, which is the whole point: if the config
-  // records a bucket and the environment has no object-storage credentials,
-  // the operator can export the keys (or Ctrl-C) while it is still cheap,
-  // instead of finding the stranded bucket in the leak report afterwards. The
-  // entries are leak-RISK — reported, not exit-failing; each bucket's ACTUAL
-  // outcome is recorded by its own delete effect later (see leak-ledger.js's
-  // destroyExitCode for the full reasoning).
-  for (const risk of checkS3CredentialMismatch({
-    envConfig,
-    envKeys: Provider.OBJECT_STORAGE_ENV,
-    purgeBackups: args.purgeBackups,
-    canPrompt: !!process.stdin.isTTY,
-  })) {
-    p.log.warn(`Object storage: ${risk.reason}`);
-    p.log.message(`  ${c.dim(risk.hint)}`);
-    results.leaks.risk(risk);
-  }
-
   // ========== TIER DISPATCH (step-plan) ==========
   // planDestroyTargets derives every teardown target from persisted config
   // (ownership-aware; HA → both stack envs). planDestroy(tier) yields the pure,
@@ -4927,6 +5235,35 @@ async function main(argv = []) {
   // ctx so the effects (thin wrappers over the hardened tier helpers) read them.
   const plan = planDestroyTargets(envConfig, projectConfig, envName);
   const isK8s = isK8sTier(plan.tier);
+
+  // ========== PRE-TEARDOWN: S3-CONFIG / KEYS MISMATCH ==========
+  // Runs BEFORE anything is deleted, which is the whole point: if the config
+  // records object storage this destroy reaches (the stack state of
+  // plan.stackEnvs on every destroy, the buckets under -purge) and the
+  // environment has no object-storage credentials, the operator can export
+  // the keys (or Ctrl-C) while it is still cheap, instead of finding the kept
+  // environment or the stranded bucket in the leak report afterwards. The
+  // entries are leak-RISK — reported, not exit-failing; each ACTUAL outcome
+  // is recorded by its own effect later (see leak-ledger.js's
+  // destroyExitCode for the full reasoning).
+  for (const risk of checkS3CredentialMismatch({
+    envConfig,
+    envKeys: Provider.OBJECT_STORAGE_ENV,
+    environment: envName,
+    stackEnvs: plan.stackEnvs,
+    purgeBackups: args.purgeBackups,
+    appBucketOwned: ownsAppBucket(envConfig, projectConfig, envName),
+    // The rule handleBackupBucket deletes by: only this environment's folder
+    // while another environment keeps backups in the bucket.
+    backupsHolders: destroyPreviewBucketFacts(projectConfig, envName).backupBucketHolders,
+    backupsPrefix: envBackupPrefixFor(projectConfig.projectName, envName),
+    canPrompt: !!process.stdin.isTTY,
+  })) {
+    p.log.warn(`Object storage: ${risk.reason}`);
+    p.log.message(`  ${c.dim(risk.hint)}`);
+    results.leaks.risk(risk);
+  }
+
   if (plan.tier === 'unrecorded') {
     p.log.warn(
       `No deployment is recorded for "${envName}" — its deploy never reached provisioning. ` +

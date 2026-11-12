@@ -540,7 +540,7 @@ vibecarbon destroy prod
 # Skip confirmation (dangerous!)
 vibecarbon destroy prod -y
 
-# Also delete the backup S3 bucket
+# Also delete its backups and uploads
 vibecarbon destroy prod -y -purge
 
 # Scripted production destroy (the typed confirmation as a flag)
@@ -557,9 +557,16 @@ environment uses, and GitHub environment secrets.
 > scripts supply the value with `-confirm <project>-<env>`; without it, and
 > with no terminal to type in, the command exits instead of waiting.
 
+Each storage region of a project normally has one backups bucket, shared by
+the project's environments in that region. An environment that already keeps
+backups in a bucket, even one in another region, stays with it, so its backups
+are never split. `-purge` deletes this environment's folder in its bucket, and
+the bucket when no other environment keeps backups in it.
+
 The Pulumi state bucket is kept and recorded as `retainedStateBucket` in
 `.vibecarbon.json` so a redeploy resumes the same warm state backend; `-purge`
-deletes it along with the backup bucket.
+deletes it with the project's last live environment, since every environment's
+stack lives in it.
 
 {/* BEGIN GENERATED: flags destroy */}
 | Flag | Description |
@@ -567,7 +574,7 @@ deletes it along with the backup bucket.
 | `-y` | Skip confirmation prompts (does not skip the prod type-to-confirm) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-orphans` | Destroy stray Pulumi stacks not tracked in config |
-| `-purge` | Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved) |
+| `-purge` | Also delete this environment's backups and uploads, and the backup and state buckets once nothing else uses them (default: all kept) |
 | `-force` | Destroy even when the pre-destroy backup fails or is skipped (default: the destroy stops) |
 | `-confirm <value>` | Production only: supply the type-to-confirm value (project and env joined by a dash, like my-saas-prod) on the command line (scripts / no TTY) |
 {/* END GENERATED: flags destroy */}

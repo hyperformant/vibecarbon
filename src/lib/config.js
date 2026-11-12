@@ -407,19 +407,6 @@ export function loadS3Config(envName, cwd = process.cwd()) {
   return config?.environments?.[envName]?.s3 || null;
 }
 
-/**
- * Load backup S3 configuration for a specific environment.
- * This is the dedicated backup bucket (separate from storage bucket).
- *
- * @param {string} envName - Environment name (e.g., 'prod', 'staging')
- * @param {string} [cwd] - Working directory (defaults to process.cwd())
- * @returns {object|null} - Backup S3 config or null if not configured
- */
-export function loadBackupS3Config(envName, cwd = process.cwd()) {
-  const config = loadProjectConfig(cwd);
-  return config?.environments?.[envName]?.backupS3 || null;
-}
-
 // ============================================================================
 // GLOBAL PROJECT REGISTRY (~/.vibecarbon/projects.json)
 // ============================================================================

@@ -14,6 +14,7 @@ import {
   formatLeakReport,
   renderLeakReportLines,
 } from '../../../src/lib/destroy/leak-ledger.js';
+import { ORPHANS_DESTROY_COMMAND } from '../../../src/lib/destroy/retry-command.js';
 
 function makeResults() {
   return { leaks: createLeakLedger(), pulumiDestroyFailed: false };
@@ -145,5 +146,36 @@ describe('recordPulumiDestroyFailure', () => {
       resource: 'd4-standby (d4-standby)',
     });
     expect(results.leaks.entries[0].hint).toMatch(/`vibecarbon destroy d4`/);
+  });
+
+  it('the rerun carries -purge exactly when the destroy had it, and an orphan cleanup keeps its own', () => {
+    for (const [args, command] of [
+      [{ purgeBackups: true }, '`vibecarbon destroy d4 -purge`'],
+      [{}, '`vibecarbon destroy d4`'],
+    ] as const) {
+      const results = makeResults();
+      recordPulumiDestroyFailure({
+        error: failure(null),
+        stackEnv: 'd4-standby',
+        dirLabel: ' (d4-standby)',
+        environment: 'd4',
+        args,
+        results,
+        providerName: 'DigitalOcean',
+      });
+      expect(results.leaks.entries[0].hint).toContain(`then run ${command} again to finish`);
+    }
+    const orphan = makeResults();
+    recordPulumiDestroyFailure({
+      error: failure(null),
+      stackEnv: 'p-old',
+      dirLabel: '',
+      environment: 'p-old',
+      args: { purgeBackups: true },
+      finishCommand: ORPHANS_DESTROY_COMMAND,
+      results: orphan,
+      providerName: 'DigitalOcean',
+    });
+    expect(orphan.leaks.entries[0].hint).toContain('`vibecarbon destroy -orphans`');
   });
 });

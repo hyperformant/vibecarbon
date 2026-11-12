@@ -52,6 +52,7 @@ const { RESTORE_MARKER_KEYS, restoreMarkerStringData } = await import(
 const { assertDeployRestoreAllowed, NoRestorePointError, resolveDeployRestorePoint } = await import(
   '../../../src/lib/walg/restore-base.js'
 );
+const { backupStorageConfig } = await import('../../../src/lib/backups-bucket.js');
 const { buildRecoveryConfig, renderRecoveryConf } = await import(
   '../../../src/lib/walg/recovery-config.js'
 );
@@ -131,6 +132,8 @@ function fakeS3(names: Array<{ name: string; finish: string; size?: number }>) {
   };
 }
 
+// The uploads bucket's store, and the backups bucket at its own region and
+// endpoint (backupStorageConfig): the listing goes to the backups bucket.
 const S3 = {
   bucket: 'proj-storage',
   endpoint: 'https://fsn1.example.test',
@@ -139,6 +142,11 @@ const S3 = {
   secretKey: 'SK',
   walgPrefix: 'backups/proj/prod/walg',
 };
+const BACKUPS_STORE = backupStorageConfig(S3, {
+  bucket: 'proj-backups',
+  region: 'nbg1',
+  endpoint: 'https://nbg1.example.test',
+});
 
 describe('resolveDeployRestorePoint', () => {
   const two = [
@@ -149,8 +157,7 @@ describe('resolveDeployRestorePoint', () => {
     resolveDeployRestorePoint({
       restore,
       k8s: true,
-      s3Config: S3,
-      backupBucketName: 'proj-backups',
+      backup: BACKUPS_STORE,
       credentialVars: 'HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY',
       makeClient: async () => s3,
       ...extra,
@@ -187,6 +194,28 @@ describe('resolveDeployRestorePoint', () => {
     expect(new Set(s3.seen)).toEqual(new Set(['ListObjectsV2Command', 'GetObjectCommand']));
   });
 
+  it("builds its client for the backups bucket's own endpoint, never the uploads store's", async () => {
+    const makeClient = vi.fn(async () => fakeS3(two));
+    await resolve('latest', fakeS3(two), { makeClient });
+    expect(makeClient).toHaveBeenCalledTimes(1);
+    expect(makeClient).toHaveBeenCalledWith({
+      accessKey: 'AK',
+      secretKey: 'SK',
+      walgPrefix: 'backups/proj/prod/walg',
+      bucket: 'proj-backups',
+      region: 'nbg1',
+      endpoint: 'https://nbg1.example.test',
+    });
+  });
+
+  it('no backups bucket on record: refuses before any listing', async () => {
+    const makeClient = vi.fn();
+    await expect(resolve('latest', fakeS3(two), { backup: null, makeClient })).rejects.toThrow(
+      /no backup bucket on record/,
+    );
+    expect(makeClient).not.toHaveBeenCalled();
+  });
+
   it('no base backup at all: NoRestorePointError naming where it looked', async () => {
     const err = await resolve('latest', fakeS3([])).catch((e) => e);
     expect(err).toBeInstanceOf(NoRestorePointError);
@@ -205,7 +234,7 @@ describe('resolveDeployRestorePoint', () => {
 
   it('names the credential variables, never a value, when credentials are missing', async () => {
     const err = await resolve('latest', fakeS3(two), {
-      s3Config: { ...S3, accessKey: '', secretKey: '' },
+      backup: { ...BACKUPS_STORE, accessKey: '', secretKey: '' },
     }).catch((e) => e);
     expect(err.message).toContain('HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY');
   });

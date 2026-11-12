@@ -105,7 +105,7 @@ const values = () => ({
       endpoint: 'https://sfo3.example',
       region: 'sfo3',
     },
-    backupBucketName: 'proj-backups',
+    backupTarget: { bucket: 'proj-backups', region: 'sfo3', endpoint: 'https://sfo3.example' },
     walgRole: 'primary',
     storageClass: 'do-block-storage',
     walArchiveSha: '0123456789abcdef',

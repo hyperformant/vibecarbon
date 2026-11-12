@@ -170,7 +170,87 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
   });
 });
 
-describe('deployK3s feeds the pilot-light role into the k3s-apply gate', () => {
+// Where the app bucket and the backups bucket are is rendered into the applied
+// Secrets (the app Secret's S3_*, the infra Secret's S3_BACKUP_BUCKET) and the
+// db StatefulSet (wal-g's endpoint and region), and no manifest digest sees
+// them. Without them in the gate, a deploy that corrected an environment's
+// uploads region (s3-setup's self-heal) skipped the apply, and the app Secret
+// kept the wrong region for good.
+describe('buildK3sApplyInputs: where the buckets are is part of the gate', () => {
+  const EP = (region: string) => `https://${region}.your-objectstorage.com`;
+  const app = (region: string) => ({
+    accessKey: 'AK',
+    secretKey: 'SK',
+    bucket: 'proj-abc123-prod-storage',
+    region,
+    endpoint: EP(region),
+  });
+  const backups = (region: string, bucket = 'proj-abc123-backups') => ({
+    bucket,
+    region,
+    endpoint: EP(region),
+  });
+  const base = { imageTag: 'r:5000/app:abc', dbImageTag: 'db:v1', projectDir: tmpdir() };
+  const inputs = (s3Config: unknown, backupTarget: unknown) =>
+    buildK3sApplyInputs({ ...base, s3Config, backupTarget });
+  // StateTracker keys its state file off process.cwd()/.vibecarbon.
+  let dir: string;
+  let cwdSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-gate-storage-'));
+    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  });
+  afterEach(() => {
+    cwdSpy.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('names each bucket with its region and endpoint', () => {
+    expect(inputs(app('fsn1'), backups('nbg1')).storageTargets).toBe(
+      `proj-abc123-prod-storage@fsn1@${EP('fsn1')} proj-abc123-backups@nbg1@${EP('nbg1')}`,
+    );
+  });
+
+  it("changing the backups target's region changes the inputs", () => {
+    const before = inputs(app('fsn1'), backups('fsn1'));
+    const after = inputs(app('fsn1'), backups('nbg1'));
+    expect(after.storageTargets).not.toBe(before.storageTargets);
+    const t = new StateTracker('proj', 'gate-storage-backups');
+    t.startStep('k3s-apply', before);
+    t.completeStep('k3s-apply');
+    expect(new StateTracker('proj', 'gate-storage-backups').shouldSkip('k3s-apply', after)).toBe(
+      false,
+    );
+  });
+
+  it("changing the app bucket's region changes the inputs (the self-healed record)", () => {
+    const before = inputs(app('nbg1'), backups('nbg1'));
+    const after = inputs(app('fsn1'), backups('nbg1'));
+    expect(after.storageTargets).not.toBe(before.storageTargets);
+    const t = new StateTracker('proj', 'gate-storage-app');
+    t.startStep('k3s-apply', before);
+    t.completeStep('k3s-apply');
+    expect(new StateTracker('proj', 'gate-storage-app').shouldSkip('k3s-apply', after)).toBe(false);
+  });
+
+  it('another backups bucket changes the inputs; the same targets keep the skip', () => {
+    expect(
+      inputs(app('fsn1'), backups('fsn1', 'proj-abc123-fsn1-backups')).storageTargets,
+    ).not.toBe(inputs(app('fsn1'), backups('fsn1')).storageTargets);
+    expect(inputs(app('fsn1'), backups('fsn1'))).toEqual(inputs(app('fsn1'), backups('fsn1')));
+  });
+});
+
+describe('deployK3s feeds the k3s-apply gate its pilot-light role and storage targets', () => {
+  it('deployK3s hands the gate the app config and the backups target', () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
+    const args = gateCall.slice(0, gateCall.indexOf('});'));
+    expect(args).toMatch(/\n\s+s3Config: options\.s3Config,\n/);
+    expect(args).toMatch(/\n\s+backupTarget: options\.backupTarget,\n/);
+  });
+
   it('passes options.role to buildK3sApplyInputs', () => {
     const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
     const body = src.slice(src.indexOf('export async function deployK3s('));

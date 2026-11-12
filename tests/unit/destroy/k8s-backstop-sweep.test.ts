@@ -160,7 +160,11 @@ describe('a saved reserved IP address is released only while it is still ours', 
     results.leaks.entries.map(
       (e: { resourceClass: string; severity: string }) => `${e.severity}:${e.resourceClass}`,
     );
-  const sweep = (provider: object, results: ReturnType<typeof makeResults>) =>
+  const sweep = (
+    provider: object,
+    results: ReturnType<typeof makeResults>,
+    args?: { purgeBackups?: boolean },
+  ) =>
     sweepK8sBackstopTargets({
       provider,
       targets: [target],
@@ -168,6 +172,7 @@ describe('a saved reserved IP address is released only while it is still ours', 
       s: spinner(),
       projectName: 'proj',
       environment: 'prod',
+      args,
     });
 
   it('Linode: releases the address when it carries this project and stack', async () => {
@@ -221,6 +226,15 @@ describe('a saved reserved IP address is released only while it is still ours', 
       expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
     },
   );
+
+  it('Linode: the retry line of an address it keeps names the -purge rerun after a -purge destroy', async () => {
+    reservedIpsListing([
+      { address: '203.0.113.7', tags: tags('proj', 'prod-primary'), linode_id: 4242 },
+    ]);
+    const results = makeResults();
+    await sweep(linode(), results, { purgeBackups: true });
+    expect(results.leaks.entries[0].hint).toContain('Run `vibecarbon destroy prod -purge` again');
+  });
 
   it('Linode: an address no longer reserved on the account is already released', async () => {
     // The account holds another project's address only.

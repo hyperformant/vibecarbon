@@ -56,6 +56,13 @@ export class ScalewayObjectStorageProvider extends S3CompatibleProvider {
   // R2: a one-bucket key needs org-wide IAM write on the deploy key, a privilege escalation, so the app shares it.
   static appKeyScoping = 'none';
 
+  /**
+   * The IAM key pair is bound to a Project (its preferred Project for Object
+   * Storage), not to a region: the same key signs for fr-par and nl-ams
+   * (scaleway docs-content, IAM, using API keys with Object Storage).
+   */
+  static keyRegions = 'all';
+
   static ENDPOINTS = {
     'fr-par': 'https://s3.fr-par.scw.cloud',
     'nl-ams': 'https://s3.nl-ams.scw.cloud',

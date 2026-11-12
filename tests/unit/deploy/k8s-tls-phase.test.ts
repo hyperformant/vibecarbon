@@ -32,7 +32,11 @@ const IDENTITY = {
   dnsNames: [DOMAIN, `*.${DOMAIN}`],
   ca: 'staging',
 };
+// The uploads bucket's store, and the backups bucket in another region: the
+// snapshot goes to the backups bucket at ITS endpoint (an environment an older
+// CLI put in another region's bucket keeps it there).
 const S3 = { accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3', region: 'eu' };
+const BACKUPS = { bucket: 'proj-backups', region: 'nbg1', endpoint: 'https://nbg1.s3' };
 
 const quietSpinner = () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() });
 
@@ -70,7 +74,7 @@ const ARGS = {
   dnsProvider: 'hetzner',
   kubeconfig: '/proj/.vibecarbon/kubeconfig-prod-primary',
   s3Config: S3,
-  backupS3Config: { bucket: 'proj-backups' },
+  backupS3Config: BACKUPS,
 };
 
 let warn: ReturnType<typeof vi.spyOn>;
@@ -169,8 +173,18 @@ describe('TLS phase (verifyK8sTls)', () => {
       envName: 'prod',
       ca: 'staging',
       dnsNames: IDENTITY.dnsNames,
-      s3Config: { ...S3, bucket: 'proj-backups' },
+      s3Config: {
+        accessKey: 'AK',
+        secretKey: 'SK',
+        bucket: 'proj-backups',
+        region: 'nbg1',
+        endpoint: 'https://nbg1.s3',
+      },
     });
+    // Never the uploads store's host or region.
+    const written = snapArgs.s3Config as Record<string, unknown>;
+    expect(written.endpoint).not.toBe(S3.endpoint);
+    expect(written.region).not.toBe(S3.region);
     expect((snapArgs.runKubectl as unknown as { kubeconfig: string }).kubeconfig).toBe(
       ARGS.kubeconfig,
     );

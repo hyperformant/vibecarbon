@@ -18,7 +18,13 @@ function providerWithProbe(ready: boolean) {
     bucketExists: () => Promise<boolean>;
     _send: () => Promise<unknown>;
     waitForBucketVisible: () => Promise<boolean>;
-    createBucket: (b: string) => Promise<{ name: string; created: boolean; ready: boolean }>;
+    createBucket: (b: string) => Promise<{
+      name: string;
+      created: boolean;
+      ready: boolean;
+      region: string;
+      endpoint: string;
+    }>;
   };
   p.bucketExists = vi.fn(async () => false);
   p._send = vi.fn(async () => ({}));
@@ -32,6 +38,8 @@ describe('createBucket surfaces the visibility probe as `ready`', () => {
       name: 'b',
       created: true,
       ready: true,
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
     });
   });
   it('ready: false when the probe exhausted its budget', async () => {
@@ -39,6 +47,8 @@ describe('createBucket surfaces the visibility probe as `ready`', () => {
       name: 'b',
       created: true,
       ready: false,
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
     });
   });
   it('an existing bucket is ready (HEAD already answered)', async () => {
@@ -66,13 +76,21 @@ describe('assertBucketReady', () => {
 });
 
 describe('census: every createBucket call site is gated', () => {
-  it('each `await s3Provider.createBucket(` in the orchestrator is followed by assertBucketReady on its result', () => {
+  it('each `await s3Provider[.forRegion(…)].createBucket(` in the orchestrator is followed by assertBucketReady on its result', () => {
     const src = readFileSync(
       join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
       'utf-8',
     );
-    const calls = [...src.matchAll(/const (\w+) = await s3Provider\.createBucket\(/g)];
+    // A bucket in another region is created through its own client
+    // (s3Provider.forRegion), so the chain may break across lines.
+    const calls = [
+      ...src.matchAll(
+        /const (\w+) = await s3Provider(?:\s*\.forRegion\([^)]*\))?\s*\.createBucket\(/g,
+      ),
+    ];
     expect(calls.length).toBe(3);
+    // Every createBucket call in the file is one of these.
+    expect((src.match(/\.createBucket\(/g) ?? []).length).toBe(calls.length);
     for (const m of calls) {
       const after = src.slice(m.index, m.index + 400);
       expect(after, `${m[1]} is not gated`).toMatch(new RegExp(`assertBucketReady\\(${m[1]},`));

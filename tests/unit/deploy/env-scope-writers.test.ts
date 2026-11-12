@@ -24,7 +24,7 @@ describe('k8s app and infra Secrets', () => {
         endpoint: 'https://fsn1.your-objectstorage.com',
         region: 'fsn1',
       },
-      backupBucketName: null,
+      backupTarget: null,
     };
     const app = buildAppSecretData(args);
     const infra = buildInfraSecretData(args);
@@ -35,13 +35,38 @@ describe('k8s app and infra Secrets', () => {
     expect(app.S3_BUCKET).toBe('myapp-abc123-storage');
   });
 
+  it("the infra Secret's S3_BACKUP_BUCKET is the backups target's bucket, never the uploads bucket", () => {
+    // The backup CronJob and the db pod's wal-g read S3_BACKUP_BUCKET from the
+    // infra Secret; an environment an older CLI put in another region's
+    // backups bucket keeps it.
+    const s3Config = {
+      accessKey: 'ak',
+      secretKey: 'sk',
+      bucket: 'myapp-abc123-staging-storage',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+      region: 'fsn1',
+    };
+    const backupTarget = {
+      bucket: 'myapp-abc123-backups',
+      region: 'nbg1',
+      endpoint: 'https://nbg1.your-objectstorage.com',
+    };
+    const infra = buildInfraSecretData({ envLocal: {}, s3Config, backupTarget });
+    expect(infra.S3_BACKUP_BUCKET).toBe('myapp-abc123-backups');
+    expect(Object.values(infra)).not.toContain(s3Config.bucket);
+    // No target, no backups bucket: nothing names one.
+    expect(buildInfraSecretData({ envLocal: {}, s3Config, backupTarget: null })).not.toHaveProperty(
+      'S3_BACKUP_BUCKET',
+    );
+  });
+
   it('applyK3sManifests hands the Secret no environment', () => {
     const k3s = src('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(
       // `restore` is the deploy -restore marker (a backup name and recovery
       // settings), not an environment; nor is `walgRole` (the db's wal-g role
       // intent, primary or standby).
-      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName,\s*restore,\s*walgRole,?\s*\}\)/,
+      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupTarget,\s*restore,\s*walgRole,?\s*\}\)/,
     );
     expect(k3s).not.toMatch(/VC_ENV\s*=/);
   });

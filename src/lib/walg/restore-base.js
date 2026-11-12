@@ -32,8 +32,9 @@ import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { formatInstant } from '../backup-format.js';
 import { formatBytes } from '../backup-s3.js';
+import { backupsTargetOf } from '../backups-bucket.js';
 import { c } from '../colors.js';
-import { loadBackupS3Config, loadS3Config } from '../config.js';
+import { loadProjectConfig, loadS3Config } from '../config.js';
 import { providerFor } from '../providers/index.js';
 import { S3_HTTP_TIMEOUTS } from '../s3-timeouts.js';
 import { buildRecoveryConfig, RESTORE_PITR_RE, renderRecoveryConf } from './recovery-config.js';
@@ -110,14 +111,21 @@ export async function createS3Client(s3Config, clientOptions = {}) {
 }
 
 /**
- * Resolve the backup bucket's S3 config, credentials included. Compose reads
- * the dedicated backup bucket; k8s prefers it and falls back to the storage
- * bucket (where its db pod's wal-g writes when there is no backup bucket).
- * Credentials are topped up from the provider's object-storage env vars, then
- * the prompt unless `skipPrompts`. Null when no bucket or no credentials.
+ * Resolve the backup bucket's S3 config, credentials included: the one place
+ * restore, backup, status, failover, scale and the compose failover TLS
+ * restore take it from. The bucket, its region and its endpoint come from the
+ * environment's record in `.vibecarbon.json` through backupsTargetOf, so an
+ * environment whose backups sit in another region than its uploads (one an
+ * older CLI put there, which keeps them) is read at that bucket's own host.
+ * Compose stops there; k8s falls back to the uploads bucket (where its db
+ * pod's wal-g writes when there is no backup bucket). A record with no
+ * endpoint is read at its region's endpoint, and one whose region has none
+ * is refused by name (endpointOfRecord). Credentials are topped
+ * up from the provider's object-storage env vars, then the prompt unless
+ * `skipPrompts`. Null when no bucket or no credentials.
  *
  * @param {{ isCompose: boolean, envName: string, projectName: string, envConfig: object, skipPrompts?: boolean }} args
- * @returns {Promise<{ bucket: string, endpoint: string, region: string, accessKey: string, secretKey: string } | null>}
+ * @returns {Promise<{ bucket: string, endpoint: string | null, region: string | null, accessKey: string, secretKey: string } | null>}
  */
 export async function resolveS3Config({
   isCompose,
@@ -127,9 +135,18 @@ export async function resolveS3Config({
   skipPrompts = false,
 }) {
   const Provider = providerFor(envConfig);
-  const backupS3 = loadBackupS3Config(envName);
-  const s3Config = isCompose ? backupS3 : backupS3 || loadS3Config(envName);
-  if (!s3Config?.bucket) return null;
+  const backups = backupsTargetOf(loadProjectConfig()?.environments?.[envName]);
+  const record = isCompose ? backups : (backups ?? loadS3Config(envName));
+  if (!record?.bucket) return null;
+  const s3Config = record.endpoint
+    ? record
+    : {
+        ...record,
+        endpoint: await endpointOfRecord(Provider, record, {
+          envName,
+          what: backups ? 'backups bucket' : 'storage bucket',
+        }),
+      };
   if (s3Config.accessKey && s3Config.secretKey) return s3Config;
   const creds = await Provider.promptObjectStorageCredentials(projectName, {
     save: false,
@@ -137,6 +154,34 @@ export async function resolveS3Config({
   });
   if (!creds) return null;
   return { ...s3Config, accessKey: creds.accessKey, secretKey: creds.secretKey };
+}
+
+/**
+ * The host of a bucket whose record names no endpoint: its region's endpoint
+ * on the provider's object storage. No CLI writes such a record (a backups
+ * record in another region than the uploads always carries its endpoint),
+ * but a hand edit can, and a client with no endpoint signs for the AWS
+ * default host and fails with an auth error that names neither the bucket
+ * nor the cause. With no region, or a region the provider has no endpoint
+ * for, it refuses with a line that names the bucket, the region and the way
+ * out.
+ *
+ * @param {any} Provider - the environment's compute provider class
+ * @param {{ bucket: string, region?: string | null }} record
+ * @param {{ envName: string, what: string }} opts
+ * @returns {Promise<string>}
+ */
+async function endpointOfRecord(Provider, record, { envName, what }) {
+  const S3Class = await Provider.getObjectStorageProviderClass();
+  const endpoint = record.region ? S3Class.getEndpointForRegion(record.region) : null;
+  if (endpoint) return endpoint;
+  const where = record.region
+    ? `in ${record.region}, a region with no known object-storage endpoint,`
+    : 'with no region';
+  throw new Error(
+    `${envName}'s ${what} ${record.bucket} is on record ${where} and no endpoint, so the CLI cannot tell which host holds it. ` +
+      `Deploy ${envName} again to record it, or add its endpoint to the ${envName} entry in .vibecarbon.json.`,
+  );
 }
 
 /** The env vars a provider's object-storage credentials come from, for messages. */
@@ -608,19 +653,21 @@ export function restorePointOf(chosenSource, lineage) {
 /**
  * The restore point `deploy -restore` seeds the new database from, resolved
  * before anything is provisioned (C5): the exact base backup, read from the
- * stop sentinels in the bucket and prefix the db pod's wal-g uses (the
- * backup bucket, else the storage bucket; s3Config.walgPrefix), with its
- * target, recovery config and size. Null for a deploy without -restore.
+ * stop sentinels in the backups bucket and prefix the db pod's wal-g uses
+ * (`backup`, backupStorageConfig's config of the deploy's settled backups
+ * target: its bucket, region and endpoint, and the env's walgPrefix), with
+ * its target, recovery config and size. Null for a deploy without -restore.
  * deployK3s only checks the object is complete.
  *
- * Reads only (ListObjectsV2, GetObject), with the deploy's own object-storage
+ * Reads only (ListObjectsV2, GetObject), through a client built for the
+ * backups bucket's own endpoint, with the deploy's own object-storage
  * credentials (Decision 1). Errors name the variables, never a value.
  *
  * The base comes from one lineage's folder: `lineage` (the -lineage flag), or
  * resolveRestoreLineage's pick from `envConfig.backup` (the destroyed
  * environment's record, which survives a destroy).
  *
- * @param {{ restore: string | null, k8s: boolean, envConfig?: object, lineage?: string | null, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
+ * @param {{ restore: string | null, k8s: boolean, envConfig?: object, lineage?: string | null, backup: { bucket?: string, walgPrefix?: string, endpoint?: string | null, region?: string | null, accessKey?: string, secretKey?: string } | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
  * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number, attempt: string, lineage: string } | null>}
  * @throws {NoRestorePointError} when no base backup satisfies the restore point
  * @throws {AmbiguousLineageError}
@@ -630,8 +677,7 @@ export async function resolveDeployRestorePoint({
   k8s,
   envConfig,
   lineage: flag = null,
-  s3Config,
-  backupBucketName,
+  backup,
   credentialVars,
   makeClient = createS3Client,
 }) {
@@ -648,15 +694,15 @@ export async function resolveDeployRestorePoint({
         '(e.g. base_000000010000000000000004) or an ISO-8601 time (e.g. 2026-06-22T14:30:00Z)',
     );
   }
-  const bucket = backupBucketName || s3Config?.bucket;
-  const prefix = s3Config?.walgPrefix;
+  const bucket = backup?.bucket;
+  const prefix = backup?.walgPrefix;
   if (!bucket || !prefix) {
     throw new Error('there is no backup bucket on record for this environment to restore from');
   }
-  if (!s3Config.accessKey || !s3Config.secretKey) {
+  if (!backup.accessKey || !backup.secretKey) {
     throw new Error(`reading the backups in s3://${bucket}/${prefix} needs ${credentialVars}`);
   }
-  const s3 = await makeClient({ ...s3Config, bucket });
+  const s3 = await makeClient(backup);
   const lineages = await listLineages({ s3, bucket, base: prefix });
   const lineage = resolveRestoreLineage({
     envConfig,

@@ -16,26 +16,21 @@ function mismatchOf(envConfig: object): Error {
 }
 
 describe('resolveEnvStorage', () => {
-  it('derives the env bucket, backup bucket and wal-g prefix, with no key prefix', () => {
+  it('derives the env bucket and wal-g prefix, with no key prefix', () => {
+    // The backups bucket is chosen by the deploy for its storage region
+    // (backups-bucket-choice.test.ts), not here.
     const r = resolveEnvStorage('prod', {}, project);
     expect(r).toEqual({
       bucket: 'myapp-cd9ecc-prod-storage',
-      backupBucket: 'myapp-cd9ecc-backups',
       walgPrefix: 'backups/myapp/prod/walg',
     });
     expect(Object.hasOwn(r, 'keyPrefix')).toBe(false);
   });
 
-  it('gives two environments two buckets and one backup bucket', () => {
+  it('gives two environments two buckets', () => {
     const a = resolveEnvStorage('staging', {}, project);
     const b = resolveEnvStorage('prod', {}, project);
     expect(a.bucket).not.toBe(b.bucket);
-    expect(a.backupBucket).toBe(b.backupBucket);
-  });
-
-  it('prefers a persisted backupS3.bucket', () => {
-    const r = resolveEnvStorage('prod', { backupS3: { bucket: 'old-backups' } }, project);
-    expect(r.backupBucket).toBe('old-backups');
   });
 
   it('fails closed on a persisted per-project bucket, naming the pin and the copy step', () => {

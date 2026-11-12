@@ -33,6 +33,15 @@ export class VultrObjectStorageProvider extends S3CompatibleProvider {
   static appKeyScoping = 'none';
 
   /**
+   * Keys belong to one subscription, and a subscription is one cluster: GET
+   * /v2/object-storage/{id} gives one cluster_id, one s3_hostname and that
+   * subscription's s3_access_key (vultr.com/api). Every other cluster
+   * answers 403 for any bucket (see the header), so only the store's own is
+   * asked.
+   */
+  static keyRegions = 'own';
+
+  /**
    * SIGNING region for every S3 client this class builds — same seam as
    * LinodeObjectStorageProvider.S3_SIGNING_REGION (s3-base getClient /
    * findBucketRegion honor it; pinned by s3-signing-region.test.ts).

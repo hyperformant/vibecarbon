@@ -26,6 +26,7 @@
  */
 
 import { describeResource } from './leak-ledger.js';
+import { retryDestroyCommand } from './retry-command.js';
 import { isEnvironmentOwnedServer } from './server-naming.js';
 
 /**
@@ -37,6 +38,8 @@ import { isEnvironmentOwnedServer } from './server-naming.js';
  * @param {ReturnType<import('./leak-ledger.js').createLeakLedger>} args.leaks
  * @param {string} args.projectName
  * @param {string} args.environment
+ * @param {{purgeBackups?: boolean}} [args.args] - this destroy's flags, for
+ *   the retry line (retryDestroyCommand).
  * @param {string} [args.deployMode] - selects the environment LABEL family
  *   (compose-ha's Pulumi nodes are labelled with the per-stack env).
  * @param {string[]} [args.roles] - extra role suffixes from persisted config.
@@ -52,6 +55,7 @@ export async function sweepEnvironmentServers({
   leaks,
   projectName,
   environment,
+  args,
   deployMode,
   roles,
   alreadyHandledIds = [],
@@ -62,7 +66,7 @@ export async function sweepEnvironmentServers({
   // A server line keeps the environment's entry (ENTRY_KEEP_BY_CLASS in
   // destroy.js), so the re-run this offers can run, and it runs this sweep.
   const consoleHint =
-    `Run \`vibecarbon destroy ${environment}\` again to retry: the environment stays in ` +
+    `Run \`${retryDestroyCommand(environment, args)}\` again to retry: the environment stays in ` +
     `.vibecarbon.json, and the re-run looks for servers named ${scope}* again. Or delete it ` +
     `in the ${providerName} console: a server left by a killed \`vibecarbon scale\` is ` +
     'outside Pulumi state, and its name blocks the next deploy with "name is already used".';

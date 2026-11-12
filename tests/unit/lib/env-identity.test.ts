@@ -135,7 +135,11 @@ describe('resolveEnvSeed (deploy-side read)', () => {
     expect(r.envConfig).not.toHaveProperty('destroyedAt');
   });
 
-  it('keeps backupsPurged (destroy bookkeeping) out of the seed', async () => {
+  it('a -purge left no backups to keep: the seed drops the flag and the backups record with it', async () => {
+    // The purge deleted the environment's backups folder (and the bucket, when
+    // no other environment kept backups in it). A recorded bucket is never
+    // moved so earlier backups stay where restore looks, and there are none:
+    // the rebuild chooses its backups bucket as a new environment would.
     const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
     const r = resolveEnvSeed(
       {
@@ -143,7 +147,7 @@ describe('resolveEnvSeed (deploy-side read)', () => {
         destroyedEnvironments: {
           staging: {
             region: 'nbg1',
-            backupS3: { bucket: 'b' },
+            backupS3: { bucket: 'b', region: 'fsn1' },
             backupsPurged: true,
             destroyedAt: 'x',
           },
@@ -151,7 +155,64 @@ describe('resolveEnvSeed (deploy-side read)', () => {
       },
       'staging',
     );
-    expect(r.envConfig).toEqual({ region: 'nbg1', backupS3: { bucket: 'b' } });
+    expect(r.envConfig).toEqual({ region: 'nbg1' });
+  });
+
+  it('a -purge that deleted the app bucket: the seed keeps its name, never the mark', async () => {
+    // The rebuild lands on the same name (and makes the bucket again); the
+    // mark is the destroy's bookkeeping for the app key fence.
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            s3: { bucket: 'proj-abc-staging', region: 'fsn1' },
+            appBucketPurged: true,
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ s3: { bucket: 'proj-abc-staging', region: 'fsn1' } });
+  });
+
+  it('a record the app key fence marked not found: the seed keeps the bucket name, never the marks', async () => {
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            s3: { bucket: 'proj-abc-staging', region: 'fsn1' },
+            appBucketNotFound: '2026-11-10T00:00:00.000Z',
+            backupsNotFound: '2026-11-10T00:00:00.000Z',
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ s3: { bucket: 'proj-abc-staging', region: 'fsn1' } });
+  });
+
+  it('a plain destroy kept the backups: the seed keeps their record', async () => {
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            region: 'nbg1',
+            backupS3: { bucket: 'b', region: 'fsn1' },
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ region: 'nbg1', backupS3: { bucket: 'b', region: 'fsn1' } });
   });
 
   it('returns an empty block for a name that never existed', async () => {

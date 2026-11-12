@@ -1,10 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { backupStorageConfig } from '../../../src/lib/backups-bucket.js';
 import {
   listBaseBackups,
   NoRestorePointError,
+  resolveDeployRestorePoint,
   resolveRestoreBase,
+  resolveS3Config,
 } from '../../../src/lib/walg/restore-base.js';
 
 /**
@@ -75,7 +80,19 @@ function fakeS3(objects: Record<string, string>, opts: { missingBucket?: boolean
         const contents = keys
           .filter((k) => !k.slice(prefix.length).includes('/'))
           .map((Key) => ({ Key }));
-        return { Contents: contents, IsTruncated: false };
+        // A delimited listing (the lineage folders) answers the folders too.
+        const folders =
+          cmd.input.Delimiter === '/'
+            ? [
+                ...new Set(
+                  keys
+                    .map((k) => k.slice(prefix.length))
+                    .filter((rest) => rest.includes('/'))
+                    .map((rest) => `${prefix}${rest.split('/')[0]}/`),
+                ),
+              ].map((Prefix) => ({ Prefix }))
+            : [];
+        return { Contents: contents, CommonPrefixes: folders, IsTruncated: false };
       }
       if (cmd.constructor.name === 'GetObjectCommand') {
         const body = objects[String(cmd.input.Key)];
@@ -156,5 +173,191 @@ describe('listBaseBackups', () => {
     });
     const [b] = await listBaseBackups({ s3, bucket: 'b', prefix });
     expect(b.timeline).toBe(10);
+  });
+});
+
+describe('resolveDeployRestorePoint reads the backups bucket at its own endpoint', () => {
+  const fixture = JSON.parse(
+    readFileSync(join(process.cwd(), 'tests/fixtures/walg/sentinel-3.0.9.json'), 'utf-8'),
+  );
+  const NAME = fixture.name as string;
+  const LINEAGE = '7699032860122738725';
+  const prefix = 'backups/myapp/prod/walg';
+  // The uploads bucket in fsn1; the backups bucket recorded in nbg1.
+  const uploads = {
+    accessKey: 'AK',
+    secretKey: 'SK',
+    walgPrefix: prefix,
+    bucket: 'myapp-abc123-prod-storage',
+    region: 'fsn1',
+    endpoint: 'https://fsn1.your-objectstorage.com',
+  };
+  const target = {
+    bucket: 'myapp-abc123-backups',
+    region: 'nbg1',
+    endpoint: 'https://nbg1.your-objectstorage.com',
+  };
+  const objects = {
+    [`${prefix}/${LINEAGE}/basebackups_005/${NAME}_backup_stop_sentinel.json`]: JSON.stringify(
+      fixture.sentinel,
+    ),
+  };
+
+  it("lists the backups bucket through a client built for the backups bucket's endpoint", async () => {
+    const s3 = fakeS3(objects);
+    const makeClient = vi.fn(async () => s3);
+    const point = await resolveDeployRestorePoint({
+      restore: 'latest',
+      k8s: true,
+      backup: backupStorageConfig(uploads, target),
+      credentialVars: 'HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY',
+      makeClient,
+    });
+    expect(point).toMatchObject({ backup: NAME, lineage: LINEAGE, target: 'latest' });
+    expect(makeClient).toHaveBeenCalledTimes(1);
+    expect(makeClient).toHaveBeenCalledWith({
+      accessKey: 'AK',
+      secretKey: 'SK',
+      walgPrefix: prefix,
+      bucket: 'myapp-abc123-backups',
+      region: 'nbg1',
+      endpoint: 'https://nbg1.your-objectstorage.com',
+    });
+    // Every read named the backups bucket, never the uploads bucket.
+    expect(new Set(s3.calls.map((c) => c.input.Bucket))).toEqual(new Set(['myapp-abc123-backups']));
+  });
+
+  it('with no backups target there is nothing to restore from', async () => {
+    const makeClient = vi.fn();
+    await expect(
+      resolveDeployRestorePoint({
+        restore: 'latest',
+        k8s: true,
+        backup: backupStorageConfig(uploads, null),
+        credentialVars: 'HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY',
+        makeClient,
+      }),
+    ).rejects.toThrow(/no backup bucket on record/);
+    expect(makeClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveS3Config reads the backups bucket through its one resolver', () => {
+  // restore, backup, status, failover, scale and the compose failover TLS
+  // restore all take the backups bucket from here. An environment an older
+  // CLI put in another region's bucket keeps it (its uploads in fsn1, its
+  // backups recorded in nbg1), and every one of them must ask nbg1.
+  const UPLOADS = {
+    bucket: 'myapp-abc123-prod-storage',
+    region: 'fsn1',
+    endpoint: 'https://fsn1.your-objectstorage.com',
+  };
+  const BACKUPS = {
+    bucket: 'myapp-abc123-backups',
+    region: 'nbg1',
+    endpoint: 'https://nbg1.your-objectstorage.com',
+  };
+  let dir = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-resolve-s3-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    vi.stubEnv('HETZNER_ACCESS_KEY', 'ABCDEFGHIJ0123456789');
+    vi.stubEnv('HETZNER_SECRET_KEY', 'x'.repeat(40));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Write `.vibecarbon.json` with one environment, and resolve it. */
+  async function resolve(prod: Record<string, unknown>, isCompose: boolean) {
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({ projectName: 'myapp', environments: { prod } }),
+    );
+    return resolveS3Config({
+      isCompose,
+      envName: 'prod',
+      projectName: 'myapp',
+      envConfig: { provider: 'hetzner' },
+      skipPrompts: true,
+    });
+  }
+
+  it.each([
+    ['compose', true],
+    ['k8s', false],
+  ])(
+    "%s: the backups bucket's own region and endpoint, not the uploads bucket's",
+    async (_mode, isCompose) => {
+      const cfg = await resolve({ provider: 'hetzner', s3: UPLOADS, backupS3: BACKUPS }, isCompose);
+      expect(cfg).toEqual({
+        ...BACKUPS,
+        accessKey: 'ABCDEFGHIJ0123456789',
+        secretKey: 'x'.repeat(40),
+      });
+    },
+  );
+
+  it('a record an old CLI wrote without a region sits beside the uploads (backupsTargetOf)', async () => {
+    const cfg = await resolve(
+      { provider: 'hetzner', s3: UPLOADS, backupS3: { bucket: BACKUPS.bucket } },
+      true,
+    );
+    expect(cfg).toMatchObject({
+      bucket: BACKUPS.bucket,
+      region: 'fsn1',
+      endpoint: UPLOADS.endpoint,
+    });
+  });
+
+  it('compose with no backups record has nothing to read', async () => {
+    expect(await resolve({ provider: 'hetzner', s3: UPLOADS }, true)).toBeNull();
+  });
+
+  it("k8s with no backups record falls back to the app record, where its db pod's wal-g writes", async () => {
+    const cfg = await resolve({ provider: 'hetzner', s3: UPLOADS }, false);
+    expect(cfg).toMatchObject({ ...UPLOADS, accessKey: 'ABCDEFGHIJ0123456789' });
+  });
+
+  it.each([
+    ['compose', true],
+    ['k8s', false],
+  ])(
+    "M6 %s: a record with a region away from the uploads and no endpoint is read at that region's host",
+    async (_mode, isCompose) => {
+      // No CLI writes this; a hand edit can. Without an endpoint the SDK
+      // signs for the AWS default host and fails naming nothing.
+      const cfg = await resolve(
+        { provider: 'hetzner', s3: UPLOADS, backupS3: { bucket: BACKUPS.bucket, region: 'nbg1' } },
+        isCompose,
+      );
+      expect(cfg).toEqual({
+        ...BACKUPS,
+        accessKey: 'ABCDEFGHIJ0123456789',
+        secretKey: 'x'.repeat(40),
+      });
+    },
+  );
+
+  it('M6: a region the provider has no endpoint for is refused by bucket, region and way out', async () => {
+    await expect(
+      resolve(
+        { provider: 'hetzner', s3: UPLOADS, backupS3: { bucket: BACKUPS.bucket, region: 'xyz9' } },
+        true,
+      ),
+    ).rejects.toThrow(
+      "prod's backups bucket myapp-abc123-backups is on record in xyz9, a region with no known object-storage endpoint, and no endpoint, so the CLI cannot tell which host holds it. Deploy prod again to record it, or add its endpoint to the prod entry in .vibecarbon.json.",
+    );
+  });
+
+  it('M6: a k8s fallback to an app record with neither region nor endpoint is refused, naming the storage bucket', async () => {
+    await expect(
+      resolve({ provider: 'hetzner', s3: { bucket: UPLOADS.bucket } }, false),
+    ).rejects.toThrow(
+      "prod's storage bucket myapp-abc123-prod-storage is on record with no region and no endpoint",
+    );
   });
 });

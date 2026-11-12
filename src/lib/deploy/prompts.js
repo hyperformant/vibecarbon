@@ -34,11 +34,7 @@ import {
   regionsForTier,
   resolveS3RegionFor,
 } from '../providers/index.js';
-import {
-  assertBucketPin,
-  deriveEnvAppBucketName,
-  deriveProjectBucketName,
-} from '../providers/s3-base.js';
+import { assertBucketPin, deriveEnvAppBucketName } from '../providers/s3-base.js';
 import {
   cheapestDefaultRegion,
   cheapestRoleSet,
@@ -544,17 +540,17 @@ export class StorageBucketMismatchError extends Error {
  * if it names a different bucket the deploy stops rather than silently
  * re-pointing the app.
  *
- * The backup bucket is per project and keeps its persisted name once an
- * environment has deployed (restore reads backups there; after a destroy the
- * identity seed carries `backupS3`). WAL-G archives under `walgPrefix` in it.
+ * WAL-G archives under `walgPrefix` in the environment's backups bucket, which
+ * the deploy chooses once it knows the storage region (chooseBackupsBucket,
+ * src/lib/backups-bucket.js), not here.
  *
  * `bucket` is the only source of the app bucket name, so a scoped app key
  * (security plan, S3 scoping) targets exactly this bucket.
  *
  * @param {string} envName already validated by ENV_NAME_FORMAT
- * @param {{ s3?: { bucket?: string, bucketPin?: string }, backupS3?: { bucket?: string } }} envConfig
+ * @param {{ s3?: { bucket?: string, bucketPin?: string } }} envConfig
  * @param {{ projectName: string, bucketSalt?: string }} projectConfig
- * @returns {{ bucket: string, backupBucket: string, walgPrefix: string }}
+ * @returns {{ bucket: string, walgPrefix: string }}
  */
 export function resolveEnvStorage(envName, envConfig, projectConfig) {
   const pin = envConfig.s3?.bucketPin;
@@ -572,7 +568,6 @@ export function resolveEnvStorage(envName, envConfig, projectConfig) {
   }
   return {
     bucket,
-    backupBucket: envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
     walgPrefix: walgPrefixFor(projectConfig.projectName, envName),
   };
 }
@@ -1534,11 +1529,6 @@ export async function gatherDeploymentConfig(args) {
       // never carries it (env-identity), so a rebuild derives as before.
       ...(envConfig.s3?.stateBucket && { stateBucket: envConfig.s3.stateBucket }),
       walgPrefix: storage.walgPrefix,
-      region: s3Region,
-      endpoint: s3Provider.getEndpoint(),
-    },
-    backupS3Config: {
-      bucket: storage.backupBucket,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),
     },

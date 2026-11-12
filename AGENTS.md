@@ -65,7 +65,13 @@ deploy never derives a fresh bucket and orphans the kept one);
 `resolveStateBucketName` reads it after the operator pin and before
 derivation. The app uploads bucket is separate: one per environment
 (`deriveEnvAppBucketName`, read only through `resolveEnvStorage`), kept on
-plain destroy and deleted by `-purge`. The derived state bucket is project-level, so `-purge` deletes it
+plain destroy and deleted by `-purge`. Backups are one bucket per project and
+storage region (`<project>-<salt>-backups` for the first region,
+`<project>-<salt>-<region>-backups` after), chosen only by
+`chooseBackupsBucket`, read only through `backupsTargetOf` and reached only
+through `backupStorageConfig`, at its own region and endpoint
+(`src/lib/backups-bucket.js`); destroy keeps it, `-purge` deletes it with its
+last holder. The derived state bucket is project-level, so `-purge` deletes it
 only with the last live environment, then clears the record and rotates
 `stateBucketGeneration` so the next deploy derives a fresh name instead of
 recreating the deleted one. A destroy that keeps the environment's entry
@@ -74,12 +80,25 @@ a re-run of `vibecarbon destroy <env>` can still find and remove, per the class
 table `ENTRY_KEEP_BY_CLASS` in `src/destroy.js`) keeps the state bucket too,
 `-purge` or not, because the retry opens its stacks there, and on the compose
 tiers it keeps the Pulumi stack state, which is removed exactly when the entry
-is; the next clean `-purge` deletes the bucket. A line a re-run cannot act on
+is. Under `-purge` it keeps the app bucket and the environment's backups as
+well: a kept entry is a live environment, and another environment's fenced
+deploy stops on a live record whose bucket is gone. Its kept lines name the
+`-purge` rerun, and that clean `-purge` deletes them. Every line destroy prints
+that names a rerun spells it through `retryDestroyCommand`
+(`src/lib/destroy/retry-command.js`), which carries `-purge` exactly when the
+destroy had it: a plain rerun would move the entry and strand the kept buckets
+(census: `retry-command-census.test.ts`). A bucket a destroy keeps after it
+moves the entry is out of reach of every destroy, since `destroy <env>` then
+stops at "not found", so its line never says "with -purge". It names what
+still works: the console and a redeploy for the app bucket, a `-purge` of the
+project's last environment for the state bucket (`keptAppBucketNext`,
+`keptStateBucketNext`). The census fails on that spelling too. A line a re-run cannot act on
 (a DNS record, a health check, a bucket) keeps neither, and its hint names the
 by-hand step. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see
 `lib/env-identity.js`) under `destroyedEnvironments.<env>`; `deploy` seeds a
-same-named environment from it and clears it once the env is live. A sibling
+same-named environment from it (without its backups record after a `-purge`,
+which left it no backups to keep) and clears it once the env is live. A sibling
 key, not a stub in `environments`: every other command treats presence there
 as "deployed".
 

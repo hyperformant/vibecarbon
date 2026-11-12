@@ -73,7 +73,7 @@ const values = (overrides: Record<string, unknown> = {}) =>
       endpoint: 'https://nbg1.example',
       region: 'nbg1',
     },
-    backupBucketName: 'proj-backups',
+    backupTarget: { bucket: 'proj-backups', region: 'nbg1', endpoint: 'https://nbg1.example' },
     storageClass: 'hcloud-volumes',
     walArchiveSha: '0123456789abcdef',
     ...overrides,
@@ -357,10 +357,10 @@ describe('buildDbManifestValues', () => {
 
   it('uses ONE canonical wal-g prefix: backup bucket first, then the storage bucket', () => {
     expect(values().WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
-    expect(values({ backupBucketName: null }).WALG_S3_PREFIX_BASE).toBe(
+    expect(values({ backupTarget: null }).WALG_S3_PREFIX_BASE).toBe(
       's3://proj-storage/backups/proj/prod/walg',
     );
-    expect(values({ backupBucketName: null, s3Config: undefined }).WALG_S3_PREFIX_BASE).toBe('');
+    expect(values({ backupTarget: null, s3Config: undefined }).WALG_S3_PREFIX_BASE).toBe('');
     // Another environment of the same project archives under its own prefix.
     expect(
       values({
@@ -371,6 +371,23 @@ describe('buildDbManifestValues', () => {
     expect(() => values({ s3Config: { bucket: 'proj-storage' } })).toThrow(/walgPrefix/);
     // The role is a write-guard in its own file, never a path segment or a value.
     expect(Object.values(values()).join(' ')).not.toMatch(/standby|primary/);
+  });
+
+  it("reaches the backups bucket at its own endpoint and region, not the uploads bucket's", () => {
+    // Uploads in nbg1, backups recorded in fsn1 (an environment an older CLI
+    // put in another region's bucket): wal-g talks to fsn1.
+    const v = values({
+      backupTarget: { bucket: 'proj-backups', region: 'fsn1', endpoint: 'https://fsn1.example' },
+    });
+    expect(v.WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
+    expect(v.S3_ENDPOINT).toBe('https://fsn1.example');
+    expect(v.S3_REGION).toBe('fsn1');
+    // No backups bucket (the legacy path): wal-g archives into the uploads
+    // bucket, so it talks to the uploads bucket's endpoint.
+    const legacy = values({ backupTarget: null });
+    expect(legacy.WALG_S3_PREFIX_BASE).toBe('s3://proj-storage/backups/proj/prod/walg');
+    expect(legacy.S3_ENDPOINT).toBe('https://nbg1.example');
+    expect(legacy.S3_REGION).toBe('nbg1');
   });
 
   it('refuses to render without an image or a StorageClass', () => {

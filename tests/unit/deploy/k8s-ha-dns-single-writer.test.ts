@@ -20,6 +20,9 @@
  * call either tier makes besides single k8s's own record; it precedes the
  * records' real write, which awaits it.
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
@@ -126,7 +129,17 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
     region: 'hel1',
     endpoint: 'https://hel1.your-objectstorage.com',
     getEndpoint: () => 'https://hel1.your-objectstorage.com',
-    createBucket: async (name: string) => ({ name, created: false, ready: true }),
+    // One region here: every bucket is in hel1.
+    forRegion() {
+      return this;
+    },
+    createBucket: async (name: string) => ({
+      name,
+      created: false,
+      ready: true,
+      region: 'hel1',
+      endpoint: 'https://hel1.your-objectstorage.com',
+    }),
     hasObjectsWithPrefix: async () => false,
     bucketExists: async () => true,
     setBucketCors: async () => {},
@@ -318,7 +331,6 @@ function gathered(ha: boolean) {
     dnsZoneId: 'zone-1',
     dnsToken: 'dns-token',
     s3Config: S3,
-    backupS3Config: { bucket: 'dnsapp-abc123-prod-backups', region: 'hel1', endpoint: S3.endpoint },
     backupConfig: {},
     services: {},
     branchName: 'main',
@@ -336,7 +348,12 @@ async function deploy(ha: boolean) {
 
 const WARMUP = 'setupSimple 0.0.0.0';
 
+// Each case runs in a scratch project dir: the deploy's command log goes to
+// <cwd>/.vibecarbon/logs, never the repo's.
+let scratch = '';
 beforeEach(() => {
+  scratch = mkdtempSync(join(tmpdir(), 'vc-k8s-ha-dns-writer-'));
+  vi.spyOn(process, 'cwd').mockReturnValue(scratch);
   store.current = projectConfigStore({
     projectName: 'dnsapp',
     bucketSalt: 'abc123',
@@ -356,7 +373,10 @@ beforeEach(() => {
   // The fan-out's early firewall check reads the cloud: nothing to find here.
   vi.spyOn(HetznerProvider.prototype, 'findFirewallByName').mockResolvedValue(null);
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  rmSync(scratch, { recursive: true, force: true });
+});
 
 describe('every step of the k8s plans is classified for this harness', () => {
   it.each(['k8s-ha', 'k8s'])('%s', (tier) => {

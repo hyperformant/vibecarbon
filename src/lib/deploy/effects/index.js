@@ -14,6 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
+import { backupStorageConfig } from '../../backups-bucket.js';
 import { spinner } from '../../cli/progress.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { readOperatorVar } from '../../operator-env.js';
@@ -705,7 +706,8 @@ async function restoreTlsSnapshot(ctx) {
         domain,
         envName: environment,
         ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
-        s3Config: { ...ctx.s3Config, bucket: ctx.backupS3Config?.bucket },
+        // The backups bucket at its own region and endpoint.
+        s3Config: backupStorageConfig(ctx.s3Config, ctx.backupS3Config),
       }),
     );
   } catch {
