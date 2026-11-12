@@ -22,7 +22,7 @@ import {
   knownHostsPathForKey,
   seedKnownHosts,
 } from '../../host-keys.js';
-import { ServerReplaceRefusedError } from '../../iac/server-replace-guard.js';
+import { describeLiveChanges, LiveChangeRefusedError } from '../../iac/live-change-guard.js';
 import { forgetStateSeal } from '../../iac/state-seal.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
@@ -80,11 +80,13 @@ const SERVER_SETUP_STEPS = Object.freeze([
  * later replacement shows as a new id. No key pinned for the IP is scanned.
  *
  * An env that records a server (the seal's up, since a warm deploy that is
- * sealed skips this step) previews first: a plan that would replace or delete
- * that server, or create one in its place, never runs
- * (iac/server-replace-guard.js). The deploy then warns,
- * leaves the seal marker unset and goes on with the server as it is, as warm
- * deploys before the seal did: nothing here re-runs the server's setup.
+ * sealed skips this step) previews first: a plan that changes anything on
+ * that server (an update, a replace, a delete, or a new one in its place), or
+ * replaces or deletes any other resource, never runs
+ * (iac/live-change-guard.js). The deploy then warns with what the plan
+ * wanted to change, leaves the seal marker unset and goes on with the server
+ * as it is, as warm deploys before the seal did: nothing here re-runs the
+ * server's setup.
  */
 async function provisionServer(ctx) {
   const {
@@ -146,12 +148,13 @@ async function provisionServer(ctx) {
           // Recover stale-EMPTY outputs reads in place (read-only poll inside
           // upStack) — the hard gate below stays as the loud last resort.
           requiredOutputs: ['serverIp'],
-          // Never replace or delete the server the env records.
-          ...(recordedServer && { refuseServerReplace: true }),
+          // Never change the live server the env records, or replace or
+          // delete anything around it.
+          ...(recordedServer && { refuseLiveChanges: true }),
         }),
       );
     } catch (err) {
-      if (!(recordedServer && err instanceof ServerReplaceRefusedError)) throw err;
+      if (!(recordedServer && err instanceof LiveChangeRefusedError)) throw err;
       s.stop(`VPS kept as it is: ${recordedServer.ip} (${region})`);
       progressLog(`[pulumi] ${err.message}`);
       forgetStateSeal(ctx.state, environment);
@@ -217,28 +220,25 @@ async function provisionServer(ctx) {
 }
 
 /**
- * Why the seal's up was skipped: its plan would have taken out the server
- * the env records, and the database with it.
+ * Why the seal's up was skipped, naming each change its plan wanted: that is
+ * what differs between the live resources and what this version deploys.
  *
  * @param {string} environment
  * @param {{ ip: string, name: string }} server
- * @param {ServerReplaceRefusedError} refusal
+ * @param {LiveChangeRefusedError} refusal
  * @returns {string}
  */
 function sealSkippedWarning(environment, server, refusal) {
-  const actions = new Set(refusal.removals.map((r) => r.action));
-  const change = actions.has('replace')
-    ? 'replace the server, and the database on it'
-    : actions.has('delete')
-      ? 'delete the server, and the database on it'
-      : 'create a new server in its place, without the database this one holds';
   return (
     `Your ${environment} server ${server.name} (${server.ip}) was left as it is. ` +
     'This version runs one Pulumi up on each existing server to encrypt the values its ' +
-    `stack state keeps in plain text, and the plan for that up would ${change}, ` +
-    "so the up didn't run. The deploy goes on with the server " +
-    'unchanged, and those values stay unencrypted until an up can run. The next deploy ' +
-    "checks again, and the deploy log lists the plan's steps."
+    "stack state keeps in plain text, and vibecarbon won't change your live server " +
+    'during that one-time step. The plan for it would make these changes: ' +
+    `${describeLiveChanges(refusal.changes).join(', ')}. That is what differs between ` +
+    "your live resources and what this version would deploy, so the up didn't run, and " +
+    'the deploy goes on without it. Those values stay unencrypted until a plan leaves the ' +
+    'server as it is and replaces or deletes nothing. The next deploy checks again, and ' +
+    "the deploy log lists the plan's steps."
   );
 }
 

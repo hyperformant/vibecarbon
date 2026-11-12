@@ -68,7 +68,10 @@ const { EFFECTS, composeServerRecord } = await import('../../../src/lib/deploy/e
 const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { recordStateSeal, stateSealRecorded } = await import('../../../src/lib/iac/state-seal.js');
 const { hasPinnedHostKey, knownHostsPathForKey } = await import('../../../src/lib/host-keys.js');
-const { ServerReplaceRefusedError } = await import('../../../src/lib/iac/server-replace-guard.js');
+const { LiveChangeRefusedError, liveChangeOf } = await import(
+  '../../../src/lib/iac/live-change-guard.js'
+);
+const { SERVER_RESOURCE_TYPES } = await import('../../../src/lib/iac/create-timeout.js');
 const p = await import('@clack/prompts');
 
 /** A ledger that holds nothing: these tests stop at or before the up. */
@@ -359,15 +362,25 @@ describe('provisionServer and the seal marker (lib/iac/state-seal.js)', () => {
   });
 });
 
-describe("provisionServer: the seal's up never replaces the recorded server (iac/server-replace-guard.js)", () => {
+describe("provisionServer: the seal's up never changes the live server (iac/live-change-guard.js)", () => {
   const IP = '203.0.113.10';
-  const removal = (action: string) => ({
-    op: action,
-    action,
-    urn: 'urn:pulumi:production::testapp::hcloud:index/server:Server::server',
-    noun: 'server',
-    name: 'testapp-production',
-  });
+  /** A step of the seal up's plan, as the preview's guard reads it. */
+  const step = (op: string, type: string, logical: string, name: string) =>
+    liveChangeOf(
+      {
+        resourcePreEvent: {
+          metadata: {
+            op,
+            type,
+            urn: `urn:pulumi:production::testapp::${type}::${logical}`,
+            old: { inputs: { name } },
+          },
+        },
+      },
+      SERVER_RESOURCE_TYPES,
+    );
+  const SERVER = 'hcloud:index/server:Server';
+  const SCALEWAY_IP = 'scaleway:instance/ip:Ip';
   let warn: ReturnType<typeof vi.spyOn>;
   afterEach(() => {
     warn?.mockRestore();
@@ -394,9 +407,9 @@ describe("provisionServer: the seal's up never replaces the recorded server (iac
     const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
     const state = new StateTracker('testapp', 'production');
     cwd.mockRestore();
-    for (const step of ['compose-setup-server', 'compose-setup-files']) {
-      state.startStep(step, { serverIp: IP });
-      state.completeStep(step, { serverIp: IP });
+    for (const name of ['compose-setup-server', 'compose-setup-files']) {
+      state.startStep(name, { serverIp: IP });
+      state.completeStep(name, { serverIp: IP });
     }
     recordStateSeal(state, 'production');
     return ctxWith(state, {
@@ -408,25 +421,47 @@ describe("provisionServer: the seal's up never replaces the recorded server (iac
     }) as Record<string, unknown> & { state: InstanceType<typeof StateTracker> };
   }
 
-  it('asks upStack to refuse a server replacement only when the env records a server', async () => {
+  it('asks upStack to refuse live changes only when the env records a server', async () => {
     upStackMock.mockRejectedValueOnce(new Error('STOP_AFTER_UPSTACK_CALL'));
     await expect(EFFECTS.provisionServer(recordedCtx())).rejects.toThrow('STOP_AFTER_UPSTACK_CALL');
-    expect(upStackMock.mock.calls.at(-1)?.[2]).toMatchObject({ refuseServerReplace: true });
+    expect(upStackMock.mock.calls.at(-1)?.[2]).toMatchObject({ refuseLiveChanges: true });
 
     upStackMock.mockRejectedValueOnce(new Error('STOP_AFTER_UPSTACK_CALL'));
     await expect(EFFECTS.provisionServer(ctxWith(noLedger()))).rejects.toThrow(
       'STOP_AFTER_UPSTACK_CALL',
     );
-    expect(upStackMock.mock.calls.at(-1)?.[2]).not.toHaveProperty('refuseServerReplace');
+    expect(upStackMock.mock.calls.at(-1)?.[2]).not.toHaveProperty('refuseLiveChanges');
   });
 
-  for (const action of ['replace', 'delete', 'create']) {
-    it(`a plan that would ${action} it: no up, the seal skipped with a warning, the deploy goes on with the server as it is`, async () => {
+  const PLANS: Array<[string, unknown[], string]> = [
+    [
+      'resize the server in place',
+      [step('update', SERVER, 'server', 'testapp-production')],
+      'Server testapp-production (update)',
+    ],
+    [
+      'replace the server',
+      ['replace', 'create-replacement', 'delete-replaced'].map((op) =>
+        step(op, SERVER, 'server', 'testapp-production'),
+      ),
+      'Server testapp-production (replace)',
+    ],
+    [
+      'make a new server in its place',
+      [step('create', SERVER, 'server', 'testapp-production')],
+      'Server testapp-production (create)',
+    ],
+    [
+      'replace its Scaleway IP',
+      [step('replace', SCALEWAY_IP, 'ip', 'testapp-production-ip')],
+      'Ip testapp-production-ip (replace)',
+    ],
+  ];
+  for (const [what, changes, named] of PLANS) {
+    it(`a plan that would ${what}: no up, the seal skipped with a warning naming ${named}, the deploy goes on with the server as it is`, async () => {
       const ctx = recordedCtx();
       warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
-      upStackMock.mockRejectedValueOnce(
-        new ServerReplaceRefusedError('production', [removal(action)]),
-      );
+      upStackMock.mockRejectedValueOnce(new LiveChangeRefusedError('production', changes));
 
       await expect(EFFECTS.provisionServer(ctx)).resolves.toBeUndefined();
 
@@ -445,22 +480,51 @@ describe("provisionServer: the seal's up never replaces the recorded server (iac
       expect(message).toContain(
         'Your production server testapp-production (203.0.113.10) was left as it is.',
       );
-      expect(message).toMatch(
-        action === 'create'
-          ? /create a new server in its place/
-          : new RegExp(`${action} the server, and the database on it`),
+      expect(message).toContain(
+        "vibecarbon won't change your live server during that one-time step",
       );
+      // What drifted: each change once, with the type, the name and the op.
+      expect(message).toContain(`The plan for it would make these changes: ${named}. `);
+      expect(message).toContain('the deploy goes on without it');
       expect(message).toContain('The next deploy checks again');
-      expect(message).not.toContain('\u2014');
+      expect(message).not.toContain('—');
     });
   }
 
+  it('the warning lists every change the plan wanted, and the deploy log their steps', async () => {
+    const ctx = recordedCtx();
+    warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    // progressLog's line once the spinner has stopped.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    upStackMock.mockRejectedValueOnce(
+      new LiveChangeRefusedError('production', [
+        step('update', SERVER, 'server', 'testapp-production'),
+        step('delete', 'hcloud:index/firewall:Firewall', 'firewall', 'testapp-production-fw'),
+      ]),
+    );
+
+    try {
+      await EFFECTS.provisionServer(ctx);
+      expect(logged.mock.calls.map(([line]) => String(line))).toContainEqual(
+        expect.stringMatching(
+          /^\[pulumi\] The up for production would change .*\(steps: update urn:.*, delete urn:/,
+        ),
+      );
+    } finally {
+      logged.mockRestore();
+    }
+
+    expect(warn.mock.calls.at(-1)?.[0]).toContain(
+      'would make these changes: Server testapp-production (update), Firewall testapp-production-fw (delete). ',
+    );
+  });
+
   it('a first deploy (no server on record) never asks, so a refusal there is just an error', async () => {
     upStackMock.mockRejectedValueOnce(
-      new ServerReplaceRefusedError('production', [removal('replace')]),
+      new LiveChangeRefusedError('production', [step('update', SERVER, 'server', 'x')]),
     );
     await expect(EFFECTS.provisionServer(ctxWith(noLedger()))).rejects.toBeInstanceOf(
-      ServerReplaceRefusedError,
+      LiveChangeRefusedError,
     );
   });
 });
