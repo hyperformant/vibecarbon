@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { importingWorkspace } from '../../_shared/fake-stack-import.js';
 import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
@@ -67,10 +68,10 @@ function stackThat(name: string, log: string[], gate: Promise<void>) {
       log.push(`${name}:export`);
       return stateFor();
     },
-    importStack: async () => {
+    workspace: importingWorkspace(async () => {
       await gate;
       log.push(`${name}:import`);
-    },
+    }),
   };
 }
 

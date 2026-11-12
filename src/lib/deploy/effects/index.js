@@ -16,12 +16,13 @@ import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { backupStorageConfig } from '../../backups-bucket.js';
 import { spinner } from '../../cli/progress.js';
-import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import { forgetHostKey, knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { queueBootTiming } from '../boot-timing.js';
 import { VC_COMPOSE } from '../compose/command.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
@@ -31,10 +32,31 @@ import { K8S_EFFECTS } from './k8s.js';
 import { K8S_HA_EFFECTS } from './k8s-ha.js';
 
 /**
- * Provision one Hetzner VPS via Pulumi, wait for SSH, and seed the trusted
- * host key. Sets ctx.serverIp / providerServerId / providerServerName so the
- * downstream effects (and the orchestrator's return value) can read them.
- * Gated by `when: !ctx.serverIp` — a warm redeploy skips it.
+ * The ledger steps that set up the server itself. Keyed by its IP, so a new
+ * server at an IP an earlier one had (a recycled address, in a ledger that
+ * outlived its env record) would skip them: a provision forgets them, and
+ * they run on the server it made.
+ */
+const SERVER_SETUP_STEPS = Object.freeze([
+  'compose-setup-server',
+  'compose-dockerhub-login',
+  'compose-ghcr-login',
+  'compose-setup-files',
+]);
+
+/**
+ * Provision one VPS via Pulumi, wait for SSH, and seed the trusted host key.
+ * Sets ctx.serverIp / providerServerId / providerServerName / providerFirewallId
+ * so the downstream effects (and the orchestrator's return value) can read
+ * them. Gated by `when: !ctx.serverIp`: a warm redeploy skips it, so no
+ * deploy runs an up on a server the env records.
+ *
+ * Every run makes a new machine. Its IP may be one an earlier server had
+ * (Hetzner reissues addresses), and a known_hosts file can outlive the record
+ * that named that server (a teammate destroyed the env from their machine, or
+ * a destroy stopped before its local cleanup). So any key pinned for the IP
+ * goes before the SSH wait (accept-new would refuse the new machine on the
+ * old key, not trust it), and the new key is pinned after.
  */
 async function provisionServer(ctx) {
   const {
@@ -47,6 +69,8 @@ async function provisionServer(ctx) {
     sshKeyPath,
     envConfig,
   } = ctx;
+  // A server on record and no key here: stop before a new key replaces it.
+  requireDeployKey({ environment, envConfig, keyPath: sshKeyPath });
   generateSSHKeyPair(sshKeyPath);
   const { upStack } = await import('../../iac/index.js');
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
@@ -70,6 +94,7 @@ async function provisionServer(ctx) {
   // the line cleanly instead of corrupting it.
   const s = spinner();
   s.start(`Provisioning VPS in ${region}...`);
+  const khPath = knownHostsPathForKey(sshKeyPath);
   try {
     const result = await perfAsync('deploy.iac.upStack', () =>
       upStack(environment, program, {
@@ -99,9 +124,10 @@ async function provisionServer(ctx) {
       );
     }
     ctx.serverIp = result.outputs.serverIp;
-    // This deploy created (or converged) the server: persist-provisioned-server
-    // records it before anything points DNS at it.
+    // This deploy created the server: persist-provisioned-server records it
+    // before anything points DNS at it.
     ctx.serverProvisioned = true;
+    for (const step of SERVER_SETUP_STEPS) ctx.state.invalidateStep(step);
     ctx.providerServerId = result.outputs.serverId || null;
     ctx.providerServerName = `${projectConfig.projectName}-${environment}`;
     // Both compose programs export firewallId; nothing used to read it, so
@@ -110,6 +136,8 @@ async function provisionServer(ctx) {
     // (firewalled) one was deleted. Persisting it here is what makes
     // scale-servers able to re-attach — see buildReplacementServerArgs.
     ctx.providerFirewallId = result.outputs.firewallId || null;
+    // A new machine: a key known_hosts pins for its IP belongs to an earlier one.
+    forgetHostKey(khPath, ctx.serverIp);
     const { waitForSSH } = await import('../compose/index.js');
     s.message(`Waiting for SSH on ${ctx.serverIp}...`);
     await perfAsync('deploy.iac.waitForSSH', () => waitForSSH(ctx.serverIp, sshKeyPath, 30));
@@ -120,9 +148,10 @@ async function provisionServer(ctx) {
   s.stop(`VPS provisioned: ${ctx.serverIp} (${region})`);
   // Trusted host-key seed on fresh provision — captures the new VPS's host
   // key via ssh-keyscan into the per-env known_hosts so the pinned SSH opts
-  // (accept-new) become a strict pin. Re-seeding cleanly re-pins a Hetzner-
-  // recycled IP (destroy → redeploy). Best-effort: falls back to accept-new.
-  await seedKnownHosts(knownHostsPathForKey(sshKeyPath), ctx.serverIp);
+  // (accept-new) become a strict pin. With the stale key dropped above, a
+  // Hetzner-recycled IP (destroy → redeploy) is pinned to the new machine.
+  // Best-effort: falls back to accept-new.
+  await seedKnownHosts(khPath, ctx.serverIp);
 }
 
 /**

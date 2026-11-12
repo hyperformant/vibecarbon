@@ -1,8 +1,11 @@
 /**
  * A warm compose-ha deploy skips both Pulumi `up`s when nothing the two
- * programs receive changed, as k8s does with `k3s-infra`. These tests drive
- * haProvisionServers with `upStack` faked at its boundary and a real
- * StateTracker on a temp directory.
+ * programs receive changed, as k8s does with `k3s-infra`, and both stacks are
+ * marked sealed (lib/iac/state-seal.js). These tests drive haProvisionServers
+ * with `upStack` faked at its boundary and a real StateTracker on a temp
+ * directory. The fake records the seal marker in the ledger it is handed, as
+ * the real upStack does once its seal and history cleanup finish
+ * (fake.sealFinishes false: they didn't).
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,6 +16,7 @@ const fake = vi.hoisted(() => ({
   upStack: vi.fn(),
   standbyType: 'cpx22',
   version: '1.2.3',
+  sealFinishes: true,
 }));
 vi.mock('../../../src/lib/version.js', () => ({
   get VERSION() {
@@ -35,6 +39,7 @@ vi.mock('../../../src/lib/sizing.js', async (orig) => ({
 }));
 
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
+const { recordStateSeal, stateSealRecorded } = await import('../../../src/lib/iac/state-seal.js');
 const { StateTracker, COMPOSE_HA_INFRA_STEP } = await import('../../../src/lib/deploy/state.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
@@ -99,15 +104,22 @@ beforeEach(() => {
   process.chdir(dir);
   mkdirSync(join(dir, '.vibecarbon'));
   keyPath = join(dir, 'key');
+  // Both halves, as the machine that deployed the pair keeps them
+  // (deploy-key.js refuses a recorded pair without them).
+  writeFileSync(keyPath, 'PRIVATE', { mode: 0o600 });
   setPublicKey('ssh-ed25519 AAAA-one');
   fake.standbyType = 'cpx22';
   fake.version = '1.2.3';
+  fake.sealFinishes = true;
   let n = 0;
   fake.upStack.mockReset();
-  fake.upStack.mockImplementation(async (stack: string) => {
-    n += 1;
-    return { outputs: outputsFor(stack, n) };
-  });
+  fake.upStack.mockImplementation(
+    async (stack: string, _program: unknown, opts: { ledger?: unknown }) => {
+      n += 1;
+      if (opts?.ledger && fake.sealFinishes) recordStateSeal(opts.ledger as never, stack);
+      return { outputs: outputsFor(stack, n) };
+    },
+  );
   vi.spyOn(HetznerProvider.prototype, 'createSSHKey').mockResolvedValue(111 as never);
   vi.spyOn(DigitalOceanProvider.prototype, 'createSSHKey').mockResolvedValue(111 as never);
   summaries.mockReset();
@@ -188,6 +200,41 @@ describe('compose-ha infra skip', () => {
     expect(ups()).toBe(4);
   });
 
+  it('each up is handed the ledger its seal marks', async () => {
+    const first = makeCtx();
+    await provision(first);
+    for (const call of fake.upStack.mock.calls) expect(call[2].ledger).toBe(first.state);
+    expect(stateSealRecorded(first.state, 'prod-primary')).toBe(true);
+    expect(stateSealRecorded(first.state, 'prod-standby')).toBe(true);
+  });
+
+  it('a ledger an older version wrote (same inputs, no seal marker) runs both ups once more, then skips', async () => {
+    const first = makeCtx();
+    fake.sealFinishes = false;
+    await provision(first);
+    expect(ups()).toBe(2);
+
+    // The upgraded CLI's first deploy: nothing changed, but nothing is sealed.
+    fake.sealFinishes = true;
+    const second = warmCtx(first);
+    await provision(second);
+    expect(ups()).toBe(4);
+
+    const third = warmCtx(second);
+    await provision(third);
+    expect(ups()).toBe(4);
+  });
+
+  it('one stack sealed, the other not: both ups run', async () => {
+    const first = makeCtx();
+    fake.sealFinishes = false;
+    await provision(first);
+    const second = warmCtx(first);
+    recordStateSeal(second.state, 'prod-primary');
+    await provision(second);
+    expect(ups()).toBe(4);
+  });
+
   it('a changed environment runs Pulumi (its hash, not just its ledger file)', async () => {
     const first = makeCtx();
     await provision(first);
@@ -236,9 +283,14 @@ describe('compose-ha infra skip', () => {
     });
 
     it('a numeric servers[] id equal to the recorded string still skips', async () => {
-      fake.upStack.mockImplementation(async (stack: string) => ({
-        outputs: { ...outputsFor(stack, 1), serverId: stack.endsWith('primary') ? '41' : '42' },
-      }));
+      fake.upStack.mockImplementation(
+        async (stack: string, _program: unknown, opts: { ledger?: unknown }) => {
+          if (opts?.ledger) recordStateSeal(opts.ledger as never, stack);
+          return {
+            outputs: { ...outputsFor(stack, 1), serverId: stack.endsWith('primary') ? '41' : '42' },
+          };
+        },
+      );
       const first = makeCtx();
       await provision(first);
       const next = warmCtx(first);

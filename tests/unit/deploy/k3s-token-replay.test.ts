@@ -9,9 +9,26 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * interpolated into every node's userData, userData is immutable, so a fresh
  * token on an existing stack plans a full-cluster replace (etcd + PVC data
  * loss). The role reconciler makes cross-role re-runs of that block routine.
- * resolveStackK3sToken must recover the stored token; only a fresh stack may
- * mint one.
+ * resolveStackK3sToken must recover the stored token.
+ *
+ * A stack with no recorded token (none in the backend, or outputs without
+ * it) gets the one derived from the project's state passphrase, never a
+ * random one: a first up that failed after creating servers leaves empty
+ * outputs while its servers booted with that token, and the rerun must hand
+ * them the same one (ruling R23, lib/iac/k3s-token.js).
+ *
+ * Sentinels only: the passphrase and tokens here are never real.
  */
+
+const PASSPHRASE = 'SENTINEL-passphrase-replay-00000000000000000000';
+const passphrase = vi.hoisted(() => ({ dirs: [] as string[] }));
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async (dir: string) => {
+    passphrase.dirs.push(dir);
+    return PASSPHRASE;
+  },
+}));
 
 const getStackOutputs = vi.fn();
 const { StateMigrationError, StateUndecryptableError } = await import(
@@ -20,20 +37,23 @@ const { StateMigrationError, StateUndecryptableError } = await import(
 const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
 const { K3sTokenProbeError } = await import('../../../src/lib/iac/index.js');
 const { StatePassphraseError } = await import('../../../src/lib/state-passphrase.js');
+const { deriveK3sToken } = await import('../../../src/lib/iac/k3s-token.js');
 
 vi.mock('../../../src/lib/iac/index.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../src/lib/iac/index.js')>();
   return { ...real, getStackOutputs };
 });
 
-const FakeProvider = {
-  getK8sProgram: vi.fn(async () => ({ fake: 'program' })),
-};
+const derived = (stackName: string) =>
+  deriveK3sToken({ passphrase: PASSPHRASE, projectName: 'shop', stackName });
+
+/** Every string a call recorded, for "never logged, never passed" checks. */
+const said = (fn: ReturnType<typeof vi.fn>) => JSON.stringify(fn.mock.calls);
 
 describe('resolveStackK3sToken', () => {
   beforeEach(() => {
     getStackOutputs.mockReset();
-    FakeProvider.getK8sProgram.mockClear();
+    passphrase.dirs.length = 0;
   });
 
   const load = async () => {
@@ -45,31 +65,45 @@ describe('resolveStackK3sToken', () => {
     getStackOutputs.mockResolvedValueOnce({ k3sToken: 'stack-token-abc', masterIp: '1.2.3.4' });
     const resolveStackK3sToken = await load();
     const token = await resolveStackK3sToken(
-      FakeProvider,
       { environment: 'e4-primary' },
-      { log: vi.fn() },
+      { log: vi.fn(), projectName: 'shop' },
     );
-    expect(token).toBe('stack-token-abc');
+    expect(token).toEqual({ k3sToken: 'stack-token-abc', k3sTokenReplayed: true });
+    // The probe only reads outputs, so its program is never the real one: the
+    // real one needs the token this probe decides.
     expect(getStackOutputs).toHaveBeenCalledWith(
       'e4-primary',
-      { fake: 'program' },
-      expect.anything(),
+      expect.any(Function),
+      expect.objectContaining({ projectName: 'shop' }),
     );
+    expect(passphrase.dirs).toEqual([]);
   });
 
-  it('returns undefined (fresh-stack path) on empty outputs, loudly', async () => {
+  // A first up that failed after it created servers: the stack exists, its
+  // outputs are empty, and its servers booted with the derived token.
+  it('empty outputs: the token derived for this project and stack, never logged', async () => {
     getStackOutputs.mockResolvedValueOnce({});
     const log = vi.fn();
     const resolveStackK3sToken = await load();
-    const token = await resolveStackK3sToken(FakeProvider, { environment: 'e4-standby' }, { log });
-    expect(token).toBeUndefined();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+    const token = await resolveStackK3sToken(
+      { environment: 'e4-standby' },
+      { log, projectName: 'shop', projectDir: '/proj' },
+    );
+    expect(token).toEqual({ k3sToken: derived('e4-standby'), k3sTokenReplayed: false });
+    expect(passphrase.dirs).toEqual(['/proj']);
+    expect(log).toHaveBeenCalledWith(
+      '[k3s-infra] k3s token probe: empty (outputs object empty (fresh stack)), using the token derived from the state passphrase for this stack',
+    );
+    // Neither the token nor the passphrase is logged or handed to the probe.
+    for (const secret of [token.k3sToken, PASSPHRASE]) {
+      expect(said(log)).not.toContain(secret);
+      expect(said(getStackOutputs)).not.toContain(secret);
+    }
   });
 
   // A first deploy: getStackOutputs finds no stack (getOrCreateStack's
-  // requireExisting answer, the flag set). The program mints a token exactly
-  // as it always has.
-  it('a stack the backend does not have yet mints, as a first deploy always has', async () => {
+  // requireExisting answer, the flag set).
+  it('a stack the backend does not have yet: the derived token, as its rerun will get', async () => {
     getStackOutputs.mockRejectedValueOnce(
       Object.assign(
         new Error(
@@ -80,11 +114,22 @@ describe('resolveStackK3sToken', () => {
     );
     const log = vi.fn();
     const resolveStackK3sToken = await load();
-    const token = await resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log });
-    expect(token).toBeUndefined();
-    expect(log).toHaveBeenCalledWith(
-      '[k3s-infra] k3s token probe: missing (no stack e4-primary in the state backend yet), minting a fresh token (fresh-stack path)',
+    const first = await resolveStackK3sToken(
+      { environment: 'e4-primary' },
+      { log, projectName: 'shop' },
     );
+    expect(first).toEqual({ k3sToken: derived('e4-primary'), k3sTokenReplayed: false });
+    expect(log).toHaveBeenCalledWith(
+      '[k3s-infra] k3s token probe: missing (no stack e4-primary in the state backend yet), using the token derived from the state passphrase for this stack',
+    );
+    // The rerun after that first up failed reads empty outputs: same token.
+    getStackOutputs.mockResolvedValueOnce({});
+    const rerun = await resolveStackK3sToken(
+      { environment: 'e4-primary' },
+      { log, projectName: 'shop' },
+    );
+    expect(rerun.k3sToken).toBe(first.k3sToken);
+    expect(said(log)).not.toContain(first.k3sToken);
   });
 
   // Any other failed read leaves a stack that may exist unread, with the
@@ -101,16 +146,15 @@ describe('resolveStackK3sToken', () => {
     getStackOutputs.mockRejectedValueOnce(cause);
     const log = vi.fn();
     const resolveStackK3sToken = await load();
-    const err = await resolveStackK3sToken(
-      FakeProvider,
-      { environment: 'e4-primary' },
-      { log },
-    ).catch((e: Error) => e);
+    const err = await resolveStackK3sToken({ environment: 'e4-primary' }, { log }).catch(
+      (e: Error) => e,
+    );
     expect(err).toBeInstanceOf(K3sTokenProbeError);
     expect((err as Error).cause).toBe(cause);
-    expect((err as Error).message).toContain("Couldn't read the k3s join token for e4-primary");
-    expect((err as Error).message).toContain('Running this again is safe.');
+    expect((err as Error).message).toContain("Couldn't read your k3s join token for e4-primary");
+    expect((err as Error).message).toContain('You can run this again safely.');
     expect(log).not.toHaveBeenCalled();
+    expect(passphrase.dirs).toEqual([]);
   });
 
   // A state the project's passphrase cannot read still holds the cluster's
@@ -139,10 +183,11 @@ describe('resolveStackK3sToken', () => {
       getStackOutputs.mockRejectedValueOnce(failure);
       const log = vi.fn();
       const resolveStackK3sToken = await load();
-      await expect(
-        resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log }),
-      ).rejects.toBe(failure);
-      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+      await expect(resolveStackK3sToken({ environment: 'e4-primary' }, { log })).rejects.toBe(
+        failure,
+      );
+      expect(log).not.toHaveBeenCalled();
+      expect(passphrase.dirs).toEqual([]);
     });
   });
 
@@ -175,10 +220,11 @@ describe('resolveStackK3sToken', () => {
       getStackOutputs.mockRejectedValueOnce(failure);
       const log = vi.fn();
       const resolveStackK3sToken = await load();
-      await expect(
-        resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log }),
-      ).rejects.toBe(failure);
-      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+      await expect(resolveStackK3sToken({ environment: 'e4-primary' }, { log })).rejects.toBe(
+        failure,
+      );
+      expect(log).not.toHaveBeenCalled();
+      expect(passphrase.dirs).toEqual([]);
     });
   });
 
@@ -191,13 +237,12 @@ describe('resolveStackK3sToken', () => {
     getStackOutputs.mockResolvedValueOnce({ k3sToken: 'stack-token-abc' });
     const resolveStackK3sToken = await load();
     await resolveStackK3sToken(
-      FakeProvider,
       { environment: 'd3' },
       { log: vi.fn(), provider: 'digitalocean', providerToken: 'do-secret-token' },
     );
     expect(getStackOutputs).toHaveBeenCalledWith(
       'd3',
-      { fake: 'program' },
+      expect.any(Function),
       expect.objectContaining({ provider: 'digitalocean', providerToken: 'do-secret-token' }),
     );
   });
@@ -207,10 +252,11 @@ describe('deployK3s wires the replayed token into the real program', () => {
   it('k3s-infra block calls resolveStackK3sToken and spreads the token', () => {
     // Source-level lockstep guard (same style as the walg-prefix and
     // node-ip guards): the helper is only load-bearing if the k3s-infra
-    // block actually consumes it before building the program.
+    // block actually consumes it before building the program, and it always
+    // does: a program built without a token refuses (k3s-token-census).
     const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
-    expect(src).toMatch(/resolveStackK3sToken\(Provider, programConfig/);
-    expect(src).toMatch(/\.\.\.\(priorK3sToken \? \{ k3sToken: priorK3sToken \} : \{\}\)/);
+    expect(src).toMatch(/const stackToken = await resolveStackK3sToken\(programConfig, \{/);
+    expect(src).toMatch(/getK8sProgram\(\{ \.\.\.programConfig, \.\.\.stackToken \}\)/);
   });
 
   // M3 Task 9a (DO k8s 401 RCA): the k3s-infra block's two IaC calls
@@ -224,7 +270,7 @@ describe('deployK3s wires the replayed token into the real program', () => {
   it('threads provider explicitly into both k3s-infra IaC calls', () => {
     const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
     expect(src).toMatch(
-      /resolveStackK3sToken\(Provider, programConfig, \{\s*provider: providerIdFor\(options\),/,
+      /resolveStackK3sToken\(programConfig, \{\s*provider: providerIdFor\(options\),/,
     );
     expect(src).toMatch(
       /upStack\(options\.environment, program, \{\s*perfStem: [^\n]*\n\s*provider: providerIdFor\(options\),/,

@@ -29,14 +29,20 @@ import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
 import { perfAsync, perfEnabled, perfRecord, perfTimer } from '../perf.js';
-import { getProviderClass } from '../providers/index.js';
+import { getProvider, getProviderClass } from '../providers/index.js';
 import {
   ensureStatePassphrase,
   resolveStatePassphrase,
   STATE_PASSPHRASE_KEY,
   statePassphraseGeneratedThisRun,
 } from '../state-passphrase.js';
-import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
+import { makeTempDir, removeTempDir } from '../temp-dir.js';
+import {
+  createTimeoutError,
+  parseCreateTimeouts,
+  SERVER_RESOURCE_TYPES,
+} from './create-timeout.js';
+import { requirePulumiProject } from './pulumi-project.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
@@ -51,6 +57,24 @@ import {
   isStatePassphraseFailure,
   StateMigrationError,
 } from './state-error.js';
+import { removePlainHistory } from './state-history.js';
+import {
+  classifyPendingCreates,
+  forgetPendingReported,
+  pendingCreatesBlock,
+  pendingLabel,
+  pendingLookupFailed,
+  pendingReported,
+  recordPendingReported,
+  untrackedServers,
+} from './state-pending.js';
+import {
+  forgetStateSeal,
+  plainValueCount,
+  recordStateSeal,
+  sealServerUserData,
+  stateSealRecorded,
+} from './state-seal.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
 import { makeWorkspaceDir } from './workspace-dir.js';
 
@@ -59,38 +83,6 @@ import { makeWorkspaceDir } from './workspace-dir.js';
 // implementation, not two copies drifting apart.
 export { failingPulumiCommandVerb };
 
-/**
- * The Pulumi PROJECT scopes state keys: the DIY backend stores every checkpoint
- * as `.pulumi/stacks/<project>/<stack>.json`. This used to be the constant
- * 'vibecarbon', which made state keys collide the moment two vibecarbon
- * projects shared one state bucket — exactly what the project-level
- * `stateBucket` pin and the e2e shared bucket introduced. Two projects pinned
- * to one bucket with an env name in common would silently ADOPT each other's
- * live state: select succeeds on the other project's stack file, URNs match
- * (program logical names are constants), and `up` reconciles someone else's
- * servers. (Review finding, 2026-08-15.)
- *
- * So the project name is now the vibecarbon PROJECT'S name, required
- * explicitly: state keys become `.pulumi/stacks/<projectName>/<stack>.json`,
- * distinct per project, and a shared bucket is safe by construction.
- *
- * REQUIRED, never defaulted: a call site that fell back to a constant would
- * read a DIFFERENT key than the one the deploy wrote, see "no stack", and take
- * the create-or-orphan paths — the silent-split failure mode is strictly worse
- * than a loud throw. Pre-release, so no migration shim for state written under
- * the old constant key.
- */
-function requirePulumiProject(options) {
-  const name = options?.projectName;
-  if (typeof name !== 'string' || name.trim() === '') {
-    throw new Error(
-      'iac: options.projectName is required — Pulumi state keys are scoped per project ' +
-        '(.pulumi/stacks/<projectName>/<stack>.json). Pass the vibecarbon projectName from ' +
-        'projectConfig; a defaulted name would read a different key than the deploy wrote.',
-    );
-  }
-  return name.trim();
-}
 const LOCAL_STATE_DIR = join(homedir(), '.vibecarbon', 'pulumi-state');
 
 // Pulumi's file:// backend requires the target directory to exist before
@@ -234,17 +226,31 @@ export function buildEnv(options) {
   // staleness.
   //
   // Safe because it is not the only copy. The live checkpoint keeps its `.bak`
-  // sibling, and `.pulumi/history/<ts>.checkpoint.json` still retains a full
-  // checkpoint per update — so state recovery material survives; only the
-  // duplicate of it goes.
+  // sibling, and `.pulumi/history/<ts>.checkpoint.json` keeps a full
+  // checkpoint per update, so state recovery material survives; only the
+  // duplicate of it goes. The one exception: the history copies from before a
+  // stack's seal held its user data in plain text, and the deploy deletes
+  // them after the seal (state-history.js), so a stack's recovery copies start
+  // at its seal.
   //
   // Unknown env vars are ignored by the CLI, so this is inert on a version
   // that predates the flag rather than an error.
   env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS = 'true';
+  // An operator's shell export of RETAIN_CHECKPOINTS (both spellings, CLI
+  // 3.259.0) would keep a timestamped full copy of every checkpoint beside
+  // the stack's own file (`<stack>.json.<time>`), which nothing removes: the
+  // ones from before the seal hold the plain user data. The history above is
+  // the recovery copy, so it is dropped. `undefined`, not deleted: see the
+  // passphrase below.
+  env.PULUMI_DIY_BACKEND_RETAIN_CHECKPOINTS = undefined;
+  env.PULUMI_RETAIN_CHECKPOINTS = undefined;
   // The project's state passphrase encrypts the values Pulumi marks secret in
-  // the state. It is NOT a blanket seal: a plain output (the k8s programs'
-  // `k3sToken`) and user data stay readable until a later change wraps them in
-  // pulumi.secret and re-seals existing state. SECURITY: never default to ''
+  // the state: every server's user data and the k8s programs' `k3sToken`
+  // output (the programs wrap both in pulumi.secret). A server made before
+  // that wrap keeps its user data plain (it is in ignoreChanges) until the
+  // seal after a successful up rewrites it (sealStackState; the seal marker
+  // in state-seal.js makes the first deploy after an upgrade run that up);
+  // anything a program hands Pulumi plain stays plain. SECURITY: never default to ''
   // (the empty passphrase every legacy stack was made with) and never let an
   // inherited PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE (a
   // shell export for another project) win over the project's own value.
@@ -896,6 +902,55 @@ async function verifyStateAfterHistoryWrite(stack) {
 }
 
 /**
+ * `pulumi stack import` of `state` into `stack`: the one way src writes a
+ * deployment back (tests/unit/iac/state-import.test.ts).
+ *
+ * The SDK's Stack.importStack (3.274.1) writes the whole deployment, with
+ * every secret in plain text (exportStack runs `stack export --show-secrets`),
+ * to `<os tmpdir>/automation-<6 digits>` with the default mode (0664 under a
+ * 002 umask, so every local user can read it) and deletes it only when the
+ * import succeeds: each failed import left one behind. This writes it to a
+ * 0600 file in a 0700 directory of its own (temp-dir.js makeTempDir), runs
+ * the command the SDK runs, in the stack's workspace with the same
+ * environment, and removes the directory whether the import worked or not.
+ * A process.exit during the import (Ctrl-C) skips the finally; the exit sweep
+ * removes the directory then, and a kill that skips even that leaves it to
+ * the stale sweep (`vc-state-import-` is in STALE_SECRET_PREFIXES). It sits
+ * in the OS temp dir, not in the workspace directory: the stale sweep reads
+ * only the temp dir's own entries, and a workspace directory holds no secret
+ * (tests/unit/lib/temp-dir-census.test.ts).
+ *
+ * No retry and no lock handling here: callers wrap it as they wrapped the SDK
+ * call (withStateBackendRetry, runPastStaleLock), and its failure is the
+ * SDK's CommandError, as before.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {object} state - a deployment, as exportStack returns it
+ * @returns {Promise<void>}
+ */
+export async function importStackState(stack, state) {
+  const { workspace } = stack;
+  const dir = makeTempDir('vc-state-import-');
+  try {
+    const file = join(dir, 'deployment.json');
+    writeFileSync(file, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
+    const result = await workspace.pulumiCommand.run(
+      ['stack', 'import', '--file', file, '--stack', stack.name],
+      workspace.workDir,
+      { ...(workspace.pulumiHome && { PULUMI_HOME: workspace.pulumiHome }), ...workspace.envVars },
+    );
+    // What the import drops from the snapshot, a pending operation among
+    // them, it says only on stderr ("removing pending operation 'creating' on
+    // '<urn>'", CLI 3.259.0): names, never values.
+    for (const line of (result?.stderr ?? '').split('\n')) {
+      if (line.trim()) progressLog(`[pulumi] stack import ${stack.name}: ${line.trim()}`);
+    }
+  } finally {
+    removeTempDir(dir);
+  }
+}
+
+/**
  * `vultr:index/firewallRule:FirewallRule` inputs the pre-up refresh poisons.
  *
  * `source` is WRITE-"" / READ-CIDR asymmetric on Vultr. terraform-provider-
@@ -940,7 +995,7 @@ const VULTR_RULE_SOURCE_VALID = new Set(['', 'cloudflare']);
  *
  * No-op on every other provider and on any stack that holds no Vultr
  * firewall rules, and a no-op when the inputs are already clean — the
- * expensive importStack only runs when something actually changed.
+ * expensive import only runs when something actually changed.
  *
  * Never throws: this is a repair on the way to `up`, and `up`'s own error is
  * always a better thing to surface than a failure inside the repair.
@@ -971,7 +1026,10 @@ export async function repairVultrFirewallRuleInputs(stack) {
       if (touched) repaired++;
     }
     if (repaired > 0) {
-      await withStateBackendRetry(() => stack.importStack(state), 'post-refresh state repair');
+      await withStateBackendRetry(
+        () => importStackState(stack, state),
+        'post-refresh state repair',
+      );
       progressLog(
         `[pulumi] repaired ${repaired} vultr firewall rule ${
           repaired === 1 ? 'input' : 'inputs'
@@ -1029,7 +1087,7 @@ export async function dropRetiredStackResources(stack, providerId, { recordAddre
     if (result.removed.length > 0) {
       if (recordAddresses && result.addresses.length > 0) await recordAddresses(result.addresses);
       await withStateBackendRetry(
-        () => runPastStaleLock(stack, () => stack.importStack(result.deployment)),
+        () => runPastStaleLock(stack, () => importStackState(stack, result.deployment)),
         'retired-resource import',
       );
     }
@@ -1092,8 +1150,11 @@ async function prepareStackForUp(stackName, program, options) {
   // whenever the firewall is in state but already gone from the cloud.
   // Re-verified against provider v1.68.0 / hcloud-go v2.47.0, the versions
   // @pulumi/hcloud 1.41.0 bridges, so this is current, not historical.
-  // `refresh` reconciles state with live cloud resources and clears the
-  // pending-op markers. Idempotent — no-op when state already matches reality.
+  // `refresh` reconciles state with live cloud resources and drops a pending
+  // update or delete. It keeps a pending create, and so does the up (CLI
+  // 3.259.0, 2026-11-11): the seal after the up resolves those
+  // (resolvePendingCreates). Idempotent — no-op when state already matches
+  // reality.
   //
   // Skip on truly-empty stacks: a freshly-created stack has only the
   // bookkeeping `pulumi:pulumi:Stack` resource (no real cloud resources
@@ -1288,6 +1349,12 @@ async function runUp(stack, options) {
       throw err;
     }
   }
+  // The update applied, so the state is the project passphrase's now: seal
+  // what an existing server still keeps plain. Never throws. Timed under the
+  // caller's perfStem, as every upStack marker is, and silent without one.
+  const sealTimer = options.perfStem ? perfTimer(`${options.perfStem}.seal`) : null;
+  await sealStackState(stack, options);
+  sealTimer?.end();
   // Flatten outputs: { foo: { value: 'bar', secret: false } } → { foo: 'bar' }
   const outputs = flattenOutputs(rawOutputs);
 
@@ -1307,6 +1374,293 @@ async function runUp(stack, options) {
     );
   }
   return { outputs, summary };
+}
+
+/**
+ * Seal the plain user data and k3s token a stack's existing servers still
+ * keep (state-seal.js says why they are plain), right after a successful up:
+ * a fresh export, sealServerUserData, and an import only when it sealed
+ * anything. Then, on a deploy whose ledger doesn't mark the stack sealed yet,
+ * the history copies that still hold plain values go (state-history.js), and
+ * only once both are done does the ledger get the marker (state-seal.js says
+ * how each mode's deploy gate reads it).
+ *
+ * After the up, never before it (R20). A legacy stack that holds no secret
+ * still carries the salt of the empty passphrase older versions used, and
+ * Pulumi refuses to import a secret into it ("failed to encrypt: incorrect
+ * passphrase", CLI 3.259.0). The refresh and the up write the state under the
+ * project's passphrase, so the export after them imports. A failed up seals
+ * nothing; the next successful one does.
+ *
+ * Imported twice when it sealed anything, the first time a stack is sealed:
+ * Pulumi keeps the checkpoint an import replaces as `<stack>.json.bak` beside
+ * the stack's file (file and S3 backends alike), so one import leaves the
+ * plain values in the .bak, and a second, identical one replaces it with the
+ * sealed checkpoint (proven on 3.259.0, file backend, 2026-11-11). Pulumi's
+ * history keeps a full checkpoint for every refresh and up
+ * (`.pulumi/history/<project>/<stack>/*.checkpoint.json`), which no Pulumi
+ * command removes; removePlainHistory deletes the ones that hold plain values
+ * and keeps every `.history.json`.
+ *
+ * Never over pending operations. A create an earlier run left unfinished
+ * (Ctrl-C mid-provision) survives the refresh and the up, and `stack import`
+ * drops it from the snapshot with only a warning (CLI 3.259.0, Task 7
+ * review): the only record of a server that may be running. So while a plain
+ * value is left (in a resource or in the operation's own inputs), the deploy
+ * first clears them itself, and only once nothing they made is left running
+ * untracked (resolvePendingCreates, state-pending.js); otherwise it tells the
+ * user what to delete in the provider's console, then deploy again.
+ *
+ * No lock spans the export and the imports, and none can: Pulumi's lock (the
+ * one stack-lock.js reads) is taken per command, so the up's is released when
+ * it returns, each import takes its own, and state-lock.js serializes within
+ * this process only. Another run's update is lost only if it starts after the
+ * export and finishes before an import, seconds apart, and an up takes minutes
+ * holding the stack's lock: one still running when an import comes makes that
+ * import fail (StackHeldError), which ends in the warning below. The DIY
+ * backend has no compare-and-swap to close the window; the Vultr repair and
+ * the retired-resource surgery have the same one.
+ *
+ * Logs how many values it sealed, a number only, on every up: a second
+ * deploy that seals any means a refresh handed them back plain.
+ *
+ * Never throws: the up has succeeded and the servers are as it left them. A
+ * failure says so and that the next successful deploy seals them, never the
+ * unrecoverable-state message: a passphrase refused here only means the
+ * values stay plain for now. A failure of the seal or of the history cleanup
+ * also clears the marker, so the next deploy runs the up again rather than
+ * skipping it, in every mode.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ ledger?: object, projectName?: string, s3Config?: object, provider?: string }} [options]
+ *   `ledger`: the deploy's StateTracker; without one (scale, failover) the
+ *   stack is sealed and nothing else happens, and a state with unfinished
+ *   creates waits for the next deploy.
+ * @returns {Promise<void>}
+ */
+async function sealStackState(stack, options = {}) {
+  const ledger = options.ledger ?? null;
+  const { finished, count } = await sealCurrentState(stack, options);
+  if (!ledger) return;
+  if (!finished) {
+    forgetStateSeal(ledger, stack.name);
+    return;
+  }
+  // A marked stack that sealed nothing left no plain copy in this deploy's
+  // history either. One that sealed some (a refresh handed values back
+  // plain) did: this deploy's refresh and up wrote them there.
+  if (stateSealRecorded(ledger, stack.name) && count === 0) return;
+  if (await removeHistoryCopies(stack, options)) recordStateSeal(ledger, stack.name);
+  else forgetStateSeal(ledger, stack.name);
+}
+
+/**
+ * The seal itself: export, seal, import twice. `finished`: the stack's state
+ * and its .bak now hold no plain value; `count`: the values it sealed.
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ ledger?: object, provider?: string, providerToken?: string, onOutput?: (out: string) => void }} options
+ * @returns {Promise<{ finished: boolean, count: number }>}
+ */
+async function sealCurrentState(stack, options) {
+  const importSealed = (deployment) =>
+    withStateBackendRetry(
+      () => runPastStaleLock(stack, () => importStackState(stack, deployment)),
+      `seal import ${stack.name}`,
+    );
+  let sealed;
+  try {
+    let exported = await withStateBackendRetry(
+      () => stack.exportStack(),
+      `seal export ${stack.name}`,
+    );
+    const pending = exported?.deployment?.pending_operations ?? [];
+    if (pending.length > 0 && plainValueCount(exported, SERVER_RESOURCE_TYPES) > 0) {
+      exported = await resolvePendingCreates(stack, exported, options);
+      if (!exported) return { finished: false, count: 0 };
+    }
+    sealed = sealServerUserData(exported, SERVER_RESOURCE_TYPES);
+    if (sealed.count > 0) await importSealed(sealed.deployment);
+  } catch (err) {
+    progressLog(`[pulumi] state seal for ${stack.name} failed: ${summarizePulumiError(err)}`);
+    p.log.warn(sealFailed(stack.name, err));
+    return { finished: false, count: 0 };
+  }
+  progressLog(
+    `[pulumi] sealed ${sealed.count} plain user data and k3s token values in ${stack.name}'s state`,
+  );
+  if (sealed.count === 0) return { finished: true, count: 0 };
+  try {
+    await importSealed(sealed.deployment);
+  } catch (err) {
+    progressLog(
+      `[pulumi] ${stack.name}'s state is sealed, but its previous copy (.bak) keeps the plain values until the next deploy: ${summarizePulumiError(err)}`,
+    );
+    return { finished: false, count: sealed.count };
+  }
+  return { finished: true, count: sealed.count };
+}
+
+/**
+ * Delete the stack's history copies that hold plain values. Whether it got
+ * through them; never throws.
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ projectName?: string, s3Config?: object, provider?: string }} options
+ * @returns {Promise<boolean>}
+ */
+async function removeHistoryCopies(stack, options) {
+  try {
+    const history = await removePlainHistory({
+      backendUrl: resolveBackendUrl(options.s3Config, options.provider),
+      projectName: requirePulumiProject(options),
+      stackName: stack.name,
+      types: SERVER_RESOURCE_TYPES,
+      s3Config: options.s3Config,
+      provider: options.provider,
+    });
+    if (!history.managed) {
+      progressLog(
+        `[pulumi] ${stack.name}'s Pulumi backend isn't one vibecarbon manages, so its history copies stay as they are`,
+      );
+      return true;
+    }
+    progressLog(
+      `[pulumi] removed ${history.removed} of ${history.checked} history copies of ${stack.name}'s state that held plain values`,
+    );
+    if (history.unreadable.length > 0) {
+      progressLog(
+        `[pulumi] left ${history.unreadable.length} history copies of ${stack.name}'s state it couldn't read: ${history.unreadable.join(', ')}`,
+      );
+    }
+    return true;
+  } catch (err) {
+    progressLog(`[pulumi] history cleanup for ${stack.name} failed: ${summarizePulumiError(err)}`);
+    p.log.warn(
+      `Your servers in ${stack.name} are updated and their user data is sealed in the Pulumi state, but vibecarbon couldn't remove the older copies of that state Pulumi keeps in its history, which still hold it in plain text: ${summarizePulumiError(err).replace(/\.$/, '')}. The next deploy tries again.`,
+    );
+    return false;
+  }
+}
+
+/**
+ * What the user reads when the seal after an up fails.
+ * @param {string} stackName
+ * @param {unknown} err
+ */
+function sealFailed(stackName, err) {
+  const what = isStatePassphraseFailure(err)
+    ? "Pulumi wouldn't encrypt it with this project's state passphrase"
+    : summarizePulumiError(err)
+        .replace(/^error:\s*/i, '')
+        .replace(/\.$/, '');
+  return (
+    `Your servers in ${stackName} are updated, but vibecarbon couldn't seal their user data in the Pulumi state: ${what}. ` +
+    'It stays in plain text in the state until the next successful deploy seals it.'
+  );
+}
+
+/**
+ * Clear the creates an earlier run left unfinished in `exported`, once
+ * nothing they made is left running untracked (state-pending.js says how
+ * that is decided), and return the state the seal goes on with; null when the
+ * seal waits, after telling the user why. The lookup and the decision run
+ * under no lock (sealStackState says why none spans the seal); only the clear
+ * runs past a stale lock (runPastStaleLock), as the seal's imports do. Only on
+ * a deploy (a ledger): scale and failover leave it to the next deploy. Throws
+ * when the deploy named no provider (the lookup would ask a guessed one), or
+ * when the clear or the export after it fails; the caller warns.
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ deployment: { pending_operations: object[] } }} exported
+ * @param {{ ledger?: object, provider?: string, providerToken?: string, onOutput?: (out: string) => void }} options
+ * @returns {Promise<object | null>}
+ */
+async function resolvePendingCreates(stack, exported, options) {
+  const count = exported.deployment.pending_operations.length;
+  const creates = `${count} unfinished ${count === 1 ? 'create' : 'creates'}`;
+  const ledger = options.ledger ?? null;
+  if (!ledger) {
+    progressLog(
+      `[pulumi] state seal for ${stack.name} left for the next deploy: its state records ${creates}`,
+    );
+    return null;
+  }
+  // Every deploy's upStack names its provider (providerIdFor); one that
+  // doesn't would have the lookup ask another provider's API, whose empty
+  // answer reads as "nothing left running" and clears the record.
+  const providerId = options.provider;
+  if (!providerId) {
+    throw new Error(
+      `the deploy named no provider to ask which servers ${stack.name}'s unfinished creates left running`,
+    );
+  }
+  const { servers, others } = classifyPendingCreates(exported, SERVER_RESOURCE_TYPES);
+  let untracked = [];
+  if (servers.length > 0) {
+    try {
+      const listed = await untrackedServers(
+        servers,
+        exported,
+        SERVER_RESOURCE_TYPES,
+        getProvider(providerId, options.providerToken),
+      );
+      untracked = listed.ours;
+      if (listed.foreign.length > 0) {
+        const foreign = listed.foreign.map((s) => `${s.name} (id ${s.id})`).join(', ');
+        progressLog(
+          `[pulumi] state seal for ${stack.name} leaves alone ${foreign}: same name, but without this environment's ownership labels, so not vibecarbon's`,
+        );
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      progressLog(
+        `[pulumi] state seal for ${stack.name} waits: the lookup of ${servers.map((s) => s.name).join(', ')} failed: ${reason}`,
+      );
+      p.log.warn(pendingLookupFailed(stack.name, servers, reason));
+      return null;
+    }
+  }
+  if (untracked.length > 0 || (others.length > 0 && !pendingReported(ledger, stack.name, others))) {
+    progressLog(
+      `[pulumi] state seal for ${stack.name} waits on ${creates}: ${[
+        ...untracked.map((s) => `${s.name} (id ${s.id}) running untracked`),
+        ...others.map((o) =>
+          o.kept
+            ? `another ${pendingLabel(o)} besides id ${o.kept.id}, which vibecarbon can't confirm`
+            : `${pendingLabel(o)}, which vibecarbon can't confirm`,
+        ),
+      ].join(', ')}`,
+    );
+    if (others.length > 0) recordPendingReported(ledger, stack.name, others);
+    p.log.warn(
+      pendingCreatesBlock(stack.name, {
+        untracked,
+        others,
+        providerName: getProviderClass(providerId).NAME,
+      }),
+    );
+    return null;
+  }
+  await withStateBackendRetry(
+    () =>
+      runPastStaleLock(stack, () =>
+        stack.refresh({ clearPendingCreates: true, onOutput: options.onOutput, color: 'never' }),
+      ),
+    `clear pending creates ${stack.name}`,
+  );
+  forgetPendingReported(ledger, stack.name);
+  progressLog(
+    `[pulumi] cleared ${creates} from ${stack.name}'s state: ${[...servers, ...others].map(pendingLabel).join(', ')}`,
+  );
+  const cleared = await withStateBackendRetry(
+    () => stack.exportStack(),
+    `seal export ${stack.name}`,
+  );
+  const left = cleared?.deployment?.pending_operations ?? [];
+  if (left.length > 0) {
+    throw new Error(
+      `its state still records ${left.length} unfinished ${left.length === 1 ? 'operation' : 'operations'} after Pulumi cleared them`,
+    );
+  }
+  return cleared;
 }
 
 /** Flatten { foo: { value: 'bar' } } → { foo: 'bar' } (null-safe). */
@@ -1759,8 +2113,8 @@ export async function getStackOutputs(stackName, program, options = {}) {
 /**
  * A k3s token probe that couldn't read the stack: it may exist, holding the
  * join token its live cluster runs with, so the command stops instead of
- * minting a new one (R22). Names the stack and the first line of what failed;
- * the full error is the cause.
+ * building with another one (R22). Names the stack and the first line of what
+ * failed; the full error is the cause.
  */
 export class K3sTokenProbeError extends Error {
   /**
@@ -1769,9 +2123,9 @@ export class K3sTokenProbeError extends Error {
    */
   constructor(stackName, cause) {
     super(
-      `Couldn't read the k3s join token for ${stackName} from its Pulumi state: ${summarizePulumiError(cause).replace(/\.$/, '')}. ` +
-        'vibecarbon stopped before creating or changing any of its servers, because a new token would leave new nodes unable to join the cluster. ' +
-        'Running this again is safe.',
+      `Couldn't read your k3s join token for ${stackName} from its Pulumi state: ${summarizePulumiError(cause).replace(/\.$/, '')}. ` +
+        'vibecarbon stopped before creating or changing any of its servers, because a different token would leave new nodes unable to join your cluster. ' +
+        'You can run this again safely.',
       { cause },
     );
     this.name = 'K3sTokenProbeError';
@@ -1791,15 +2145,18 @@ export class K3sTokenProbeError extends Error {
  *   - `recovered`: outputs has a non-empty k3sToken: replay it.
  *   - `empty`:     the stack exists but its outputs lack the token: a stack
  *                  created whose first up never finished, or outputs that
- *                  dropped the key. The caller mints one; the master-replace
- *                  defense catches the destructive case.
+ *                  dropped the key. The caller uses the token derived from
+ *                  the state passphrase (k3s-token.js), the one that first
+ *                  up's servers booted with; the master-replace defense
+ *                  catches the destructive case.
  *   - `missing`:   the state backend has no such stack (getOrCreateStack's
  *                  requireExisting answer, `stackNotFound`): a first deploy.
- *                  The caller mints one.
+ *                  The caller uses the derived token too.
  *
  * Every other probe failure throws, because the stack may exist and hold the
- * token its live cluster runs with, unread. A minted token would reach every
- * node made from then on, and none of them could join (R22):
+ * token its live cluster runs with, unread (an older version recorded a
+ * random one). Any other token would reach every node made from then on, and
+ * none of them could join (R22):
  *
  *   - a passphrase failure (isStatePassphraseFailure), a StateMigrationError
  *     (the one-time legacy migration stopped) and a StackHeldError (another

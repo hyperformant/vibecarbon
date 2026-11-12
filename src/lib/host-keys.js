@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -169,12 +170,41 @@ export function buildHostKeyOptsForPath(khPath) {
 
 /**
  * Does a known_hosts line's host field reference `ip`? The first
- * whitespace-delimited field is `host[,host2,...]` (we scan un-hashed, so it
- * is the literal IP, not a `|1|…` hash).
+ * whitespace-delimited field is `host[,host2,...]`, as our scan writes it
+ * (no `-H`), or `|1|<salt>|<hash>`: ssh's own accept-new connect hashes the
+ * line it adds wherever HashKnownHosts is on, as Debian and Ubuntu ship
+ * /etc/ssh/ssh_config. The hash is HMAC-SHA1 of the host under the salt
+ * (OpenSSH hostfile.c), and port 22's host is the bare IP.
  */
 function hostLineMatchesIp(line, ip) {
   const host = line.split(/\s+/)[0] || '';
+  if (host.startsWith('|1|')) {
+    const [salt, hash] = host.slice(3).split('|');
+    if (!salt || !hash) return false;
+    return createHmac('sha1', Buffer.from(salt, 'base64')).update(ip).digest('base64') === hash;
+  }
   return host.split(',').includes(ip);
+}
+
+/** The lines of `khPath`, none when it doesn't exist. */
+const knownHostsLines = (khPath) =>
+  existsSync(khPath)
+    ? readFileSync(khPath, 'utf-8')
+        .split('\n')
+        .filter((line) => line.trim())
+    : [];
+
+/**
+ * Drop every key `khPath` pins for `ip`, keeping the other hosts' (HA keeps
+ * two servers in one file). For a new machine at a pinned IP: the old key
+ * can't match it, and accept-new would refuse it rather than trust it.
+ * @param {string} khPath
+ * @param {string} ip
+ */
+export function forgetHostKey(khPath, ip) {
+  const lines = knownHostsLines(khPath);
+  const kept = lines.filter((line) => !hostLineMatchesIp(line, ip));
+  if (kept.length < lines.length) writeKnownHosts(khPath, kept);
 }
 
 async function defaultKeyscan(ip) {
@@ -237,12 +267,7 @@ export async function seedKnownHosts(khPath, ip, opts = {}) {
   }
   if (!scanned) return false;
 
-  let kept = [];
-  if (existsSync(khPath)) {
-    kept = readFileSync(khPath, 'utf-8')
-      .split('\n')
-      .filter((line) => line.trim() && !hostLineMatchesIp(line, ip));
-  }
+  const kept = knownHostsLines(khPath).filter((line) => !hostLineMatchesIp(line, ip));
   const merged = [...kept, ...scanned.split('\n').filter((l) => l.trim())];
   writeKnownHosts(khPath, merged);
   return true;

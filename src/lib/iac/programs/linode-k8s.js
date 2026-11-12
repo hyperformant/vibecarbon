@@ -29,8 +29,8 @@
  * floatingIp, networkId, sshKeyId, k3sToken, clusterName, vpcCidr.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as linode from '@pulumi/linode';
+import * as pulumi from '@pulumi/pulumi';
 import {
   encodeLabel,
   encodeLabels,
@@ -39,7 +39,12 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../providers/linode.js';
-import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
+import {
+  SERVER_OWNER_LABELS,
+  serverResourceOptions,
+  workerResourceOptions,
+} from '../create-timeout.js';
+import { requireK3sToken } from '../k3s-token.js';
 
 const VPC_CIDR = LinodeProvider.DEFAULT_VPC_CIDR;
 const MASTER_IP = '10.0.1.2';
@@ -83,7 +88,11 @@ function assertLabelsFit(labels) {
  * @property {string} environment
  * @property {string} sshPublicKey       OpenSSH-format public key
  * @property {string} [existingSshKeyId] k8s-ha's shared key: reuse, create nothing
- * @property {string} [k3sToken]         Auto-generated if omitted
+ * @property {string} k3sToken          The stack's recorded token, or one
+ *                                       derived from the state passphrase.
+ *                                       Required.
+ * @property {boolean} [k3sTokenReplayed] The token is the stack's recorded
+ *                                       one (a cluster exists to protect).
  * @property {{id: string, privateIp: string}} [priorMaster] The master as the
  *   prior state records it. Set only by converge-cluster.js (scale and
  *   failover), whose preview refuses any plan that replaces the master; the
@@ -116,9 +125,12 @@ function pulumiAddresses(cidrs) {
  */
 export function buildLinodeK8sProgram(config) {
   const clusterName = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   if (!config.allowedSshIps?.length) {
@@ -150,7 +162,9 @@ export function buildLinodeK8sProgram(config) {
         `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
     );
   }
-  const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
+  // Always the CLI's: the stack's recorded token or the one derived from the
+  // state passphrase (lib/iac/k3s-token.js). Never made here.
+  const k3sToken = requireK3sToken(config, 'buildLinodeK8sProgram');
   const image = LinodeProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;
   const world = { ipv4s: ['0.0.0.0/0'], ipv6s: ['::/0'] };
@@ -252,7 +266,7 @@ export function buildLinodeK8sProgram(config) {
         interfaceGeneration: 'legacy_config',
         interfaces: interfaces(MASTER_IP),
         ipv4s: [reservedIp.address],
-        metadatas: [{ userData: toB64(masterUserData) }],
+        metadatas: pulumi.secret([{ userData: toB64(masterUserData) }]),
         firewallId,
         tags: encodeLabels({ ...labels, role: 'master', cluster: clusterName }),
       },
@@ -274,7 +288,7 @@ export function buildLinodeK8sProgram(config) {
         authorizedKeys,
         interfaceGeneration: 'legacy_config',
         interfaces: interfaces(DB_IP),
-        metadatas: [{ userData: toB64(dbUserData) }],
+        metadatas: pulumi.secret([{ userData: toB64(dbUserData) }]),
         firewallId,
         tags: encodeLabels({
           ...labels,
@@ -304,7 +318,7 @@ export function buildLinodeK8sProgram(config) {
             authorizedKeys,
             interfaceGeneration: 'legacy_config',
             interfaces: interfaces(`10.0.1.${WORKER_IP_BASE + i}`),
-            metadatas: [{ userData: toB64(workerUserData) }],
+            metadatas: pulumi.secret([{ userData: toB64(workerUserData) }]),
             firewallId,
             // 'cluster-autoscaler/node': 'static' marks Pulumi-owned workers
             // apart from autoscaler-spawned ones for the destroy sweep.
@@ -322,7 +336,7 @@ export function buildLinodeK8sProgram(config) {
             // would hold a worker back until the master finished. With no
             // token to replay it has nothing to protect yet: see
             // workerResourceOptions.
-            omitJoinTrigger: !config.k3sToken,
+            omitJoinTrigger: !config.k3sTokenReplayed,
             joinTarget: {
               // A scale or failover names the master from prior state, so the
               // worker resizes alongside it: see priorMasterFrom.
@@ -346,7 +360,7 @@ export function buildLinodeK8sProgram(config) {
       floatingIp: reservedIp.address,
       networkId: network.id.apply((id) => String(id)),
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
-      k3sToken,
+      k3sToken: pulumi.secret(k3sToken),
       clusterName,
       vpcCidr: VPC_CIDR,
     };

@@ -763,11 +763,35 @@ export class BaseProvider {
    * callers use this for best-effort discovery/recovery paths; only
    * network-level errors reject. Exact name match means at most one result
    * on providers with unique server names.
+   *
+   * `strict`: an answer the caller acts on as "no such server" (the seal
+   * dropping an unfinished create from the state, lib/iac/state-pending.js).
+   * It rejects instead (serverLookupError) whenever the provider didn't list
+   * every page: a refused request, or a listing longer than the walk reads.
    * @param {string} name - Exact server name
+   * @param {{ strict?: boolean }} [options]
    * @returns {Promise<object[]>}
    */
-  async findServersByName(_name) {
+  async findServersByName(_name, _options = {}) {
     throw new Error('findServersByName() must be implemented by subclass');
+  }
+
+  /**
+   * What a strict findServersByName rejects with when it couldn't list every
+   * server: an empty answer from it would read as "no such server".
+   * @param {string} name - the server it looked for
+   * @param {number} [status] - the HTTP status; absent when the listing ran
+   *   past the pages the walk reads
+   * @returns {Error}
+   */
+  serverLookupError(name, status) {
+    const why =
+      status === undefined
+        ? 'the server list has more pages than vibecarbon reads'
+        : `it answered HTTP ${status}`;
+    return new Error(
+      `${this.constructor.NAME} couldn't say whether the server ${name} exists: ${why}`,
+    );
   }
 
   // ── Operator firewall access (C9) ────────────────────────────────────

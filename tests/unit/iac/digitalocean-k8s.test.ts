@@ -19,6 +19,7 @@ import {
   vpcCidrForCluster,
 } from '../../../src/lib/iac/programs/digitalocean-k8s.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
+import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
 
 type CapturedResource = { type: string; name: string; inputs: Record<string, unknown> };
 
@@ -76,6 +77,8 @@ const baseConfig = {
   allowedSshIps: ['203.0.113.5/32'],
   allowedK8sApiIps: ['203.0.113.5/32'],
   labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
+  // The CLI always passes one (lib/iac/k3s-token.js). Sentinel only.
+  k3sToken: 'SENTINEL-k3s-token',
 };
 
 const CLUSTER_NAME = 'acme-prod';
@@ -356,7 +359,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     const master = byType('digitalocean:index/droplet:Droplet').find(
       (d) => d.inputs.name === `${CLUSTER_NAME}-master`,
     );
-    const userData = master?.inputs.userData as string;
+    const userData = unsealMockInput<string>(master?.inputs.userData);
     expect(userData).toContain('--from-literal=access-token="dop_v1_test_token_1234"');
     expect(userData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     expect([...userData].every((ch) => (ch.codePointAt(0) ?? 0) <= 0x7f)).toBe(true);
@@ -367,8 +370,8 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     const dbDroplet = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
     const worker1 = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-worker-1`);
 
-    const dbUserData = dbDroplet?.inputs.userData as string;
-    const workerUserData = worker1?.inputs.userData as string;
+    const dbUserData = unsealMockInput<string>(dbDroplet?.inputs.userData);
+    const workerUserData = unsealMockInput<string>(worker1?.inputs.userData);
 
     expect(dbUserData).toContain('K3S_URL="https://10.10.0.11:6443"');
     expect(dbUserData).toContain('--node-taint="dedicated=db:NoSchedule"');
@@ -437,7 +440,9 @@ describe('buildDigitalOceanK8sProgram — a scale or failover (priorMaster)', ()
       const droplet = mine.find(
         (r) => r.type === 'digitalocean:index/droplet:Droplet' && r.inputs.name === name,
       );
-      expect(droplet?.inputs.userData, name).toContain(`K3S_URL="https://${PRIOR.privateIp}:6443"`);
+      expect(unsealMockInput<string>(droplet?.inputs.userData), name).toContain(
+        `K3S_URL="https://${PRIOR.privateIp}:6443"`,
+      );
     }
   });
 });

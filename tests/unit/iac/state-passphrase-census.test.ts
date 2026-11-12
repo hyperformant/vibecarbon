@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { importingWorkspace } from '../../_shared/fake-stack-import.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
@@ -215,8 +216,7 @@ const fakeStack = () => ({
       ],
     },
   }),
-  importStack: async () => undefined,
-  workspace: { removeStack: async () => undefined },
+  workspace: importingWorkspace(async () => undefined, { removeStack: async () => undefined }),
 });
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {

@@ -43,8 +43,9 @@ import { STATE_ERROR_CORPUS } from './fixtures/state-error-corpus.js';
 // (see /tmp/k8s-ha-matrix.log) because the probe path silently returned
 // no token and the master-replace defense had to catch it. This file
 // pins the observable outcomes so a future "loosen the catch" edit can't
-// turn a failed read into a minted token again: recovered replays, empty and
-// missing mint, and every other failure stops the command.
+// turn a failed read into a fresh token again: recovered replays, empty and
+// missing take the token derived from the state passphrase (k3s-token.js),
+// and every other failure stops the command.
 describe('classifyK3sTokenProbe', () => {
   it('recovered: outputs has a non-empty k3sToken — caller replays it', () => {
     const probe = classifyK3sTokenProbe({
@@ -59,7 +60,7 @@ describe('classifyK3sTokenProbe', () => {
     const probeFromUndef = classifyK3sTokenProbe({});
     expect(probeFromNull.status).toBe('empty');
     expect(probeFromUndef.status).toBe('empty');
-    // No priorK3sToken field — caller must mint a fresh one.
+    // No priorK3sToken field: the caller uses the derived token.
     expect(probeFromNull.priorK3sToken).toBeUndefined();
     expect(probeFromUndef.priorK3sToken).toBeUndefined();
   });
@@ -132,9 +133,9 @@ describe('classifyK3sTokenProbe', () => {
       const err = thrown as Error;
       expect(err.cause).toBe(cause);
       expect(err.message).toBe(
-        "Couldn't read the k3s join token for e4-primary from its Pulumi state: S3 backend unreachable. " +
-          'vibecarbon stopped before creating or changing any of its servers, because a new token would leave new nodes unable to join the cluster. ' +
-          'Running this again is safe.',
+        "Couldn't read your k3s join token for e4-primary from its Pulumi state: S3 backend unreachable. " +
+          'vibecarbon stopped before creating or changing any of its servers, because a different token would leave new nodes unable to join your cluster. ' +
+          'You can run this again safely.',
       );
       expect(err.message).not.toContain('retry attempt 3');
       expect(err.message).not.toContain('—');
@@ -167,7 +168,7 @@ describe('classifyK3sTokenProbe', () => {
 
     it('without a stack name it still says what failed', () => {
       expect(() => classifyK3sTokenProbe({ error: new Error('boom') })).toThrow(
-        "Couldn't read the k3s join token for this cluster from its Pulumi state: boom.",
+        "Couldn't read your k3s join token for this cluster from its Pulumi state: boom.",
       );
     });
   });
@@ -284,7 +285,7 @@ describe('classifyK3sTokenProbe on what getStackOutputs really throws', () => {
     sdk.select = 'unreadable';
     const error = await read();
     expect(() => classifyK3sTokenProbe({ error, stackName: 'e4-primary' })).toThrow(
-      /^Couldn't read the k3s join token for e4-primary from its Pulumi state: error: could not read checkpoint: AccessDenied/,
+      /^Couldn't read your k3s join token for e4-primary from its Pulumi state: error: could not read checkpoint: AccessDenied/,
     );
   });
 });

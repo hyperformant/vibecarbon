@@ -65,6 +65,7 @@ import { completionSummaryLines, entryIpFor } from './completion-summary.js';
 import { imageBuildRecord } from './compose/app-image.js';
 import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
+import { requireDeployKey } from './deploy-key.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { DEGRADED_CAUSE, preserveSafetyFields } from './env-safety-fields.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
@@ -1145,6 +1146,10 @@ export async function executeDeployment(args, gatheredConfig) {
   // A compose scale stopped mid-cutover: the config may still name the old
   // server while DNS and the database moved. Only the scale resumes it.
   assertNoScaleCutoverInFlight({ environment, envConfig, action: 'deploy' });
+  // Servers on record and this machine lacks the key they trust: stop before
+  // the first SSH call below and before any key is made (deploy-key.js). Each
+  // mode's key step checks again where it would make one.
+  requireDeployKey({ environment, envConfig, keyPath: sshKeyPathFor(environment) });
   await liftStrandedFenceAtEntry({
     tier,
     environment,
@@ -2167,6 +2172,9 @@ export async function executeDeployment(args, gatheredConfig) {
     const deploymentConfig = {
       projectName: projectConfig.projectName,
       environment: config.environment,
+      // The record as it stood before this deploy: deployK3s and the k8s-ha key
+      // step refuse to make a key for servers it names (deploy-key.js).
+      envConfig,
       provider: config.provider,
       region,
       secondaryRegion,

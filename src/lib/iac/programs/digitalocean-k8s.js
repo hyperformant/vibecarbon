@@ -95,11 +95,15 @@
  * all — its S3 endpoints resolve to public IPs and never need it.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
-import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
+import {
+  SERVER_OWNER_LABELS,
+  serverResourceOptions,
+  workerResourceOptions,
+} from '../create-timeout.js';
+import { requireK3sToken } from '../k3s-token.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -109,8 +113,12 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  * @property {string} sshPublicKey     OpenSSH-format public key
  * @property {string} [existingSshKeyId]  If set, skip creating a new SSH key
  *                                        (HA case: shared key across clusters)
- * @property {string} [k3sToken]          Pre-shared k3s node-join token
- *                                        (auto-generated if omitted)
+ * @property {string} k3sToken           k3s node-join token: the stack's
+ *                                        recorded one, or one derived from
+ *                                        the state passphrase. Required.
+ * @property {boolean} [k3sTokenReplayed] The token is the stack's recorded
+ *                                        one. Unused here: every worker
+ *                                        keeps its join trigger.
  * @property {{id: string, privateIp: string}} [priorMaster] The master as the
  *   prior state records it. Set only by converge-cluster.js (scale and
  *   failover), whose preview refuses any plan that replaces the master; the
@@ -208,9 +216,12 @@ export function vpcCidrForCluster(clusterName) {
  */
 export function buildDigitalOceanK8sProgram(config) {
   const clusterName = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   // Operator-IP firewall lock (H-2) — byte-parity with hetzner-k8s.js and
@@ -229,7 +240,9 @@ export function buildDigitalOceanK8sProgram(config) {
   }
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
-  const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
+  // Always the CLI's: the stack's recorded token or the one derived from the
+  // state passphrase (lib/iac/k3s-token.js). Never made here.
+  const k3sToken = requireK3sToken(config, 'buildDigitalOceanK8sProgram');
   const vpcIpRange = config.vpcIpRange ?? vpcCidrForCluster(clusterName);
   const image = config.image ?? DigitalOceanProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;
@@ -333,7 +346,7 @@ export function buildDigitalOceanK8sProgram(config) {
         vpcUuid: network.id,
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({ ...labels, role: 'master', cluster: clusterName }),
-        userData: transliterateToAscii(masterUserDataRaw),
+        userData: pulumi.secret(transliterateToAscii(masterUserDataRaw)),
         dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
       },
       // dependsOn firewall (M3 Task 5b): DO firewalls attach by tag, not by
@@ -381,7 +394,7 @@ export function buildDigitalOceanK8sProgram(config) {
           'node-pool': 'db-pool',
           cluster: clusterName,
         }),
-        userData: dbUserData,
+        userData: pulumi.secret(dbUserData),
         dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
       },
       // dependsOn firewall explicitly (M3 Task 5b), not just transitively
@@ -427,7 +440,7 @@ export function buildDigitalOceanK8sProgram(config) {
               'cluster-autoscaler/node': 'static',
               cluster: clusterName,
             }),
-            userData: workerUserData,
+            userData: pulumi.secret(workerUserData),
             dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
           },
           // dependsOn firewall explicitly (M3 Task 5b), not just
@@ -457,7 +470,7 @@ export function buildDigitalOceanK8sProgram(config) {
       workerIps: workers.map((w) => w.ipv4Address),
       networkId: network.id,
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
-      k3sToken,
+      k3sToken: pulumi.secret(k3sToken),
       clusterName,
       // M3 Task 9c: the Vpc's actual ipRange (a plain string — Vpc.ipRange
       // is an input we set, not a Pulumi-computed Output, so no .apply()

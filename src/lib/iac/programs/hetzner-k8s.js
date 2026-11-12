@@ -19,11 +19,15 @@
  * networkId, sshKeyId, k3sToken.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { loadCloudInit, renderScript } from '../cloud-init.js';
-import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
+import {
+  SERVER_OWNER_LABELS,
+  serverResourceOptions,
+  workerResourceOptions,
+} from '../create-timeout.js';
+import { requireK3sToken } from '../k3s-token.js';
 
 // Hetzner location → private-network zone. Single source of truth: this is
 // the ONLY place that derives a networkZone, and it's derived here — inside
@@ -62,8 +66,11 @@ export function networkZoneFor(location) {
  * @property {string} sshPublicKey     OpenSSH-format public key
  * @property {string} [existingSshKeyId]  If set, skip creating a new SSH key
  *                                        (HA case: shared key across clusters)
- * @property {string} [k3sToken]          Pre-shared k3s node-join token
- *                                        (auto-generated if omitted)
+ * @property {string} k3sToken           k3s node-join token: the stack's
+ *                                        recorded one, or one derived from
+ *                                        the state passphrase. Required.
+ * @property {boolean} [k3sTokenReplayed] The token is the stack's recorded
+ *                                        one (a cluster exists to protect).
  * @property {{id: string, privateIp: string}} [priorMaster] The master as the
  *   prior state records it. Set only by converge-cluster.js (scale and
  *   failover), whose preview refuses any plan that replaces the master; the
@@ -97,7 +104,14 @@ export function networkZoneFor(location) {
  */
 export function buildHetznerK8sProgram(config) {
   const clusterName = `${config.projectName}-${config.environment}`;
-  const labels = { project: config.projectName, environment: config.environment, ...config.labels };
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
+  const labels = {
+    project: config.projectName,
+    environment: config.environment,
+    ...SERVER_OWNER_LABELS,
+    ...config.labels,
+  };
   // Operator-IP firewall lock (H-2). The deploy flow populates these from
   // projectConfig.operatorCidrs; an empty list = nothing can SSH in or hit
   // the k8s API. We refuse to build a program that would do that — far
@@ -114,7 +128,9 @@ export function buildHetznerK8sProgram(config) {
   }
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
-  const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
+  // Always the CLI's: the stack's recorded token or the one derived from the
+  // state passphrase (lib/iac/k3s-token.js). Never made here.
+  const k3sToken = requireK3sToken(config, 'buildHetznerK8sProgram');
   const privateNetworkRange = config.privateNetworkRange ?? '10.0.0.0/8';
   const subnetRange = config.subnetRange ?? '10.0.1.0/24';
   const minWorkers = config.minWorkers ?? 1;
@@ -286,7 +302,7 @@ export function buildHetznerK8sProgram(config) {
         networks: [
           { networkId: network.id.apply((id) => Number.parseInt(id, 10)), ip: '10.0.1.1' },
         ],
-        userData: masterUserData,
+        userData: pulumi.secret(masterUserData),
       },
       serverResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
     );
@@ -326,7 +342,7 @@ export function buildHetznerK8sProgram(config) {
         networks: [
           { networkId: network.id.apply((id) => Number.parseInt(id, 10)), ip: '10.0.1.2' },
         ],
-        userData: dbUserData,
+        userData: pulumi.secret(dbUserData),
       },
       serverResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
     );
@@ -370,14 +386,14 @@ export function buildHetznerK8sProgram(config) {
                 ip: `10.0.1.${10 + i}`,
               },
             ],
-            userData: workerUserData,
+            userData: pulumi.secret(workerUserData),
           },
           workerResourceOptions('hcloud:index/server:Server', {
             dependsOn: [subnet],
             // The master's address is static, so only the join trigger would
             // hold a worker back until the master finished. With no token to
             // replay it has nothing to protect yet: see workerResourceOptions.
-            omitJoinTrigger: !config.k3sToken,
+            omitJoinTrigger: !config.k3sTokenReplayed,
             joinTarget: {
               // A scale or failover names the master from prior state, so the
               // worker resizes alongside it: see priorMasterFrom.
@@ -401,7 +417,7 @@ export function buildHetznerK8sProgram(config) {
       floatingIp: floatingIp.ipAddress,
       networkId: network.id,
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
-      k3sToken,
+      k3sToken: pulumi.secret(k3sToken),
       clusterName,
     };
   };

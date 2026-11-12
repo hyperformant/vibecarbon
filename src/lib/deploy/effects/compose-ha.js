@@ -36,6 +36,7 @@ import { c, link } from '../../colors.js';
 import { loadProjectConfig, registerProject, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import { infraStepSkips } from '../../iac/state-seal.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { haClassMessage, haStandbyType } from '../../sizing.js';
@@ -71,6 +72,7 @@ import {
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { preserveSafetyFields } from '../env-safety-fields.js';
 import { readReplicaState } from '../failover-guard.js';
@@ -184,6 +186,9 @@ async function settleBothRegions(ups) {
 async function haProvisionServers(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { environment, sshKeyPath, region, apiToken, s3Config, imageRef, envConfig } = ctx;
+  // Servers on record and this machine lacks the key they trust: stop before
+  // the key below is made and handed to both stacks (deploy-key.js).
+  requireDeployKey({ environment, envConfig, keyPath: sshKeyPath });
   if (!imageRef) {
     throw new Error(
       'compose-ha deploy requires ctx.imageRef (ghcr.io/<owner>/<repo>:<tag>), build pipeline changed in Lever 1',
@@ -295,7 +300,7 @@ async function haProvisionServers(ctx) {
     if (message) p.log[message.level](message.line);
   }
 
-  // Generate SSH key pair
+  // Generate SSH key pair (required above when servers are on record).
   generateSSHKeyPair(sshKeyPath);
   const publicKey = readFileSync(`${sshKeyPath}.pub`, 'utf-8').trim();
 
@@ -358,8 +363,15 @@ async function haProvisionServers(ctx) {
     cliVersion: VERSION,
   };
   const state = ctx.state;
+  // The seal marker is part of the decision (lib/iac/state-seal.js): a pair
+  // deployed before its state was sealed runs both ups once more.
   const recorded =
-    !ctx.reconverge && state?.shouldSkip(COMPOSE_HA_INFRA_STEP, infraInputs)
+    !ctx.reconverge &&
+    state &&
+    infraStepSkips(state, COMPOSE_HA_INFRA_STEP, infraInputs, [
+      `${environment}-primary`,
+      `${environment}-standby`,
+    ])
       ? state.getStepResult(COMPOSE_HA_INFRA_STEP)
       : null;
   // The ledger is not trusted over reality. It is reused only when every
@@ -387,6 +399,7 @@ async function haProvisionServers(ctx) {
               providerToken: apiToken,
               s3Config,
               projectName,
+              ledger: state,
               // Recover stale-EMPTY outputs reads in place (read-only poll inside
               // upStack); the hard gate below stays the loud last resort. This
               // path is the MOST exposed member of the class: two parallel ups
@@ -401,6 +414,7 @@ async function haProvisionServers(ctx) {
               providerToken: apiToken,
               s3Config,
               projectName,
+              ledger: state,
               requiredOutputs: ['serverIp'],
             }),
           ),

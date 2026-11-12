@@ -2,10 +2,12 @@
  * `vibecarbon scale` on k8s reads the stack's k3s join token before it
  * resizes anything, through the real converge seam and the real probe
  * classifier. A failed read stops the scale with the probe's message; only a
- * stack the state backend doesn't have takes the fresh-stack path (R22).
+ * stack the state backend doesn't have builds with a token the stack doesn't
+ * record, the one derived from the state passphrase (R22, R23).
  *
  * The Pulumi calls themselves (getStackOutputs, the preview's stack, upStack)
- * are stood in for, so nothing reaches a backend.
+ * and the passphrase resolver are stood in for, so nothing reaches a backend
+ * or the repo's .env.local. Sentinels only.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -38,8 +40,14 @@ vi.mock('../../../src/lib/iac/index.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   ...iac,
 }));
+const PASSPHRASE = 'SENTINEL-passphrase-scale-probe-0000000000000000';
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  ensureStatePassphrase: async () => PASSPHRASE,
+}));
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
+const { deriveK3sToken } = await import('../../../src/lib/iac/k3s-token.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
 class ExitError extends Error {
@@ -108,15 +116,15 @@ describe('scale stops when it cannot read the k3s join token', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     const said = errors.join('\n');
     expect(said).toContain(
-      `Couldn't read the k3s join token for unit-scale-probe-xyz from its Pulumi state: ${message.replace(/\.$/, '')}.`,
+      `Couldn't read your k3s join token for unit-scale-probe-xyz from its Pulumi state: ${message.replace(/\.$/, '')}.`,
     );
-    expect(said).toContain('Running this again is safe.');
-    // Only the probe's program was built: no minted token went anywhere.
-    expect(programs).toHaveLength(1);
+    expect(said).toContain('You can run this again safely.');
+    // No program was built: no token went anywhere.
+    expect(programs).toHaveLength(0);
     expect(iac.upStack).not.toHaveBeenCalled();
   });
 
-  it('a stack the backend does not have: the fresh-stack path, as before', async () => {
+  it('a stack the backend does not have: the derived token, never a random one', async () => {
     const notFound = Object.assign(new Error('Pulumi stack "unit-scale-probe-xyz" was not found'), {
       stackNotFound: true,
     });
@@ -125,8 +133,15 @@ describe('scale stops when it cannot read the k3s join token', () => {
     await SCALE_EFFECTS.scaleApplyK8sChanges(ctx);
 
     expect(exitSpy).not.toHaveBeenCalled();
-    expect(programs).toHaveLength(2);
-    expect(programs[1].k3sToken).toBeUndefined();
+    expect(programs).toHaveLength(1);
+    expect(programs[0].k3sToken).toBe(
+      deriveK3sToken({
+        passphrase: PASSPHRASE,
+        projectName: 'proj',
+        stackName: 'unit-scale-probe-xyz',
+      }),
+    );
+    expect(programs[0].k3sTokenReplayed).toBe(false);
     expect(iac.upStack).toHaveBeenCalledTimes(1);
   });
 });

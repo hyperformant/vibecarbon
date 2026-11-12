@@ -1492,13 +1492,16 @@ export class ScalewayProvider extends BaseProvider {
    * a contains-match, so exact matching happens client-side; soft-fail []
    * on non-ok).
    * @param {string} name
+   * @param {{ strict?: boolean }} [options] - reject rather than answer `[]`
+   *   when the listing isn't complete (BaseProvider.findServersByName)
    * @returns {Promise<object[]>}
    */
-  async findServersByName(name) {
-    const { items, status } = await this._walkAllZones(
+  async findServersByName(name, { strict = false } = {}) {
+    const { items, complete, status } = await this._walkAllZones(
       `/servers?name=${encodeURIComponent(name)}`,
       'servers',
     );
+    if (strict && !complete) throw this.serverLookupError(name, status);
     if (status !== undefined) return [];
     return items.filter((s) => s.name === name);
   }

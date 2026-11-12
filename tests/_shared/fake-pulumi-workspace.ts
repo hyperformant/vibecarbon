@@ -36,15 +36,23 @@
  * reads from then on; any other stack fails with Pulumi's refusal.
  * `fakePulumi.behaviour.migrate` overrides that, run by run (a lock, the
  * store pushing back, any other stderr). Without the module mock the fake
- * workspace's command does not exist, so the child fails to start. A test
- * that sets `fakePulumi.workDirRoot` gets real workspace directories, to see
- * what a run leaves in the stack's settings file.
+ * workspace's command does not exist, so the child fails to start.
+ *
+ * Every fake workspace has a real directory, under `fakePulumi.workDirRoot`
+ * when a test sets one (to see what a run leaves in the stack's settings
+ * file), otherwise under a temp dir the test setup removes after the file.
+ * `stack import` (importStackState in lib/iac/index.js, the one way src
+ * imports) runs through the workspace's `pulumiCommand.run`: it records
+ * `importStack` in `fakePulumi.calls` and, in `fakePulumi.imports`, the
+ * deployment the file held and the file's and its directory's modes, read
+ * while the import runs.
  */
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { createTempDir } from './temp-dir.js';
 
 export type StackVerb =
   | 'refresh'
@@ -59,15 +67,27 @@ export type StackVerb =
 /** The fake workspace's pulumi binary: absent, so only the mocked spawn runs it. */
 export const FAKE_PULUMI_COMMAND = '/nonexistent/fake-pulumi';
 
+let defaultWorkDirRoot: string | null = null;
+
 /**
- * The working directory of a fake workspace for `stackName`: a path that does
- * not exist, or a real directory under `fakePulumi.workDirRoot` when a test
- * sets one (to see what the migration leaves in it).
+ * The working directory of a fake workspace for `stackName`: under
+ * `fakePulumi.workDirRoot` when a test sets one, otherwise under one temp dir
+ * per test file.
  */
-export const fakeWorkDir = (stackName: string) =>
-  fakePulumi.workDirRoot
-    ? join(fakePulumi.workDirRoot, stackName)
-    : `/fake/pulumi-workdir/${stackName}`;
+export const fakeWorkDir = (stackName: string) => {
+  defaultWorkDirRoot ??= createTempDir('fake-pulumi-workdirs-');
+  return join(fakePulumi.workDirRoot ?? defaultWorkDirRoot, stackName);
+};
+
+/** One `stack import`, as the fake workspace's pulumi saw it. */
+export interface FakeImport {
+  stack: string;
+  deployment: unknown;
+  /** The file's and its directory's permission bits while the import ran. */
+  fileMode: number;
+  dirMode: number;
+  file: string;
+}
 
 /** One migration child, as spawned. */
 export interface FakeMigration {
@@ -94,23 +114,29 @@ export const fakePulumi = {
   calls: [] as string[],
   workspaceEnvs: [] as Record<string, string | undefined>[],
   migrations: [] as FakeMigration[],
+  imports: [] as FakeImport[],
   /** Stacks removed while trackRemovals() is on; null when it is off. */
   removed: null as Set<string> | null,
   /** Stacks still under the empty passphrase, with the refusal their reads throw. */
   legacyStacks: new Map<string, () => Error>(),
-  /** Where real workspace directories go; null for paths that do not exist. */
+  /** Where workspace directories go; null for a temp dir of this test file's. */
   workDirRoot: null as string | null,
   /**
-   * Per-verb override; throw from it to make the verb fail. `migrate` gets the
-   * child as spawned (its cwd is the stack's workspace) and answers for it.
+   * Per-verb override; throw from it to make the verb fail. It gets the stack
+   * name and the verb's own arguments (refresh's options, say). `migrate`
+   * gets the child as spawned (its cwd is the stack's workspace) and answers
+   * for it.
    */
-  behaviour: {} as Partial<Record<StackVerb, (stackName: string) => unknown>> & {
+  behaviour: {} as Partial<
+    Record<StackVerb, (stackName: string, ...args: unknown[]) => unknown>
+  > & {
     migrate?: (stackName: string, child: FakeMigration) => MigrationAnswer;
   },
   reset() {
     this.calls.length = 0;
     this.workspaceEnvs.length = 0;
     this.migrations.length = 0;
+    this.imports.length = 0;
     this.behaviour = {};
     this.legacyStacks.clear();
     this.removed?.clear();
@@ -157,7 +183,7 @@ const DEFAULTS: Record<StackVerb, () => unknown> = {
 
 function fakeStack(name: string, envVars: Record<string, string | undefined>) {
   const workDir = fakeWorkDir(name);
-  if (fakePulumi.workDirRoot) mkdirSync(workDir, { recursive: true });
+  mkdirSync(workDir, { recursive: true });
   const op =
     (verb: StackVerb) =>
     async (...args: unknown[]) => {
@@ -166,22 +192,39 @@ function fakeStack(name: string, envVars: Record<string, string | undefined>) {
       );
       const legacy = fakePulumi.legacyStacks.get(name);
       if (legacy && READS.has(verb)) throw legacy();
-      const answer = (fakePulumi.behaviour[verb] ?? DEFAULTS[verb])(name);
+      const answer = (fakePulumi.behaviour[verb] ?? DEFAULTS[verb])(name, ...args);
       if (verb === 'removeStack') fakePulumi.removed?.add(String(args[0]));
       return answer;
     };
+  const importStack = op('importStack');
+  /** The SDK's PulumiCommand.run, for `stack import --file <f> --stack <name>` only. */
+  const run = async (args: string[]) => {
+    if (args[0] !== 'stack' || args[1] !== 'import') {
+      throw new Error(`the fake pulumi runs only \`stack import\`, not: ${args.join(' ')}`);
+    }
+    const file = args[args.indexOf('--file') + 1];
+    const deployment = JSON.parse(readFileSync(file, 'utf8'));
+    fakePulumi.imports.push({
+      stack: args[args.indexOf('--stack') + 1],
+      deployment,
+      fileMode: statSync(file).mode & 0o777,
+      dirMode: statSync(dirname(file)).mode & 0o777,
+      file,
+    });
+    await importStack(deployment);
+    return { stdout: '', stderr: '', code: 0 };
+  };
   return {
     name,
     refresh: op('refresh'),
     exportStack: op('exportStack'),
-    importStack: op('importStack'),
     destroy: op('destroy'),
     outputs: op('outputs'),
     up: op('up'),
     cancel: op('cancel'),
     workspace: {
       removeStack: op('removeStack'),
-      pulumiCommand: { command: FAKE_PULUMI_COMMAND },
+      pulumiCommand: { command: FAKE_PULUMI_COMMAND, run },
       workDir,
       envVars,
     },

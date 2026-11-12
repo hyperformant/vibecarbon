@@ -1,7 +1,8 @@
 import * as digitalocean from '@pulumi/digitalocean';
+import * as pulumi from '@pulumi/pulumi';
 import { encodeLabels } from '../../providers/digitalocean.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
-import { serverResourceOptions } from '../create-timeout.js';
+import { SERVER_OWNER_LABELS, serverResourceOptions } from '../create-timeout.js';
 import { spliceDockerInstall } from '../docker-install.js';
 
 // The Docker install spliced into the user data is the one shared by every
@@ -108,9 +109,12 @@ export function loadDoComposeUserData() {
  */
 export function buildDigitalOceanComposeProgram(config) {
   const name = `${config.projectName}-${config.environment}`;
+  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
+  // caller has always passed it: the same keys in the same order.
   const labels = {
     project: config.projectName,
     environment: config.environment,
+    ...SERVER_OWNER_LABELS,
     ...(config.labels ?? {}),
   };
   // Operator-IP firewall lock (mirrors hetzner-compose.js's H-2 guard) — an
@@ -159,7 +163,7 @@ export function buildDigitalOceanComposeProgram(config) {
         // types as number[]).
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({ ...labels, role: 'compose' }),
-        userData,
+        userData: pulumi.secret(userData),
         // Skip DO's Droplet Console agent (44-68s of vendor cloud-init per boot).
         dropletAgent: false,
       },

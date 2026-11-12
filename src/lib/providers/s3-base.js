@@ -450,6 +450,63 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * Every key under `prefix`, across as many list pages as it takes.
+   * @param {string} bucketName
+   * @param {string} prefix
+   * @returns {Promise<string[]>}
+   */
+  async listObjectKeys(bucketName, prefix) {
+    const keys = [];
+    let continuationToken;
+    do {
+      const page = await this._send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const obj of page.Contents ?? []) if (obj.Key) keys.push(obj.Key);
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return keys;
+  }
+
+  /**
+   * One object's bytes.
+   * @param {string} bucketName
+   * @param {string} key
+   * @returns {Promise<Buffer>}
+   */
+  async getObjectBytes(bucketName, key) {
+    const res = await this._send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+    return Buffer.from(await res.Body.transformToByteArray());
+  }
+
+  /**
+   * Delete exactly these keys. DeleteObjects answers 200 even when some keys
+   * failed, so a key in its Errors throws rather than counting as removed.
+   * @param {string} bucketName
+   * @param {readonly string[]} keys
+   * @returns {Promise<void>}
+   */
+  async deleteObjectKeys(bucketName, keys) {
+    const BATCH = 1000;
+    for (let i = 0; i < keys.length; i += BATCH) {
+      const batch = keys.slice(i, i + BATCH).map((Key) => ({ Key }));
+      const res = await this._send(
+        new DeleteObjectsCommand({ Bucket: bucketName, Delete: { Objects: batch } }),
+      );
+      const failed = res?.Errors ?? [];
+      if (failed.length > 0) {
+        throw new Error(
+          `${failed.length} object(s) in ${bucketName} were not deleted (first: ${failed[0].Key}: ${failed[0].Code || failed[0].Message})`,
+        );
+      }
+    }
+  }
+
+  /**
    * Copy every object under `prefix` from `srcBucket` to `destBucket`,
    * preserving keys. Server-side copy (CopyObjectCommand) — no bytes transit
    * the operator. Used to migrate legacy Pulumi state (the `.pulumi/` prefix)

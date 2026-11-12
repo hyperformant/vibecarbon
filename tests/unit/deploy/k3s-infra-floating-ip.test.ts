@@ -71,12 +71,21 @@ describe('deployK3s reads its floating IP only through infraFloatingIp', () => {
     'utf8',
   );
   // The code that runs: from the infra step's gate to the function's return.
-  const start = src.indexOf("if (!state.shouldSkip('k3s-infra', infraInputs)) {");
+  const start = src.indexOf(
+    "if (!infraStepSkips(state, 'k3s-infra', infraInputs, [options.environment])) {",
+  );
   const body = src.slice(start, src.indexOf('\nexport ', start));
 
-  it('the infra step is gated on its inputs alone', () => {
+  it('the infra step is gated on its inputs and the seal marker, nothing else', () => {
+    // infraStepSkips (lib/iac/state-seal.js): the recorded inputs and the
+    // stack's seal marker, tests/unit/iac/state-seal.test.ts.
     expect(start).toBeGreaterThan(0);
     expect(src).not.toContain('k3sInfraMustRun');
+  });
+
+  it("the infra step's up is handed the ledger its seal marks", () => {
+    const up = body.slice(body.indexOf('upStack(options.environment, program, {'));
+    expect(up.slice(0, up.indexOf('\n      }),'))).toContain('ledger: state,');
   });
 
   it('the saved result is read once, and its floatingIp only through the helper', () => {

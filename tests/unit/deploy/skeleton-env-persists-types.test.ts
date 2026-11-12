@@ -64,6 +64,12 @@ vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
 vi.mock('../../../src/lib/operator-ip.js', () => ({
   ensureOperatorIpAccess: vi.fn(async () => ({ added: false })),
 }));
+// The machine that deployed these environments, so their deploy key is here
+// (deploy-key-refusal.test.ts drives a machine without it).
+vi.mock('../../../src/lib/deploy/deploy-key.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  requireDeployKey: () => {},
+}));
 // The first remote step after the skeleton save fails, as an IaC failure would.
 vi.mock('../../../src/lib/deploy/state.js', () => ({
   StateTracker: class {

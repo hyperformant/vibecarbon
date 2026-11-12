@@ -4,8 +4,11 @@ import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it, vi } from 'vitest';
 import {
   SERVER_CREATE_TIMEOUT,
+  SERVER_OWNER_LABELS,
   SERVER_RESOURCE_TYPES,
 } from '../../../src/lib/iac/create-timeout.js';
+import { OWNERSHIP_KEYS, recordedOwnership } from '../../../src/lib/iac/state-pending.js';
+import { getProvider } from '../../../src/lib/providers/index.js';
 
 /**
  * Census: every server-class resource in every provider IaC program carries
@@ -73,8 +76,10 @@ const k8s = {
   workerServerType: 'cx23',
   minWorkers: 2,
   apiToken: 'test-token',
-  // An existing cluster's token, replayed. A first deploy mints its own.
+  // An existing cluster's token, replayed. A first deploy gets one derived
+  // from the state passphrase (lib/iac/k3s-token.js), not replayed.
   k3sToken: 'replayed-token',
+  k3sTokenReplayed: true,
 };
 
 const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown> }> = {
@@ -103,6 +108,22 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
   },
 };
 
+/** A value as the program set it, with any Pulumi output resolved. */
+async function settled(v: unknown): Promise<unknown> {
+  if (pulumi.Output.isInstance(v)) {
+    return settled(
+      await new Promise((resolve) =>
+        (v as pulumi.Output<unknown>).apply((x) => {
+          resolve(x);
+          return x;
+        }),
+      ),
+    );
+  }
+  if (Array.isArray(v)) return Promise.all(v.map(settled));
+  return v;
+}
+
 async function runProgram(file: string, configOverride?: Record<string, unknown>) {
   const { builder, config } = PROGRAMS[file];
   const mod = await import(`../../../src/lib/iac/programs/${file}`);
@@ -121,6 +142,70 @@ describe('server-class create timeouts (census)', () => {
   it('the bound is a Pulumi duration the bridge parses', () => {
     expect(SERVER_CREATE_TIMEOUT).toMatch(/^\d+m$/);
   });
+
+  it.each(Object.keys(PROGRAMS))(
+    '%s: every server-class resource sets its name in nameInput, where the pending-create lookup reads it',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length, `${file} registered no server-class resource`).toBeGreaterThan(0);
+      for (const server of servers) {
+        const { nameInput } =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES];
+        const value = (server.args as Record<string, unknown>)[nameInput];
+        expect(typeof value, `${file}: ${server.type} "${server.name}" sets no ${nameInput}`).toBe(
+          'string',
+        );
+        expect(value, `${file}: ${server.type} "${server.name}"`).not.toBe('');
+      }
+    },
+  );
+
+  // Safety: the seal tells the user to delete a server an unfinished create
+  // left running only when it carries the ownership labels the create
+  // recorded (lib/iac/state-pending.js). So every server must record them in
+  // labelsInput, set by the program itself (the census passes no caller
+  // labels), and the provider must read them back off a server identically:
+  // a provider whose decode disagreed would turn every server of ours into one
+  // that "only shares the name", and the seal would clear its record unseen.
+  // The long project name pushes Linode's tags past 50 characters, where both
+  // sides carry the squeezed value.
+  const LONG_PROJECT = 'a-project-name-long-enough-to-squeeze-its-tag';
+  it.each(
+    Object.keys(PROGRAMS).flatMap((file) => [
+      [file, 'p'],
+      [file, LONG_PROJECT],
+    ]),
+  )(
+    '%s (project %s): every server-class resource records its ownership labels as its provider reads them',
+    async (file, projectName) => {
+      const resources = await runProgram(file, { ...PROGRAMS[file].config, projectName });
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length, `${file} registered no server-class resource`).toBeGreaterThan(0);
+      const provider = getProvider(file.split('-')[0], 'census-token');
+      const raw = { ...SERVER_OWNER_LABELS, project: projectName, environment: 'e' };
+      if (file.startsWith('linode-') && projectName === LONG_PROJECT) {
+        // Non-vacuous: the tag really is squeezed.
+        expect(provider.labelValue('project', projectName)).not.toBe(projectName);
+      }
+      for (const server of servers) {
+        const { labelsInput } =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES];
+        const value = await settled((server.args as Record<string, unknown>)[labelsInput]);
+        const owner = recordedOwnership({ [labelsInput]: value }, labelsInput);
+        expect(
+          owner,
+          `${file}: ${server.type} "${server.name}" records no ownership`,
+        ).not.toBeNull();
+        const read = provider.serverLabels({ [labelsInput]: value });
+        for (const key of OWNERSHIP_KEYS) {
+          const expected = provider.labelValue(key, raw[key as keyof typeof raw]);
+          expect(owner?.[key], `${file}: ${server.type} "${server.name}" ${key}`).toBe(expected);
+          expect(read[key], `${file}: ${server.type} "${server.name}" ${key}`).toBe(expected);
+        }
+      }
+    },
+  );
 
   it.each(Object.keys(PROGRAMS))(
     '%s: every server-class resource sets customTimeouts.create',
@@ -250,15 +335,20 @@ describe('server-class create timeouts (census)', () => {
   // first deploy has no worker to protect, and a trigger that arrives on the
   // second deploy replaces nothing but counts from then on (proved on real
   // Pulumi, 2026-11-05: 7 of 7 transitions), so it waits for a token to replay.
-  // Linode's workers take a fixed VPC address too (10.0.1.2 for the master),
-  // so the same holds there.
+  // A first deploy still has a token, the derived one: only a replayed token
+  // says there is a cluster to protect. Linode's workers take a fixed VPC
+  // address too (10.0.1.2 for the master), so the same holds there.
   it.each([
     ['hetzner-k8s.js', 'userData'],
     ['linode-k8s.js', 'metadatas'],
   ])(
     '%s: a first deploy starts its workers with the master, not after it',
     async (file, scriptInput) => {
-      const { k3sToken: _existing, ...fresh } = PROGRAMS[file].config;
+      const fresh = {
+        ...PROGRAMS[file].config,
+        k3sToken: 'derived-token',
+        k3sTokenReplayed: false,
+      };
       const resources = await runProgram(file, fresh);
       const workers = resources.filter(
         (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
@@ -363,7 +453,11 @@ describe('server-class create timeouts (census)', () => {
   });
 
   it('digitalocean-k8s.js: a first deploy keeps the trigger, its workers wait on the master anyway', async () => {
-    const { k3sToken: _existing, ...fresh } = PROGRAMS['digitalocean-k8s.js'].config;
+    const fresh = {
+      ...PROGRAMS['digitalocean-k8s.js'].config,
+      k3sToken: 'derived-token',
+      k3sTokenReplayed: false,
+    };
     const resources = await runProgram('digitalocean-k8s.js', fresh);
     const workers = resources.filter(
       (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),

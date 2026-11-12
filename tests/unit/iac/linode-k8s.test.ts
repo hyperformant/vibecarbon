@@ -4,6 +4,7 @@
  */
 import * as pulumi from '@pulumi/pulumi';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
 
 const fetchWithRetryMock = vi.fn();
 vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
@@ -84,6 +85,8 @@ const baseConfig = {
   allowedSshIps: ['203.0.113.5/32', '2001:db8::1/128'],
   allowedK8sApiIps: ['203.0.113.6/32'],
   labels: { 'managed-by': 'vibecarbon' },
+  // The CLI always passes one (lib/iac/k3s-token.js). Sentinel only.
+  k3sToken: 'SENTINEL-k3s-token',
 };
 const CLUSTER = 'acme-prod';
 
@@ -246,7 +249,10 @@ describe('buildLinodeK8sProgram resource graph', () => {
     expect(master.inputs.tags).toEqual(
       expect.arrayContaining(['role:master', `cluster:${CLUSTER}`]),
     );
-    const userData = Buffer.from(master.inputs.metadatas[0].userData, 'base64').toString();
+    const userData = Buffer.from(
+      unsealMockInput<Array<{ userData: string }>>(master.inputs.metadatas)[0].userData,
+      'base64',
+    ).toString();
     expect(userData).toContain('linode_test_token_1234');
     expect(userData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
   });
@@ -273,7 +279,10 @@ describe('buildLinodeK8sProgram resource graph', () => {
   it('renders db and worker user data against the fixed master address', () => {
     for (const name of ['db', 'worker-1']) {
       const i = byType(captured, INSTANCE).find((x) => x.name === name) as Captured;
-      const ud = Buffer.from(i.inputs.metadatas[0].userData, 'base64').toString();
+      const ud = Buffer.from(
+        unsealMockInput<Array<{ userData: string }>>(i.inputs.metadatas)[0].userData,
+        'base64',
+      ).toString();
       expect(ud).toContain('https://10.0.1.2:6443');
       expect(ud).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     }
@@ -528,7 +537,10 @@ describe('a long e2e-shaped k8s-ha primary: every tag fits and the autoscaler fi
 
   it("renders the CSI StorageClass volumeTags as the project's encoded tag", () => {
     const master = byType(slice, INSTANCE).find((i) => i.name === 'master') as Captured;
-    const userData = Buffer.from(master.inputs.metadatas[0].userData, 'base64').toString();
+    const userData = Buffer.from(
+      unsealMockInput<Array<{ userData: string }>>(master.inputs.metadatas)[0].userData,
+      'base64',
+    ).toString();
     expect(userData).toContain(
       `linodebs.csi.linode.com/volumeTags: "${encodeLabel('project', HA_PROJECT)}"`,
     );

@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { afterAll, describe, expect, it } from 'vitest';
+import { importStackState } from '../../../src/lib/iac/index.js';
 import { retargetServerResource } from '../../../src/lib/iac/server-state.js';
 import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 
@@ -131,7 +132,7 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
         'prod',
       );
       expect(changed).toBe(true);
-      await live.importStack(deployment);
+      await importStackState(live, deployment);
 
       // The program reads the scaled size from config: 'big'.
       const synced = await deployPlan(await stackFor('prod', 'big'));

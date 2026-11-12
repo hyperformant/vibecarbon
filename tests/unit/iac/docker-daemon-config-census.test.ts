@@ -39,6 +39,7 @@ import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
 import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { resolveOutputs } from '../../_shared/pulumi-secrets.js';
 
 const { created } = vi.hoisted(() => ({
   created: [] as Array<{ type: string; name: string; args: unknown; opts?: unknown }>,
@@ -184,11 +185,13 @@ async function programUserData(file: string): Promise<Array<[string, string]>> {
     return `${pkg}:${m}/${cls[0].toLowerCase()}${cls.slice(1)}:${cls}` in SERVER_RESOURCE_TYPES;
   });
   expect(servers.length, `${file} registered no server-class resource`).toBeGreaterThan(0);
-  return servers.map((s) => {
-    const texts = cloudConfigIn(s.args);
-    expect(texts, `${file}: server "${s.name}" carries one cloud-config`).toHaveLength(1);
-    return [`${file} server "${s.name}"`, texts[0]];
-  });
+  return Promise.all(
+    servers.map(async (s) => {
+      const texts = cloudConfigIn(await resolveOutputs(s.args));
+      expect(texts, `${file}: server "${s.name}" carries one cloud-config`).toHaveLength(1);
+      return [`${file} server "${s.name}"`, texts[0]] as [string, string];
+    }),
+  );
 }
 
 const step = (s: string | string[]) => (Array.isArray(s) ? s.join(' ') : String(s));

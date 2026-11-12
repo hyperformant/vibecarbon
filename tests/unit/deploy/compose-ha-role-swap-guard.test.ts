@@ -47,6 +47,13 @@ vi.mock('../../../src/lib/deploy/state.js', () => ({
   },
 }));
 
+// The machine that deployed these environments, so their deploy key is here
+// (deploy-key-refusal.test.ts drives a machine without it).
+vi.mock('../../../src/lib/deploy/deploy-key.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  requireDeployKey: () => {},
+}));
+
 // The reconverge preconditions read each node's replica state and the apex A
 // records before any mutation; answered here from a per-ip model.
 const replica = vi.hoisted(() => ({

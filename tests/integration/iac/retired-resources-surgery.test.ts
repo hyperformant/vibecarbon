@@ -5,8 +5,8 @@
  * the master; today's program declares neither. Left in state, the next `up`
  * deletes the assignment (cutting the address off while the domain may still
  * point at it) and the IP. The surgery takes both out of the deployment with
- * exportStack/importStack before any up or preview, so Pulumi never touches
- * them and the address stays assigned and serving.
+ * an export and an import (importStackState) before any up or preview, so
+ * Pulumi never touches them and the address stays assigned and serving.
  *
  * Real Pulumi engine, a file:// backend in a tmp dir, and the fake cloud
  * (fakecloud/), whose ReservedIpAssignment records on its IP which server it
@@ -49,6 +49,7 @@ import {
   createDeployDropRetired,
   releaseRetiredReservedIps,
 } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
+import { importStackState } from '../../../src/lib/iac/index.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
 import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 
@@ -289,7 +290,7 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
       );
       // `pulumi stack import` checks the snapshot's integrity: the note's
       // dependency on the IP now names a resource the state no longer holds.
-      await expect(stack.importStack(naive)).rejects.toThrow(/refers to missing resource/);
+      await expect(importStackState(stack, naive)).rejects.toThrow(/refers to missing resource/);
     });
 
     it('with the surgery: import accepted, nothing deleted, the IP stays assigned, idempotent', async () => {
@@ -304,7 +305,7 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
         'ingress',
         'ingress-assignment',
       ]);
-      await stack.importStack(deployment);
+      await importStackState(stack, deployment);
 
       // References to the removed URNs are gone from what the engine holds.
       const held = JSON.stringify((await stack.exportStack()).deployment);
@@ -345,7 +346,7 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
       const dropRetired = async (stackName: string) => {
         const s = await stackFor(stackName, newProgram(address));
         const { deployment, removed } = dropStackResources(await s.exportStack(), RETIRED);
-        if (removed.length > 0) await s.importStack(deployment);
+        if (removed.length > 0) await importStackState(s, deployment);
       };
       const out = await releaseOnWarmRedeploy('warm', address, dropRetired);
       expect(out).toEqual({ released: [address], kept: [] });
@@ -489,7 +490,7 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
         r.urn.endsWith('::ip-child'),
       );
       expect(child.parent).toBe(stackUrn);
-      await stack.importStack(deployment);
+      await importStackState(stack, deployment);
     });
   },
 );

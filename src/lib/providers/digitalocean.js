@@ -1336,22 +1336,32 @@ export class DigitalOceanProvider extends BaseProvider {
    * filters client-side. Soft-fail contract: [] on a non-ok response at any
    * page (B0-3) — best-effort discovery/recovery; network throws propagate.
    * @param {string} name
+   * @param {{ strict?: boolean }} [options] - reject rather than answer `[]`
+   *   when the listing isn't complete (BaseProvider.findServersByName)
    * @returns {Promise<object[]>}
    */
-  async findServersByName(name) {
+  async findServersByName(name, { strict = false } = {}) {
     const droplets = [];
     let page = 1;
+    let complete = false;
     for (let guard = 0; guard < 20; guard++) {
       const response = await fetchWithRetry(
         `${DigitalOceanProvider.API_BASE}/droplets?per_page=50&page=${page}`,
         { headers: { Authorization: `Bearer ${this.apiToken}` } },
       );
-      if (!response.ok) return [];
+      if (!response.ok) {
+        if (strict) throw this.serverLookupError(name, response.status);
+        return [];
+      }
       const data = await response.json();
       if (Array.isArray(data.droplets)) droplets.push(...data.droplets);
-      if (!data.links?.pages?.next) break;
+      if (!data.links?.pages?.next) {
+        complete = true;
+        break;
+      }
       page++;
     }
+    if (strict && !complete) throw this.serverLookupError(name);
     return droplets.filter((d) => d.name === name);
   }
 

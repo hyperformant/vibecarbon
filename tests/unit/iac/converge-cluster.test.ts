@@ -7,7 +7,9 @@
  * from failover:
  *
  *   (a) the k3sToken probe is replayed into the REAL program config (userData
- *       stays byte-stable → Pulumi plans an in-place resize, not a replace);
+ *       stays byte-stable → Pulumi plans an in-place resize, not a replace),
+ *       and a stack that records none gets the token derived from the state
+ *       passphrase, never a random one (lib/iac/k3s-token.js);
  *   (b) a preview that schedules a master `replace` op throws BEFORE `upStack`
  *       (the master-replace defense fails fast instead of wiping etcd);
  *   (c) `overrides` flows into `buildProgramConfig`'s newValues slot (so a
@@ -18,7 +20,10 @@
  * classifyK3sTokenProbe) and `../images.js` (k3sVersion) are mocked
  * so no @pulumi / real cloud call is made. The Provider is a fake that records
  * every `getK8sProgram(config)` call, which is how we inspect the assembled
- * program config without exporting internals.
+ * program config without exporting internals. The probe reads outputs with
+ * an empty program, so the only program built is the real one.
+ *
+ * Sentinels only: the passphrase and tokens here are never real.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +35,12 @@ const getOrCreateStackMock = vi.fn();
 const classifyK3sTokenProbeMock = vi.fn();
 const dropRetiredMock = vi.fn();
 const recordRetiredMock = vi.fn();
+
+const PASSPHRASE = 'SENTINEL-passphrase-converge-000000000000000000';
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => PASSPHRASE,
+}));
 
 vi.mock('../../../src/lib/iac/index.js', () => ({
   upStack: (...a: unknown[]) => upStackMock(...a),
@@ -48,7 +59,16 @@ vi.mock('../../../src/lib/deploy/k8s/retired-reserved-ip.js', () => ({
   recordRetiredReservedIps: (...a: unknown[]) => recordRetiredMock(...a),
 }));
 
-const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
+const { convergeClusterInfra, ConvergeBuildError } = await import(
+  '../../../src/lib/iac/converge-cluster.js'
+);
+const { deriveK3sToken } = await import('../../../src/lib/iac/k3s-token.js');
+/** The token a stack of project `proj` with no recorded one is built with. */
+const DERIVED = deriveK3sToken({
+  passphrase: PASSPHRASE,
+  projectName: 'proj',
+  stackName: 'unit-cluster-xyz',
+});
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
 /** Fake Provider that records the config passed to each getK8sProgram call. */
@@ -115,12 +135,40 @@ describe('convergeClusterInfra', () => {
 
     await convergeClusterInfra({ ...baseArgs(), Provider });
 
-    // getK8sProgram is called twice: [0] = probe program (no replay), [1] =
-    // real program with the replayed token merged in.
-    expect(programCalls).toHaveLength(2);
-    expect(programCalls[0].k3sToken).toBeUndefined();
-    expect(programCalls[1].k3sToken).toBe('REPLAY_TOKEN');
+    // The probe reads outputs with an empty program: the only program built
+    // is the real one, with the replayed token merged in.
+    expect(programCalls).toHaveLength(1);
+    expect(programCalls[0].k3sToken).toBe('REPLAY_TOKEN');
+    expect(programCalls[0].k3sTokenReplayed).toBe(true);
+    expect(getStackOutputsMock).toHaveBeenCalledWith(
+      'unit-cluster-xyz',
+      expect.any(Function),
+      expect.objectContaining({ projectName: 'proj' }),
+    );
     expect(upStackMock).toHaveBeenCalledTimes(1);
+  });
+
+  // A first up that failed after creating servers leaves the stack's outputs
+  // empty while its servers booted with the derived token: a scale or
+  // failover on it builds with that same token, never a random one.
+  it('(a2) a stack whose outputs lack the token: the derived token, said without it', async () => {
+    const { Provider, programCalls } = makeProvider();
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      await convergeClusterInfra({ ...baseArgs(), Provider });
+      expect(programCalls).toHaveLength(1);
+      expect(programCalls[0].k3sToken).toBe(DERIVED);
+      expect(programCalls[0].k3sTokenReplayed).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        'unit-cluster-xyz: fresh stack, so this run uses the k3s token derived from your state passphrase for this stack, the one a deploy of it uses when none is recorded. The preview below still stops any plan that would replace the master.',
+      );
+      const said = JSON.stringify([warn.mock.calls, getStackOutputsMock.mock.calls]);
+      expect(said).not.toContain(DERIVED);
+      expect(said).not.toContain(PASSPHRASE);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('(b) throws before upStack when the preview schedules a master replace', async () => {
@@ -330,8 +378,8 @@ describe('convergeClusterInfra', () => {
 
     await convergeClusterInfra({ ...baseArgs(), Provider });
 
-    expect(programCalls[0].priorMaster).toBeUndefined();
-    expect(programCalls[1].priorMaster).toEqual({ id: '5000001', privateIp: '10.0.1.2' });
+    expect(programCalls).toHaveLength(1);
+    expect(programCalls[0].priorMaster).toEqual({ id: '5000001', privateIp: '10.0.1.2' });
   });
 
   it('(h2) leaves the program on the live master when state lacks either value', async () => {
@@ -344,7 +392,7 @@ describe('convergeClusterInfra', () => {
       getStackOutputsMock.mockResolvedValue(outputs);
       const { Provider, programCalls } = makeProvider();
       await convergeClusterInfra({ ...baseArgs(), Provider });
-      expect(programCalls[1], JSON.stringify(outputs)).not.toHaveProperty('priorMaster');
+      expect(programCalls[0], JSON.stringify(outputs)).not.toHaveProperty('priorMaster');
     }
   });
 
@@ -360,7 +408,7 @@ describe('convergeClusterInfra', () => {
     });
     const { Provider, programCalls } = makeProvider();
     await convergeClusterInfra({ ...baseArgs(), Provider });
-    expect(programCalls[1]).not.toHaveProperty('priorMaster');
+    expect(programCalls[0]).not.toHaveProperty('priorMaster');
   });
   // A DigitalOcean cluster made before 2026-11 still holds a reserved IP its
   // domain may point at. Scale and failover converge the current program,
@@ -419,6 +467,46 @@ describe('convergeClusterInfra', () => {
     ).rejects.toThrow(/Could not take the retired reserved IP out/);
     expect(stack.preview).not.toHaveBeenCalled();
     expect(upStackMock).not.toHaveBeenCalled();
+  });
+
+  // A program that refuses to build (operatorCidrs emptied by hand in
+  // .vibecarbon.json) stops the converge before the stack is opened. The
+  // error says so by name: failover skips its revert for it, which would only
+  // build the same program again and report leftover workers never made.
+  it('(j) a program that refuses to build: a ConvergeBuildError naming the refusal, before the stack opens', async () => {
+    const refusal = new Error(
+      'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
+    );
+    const { Provider } = makeProvider();
+    Provider.getK8sProgram.mockRejectedValueOnce(refusal);
+
+    const err = await convergeClusterInfra({ ...baseArgs(), Provider }).catch((e: Error) => e);
+
+    expect(err).toBeInstanceOf(ConvergeBuildError);
+    expect((err as Error).name).toBe('ConvergeBuildError');
+    expect((err as Error).cause).toBe(refusal);
+    expect((err as Error).message).toBe(
+      "Couldn't build the Pulumi program for unit-cluster-xyz from your project's config: " +
+        'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...). ' +
+        "vibecarbon stopped before it previewed or changed any of the cluster's servers, so you can fix what it names and run this again.",
+    );
+    expect((err as Error & { logLines: string[] }).logLines).toEqual([(err as Error).message]);
+    expect(getOrCreateStackMock).not.toHaveBeenCalled();
+    expect(upStackMock).not.toHaveBeenCalled();
+  });
+
+  it('(j2) a refusal that ends in a sentence keeps one full stop', async () => {
+    const { Provider } = makeProvider();
+    Provider.getK8sProgram.mockRejectedValueOnce(
+      new Error('Use a shorter project or environment name.\n    at buildLinodeK8sProgram'),
+    );
+
+    const err = await convergeClusterInfra({ ...baseArgs(), Provider }).catch((e: Error) => e);
+
+    expect((err as Error).message).toContain(
+      "config: Use a shorter project or environment name. vibecarbon stopped before it previewed or changed any of the cluster's servers",
+    );
+    expect((err as Error).message).not.toContain('buildLinodeK8sProgram');
   });
 });
 
@@ -497,9 +585,9 @@ describe('convergeClusterInfra — a state the passphrase cannot read', () => {
       try {
         await expect(convergeClusterInfra({ ...baseArgs(), Provider })).rejects.toBe(failure);
 
-        // [0] is the probe program; a second call would be the real program,
-        // built with a minted token.
-        expect(programCalls).toHaveLength(1);
+        // Any call would be the real program, built with a token the probe
+        // never read.
+        expect(programCalls).toHaveLength(0);
         expect(getOrCreateStackMock).not.toHaveBeenCalled();
         expect(upStackMock).not.toHaveBeenCalled();
         // The spinner says what happened, never that the state was read.
@@ -514,11 +602,12 @@ describe('convergeClusterInfra — a state the passphrase cannot read', () => {
   );
 });
 
-// The probe mints a token only for a stack the backend doesn't have (R22).
-// Any other failed read stops the converge: the stack may exist, and its
-// live cluster's token is what every new node needs to join. Scale and
-// failover reach the stack only through this seam.
-describe('convergeClusterInfra — the k3s token probe mints only for a missing stack', () => {
+// Only a stack the backend doesn't have, or one whose outputs lack the token,
+// gets a token the stack doesn't record: the derived one (R22, R23). Any
+// other failed read stops the converge: the stack may exist, and its live
+// cluster's token is what every new node needs to join. Scale and failover
+// reach the stack only through this seam.
+describe('convergeClusterInfra — the k3s token probe builds only with a recorded or derived token', () => {
   async function withRealClassifier() {
     const real = await vi.importActual<typeof import('../../../src/lib/iac/index.js')>(
       '../../../src/lib/iac/index.js',
@@ -546,9 +635,9 @@ describe('convergeClusterInfra — the k3s token probe mints only for a missing 
       expect(err).toBeInstanceOf(real.K3sTokenProbeError);
       expect((err as Error).cause).toBe(cause);
       expect((err as Error).message).toContain(
-        "Couldn't read the k3s join token for unit-cluster-xyz from its Pulumi state",
+        "Couldn't read your k3s join token for unit-cluster-xyz from its Pulumi state",
       );
-      expect(programCalls).toHaveLength(1);
+      expect(programCalls).toHaveLength(0);
       expect(getOrCreateStackMock).not.toHaveBeenCalled();
       expect(upStackMock).not.toHaveBeenCalled();
       expect(error).toHaveBeenCalledWith("Prior cluster state can't be read (unit-cluster-xyz)");
@@ -558,7 +647,11 @@ describe('convergeClusterInfra — the k3s token probe mints only for a missing 
     }
   });
 
-  it('a stack the backend does not have: the fresh-stack path, a minted token, the preview and the up', async () => {
+  // Scale and failover change only a cluster that exists: the preview's stack
+  // open (requireExisting) refuses to create one, so the run stops there.
+  // Stood in for here, the preview and the up run; what matters is the token
+  // the program would get and what the warning says happens.
+  it('a stack the backend does not have: the derived token, and the warning says the preview stops', async () => {
     await withRealClassifier();
     getStackOutputsMock.mockRejectedValue(
       Object.assign(new Error('Pulumi stack "unit-cluster-xyz" was not found'), {
@@ -570,11 +663,34 @@ describe('convergeClusterInfra — the k3s token probe mints only for a missing 
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     try {
       await convergeClusterInfra({ ...baseArgs(), Provider });
-      expect(programCalls).toHaveLength(2);
-      expect(programCalls[1].k3sToken).toBeUndefined();
-      expect(upStackMock).toHaveBeenCalledTimes(1);
+      expect(programCalls).toHaveLength(1);
+      expect(programCalls[0].k3sToken).toBe(DERIVED);
+      expect(programCalls[0].k3sTokenReplayed).toBe(false);
       expect(warn).toHaveBeenCalledWith(
-        'unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet, so this run makes its k3s token.',
+        "unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet. `vibecarbon scale` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating any servers.",
+      );
+      const said = JSON.stringify(warn.mock.calls);
+      expect(said).not.toContain(DERIVED);
+      expect(said).not.toContain(PASSPHRASE);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a failover names itself in that warning', async () => {
+    await withRealClassifier();
+    getStackOutputsMock.mockRejectedValue(
+      Object.assign(new Error('Pulumi stack "unit-cluster-xyz" was not found'), {
+        stackNotFound: true,
+      }),
+    );
+    const { Provider } = makeProvider();
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      await convergeClusterInfra({ ...baseArgs(), Provider, action: 'failover' });
+      expect(warn).toHaveBeenCalledWith(
+        "unit-cluster-xyz: no stack unit-cluster-xyz in the state backend yet. `vibecarbon failover` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating any servers.",
       );
     } finally {
       warn.mockRestore();

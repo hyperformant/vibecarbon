@@ -21,7 +21,9 @@
  *   3. `buildProgramConfig` — assembles byte-identical program inputs, with
  *      `overrides` taking the `newValues` slot.
  *   4. k3sToken probe/replay — reads prior outputs and replays the token so
- *      userData hashes match (in-place resize, not replace).
+ *      userData hashes match (in-place resize, not replace). A stack that
+ *      records none gets the token derived from the state passphrase
+ *      (k3s-token.js), never a random one.
  *   5. master-replace preview guard — runs a Pulumi preview and refuses to
  *      proceed if ANY role=master resource is scheduled for replacement.
  *   6. `upStack` — applies the change and returns its flattened outputs.
@@ -38,6 +40,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
+import { summarizeCommandError } from '../cli/error-line.js';
 import { spinner } from '../cli/progress.js';
 import { haSshKeyName as haSshKeyNameFor } from '../deploy/k8s/ha-ssh-key.js';
 import { recordRetiredReservedIps } from '../deploy/k8s/retired-reserved-ip.js';
@@ -60,6 +63,34 @@ function abort(lines) {
   );
   err.logLines = lines;
   return err;
+}
+
+/**
+ * The cluster's program refused to build from the project's config (an
+ * operatorCidrs list emptied by hand in .vibecarbon.json, a name too long for a
+ * node name), so the converge stopped before it opened the stack, previewed or
+ * changed any server. An abort like the others here, `logLines` included.
+ * Failover checks it by name and skips its revert: a revert would build the
+ * same program again and report leftover workers that were never made.
+ */
+export class ConvergeBuildError extends Error {
+  /**
+   * @param {string} stackName the stack the program was for
+   * @param {unknown} cause what the build threw
+   */
+  constructor(stackName, cause) {
+    const reason = summarizeCommandError(
+      cause instanceof Error ? cause.message : String(cause),
+    ).replace(/\.$/, '');
+    super(
+      `Couldn't build the Pulumi program for ${stackName} from your project's config: ${reason}. ` +
+        `vibecarbon stopped before it previewed or changed any of the cluster's servers, so you can fix what it names and run this again.`,
+      { cause },
+    );
+    this.name = 'ConvergeBuildError';
+    /** @type {string[]} */
+    this.logLines = [this.message];
+  }
 }
 
 /**
@@ -314,12 +345,11 @@ export async function convergeClusterInfra({
   const probeSpinner = spinner();
   probeSpinner.start(`Reading prior cluster state (${label})...`);
   try {
-    // CD2 — lazy dispatch through the provider class (no named
-    // buildHetznerK8sProgram import) so Phase B providers slot in
-    // without editing this file.
-    const probeProgram = await Provider.getK8sProgram(programConfig);
+    // The probe only reads outputs and never runs its program, so it is an
+    // empty one: the real program needs the token this probe decides, and a
+    // k8s program refuses to build without one.
     probeOutputs = await perfAsync(`scale.k8s.${clusterEnv}.probeOutputs`, () =>
-      getStackOutputs(clusterEnv, probeProgram, {
+      getStackOutputs(clusterEnv, async () => ({}), {
         provider: providerIdFor(envConfig),
         providerToken: apiToken,
         s3Config,
@@ -351,39 +381,57 @@ export async function convergeClusterInfra({
       ? `No prior cluster state (${label})`
       : `Prior cluster state read (${label})`,
   );
-  const priorK3sToken = probe.priorK3sToken;
   switch (probe.status) {
     case 'recovered':
       break;
     case 'empty':
-      // Legit on a fresh stack; suspicious on an established one. Either
-      // way, the master-replace defense below is what protects etcd —
-      // we just log loudly so a misbehaving probe is visible in run logs.
+      // A first up that failed after creating servers leaves this: those
+      // servers booted with the derived token, so it is the one to build
+      // with. Suspicious on an established stack (an older version recorded
+      // a random token there), and the master-replace defense below is what
+      // protects etcd; the warning makes a misbehaving probe visible.
       p.log.warn(
-        `${label}: ${probe.reason}. Proceeding with newly-minted k3sToken, master-replace defense will block any destructive plan.`,
+        `${label}: ${probe.reason}, so this run uses the k3s token derived from your state passphrase for this stack, the one a deploy of it uses when none is recorded. The preview below still stops any plan that would replace the master.`,
       );
       break;
     case 'missing':
-      // The state backend has no such stack: nothing to replay, and the up
-      // below creates it with the token this run makes.
-      p.log.warn(`${label}: ${probe.reason}, so this run makes its k3s token.`);
+      // The state backend has no such stack. A converge never creates one:
+      // the preview's stack open below (requireExisting) refuses, and the run
+      // stops there.
+      p.log.warn(
+        `${label}: ${probe.reason}. \`vibecarbon ${action}\` only changes a cluster you've already deployed and never creates one, so this run stops at the preview below without creating any servers.`,
+      );
       break;
     default:
       // Future-proof: classifyK3sTokenProbe is the single source of
       // truth for status values; surface any unhandled status so a
-      // silent regression can't flow through.
+      // silent regression can't flow through. k3sTokenForStack refuses it.
       p.log.error(`${label}: unexpected probe status '${probe.status}': ${probe.reason}`);
   }
+  // The recorded token, replayed, or the one derived from the project's state
+  // passphrase for this stack: never logged.
+  const { k3sTokenForStack } = await import('./k3s-token.js');
+  const stackToken = await k3sTokenForStack(probe, {
+    projectName: projectConfig.projectName,
+    stackName: clusterEnv,
+  });
 
   const priorMaster = priorMasterFrom(probeOutputs);
-  const program = await Provider.getK8sProgram({
-    ...programConfig,
-    // Replay the prior token (when available) so userData hashes match
-    // and Pulumi plans an in-place server-type change rather than a
-    // destructive replace of every node.
-    k3sToken: priorK3sToken,
-    ...(priorMaster && { priorMaster }),
-  });
+  // A refusal here comes before the stack opens: nothing of the cluster's has
+  // changed, and the error says so by name (ConvergeBuildError).
+  let program;
+  try {
+    program = await Provider.getK8sProgram({
+      ...programConfig,
+      // The recorded token, replayed, so userData hashes match and Pulumi
+      // plans an in-place server-type change rather than a destructive replace
+      // of every node; the derived one for a stack that records none.
+      ...stackToken,
+      ...(priorMaster && { priorMaster }),
+    });
+  } catch (err) {
+    throw new ConvergeBuildError(clusterEnv, err);
+  }
 
   // Defense in depth: run a Pulumi preview and refuse to proceed if any
   // resource with role=master is scheduled for replacement. The k3sToken

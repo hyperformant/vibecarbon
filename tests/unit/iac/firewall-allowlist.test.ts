@@ -15,6 +15,7 @@ const baseK8sConfig = {
   k3sVersion: 'v1.31.0+k3s1',
   apiToken: 'tok',
   labels: {},
+  k3sToken: 'SENTINEL-k3s-token',
 };
 
 const baseComposeConfig = {

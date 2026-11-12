@@ -155,6 +155,20 @@ describe('buildEnv', () => {
       expect(env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS).toBe('true');
     });
 
+    it("drops an operator's RETAIN_CHECKPOINTS, whose copies would keep pre-seal plain values", () => {
+      // Both spellings the CLI reads (3.259.0). Each would keep a timestamped
+      // full copy of every checkpoint beside the stack file, which nothing
+      // removes; the history is the recovery copy. Undefined, not deleted, so
+      // the SDK's {...process.env, ...envVars} spawn cannot bring them back.
+      process.env.PULUMI_DIY_BACKEND_RETAIN_CHECKPOINTS = 'true';
+      process.env.PULUMI_RETAIN_CHECKPOINTS = 'true';
+      const env = buildEnv({ provider, providerToken: 'secret-token' });
+      for (const key of ['PULUMI_DIY_BACKEND_RETAIN_CHECKPOINTS', 'PULUMI_RETAIN_CHECKPOINTS']) {
+        expect(key in env, key).toBe(true);
+        expect(env[key], key).toBeUndefined();
+      }
+    });
+
     it('does not skip checkpoints, which destroy correctness depends on', () => {
       // PULUMI_SKIP_CHECKPOINTS exists on this CLI and would cut far more
       // writes, but it keeps only the FINAL deployment: an update that dies

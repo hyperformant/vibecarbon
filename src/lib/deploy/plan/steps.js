@@ -15,7 +15,12 @@
 import { hasAutomatedDns } from '../../dns-provider.js';
 import { defineStep } from './step.js';
 
-/** Provision a fresh Hetzner VPS — only when no server IP is known yet. */
+/**
+ * Provision a fresh VPS, only when no server IP is known yet. A recorded
+ * server never gets an up, so a deploy never changes it. Nor does the state
+ * seal (lib/iac/state-seal.js) need one there: a compose server's user data
+ * holds no credential (tests/unit/iac/state-secret-census.test.ts).
+ */
 export const provisionServerStep = () =>
   defineStep({ name: 'provision-server', effect: 'provisionServer', when: (ctx) => !ctx.serverIp });
 

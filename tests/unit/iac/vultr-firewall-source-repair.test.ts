@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import { repairVultrFirewallRuleInputs } from '../../../src/lib/iac/index.js';
+import { importingWorkspace } from '../../_shared/fake-stack-import.js';
 
 const RULE = 'vultr:index/firewallRule:FirewallRule';
 
@@ -61,15 +62,19 @@ const stateWith = (rules: { source?: unknown; outSource?: unknown }[], type = RU
   },
 });
 
+/** A stack whose `stack import` (through the workspace) records what it got. */
 const fakeStack = (state: unknown) => {
   const imported: unknown[] = [];
+  const importDeployment = vi.fn(async (s: unknown) => {
+    imported.push(s);
+  });
   return {
     stack: {
+      name: 'v2',
       exportStack: vi.fn(async () => state),
-      importStack: vi.fn(async (s: unknown) => {
-        imported.push(s);
-      }),
+      workspace: importingWorkspace(importDeployment),
     },
+    importDeployment,
     imported,
   };
 };
@@ -82,12 +87,12 @@ describe('repairVultrFirewallRuleInputs', () => {
       { source: '::/0' },
       { source: '162.227.97.176/32' },
     ]);
-    const { stack, imported } = fakeStack(state);
+    const { stack, importDeployment, imported } = fakeStack(state);
 
     const repaired = await repairVultrFirewallRuleInputs(stack as never);
 
     expect(repaired).toBe(3);
-    expect(stack.importStack).toHaveBeenCalledTimes(1);
+    expect(importDeployment).toHaveBeenCalledTimes(1);
     for (const r of (imported[0] as typeof state).deployment.resources.slice(1)) {
       expect(r.inputs.source).toBe('');
       expect(r.outputs.source).toBe('');
@@ -97,10 +102,10 @@ describe('repairVultrFirewallRuleInputs', () => {
   it('leaves a clean stack alone and never writes state', async () => {
     // Cold-deploy shape: inputs.source is already ''. Importing state is a
     // real write against the backend, so a no-op repair must not do one.
-    const { stack } = fakeStack(stateWith([{ source: '' }, { source: '' }]));
+    const { stack, importDeployment } = fakeStack(stateWith([{ source: '' }, { source: '' }]));
 
     expect(await repairVultrFirewallRuleInputs(stack as never)).toBe(0);
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(importDeployment).not.toHaveBeenCalled();
   });
 
   it('repairs the COLD-DEPLOY shape too — outputs are what `up` diffs against', async () => {
@@ -120,36 +125,37 @@ describe('repairVultrFirewallRuleInputs', () => {
   });
 
   it('leaves inputs that never had a source alone', async () => {
-    const { stack } = fakeStack(stateWith([{}, {}]));
+    const { stack, importDeployment } = fakeStack(stateWith([{}, {}]));
 
     expect(await repairVultrFirewallRuleInputs(stack as never)).toBe(0);
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(importDeployment).not.toHaveBeenCalled();
   });
 
   it('does not clobber a legitimate `cloudflare` source', async () => {
     // We never set it today, but it IS a valid value. A repair that blanked
     // every non-empty source would silently rewrite a deliberate choice.
-    const { stack } = fakeStack(stateWith([{ source: 'cloudflare' }]));
+    const { stack, importDeployment } = fakeStack(stateWith([{ source: 'cloudflare' }]));
 
     expect(await repairVultrFirewallRuleInputs(stack as never)).toBe(0);
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(importDeployment).not.toHaveBeenCalled();
   });
 
   it('touches no other resource type — this is not a general state rewriter', async () => {
-    const { stack } = fakeStack(
+    const { stack, importDeployment } = fakeStack(
       stateWith([{ source: '0.0.0.0/0' }], 'hcloud:index/firewall:Firewall'),
     );
 
     expect(await repairVultrFirewallRuleInputs(stack as never)).toBe(0);
-    expect(stack.importStack).not.toHaveBeenCalled();
+    expect(importDeployment).not.toHaveBeenCalled();
   });
 
   it('swallows an export failure rather than blocking the up it precedes', async () => {
     const stack = {
+      name: 'v2',
       exportStack: vi.fn(async () => {
         throw new Error('backend unreachable');
       }),
-      importStack: vi.fn(),
+      workspace: importingWorkspace(vi.fn()),
     };
 
     await expect(repairVultrFirewallRuleInputs(stack as never)).resolves.toBe(0);
@@ -157,8 +163,9 @@ describe('repairVultrFirewallRuleInputs', () => {
 
   it('swallows an import failure the same way', async () => {
     const stack = {
+      name: 'v2',
       exportStack: vi.fn(async () => stateWith([{ source: '0.0.0.0/0' }])),
-      importStack: vi.fn(async () => {
+      workspace: importingWorkspace(async () => {
         throw new Error('state lock held');
       }),
     };

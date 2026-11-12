@@ -1,7 +1,8 @@
 /**
  * upStack emits `[perf]` timing lines only when perf tracing is on AND the caller
  * named its timer (`perfStem`); the `onEvent` handler itself is always passed
- * (the droplet plan recorder needs it), and `<stem>.prepare` is emitted.
+ * (the droplet plan recorder needs it), and `<stem>.prepare` and `<stem>.seal`
+ * (the state seal after the up) are emitted.
  * The handler pairs real engine events into `[perf] <stem>.resource.*` lines.
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -67,6 +68,8 @@ describe('upStack resource timing', () => {
     expect(out).toMatch(/\[perf\] deploy\.iac\.upStack\.prepare \d+ms/);
     expect(out).toMatch(/\[perf\] deploy\.iac\.upStack\.resource\.firstEvent \d+ms/);
     expect(out).toMatch(/\[perf\] deploy\.iac\.upStack\.resource\.Server\.web \d+ms/);
+    // The state seal after the up hangs off the same stem.
+    expect(out).toMatch(/\[perf\] deploy\.iac\.upStack\.seal \d+ms/);
   });
 
   it('without a perfStem the handler (kept for droplet plans) writes no timing lines', async () => {

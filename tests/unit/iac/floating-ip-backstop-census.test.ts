@@ -120,6 +120,8 @@ describe('floating and reserved IPs a program makes are found by their labels', 
       minWorkers: 1,
       maxWorkers: 2,
       k3sVersion: 'v1.37.2+k3s1',
+      // The CLI always passes one (lib/iac/k3s-token.js); a k8s program refuses without it.
+      k3sToken: 'SENTINEL-k3s-token',
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
     });
     holdsToTheSweep(id, P, await ipsOf(program));
@@ -152,6 +154,7 @@ describe('floating and reserved IPs a program makes are found by their labels', 
           minWorkers: 1,
           maxWorkers: 2,
           k3sVersion: 'v1.37.2+k3s1',
+          k3sToken: 'SENTINEL-k3s-token',
           labels: {},
         });
         for (const ip of await ipsOf(program)) seen.add(`k8s ${ip.type}`);

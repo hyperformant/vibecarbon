@@ -58,6 +58,7 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
+import { infraStepSkips } from '../../iac/state-seal.js';
 import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
@@ -120,6 +121,7 @@ import {
   POD_EXEC_QUERY_MS,
   standbyDbRebuildHint,
 } from '../db-workload.js';
+import { requireDeployKey } from '../deploy-key.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
 import { waitForRemoteMarker } from '../remote-marker.js';
@@ -4973,41 +4975,50 @@ export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegi
 }
 
 /**
- * Probe an existing Pulumi stack for its k3s token so a re-deploy replays it.
+ * The k3s token this deploy builds its program with: the stack's recorded
+ * one, replayed, or, when the stack records none, the one derived from the
+ * project's state passphrase for this stack (lib/iac/k3s-token.js).
  *
- * Returns the stack's stored `k3sToken`, or undefined when there is none to
- * replay: the backend has no such stack (a first deploy), or the stack's
- * outputs lack the token. The program then mints one exactly as before.
- * See the call-site comment in deployK3s's k3s-infra block for why replay is
- * load-bearing (a minted token on a live stack leaves new nodes unable to
- * join).
+ * The stack records none when the backend has no such stack (a first deploy)
+ * or its outputs lack the token. The second is what a first up that failed
+ * after creating servers leaves: those servers booted with the derived token,
+ * so the rerun derives the same one and the stack records the token its
+ * servers run with. See the call-site comment in deployK3s's k3s-infra block
+ * for why replay is load-bearing (a new token on a live stack leaves new
+ * nodes unable to join).
  *
  * Any other failed read stops the deploy (classifyK3sTokenProbe, R22): the
- * stack may exist, and a token minted here would reach a live cluster. A
- * passphrase failure, a StateMigrationError (the one-time legacy migration
- * stopped) and a StackHeldError (another run holds the stack) propagate as
- * they are; anything else (the backend unreachable, its retries run out) is
- * a K3sTokenProbeError naming the stack.
+ * stack may exist, holding the random token an older version recorded, and
+ * no other token would let a new node join. A passphrase failure, a
+ * StateMigrationError (the one-time legacy migration stopped) and a
+ * StackHeldError (another run holds the stack) propagate as they are;
+ * anything else (the backend unreachable, its retries run out) is a
+ * K3sTokenProbeError naming the stack.
  *
- * @param {any} Provider  provider class (getK8sProgram static)
+ * The probe only reads the stack's outputs, so its program is an empty one
+ * that never runs: the real program needs the token the probe decides, and a
+ * k8s program refuses to build without one.
+ *
  * @param {Record<string, unknown>} programConfig  same config the real program uses
- * @param {{provider?: string, providerToken?: string, s3Config?: object, log?: (msg: string) => void}} [opts]
+ * @param {{provider?: string, providerToken?: string, s3Config?: object, projectName?: string, projectDir?: string, log?: (msg: string) => void}} [opts]
  *   `provider` is required whenever `providerToken` is set — buildEnv throws
- *   otherwise (see its JSDoc / the DO k8s 401 RCA).
- * @returns {Promise<string|undefined>}
+ *   otherwise (see its JSDoc / the DO k8s 401 RCA). `projectName` and
+ *   `projectDir` scope the stack open and the derivation alike.
+ * @returns {Promise<{k3sToken: string, k3sTokenReplayed: boolean}>}
  */
-export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
+export async function resolveStackK3sToken(programConfig, opts = {}) {
   const log = opts.log ?? console.error;
   const { getStackOutputs, classifyK3sTokenProbe } = await import('../../iac/index.js');
+  const { k3sTokenForStack } = await import('../../iac/k3s-token.js');
   const stackName = programConfig.environment;
   let probe;
   try {
-    const probeProgram = await Provider.getK8sProgram(programConfig);
-    const outputs = await getStackOutputs(stackName, probeProgram, {
+    const outputs = await getStackOutputs(stackName, async () => ({}), {
       provider: opts.provider,
       providerToken: opts.providerToken,
       s3Config: opts.s3Config,
       projectName: opts.projectName,
+      projectDir: opts.projectDir,
     });
     probe = classifyK3sTokenProbe({ outputs, stackName });
   } catch (err) {
@@ -5019,10 +5030,14 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
   }
   if (probe.status !== 'recovered') {
     log(
-      `[k3s-infra] k3s token probe: ${probe.status} (${probe.reason}), minting a fresh token (fresh-stack path)`,
+      `[k3s-infra] k3s token probe: ${probe.status} (${probe.reason}), using the token derived from the state passphrase for this stack`,
     );
   }
-  return probe.priorK3sToken;
+  return k3sTokenForStack(probe, {
+    projectName: opts.projectName,
+    stackName,
+    projectDir: opts.projectDir,
+  });
 }
 
 /**
@@ -5077,6 +5092,16 @@ async function deployK3sSteps(options, inFlight) {
   const spin = options.tracker ? options.tracker.spinner.bind(options.tracker) : spinner;
   const s = spin();
   const projectDir = process.cwd();
+  // A cluster on record and no key here: stop before ensureSshKey makes a new
+  // one and the up installs it (deploy-key.js). HA clusters share the key
+  // haK8sGenerateSshKey already required.
+  if (!options.sharedSshKeyPath) {
+    requireDeployKey({
+      environment: options.environment,
+      envConfig: options.envConfig,
+      keyPath: sshKeyPathFor(options.environment, projectDir),
+    });
+  }
   // perfPrefix tags all internal sub-stage perf timings. Default 'k3s' for
   // single-cluster (`deploy.k3s.iac.upStack` etc); HA passes 'k3s.primary' /
   // 'k3s.standby' so the perf_substep table can attribute primary/standby
@@ -5156,7 +5181,11 @@ async function deployK3sSteps(options, inFlight) {
     maxWorkers,
     k3sVersion: k3sVersion(),
   };
-  if (!state.shouldSkip('k3s-infra', infraInputs)) {
+  // Gated on its inputs and on the seal marker (lib/iac/state-seal.js): a
+  // cluster deployed before its state was sealed runs this up once, whose
+  // seal and history cleanup set the marker; until they finish, every deploy
+  // runs it again.
+  if (!infraStepSkips(state, 'k3s-infra', infraInputs, [options.environment])) {
     state.startStep('k3s-infra', infraInputs);
     const { upStack } = await import('../../iac/index.js');
 
@@ -5187,27 +5216,27 @@ async function deployK3sSteps(options, inFlight) {
     // program. The token is interpolated into every node's cloud-init user
     // data, which every server ignores once it exists (serverResourceOptions /
     // workerResourceOptions, lib/iac/create-timeout.js): a live master keeps
-    // the token it booted with whatever the program says. A freshly minted
-    // token would reach only what is created from now on (a new static
-    // worker, every autoscaler-spawned worker through the carbon-autoscaler
-    // config, the stack's k3sToken output), and none of those could join.
-    // The role reconciler makes re-running this block on an EXISTING stack
-    // routine (primary↔standby shapes hash differently after a failover
-    // swap), so the token must come from the stack; only a genuinely fresh
-    // stack mints one. History: before servers ignored their user data, a
-    // fresh token REPLACED every server (RCA 2026-07-17 e4 rig: the
-    // post-failover reconverge deploy replaced all servers of both clusters).
-    // Same probe-and-replay contract as scale's converge seam.
-    const priorK3sToken = await resolveStackK3sToken(Provider, programConfig, {
+    // the token it booted with whatever the program says. Another token
+    // would reach only what is created from now on (a new static worker,
+    // every autoscaler-spawned worker through the carbon-autoscaler config,
+    // the stack's k3sToken output), and none of those could join. The role
+    // reconciler makes re-running this block on an EXISTING stack routine
+    // (primary↔standby shapes hash differently after a failover swap), so the
+    // token must come from the stack. A stack that records none gets the one
+    // derived from the state passphrase, which is also what the servers of a
+    // first up that failed partway booted with (lib/iac/k3s-token.js).
+    // History: before servers ignored their user data, a fresh token REPLACED
+    // every server (RCA 2026-07-17 e4 rig: the post-failover reconverge
+    // deploy replaced all servers of both clusters). Same probe-and-replay
+    // contract as scale's converge seam.
+    const stackToken = await resolveStackK3sToken(programConfig, {
       provider: providerIdFor(options),
       providerToken: options.apiToken,
       s3Config: options.s3Config,
       projectName: options.projectName,
+      projectDir,
     });
-    const program = await Provider.getK8sProgram({
-      ...programConfig,
-      ...(priorK3sToken ? { k3sToken: priorK3sToken } : {}),
-    });
+    const program = await Provider.getK8sProgram({ ...programConfig, ...stackToken });
 
     s.start('Provisioning k3s cluster (Pulumi up)');
     const requiredOutputs =
@@ -5219,6 +5248,8 @@ async function deployK3sSteps(options, inFlight) {
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
+        // Where the seal records its marker.
+        ledger: state,
         // A DigitalOcean cluster made before 2026-11: the reserved IP the up
         // takes out of this stack goes onto the environment's record, where
         // the release and destroy find it (k8s/retired-reserved-ip.js).

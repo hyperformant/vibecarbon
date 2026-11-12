@@ -1341,22 +1341,32 @@ export class LinodeProvider extends BaseProvider {
    * Find instances by exact label. Full paginated walk + client-side match
    * (soft-fail [] on a non-ok response, same contract as the DO twin).
    * @param {string} name
+   * @param {{ strict?: boolean }} [options] - reject rather than answer `[]`
+   *   when the listing isn't complete (BaseProvider.findServersByName)
    * @returns {Promise<object[]>}
    */
-  async findServersByName(name) {
+  async findServersByName(name, { strict = false } = {}) {
     const instances = [];
     let page = 1;
+    let complete = false;
     for (let guard = 0; guard < 20; guard++) {
       const response = await fetchWithRetry(
         `${LinodeProvider.API_BASE}/linode/instances?page=${page}&page_size=100`,
         { headers: { Authorization: `Bearer ${this.apiToken}` } },
       );
-      if (!response.ok) return [];
+      if (!response.ok) {
+        if (strict) throw this.serverLookupError(name, response.status);
+        return [];
+      }
       const data = await response.json();
       if (Array.isArray(data.data)) instances.push(...data.data);
-      if (!data.pages || page >= data.pages) break;
+      if (!data.pages || page >= data.pages) {
+        complete = true;
+        break;
+      }
       page++;
     }
+    if (strict && !complete) throw this.serverLookupError(name);
     // Compare against the WIRE label, not the logical name: the Pulumi
     // program squeezes long names to fit Linode's 3-50 instance cap, so a
     // literal comparison would silently fail to find exactly the servers whose
