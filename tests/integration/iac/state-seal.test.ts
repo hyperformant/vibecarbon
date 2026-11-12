@@ -32,15 +32,6 @@
  *       tracks it at the same URN, and the record stays, so the user is told
  *       that IP's id as the one to keep and asked only about another by its
  *       name. The deploy after clears the record, never the IP, and seals.
- *   (f) the compose deploy's seal up on a recorded server
- *       (refuseLiveChanges, ruling R36): a plan that would resize the server
- *       in place, replace it (its user data changed and not ignored), delete
- *       it (the program no longer declares it) or create one (a stack that
- *       lost it) never applies, and neither does one that replaces another
- *       resource (the reserved IP's assignment, as a Scaleway IP replace
- *       would). The cloud keeps everything as it was, nothing is sealed and
- *       the ledger gets no marker. A plan that only updates a firewall rule
- *       in place applies it and seals, and so does the clean plan.
  *
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
@@ -70,7 +61,6 @@ import {
   importStackState,
   upStack,
 } from '../../../src/lib/iac/index.js';
-import { LiveChangeRefusedError } from '../../../src/lib/iac/live-change-guard.js';
 import {
   SECRET_SIG,
   SECRET_SIG_KEY,
@@ -157,26 +147,6 @@ class FakeReservedIp extends pulumi.CustomResource {
 }
 
 /**
- * A reserved IP's assignment to a server: any input change replaces it, so a
- * test changes `note` to plan a replace.
- */
-class FakeIpAssignment extends pulumi.CustomResource {
-  constructor(
-    name: string,
-    args: { ipAddress: pulumi.Input<string>; serverId: pulumi.Input<string>; note?: string },
-  ) {
-    super('fakecloud:index:ReservedIpAssignment', name, args, {});
-  }
-}
-
-/** A firewall rule: any input change updates it in place. */
-class FakeFirewallRule extends pulumi.CustomResource {
-  constructor(name: string, args: { rule: string }) {
-    super('fakecloud:index:FirewallRule', name, args, {});
-  }
-}
-
-/**
  * The program before and after user data was wrapped in pulumi.secret. Both
  * keep it in ignoreChanges, as create-timeout.js serverResourceOptions does.
  */
@@ -218,9 +188,9 @@ const rawStack = (stackName: string) =>
   );
 
 /** Deploy `stackName` as a version before the passphrase did: '' and the plain program. */
-async function writeLegacyStack(stackName: string, legacy = program(false)) {
+async function writeLegacyStack(stackName: string) {
   const stack = await LocalWorkspace.createOrSelectStack(
-    { stackName, projectName: PROJECT, program: legacy },
+    { stackName, projectName: PROJECT, program: program(false) },
     rawWorkspace(''),
   );
   await stack.up();
@@ -541,117 +511,5 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
     expect(ips(), 'the IP to keep was kept').toEqual([ipId]);
     expect(sentinelFiles()).toEqual([]);
     expect(stateSealRecorded(ledgerFor('e5'), 'e5')).toBe(true);
-  });
-  it('(f) the seal up on a recorded server: a plan that changes the server, or replaces or deletes anything, never applies; a firewall rule update and the clean plan seal', async () => {
-    await writeLegacyStack('e6');
-    const before = cloudServers();
-    const ledger = ledgerFor('e6');
-    const refusing = { ...opts, ledger, refuseLiveChanges: true };
-    /** The changes the refusal upStack throws names, read back. */
-    const refusal = async (stack: string, prog: () => Promise<unknown>) => {
-      const err = await upStack(stack, prog as never, refusing).then(
-        () => null,
-        (e: unknown) => e,
-      );
-      expect(err).toBeInstanceOf(LiveChangeRefusedError);
-      return [
-        ...new Set(
-          (err as InstanceType<typeof LiveChangeRefusedError>).changes.map(
-            (c: { action: string; kind: string; name: string }) =>
-              `${c.action} ${c.kind} ${c.name}`,
-          ),
-        ),
-      ];
-    };
-    /** The program of today with the server at `size`, user data ignored. */
-    const sized = (size: string) => async () => {
-      const server = new FakeServer(
-        'server',
-        { size, userData: pulumi.secret(USER_DATA) },
-        { ignoreChanges: ['userData'] },
-      );
-      return { serverId: server.id };
-    };
-
-    // An in-place update: a resize stops a server this deploy never touched.
-    expect(await refusal('e6', sized('large'))).toEqual(['update Server server']);
-    // Replace: changed user data the program no longer ignores.
-    const replacing = async () => {
-      const server = new FakeServer('server', {
-        size: 'small',
-        userData: pulumi.secret(`${USER_DATA}# changed\n`),
-      });
-      return { serverId: server.id };
-    };
-    expect(await refusal('e6', replacing)).toEqual(['replace Server server']);
-    // Delete: the program no longer declares the server.
-    expect(await refusal('e6', async () => ({}))).toEqual(['delete Server server']);
-    // Create: a stack that holds no server, as one that lost the record would.
-    expect(await refusal('e6-lost', program(true))).toEqual(['create Server server']);
-
-    expect(cloudServers(), 'the cloud kept its one server, unchanged').toEqual(before);
-    expect(sealCounts(), 'no up ran, so no seal').toEqual([]);
-    expect(stateSealRecorded(ledger, 'e6')).toBe(false);
-    expect(holdsSentinel(checkpoint('e6')), 'the state stays as it was').toBe(true);
-
-    // The clean plan: the up runs and seals.
-    await upStack('e6', program(true), refusing);
-    expect(sealCounts()).toEqual(['e6:2']);
-    expect(warnings).toEqual([]);
-    expect(stateSealRecorded(ledger, 'e6')).toBe(true);
-    expect(holdsSentinel(checkpoint('e6'))).toBe(false);
-    expect(cloudServers()).toEqual(before);
-  });
-
-  it('(f) around the server: a replaced IP assignment never applies, as a Scaleway IP replace would not; a firewall rule updated in place applies and seals', async () => {
-    /** The server, its reserved IP and that IP's assignment, and a firewall rule. */
-    const networked =
-      (wrapped: boolean, { rule = 'allow 22', note }: { rule?: string; note?: string } = {}) =>
-      async () => {
-        const made = (await program(wrapped)()) as { serverId: pulumi.Output<string> };
-        const ip = new FakeReservedIp('ingress', { name: 'sealtest-e7-ip' });
-        new FakeIpAssignment('ingress-assignment', {
-          // The IP's id is its address. The fake's ReservedIp plans an update
-          // on every up (its diff reads the address it outputs as a changed
-          // input), so a preview holds its outputs unknown, and an assignment
-          // fed `ip.ipAddress` would plan a replace on every preview.
-          ipAddress: ip.id,
-          serverId: made.serverId,
-          ...(note && { note }),
-        });
-        new FakeFirewallRule('ssh', { rule });
-        return made;
-      };
-    await writeLegacyStack('e7', networked(false));
-    const cloud = () => JSON.parse(readFileSync(cloudFile, 'utf8'));
-    const before = cloud();
-    const ledger = ledgerFor('e7');
-    const refusing = { ...opts, ledger, refuseLiveChanges: true };
-
-    const err = await upStack('e7', networked(true, { note: 'moved' }), refusing).then(
-      () => null,
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(LiveChangeRefusedError);
-    expect((err as Error).message).toMatch(
-      /^The up for e7 would change ReservedIpAssignment ingress-assignment \(replace\), so it didn't run/,
-    );
-    expect(cloud(), 'the server, the IP and its assignment as they were').toEqual(before);
-    expect(sealCounts()).toEqual([]);
-    expect(stateSealRecorded(ledger, 'e7')).toBe(false);
-
-    // Only the firewall rule changes, in place: it applies, and the stack seals.
-    await upStack('e7', networked(true, { rule: 'allow 22 from 198.51.100.0/24' }), refusing);
-    expect(sealCounts()).toEqual(['e7:2']);
-    expect(warnings).toEqual([]);
-    expect(stateSealRecorded(ledger, 'e7')).toBe(true);
-    const after = cloud();
-    expect(after.servers, 'the server untouched').toEqual(before.servers);
-    expect(Object.values(after.things['fakecloud:index:FirewallRule'])).toEqual([
-      { rule: 'allow 22 from 198.51.100.0/24' },
-    ]);
-    expect(after.things['fakecloud:index:ReservedIpAssignment']).toEqual(
-      before.things['fakecloud:index:ReservedIpAssignment'],
-    );
   });
 });

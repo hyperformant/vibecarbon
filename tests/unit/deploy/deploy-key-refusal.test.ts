@@ -1,9 +1,9 @@
 /**
  * PR 2 final review C1(a): an environment whose servers exist, deployed from a
  * machine without `.vibecarbon/deploy_key_<env>`, stops before any key is made
- * and before any up runs. Before this, provisionServer made a new key and the
- * seal's up ran with it: on DigitalOcean the SshKey resource was replaced, the
- * droplet's sshKeys with it, and so the droplet and its database.
+ * and before any up runs. Before this, a deploy made a new key and ran its up
+ * with it: on DigitalOcean the SshKey resource was replaced, the droplet's
+ * sshKeys with it, and so the droplet and its database.
  *
  * Every mode's key step runs here with the REAL generators (generateSSHKeyPair,
  * ensureSshKey): a missing guard makes a key file, which the tests look for.
@@ -172,7 +172,6 @@ const composeCtx = (envConfig: Record<string, unknown>) => ({
   state: { invalidateStep: () => {} },
   serverIp: (envConfig.servers as { ip?: string }[] | undefined)?.[0]?.ip ?? null,
   providerServerId: (envConfig.servers as { id?: string }[] | undefined)?.[0]?.id ?? null,
-  stateSealed: false,
 });
 
 describe('compose: provisionServer', () => {

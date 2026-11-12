@@ -22,15 +22,21 @@
  *
  * THE SEAL MARKER. A deploy records, in its step ledger
  * (`.vibecarbon/deploy-state-<env>.json`, lib/deploy/state.js), that a stack
- * is sealed and its history holds no plain copy, once both are done. Every
- * mode's warm deploy skips Pulumi when nothing about its servers changed (the
- * k8s `k3s-infra` and compose-ha `compose-ha-infra` steps, compose's
- * `provision-server` on a recorded server), and the marker is part of that
- * decision (infraStepSkips; `ctx.stateSealed` for compose): without it the
- * first deploy after an upgrade would skip the up, so nothing would seal. A
- * seal or a history cleanup that didn't finish records no marker, so the next
- * deploy runs the up and tries again; once recorded, it costs nothing. The
- * ledger is per machine, so a teammate's first deploy runs the up once too.
+ * is sealed and its history holds no plain copy, once both are done. The k8s
+ * `k3s-infra` and compose-ha `compose-ha-infra` steps skip Pulumi on a warm
+ * deploy when nothing about their servers changed, and the marker is part of
+ * that decision (infraStepSkips): without it the first deploy after an
+ * upgrade would skip the up, so nothing would seal. A seal or a history
+ * cleanup that didn't finish records no marker, so the next deploy runs the
+ * up and tries again; once recorded, it costs nothing. The ledger is per
+ * machine, so a teammate's first deploy runs the up once too.
+ *
+ * Compose single runs no up for the seal: its warm deploy never runs Pulumi
+ * on the server it records (deploy/plan/steps.js provisionServerStep). Its
+ * user data is the shared compose cloud-init, which holds no credential
+ * (tests/unit/iac/state-secret-census.test.ts), so a compose server an older
+ * version made keeps it plain in its state and history, and nothing secret
+ * is in it.
  */
 
 /**

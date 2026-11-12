@@ -16,17 +16,13 @@ import { hasAutomatedDns } from '../../dns-provider.js';
 import { defineStep } from './step.js';
 
 /**
- * Provision a fresh VPS when no server IP is known yet, and run the same up on
- * a known server whose stack the ledger doesn't mark sealed
- * (`ctx.stateSealed`, lib/iac/state-seal.js): the seal runs after an up, so a
- * warm deploy that skipped it would never seal.
+ * Provision a fresh VPS, only when no server IP is known yet. A recorded
+ * server never gets an up, so a deploy never changes it. Nor does the state
+ * seal (lib/iac/state-seal.js) need one there: a compose server's user data
+ * holds no credential (tests/unit/iac/state-secret-census.test.ts).
  */
 export const provisionServerStep = () =>
-  defineStep({
-    name: 'provision-server',
-    effect: 'provisionServer',
-    when: (ctx) => !ctx.serverIp || !ctx.stateSealed,
-  });
+  defineStep({ name: 'provision-server', effect: 'provisionServer', when: (ctx) => !ctx.serverIp });
 
 /** Wait for cloud-init (and, for local/direct modes, dockerd) to be ready. */
 export const setupServerStep = () => defineStep({ name: 'setup-server', effect: 'setupServer' });

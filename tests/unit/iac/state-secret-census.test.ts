@@ -14,9 +14,14 @@ import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
  *
  * A server's user data is the rendered cloud-init. On the k8s programs it holds
  * the provider token and the k3s join token; the compose cloud-init
- * (carbon/cloud-init/docker-ce-setup.yaml) carries no credential. Server user
- * data sits in `ignoreChanges` (create-timeout.js), so wrapping it replaces no
- * existing server; the first test pins that pairing.
+ * (carbon/cloud-init/docker-ce-setup.yaml) carries no credential, and a test
+ * below holds every compose program to that. A single-server compose deploy
+ * never runs an up on the server it already has (deploy/plan/steps.js
+ * provisionServerStep), so such a server an older version made keeps its
+ * user data plain for good, and that is safe only while it carries no
+ * credential. Server user data sits in `ignoreChanges` (create-timeout.js),
+ * so wrapping it replaces no existing server; the first test pins that
+ * pairing.
  *
  * Same harness as server-create-timeouts-census.test.ts: each provider SDK is a
  * recorder, every program runs, and the arguments of every resource are read
@@ -229,6 +234,28 @@ describe('secrets in Pulumi state (census)', () => {
         decoded.some((u) => u.includes(API_TOKEN)),
         `${file}: provider token`,
       ).toBe(true);
+    },
+  );
+
+  it.each(Object.keys(PROGRAMS).filter((f) => f.endsWith('-compose.js')))(
+    '%s: its user data carries no credential, since a single-server compose deploy never seals the server it has',
+    async (file) => {
+      const { resources } = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length).toBeGreaterThan(0);
+      for (const server of servers) {
+        const input =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES].userDataInput;
+        // Linode carries user data base64-encoded in its metadata.
+        const userData = JSON.stringify(
+          await revealed((server.args as Record<string, unknown>)[input]),
+        ).replace(/"userData":"([A-Za-z0-9+/=]+)"/g, (_m, b64) =>
+          Buffer.from(b64, 'base64').toString('utf8'),
+        );
+        // Positive control: this is the shared compose cloud-init.
+        expect(userData, `${file}: ${server.name}`).toContain('/var/lib/vibecarbon/ready');
+        expect(userData, `${file}: the provider token`).not.toContain(API_TOKEN);
+      }
     },
   );
 

@@ -14,7 +14,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   forgetHostKey,
-  hasPinnedHostKey,
   knownHostsPath,
   knownHostsPathForKey,
   pinHostKey,
@@ -217,7 +216,7 @@ const hasSshKeygen = (() => {
   }
 })();
 
-describe('hasPinnedHostKey and forgetHostKey', () => {
+describe('dropping the keys pinned for an IP (forgetHostKey, and the re-pin)', () => {
   let tmp: string;
   let khPath: string;
 
@@ -231,46 +230,51 @@ describe('hasPinnedHostKey and forgetHostKey', () => {
     cleanupTempDir(tmp);
   });
 
-  it('no file, or no line for the IP: nothing pinned', () => {
-    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
-    writeFileSync(khPath, '198.51.100.7 ssh-ed25519 OTHER\n203.0.113.100 ssh-ed25519 NEAR\n');
-    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
+  const lines = () => readFileSync(khPath, 'utf-8');
+
+  it('a plain line names its IP, alone or among several hosts on one line, and never a longer IP', () => {
+    writeFileSync(
+      khPath,
+      '198.51.100.7,203.0.113.10 ssh-ed25519 KEY\n203.0.113.100 ssh-ed25519 NEAR\n',
+    );
+    forgetHostKey(khPath, '203.0.113.10');
+    expect(lines()).toBe('203.0.113.100 ssh-ed25519 NEAR\n');
   });
 
-  it('a plain line pins its IP, alone or among several hosts on one line', () => {
-    writeFileSync(khPath, '198.51.100.7,203.0.113.10 ssh-ed25519 KEY\n');
-    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(true);
-    expect(hasPinnedHostKey(khPath, '198.51.100.7')).toBe(true);
-  });
-
-  it('a hashed line pins only the IP it was hashed from', () => {
-    writeFileSync(khPath, `${HASHED_10}\n`);
-    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(true);
-    expect(hasPinnedHostKey(khPath, '198.51.100.7')).toBe(false);
-    writeFileSync(khPath, '|1|broken ssh-ed25519 KEY\n');
-    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
+  it('a hashed line names only the IP it was hashed from, and a broken hash names none', () => {
+    writeFileSync(khPath, `${HASHED_10}\n|1|broken ssh-ed25519 KEY\n`);
+    forgetHostKey(khPath, '198.51.100.7');
+    expect(lines()).toBe(`${HASHED_10}\n|1|broken ssh-ed25519 KEY\n`);
+    forgetHostKey(khPath, '203.0.113.10');
+    expect(lines()).toBe('|1|broken ssh-ed25519 KEY\n');
   });
 
   it.runIf(hasSshKeygen)("matches a line this machine's ssh-keygen hashes now", () => {
-    writeFileSync(khPath, '192.0.2.44 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIVEKEY\n');
+    writeFileSync(
+      khPath,
+      '192.0.2.44 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIVEKEY\n198.51.100.7 ssh-ed25519 OTHER\n',
+    );
     execFileSync('ssh-keygen', ['-H', '-f', khPath], { stdio: 'ignore' });
-    expect(readFileSync(khPath, 'utf-8')).toMatch(/^\|1\|/);
-    expect(hasPinnedHostKey(khPath, '192.0.2.44')).toBe(true);
-    expect(hasPinnedHostKey(khPath, '192.0.2.45')).toBe(false);
+    expect(lines()).toMatch(/^\|1\|/);
+    const hashed = lines();
+    forgetHostKey(khPath, '192.0.2.45');
+    expect(lines()).toBe(hashed);
+    forgetHostKey(khPath, '192.0.2.44');
+    expect(lines().trim().split('\n')).toHaveLength(1);
+    expect(lines()).not.toBe(hashed);
   });
 
-  it('forgetHostKey drops every key for the IP, plain or hashed, and keeps the other hosts', () => {
+  it('drops every key for the IP, plain or hashed, and keeps the other hosts', () => {
     writeFileSync(
       khPath,
       `${HASHED_10}\n203.0.113.10 ssh-ed25519 PLAIN\n${HASHED_7}\n198.51.100.7 ssh-ed25519 OTHER\n`,
     );
     forgetHostKey(khPath, '203.0.113.10');
     expect(readFileSync(khPath, 'utf-8')).toBe(`${HASHED_7}\n198.51.100.7 ssh-ed25519 OTHER\n`);
-    expect(hasPinnedHostKey(khPath, '203.0.113.10')).toBe(false);
     expect(statSync(khPath).mode & 0o077).toBe(0);
   });
 
-  it('forgetHostKey leaves a file without that IP, or no file, as it is', () => {
+  it('leaves a file without that IP, or no file, as it is', () => {
     forgetHostKey(khPath, '203.0.113.10');
     expect(existsSync(khPath)).toBe(false);
     writeFileSync(khPath, '198.51.100.7 ssh-ed25519 OTHER\n');

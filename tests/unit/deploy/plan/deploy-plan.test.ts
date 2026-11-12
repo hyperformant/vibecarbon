@@ -73,12 +73,15 @@ describe('planDeploy(compose)', () => {
   it('gates conditional steps with when-predicates and leaves unconditional steps ungated', () => {
     const byName = Object.fromEntries(planDeploy('compose', {}).map((s) => [s.name, s]));
 
-    // provision-server when the server has not been provisioned yet, or its
-    // stack isn't marked sealed (the seal runs after an up)
+    // provision-server only when the server has not been provisioned yet: a
+    // recorded server never gets an up, sealed or not (its user data holds
+    // no credential, so the seal has nothing to protect there)
     expect(typeof byName['provision-server'].when).toBe('function');
-    expect(byName['provision-server'].when({ serverIp: null, stateSealed: true })).toBe(true);
-    expect(byName['provision-server'].when({ serverIp: '1.2.3.4', stateSealed: true })).toBe(false);
-    expect(byName['provision-server'].when({ serverIp: '1.2.3.4', stateSealed: false })).toBe(true);
+    expect(byName['provision-server'].when({ serverIp: null })).toBe(true);
+    expect(byName['provision-server'].when({ serverIp: '1.2.3.4' })).toBe(false);
+    expect(byName['provision-server'].when({ serverIp: '1.2.3.4', stateSealed: false })).toBe(
+      false,
+    );
 
     // transfer-image only for local sideload / direct build modes
     expect(byName['transfer-image'].when({ isComposeLocal: true })).toBe(true);

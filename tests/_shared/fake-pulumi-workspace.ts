@@ -61,7 +61,6 @@ export type StackVerb =
   | 'destroy'
   | 'outputs'
   | 'up'
-  | 'preview'
   | 'cancel'
   | 'removeStack';
 
@@ -169,7 +168,6 @@ const READS: ReadonlySet<StackVerb> = new Set([
   'destroy',
   'outputs',
   'up',
-  'preview',
 ]);
 
 const DEFAULTS: Record<StackVerb, () => unknown> = {
@@ -179,7 +177,6 @@ const DEFAULTS: Record<StackVerb, () => unknown> = {
   destroy: () => ({ summary: { result: 'succeeded', resourceChanges: { delete: 1 } } }),
   outputs: () => ({}),
   up: () => ({ outputs: {}, summary: { result: 'succeeded' } }),
-  preview: () => ({ changeSummary: {}, stdout: '', stderr: '' }),
   cancel: () => undefined,
   removeStack: () => undefined,
 };
@@ -224,7 +221,6 @@ function fakeStack(name: string, envVars: Record<string, string | undefined>) {
     destroy: op('destroy'),
     outputs: op('outputs'),
     up: op('up'),
-    preview: op('preview'),
     cancel: op('cancel'),
     workspace: {
       removeStack: op('removeStack'),

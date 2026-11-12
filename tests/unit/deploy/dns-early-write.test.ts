@@ -289,7 +289,6 @@ describe('compose: the provisioned server is on disk before the early write', ()
     dnsToken: 'tok',
     dnsWarmupPromise: Promise.resolve(),
     state: state(),
-    stateSealed: true,
   });
   const REAL = ['persistProvisionedServer', 'startDnsUpdate', 'updateDns'];
 

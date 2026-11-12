@@ -41,7 +41,6 @@ import {
   parseCreateTimeouts,
   SERVER_RESOURCE_TYPES,
 } from './create-timeout.js';
-import { LiveChangeRefusedError, liveChangeOf } from './live-change-guard.js';
 import { requirePulumiProject } from './pulumi-project.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
@@ -1111,9 +1110,6 @@ export async function dropRetiredStackResources(stack, providerId, { recordAddre
  * optional `onOutput` sink so callers can forward progress to a spinner.
  * `options.recordRetiredAddresses` records the addresses the retired-resource
  * surgery takes out of the stack (dropRetiredStackResources).
- * `options.refuseLiveChanges` previews after the refresh and throws
- * LiveChangeRefusedError, before the up, when the plan would change the
- * server or replace or delete anything (refuseLiveChanges).
  */
 async function upStackImpl(stackName, program, options = {}) {
   // `options.perfStem` is the caller's own perf timer name (e.g.
@@ -1122,39 +1118,7 @@ async function upStackImpl(stackName, program, options = {}) {
   const prepare = options.perfStem ? perfTimer(`${options.perfStem}.prepare`) : null;
   const stack = await prepareStackForUp(stackName, program, options);
   prepare?.end();
-  if (options.refuseLiveChanges) await refuseLiveChanges(stack, options);
   return runUp(stack, options);
-}
-
-/**
- * Preview the up and stop before it when its plan would change the server,
- * or replace or delete any resource (live-change-guard.js says who asks and
- * why). Runs after the refresh, so it plans what the up itself would.
- *
- * @param {import('@pulumi/pulumi/automation').Stack} stack
- * @param {{ onOutput?: (out: string) => void }} options
- * @throws {LiveChangeRefusedError}
- */
-async function refuseLiveChanges(stack, options) {
-  let changes = [];
-  recordStateOp('preview');
-  await withStateBackendRetry(
-    () =>
-      runPastStaleLock(stack, () => {
-        // A retried preview reports its whole plan again.
-        changes = [];
-        return stack.preview({
-          onOutput: options.onOutput,
-          color: 'never',
-          onEvent: (event) => {
-            const change = liveChangeOf(event, SERVER_RESOURCE_TYPES);
-            if (change) changes.push(change);
-          },
-        });
-      }),
-    'pre-up preview',
-  );
-  if (changes.length > 0) throw new LiveChangeRefusedError(stack.name, changes);
 }
 
 /**

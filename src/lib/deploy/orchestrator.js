@@ -21,7 +21,6 @@ import { loadProjectConfig, registerProject, updateProjectConfig } from '../conf
 import { writeLogDetail } from '../deploy-logger.js';
 import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
-import { stateSealRecorded } from '../iac/state-seal.js';
 import { localKubeconfigPath } from '../kubeconfig.js';
 import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
@@ -2333,12 +2332,9 @@ export async function executeDeployment(args, gatheredConfig) {
         ...deployCtx,
         sshKeyPath,
         // Seed the mutable server identity from any prior deploy so the warm
-        // path (`when: !ctx.serverIp || !ctx.stateSealed`) skips provisioning.
-        // provisionServer sets these on a fresh deploy.
+        // path (`when: !ctx.serverIp`) skips provisioning. provisionServer sets
+        // these on a fresh deploy.
         serverIp: composeServer?.ip || null,
-        // Whether the ledger marks the stack sealed; until it does, the warm
-        // path runs the up once more for the seal (lib/iac/state-seal.js).
-        stateSealed: stateSealRecorded(state, environment),
         providerServerId: composeServer?.id || null,
         providerServerName: composeServer?.providerServerName || null,
         providerFirewallId: composeServer?.firewallId || null,

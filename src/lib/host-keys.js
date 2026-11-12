@@ -195,16 +195,6 @@ const knownHostsLines = (khPath) =>
     : [];
 
 /**
- * Whether `khPath` pins a host key for `ip`, hashed or not.
- * @param {string} khPath
- * @param {string} ip
- * @returns {boolean}
- */
-export function hasPinnedHostKey(khPath, ip) {
-  return knownHostsLines(khPath).some((line) => hostLineMatchesIp(line, ip));
-}
-
-/**
  * Drop every key `khPath` pins for `ip`, keeping the other hosts' (HA keeps
  * two servers in one file). For a new machine at a pinned IP: the old key
  * can't match it, and accept-new would refuse it rather than trust it.

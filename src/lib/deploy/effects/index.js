@@ -15,15 +15,8 @@
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { backupStorageConfig } from '../../backups-bucket.js';
-import { progressLog, spinner } from '../../cli/progress.js';
-import {
-  forgetHostKey,
-  hasPinnedHostKey,
-  knownHostsPathForKey,
-  seedKnownHosts,
-} from '../../host-keys.js';
-import { describeLiveChanges, LiveChangeRefusedError } from '../../iac/live-change-guard.js';
-import { forgetStateSeal } from '../../iac/state-seal.js';
+import { spinner } from '../../cli/progress.js';
+import { forgetHostKey, knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
@@ -39,9 +32,10 @@ import { K8S_EFFECTS } from './k8s.js';
 import { K8S_HA_EFFECTS } from './k8s-ha.js';
 
 /**
- * The ledger steps that set up the server itself. Keyed by its IP, so a server
- * an up put at the IP the env already had would skip them: a provisioning up
- * forgets them, and they run on whatever server the up left.
+ * The ledger steps that set up the server itself. Keyed by its IP, so a new
+ * server at an IP an earlier one had (a recycled address, in a ledger that
+ * outlived its env record) would skip them: a provision forgets them, and
+ * they run on the server it made.
  */
 const SERVER_SETUP_STEPS = Object.freeze([
   'compose-setup-server',
@@ -54,39 +48,15 @@ const SERVER_SETUP_STEPS = Object.freeze([
  * Provision one VPS via Pulumi, wait for SSH, and seed the trusted host key.
  * Sets ctx.serverIp / providerServerId / providerServerName / providerFirewallId
  * so the downstream effects (and the orchestrator's return value) can read
- * them. Gated by `when: !ctx.serverIp || !ctx.stateSealed`: a warm redeploy
- * skips it once its stack is sealed, and before that runs it once for the
- * seal (lib/iac/state-seal.js).
+ * them. Gated by `when: !ctx.serverIp`: a warm redeploy skips it, so no
+ * deploy runs an up on a server the env records.
  *
- * Every run takes the whole path, a known server included: an up can put a
- * new server at the IP the env records (Scaleway's flexible IP outlives its
- * server, Hetzner reissues addresses), so the same IP proves nothing. The
- * SSH wait, the record persist-provisioned-server writes and the server's
- * own setup steps all run again. A run that fails after its up forgets the
- * seal marker that up recorded, so the next deploy provisions again instead
- * of skipping to a server it never reached: a throw, an SSH wait that ran
- * out (waitForSSH answers false) and a host-key scan that found nothing
- * (seedKnownHosts answers false) all count.
- *
- * The host key is re-pinned only for a new machine: the up's server id is
- * the provider's word for which machine answers at the IP, the IP isn't. The
- * same id as the env records keeps its pinned key, and SSH checks against
- * it, so a stack that runs this every deploy (one that never seals) never
- * re-pins by keyscan. A new id drops the old key before the wait (accept-new
- * would refuse the new machine, not trust it) and scans the new one after, as
- * a fresh provision does. A record with no id names no machine to compare:
- * its pinned key stays, so SSH still checks the server against it, and the
- * id this up reports goes on the record (persist-provisioned-server), so a
- * later replacement shows as a new id. No key pinned for the IP is scanned.
- *
- * An env that records a server (the seal's up, since a warm deploy that is
- * sealed skips this step) previews first: a plan that changes anything on
- * that server (an update, a replace, a delete, or a new one in its place), or
- * replaces or deletes any other resource, never runs
- * (iac/live-change-guard.js). The deploy then warns with what the plan
- * wanted to change, leaves the seal marker unset and goes on with the server
- * as it is, as warm deploys before the seal did: nothing here re-runs the
- * server's setup.
+ * Every run makes a new machine. Its IP may be one an earlier server had
+ * (Hetzner reissues addresses), and a known_hosts file can outlive the record
+ * that named that server (a teammate destroyed the env from their machine, or
+ * a destroy stopped before its local cleanup). So any key pinned for the IP
+ * goes before the SSH wait (accept-new would refuse the new machine on the
+ * old key, not trust it), and the new key is pinned after.
  */
 async function provisionServer(ctx) {
   const {
@@ -125,42 +95,19 @@ async function provisionServer(ctx) {
   const s = spinner();
   s.start(`Provisioning VPS in ${region}...`);
   const khPath = knownHostsPathForKey(sshKeyPath);
-  // The server the env records, if any: this run is then the seal's up on it.
-  const recordedServer = ctx.serverIp
-    ? {
-        ip: ctx.serverIp,
-        name: ctx.providerServerName || `${projectConfig.projectName}-${environment}`,
-      }
-    : null;
-  let reseed = true;
   try {
-    let result;
-    try {
-      result = await perfAsync('deploy.iac.upStack', () =>
-        upStack(environment, program, {
-          perfStem: 'deploy.iac.upStack',
-          provider: providerIdFor(envConfig),
-          providerToken: apiToken,
-          s3Config,
-          projectName: projectConfig.projectName,
-          // Where the seal records its marker, which this step's gate reads.
-          ledger: ctx.state,
-          // Recover stale-EMPTY outputs reads in place (read-only poll inside
-          // upStack) — the hard gate below stays as the loud last resort.
-          requiredOutputs: ['serverIp'],
-          // Never change the live server the env records, or replace or
-          // delete anything around it.
-          ...(recordedServer && { refuseLiveChanges: true }),
-        }),
-      );
-    } catch (err) {
-      if (!(recordedServer && err instanceof LiveChangeRefusedError)) throw err;
-      s.stop(`VPS kept as it is: ${recordedServer.ip} (${region})`);
-      progressLog(`[pulumi] ${err.message}`);
-      forgetStateSeal(ctx.state, environment);
-      p.log.warn(sealSkippedWarning(environment, recordedServer, err));
-      return;
-    }
+    const result = await perfAsync('deploy.iac.upStack', () =>
+      upStack(environment, program, {
+        perfStem: 'deploy.iac.upStack',
+        provider: providerIdFor(envConfig),
+        providerToken: apiToken,
+        s3Config,
+        projectName: projectConfig.projectName,
+        // Recover stale-EMPTY outputs reads in place (read-only poll inside
+        // upStack) — the hard gate below stays as the loud last resort.
+        requiredOutputs: ['serverIp'],
+      }),
+    );
     // Hard gate: a stale S3 state read after a throttled stack-create can
     // return a "successful" up with EMPTY outputs (same family as the
     // stale-CHECKPOINT/stale-stack-select fixes in lib/iac). Without this,
@@ -177,20 +124,11 @@ async function provisionServer(ctx) {
       );
     }
     ctx.serverIp = result.outputs.serverIp;
-    // This deploy created (or converged) the server: persist-provisioned-server
-    // records it before anything points DNS at it.
+    // This deploy created the server: persist-provisioned-server records it
+    // before anything points DNS at it.
     ctx.serverProvisioned = true;
     for (const step of SERVER_SETUP_STEPS) ctx.state.invalidateStep(step);
-    const recordedServerId = ctx.providerServerId;
     ctx.providerServerId = result.outputs.serverId || null;
-    // Only two ids that differ say the machine changed; a record without one
-    // keeps its pin, and gets this run's id.
-    const newMachine =
-      recordedServerId != null &&
-      ctx.providerServerId != null &&
-      String(recordedServerId) !== String(ctx.providerServerId);
-    if (newMachine) forgetHostKey(khPath, ctx.serverIp);
-    reseed = newMachine || !hasPinnedHostKey(khPath, ctx.serverIp);
     ctx.providerServerName = `${projectConfig.projectName}-${environment}`;
     // Both compose programs export firewallId; nothing used to read it, so
     // `vibecarbon scale` built its blue-green replacement with `firewalls: []`
@@ -198,48 +136,22 @@ async function provisionServer(ctx) {
     // (firewalled) one was deleted. Persisting it here is what makes
     // scale-servers able to re-attach — see buildReplacementServerArgs.
     ctx.providerFirewallId = result.outputs.firewallId || null;
+    // A new machine: a key known_hosts pins for its IP belongs to an earlier one.
+    forgetHostKey(khPath, ctx.serverIp);
     const { waitForSSH } = await import('../compose/index.js');
     s.message(`Waiting for SSH on ${ctx.serverIp}...`);
-    const reached = await perfAsync('deploy.iac.waitForSSH', () =>
-      waitForSSH(ctx.serverIp, sshKeyPath, 30),
-    );
-    if (!reached) forgetStateSeal(ctx.state, environment);
+    await perfAsync('deploy.iac.waitForSSH', () => waitForSSH(ctx.serverIp, sshKeyPath, 30));
   } catch (err) {
     s.stop('Provisioning failed', 1);
-    forgetStateSeal(ctx.state, environment);
     throw err;
   }
   s.stop(`VPS provisioned: ${ctx.serverIp} (${region})`);
-  // Trusted host-key seed for a new machine: captures its host key via
-  // ssh-keyscan into the per-env known_hosts so the pinned SSH opts
-  // (accept-new) become a strict pin. Re-seeding cleanly re-pins a Hetzner-
-  // recycled IP (destroy → redeploy). Best-effort: falls back to accept-new.
-  if (reseed && !(await seedKnownHosts(khPath, ctx.serverIp))) {
-    forgetStateSeal(ctx.state, environment);
-  }
-}
-
-/**
- * Why the seal's up was skipped, naming each change its plan wanted: that is
- * what differs between the live resources and what this version deploys.
- *
- * @param {string} environment
- * @param {{ ip: string, name: string }} server
- * @param {LiveChangeRefusedError} refusal
- * @returns {string}
- */
-function sealSkippedWarning(environment, server, refusal) {
-  return (
-    `Your ${environment} server ${server.name} (${server.ip}) was left as it is. ` +
-    'This version runs one Pulumi up on each existing server to encrypt the values its ' +
-    "stack state keeps in plain text, and vibecarbon won't change your live server " +
-    'during that one-time step. The plan for it would make these changes: ' +
-    `${describeLiveChanges(refusal.changes).join(', ')}. That is what differs between ` +
-    "your live resources and what this version would deploy, so the up didn't run, and " +
-    'the deploy goes on without it. Those values stay unencrypted until a plan leaves the ' +
-    'server as it is and replaces or deletes nothing. The next deploy checks again, and ' +
-    "the deploy log lists the plan's steps."
-  );
+  // Trusted host-key seed on fresh provision — captures the new VPS's host
+  // key via ssh-keyscan into the per-env known_hosts so the pinned SSH opts
+  // (accept-new) become a strict pin. With the stale key dropped above, a
+  // Hetzner-recycled IP (destroy → redeploy) is pinned to the new machine.
+  // Best-effort: falls back to accept-new.
+  await seedKnownHosts(khPath, ctx.serverIp);
 }
 
 /**
