@@ -20,8 +20,9 @@ const s3 = {
     objectsRemoved: 0,
     warnings: [],
   })),
-  // Every region is asked (S3CompatibleProvider.locateBucket).
+  // Every region these Hetzner keys address is asked (S3CompatibleProvider.locateBucket).
   locateBucket: vi.fn(async (_b: string): Promise<string | null> => null),
+  addressableRegions: vi.fn(() => ['fsn1', 'nbg1', 'hel1']),
   // The same fake at another region; the region is logged with the others.
   forRegion: vi.fn((region: string) => {
     storageClients.push(region);
@@ -368,6 +369,51 @@ describe('handleBackupBucket with a backups bucket per storage region', () => {
     expect(twoWays.results.backupsPurged).toBeUndefined();
     expect(twoWays.results.leaks.entries[0]?.reason).toContain(
       'the store is answering two ways, so it was left in place',
+    );
+  });
+
+  it('N3: a store answering two ways points to the console, never to a destroy rerun that cannot run', async () => {
+    // A bucket-purge leak moves the environment to destroyedEnvironments, so
+    // "destroy staging" afterwards finds no environment.
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('fsn1');
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    const [entry] = results.leaks.entries;
+    expect(entry.reason).not.toMatch(/destroy again/i);
+    expect(entry.reason).toContain(
+      'left in place; look at it in the Object Storage console before deleting anything by hand',
+    );
+    // prod keeps backups there, so the hint removes this folder only.
+    expect(entry.hint).toBe(
+      `Delete backups/myapp/staging/ in ${BACKUPS} via the Hetzner Cloud Object Storage console, and leave the bucket: prod keeps backups there.`,
+    );
+  });
+
+  it('N2: a purge that fails where the bucket was found is reported in that region, not the recorded one', async () => {
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    s3.deletePrefix.mockRejectedValueOnce(
+      new Error(`1 object(s) under backups/myapp/staging/ in ${BACKUPS} were not deleted`),
+    );
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(storageClients).toEqual(['fsn1', 'nbg1']);
+    expect(results.backupsPurged).toBeUndefined();
+    expect(results.leaks.entries[0]?.resource).toBe(`${BACKUPS} (nbg1)`);
+  });
+
+  it('N2: a search that cannot answer is reported at the recorded region, the only one known', async () => {
+    s3.deletePrefix.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockRejectedValueOnce(new Error('hel1 answered "Forbidden (HTTP 403)"'));
+    const { results } = await destroy(project(['prod']), 'prod', { purgeBackups: true });
+    const [entry] = results.leaks.entries;
+    expect(entry.resource).toBe(`${BACKUPS} (fsn1)`);
+    // The last holder: emptying and deleting the bucket is the right step.
+    expect(entry.hint).toBe(
+      'Empty it via the Hetzner Cloud Object Storage console, then DeleteBucket; it keeps billing until removed.',
     );
   });
 

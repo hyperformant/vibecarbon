@@ -27,8 +27,9 @@ const s3 = {
   })),
   getBucketCorsOrigins: vi.fn(async (_b: string) => [] as string[]),
   setBucketCors: vi.fn(async (_b: string, _o: string[]) => {}),
-  // Every region is asked (S3CompatibleProvider.locateBucket).
+  // Every region these Hetzner keys address is asked (S3CompatibleProvider.locateBucket).
   locateBucket: vi.fn(async (_b: string): Promise<string | null> => null),
+  addressableRegions: vi.fn(() => ['fsn1', 'nbg1', 'hel1']),
   forRegion: vi.fn((_region: string) => s3),
 };
 const noSuchBucket = () =>
@@ -353,6 +354,32 @@ describe('-purge finds an app bucket its record puts in the wrong region (the ol
     expect(results.appBucketPurged).toBeUndefined();
     const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
     expect(ledger.entries[0]?.reason).toContain(`hel1 answered "AccessDenied"`);
+    expect(ledger.entries[0]?.resource).toBe(`${STAGING_BUCKET} (fsn1)`);
+  });
+
+  it('N2: a delete that fails where the bucket was found is reported in that region', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('nbg1');
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(new Error('Failed to abort multipart uploads'));
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    expect(results.appBucketPurged).toBeUndefined();
+    const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
+    expect(ledger.entries[0]?.resource).toBe(`${STAGING_BUCKET} (nbg1)`);
+  });
+
+  it('N3: a store answering two ways points to the console, never to a destroy rerun', async () => {
+    s3.emptyAndDeleteBucket.mockRejectedValueOnce(noSuchBucket());
+    s3.locateBucket.mockResolvedValueOnce('fsn1');
+    const { results } = await destroy(project(['prod', 'staging']), 'staging', {
+      purgeBackups: true,
+    });
+    const ledger = results.leaks as ReturnType<typeof createLeakLedger>;
+    expect(ledger.entries[0]?.reason).not.toMatch(/destroy again/i);
+    expect(ledger.entries[0]?.reason).toContain(
+      'look at it in the Object Storage console before deleting anything by hand',
+    );
   });
 });
 

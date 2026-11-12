@@ -39,6 +39,14 @@ export class HetznerS3Provider extends S3CompatibleProvider {
   static appKeyScoping = 'paste-fence';
 
   /**
+   * One key pair reaches every bucket of its project in every location:
+   * "By default, you can use each access key & secret key pair to access
+   * every Bucket within the same project" (docs.hetzner.com, Object Storage
+   * FAQ, buckets and objects); the location only picks the endpoint.
+   */
+  static keyRegions = 'all';
+
+  /**
    * The project user every key here belongs to (`p…`), from ListBuckets'
    * `Owner.ID`. The fence policy's principals are `<ownerId>:<accessKeyId>`.
    * @returns {Promise<string>}

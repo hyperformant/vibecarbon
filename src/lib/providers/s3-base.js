@@ -177,6 +177,14 @@ const bareListBuckets = (next, context) => (args) => {
  * plan R2). The base declares none on purpose, so a provider that forgets it
  * fails tests/unit/providers/app-key-scoping-census.test.ts instead of
  * inheriting a silent default, the same pattern as `bucketQuietMs`.
+ *
+ * And `static keyRegions` ('all' | 'own'): which of the class's ENDPOINTS
+ * the operator's storage keys can address. 'all' when one key pair reaches
+ * the account's or project's buckets in every region; 'own' when a key
+ * works only on the one cluster it was made for, so any other cluster
+ * answers an access error whatever the bucket. locateBucket asks only these
+ * regions (addressableRegions). The base declares none, and
+ * tests/unit/providers/key-regions-census.test.ts fails a class that forgets.
  */
 export class S3CompatibleProvider {
   /**
@@ -522,19 +530,42 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * The regions these keys can address (static keyRegions): every region of
+   * ENDPOINTS for keys that reach the whole account or project, only this
+   * store's own region for keys bound to one cluster. A class that declares
+   * neither throws, so a new provider never searches by accident.
+   * @returns {string[]}
+   */
+  addressableRegions() {
+    const scope = this.constructor.keyRegions;
+    if (scope === 'all') return Object.keys(this.constructor.ENDPOINTS);
+    if (scope === 'own') return [this.region];
+    throw new Error(
+      `${this.constructor.name} declares no keyRegions, so the regions its keys can address are unknown`,
+    );
+  }
+
+  /**
    * Strict twin of findBucketRegion for decisions that treat "missing" as
-   * proof: asks every region of this store whether it holds the bucket, and
-   * returns null ONLY when every region answered not-found. findBucketRegion
-   * swallows every per-region failure, so an unreachable store reads as
-   * "nowhere"; this throws instead, so a caller never mistakes silence for
-   * absence. That error names the bucket and the region that answered, with
-   * the answer in plain words (describeS3Error), never the SDK error alone;
-   * `region`, `bucket` and `cause` are on it for a caller's own message.
+   * proof: asks every region these keys can address (addressableRegions)
+   * whether it holds the bucket, and returns null ONLY when each answered
+   * not-found. A region the keys cannot address is never asked: it answers
+   * an access error for any bucket, which would read as "cannot tell" and
+   * stop a purge of a bucket that does not exist. So a store whose keys work
+   * on one cluster (Vultr, Linode) asks only that cluster, and its not-found
+   * means gone: a bucket there is the only one these keys could reach.
+   * findBucketRegion swallows every per-region failure, so an unreachable
+   * store reads as "nowhere"; this throws instead, so a caller never
+   * mistakes silence for absence. That error names the bucket and the region
+   * that answered, with the answer in plain words (describeS3Error), never
+   * the SDK error alone; `region`, `bucket` and `cause` are on it for a
+   * caller's own message.
    * @param {string} bucketName
    * @returns {Promise<string|null>} the region holding the bucket, or null
    */
   async locateBucket(bucketName) {
-    for (const [region, endpoint] of Object.entries(this.constructor.ENDPOINTS)) {
+    for (const region of this.addressableRegions()) {
+      const endpoint = this.constructor.ENDPOINTS[region];
       const client = new S3Client({
         region: this.constructor.S3_SIGNING_REGION ?? region,
         endpoint,

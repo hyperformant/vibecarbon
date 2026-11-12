@@ -1217,36 +1217,44 @@ function isNoSuchBucket(err) {
 
 /**
  * Run `op` on a bucket at its recorded region, and when that region says the
- * bucket does not exist, look for it in every region before concluding
- * anything (locateBucket). A record can name the wrong region: an environment
- * that hit the old bug and was not deployed since, or a deploy that died
- * before its final save. A store asked in the wrong region answers "no such
- * bucket" for a bucket full of data, so that answer alone never means gone.
+ * bucket does not exist, look for it in every region these keys can address
+ * before concluding anything (locateBucket; keys made for one cluster, as on
+ * Vultr and Linode, address only that one). A record can name the wrong
+ * region: an environment that hit the old bug and was not deployed since, or
+ * a deploy that died before its final save. A store asked in the wrong region
+ * answers "no such bucket" for a bucket full of data, so that answer alone
+ * never means gone where the keys reach other regions.
  *
- * Returns where `op` ran, or `{ gone: true }` only when every region said not
- * found. A region that answers anything else throws (locateBucket names the
+ * Returns where `op` ran, or `{ gone: true, searched }` only when every
+ * region asked said not found (`searched`, how many were asked, words the
+ * line). A region that answers anything else throws (locateBucket names the
  * bucket and the region), and so does a store that says NoSuchBucket where the
  * search then finds the bucket: the caller keeps it and records why.
+ * `ran.region` is where `op` is running, set before each run starts, so a
+ * caller whose op fails or times out at a found region reports that region.
  * @template T
- * @param {{ forRegion: (region: string) => any, locateBucket: (bucket: string) => Promise<string|null> }} store
+ * @param {{ forRegion: (region: string) => any, locateBucket: (bucket: string) => Promise<string|null>, addressableRegions: () => string[] }} store
  *   the client at `region`
  * @param {string} bucket
  * @param {string} region - where the record says the bucket is
  * @param {(store: any) => Promise<T>} op
- * @returns {Promise<{ result: T, region: string, gone?: false } | { gone: true }>}
+ * @param {{ region?: string }} [ran] - written: where `op` runs
+ * @returns {Promise<{ result: T, region: string, gone?: false } | { gone: true, searched: number }>}
  */
-async function atBucketRegion(store, bucket, region, op) {
+async function atBucketRegion(store, bucket, region, op, ran = {}) {
+  ran.region = region;
   try {
     return { result: await op(store), region };
   } catch (err) {
     if (!isNoSuchBucket(err)) throw err;
     const found = await store.locateBucket(bucket);
-    if (found === null) return { gone: true };
+    if (found === null) return { gone: true, searched: store.addressableRegions().length };
     if (found === region) {
       throw new Error(
-        `${bucket} answered NoSuchBucket in ${region}, but a HeadBucket there finds it: the store is answering two ways, so it was left in place. Run the destroy again in a few minutes.`,
+        `${bucket} answered NoSuchBucket in ${region}, but a HeadBucket there finds it: the store is answering two ways, so it was left in place; look at it in the Object Storage console before deleting anything by hand`,
       );
     }
+    ran.region = found;
     return { result: await op(store.forRegion(found)), region: found };
   }
 }
@@ -1254,6 +1262,16 @@ async function atBucketRegion(store, bucket, region, op) {
 /** ` in fsn1, not nbg1 as its record said` when the bucket was found elsewhere. */
 const foundElsewhere = (ran, recorded) =>
   ran && ran !== recorded ? ` in ${ran}, not ${recorded} as its record said` : '';
+
+/**
+ * The line for a bucket that no region these keys reach has. "In any region"
+ * only when more than one was asked: keys for one cluster asked just that
+ * one, and the line reads as it always did there.
+ * @param {string} what - "Backup bucket" or "S3 bucket"
+ * @param {number} searched - how many regions were asked
+ */
+const notFoundLine = (what, searched) =>
+  `${what} not found${searched > 1 ? ' in any region' : ''} (already deleted or never created)`;
 
 /**
  * Handle the backup S3 bucket at the end of destroy. Default behavior is to
@@ -1299,6 +1317,9 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
     return { purged: false };
   }
   const region = target.region;
+  // Where the purge is running: the recorded region, or where the bucket was
+  // found. A failure is reported there, the region whose console holds it.
+  const ran = { region };
   spinner.start(`Purging backup bucket: ${bucketName}`);
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
@@ -1342,7 +1363,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
     // Where the record says, else wherever the bucket really is: a wrong
     // region on record must never read as "purged" while the folder stays.
     const outcome = await Promise.race([
-      atBucketRegion(s3Provider, bucketName, region, purgeAt),
+      atBucketRegion(s3Provider, bucketName, region, purgeAt, ran),
       new Promise((_, reject) => {
         // Detach the timer from the event loop so a fast purge win doesn't
         // leave it holding the process open — handle-probe evidence
@@ -1362,7 +1383,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       }),
     ]);
     if (outcome.gone) {
-      spinner.stop('Backup bucket not found in any region (already deleted or never created)');
+      spinner.stop(notFoundLine('Backup bucket', outcome.searched));
       return { purged: true };
     }
     const { result } = outcome;
@@ -1383,9 +1404,13 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
     spinner.stop(`Backup bucket purge failed: ${error.message}`);
     leaks.leak({
       resourceClass: 'bucket',
-      resource: describeResource({ name: bucketName, region }),
+      resource: describeResource({ name: bucketName, region: ran.region }),
       reason: `purge failed: ${error.message}`,
-      hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,
+      // Only this environment's folder is ours to remove when another
+      // environment keeps backups in the bucket.
+      hint: deleteBucket
+        ? `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`
+        : `Delete ${envBackupPrefix} in ${bucketName} via the ${Provider.NAME} Object Storage console, and leave the bucket: ${holders.join(', ')} ${holders.length === 1 ? 'keeps' : 'keep'} backups there.`,
     });
     return { purged: false };
   }
@@ -1728,6 +1753,8 @@ async function deleteAppBucketEffect(ctx) {
   const s3Region = envConfig.s3?.region || 'fsn1';
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
+  // Where the delete is running: a failure is reported in that region.
+  const ran = { region: s3Region };
   spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
@@ -1744,11 +1771,15 @@ async function deleteAppBucketEffect(ctx) {
       // Where the record says, else wherever the bucket really is: an
       // environment that hit the old bug records its uploads under the wrong
       // region until its next deploy, and its uploads are still there.
-      const outcome = await atBucketRegion(s3Provider, s3BucketName, s3Region, (store) =>
-        store.emptyAndDeleteBucket(s3BucketName),
+      const outcome = await atBucketRegion(
+        s3Provider,
+        s3BucketName,
+        s3Region,
+        (store) => store.emptyAndDeleteBucket(s3BucketName),
+        ran,
       );
       if (outcome.gone) {
-        spinner.stop('S3 bucket not found in any region (already deleted or never created)');
+        spinner.stop(notFoundLine('S3 bucket', outcome.searched));
         return;
       }
       const result = outcome.result;
@@ -1786,7 +1817,7 @@ async function deleteAppBucketEffect(ctx) {
     spinner.stop(`S3 deletion failed: ${error.message}`);
     results.leaks.leak({
       resourceClass: 'bucket',
-      resource: describeResource({ name: s3BucketName, region: s3Region }),
+      resource: describeResource({ name: s3BucketName, region: ran.region }),
       reason: `not deleted: ${error.message}`,
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });

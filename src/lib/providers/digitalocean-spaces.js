@@ -33,6 +33,14 @@ export class DigitalOceanSpacesProvider extends S3CompatibleProvider {
   static appKeyScoping = 'mint';
 
   /**
+   * The operator's key is a Full Access Spaces key (guided setup requires
+   * it), which "allows all supported S3 APIs on all buckets" of the team,
+   * with no region in the grant (docs.digitalocean.com, Spaces, manage
+   * access); every regional endpoint answers for the same buckets.
+   */
+  static keyRegions = 'all';
+
+  /**
    * Mint the env's app key: a `readwrite` grant on `bucket` only. Never
    * `fullaccess`, the grant that reaches every bucket. One POST, never
    * retried (a retried create can mint twice): a failure throws one line that

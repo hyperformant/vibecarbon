@@ -1203,8 +1203,10 @@ export async function removeStackState(stackName, options = {}) {
  * The error text alone is not enough: region-scoped stores answer a bucket
  * that lives in a different region with the same 404, so a wrong endpoint
  * would read as "absent" and hide real state. locateBucket asks every
- * region with the same keys and only returns null when each one answered
- * "not found"; any other answer (or no answer) keeps the original error.
+ * region these keys can address (all of them on Hetzner, DigitalOcean and
+ * Scaleway; the one cluster Vultr and Linode keys work on) and only returns
+ * null when each one answered "not found"; any other answer (or no answer)
+ * keeps the original error.
  * @param {Error} err
  * @param {{provider?: string, s3Config?: {stateBucket?: string, bucket?: string, accessKey?: string, secretKey?: string, stateBucketRegion?: string, region?: string}}} options
  * @returns {Promise<boolean>}
