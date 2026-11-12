@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
  * Pulumi state keys are scoped per PROJECT: `.pulumi/stacks/<project>/<stack>.json`.
@@ -61,6 +62,9 @@ const healthyStack = (name: string) => ({
     summary: { result: 'succeeded' },
   }),
 });
+
+// Each test opens stacks through its own module copies (resetModules below).
+afterEach(removeCurrentWorkspaceDirs);
 
 beforeEach(() => {
   vi.resetModules();

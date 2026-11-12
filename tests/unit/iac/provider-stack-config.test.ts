@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listProviders } from '../../../src/lib/providers/index.js';
+import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
  * A provider's own Pulumi settings reach every stack the CLI opens.
@@ -46,6 +47,9 @@ const open = async (provider: string | undefined, stackName = 'production') => {
   });
   return selectStackMock.mock.calls[0]?.[1] ?? createStackMock.mock.calls[0]?.[1];
 };
+
+// Each test opens stacks through its own module copies (resetModules below).
+afterEach(removeCurrentWorkspaceDirs);
 
 beforeEach(() => {
   vi.resetModules();

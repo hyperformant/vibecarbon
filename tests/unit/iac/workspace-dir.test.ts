@@ -8,7 +8,7 @@
  * it exists while the workspace runs. The exit hook in a real process is
  * tests/integration/iac/workspace-dir-exit.test.ts.
  */
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -58,6 +58,7 @@ const { getOrCreateStack, listStacks, openStateBackend } = await import(
 const { __workspaceDirsForTests, makeWorkspaceDir, removeWorkspaceDirs } = await import(
   '../../../src/lib/iac/workspace-dir.js'
 );
+const { sweepTempDirs } = await import('../../../src/lib/temp-dir.js');
 
 const BASE = {
   projectName: 'proj',
@@ -74,8 +75,6 @@ const BASE = {
   decrypts: false,
 };
 
-const exitHooks = () => process.listeners('exit').filter((l) => l === removeWorkspaceDirs);
-
 beforeEach(() => {
   opened.length = 0;
   behaviour.select = 'ok';
@@ -87,13 +86,14 @@ afterEach(() => {
 });
 
 describe('makeWorkspaceDir and removeWorkspaceDirs', () => {
-  it('a new empty automation-* directory under the OS temp dir each time, all removed together', () => {
+  it('a new empty private vibecarbon-pulumi-* directory under the OS temp dir each time, all removed together', () => {
     const a = makeWorkspaceDir();
     const b = makeWorkspaceDir();
     expect(a).not.toBe(b);
     for (const dir of [a, b]) {
       expect(dirname(dir)).toBe(tmpdir());
-      expect(basename(dir)).toMatch(/^automation-/);
+      expect(basename(dir)).toMatch(/^vibecarbon-pulumi-/);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
       expect(readdirSync(dir)).toEqual([]);
     }
     // What a workspace leaves in one: its project file and the stack's salt.
@@ -108,16 +108,17 @@ describe('makeWorkspaceDir and removeWorkspaceDirs', () => {
     expect(__workspaceDirsForTests()).toEqual([]);
   });
 
-  it('one exit hook however many directories, and none once they are removed', () => {
-    expect(exitHooks()).toHaveLength(0);
-    makeWorkspaceDir();
-    makeWorkspaceDir();
-    expect(exitHooks()).toHaveLength(1);
-    removeWorkspaceDirs();
-    expect(exitHooks()).toHaveLength(0);
-    // A later open in the same process hooks again.
-    makeWorkspaceDir();
-    expect(exitHooks()).toHaveLength(1);
+  it("are on temp-dir.js's exit sweep, which removes them at process exit", () => {
+    const a = makeWorkspaceDir();
+    writeFileSync(join(a, 'Pulumi.yaml'), 'name: proj\n');
+    const b = makeWorkspaceDir();
+    // The 'exit' listener runs exactly this.
+    sweepTempDirs({ report: () => {} });
+    expect(existsSync(a)).toBe(false);
+    expect(existsSync(b)).toBe(false);
+    // Already gone: removing them again is a no-op.
+    expect(() => removeWorkspaceDirs()).not.toThrow();
+    expect(__workspaceDirsForTests()).toEqual([]);
   });
 });
 

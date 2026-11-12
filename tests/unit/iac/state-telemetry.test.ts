@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
  * The telemetry exists so a failure log can answer "were we over the store's
@@ -68,6 +69,8 @@ beforeEach(() => {
 afterEach(async () => {
   const { resetStateTelemetryForTest } = await import('../../../src/lib/iac/state-telemetry.js');
   resetStateTelemetryForTest();
+  // Each test opens stacks through its own module copies (resetModules above).
+  await removeCurrentWorkspaceDirs();
 });
 
 describe('state telemetry — wiring through upStack', () => {

@@ -6,12 +6,13 @@
  * making its own `automation-*` one.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { statePassphraseFingerprint } from '../../../src/lib/state-passphrase.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
 const WORKSPACE_DIR = pathToFileURL(join(SRC, 'lib/iac/workspace-dir.js')).href;
@@ -27,10 +28,7 @@ const hasPulumi = (() => {
   }
 })();
 
-const root = mkdtempSync(join(tmpdir(), 'vc-workspace-dir-exit-'));
-afterAll(() => {
-  rmSync(root, { recursive: true, force: true });
-});
+const root = createTempDir('vc-workspace-dir-exit-');
 
 /**
  * Run `body` as an ES module in a new node process. It prints one JSON line
@@ -46,7 +44,9 @@ function runChild(body: string, env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
     encoding: 'utf8',
     timeout: 60_000,
-    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...env },
+    // The child's temp dir is this file's, so the temp-dir census sees
+    // whatever it leaves.
+    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', TMPDIR: tmpdir(), ...env },
   });
   const line = result.stdout.split('\n').find((l) => l.startsWith('{'));
   if (!line) throw new Error(`child printed no report: ${result.stderr}`);
@@ -102,7 +102,12 @@ report({
       expect(report.dirs).toHaveLength(3);
       expect(report.dirs).toContain(report.workDir);
       expect(report.files).toEqual(['Pulumi.exit-e1.yaml', 'Pulumi.yaml']);
-      for (const dir of report.dirs) expect(existsSync(dir), dir).toBe(false);
+      for (const dir of report.dirs) {
+        expect(basename(dir)).toMatch(/^vibecarbon-pulumi-/);
+        expect(existsSync(dir), dir).toBe(false);
+      }
+      // And the SDK made none of its own in the temp dir the child shared.
+      expect(readdirSync(tmpdir()).filter((name) => name.startsWith('automation-'))).toEqual([]);
     },
     60_000,
   );
