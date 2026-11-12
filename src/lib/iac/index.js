@@ -29,7 +29,7 @@ import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
 import { perfAsync, perfEnabled, perfRecord, perfTimer } from '../perf.js';
-import { getProviderClass } from '../providers/index.js';
+import { getProvider, getProviderClass } from '../providers/index.js';
 import {
   ensureStatePassphrase,
   resolveStatePassphrase,
@@ -56,6 +56,15 @@ import {
   StateMigrationError,
 } from './state-error.js';
 import { removePlainHistory } from './state-history.js';
+import {
+  classifyPendingCreates,
+  forgetPendingReported,
+  pendingCreatesBlock,
+  pendingLookupFailed,
+  pendingReported,
+  recordPendingReported,
+  untrackedServers,
+} from './state-pending.js';
 import {
   forgetStateSeal,
   plainValueCount,
@@ -1167,8 +1176,11 @@ async function prepareStackForUp(stackName, program, options) {
   // whenever the firewall is in state but already gone from the cloud.
   // Re-verified against provider v1.68.0 / hcloud-go v2.47.0, the versions
   // @pulumi/hcloud 1.41.0 bridges, so this is current, not historical.
-  // `refresh` reconciles state with live cloud resources and clears the
-  // pending-op markers. Idempotent — no-op when state already matches reality.
+  // `refresh` reconciles state with live cloud resources and drops a pending
+  // update or delete. It keeps a pending create, and so does the up (CLI
+  // 3.259.0, 2026-11-11): the seal after the up resolves those
+  // (resolvePendingCreates). Idempotent — no-op when state already matches
+  // reality.
   //
   // Skip on truly-empty stacks: a freshly-created stack has only the
   // bookkeeping `pulumi:pulumi:Stack` resource (no real cloud resources
@@ -1413,12 +1425,14 @@ async function runUp(stack, options) {
  * command removes; removePlainHistory deletes the ones that hold plain values
  * and keeps every `.history.json`.
  *
- * Never with pending operations. A server create an earlier run left
- * unfinished (Ctrl-C mid-provision) survives the refresh and the up, and
- * `stack import` drops it from the snapshot with only a warning (CLI 3.259.0,
- * Task 7 review): the only record of a server that may be running. So a state
- * that lists any, while a plain value is left (in a resource or in the
- * operation's own inputs), is left alone and the user is told what clears it.
+ * Never over pending operations. A create an earlier run left unfinished
+ * (Ctrl-C mid-provision) survives the refresh and the up, and `stack import`
+ * drops it from the snapshot with only a warning (CLI 3.259.0, Task 7
+ * review): the only record of a server that may be running. So while a plain
+ * value is left (in a resource or in the operation's own inputs), the deploy
+ * first clears them itself, and only once nothing they made is left running
+ * untracked (resolvePendingCreates, state-pending.js); otherwise it tells the
+ * user what to delete in the provider's console, then deploy again.
  *
  * No lock spans the export and the imports, and none can: Pulumi's lock (the
  * one stack-lock.js reads) is taken per command, so the up's is released when
@@ -1436,18 +1450,20 @@ async function runUp(stack, options) {
  * Never throws: the up has succeeded and the servers are as it left them. A
  * failure says so and that the next successful deploy seals them, never the
  * unrecoverable-state message: a passphrase refused here only means the
- * values stay plain for now. A failure also clears the marker, so the next
- * deploy runs the up again rather than skipping it, in every mode.
+ * values stay plain for now. A failure of the seal or of the history cleanup
+ * also clears the marker, so the next deploy runs the up again rather than
+ * skipping it, in every mode.
  *
  * @param {import('@pulumi/pulumi/automation').Stack} stack
  * @param {{ ledger?: object, projectName?: string, s3Config?: object, provider?: string }} [options]
  *   `ledger`: the deploy's StateTracker; without one (scale, failover) the
- *   stack is sealed and nothing else happens.
+ *   stack is sealed and nothing else happens, and a state with unfinished
+ *   creates waits for the next deploy.
  * @returns {Promise<void>}
  */
 async function sealStackState(stack, options = {}) {
   const ledger = options.ledger ?? null;
-  const { finished, count } = await sealCurrentState(stack);
+  const { finished, count } = await sealCurrentState(stack, options);
   if (!ledger) return;
   if (!finished) {
     forgetStateSeal(ledger, stack.name);
@@ -1458,15 +1474,17 @@ async function sealStackState(stack, options = {}) {
   // plain) did: this deploy's refresh and up wrote them there.
   if (stateSealRecorded(ledger, stack.name) && count === 0) return;
   if (await removeHistoryCopies(stack, options)) recordStateSeal(ledger, stack.name);
+  else forgetStateSeal(ledger, stack.name);
 }
 
 /**
  * The seal itself: export, seal, import twice. `finished`: the stack's state
  * and its .bak now hold no plain value; `count`: the values it sealed.
  * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ ledger?: object, provider?: string, providerToken?: string, onOutput?: (out: string) => void }} options
  * @returns {Promise<{ finished: boolean, count: number }>}
  */
-async function sealCurrentState(stack) {
+async function sealCurrentState(stack, options) {
   const importSealed = (deployment) =>
     withStateBackendRetry(
       () => runPastStaleLock(stack, () => importStackState(stack, deployment)),
@@ -1474,17 +1492,14 @@ async function sealCurrentState(stack) {
     );
   let sealed;
   try {
-    const exported = await withStateBackendRetry(
+    let exported = await withStateBackendRetry(
       () => stack.exportStack(),
       `seal export ${stack.name}`,
     );
     const pending = exported?.deployment?.pending_operations ?? [];
     if (pending.length > 0 && plainValueCount(exported, SERVER_RESOURCE_TYPES) > 0) {
-      progressLog(
-        `[pulumi] state seal for ${stack.name} skipped: its state lists ${pending.length} pending ${pending.length === 1 ? 'operation' : 'operations'}`,
-      );
-      p.log.warn(sealPending(stack.name, pending));
-      return { finished: false, count: 0 };
+      exported = await resolvePendingCreates(stack, exported, options);
+      if (!exported) return { finished: false, count: 0 };
     }
     sealed = sealServerUserData(exported, SERVER_RESOURCE_TYPES);
     if (sealed.count > 0) await importSealed(sealed.deployment);
@@ -1567,27 +1582,87 @@ function sealFailed(stackName, err) {
 }
 
 /**
- * What the user reads when the state lists operations an earlier run didn't
- * finish, so the seal leaves it alone.
- * @param {string} stackName
- * @param {Array<{ type?: string, resource?: { urn?: string } }>} pending
+ * Clear the creates an earlier run left unfinished in `exported`, once
+ * nothing they made is left running untracked (state-pending.js says how
+ * that is decided), and return the state the seal goes on with; null when the
+ * seal waits, after telling the user why. Under the stack's lock as the
+ * seal's imports are. Only on a deploy (a ledger): scale and failover leave
+ * it to the next deploy. Throws when the clear or the export after it fails;
+ * the caller warns.
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {{ deployment: { pending_operations: object[] } }} exported
+ * @param {{ ledger?: object, provider?: string, providerToken?: string, onOutput?: (out: string) => void }} options
+ * @returns {Promise<object | null>}
  */
-function sealPending(stackName, pending) {
-  const named = pending.slice(0, 3).map(
-    (op) =>
-      `${op?.type ?? 'an operation'} ${String(op?.resource?.urn ?? '')
-        .split('::')
-        .pop()}`,
+async function resolvePendingCreates(stack, exported, options) {
+  const count = exported.deployment.pending_operations.length;
+  const creates = `${count} unfinished ${count === 1 ? 'create' : 'creates'}`;
+  const ledger = options.ledger ?? null;
+  if (!ledger) {
+    progressLog(
+      `[pulumi] state seal for ${stack.name} left for the next deploy: its state records ${creates}`,
+    );
+    return null;
+  }
+  const providerId = options.provider ?? 'hetzner';
+  const { servers, others } = classifyPendingCreates(exported, SERVER_RESOURCE_TYPES);
+  let untracked = [];
+  if (servers.length > 0) {
+    try {
+      untracked = await untrackedServers(
+        servers,
+        exported,
+        SERVER_RESOURCE_TYPES,
+        getProvider(providerId, options.providerToken),
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      progressLog(
+        `[pulumi] state seal for ${stack.name} waits: the lookup of ${servers.map((s) => s.name).join(', ')} failed: ${reason}`,
+      );
+      p.log.warn(pendingLookupFailed(stack.name, servers, reason));
+      return null;
+    }
+  }
+  if (untracked.length > 0 || (others.length > 0 && !pendingReported(ledger, stack.name, others))) {
+    progressLog(
+      `[pulumi] state seal for ${stack.name} waits on ${creates}: ${[
+        ...untracked.map((s) => `${s.name} (id ${s.id}) running untracked`),
+        ...others.map((o) => `${o.what} ${o.name}, which vibecarbon can't look up`),
+      ].join(', ')}`,
+    );
+    if (others.length > 0) recordPendingReported(ledger, stack.name, others);
+    p.log.warn(
+      pendingCreatesBlock(stack.name, {
+        untracked,
+        others,
+        providerName: getProviderClass(providerId).NAME,
+      }),
+    );
+    return null;
+  }
+  await withStateBackendRetry(
+    () =>
+      runPastStaleLock(stack, () =>
+        stack.refresh({ clearPendingCreates: true, onOutput: options.onOutput, color: 'never' }),
+      ),
+    `clear pending creates ${stack.name}`,
   );
-  const more = pending.length > 3 ? ` and ${pending.length - 3} more` : '';
-  const one = pending.length === 1;
-  return (
-    `Your servers in ${stackName} are updated, but vibecarbon left their user data in plain text in the Pulumi state: ` +
-    `it still records ${one ? 'an operation' : 'operations'} an earlier run didn't finish (${named.join(', ')}${more}), ` +
-    `and sealing rewrites the state without ${one ? 'that record' : 'those records'}, the only trace of a server that may be running in your account. ` +
-    `Check your provider for ${one ? 'that server' : 'those servers'}, then clear the record with \`pulumi refresh --clear-pending-creates --stack ${stackName}\`. ` +
-    'The next deploy seals the state.'
+  forgetPendingReported(ledger, stack.name);
+  progressLog(
+    `[pulumi] cleared ${creates} from ${stack.name}'s state: ${[...servers, ...others].map((c) => c.name).join(', ')}`,
   );
+  const cleared = await withStateBackendRetry(
+    () => stack.exportStack(),
+    `seal export ${stack.name}`,
+  );
+  const left = cleared?.deployment?.pending_operations ?? [];
+  if (left.length > 0) {
+    throw new Error(
+      `its state still records ${left.length} unfinished ${left.length === 1 ? 'operation' : 'operations'} after Pulumi cleared them`,
+    );
+  }
+  return cleared;
 }
 
 /** Flatten { foo: { value: 'bar' } } → { foo: 'bar' } (null-safe). */

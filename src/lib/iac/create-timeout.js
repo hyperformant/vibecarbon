@@ -62,16 +62,22 @@ export const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIME
  * new base image reaches new servers only, like user data. Hetzner moved its
  * compose servers from the `docker-ce` app image to plain Ubuntu (2026-11-04):
  * without this, the next deploy would have replaced each live server.
+ *
+ * `nameInput` is the input the programs set the server's name in, the one its
+ * provider's findServersByName matches: the seal looks a server up by it when
+ * an earlier run left the server's create unfinished (lib/iac/state-pending.js).
  */
 export const SERVER_RESOURCE_TYPES = Object.freeze({
   'hcloud:index/server:Server': {
     noun: 'server',
+    nameInput: 'name',
     locationInput: 'location',
     userDataInput: 'userData',
     imageInput: 'image',
   },
   'digitalocean:index/droplet:Droplet': {
     noun: 'droplet',
+    nameInput: 'name',
     locationInput: 'region',
     userDataInput: 'userData',
     imageInput: 'image',
@@ -82,18 +88,21 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
   },
   'vultr:index/instance:Instance': {
     noun: 'instance',
+    nameInput: 'label',
     locationInput: 'region',
     userDataInput: 'userData',
     imageInput: 'osId',
   },
   'linode:index/instance:Instance': {
     noun: 'instance',
+    nameInput: 'label',
     locationInput: 'region',
     userDataInput: 'metadatas',
     imageInput: 'image',
   },
   'scaleway:instance/server:Server': {
     noun: 'server',
+    nameInput: 'name',
     locationInput: 'zone',
     userDataInput: 'userData',
     imageInput: 'image',

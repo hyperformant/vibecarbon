@@ -123,6 +123,24 @@ describe('server-class create timeouts (census)', () => {
   });
 
   it.each(Object.keys(PROGRAMS))(
+    '%s: every server-class resource sets its name in nameInput, where the pending-create lookup reads it',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length, `${file} registered no server-class resource`).toBeGreaterThan(0);
+      for (const server of servers) {
+        const { nameInput } =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES];
+        const value = (server.args as Record<string, unknown>)[nameInput];
+        expect(typeof value, `${file}: ${server.type} "${server.name}" sets no ${nameInput}`).toBe(
+          'string',
+        );
+        expect(value, `${file}: ${server.type} "${server.name}"`).not.toBe('');
+      }
+    },
+  );
+
+  it.each(Object.keys(PROGRAMS))(
     '%s: every server-class resource sets customTimeouts.create',
     async (file) => {
       const resources = await runProgram(file);

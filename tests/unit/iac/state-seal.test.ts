@@ -6,7 +6,9 @@
  *
  * With a deploy's ledger it also removes the history copies that still hold
  * plain values, and only then records the seal marker the k8s and compose-ha
- * gates read (infraStepSkips); never with pending operations.
+ * gates read (infraStepSkips). It never imports over an unfinished create:
+ * the deploy clears those first, once the provider (a fake here) lists
+ * nothing they left running untracked (state-pending.js).
  *
  * The real engine's answer (a legacy sentinel gone from the stack file, its
  * .bak and its history, a second deploy sealing 0) is
@@ -38,6 +40,29 @@ const logged: string[] = [];
 vi.mock('../../../src/lib/cli/progress.js', () => ({
   progressLog: (m: string) => logged.push(m),
 }));
+// The provider the seal asks about an unfinished server create.
+const lookup = vi.hoisted(() => ({
+  answer: async (_name: string): Promise<Array<{ id: unknown }>> => [],
+  calls: [] as Array<[string, unknown]>,
+  made: [] as unknown[][],
+  reset() {
+    this.answer = async () => [];
+    this.calls.length = 0;
+    this.made.length = 0;
+  },
+}));
+vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/providers/index.js')>()),
+  getProvider: (...args: unknown[]) => {
+    lookup.made.push(args);
+    return {
+      findServersByName: (name: string, options: unknown) => {
+        lookup.calls.push([name, options]);
+        return lookup.answer(name);
+      },
+    };
+  },
+}));
 
 const {
   SECRET_SIG,
@@ -52,6 +77,7 @@ const {
 const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { SERVER_RESOURCE_TYPES } = await import('../../../src/lib/iac/create-timeout.js');
 const { __resetStateProbesForTests, upStack } = await import('../../../src/lib/iac/index.js');
+const { pendingReported } = await import('../../../src/lib/iac/state-pending.js');
 
 // Sentinels only: never a real credential.
 const TOKEN = 'SENTINEL-provider-token-71c2';
@@ -531,27 +557,18 @@ describe('with a ledger: the history copies, then the seal marker', () => {
     expect(stateSealRecorded(ledger, 'e1')).toBe(false);
   });
 
-  it('pending operations with a plain value left: no import, a warning that says why and what clears it, no marker', async () => {
-    fakePulumi.behaviour.exportStack = () => withPending(structuredClone(LEGACY), CLOUD_INIT);
-    const plain = writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+  it('a marked stack that sealed values again and whose cleanup fails loses its marker, so the next deploy runs the up again', async () => {
+    writeHistory(backendDir, 'e1-1000', LEGACY.deployment);
+    chmodSync(join(backendDir, '.pulumi/history/proj/e1'), 0o000);
     const ledger = ledgerIn(ledgerDir);
+    recordStateSeal(ledger, 'e1');
 
     await upStack('e1', async () => ({}), { ...BASE, ledger });
 
-    expect(fakePulumi.imports).toEqual([]);
-    expect(warnings).toEqual([
-      "Your servers in e1 are updated, but vibecarbon left their user data in plain text in the Pulumi state: it still records an operation an earlier run didn't finish (creating worker-1), " +
-        'and sealing rewrites the state without that record, the only trace of a server that may be running in your account. ' +
-        'Check your provider for that server, then clear the record with `pulumi refresh --clear-pending-creates --stack e1`. ' +
-        'The next deploy seals the state.',
-    ]);
-    expect(logged).toContain(
-      '[pulumi] state seal for e1 skipped: its state lists 1 pending operation',
-    );
-    expect(sealLines()).toEqual([]);
-    expect(existsSync(plain)).toBe(true);
+    expect(fakePulumi.imports).toHaveLength(2);
+    expect(warnings).toHaveLength(1);
     expect(stateSealRecorded(ledger, 'e1')).toBe(false);
-    expect(`${warnings.join('\n')}\n${logged.join('\n')}`).not.toContain(TOKEN);
+    expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(false);
   });
 
   it('pending operations with nothing plain anywhere: nothing to import, so the stack counts as sealed', async () => {
@@ -564,6 +581,271 @@ describe('with a ledger: the history copies, then the seal marker', () => {
     expect(fakePulumi.imports).toEqual([]);
     expect(warnings).toEqual([]);
     expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+  });
+});
+
+/** A create of a resource vibecarbon has no lookup for, left unfinished. */
+const pendingFirewall = (urnName = 'fw', name = 'proj-e1-firewall') => ({
+  type: 'creating',
+  resource: {
+    urn: `urn:pulumi:e1::proj::hcloud:index/firewall:Firewall::${urnName}`,
+    custom: true,
+    type: 'hcloud:index/firewall:Firewall',
+    inputs: { name },
+  },
+});
+
+/** `state` with `ops` as its pending operations. */
+function withOps(state: ReturnType<typeof legacyState>, ops: unknown[]) {
+  const next = structuredClone(state) as ReturnType<typeof legacyState> & {
+    deployment: { pending_operations?: unknown[] };
+  };
+  next.deployment.pending_operations = ops;
+  return next;
+}
+
+/**
+ * e1 exports `before` until a refresh clears its pending creates, `after`
+ * from then on, as the engine does. Returns the options of each clearing
+ * refresh.
+ */
+function clearingExports(before: unknown, after: unknown) {
+  const clears: Array<Record<string, unknown>> = [];
+  let cleared = false;
+  fakePulumi.behaviour.refresh = (_stack, options) => {
+    const opts = (options ?? {}) as Record<string, unknown>;
+    if (opts.clearPendingCreates) {
+      cleared = true;
+      clears.push(opts);
+    }
+  };
+  fakePulumi.behaviour.exportStack = () => structuredClone(cleared ? after : before);
+  return clears;
+}
+
+const OPENING =
+  'Your servers in e1 are updated, but vibecarbon left their user data in plain text in the Pulumi state.';
+
+describe('unfinished creates: the deploy clears them itself before it seals (state-pending.js)', () => {
+  let ledgerDir: string;
+  beforeEach(() => {
+    fakePulumi.reset();
+    __resetStateProbesForTests();
+    lookup.reset();
+    warnings.length = 0;
+    logged.length = 0;
+    ledgerDir = createTempDir('seal-pending-ledger-');
+    process.env.PULUMI_BACKEND_URL = `file://${createTempDir('seal-pending-backend-')}`;
+  });
+  /** A later deploy: a new process, the same ledger file. */
+  const nextDeploy = () => {
+    fakePulumi.calls.length = 0;
+    fakePulumi.imports.length = 0;
+    __resetStateProbesForTests();
+    warnings.length = 0;
+    logged.length = 0;
+  };
+
+  it('no server by that name: cleared under the lock, then sealed, and the marker set', async () => {
+    const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(lookup.made).toEqual([['hetzner', 't']]);
+    expect(lookup.calls).toEqual([['proj-e1-worker-1', { strict: true }]]);
+    expect(clears).toHaveLength(1);
+    expect(clears[0]).toMatchObject({ clearPendingCreates: true, color: 'never' });
+    const afterUp = fakePulumi.calls.slice(fakePulumi.calls.indexOf('up') + 1);
+    expect(afterUp).toEqual([
+      'exportStack',
+      'refresh',
+      'exportStack',
+      'importStack',
+      'importStack',
+    ]);
+    for (const imported of fakePulumi.imports) {
+      const deployment = imported.deployment as ReturnType<typeof withOps>;
+      expect(deployment.deployment.pending_operations ?? []).toEqual([]);
+      expect(isEnvelope(serverOf(deployment).inputs.userData)).toBe(true);
+    }
+    expect(logged).toContain(
+      "[pulumi] cleared 1 unfinished create from e1's state: proj-e1-worker-1",
+    );
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+  });
+
+  it('the server listed by that name is the one the state tracks: nothing untracked, so cleared', async () => {
+    const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
+    // The id the state records is '21'; the API answers a number.
+    lookup.answer = async () => [{ id: 21 }];
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(clears).toHaveLength(1);
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(true);
+  });
+
+  it('a server running untracked: nothing cleared or sealed, the warning names it and the console; once it is deleted, the next deploy clears and seals', async () => {
+    const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
+    lookup.answer = async () => [{ id: 777 }];
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(clears).toEqual([]);
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([
+      `${OPENING} An earlier run started creating the server proj-e1-worker-1 and didn't finish, ` +
+        'and the state keeps a record of that create, which has to go before vibecarbon can seal it. ' +
+        "proj-e1-worker-1 (id 777) is running in your account without Pulumi tracking it, so you're billed for it " +
+        'and no vibecarbon command will remove it: delete it in your Hetzner Cloud console. ' +
+        'Then deploy again: the next deploy clears the record and seals the state.',
+    ]);
+    expect(logged).toContain(
+      '[pulumi] state seal for e1 waits on 1 unfinished create: proj-e1-worker-1 (id 777) running untracked',
+    );
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+    expect(`${warnings.join('\n')}\n${logged.join('\n')}`).not.toContain(TOKEN);
+
+    // The user deleted it in the console.
+    nextDeploy();
+    lookup.answer = async () => [];
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    expect(clears).toHaveLength(1);
+    expect(fakePulumi.imports).toHaveLength(2);
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(true);
+  });
+
+  it('a create vibecarbon has no lookup for: the deploy says to check the console, and the next deploy clears and seals', async () => {
+    const clears = clearingExports(withOps(LEGACY, [pendingFirewall()]), LEGACY);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    expect(lookup.made).toEqual([]);
+    expect(clears).toEqual([]);
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([
+      `${OPENING} An earlier run started creating the firewall proj-e1-firewall and didn't finish, ` +
+        'and the state keeps a record of that create, which has to go before vibecarbon can seal it. ' +
+        'Nothing in vibecarbon can look up the firewall proj-e1-firewall, so check your Hetzner Cloud console for it ' +
+        "and delete it if it's there. Then deploy again: the next deploy clears the record and seals the state.",
+    ]);
+    expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(false);
+
+    // "Then deploy again".
+    nextDeploy();
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    expect(clears).toHaveLength(1);
+    expect(fakePulumi.imports).toHaveLength(2);
+    expect(warnings).toEqual([]);
+    const after = ledgerIn(ledgerDir);
+    expect(stateSealRecorded(after, 'e1')).toBe(true);
+    // The report is gone with the creates it named.
+    expect(pendingReported(after, 'e1', [{ urn: pendingFirewall().resource.urn }] as never)).toBe(
+      false,
+    );
+  });
+
+  it('a create that appears after the warning is reported too, not cleared unseen', async () => {
+    clearingExports(withOps(LEGACY, [pendingFirewall()]), LEGACY);
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    nextDeploy();
+    const clears = clearingExports(
+      withOps(LEGACY, [pendingFirewall(), pendingFirewall('net', 'proj-e1-network')]),
+      LEGACY,
+    );
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    expect(clears).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(
+      'Nothing in vibecarbon can look up the firewall proj-e1-firewall and the firewall proj-e1-network, ' +
+        'so check your Hetzner Cloud console for them and delete any that are there.',
+    );
+    expect(warnings[0]).toContain('the next deploy clears the records and seals the state.');
+  });
+
+  it("the provider can't answer: nothing cleared, the warning says the check failed and the next deploy checks again", async () => {
+    const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
+    lookup.answer = async () => {
+      throw new Error(
+        "Hetzner Cloud couldn't say whether the server proj-e1-worker-1 exists: it answered HTTP 503",
+      );
+    };
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(clears).toEqual([]);
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([
+      `${OPENING} An earlier run started creating the server proj-e1-worker-1 and didn't finish. ` +
+        'Before it drops the record of that create, vibecarbon checks whether that server exists, and the check failed ' +
+        "(Hetzner Cloud couldn't say whether the server proj-e1-worker-1 exists: it answered HTTP 503). " +
+        'The next deploy checks again.',
+    ]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+  });
+
+  it('a clear that fails: the seal warns as any failed seal does, nothing imported, no marker', async () => {
+    fakePulumi.behaviour.exportStack = () => withPending(LEGACY, CLOUD_INIT);
+    fakePulumi.behaviour.refresh = (_stack, options) => {
+      if ((options as { clearPendingCreates?: boolean })?.clearPendingCreates) {
+        throw new Error(STORE_FAULT);
+      }
+    };
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(
+      /^Your servers in e1 are updated, but vibecarbon couldn't seal their user data in the Pulumi state: /,
+    );
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+  });
+
+  it('a clear that leaves a record behind: nothing imported over it, and the seal says so', async () => {
+    // The engine answered the clear, but the export still lists the create.
+    const clears = clearingExports(
+      withPending(LEGACY, CLOUD_INIT),
+      withPending(LEGACY, CLOUD_INIT),
+    );
+    const ledger = ledgerIn(ledgerDir);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger });
+
+    expect(clears).toHaveLength(1);
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([
+      "Your servers in e1 are updated, but vibecarbon couldn't seal their user data in the Pulumi state: " +
+        'its state still records 1 unfinished operation after Pulumi cleared them. ' +
+        'It stays in plain text in the state until the next successful deploy seals it.',
+    ]);
+    expect(stateSealRecorded(ledger, 'e1')).toBe(false);
+  });
+
+  it('no ledger (scale, failover): no lookup, no clear, no warning; the next deploy resolves it', async () => {
+    const clears = clearingExports(withPending(LEGACY, CLOUD_INIT), LEGACY);
+
+    await upStack('e1', async () => ({}), BASE);
+
+    expect(lookup.made).toEqual([]);
+    expect(clears).toEqual([]);
+    expect(fakePulumi.imports).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(logged).toContain(
+      '[pulumi] state seal for e1 left for the next deploy: its state records 1 unfinished create',
+    );
   });
 });
 

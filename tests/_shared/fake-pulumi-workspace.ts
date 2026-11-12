@@ -122,10 +122,14 @@ export const fakePulumi = {
   /** Where workspace directories go; null for a temp dir of this test file's. */
   workDirRoot: null as string | null,
   /**
-   * Per-verb override; throw from it to make the verb fail. `migrate` gets the
-   * child as spawned (its cwd is the stack's workspace) and answers for it.
+   * Per-verb override; throw from it to make the verb fail. It gets the stack
+   * name and the verb's own arguments (refresh's options, say). `migrate`
+   * gets the child as spawned (its cwd is the stack's workspace) and answers
+   * for it.
    */
-  behaviour: {} as Partial<Record<StackVerb, (stackName: string) => unknown>> & {
+  behaviour: {} as Partial<
+    Record<StackVerb, (stackName: string, ...args: unknown[]) => unknown>
+  > & {
     migrate?: (stackName: string, child: FakeMigration) => MigrationAnswer;
   },
   reset() {
@@ -188,7 +192,7 @@ function fakeStack(name: string, envVars: Record<string, string | undefined>) {
       );
       const legacy = fakePulumi.legacyStacks.get(name);
       if (legacy && READS.has(verb)) throw legacy();
-      const answer = (fakePulumi.behaviour[verb] ?? DEFAULTS[verb])(name);
+      const answer = (fakePulumi.behaviour[verb] ?? DEFAULTS[verb])(name, ...args);
       if (verb === 'removeStack') fakePulumi.removed?.add(String(args[0]));
       return answer;
     };

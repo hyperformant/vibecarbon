@@ -21,7 +21,12 @@
  *   (b) a second deploy (refresh, then up) hands the sealed values back
  *       sealed: it seals 0, reads no history (the marker is set), and the
  *       server is still not replaced;
- *   (c) no import leaves its deployment file behind.
+ *   (c) no import leaves its deployment file behind;
+ *   (d) a legacy stack that also records a server create an earlier run
+ *       didn't finish, its user data plain: the provider (a fake) lists no
+ *       server by that name, so the deploy clears the record with the SDK's
+ *       refresh({ clearPendingCreates: true }) and seals, and the sentinel
+ *       the record carried is gone from the backend too.
  *
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
@@ -72,6 +77,7 @@ vi.mock('../../../src/lib/iac/create-timeout.js', async (orig) => {
       ...actual.SERVER_RESOURCE_TYPES,
       'fakecloud:index:Server': {
         noun: 'server',
+        nameInput: 'name',
         locationInput: 'size',
         userDataInput: 'userData',
         imageInput: 'size',
@@ -79,6 +85,18 @@ vi.mock('../../../src/lib/iac/create-timeout.js', async (orig) => {
     }),
   };
 });
+
+// The provider the seal asks whether an unfinished create left a server.
+const lookup = vi.hoisted(() => ({ calls: [] as string[] }));
+vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/providers/index.js')>()),
+  getProvider: () => ({
+    findServersByName: async (name: string) => {
+      lookup.calls.push(name);
+      return [];
+    },
+  }),
+}));
 
 const hasPulumi = (() => {
   try {
@@ -327,5 +345,54 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
       readdirSync(dir).filter((name) => name.startsWith('state-import-')),
     );
     expect(leftovers).toEqual([]);
+  });
+
+  it('(d) an unfinished server create on a legacy stack: no server by that name, so the deploy clears the record and seals', async () => {
+    await writeLegacyStack('e4');
+    // An earlier run's create of a second server, interrupted: Pulumi keeps
+    // it under pending_operations, plain user data and all.
+    const file = checkpoint('e4');
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    const latest = saved.checkpoint.latest;
+    const server = latest.resources.find(
+      (r: { type: string }) => r.type === 'fakecloud:index:Server',
+    );
+    latest.pending_operations = [
+      {
+        type: 'creating',
+        resource: {
+          urn: server.urn.replace(/::server$/, '::ghost'),
+          custom: true,
+          type: server.type,
+          inputs: { name: 'sealtest-e4-ghost', size: 'small', userData: USER_DATA },
+          parent: server.parent,
+          provider: server.provider,
+        },
+      },
+    ];
+    writeFileSync(file, JSON.stringify(saved));
+    const before = cloudServers();
+    lookup.calls.length = 0;
+
+    const ledger = ledgerFor('e4');
+    await upStack('e4', program(true), {
+      ...opts,
+      ledger,
+      provider: 'hetzner',
+      providerToken: 't',
+    });
+
+    expect(lookup.calls).toEqual(['sealtest-e4-ghost']);
+    expect(warnings).toEqual([]);
+    expect(logged).toContain(
+      "[pulumi] cleared 1 unfinished create from e4's state: sealtest-e4-ghost",
+    );
+    expect(sealCounts()).toEqual(['e4:2']);
+    const exported = (await rawStack('e4').then((s) => s.exportStack())).deployment;
+    expect(exported.pending_operations ?? []).toEqual([]);
+    // The record the clear dropped held the sentinel too: nothing anywhere.
+    expect(sentinelFiles()).toEqual([]);
+    expect(stateSealRecorded(ledger, 'e4')).toBe(true);
+    expect(cloudServers()).toEqual(before);
   });
 });

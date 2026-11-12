@@ -1391,14 +1391,19 @@ export class HetznerProvider extends BaseProvider {
    * the exact-match semantics every pre-B0-3 call site enforced with
    * `.find((s) => s.name === name)`.
    * @param {string} name - Exact server name
+   * @param {{ strict?: boolean }} [options] - reject rather than answer `[]`
+   *   when the listing isn't complete (BaseProvider.findServersByName)
    * @returns {Promise<object[]>}
    */
-  async findServersByName(name) {
+  async findServersByName(name, { strict = false } = {}) {
     const response = await fetchWithRetry(
       `${HetznerProvider.API_BASE}/servers?name=${encodeURIComponent(name)}`,
       { headers: { Authorization: `Bearer ${this.apiToken}` } },
     );
-    if (!response.ok) return [];
+    if (!response.ok) {
+      if (strict) throw this.serverLookupError(name, response.status);
+      return [];
+    }
     const data = await response.json();
     return (data.servers || []).filter((s) => s.name === name);
   }

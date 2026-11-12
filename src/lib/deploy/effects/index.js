@@ -17,6 +17,7 @@ import * as p from '@clack/prompts';
 import { backupStorageConfig } from '../../backups-bucket.js';
 import { spinner } from '../../cli/progress.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import { forgetStateSeal } from '../../iac/state-seal.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
@@ -31,13 +32,32 @@ import { K8S_EFFECTS } from './k8s.js';
 import { K8S_HA_EFFECTS } from './k8s-ha.js';
 
 /**
- * Provision one Hetzner VPS via Pulumi, wait for SSH, and seed the trusted
- * host key. Sets ctx.serverIp / providerServerId / providerServerName so the
- * downstream effects (and the orchestrator's return value) can read them.
- * Gated by `when: !ctx.serverIp || !ctx.stateSealed` — a warm redeploy skips
- * it once its stack is sealed. Before that, a warm redeploy runs the up once
- * for the seal (lib/iac/state-seal.js), and a server the up left where it
- * was keeps its SSH pin and its record: nothing about it changed.
+ * The ledger steps that set up the server itself. Keyed by its IP, so a server
+ * an up put at the IP the env already had would skip them: a provisioning up
+ * forgets them, and they run on whatever server the up left.
+ */
+const SERVER_SETUP_STEPS = Object.freeze([
+  'compose-setup-server',
+  'compose-dockerhub-login',
+  'compose-ghcr-login',
+  'compose-setup-files',
+]);
+
+/**
+ * Provision one VPS via Pulumi, wait for SSH, and seed the trusted host key.
+ * Sets ctx.serverIp / providerServerId / providerServerName / providerFirewallId
+ * so the downstream effects (and the orchestrator's return value) can read
+ * them. Gated by `when: !ctx.serverIp || !ctx.stateSealed`: a warm redeploy
+ * skips it once its stack is sealed, and before that runs it once for the
+ * seal (lib/iac/state-seal.js).
+ *
+ * Every run takes the whole path, a known server included: an up can put a
+ * new server at the IP the env records (Scaleway's flexible IP outlives its
+ * server, Hetzner reissues addresses), so the same IP proves nothing. The
+ * SSH wait, the host-key re-seed, the record persist-provisioned-server
+ * writes and the server's own setup steps all run again. A run that fails
+ * after its up forgets the seal marker that up recorded, so the next deploy
+ * provisions again instead of skipping to a server it never reached.
  */
 async function provisionServer(ctx) {
   const {
@@ -71,10 +91,8 @@ async function provisionServer(ctx) {
   // no per-step UI (the plan runner is silent; effects own their own spinners).
   // spinner() registers as active so any retry chatter fired underneath updates
   // the line cleanly instead of corrupting it.
-  // A server the env already records: this up is the seal's (see above).
-  const knownIp = ctx.serverIp ?? null;
   const s = spinner();
-  s.start(knownIp ? `Checking VPS ${knownIp} with Pulumi...` : `Provisioning VPS in ${region}...`);
+  s.start(`Provisioning VPS in ${region}...`);
   try {
     const result = await perfAsync('deploy.iac.upStack', () =>
       upStack(environment, program, {
@@ -105,14 +123,11 @@ async function provisionServer(ctx) {
           `for env '${environment}'.`,
       );
     }
-    if (knownIp && result.outputs.serverIp === knownIp) {
-      s.stop(`VPS unchanged: ${knownIp} (${region})`);
-      return;
-    }
     ctx.serverIp = result.outputs.serverIp;
     // This deploy created (or converged) the server: persist-provisioned-server
     // records it before anything points DNS at it.
     ctx.serverProvisioned = true;
+    for (const step of SERVER_SETUP_STEPS) ctx.state.invalidateStep(step);
     ctx.providerServerId = result.outputs.serverId || null;
     ctx.providerServerName = `${projectConfig.projectName}-${environment}`;
     // Both compose programs export firewallId; nothing used to read it, so
@@ -126,6 +141,7 @@ async function provisionServer(ctx) {
     await perfAsync('deploy.iac.waitForSSH', () => waitForSSH(ctx.serverIp, sshKeyPath, 30));
   } catch (err) {
     s.stop('Provisioning failed', 1);
+    forgetStateSeal(ctx.state, environment);
     throw err;
   }
   s.stop(`VPS provisioned: ${ctx.serverIp} (${region})`);

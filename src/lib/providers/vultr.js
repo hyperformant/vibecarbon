@@ -915,10 +915,13 @@ export class VultrProvider extends BaseProvider {
   /**
    * Find instances by exact label (client-side; soft-fail [] on non-ok).
    * @param {string} name
+   * @param {{ strict?: boolean }} [options] - reject rather than answer `[]`
+   *   when the listing isn't complete (BaseProvider.findServersByName)
    * @returns {Promise<object[]>}
    */
-  async findServersByName(name) {
-    const { items, status } = await this._walkCursor('/instances', 'instances');
+  async findServersByName(name, { strict = false } = {}) {
+    const { items, complete, status } = await this._walkCursor('/instances', 'instances');
+    if (strict && !complete) throw this.serverLookupError(name, status);
     if (status !== undefined) return [];
     return items.filter((i) => i.label === name);
   }
