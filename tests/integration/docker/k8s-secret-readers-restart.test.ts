@@ -33,8 +33,7 @@
  * in afterAll.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -43,6 +42,7 @@ import { k3sVersion } from '../../../src/lib/images.js';
 import { BaseProvider } from '../../../src/lib/providers/base.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { CLOUD_SECRET_READERS } from '../../_shared/cloud-secret-readers.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const SKIPPED =
   process.env.DOCKER_INTEGRATION === 'true'
@@ -227,7 +227,7 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
 
   beforeAll(() => {
     expect(run('kubectl', ['version', '--client']).status, 'kubectl on PATH').toBe(0);
-    dir = mkdtempSync(join(tmpdir(), 'vctest-readers-'));
+    dir = createTempDir('vctest-readers-');
     must('docker', [
       'network',
       'create',
@@ -339,7 +339,7 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
   afterAll(() => {
     run('docker', ['rm', '-f', '-v', SERVER, AGENT]);
     run('docker', ['network', 'rm', NET]);
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (dir) cleanupTempDir(dir);
   });
 
   // applyCloudSecrets says what it hands over and restarts.

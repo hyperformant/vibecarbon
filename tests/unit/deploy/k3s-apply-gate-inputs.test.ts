@@ -10,6 +10,7 @@ import { BUNDLED_K8S_DIR, buildK3sApplyInputs } from '../../../src/lib/deploy/k8
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 // @ts-expect-error — JS module without types
 import { activateImageSet, bundledImageSet } from '../../../src/lib/images.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Regression coverage for the `k3s-apply` gate hole found in the M3 follow-up
@@ -253,14 +254,14 @@ describe('buildK3sApplyInputs — a replaced provider token opens the gate', () 
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-gate-token-'));
+    dir = createTempDir('vc-k3s-gate-token-');
     mkdirSync(join(dir, 'k8s', 'base'), { recursive: true });
     writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: []\n');
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
+    cleanupTempDir(dir);
   });
 
   const inputs = (apiToken?: string) =>

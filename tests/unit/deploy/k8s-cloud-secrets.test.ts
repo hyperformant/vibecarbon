@@ -58,8 +58,7 @@
  * leaves of the retired ones, needs a real apiserver:
  * tests/integration/docker/k8s-cloud-secrets-takeover.test.ts.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +66,7 @@ import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-r
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 type Call = { argv: string[]; input?: string; env?: NodeJS.ProcessEnv };
 const calls: Call[] = [];
@@ -957,7 +957,7 @@ describe('applyCloudSecrets', () => {
       expect(await source()).toBe('It is the token you entered for this deploy');
 
       const { bootstrapOperatorEnv } = await import('../../../src/lib/project.js');
-      const dir = mkdtempSync(join(tmpdir(), 'vc-token-source-'));
+      const dir = createTempDir('vc-token-source-');
       const plain = 'vc-sentinel-plain-token';
       try {
         writeFileSync(join(dir, '.env.local'), `${formatDotenvLine('HETZNER_API_TOKEN', plain)}\n`);
@@ -968,7 +968,7 @@ describe('applyCloudSecrets', () => {
         );
       } finally {
         bootstrapOperatorEnv(join(dir, 'none'));
-        rmSync(dir, { recursive: true, force: true });
+        cleanupTempDir(dir);
       }
     });
 

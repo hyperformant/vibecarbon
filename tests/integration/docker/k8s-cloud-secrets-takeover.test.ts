@@ -45,8 +45,7 @@
  * Every container here is named vctest-* and removed in afterAll.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyCloudSecrets, CLOUD_SECRETS_APPLY_ARGV } from '../../../src/lib/deploy/k8s/k3s.js';
@@ -61,6 +60,7 @@ import {
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const SKIPPED =
   process.env.DOCKER_INTEGRATION === 'true'
@@ -174,7 +174,7 @@ describe.skipIf(SKIPPED)(
 
     beforeAll(() => {
       expect(run('kubectl', ['version', '--client']).status, 'kubectl on PATH').toBe(0);
-      dir = mkdtempSync(join(tmpdir(), 'vctest-k3s-secrets-'));
+      dir = createTempDir('vctest-k3s-secrets-');
       must('docker', [
         'run',
         '-d',
@@ -216,7 +216,7 @@ describe.skipIf(SKIPPED)(
 
     afterAll(() => {
       run('docker', ['rm', '-f', '-v', NODE]);
-      if (dir) rmSync(dir, { recursive: true, force: true });
+      if (dir) cleanupTempDir(dir);
     });
 
     // applyCloudSecrets says what it hands over and restarts.

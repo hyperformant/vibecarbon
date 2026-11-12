@@ -22,12 +22,12 @@
  * only the GitHub API calls stubbed, as gitops-backup-config.test.ts does.
  */
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gitSafeEnv } from '../../../src/lib/command.js';
 import { LEGACY_GITOPS_STEP } from '../../_shared/legacy-gitops-secrets.js';
+import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
   listRepoSecretNames: vi.fn(async (): Promise<string[]> => []),
@@ -52,8 +52,8 @@ const LEGACY_WORKFLOW = TEMPLATE_WORKFLOW.replace(
   `${LEGACY_GITOPS_STEP}\n\n  bootstrap-flux:`,
 );
 
-const work = mkdtempSync(join(tmpdir(), 'vc-gitops-token-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-gitops-token-');
+afterAll(() => cleanupTempDir(work));
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, env: gitSafeEnv(), encoding: 'utf-8' }).trim();
