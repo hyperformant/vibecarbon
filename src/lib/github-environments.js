@@ -116,7 +116,7 @@ async function setSecretFromBodyFile(key, value, env, { timeout } = {}) {
   if (!value) return false;
   const args = ['gh', 'secret', 'set', key];
   if (env) args.push('--env', env);
-  await runCommandAsync(args, { silent: true, input: value, timeout });
+  await runCommandAsync(args, { cleanEnv: true, silent: true, input: value, timeout });
   return true;
 }
 
@@ -129,7 +129,7 @@ async function setVariable(key, value, env, { timeout } = {}) {
   if (value === undefined || value === null || value === '') return false;
   const args = ['gh', 'variable', 'set', key, '--body', String(value)];
   if (env) args.push('--env', env);
-  await runCommandAsync(args, { silent: true, timeout });
+  await runCommandAsync(args, { cleanEnv: true, silent: true, timeout });
   return true;
 }
 
