@@ -15,16 +15,52 @@
  *
  * Callers run it only when a Secret that carries the token is about to be
  * created or to change (applyCloudSecrets, applyK3sManifests), so a deploy
- * whose Secrets already hold the token makes no call.
+ * whose Secrets already hold the token makes no call. A deploy that hands a
+ * new token to both reads once: the verdict is kept for the rest of that
+ * deploy (`seen`, one per cluster, from newTokenChecks), by the token's
+ * keyed fingerprint and never the token.
  */
 import { readOperatorVar } from '../../operator-env.js';
 import { describeCredentialSource } from '../../project.js';
+import { fingerprintSecret } from '../secret-fingerprint.js';
 
 /**
  * What a provider answers for a server a token cannot see: no such token,
  * not allowed, or a server outside its project or account.
  */
 export const CANT_SEE_STATUSES = Object.freeze([401, 403, 404]);
+
+/**
+ * The verdicts one deploy of one cluster has reached: each a provider, a
+ * master id and the keyed fingerprint of a token that read it
+ * (fingerprintSecret, an HMAC under this machine's key), never the token.
+ * deployK3s makes one per cluster and hands it to both callers, so the
+ * autoscaler's Secret reuses the cloud Secrets' check instead of reading
+ * again.
+ *
+ * @returns {Set<string>}
+ */
+export function newTokenChecks() {
+  return new Set();
+}
+
+/**
+ * The key a verdict is kept under: no part of it is the token.
+ *
+ * @param {string} providerName
+ * @param {string} id
+ * @param {string} token
+ */
+function verdictKey(providerName, id, token) {
+  return `${providerName}\0${id}\0${fingerprintSecret(token)}`;
+}
+
+/** Names as one phrase: "a", "a and b", "a, b and c". */
+function listing(names) {
+  return names.length <= 2
+    ? names.join(' and ')
+    : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
 
 /**
  * Where the deploy's token came from, for the line that says which one to
@@ -55,7 +91,12 @@ function tokenSource(ProviderClass, token) {
  *
  * The master's id is the one the provisioning recorded (`masterId`), else
  * the one the master node carries (`readMasterNodeId`); with neither, it
- * refuses.
+ * refuses, saying how to have provisioning record it again.
+ *
+ * `secretNames` are the Secrets the caller is about to write the token
+ * into, `namespace/name`: a refusal says it left them as they were. `seen`
+ * (newTokenChecks) keeps a passed check for the rest of the deploy: the
+ * same token against the same master makes no second read.
  *
  * @param {{
  *   ProviderClass: typeof import('../../providers/base.js').BaseProvider,
@@ -64,7 +105,8 @@ function tokenSource(ProviderClass, token) {
  *   readMasterNodeId: () => Promise<string|undefined>,
  *   operatorEnv: string,
  *   stackName?: string,
- *   kubeconfig?: string,
+ *   secretNames: string[],
+ *   seen?: Set<string>,
  * }} args
  */
 export async function assertTokenSeesCluster({
@@ -74,15 +116,19 @@ export async function assertTokenSeesCluster({
   readMasterNodeId,
   operatorEnv,
   stackName,
-  kubeconfig,
+  secretNames,
+  seen,
 }) {
   const name = ProviderClass.NAME;
+  const stack = stackName || operatorEnv;
   const cluster =
     stackName && stackName !== operatorEnv
       ? `${operatorEnv}'s ${stackName} cluster`
       : `${operatorEnv}'s cluster`;
+  const one = secretNames.length === 1;
   const stopped =
-    'so this deploy stopped before handing it over, and the cluster still holds the token it had';
+    `so this deploy stopped before writing it into ${listing(secretNames)}, and left ` +
+    `${one ? 'that Secret as it was' : 'those Secrets as they were'}`;
   const couldnt = `Couldn't check that your ${name} API token can see ${cluster}`;
   let id = masterId != null && String(masterId) !== '' ? String(masterId) : undefined;
   if (id === undefined) {
@@ -97,14 +143,24 @@ export async function assertTokenSeesCluster({
     }
   }
   if (!id) {
+    // Only the provisioning step records the id, and a deploy skips that
+    // step while its record matches. -full clears the environment's own
+    // record (deploy-state-<env>.json), not a k8s-ha cluster's.
+    const rerun =
+      stack === operatorEnv
+        ? `Run \`vibecarbon deploy ${operatorEnv} -full\`: it redoes every step, provisioning ` +
+          'included, and provisioning records the id.'
+        : `Delete \`.vibecarbon/deploy-state-${stack}.json\` in your project (\`-full\` clears ` +
+          `only ${operatorEnv}'s own record), then deploy ${operatorEnv} again: it redoes every ` +
+          `step for ${stack}, provisioning included, and provisioning records the id.`;
     throw new Error(
-      `${couldnt}: this deploy's record has no id for its master server (vibecarbon 0.50 and ` +
-        `older didn't keep one), and the master node names none either, which the cluster's ` +
-        `cloud controller sets once it runs. So this deploy stopped before handing the token ` +
-        `over, and the cluster still holds the one it had. See whether the controller runs ` +
-        `with \`KUBECONFIG=${kubeconfig ?? '<kubeconfig>'} kubectl -n kube-system get pods\`.`,
+      `${couldnt}: this deploy's record of the cluster names no master server, and the master ` +
+        `node names none either (the cloud controller sets that only once it has the token), ` +
+        `${stopped}. ${rerun}`,
     );
   }
+  const key = verdictKey(name, id, token);
+  if (seen?.has(key)) return;
   const cantSee = (answer) =>
     `Your ${name} API token can't see ${cluster}: ${answer} when this deploy read its master ` +
     `server (${id}) with it, ${stopped}. ${tokenSource(ProviderClass, token)}; it may be ` +
@@ -129,4 +185,5 @@ export async function assertTokenSeesCluster({
   if (String(server?.id ?? '') !== id) {
     throw new Error(cantSee(`${name} didn't answer with that server`));
   }
+  seen?.add(key);
 }

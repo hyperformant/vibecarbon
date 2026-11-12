@@ -1339,7 +1339,8 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
       expect((err as Error).message).toContain(
         "Your Hetzner Cloud API token can't see e2e's cluster: Hetzner Cloud answered HTTP 404 " +
           `when this deploy read its master server (${MASTER_ID}) with it, so this deploy ` +
-          'stopped before handing it over, and the cluster still holds the token it had.',
+          'stopped before writing it into kube-system/carbon-autoscaler-config, and left that ' +
+          'Secret as it was.',
       );
     } finally {
       serverAnswer = async (id) => ({ id });
@@ -1364,6 +1365,41 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
       expect(serverReads[0].at).toBeGreaterThan(cmdCalls.findIndex(isSecretRead));
       expect(serverReads[0].at).toBeLessThanOrEqual(Number(applied?.seq));
     }
+  });
+
+  it("a token this deploy's cloud Secrets already checked is not read again for the autoscaler's", async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const { assertTokenSeesCluster, newTokenChecks } = await import(
+      '../../../src/lib/deploy/k8s/token-sees-cluster.js'
+    );
+    const tokenChecks = newTokenChecks();
+    // What applyCloudSecrets did first in the same deploy: one read, passed.
+    await assertTokenSeesCluster({
+      ProviderClass: FakeHetznerProvider as never,
+      token: baseArgs('').apiToken,
+      masterId: MASTER_ID,
+      readMasterNodeId: async () => undefined,
+      operatorEnv: 'e2e',
+      stackName: 'e2e',
+      secretNames: ['kube-system/hcloud'],
+      seen: tokenChecks,
+    });
+    expect(serverReads).toHaveLength(1);
+    serverReads = [];
+    caSecretOut = caSecret('old-token');
+    await applyK3sManifests({ ...baseArgs(makeProjectDir()), tokenChecks });
+    expect(serverReads).toEqual([]);
+    expect(stdinCalls.some((c) => c.data.includes('name: carbon-autoscaler-config'))).toBe(true);
+    // Another token, say one rotated between the two: read again.
+    serverReads = [];
+    cmdCalls = [];
+    stdinCalls = [];
+    await applyK3sManifests({
+      ...baseArgs(makeProjectDir()),
+      apiToken: 'hetzner-token-2',
+      tokenChecks,
+    });
+    expect(serverReads.map(({ token }) => token)).toEqual(['hetzner-token-2']);
   });
 
   it('the Secret already holding the token makes no call', async () => {

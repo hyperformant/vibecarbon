@@ -25,7 +25,7 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 ## Prerequisites
 
 1. **A DigitalOcean account**: [sign up](https://cloud.digitalocean.com/registrations/new)
-2. **A DigitalOcean Personal Access Token**: Control Panel → API → Tokens/Keys (Read & Write). Stored as `DIGITALOCEAN_TOKEN` or `DO_TOKEN`.
+2. **A DigitalOcean Personal Access Token**: Control Panel → API → Tokens/Keys (Read & Write). The deploy reads it as `DIGITALOCEAN_API_TOKEN`, from the project's `.env.local` or your shell (the shell wins), and asks for it on first run if neither has it.
 3. **Spaces Access Key & Secret Key**: Control Panel → API → Spaces Access Keys. Used for the dedicated Pulumi state bucket and `wal-g` S3 database backups.
 4. **A domain** you control, for the application URL and Let's Encrypt TLS certificates.
 5. **Docker running locally**: images are built on your machine and pushed over SSH (`local` build mode).

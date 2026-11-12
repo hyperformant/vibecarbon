@@ -180,7 +180,7 @@ import {
 import { recordRetiredReservedIps } from './retired-reserved-ip.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
 import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
-import { assertTokenSeesCluster } from './token-sees-cluster.js';
+import { assertTokenSeesCluster, newTokenChecks } from './token-sees-cluster.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2221,6 +2221,15 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
 }
 
 /**
+ * What every rotation error ends with (restartSecretReaders): a deploy that
+ * stopped partway left something on the old token, and only a deploy that
+ * finishes hands the new one to all of it.
+ */
+export const FINISH_BEFORE_REVOKE =
+  'deploy again and let it finish before you revoke the old token: this deploy stopped ' +
+  'partway, so the cluster autoscaler may still hold the old one.';
+
+/**
  * Restart the workloads that read Secrets this deploy just changed, as
  * findSecretReaders found them before the apply: they read them when they
  * start (env from secretKeyRef, the upstream CCM/CSI manifests and the
@@ -2258,15 +2267,6 @@ export async function findSecretReaders({ env, namespace, secretNames, signal })
  * @param {SecretReaders & {env: NodeJS.ProcessEnv, signal?: AbortSignal, wait?: boolean}} args
  * @returns {Promise<string[]>} what it restarted, as `kind/name`
  */
-/**
- * What every rotation error ends with (restartSecretReaders): a deploy that
- * stopped partway left something on the old token, and only a deploy that
- * finishes hands the new one to all of it.
- */
-export const FINISH_BEFORE_REVOKE =
-  'deploy again and let it finish before you revoke the old token: this deploy stopped ' +
-  'partway, so the cluster autoscaler may still hold the old one.';
-
 export async function restartSecretReaders({
   env,
   namespace,
@@ -2620,9 +2620,11 @@ async function masterNodeServerId({ env, ProviderClass }) {
  * the id the provisioning recorded (`masterId`, the k3s-infra step's
  * output) or, without one, the id the master node carries
  * (masterNodeServerId). Its callers run it only when a Secret that carries
- * the token is about to be created or to change.
+ * the token is about to be created or to change, and name those Secrets
+ * (`secretNames`); `tokenChecks` (newTokenChecks) is the deploy's record of
+ * checks already passed, so the second caller of a deploy reads nothing.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string}} args
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string, secretNames: string[], tokenChecks?: Set<string>}} args
  */
 function assertTokenSeesThisCluster({
   env,
@@ -2631,6 +2633,8 @@ function assertTokenSeesThisCluster({
   masterId,
   environment,
   operatorEnv,
+  secretNames,
+  tokenChecks,
 }) {
   return assertTokenSeesCluster({
     ProviderClass,
@@ -2639,7 +2643,8 @@ function assertTokenSeesThisCluster({
     readMasterNodeId: () => masterNodeServerId({ env, ProviderClass }),
     operatorEnv: operatorEnv ?? environment ?? 'this environment',
     stackName: environment,
-    kubeconfig: env?.KUBECONFIG ? shEscape(env.KUBECONFIG) : undefined,
+    secretNames,
+    seen: tokenChecks,
   });
 }
 
@@ -2696,7 +2701,11 @@ function assertTokenSeesThisCluster({
  * file. No token refuses before kubectl runs: applying an empty one would
  * take a working one away from the controllers.
  *
- * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string}} args
+ * `tokenChecks` (newTokenChecks) is the deploy's record of token checks
+ * already passed for this cluster; applyK3sManifests reuses what this one
+ * records, so a deploy reads the master once.
+ *
+ * @param {{env: NodeJS.ProcessEnv, ProviderClass: typeof import('../../providers/base.js').BaseProvider, token: string, masterId?: string|number|null, environment?: string, operatorEnv?: string, tokenChecks?: Set<string>}} args
  */
 export async function applyCloudSecrets({
   env,
@@ -2705,6 +2714,7 @@ export async function applyCloudSecrets({
   masterId,
   environment,
   operatorEnv,
+  tokenChecks,
 }) {
   const secrets = ProviderClass.k8sCloudSecrets({ token });
   if (secrets.length === 0) return;
@@ -2761,6 +2771,8 @@ export async function applyCloudSecrets({
       masterId,
       environment,
       operatorEnv,
+      secretNames: names,
+      tokenChecks,
     });
   }
   const readers = [];
@@ -4466,6 +4478,10 @@ export async function applyK3sManifests({
   // masterId output): a token the autoscaler's Secret doesn't hold yet is
   // read against it first (assertTokenSeesThisCluster).
   masterId,
+  // The deploy's token checks already passed for this cluster
+  // (newTokenChecks): applyCloudSecrets', so a token it checked is not read
+  // again for the autoscaler's Secret.
+  tokenChecks,
   // Where this registers what it runs alongside its main chain (the CA
   // rollout), so deployK3s can stop and settle it when the deploy fails.
   inFlight = {},
@@ -4681,6 +4697,8 @@ export async function applyK3sManifests({
           masterId,
           environment,
           operatorEnv,
+          secretNames: ['kube-system/carbon-autoscaler-config'],
+          tokenChecks,
         });
       }
       const caReaders = secretDataChanged(caTokenBefore, { token: apiToken })
@@ -6441,6 +6459,10 @@ async function deployK3sSteps(options, inFlight) {
   //     cloud Secrets and everything applyK3sManifests does next, since
   //     nothing else between here and that apply touches k3s (the image wait
   //     is local or over the peer; the apply gate's registry probe is ssh).
+  // One record of passed token checks for this cluster's deploy: the
+  // autoscaler's Secret (applyK3sManifests, step 8) reuses the cloud
+  // Secrets' check, so a rotation reads the master once.
+  const tokenChecks = newTokenChecks();
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
     // Beside the gate, which makes the same kind of call to the same apiserver,
@@ -6476,6 +6498,7 @@ async function deployK3sSteps(options, inFlight) {
         masterId: infraOutputs.masterId,
         environment: options.environment,
         operatorEnv: options.operatorEnv ?? options.environment,
+        tokenChecks,
       }),
     );
   }
@@ -6558,6 +6581,7 @@ async function deployK3sSteps(options, inFlight) {
         restore: options.restore,
         operatorEnv: options.operatorEnv ?? options.environment,
         masterId: infraOutputs.masterId,
+        tokenChecks,
         // Phase 5: cluster-autoscaler wiring. apiToken (the Hetzner Cloud
         // token CCM/CSI/Pulumi already use) flows in here under its own
         // name to make the CA Secret apply unambiguous; the k3sToken
