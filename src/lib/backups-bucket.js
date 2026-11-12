@@ -104,6 +104,26 @@ export function backupsRecordOf(envConfig) {
 }
 
 /**
+ * Point a backups record at the region its bucket was found in, with that
+ * region's endpoint: the app key fence's findings save, for a destroyed
+ * environment's kept backups bucket that its record puts in the wrong
+ * region. Both, because backupsTargetOf prefers a recorded endpoint, so the
+ * region alone would still be read at the old host. With no endpoint known,
+ * the stale one is dropped and readers derive it from the region. A record
+ * with no bucket is left alone. The one writer of an existing record's
+ * region outside the deploy's own save.
+ * @param {{ backupS3?: { bucket?: string, region?: string, endpoint?: string } } | null | undefined} envConfig - changed in place
+ * @param {{ region: string, endpoint?: string | null }} found
+ */
+export function relocateBackupsRecord(envConfig, { region, endpoint }) {
+  const record = envConfig?.backupS3;
+  if (!record?.bucket) return;
+  record.region = region;
+  if (endpoint) record.endpoint = endpoint;
+  else delete record.endpoint;
+}
+
+/**
  * Every environment that keeps backups in a bucket of this project:
  *   - each live environment's record;
  *   - each `destroyedEnvironments` entry not marked `backupsPurged`: a plain

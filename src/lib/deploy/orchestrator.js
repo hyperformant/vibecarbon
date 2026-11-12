@@ -362,7 +362,7 @@ function sameOrigins(a, b) {
  *   done: Promise<void>,
  *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null,
  *     fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[],
- *     fenceLocated?: { bucket: string, region: string }[] }>,
+ *     fenceLocated?: { bucket: string, region: string, endpoint: string|null }[] }>,
  * }}
  *   `bucketCreatedAt` (ISO string, or null when unknown) is present only on a
  *   provider that fences a pasted app key. `fenceSkipped`, `fenceGone`,
@@ -435,7 +435,11 @@ export function startAppBucketFinalize({
             fenceSkipped: fence.skipped ?? [],
             fenceGone: fence.gone ?? [],
             fenceFound: (fence.found ?? []).map((f) => f.bucket),
-            fenceLocated: (fence.located ?? []).map(({ bucket, region }) => ({ bucket, region })),
+            fenceLocated: (fence.located ?? []).map(({ bucket, region, endpoint }) => ({
+              bucket,
+              region,
+              endpoint,
+            })),
           }
         : {};
       const { recorded, createdAt, warning } = await fenceRecord;

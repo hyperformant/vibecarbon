@@ -531,9 +531,10 @@ export function fenceInfoLines(out) {
  * @param {() => number} [args.now]
  * @returns {Promise<{ written: string[], removed: string[], unverified: string[],
  *   skipped: string[], gone: string[], located: { bucket: string, region: string,
- *   onRecord: string|null, regionFrom: FenceTarget['regionFrom'] }[],
+ *   endpoint: string|null, onRecord: string|null, regionFrom: FenceTarget['regionFrom'] }[],
  *   found: { bucket: string, region: string|null }[] }>}
- *   `located[].onRecord` is the target's region (null when no record names one).
+ *   `located[].onRecord` is the target's region (null when no record names one),
+ *   and `located[].endpoint` the found region's host.
  *   `found[].region` is where it was read.
  */
 export async function applyHetznerFences({
@@ -592,6 +593,8 @@ export async function applyHetznerFences({
       located.push({
         bucket,
         region: at,
+        // That region's host, for a record whose stale endpoint would win.
+        endpoint: store.endpoint ?? null,
         onRecord: target.region ?? null,
         regionFrom: target.regionFrom ?? null,
       });

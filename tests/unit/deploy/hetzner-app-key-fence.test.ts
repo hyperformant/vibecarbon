@@ -3,6 +3,7 @@
  * Sentinel key ids only.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { backupsTargetOf } from '../../../src/lib/backups-bucket.js';
 import {
   APP_STORAGE_SECRET_PREFIX,
   appStorageSecretKeys,
@@ -637,6 +638,7 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     };
     return {
       region,
+      endpoint: `https://${region}.your-objectstorage.com`,
       forRegion: (r: string) => storeAt(r, world),
       ownerId: async () => OWNER,
       getBucketPolicy: vi.fn(async (bucket: string) => {
@@ -1090,6 +1092,39 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     ]);
   });
 
+  it('N1: a destroyed record whose kept backups bucket is in another region gets that region and its endpoint, so the next deploy reads it there with no search and no line', async () => {
+    const cfg = twoRegions();
+    // staging's backups record names nbg1, with nbg1's host; its bucket is in fsn1.
+    (cfg.environments.staging as ReturnType<typeof fencedEnv>).backupS3 = {
+      bucket: FSN1,
+      region: 'nbg1',
+      endpoint: 'https://nbg1.your-objectstorage.com',
+    };
+    destroyed(cfg, 'staging');
+    cfg.environments.qa = fencedEnv('qa', 'AK_Q', 'nbg1', BASE);
+    const world = newWorld();
+
+    expect((await deployQa(cfg, world)).filter((l) => l.includes(FSN1))).toEqual([
+      `app key fence: ${FSN1} is in fsn1, not nbg1 as destroyed staging's record says; fenced it there`,
+    ]);
+    // Both: a region with the old host would still be read at nbg1 (backupsTargetOf).
+    expect(cfg.destroyedEnvironments?.staging?.backupS3).toEqual({
+      bucket: FSN1,
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+    });
+    expect(backupsTargetOf(cfg.destroyedEnvironments?.staging)).toMatchObject({
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+    });
+
+    world.calls.length = 0;
+    expect((await deployQa(cfg, world)).filter((l) => l.includes(FSN1))).toEqual([]);
+    expect(world.calls.filter((c) => c.includes(FSN1) && !c.startsWith('put'))).toEqual([
+      `get ${FSN1}@fsn1`,
+    ]);
+  });
+
   it('M4: a kept backups bucket no region has is said once, marked backupsNotFound, never purged, and still looked for', async () => {
     // staging was destroyed plainly (its backups kept); its fsn1 backups
     // bucket has since gone from every region.
@@ -1126,7 +1161,30 @@ describe('each bucket is fenced in its own region (Task 5)', () => {
     expect(cfg.destroyedEnvironments?.staging).not.toHaveProperty('backupsNotFound');
   });
 
-  it('the findings save: backups marks only on records that hold the bucket, a located region only into a destroyed app bucket record', () => {
+  it('N1: the save drops a stale backups endpoint when the found one is not known, and never rewrites a purged or live record', () => {
+    const OLD = 'https://nbg1.your-objectstorage.com';
+    const cfg: Project = {
+      projectName: 'proj',
+      environments: { qa: fencedEnv('qa', 'AK_Q', 'nbg1', FSN1) },
+      destroyedEnvironments: {
+        kept: { backupS3: { bucket: FSN1, region: 'nbg1', endpoint: OLD } },
+        purged: { backupS3: { bucket: FSN1, region: 'nbg1', endpoint: OLD }, backupsPurged: true },
+      },
+    };
+    recordFenceOutcome(cfg, {
+      fenceSkipped: [],
+      fenceLocated: [{ bucket: FSN1, region: 'fsn1', endpoint: null }],
+    });
+    expect(cfg.destroyedEnvironments?.kept.backupS3).toEqual({ bucket: FSN1, region: 'fsn1' });
+    expect(cfg.destroyedEnvironments?.purged.backupS3).toEqual({
+      bucket: FSN1,
+      region: 'nbg1',
+      endpoint: OLD,
+    });
+    expect((cfg.environments.qa as ReturnType<typeof fencedEnv>).backupS3.region).toBe('nbg1');
+  });
+
+  it('the findings save: backups marks only on records that hold the bucket, a located region only into destroyed records', () => {
     const cfg: Project = {
       projectName: 'proj',
       environments: { qa: fencedEnv('qa', 'AK_Q', 'nbg1', BASE) },

@@ -597,6 +597,14 @@ describe('revoke on destroy', () => {
       expect(info).toHaveBeenCalledWith(
         "app key fence: proj-abc-old is in nbg1, not fsn1 as destroyed old's record says; fenced it there",
       );
+      // With the found region's host, for a kept backups record (N1).
+      expect(ctx.results.fenceLocated).toEqual([
+        {
+          bucket: 'proj-abc-old',
+          region: 'nbg1',
+          endpoint: 'https://nbg1.your-objectstorage.com',
+        },
+      ]);
       await DESTROY_EFFECTS.updateProjectConfig(ctx);
       const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
       expect(saved.destroyedEnvironments.old.s3).toEqual({

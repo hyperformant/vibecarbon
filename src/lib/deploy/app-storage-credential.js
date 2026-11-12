@@ -33,7 +33,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { backupsTargetOf } from '../backups-bucket.js';
+import { backupsTargetOf, relocateBackupsRecord } from '../backups-bucket.js';
 import { parseDotenv } from '../dotenv.js';
 import { APP_STORAGE_SECRET_PREFIX, setEnvVar } from '../project.js';
 import { getProviderClass, resolveProviderToken } from '../providers/index.js';
@@ -395,9 +395,12 @@ export function markUnfencedBuckets(projectConfig, skipped) {
  *   - `found`: the fence read a marked bucket again; both marks are cleared.
  *   - `located`: the bucket was found in another region than its record
  *     says. A destroyed record naming it as its app bucket gets that region
- *     in `s3.region`, so the next run reads it there with no search and no
- *     line. (A live record is corrected by its own deploy, and the line says
- *     so.)
+ *     in `s3.region`, and one naming it as the backups bucket it kept gets
+ *     the region and that region's endpoint in `backupS3` (the endpoint too,
+ *     or the stale one would still win in backupsTargetOf; with none known,
+ *     the stale one is dropped and the reader derives it from the region).
+ *     The next run reads the bucket there with no search and no line. (A
+ *     live record is corrected by its own deploy, and the line says so.)
  * A not-found mark only keeps the "nothing to fence" line from repeating:
  * the fence still reads the bucket on every run, looks in every region after
  * a NoSuchBucket, and fences it wherever it turns up. Neither mark is ever
@@ -407,7 +410,7 @@ export function markUnfencedBuckets(projectConfig, skipped) {
  * names is never in `gone`.
  * @param {{ destroyedEnvironments?: Record<string, any> }} projectConfig - changed in place
  * @param {{ gone?: string[], found?: string[],
- *   located?: { bucket: string, region: string }[] }} seen - what the run found
+ *   located?: { bucket: string, region: string, endpoint?: string|null }[] }} seen - what the run found
  * @param {string} [at] - ISO date for a new mark
  */
 export function recordFenceFindings(
@@ -417,19 +420,21 @@ export function recordFenceFindings(
 ) {
   const missing = new Set(gone);
   const back = new Set(found);
-  const moved = new Map(located.map((l) => [l.bucket, l.region]));
+  const moved = new Map(located.map((l) => [l.bucket, l]));
   for (const entry of Object.values(projectConfig.destroyedEnvironments ?? {})) {
     if (!entry) continue;
     const app = entry.s3?.bucket;
     if (app) {
       if (back.has(app)) delete entry.appBucketNotFound;
       else if (missing.has(app) && !entry.appBucketNotFound) entry.appBucketNotFound = at;
-      if (moved.has(app)) entry.s3.region = moved.get(app);
+      if (moved.has(app)) entry.s3.region = moved.get(app).region;
     }
     const backups = entry.backupsPurged ? null : backupsTargetOf(entry)?.bucket;
     if (backups) {
       if (back.has(backups)) delete entry.backupsNotFound;
       else if (missing.has(backups) && !entry.backupsNotFound) entry.backupsNotFound = at;
+      const to = moved.get(backups);
+      if (to) relocateBackupsRecord(entry, to);
     }
   }
   return projectConfig;
@@ -442,7 +447,7 @@ export function recordFenceFindings(
  * (recordFenceFindings).
  * @param {object} projectConfig - changed in place
  * @param {{ fenceSkipped?: string[], fenceGone?: string[], fenceFound?: string[],
- *   fenceLocated?: { bucket: string, region: string }[] }} final - what finish() returned
+ *   fenceLocated?: { bucket: string, region: string, endpoint?: string|null }[] }} final - what finish() returned
  */
 export function recordFenceOutcome(
   projectConfig,

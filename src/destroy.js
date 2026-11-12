@@ -1901,9 +1901,10 @@ async function revokeAppStorageKeyEffect(ctx) {
       // prints once.
       results.fenceGone = fenced.gone ?? [];
       results.fenceFound = (fenced.found ?? []).map((f) => f.bucket);
-      results.fenceLocated = (fenced.located ?? []).map(({ bucket, region }) => ({
+      results.fenceLocated = (fenced.located ?? []).map(({ bucket, region, endpoint }) => ({
         bucket,
         region,
+        endpoint,
       }));
     } else {
       spinner.stop(
