@@ -301,10 +301,10 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | Vultr | `compose` | 2m 33s | 39.5s | 5.1s | 4m 42s | 3m 7s | 18.0s | — |
 | | `compose-ha` | 3m 34s | 48.8s | 4.9s | 11m 18s | 3m 40s | 23.1s | 1m 30s |
-| Scaleway | `compose` | 1m 54s | 25.5s | 3.3s | 2m 36s | 2m 13s | 30.0s | — |
-| | `compose-ha` | 5m 6s | 2m 7s | 6.3s | 4m 24s | 5m 28s | 40.0s | 54.9s |
+| Scaleway | `compose` | 2m 32s | 49.8s | 5.5s | 2m 57s | 3m 2s | 29.7s | — |
+| | `compose-ha` | 5m 18s | 1m 32s | 6.7s | 4m 23s | 5m 10s | 41.2s | 1m 3s |
 
-_Latest green CI runs: Hetzner Cloud `1904abc` (2026-11-07) · DigitalOcean `a2c67c1` (2026-11-07) · Linode `1720818` (2026-11-07) · Vultr `1870cad` (2026-11-07) · Scaleway `d52d6fc` (2026-11-07) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `1904abc` (2026-11-07) · DigitalOcean `a2c67c1` (2026-11-07) · Linode `1720818` (2026-11-07) · Vultr `1870cad` (2026-11-07) · Scaleway `109d04a` (2026-11-12) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
