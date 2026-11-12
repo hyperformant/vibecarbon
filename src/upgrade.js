@@ -46,6 +46,7 @@ import {
   traefikImageRef,
 } from './lib/images.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
+import { readOperatorVar } from './lib/operator-env.js';
 import {
   adaptDockerfileForPackageManager,
   getPackageManagerVersion,
@@ -63,6 +64,13 @@ import {
 import { assertInProjectDir } from './lib/project-guard.js';
 import { sidecarBlocked, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
+import {
+  ensureStatePassphrase,
+  findStatePassphraseProblem,
+  STATE_PASSPHRASE_KEY,
+  StatePassphraseError,
+  statePassphraseGeneratedThisRun,
+} from './lib/state-passphrase.js';
 import { parseComposePs } from './lib/status/compose-ps.js';
 import { templatePathFor } from './lib/template-paths.js';
 import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
@@ -167,6 +175,57 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
   const existing = valid(local) ? local : valid(base) ? base : null;
   if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', existing ?? generatePassword(64), cwd);
   return existing ? 'copied' : 'generated';
+}
+
+/**
+ * Give a project created before the per-project state passphrase one, the way
+ * ensureBetterAuthSecret gives it a session key: the value into .env.local
+ * only (never .env, which ships to servers) and its fingerprint into
+ * .vibecarbon.json. A project that already has both is left alone, so a
+ * second run changes nothing. Wraps ensureStatePassphrase, which logs the
+ * "made one" and "recorded" lines itself.
+ *
+ * A recorded fingerprint whose value is missing or does not match is a
+ * warning here, not a stop: upgrade never opens the state, and the commands
+ * that do say the same thing and stop.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {Promise<'generated' | 'recorded' | 'problem' | null>} a new
+ *   passphrase (and fingerprint) made, a fingerprint recorded for a value
+ *   already in place, a mismatch warned about, or nothing to do. Under -dry
+ *   the first two are what would happen.
+ */
+export async function ensureStatePassphraseForUpgrade(cwd, { dryRun = false } = {}) {
+  const hadFingerprint = Boolean(loadManifest(cwd).stateEncryption?.fingerprint);
+  if (dryRun) {
+    const problem = findStatePassphraseProblem(cwd);
+    if (problem) {
+      p.log.warn(problem.message);
+      return 'problem';
+    }
+    if (hadFingerprint) return null;
+    const hasValue = Boolean(
+      readOperatorVar(STATE_PASSPHRASE_KEY).value ||
+        readOperatorVar(STATE_PASSPHRASE_KEY, {
+          env: { [STATE_PASSPHRASE_KEY]: loadEnvVariables(cwd)[STATE_PASSPHRASE_KEY] },
+        }).value,
+    );
+    return hasValue ? 'recorded' : 'generated';
+  }
+  try {
+    await ensureStatePassphrase(cwd);
+  } catch (err) {
+    if (!(err instanceof StatePassphraseError)) throw err;
+    p.log.warn(err.message);
+    return 'problem';
+  }
+  if (hadFingerprint) return null;
+  if (statePassphraseGeneratedThisRun(cwd)) return 'generated';
+  // ensureStatePassphrase said what it recorded (and, for a value only the
+  // shell has, to add it to .env.local), reading .env.local the way the
+  // dry run above does.
+  return 'recorded';
 }
 
 /**
@@ -569,6 +628,14 @@ async function main(cliArgs) {
   const s = spinner();
   s.start('Scanning infrastructure files');
 
+  const statePassphrase = await ensureStatePassphraseForUpgrade(cwd, { dryRun: args.dryRun });
+  if (args.dryRun && statePassphrase && statePassphrase !== 'problem') {
+    p.log.info(
+      statePassphrase === 'generated'
+        ? 'Would make a state passphrase for this project (saved to .env.local, its fingerprint recorded in .vibecarbon.json)'
+        : 'Would record the fingerprint of your state passphrase in .vibecarbon.json',
+    );
+  }
   const variables = reconstructVariables(cwd, { dryRun: args.dryRun });
   // What upgrade ships: the template's files, plus the files of every add-on
   // the project installed, read from the bundled services/<name>/ through

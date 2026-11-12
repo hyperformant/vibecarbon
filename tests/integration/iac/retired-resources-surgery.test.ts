@@ -50,6 +50,7 @@ import {
   releaseRetiredReservedIps,
 } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
+import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 
 // The fake cloud as a provider, for the deploy's own drop: its retired
 // resources are the fake cloud's reserved IP and assignment, as DigitalOcean's
@@ -92,8 +93,15 @@ const dir = mkdtempSync(join(tmpdir(), 'vc-retired-'));
 const cloudFile = join(dir, 'cloud.json');
 const backend = join(dir, 'state');
 mkdirSync(backend);
+// The stacks' passphrase: the deploy's own drop opens them through
+// getOrCreateStack, which reads it from the environment and checks it
+// against the fingerprint it records in this dir's .vibecarbon.json.
+const PASSPHRASE = 'retired-surgery-integration-passphrase-0123456789';
 // Every test starts its own stack in one fake cloud, in any order or alone.
-beforeAll(() => writeFileSync(cloudFile, JSON.stringify({ next: 1, servers: {} })));
+beforeAll(() => {
+  writeFileSync(cloudFile, JSON.stringify({ next: 1, servers: {} }));
+  writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
+});
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 type Thing = Record<string, unknown> & { assignedTo?: string | null };
@@ -178,13 +186,15 @@ async function stackFor(name: string, program: () => Promise<Record<string, unkn
   return LocalWorkspace.createOrSelectStack(
     { stackName: name, projectName: 'vcretired', program },
     {
+      // Removed after this file by the test setup, as the CLI's are at exit.
+      workDir: makeWorkspaceDir(),
       projectSettings: {
         name: 'vcretired',
         runtime: 'nodejs',
         backend: { url: `file://${backend}` },
       },
       envVars: {
-        PULUMI_CONFIG_PASSPHRASE: 'test',
+        PULUMI_CONFIG_PASSPHRASE: PASSPHRASE,
         PULUMI_SKIP_UPDATE_CHECK: 'true',
         FAKECLOUD_FILE: cloudFile,
         PATH: `${PLUGIN_DIR}:${process.env.PATH}`,
@@ -385,12 +395,14 @@ describe.skipIf(!hasPulumi && !process.env.CI)(
       // surgery and lock handling every up runs (dropRetiredStackResources),
       // on the fake cloud's retired types (the providers mock above).
       process.env.PULUMI_BACKEND_URL = `file://${backend}`;
+      process.env.VIBECARBON_STATE_PASSPHRASE = PASSPHRASE;
       const dropRetired = createDeployDropRetired({
         environment: 'mix',
         providerId: 'fakecloud',
         providerToken: '',
         s3Config: null,
         projectName: 'vcretired',
+        projectDir: dir,
         updateConfig: updateConfig as never,
       });
       const deletes: string[] = [];

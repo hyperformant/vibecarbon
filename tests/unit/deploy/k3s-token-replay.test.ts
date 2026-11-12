@@ -14,6 +14,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const getStackOutputs = vi.fn();
+const { StateMigrationError, StateUndecryptableError } = await import(
+  '../../../src/lib/iac/state-error.js'
+);
+const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
+const { K3sTokenProbeError } = await import('../../../src/lib/iac/index.js');
+const { StatePassphraseError } = await import('../../../src/lib/state-passphrase.js');
 
 vi.mock('../../../src/lib/iac/index.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../src/lib/iac/index.js')>();
@@ -60,20 +66,127 @@ describe('resolveStackK3sToken', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('fresh token'));
   });
 
-  it('degrades to fresh-stack behavior when the probe throws (never propagates)', async () => {
-    getStackOutputs.mockRejectedValueOnce(new Error('NoSuchBucket: state backend gone'));
+  // A first deploy: getStackOutputs finds no stack (getOrCreateStack's
+  // requireExisting answer, the flag set). The program mints a token exactly
+  // as it always has.
+  it('a stack the backend does not have yet mints, as a first deploy always has', async () => {
+    getStackOutputs.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'Pulumi stack "e4-primary" was not found in the configured state backend (s3://b). Refusing to create an empty stack in its place.',
+        ),
+        { stackNotFound: true },
+      ),
+    );
     const log = vi.fn();
     const resolveStackK3sToken = await load();
     const token = await resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log });
     expect(token).toBeUndefined();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('errored'));
+    expect(log).toHaveBeenCalledWith(
+      '[k3s-infra] k3s token probe: missing (no stack e4-primary in the state backend yet), minting a fresh token (fresh-stack path)',
+    );
+  });
+
+  // Any other failed read leaves a stack that may exist unread, with the
+  // token its live cluster runs with. A minted one would reach every new
+  // node and none could join (R22), so the deploy stops instead.
+  it.each([
+    ['the state backend is gone', 'NoSuchBucket: state backend gone'],
+    [
+      'backpressure retries ran out',
+      'error: blob (code=Unknown): SlowDown: Please reduce your request rate.',
+    ],
+  ])('%s: the deploy stops, naming the stack, and mints nothing', async (_label, message) => {
+    const cause = new Error(message);
+    getStackOutputs.mockRejectedValueOnce(cause);
+    const log = vi.fn();
+    const resolveStackK3sToken = await load();
+    const err = await resolveStackK3sToken(
+      FakeProvider,
+      { environment: 'e4-primary' },
+      { log },
+    ).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(K3sTokenProbeError);
+    expect((err as Error).cause).toBe(cause);
+    expect((err as Error).message).toContain("Couldn't read the k3s join token for e4-primary");
+    expect((err as Error).message).toContain('Running this again is safe.');
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  // A state the project's passphrase cannot read still holds the cluster's
+  // token. Minting one here would put it into the program's user data; if
+  // the up that follows can read the state (the one-time legacy migration
+  // re-encrypts it on first open), the minted token reaches a live cluster
+  // and its new nodes cannot join. So a passphrase failure propagates.
+  describe('never mints a token when the passphrase cannot open the state', () => {
+    const passphraseFailures: Array<[string, () => Error]> = [
+      [
+        'Pulumi refuses the passphrase (raw)',
+        () =>
+          new Error(
+            'code: -2\n stdout: \n stderr: Command failed with exit code 1: pulumi stack output --json --show-secrets --stack e4-primary --non-interactive\nerror: failed to decrypt: incorrect passphrase, please set PULUMI_CONFIG_PASSPHRASE to the correct passphrase or set PULUMI_CONFIG_PASSPHRASE_FILE to a file containing the passphrase\n',
+          ),
+      ],
+      ['an undecryptable stack (typed)', () => new StateUndecryptableError('e4-primary')],
+      [
+        'the passphrase is missing before Pulumi runs',
+        () => new StatePassphraseError('missing', "This project's state passphrase isn't set."),
+      ],
+    ];
+
+    it.each(passphraseFailures)('%s: the probe error propagates', async (_label, make) => {
+      const failure = make();
+      getStackOutputs.mockRejectedValueOnce(failure);
+      const log = vi.fn();
+      const resolveStackK3sToken = await load();
+      await expect(
+        resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log }),
+      ).rejects.toBe(failure);
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+    });
+  });
+
+  // The probe is often the first open of the stack in the process, so the
+  // one-time legacy migration runs inside it, and it can stop for a reason
+  // that clears on the up's own open moments later: the child re-encrypted
+  // the state and exited non-zero, or another run held the lock and has now
+  // finished. A token minted on that "errored" probe would ride the up onto
+  // the live cluster, and every later deploy would replay it.
+  describe('never mints a token when the open stopped for a reason a later open clears', () => {
+    const stops: Array<[string, () => Error]> = [
+      [
+        'the legacy migration stopped',
+        () =>
+          new StateMigrationError(
+            'Stopped while re-encrypting the Pulumi state for e4-primary: error: could not import deployment.',
+          ),
+      ],
+      [
+        'another run holds the stack',
+        () =>
+          new StackHeldError('e4-primary', [
+            { user: 'someone', host: 'laptop', pid: 4242, at: '2026-11-11T10:00:00Z' },
+          ]),
+      ],
+    ];
+
+    it.each(stops)('%s: the probe error propagates', async (_label, make) => {
+      const failure = make();
+      getStackOutputs.mockRejectedValueOnce(failure);
+      const log = vi.fn();
+      const resolveStackK3sToken = await load();
+      await expect(
+        resolveStackK3sToken(FakeProvider, { environment: 'e4-primary' }, { log }),
+      ).rejects.toBe(failure);
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining('fresh token'));
+    });
   });
 
   // M3 Task 9a (DO k8s 401 RCA): buildEnv now throws when a providerToken is
   // passed without a provider id (no more silent 'hetzner' default), so this
   // probe call MUST forward opts.provider through to getStackOutputs or a
-  // DigitalOcean k3s-infra probe would 401/throw instead of degrading to the
-  // fresh-token path.
+  // DigitalOcean k3s-infra probe would 401/throw (and now stop the deploy)
+  // instead of reading the stack's token.
   it('forwards opts.provider into the getStackOutputs probe call', async () => {
     getStackOutputs.mockResolvedValueOnce({ k3sToken: 'stack-token-abc' });
     const resolveStackK3sToken = await load();

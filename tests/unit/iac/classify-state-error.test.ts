@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
-import { classifyStateError } from '../../../src/lib/iac/state-error.js';
+import {
+  asStateUndecryptableError,
+  classifyStateError,
+  findStatePassphraseError,
+  isStatePassphraseFailure,
+  passphraseMadeThisRunText,
+  StateMigrationError,
+  StateUndecryptableError,
+} from '../../../src/lib/iac/state-error.js';
+import { StatePassphraseError } from '../../../src/lib/state-passphrase.js';
 import {
   STATE_ERROR_CORPUS,
   STATE_ERROR_NEGATIVES,
@@ -20,6 +29,29 @@ import {
 
 const run = (c: StateErrorCase) =>
   classifyStateError({ message: c.message, operation: c.operation });
+
+/**
+ * Two errors whose causes point at each other. Each `cause` read is counted,
+ * and past 50 reads it throws: the walk is synchronous, so without its cycle
+ * guard it would spin forever and vitest's timeout would never fire. This
+ * turns a missing guard into a failure.
+ */
+function countedCauseCycle() {
+  let reads = 0;
+  const outer = new Error('outer');
+  const inner = new Error('inner');
+  const pointAt = (from: Error, to: Error) =>
+    Object.defineProperty(from, 'cause', {
+      get() {
+        reads += 1;
+        if (reads > 50) throw new Error('walked past 50 cause links: the cycle guard is gone');
+        return to;
+      },
+    });
+  pointAt(outer, inner);
+  pointAt(inner, outer);
+  return { head: outer, reads: () => reads };
+}
 
 /** Fails loudly if an incident is renamed or removed, rather than silently. */
 const byId = (id: string): StateErrorCase => {
@@ -116,5 +148,193 @@ describe('classifyStateError — the properties the corpus exists to protect', (
         expect(['fail', 'retry-in-place'], `${c.id}`).toContain(got.recovery);
       }
     }
+  });
+});
+
+describe('the state passphrase class', () => {
+  const passphraseCases = STATE_ERROR_CORPUS.filter((c) => c.expect.cause === 'passphrase');
+
+  it("covers each of Pulumi's refusals: on decrypt, on encrypt, and none at all", () => {
+    expect(passphraseCases.some((c) => c.message.includes('failed to decrypt'))).toBe(true);
+    expect(passphraseCases.some((c) => c.message.includes('failed to encrypt'))).toBe(true);
+    expect(passphraseCases.some((c) => c.message.includes('passphrase must be set'))).toBe(true);
+  });
+
+  it('a retryable failure that merely mentions a passphrase is still retried', () => {
+    // STATE_ERROR_NEGATIVES holds the fatal near misses; these two keep
+    // their retry, so they live here. The word alone claims nothing.
+    const throttled = classifyStateError({
+      message:
+        'Command failed with exit code 1: pulumi up --stack e1 --non-interactive\nerror: blob (key ".pulumi/stacks/passphrase-demo/e1.json") (code=Unknown): 503 SlowDown: Please reduce your request rate',
+      operation: 'up',
+    });
+    expect(throttled.cause).toBe('throttle');
+    expect(throttled.recovery).toBe('retry-in-place');
+    const locked = classifyStateError({
+      message:
+        'Command failed with exit code 1: pulumi up --stack passphrase-e1 --non-interactive\nerror: the stack is currently locked by 1 lock(s). Either wait for the other process to finish or delete the lock file',
+      operation: 'up',
+    });
+    expect(locked.cause).toBe('lock-contention');
+    expect(locked.recovery).toBe('retry-in-place');
+  });
+
+  it('is never retried, even when the same output carries retryable wording', () => {
+    // A held lock or a SlowDown in the same output must not turn a key that
+    // cannot open the state into a retry: the same key gives the same answer
+    // on every attempt.
+    for (const c of passphraseCases) {
+      for (const noise of [
+        'error: the stack is currently locked by 1 lock(s). Either wait for the other process to finish or delete the lock file',
+        'error: 503 SlowDown: Please reduce your request rate',
+      ]) {
+        const got = classifyStateError({
+          message: `${c.message}\n${noise}`,
+          operation: c.operation,
+        });
+        expect(got.cause, c.id).toBe('passphrase');
+        expect(got.recovery, c.id).toBe('fail');
+      }
+    }
+  });
+});
+
+describe('isStatePassphraseFailure', () => {
+  it('recognises every passphrase corpus entry, raw or wrapped by a caller', () => {
+    for (const c of STATE_ERROR_CORPUS.filter((e) => e.expect.cause === 'passphrase')) {
+      const raw = new Error(c.message);
+      expect(isStatePassphraseFailure(raw), c.id).toBe(true);
+      // destroyStack wraps a failed destroy with `{ cause }`.
+      const wrapped = new Error('pulumi destroy for stack "e1" failed', { cause: raw });
+      expect(isStatePassphraseFailure(wrapped), `${c.id} wrapped`).toBe(true);
+    }
+  });
+
+  it('recognises the passphrase check that runs before Pulumi does', () => {
+    const err = new StatePassphraseError('missing', "This project's state passphrase isn't set.");
+    expect(isStatePassphraseFailure(err)).toBe(true);
+    expect(isStatePassphraseFailure(new StateUndecryptableError('e1'))).toBe(true);
+  });
+
+  it('is false for every other state failure and for nothing at all', () => {
+    for (const c of [...STATE_ERROR_CORPUS, ...STATE_ERROR_NEGATIVES]) {
+      if (c.expect.cause === 'passphrase') continue;
+      expect(isStatePassphraseFailure(new Error(c.message)), c.id).toBe(false);
+    }
+    expect(isStatePassphraseFailure(undefined)).toBe(false);
+    expect(isStatePassphraseFailure(null)).toBe(false);
+  });
+
+  it('is false for a legacy migration that stopped, whatever its cause says', () => {
+    // The migration names its own step; a refusal it carries as the cause
+    // (a re-encryption that ended with the project passphrase still refused)
+    // proves '' read the state, so nothing about it is a lost passphrase.
+    const refusal = new Error(
+      STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-export')?.message,
+    );
+    expect(isStatePassphraseFailure(refusal)).toBe(true);
+    const stopped = new StateMigrationError('Stopped after re-encrypting the state for e1', {
+      cause: refusal,
+    });
+    expect(isStatePassphraseFailure(stopped)).toBe(false);
+    expect(isStatePassphraseFailure(new Error('wrapped', { cause: stopped }))).toBe(false);
+  });
+
+  it('survives a cause cycle, visiting each error once', () => {
+    const cycle = countedCauseCycle();
+    expect(isStatePassphraseFailure(cycle.head)).toBe(false);
+    expect(cycle.reads()).toBe(2);
+  });
+});
+
+describe('StateUndecryptableError', () => {
+  it('leads with the cause a teammate can fix, and backs up before any destroy', () => {
+    const err = new StateUndecryptableError('prod');
+    expect(err.message).toBe(
+      "vibecarbon can't decrypt the Pulumi state for prod with this project's passphrase. " +
+        'If a teammate deployed this project, pull the latest .vibecarbon.json and copy their VIBECARBON_STATE_PASSPHRASE into .env.local. Then run this again. ' +
+        "If it was written with a passphrase nobody has any more, that state can't be recovered. " +
+        'Run `vibecarbon backup prod` first to keep a copy of your database, then `vibecarbon destroy prod` removes the servers so you can deploy again.',
+    );
+    expect(err.message.indexOf('vibecarbon backup')).toBeLessThan(
+      err.message.indexOf('vibecarbon destroy'),
+    );
+    expect(err.message).not.toContain('—');
+    expect(err.stackName).toBe('prod');
+  });
+
+  it('a passphrase this run made: the same words destroy uses, then the backup before destroy', () => {
+    const err = new StateUndecryptableError('prod', { madeThisRun: true });
+    expect(err.message).toBe(
+      "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read the Pulumi state for prod. " +
+        "If the project has one, pull the latest .vibecarbon.json (dropping the `stateEncryption` entry this run wrote) and copy the project's VIBECARBON_STATE_PASSPHRASE into .env.local in place of the new one, then run this again. " +
+        "If it was written with a passphrase nobody has any more, that state can't be recovered. " +
+        'Run `vibecarbon backup prod` first to keep a copy of your database, then `vibecarbon destroy prod` removes the servers so you can deploy again.',
+    );
+    expect(passphraseMadeThisRunText('this state', 'run `vibecarbon destroy prod` again')).toBe(
+      "vibecarbon made this project's state passphrase during this run, because this clone had neither the passphrase nor its fingerprint, and that new passphrase can't read this state. " +
+        "If the project has one, pull the latest .vibecarbon.json (dropping the `stateEncryption` entry this run wrote) and copy the project's VIBECARBON_STATE_PASSPHRASE into .env.local in place of the new one, then run `vibecarbon destroy prod` again.",
+    );
+  });
+
+  it('names the environment, not the HA stack, in the destroy command', () => {
+    expect(new StateUndecryptableError('prod-primary').message).toContain(
+      'Pulumi state for prod-primary',
+    );
+    expect(new StateUndecryptableError('prod-standby').message).toContain(
+      '`vibecarbon destroy prod`',
+    );
+  });
+
+  it('asStateUndecryptableError wraps only a raw Pulumi refusal', () => {
+    const raw = new Error(
+      STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-outputs')?.message,
+    );
+    const typed = asStateUndecryptableError(raw, 'e1');
+    expect(typed).toBeInstanceOf(StateUndecryptableError);
+    expect(typed.stackName).toBe('e1');
+    expect(typed.cause).toBe(raw);
+    expect(typed.message).toContain('If a teammate deployed this project');
+    // The caller says when this run made the passphrase.
+    const made = asStateUndecryptableError(raw, 'e1', { madeThisRun: true });
+    expect(made.message).toContain(
+      "vibecarbon made this project's state passphrase during this run",
+    );
+    expect(made.cause).toBe(raw);
+
+    // Already typed, or not about the passphrase: handed back untouched.
+    const precheck = new StatePassphraseError('mismatch', 'mismatch');
+    expect(asStateUndecryptableError(precheck, 'e1')).toBe(precheck);
+    expect(asStateUndecryptableError(typed, 'e2')).toBe(typed);
+    const other = new Error("error: no stack named 'e1' found");
+    expect(asStateUndecryptableError(other, 'e1')).toBe(other);
+  });
+});
+
+describe('findStatePassphraseError', () => {
+  const precheck = () =>
+    new StatePassphraseError('missing', "This project's state passphrase isn't set.");
+
+  it('finds the precheck error at the top or anywhere down the cause chain', () => {
+    const top = precheck();
+    expect(findStatePassphraseError(top)).toBe(top);
+    const deep = precheck();
+    const wrapped = new Error('outer', { cause: new Error('middle', { cause: deep }) });
+    expect(findStatePassphraseError(wrapped)).toBe(deep);
+  });
+
+  it("is null for Pulumi's own refusal, plain errors and non-errors", () => {
+    expect(
+      findStatePassphraseError(new StateUndecryptableError('e1', { cause: new Error('x') })),
+    ).toBeNull();
+    expect(findStatePassphraseError(new Error('boom'))).toBeNull();
+    expect(findStatePassphraseError(undefined)).toBeNull();
+    expect(findStatePassphraseError('StatePassphraseError')).toBeNull();
+  });
+
+  it('stops on a cause cycle, visiting each error once', () => {
+    const cycle = countedCauseCycle();
+    expect(findStatePassphraseError(cycle.head)).toBeNull();
+    expect(cycle.reads()).toBe(2);
   });
 });

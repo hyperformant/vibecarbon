@@ -161,7 +161,8 @@ jobs:
                 .DIGITALOCEAN_API_TOKEN, .DIGITALOCEAN_TOKEN,
                 .LINODE_API_TOKEN, .LINODE_TOKEN,
                 .VULTR_API_TOKEN, .VULTR_API_KEY,
-                .SCALEWAY_SECRET_KEY, .SCW_SECRET_KEY
+                .SCALEWAY_SECRET_KEY, .SCW_SECRET_KEY,
+                .VIBECARBON_STATE_PASSPHRASE
               )
               | to_entries[]
               | select(.value != null and .value != "")

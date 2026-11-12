@@ -13,32 +13,46 @@
  * - One project name ("vibecarbon"), many stacks (one per environment like
  *   "prod", "staging"). HA deploys use two stacks: "<env>-primary" and
  *   "<env>-standby".
- * - Pulumi's own secrets provider isn't used — secrets are resolved from
- *   the operator's environment (shell/CI, or the project's .env.local via
- *   bootstrapOperatorEnv); we pass them to programs as plain config.
+ * - Secrets are resolved from the operator's environment (shell/CI, or the
+ *   project's .env.local via bootstrapOperatorEnv) and passed to programs as
+ *   plain config. The state's secrets provider is encrypted with the
+ *   project's own passphrase (VIBECARBON_STATE_PASSPHRASE, see buildEnv).
  */
 
-import { mkdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
-import { perfEnabled, perfRecord, perfTimer } from '../perf.js';
+import { perfAsync, perfEnabled, perfRecord, perfTimer } from '../perf.js';
 import { getProviderClass } from '../providers/index.js';
+import {
+  ensureStatePassphrase,
+  resolveStatePassphrase,
+  STATE_PASSPHRASE_KEY,
+  statePassphraseGeneratedThisRun,
+} from '../state-passphrase.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
 import { dropStackResources } from './retired-resources.js';
 import { createDropletPlanRecorder, sizeUnavailableError } from './size-unavailable.js';
 import { runPastStaleLock, StackHeldError } from './stack-lock.js';
 import {
+  asStateUndecryptableError,
   classifyStateError,
   failingPulumiCommandVerb,
   HISTORY_WRITE_PATTERN,
   isHistoryWriteOnlyFailure,
+  isStackOpenInterrupted,
+  isStatePassphraseFailure,
+  StateMigrationError,
 } from './state-error.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
+import { makeWorkspaceDir } from './workspace-dir.js';
 
 // Re-exported so this module stays the iac layer's public surface while the
 // verb extractor lives with the classifier that depends on it — one
@@ -168,7 +182,11 @@ export function resolveBackendUrl(s3Config, provider) {
  * @param {string} [options.providerToken] - The provider's API token. Value
  *   for whatever env var name the provider class declares.
  * @param {object} [options.s3Config]
- * @param {string} [options.configPassphrase]
+ * @param {string} [options.statePassphrase] - The passphrase getOrCreateStack
+ *   already verified; used instead of re-reading the environment.
+ * @param {boolean} [options.decrypts=true] - false for a caller that decrypts
+ *   nothing (stack ls, whoami, stack rm --force): a malformed
+ *   VIBECARBON_STATE_PASSPHRASE then does not stop it.
  * @returns {Record<string, string|undefined>}
  */
 export function buildEnv(options) {
@@ -223,12 +241,31 @@ export function buildEnv(options) {
   // Unknown env vars are ignored by the CLI, so this is inert on a version
   // that predates the flag rather than an error.
   env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS = 'true';
-  // Inline programs don't need a passphrase — but Pulumi insists on one for
-  // the secrets provider. A deterministic empty value keeps the automation
-  // API happy, so nothing in state is encrypted. Secrets flow in at program
-  // time, with one exception: the k8s programs export `k3sToken` as a plain
-  // output, so anyone who can read the state bucket can read the join token.
-  env.PULUMI_CONFIG_PASSPHRASE = options.configPassphrase || '';
+  // The project's state passphrase encrypts the values Pulumi marks secret in
+  // the state. It is NOT a blanket seal: a plain output (the k8s programs'
+  // `k3sToken`) and user data stay readable until a later change wraps them in
+  // pulumi.secret and re-seals existing state. SECURITY: never default to ''
+  // (the empty passphrase every legacy stack was made with) and never let an
+  // inherited PULUMI_CONFIG_PASSPHRASE or PULUMI_CONFIG_PASSPHRASE_FILE (a
+  // shell export for another project) win over the project's own value.
+  // Both are set to `undefined`, not deleted: the Automation SDK spawns pulumi
+  // with {...process.env, ...envVars}, so a deleted key comes straight back
+  // from process.env, while an undefined one overrides it and Node drops it at
+  // spawn. With no project passphrase pulumi then sees neither variable and a
+  // decrypting call is refused by pulumi; getOrCreateStack awaits
+  // ensureStatePassphrase first and hands its verified value in as
+  // `options.statePassphrase`, so every decrypting path carries one.
+  env.PULUMI_CONFIG_PASSPHRASE = undefined;
+  env.PULUMI_CONFIG_PASSPHRASE_FILE = undefined;
+  let passphrase = options.statePassphrase ?? null;
+  if (!passphrase) {
+    try {
+      passphrase = resolveStatePassphrase();
+    } catch (err) {
+      if (options.decrypts !== false) throw err;
+    }
+  }
+  if (passphrase) env.PULUMI_CONFIG_PASSPHRASE = passphrase;
   return env;
 }
 
@@ -295,19 +332,31 @@ export function summarizePulumiError(err) {
  *   stack for them silently destroys state. See `isStackNotFoundError`.
  */
 export async function getOrCreateStack(stackName, program, options = {}) {
+  // The choke point for every decrypting Pulumi call: the project's state
+  // passphrase is checked (or made, on a new project) before any workspace
+  // exists, and an existing stack's state is read with it (probeStackState)
+  // before the stack is handed out. A caller that decrypts nothing (`stack rm
+  // --force`) opts out of both with `decrypts: false`.
+  let statePassphrase;
+  if (options.decrypts !== false) {
+    statePassphrase = await ensureStatePassphrase(projectDirOf(options));
+  }
   recordStateOp('stack-select');
   const pulumiProject = requirePulumiProject(options);
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
-  const envVars = buildEnv(options);
+  const envVars = buildEnv({ ...options, statePassphrase });
   const stackArgs = { stackName, projectName: pulumiProject, program };
   const stackConfig = options.provider ? getProviderClass(options.provider).IAC_STACK_CONFIG : {};
-  const wsOpts = {
+  // Each attempt below gets a directory of its own (workspace-dir.js), as
+  // the SDK's own mkdtemp gave it, but one this process removes at exit.
+  const wsOpts = () => ({
     projectSettings: { name: pulumiProject, runtime: 'nodejs', backend: { url: backendUrl } },
     envVars,
     ...(Object.keys(stackConfig).length > 0 && {
       stackSettings: { [stackName]: { config: stackConfig } },
     }),
-  };
+    workDir: makeWorkspaceDir(),
+  });
   const requireExisting = options.requireExisting === true;
 
   // `pulumi stack select` reads the stack file from the S3 backend. On a
@@ -323,9 +372,11 @@ export async function getOrCreateStack(stackName, program, options = {}) {
   // genuinely-fresh first deploy. A 404 here now means what it says and fails
   // loudly with a named cause; only backpressure retries (via
   // classifyStateError).
+  let stack;
+  let created = false;
   try {
-    return await withStateBackendRetry(
-      () => LocalWorkspace.selectStack(stackArgs, wsOpts),
+    stack = await withStateBackendRetry(
+      () => LocalWorkspace.selectStack(stackArgs, wsOpts()),
       `stack-select ${stackName}`,
     );
   } catch (err) {
@@ -373,11 +424,397 @@ export async function getOrCreateStack(stackName, program, options = {}) {
           `inspect the bucket directly. Underlying: ${summarizePulumiError(err)}`,
       );
     }
-    return await withStateBackendRetry(
-      () => LocalWorkspace.createStack(stackArgs, wsOpts),
+    stack = await withStateBackendRetry(
+      () => LocalWorkspace.createStack(stackArgs, wsOpts()),
       `stack-create ${stackName}`,
     );
+    created = true;
   }
+  if (statePassphrase) {
+    const probeKey = `${backendUrl}\n${pulumiProject}\n${stackName}`;
+    // A stack this open just created was made with the project's passphrase
+    // and holds nothing to migrate, and reading its checkpoint back this
+    // soon is a read-after-write the store may not answer yet: it counts as
+    // read. The up that follows reads it as it always has.
+    if (created) stateProbes.set(probeKey, Promise.resolve());
+    else await probeStackState(stack, probeKey, statePassphrase, projectDirOf(options));
+  }
+  return stack;
+}
+
+/**
+ * Stacks this process has read with the project's passphrase, by backend URL,
+ * project and stack: the settled promise of that first read (or, while it
+ * runs, the read itself, so a concurrent open waits for it instead of
+ * migrating the same stack twice). A failed read is forgotten.
+ * @type {Map<string, Promise<void>>}
+ */
+const stateProbes = new Map();
+
+/**
+ * Stacks (by probe key) whose migration THIS process started and that then
+ * stopped the open with an error. The child can finish re-encrypting and still
+ * exit non-zero, so the next open in this process may find the state already
+ * readable; it says what the failed one could not. A run that never tried
+ * stays out of it: only the process that migrated announces. REMOVE AFTER
+ * 2027-02-11 with the migration.
+ * @type {Set<string>}
+ */
+const migrationsAttempted = new Set();
+
+const MIGRATED_NOTICE = (name) =>
+  `Your Pulumi state for ${name} was stored with an empty passphrase. vibecarbon re-encrypted it with this project's passphrase.`;
+
+/**
+ * The deployment a stack's first-open probe exported, kept on the Stack
+ * object that open returned, for the up path to read once instead of
+ * exporting again (takeProbedDeployment).
+ * @type {WeakMap<object, object>}
+ */
+const probedDeployments = new WeakMap();
+
+/** Test-only: forget which stacks this process already read. */
+export function __resetStateProbesForTests() {
+  stateProbes.clear();
+  migrationsAttempted.clear();
+}
+
+/**
+ * The deployment `stack`'s probe exported, once: a second call, or any other
+ * Stack object, gets null. Only the open that probed has it, and only that
+ * open's caller reads it, before anything it does writes the state. A caller
+ * that reads the state right after opening it takes this first and exports
+ * only on null.
+ * @param {object} stack
+ * @returns {object|null}
+ */
+export function takeProbedDeployment(stack) {
+  const deployment = probedDeployments.get(stack) ?? null;
+  probedDeployments.delete(stack);
+  return deployment;
+}
+
+/**
+ * Read an existing stack's state with the project's passphrase, once per
+ * process per stack, before getOrCreateStack hands the stack out:
+ *
+ *   - it reads: the export is kept for the up path (takeProbedDeployment);
+ *   - Pulumi refuses the passphrase: a legacy stack written with the empty
+ *     one is migrated (readOrMigrateState), and any other state fails here
+ *     with the StateUndecryptableError, at the open, before a refresh, up or
+ *     destroy can surface Pulumi's raw text or act on half an answer. That is
+ *     also what keeps `destroy` from ruling a legacy state unreadable and
+ *     removing its record without reading it;
+ *   - anything else fails the open as it is, unremembered, so the next open
+ *     reads again.
+ *
+ * The probe is a full export (`stack export --show-secrets`): `stack output`
+ * and a plain export succeed under a wrong passphrase whenever the secrets
+ * sit in resources, not stack outputs (E5/E7, 2026-11-11), so neither can
+ * tell. The retired-resource surgery's own export reads the same way, but it
+ * runs on one provider only and after the open, so it never stands in for
+ * this one; it reads this one's export instead.
+ *
+ * @param {object} stack - the Automation API Stack just selected
+ * @param {string} key - backend URL, project and stack
+ * @param {string} passphrase - the project's verified passphrase
+ * @param {string} projectDir - the project it was verified for
+ */
+async function probeStackState(stack, key, passphrase, projectDir) {
+  const earlier = stateProbes.get(key);
+  if (earlier) {
+    await earlier;
+    return;
+  }
+  const read = readOrMigrateState(stack, passphrase, key, projectDir);
+  const settled = read.then(() => undefined);
+  // The failure reaches this caller through `read`; a concurrent opener
+  // awaiting `settled` gets it too, and with none, nothing is left unhandled.
+  settled.catch(() => {});
+  stateProbes.set(key, settled);
+  let deployment;
+  try {
+    deployment = await read;
+  } catch (err) {
+    if (stateProbes.get(key) === settled) stateProbes.delete(key);
+    throw err;
+  }
+  probedDeployments.set(stack, deployment);
+}
+
+/** One full export of `stack`'s state, retried only on backpressure. */
+function exportForProbe(stack) {
+  return perfAsync('state.passphraseProbe', () =>
+    withStateBackendRetry(() => stack.exportStack(), `state probe ${stack.name}`),
+  );
+}
+
+/**
+ * The probe's export, migrating a legacy stack first when the project's
+ * passphrase is refused. Throws the StateUndecryptableError only when
+ * neither passphrase opens it; the probe's own error for any other read
+ * failure, and migrateFromEmptyPassphrase's for a migration that failed for
+ * any other reason (a held lock, the store), so a stack '' still reads is
+ * never ruled unreadable. A refusal right after a migration that exited 0 is
+ * a StateMigrationError too (migratedButRefused).
+ *
+ * The migration is one-time, not a retry: it runs only on a refusal, once,
+ * and its result is checked by reading the state again.
+ *
+ * @param {object} stack
+ * @param {string} passphrase
+ * @param {string} key the probe key (see migrationsAttempted)
+ * @param {string} projectDir the project the passphrase belongs to
+ * @returns {Promise<object>} the exported deployment
+ */
+async function readOrMigrateState(stack, passphrase, key, projectDir) {
+  let refused;
+  try {
+    const deployment = await exportForProbe(stack);
+    // A migration this process started finished after all (its child exited
+    // non-zero on the way out): the user was told it stopped, so say it is done.
+    if (migrationsAttempted.delete(key)) p.log.info(MIGRATED_NOTICE(stack.name));
+    return deployment;
+  } catch (err) {
+    if (!isStatePassphraseFailure(err)) throw err;
+    refused = err;
+  }
+  // REMOVE AFTER 2027-02-11, with migrateFromEmptyPassphrase: by then every
+  // stack written with the empty passphrase has been opened (and so
+  // re-encrypted) by a CLI that has this, and a refusal here just throws the
+  // typed error below.
+  const migration = await perfAsync('state.passphraseMigrate', () =>
+    migrateFromEmptyPassphrase(stack, passphrase, key),
+  );
+  if (!migration.ok) {
+    // '' was refused too. Another process may have re-encrypted the stack
+    // between this one's read and its migration: then the project's
+    // passphrase reads it now and '' no longer does. One more read tells
+    // that apart from a state neither opens.
+    try {
+      const deployment = await exportForProbe(stack);
+      // Only when this run's own attempt got as far as the child (it ended
+      // non-zero, then the retry found '' refused): the state is the new
+      // passphrase's because of this run. A pure race stays silent.
+      if (migration.attempted) p.log.info(MIGRATED_NOTICE(stack.name));
+      return deployment;
+    } catch (err) {
+      if (!isStatePassphraseFailure(err)) throw err;
+    }
+    const typed = passphraseRefusal(refused, stack.name, 'state read', projectDir);
+    progressLog(
+      `[pulumi] the empty passphrase older vibecarbon versions used doesn't open it either: ${migration.detail}`,
+    );
+    throw typed;
+  }
+  let deployment;
+  try {
+    deployment = await exportForProbe(stack);
+  } catch (err) {
+    if (isStatePassphraseFailure(err)) throw migratedButRefused(err, stack.name);
+    throw err;
+  }
+  p.log.info(MIGRATED_NOTICE(stack.name));
+  return deployment;
+}
+
+/**
+ * The project's passphrase refused right after a re-encryption that exited
+ * 0. That exit proves '' read the state, so it is not lost: the
+ * re-encryption just didn't produce this passphrase (on CLI 3.259.0 an
+ * empty stdin migrates '' to ''). Never the typed StateUndecryptableError,
+ * which destroy removes a record on: a StateMigrationError naming the step,
+ * with Pulumi's own line in the log only.
+ *
+ * @param {unknown} err the refused read
+ * @param {string} stackName
+ * @returns {StateMigrationError}
+ */
+function migratedButRefused(err, stackName) {
+  const message = err instanceof Error ? err.message : String(err);
+  progressLog(
+    `[pulumi] state read after re-encrypting ${stackName}: ${summarizeCommandError(message)}`,
+  );
+  return new StateMigrationError(
+    `Stopped after re-encrypting the Pulumi state for ${stackName}: Pulumi finished without an error, but this project's passphrase still can't read the state. ` +
+      'The empty passphrase older vibecarbon versions used probably still opens it, so vibecarbon stopped here rather than treat the state as lost. ' +
+      "Your Pulumi CLI may take the new passphrase in a way vibecarbon doesn't expect: run `pulumi version` and report it with this message.",
+    { cause: err },
+  );
+}
+
+/**
+ * Re-encrypt a legacy stack's state, written with the empty passphrase every
+ * stack had before the per-project one, with the project's passphrase:
+ * `pulumi stack change-secrets-provider passphrase` in the stack's own
+ * workspace (its Pulumi.yaml, backend and credentials). The Automation SDK
+ * (3.274.1) has no changeSecretsProvider and its PulumiCommand.run takes no
+ * stdin, so this spawns the binary itself. Measured on CLI 3.259.0 (M1,
+ * 2026-11-11): about 0.5 s on a file:// backend; the new passphrase reads it
+ * and '' no longer does; on a state '' cannot open it exits 1 and leaves the
+ * state as it was.
+ *
+ * Unlike `stack export`, it writes the state, so it takes the stack's lock,
+ * and the child's failures are sorted the way every other state write's are
+ * (classifyStateError on its whole stderr):
+ *
+ *   - '' refused: resolves `{ ok: false, detail }` with Pulumi's line, for
+ *     the caller to rule on;
+ *   - a held lock: runPastStaleLock clears one whose holder is gone and runs
+ *     the migration once more, and a live holder is StackHeldError;
+ *   - backpressure: withStateBackendRetry's retries;
+ *   - anything else, or what is left when those run out: a plain Error that
+ *     names this step, never the typed error, so the open fails as it would
+ *     for any other state fault and destroy keeps the stack's record.
+ *
+ * SECURITY: the new passphrase goes on stdin only. argv is readable by every
+ * local user in a process listing, so it never carries it, and the child's
+ * environment holds only the old one (''): the project's value and an
+ * inherited PULUMI_CONFIG_PASSPHRASE_FILE (which would otherwise win) are
+ * both dropped.
+ *
+ * REMOVE AFTER 2027-02-11 (see readOrMigrateState).
+ *
+ * @param {object} stack
+ * @param {string} passphrase
+ * @param {string} key the probe key (see migrationsAttempted)
+ * @returns {Promise<{ ok: boolean, detail: string, attempted?: boolean }>}
+ *   `attempted`: an earlier run of the child in this call ended for a reason
+ *   other than the passphrase (so it may have written the state before it
+ *   failed). A held or stale lock counts too, which can over-announce in the
+ *   rare race where another process also migrated; it never under-announces.
+ * @throws {StackHeldError} when a live run holds the stack's lock
+ */
+async function migrateFromEmptyPassphrase(stack, passphrase, key) {
+  const step = `re-encrypting the Pulumi state for ${stack.name}`;
+  // An empty stdin makes Pulumi re-encrypt '' with '' (CLI 3.259.0): the
+  // state would stay as open as it was, under a migration that "worked".
+  // ensureStatePassphrase never returns one; this holds the line anyway,
+  // before the child, so nothing is written and nothing counts as attempted.
+  if (typeof passphrase !== 'string' || passphrase.trim() === '') {
+    throw new StateMigrationError(
+      `Stopped before ${step}: this project's state passphrase is empty, and re-encrypting with it would leave the state as open as before. ` +
+        "Put the project's passphrase in VIBECARBON_STATE_PASSPHRASE in .env.local, then run this again.",
+    );
+  }
+  let attempted = false;
+  try {
+    await withStateBackendRetry(
+      () =>
+        runPastStaleLock(stack, () =>
+          changeSecretsProvider(stack, passphrase).catch((err) => {
+            if (!isStatePassphraseFailure(err)) attempted = true;
+            throw err;
+          }),
+        ),
+      step,
+    );
+    return { ok: true, detail: '' };
+  } catch (err) {
+    if (err instanceof StackHeldError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    if (isStatePassphraseFailure(err)) {
+      return { ok: false, detail: summarizeCommandError(message), attempted };
+    }
+    migrationsAttempted.add(key);
+    // Whether the child got as far as the import or not, the next open reads
+    // the state with one passphrase or the other: named, so no reader takes
+    // it for a passphrase failure or for "no stack".
+    throw new StateMigrationError(
+      `Stopped while ${step}: ${summarizeCommandError(message).replace(/\.$/, '')}. It may already be re-encrypted with this project's passphrase, so vibecarbon 0.52 and earlier may no longer open it. Running this again is safe.`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * One `change-secrets-provider` run. Rejects with the child's whole stderr
+ * as the message, so the classifier and lockHolders read every line, after
+ * putting the stack's settings file back (snapshotStackSettings).
+ *
+ * @param {object} stack
+ * @param {string} passphrase
+ * @returns {Promise<void>}
+ */
+async function changeSecretsProvider(stack, passphrase) {
+  const { workspace } = stack;
+  const restoreSettings = snapshotStackSettings(workspace.workDir, stack.name);
+  const result = await new Promise((resolve) => {
+    let child;
+    try {
+      const env = { ...process.env, ...workspace.envVars, PULUMI_CONFIG_PASSPHRASE: '' };
+      delete env.PULUMI_CONFIG_PASSPHRASE_FILE;
+      delete env[STATE_PASSPHRASE_KEY];
+      child = spawn(
+        workspace.pulumiCommand.command,
+        [
+          'stack',
+          'change-secrets-provider',
+          'passphrase',
+          '--stack',
+          stack.name,
+          '--non-interactive',
+        ],
+        { cwd: workspace.workDir, env, stdio: ['pipe', 'ignore', 'pipe'] },
+      );
+    } catch (err) {
+      resolve({ error: err });
+      return;
+    }
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', (err) => resolve({ error: err }));
+    child.on('close', (code) => resolve({ code, stderr }));
+    // A child that exits before reading stdin closes the pipe (EPIPE); its
+    // exit code already says what happened.
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(passphrase);
+  });
+  if (result.code === 0) return;
+  restoreSettings();
+  if (result.error) throw result.error;
+  throw new Error(result.stderr.trim() || `exited with code ${result.code}`);
+}
+
+/**
+ * The stack's settings file in its workspace (Pulumi.<stack>.yaml, or the
+ * .yml or .json the SDK also reads), and a function that puts it back as it
+ * was, absent included.
+ *
+ * `change-secrets-provider` writes a new `encryptionsalt` there before it
+ * touches the state, and a failed run leaves it behind: seen on CLI 3.259.0
+ * (2026-11-11) for a held lock and for a refused passphrase alike. The file
+ * lives in the workspace's own directory, which getOrCreateStack makes per
+ * workspace (workspace-dir.js: removed at process exit, never reused by a
+ * later workspace) and which every later command on this Stack object runs in:
+ * the stale-lock retry, the read after a refusal, and the caller's refresh,
+ * up or destroy. A salt left there no longer matches the state; with a
+ * secret value in the stack's config (vibecarbon sets none today), a second
+ * run in that workspace was refused outright (review, 2026-11-11).
+ *
+ * @param {string} workDir
+ * @param {string} stackName
+ * @returns {() => void}
+ */
+function snapshotStackSettings(workDir, stackName) {
+  const name = stackName.split('/').pop();
+  const saved = ['.yaml', '.yml', '.json'].map((ext) => {
+    const path = join(workDir, `Pulumi.${name}${ext}`);
+    try {
+      return { path, content: readFileSync(path) };
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+      return { path, content: null };
+    }
+  });
+  return () => {
+    for (const { path, content } of saved) {
+      if (content === null) rmSync(path, { force: true });
+      else writeFileSync(path, content);
+    }
+  };
 }
 
 // The throttle recogniser that used to live here
@@ -583,7 +1020,11 @@ export async function dropRetiredStackResources(stack, providerId, { recordAddre
   if (retired.length === 0) return { removed: [], addresses: [], deployment: null };
   let result;
   try {
-    const state = await withStateBackendRetry(() => stack.exportStack(), 'retired-resource export');
+    // The open that returned `stack` has just read its state (the probe in
+    // getOrCreateStack): use that read rather than export a second time.
+    const state =
+      takeProbedDeployment(stack) ??
+      (await withStateBackendRetry(() => stack.exportStack(), 'retired-resource export'));
     result = dropStackResources(state, retired);
     if (result.removed.length > 0) {
       if (recordAddresses && result.addresses.length > 0) await recordAddresses(result.addresses);
@@ -659,11 +1100,12 @@ async function prepareStackForUp(stackName, program, options) {
   // to reconcile). Refresh still pays plugin spawn + cloud API listing,
   // ~3-8s on cold compose deploys for nothing. exportStack() failure
   // falls through to the safer always-refresh path.
-  // The surgery above already read the state on a provider that retires
-  // resources (DigitalOcean): reuse it rather than export twice per up.
+  // Read the state at most once per up: the surgery above already did on a
+  // provider that retires resources (DigitalOcean, from the open's probe),
+  // and the open's probe did on the first open of this stack in the process.
   let needsRefresh = true;
   try {
-    const state = surgery.deployment ?? (await stack.exportStack());
+    const state = surgery.deployment ?? takeProbedDeployment(stack) ?? (await stack.exportStack());
     const resources = state?.deployment?.resources ?? [];
     needsRefresh = resources.some((r) => r.type !== 'pulumi:pulumi:Stack');
   } catch {
@@ -680,6 +1122,11 @@ async function prepareStackForUp(stackName, program, options) {
       );
     } catch (err) {
       if (err instanceof StackHeldError) throw err;
+      // A passphrase the state refuses here refuses the up the same way:
+      // stop with the error that says what still works.
+      if (isStatePassphraseFailure(err)) {
+        throw passphraseRefusal(err, stackName, 'pre-up refresh', projectDirOf(options));
+      }
       // refresh can fail if the state file is completely corrupt or a
       // resource is unreachable. Log and proceed — `up` may still succeed
       // or surface a cleaner error.
@@ -794,6 +1241,11 @@ async function runUp(stack, options) {
       // `summary` stays undefined — the up result never came back. No caller
       // reads it (all five upStack call sites take `.outputs` only).
     } else {
+      // A refused passphrase gets the typed error, which says what still
+      // works; passphraseRefusal logs Pulumi's own line once.
+      if (isStatePassphraseFailure(err)) {
+        throw passphraseRefusal(err, stack.name, 'up', projectDirOf(options));
+      }
       // Band-aid removal 2026-08-16: the startup-staleness guarded re-run and
       // the post-up read-only reread that lived here are DELETED with their
       // manufactured trigger (fresh/recreated buckets under our own parallel
@@ -864,6 +1316,44 @@ function flattenOutputs(rawOutputs) {
     outputs[key] = entry?.value;
   }
   return outputs;
+}
+
+/**
+ * The project dir a stack open checks the passphrase in: the caller's, or the
+ * working directory every command runs from (assertInProjectDir).
+ * @param {{ projectDir?: string }} [options]
+ */
+function projectDirOf(options) {
+  return options?.projectDir ?? process.cwd();
+}
+
+/**
+ * The typed error for a passphrase refusal on `stackName` (worded for a
+ * passphrase this run made when it did), after logging Pulumi's own one-line
+ * text once. The typed error is what the operator acts on; the raw line is
+ * what shows a misclassified failure for what it was. Pulumi's output never
+ * carries the passphrase (it travels in the workspace environment, never in
+ * argv).
+ * @param {unknown} err
+ * @param {string} stackName
+ * @param {string} step
+ * @param {string} projectDir
+ */
+function passphraseRefusal(err, stackName, step, projectDir) {
+  progressLog(`[pulumi] ${step} refused the state passphrase: ${summarizePulumiError(err)}`);
+  return undecryptable(err, stackName, projectDir);
+}
+
+/**
+ * asStateUndecryptableError, told whether this process made the passphrase.
+ * @param {unknown} err
+ * @param {string} stackName
+ * @param {string} projectDir
+ */
+function undecryptable(err, stackName, projectDir) {
+  return asStateUndecryptableError(err, stackName, {
+    madeThisRun: statePassphraseGeneratedThisRun(projectDir),
+  });
 }
 
 /**
@@ -947,6 +1437,12 @@ export async function destroyStack(stackName, program, options = {}) {
     );
   } catch (err) {
     if (err instanceof StackHeldError) throw err;
+    // A passphrase that cannot open the state refuses every later step the
+    // same way (exportStack, destroy, the read-back of what is left), so stop
+    // here with the error that says what still works. The stack record stays.
+    if (isStatePassphraseFailure(err)) {
+      throw passphraseRefusal(err, stackName, 'pre-destroy refresh', projectDirOf(options));
+    }
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
   // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
@@ -982,6 +1478,9 @@ export async function destroyStack(stackName, program, options = {}) {
     );
   } catch (err) {
     if (err instanceof StackHeldError) throw err;
+    if (isStatePassphraseFailure(err)) {
+      throw passphraseRefusal(err, stackName, 'destroy', projectDirOf(options));
+    }
     throw await describeDestroyFailure(stack, stackName, err);
   }
 
@@ -1172,6 +1671,9 @@ export async function removeStackState(stackName, options = {}) {
     stack = await getOrCreateStack(stackName, async () => ({}), {
       ...options,
       requireExisting: true,
+      // Removing a stack decrypts nothing, so a lost passphrase must not
+      // block tearing the state down.
+      decrypts: false,
     });
   } catch (err) {
     if (err?.stackNotFound || /no stack named/i.test(err.message || '')) {
@@ -1241,7 +1743,12 @@ export async function getStackOutputs(stackName, program, options = {}) {
   // cluster", which is how failover minted a new k3sToken and planned to
   // re-create a live standby (2026-08-06 RCA).
   const stack = await getOrCreateStack(stackName, program, { ...options, requireExisting: true });
-  const raw = await stack.outputs();
+  let raw;
+  try {
+    raw = await stack.outputs();
+  } catch (err) {
+    throw undecryptable(err, stackName, projectDirOf(options));
+  }
   const outputs = {};
   for (const [key, { value }] of Object.entries(raw)) {
     outputs[key] = value;
@@ -1250,34 +1757,76 @@ export async function getStackOutputs(stackName, program, options = {}) {
 }
 
 /**
+ * A k3s token probe that couldn't read the stack: it may exist, holding the
+ * join token its live cluster runs with, so the command stops instead of
+ * minting a new one (R22). Names the stack and the first line of what failed;
+ * the full error is the cause.
+ */
+export class K3sTokenProbeError extends Error {
+  /**
+   * @param {string} stackName
+   * @param {unknown} cause what the probe threw
+   */
+  constructor(stackName, cause) {
+    super(
+      `Couldn't read the k3s join token for ${stackName} from its Pulumi state: ${summarizePulumiError(cause).replace(/\.$/, '')}. ` +
+        'vibecarbon stopped before creating or changing any of its servers, because a new token would leave new nodes unable to join the cluster. ' +
+        'Running this again is safe.',
+      { cause },
+    );
+    this.name = 'K3sTokenProbeError';
+    this.stackName = stackName;
+  }
+}
+
+/**
  * Classify a prior-outputs probe for the k3sToken probe-and-replay path.
  *
- * `scale.js` reads the prior stack outputs before constructing the real
- * Pulumi program so it can replay the deploy-time `k3sToken` and avoid
- * destructive userData drift (see the master-replace defense). The probe
- * has three observable outcomes:
+ * deployK3s (resolveStackK3sToken) and the converge seam that scale and
+ * failover share read the prior stack outputs before building the real
+ * Pulumi program, so they can replay the cluster's `k3sToken`. Every node's
+ * user data carries it, and a node with another token can't join the
+ * cluster. The probe has three outcomes:
  *
- *   - `recovered`: outputs has a non-empty k3sToken — replay it
- *   - `empty`:     outputs object exists but k3sToken is missing or empty —
- *                  legitimate when the stack is fresh (no prior `up`), but
- *                  also what we'd see if the deploy somehow skipped the
- *                  output declaration. Caller must not silently mint a
- *                  fresh token; the master-replace defense catches the
- *                  destructive case.
- *   - `errored`:   the probe call itself threw — backend unreachable,
- *                  expired creds, etc. Caller should surface loudly.
+ *   - `recovered`: outputs has a non-empty k3sToken: replay it.
+ *   - `empty`:     the stack exists but its outputs lack the token: a stack
+ *                  created whose first up never finished, or outputs that
+ *                  dropped the key. The caller mints one; the master-replace
+ *                  defense catches the destructive case.
+ *   - `missing`:   the state backend has no such stack (getOrCreateStack's
+ *                  requireExisting answer, `stackNotFound`): a first deploy.
+ *                  The caller mints one.
  *
- * Pure function; the Pulumi state read happens upstream.
+ * Every other probe failure throws, because the stack may exist and hold the
+ * token its live cluster runs with, unread. A minted token would reach every
+ * node made from then on, and none of them could join (R22):
  *
- * @param {{ outputs?: Record<string, unknown> | null, error?: Error | null }} probe
- * @returns {{ status: 'recovered' | 'empty' | 'errored', priorK3sToken?: string, reason: string }}
+ *   - a passphrase failure (isStatePassphraseFailure), a StateMigrationError
+ *     (the one-time legacy migration stopped) and a StackHeldError (another
+ *     run holds the stack) are rethrown as they are: their own messages say
+ *     what to do, and each can clear on a later open in the same run;
+ *   - anything else (the backend unreachable, backpressure retries run out,
+ *     a read the backend refused) is a K3sTokenProbeError naming the stack.
+ *
+ * No I/O; the Pulumi state read happens upstream.
+ *
+ * @param {{ outputs?: Record<string, unknown> | null, error?: Error | null, stackName?: string }} probe
+ * @returns {{ status: 'recovered' | 'empty' | 'missing', priorK3sToken?: string, reason: string }}
+ * @throws the probe's own error when it is one of those three, otherwise a
+ *   K3sTokenProbeError
  */
-export function classifyK3sTokenProbe({ outputs, error } = {}) {
+export function classifyK3sTokenProbe({ outputs, error, stackName } = {}) {
   if (error) {
-    // The probe reads Pulumi state, so its failures carry the same
-    // `code: N\nstdout:…` envelope — first-line-only would report `code: -2`
-    // as the reason a k3s-token recovery was refused.
-    return { status: 'errored', reason: `probe threw: ${summarizePulumiError(error)}` };
+    if (isStatePassphraseFailure(error) || isStackOpenInterrupted(error)) throw error;
+    // Set only by getOrCreateStack, when the backend says the stack isn't
+    // there; a "no stack named" line anywhere else proves nothing.
+    if (error.stackNotFound === true) {
+      return {
+        status: 'missing',
+        reason: `no stack ${stackName ?? 'for this cluster'} in the state backend yet`,
+      };
+    }
+    throw new K3sTokenProbeError(stackName ?? 'this cluster', error);
   }
   if (!outputs || typeof outputs !== 'object') {
     return { status: 'empty', reason: 'no outputs returned' };
@@ -1304,7 +1853,7 @@ export function classifyK3sTokenProbe({ outputs, error } = {}) {
 export async function listStacks(options = {}) {
   const pulumiProject = requirePulumiProject(options);
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
-  const envVars = buildEnv(options);
+  const envVars = buildEnv({ ...options, decrypts: false });
   try {
     const workspace = await LocalWorkspace.create({
       projectSettings: {
@@ -1313,6 +1862,7 @@ export async function listStacks(options = {}) {
         backend: { url: backendUrl },
       },
       envVars,
+      workDir: makeWorkspaceDir(),
     });
     const stacks = await workspace.listStacks();
     return stacks.map((s) => s.name);
@@ -1347,7 +1897,8 @@ export async function openStateBackend(options) {
       runtime: 'nodejs',
       backend: { url: resolveBackendUrl(options.s3Config, options.provider) },
     },
-    envVars: buildEnv(options),
+    envVars: buildEnv({ ...options, decrypts: false }),
+    workDir: makeWorkspaceDir(),
   });
   await workspace.whoAmI();
 }

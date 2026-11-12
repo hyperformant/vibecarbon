@@ -31,6 +31,15 @@ const createStackMock = vi.fn(() => {
   throw new Error('createStack must not be called: removal must never conjure a stack');
 });
 
+// These tests drive getOrCreateStack against a mocked LocalWorkspace. The real
+// state-passphrase check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json, so it is stubbed; state-passphrase-census.test.ts covers
+// the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
+
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
     selectStack: (...args: unknown[]) => selectStackMock(...args),

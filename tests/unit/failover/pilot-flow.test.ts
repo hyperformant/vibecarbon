@@ -39,6 +39,10 @@ import {
   waitForWorkersReady,
 } from '../../../src/failover.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
+import { K3sTokenProbeError } from '../../../src/lib/iac/index.js';
+import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
+import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
 /** `kubectl get nodes --no-headers` output with `n` Ready worker rows (+ master). */
 function readyLines(n: number): string {
@@ -325,6 +329,36 @@ describe('provisionStandbyCapacity', () => {
         }),
       );
     });
+  });
+
+  // The converge's k3s token probe stops before it builds anything when it
+  // can't read the standby stack (R22): there is nothing to revert, and a
+  // revert would only probe the same unreadable stack again and report
+  // leftovers that were never made.
+  it('a converge stopped by the k3s token probe: aborts with its reason, no revert, nothing touched', async () => {
+    const kubectl = vi.fn();
+    const stopped = new K3sTokenProbeError(
+      'e4-standby',
+      new Error('NoSuchBucket: state backend gone'),
+    );
+    const converge = vi.fn().mockRejectedValue(stopped);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      const err = await provisionStandbyCapacity({
+        ...base,
+        deps: { converge, kubectl },
+      }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(AbortProvisioningError);
+      expect(err.cause).toBe(stopped);
+      expect(err.message).toBe(`Failover aborted, the primary is untouched. ${stopped.message}`);
+      expect(err.logLines).toEqual([err.message]);
+      expect(converge).toHaveBeenCalledTimes(1);
+      expect(kubectl).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('revert failure reports leftover resources (stack + next command) and still throws', async () => {
@@ -1099,6 +1133,36 @@ describe('preflightPilotFailover exit branches', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
+  // Failover has no fresh-stack path: a standby stack the backend doesn't
+  // have stops it here, before any converge could mint a k3s token.
+  it('exits(1) when the backend has no standby stack, before any converge', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const envConfig = {
+      ha: {
+        standbyWorkerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
+        standby: { stack: 'e4-standby' },
+      },
+    };
+    await expect(
+      preflightPilotFailover('e4', envConfig, {
+        resolveCreds: async () => ({ apiToken: 't', s3Creds: null }),
+        readStackOutputs: async () => {
+          throw Object.assign(
+            new Error('Pulumi stack "e4-standby" was not found in the configured state backend'),
+            { stackNotFound: true },
+          );
+        },
+      }),
+    ).rejects.toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(error.mock.calls.flat().join('\n')).toContain('nothing was changed');
+  });
+
   it('exits(1) when the standby stack state backend is unreachable', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
       throw new Error('__exit__');
@@ -1121,6 +1185,95 @@ describe('preflightPilotFailover exit branches', () => {
       }),
     ).rejects.toThrow('__exit__');
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  // The backend answered, so "unreachable or missing" would be the wrong
+  // fault: a state the passphrase cannot open says so in its own words.
+  it.each([
+    ['typed', () => new StateUndecryptableError('e4-standby')],
+    [
+      'raw',
+      () =>
+        new Error(
+          STATE_ERROR_CORPUS.find((c) => c.id === 'passphrase-incorrect-on-outputs')?.message,
+        ),
+    ],
+  ])('a %s passphrase refusal exits(1) with its own message', async (_kind, refusal) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const envConfig = {
+      ha: {
+        standbyWorkerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
+        standby: { stack: 'e4-standby' },
+      },
+    };
+    await expect(
+      preflightPilotFailover('e4', envConfig, {
+        resolveCreds: async () => ({ apiToken: 't', s3Creds: null }),
+        readStackOutputs: async () => {
+          throw refusal();
+        },
+      }),
+    ).rejects.toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const said = error.mock.calls.flat().join('\n');
+    expect(said).toContain("vibecarbon can't decrypt the Pulumi state for e4-standby");
+    expect(said).toContain('`vibecarbon destroy e4`');
+    expect(said).toContain('Nothing was changed.');
+    expect(said).not.toContain('unreachable');
+    expect(said).not.toContain('PULUMI_CONFIG_PASSPHRASE');
+  });
+
+  // The backend answered, so "unreachable or missing" would send the operator
+  // after the wrong fault: a held stack or a stopped legacy migration says
+  // what happened and that rerunning is the way on.
+  it.each([
+    [
+      'another run holds the stack',
+      () =>
+        new StackHeldError('e4-standby', [
+          { user: 'someone', host: 'laptop', pid: 4242, at: '2026-11-11T10:00:00Z' },
+        ]),
+      'Stack "e4-standby" is in use by another run',
+    ],
+    [
+      'the legacy migration stopped',
+      () =>
+        new StateMigrationError(
+          'Stopped while re-encrypting the Pulumi state for e4-standby: error: could not import deployment. Running this again is safe.',
+        ),
+      'Stopped while re-encrypting the Pulumi state for e4-standby',
+    ],
+  ])('%s: exits(1) with its own message', async (_kind, make, expected) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const envConfig = {
+      ha: {
+        standbyWorkerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
+        standby: { stack: 'e4-standby' },
+      },
+    };
+    await expect(
+      preflightPilotFailover('e4', envConfig, {
+        resolveCreds: async () => ({ apiToken: 't', s3Creds: null }),
+        readStackOutputs: async () => {
+          throw make();
+        },
+      }),
+    ).rejects.toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const said = error.mock.calls.flat().join('\n');
+    expect(said).toContain(expected);
+    expect(said).toContain('Failover changed no servers.');
+    expect(said).not.toContain('unreachable');
   });
 
   it('returns the persisted pieces + resolved creds on a reachable backend', async () => {

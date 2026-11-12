@@ -120,6 +120,8 @@ describe('config-registry', () => {
       // shell" test below and the DOCKER_HUB-specific test further down).
       'DOCKER_HUB_USERNAME',
       'DOCKER_HUB_TOKEN',
+      // Per-project Pulumi secrets passphrase (state-passphrase.js): .env.local only.
+      'VIBECARBON_STATE_PASSPHRASE',
       // CLI-local operator override that rides the same guarantees
       // (.env.local only, stripped from any bundle baseline). ACME_CA_SERVER
       // is deliberately NOT here: the deployed server reads it from `.env`
@@ -309,6 +311,7 @@ describe('config-registry', () => {
         'SMTP_PORT',
         'STRIPE_SECRET_KEY',
         'STRIPE_WEBHOOK_SECRET',
+        'VIBECARBON_STATE_PASSPHRASE',
       ]);
       // This list IS the decision record for which formats are vendor-backed
       // enough to assert. Removed, and why (each stays loose until the vendor

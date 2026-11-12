@@ -43,6 +43,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const createOrSelectStackMock = vi.fn();
 const progressLogMock = vi.fn();
 
+// These tests drive getOrCreateStack against a mocked LocalWorkspace. The real
+// state-passphrase check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json, so it is stubbed; state-passphrase-census.test.ts covers
+// the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
+
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
     // getOrCreateStack drives select/create itself now (2026-08-06 RCA: the

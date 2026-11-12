@@ -62,6 +62,12 @@ describe('deploy.yml splits the app Secret from the infra Secret', () => {
     expect(kept, 'tokens the app Secret would carry').toEqual([]);
   });
 
+  it('drops the operator state passphrase: no workflow opens Pulumi state', () => {
+    // Defence in depth; the passphrase lives in the operator's .env.local and
+    // is never a GitHub secret copy.
+    expect(delList).toMatch(/\.VIBECARBON_STATE_PASSPHRASE\b/);
+  });
+
   it('no longer lists the names only DNS-01 used (lego token vars)', () => {
     expect(delList).not.toContain('CF_DNS_API_TOKEN');
     expect(delList).not.toContain('DO_AUTH_TOKEN');

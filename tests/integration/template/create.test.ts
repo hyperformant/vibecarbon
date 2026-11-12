@@ -1,4 +1,4 @@
-import { execSync, spawnSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -11,6 +11,7 @@ import {
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { statePassphraseFingerprint } from '../../../src/lib/state-passphrase.js';
 // Shared scrub for test-spawned git (GIT_DIR hook-leak class — see the
 // module doc in _shared/git-env.ts; this file's local copy converged there
 // after the 2026-07-30 incident showed a second hand-rolled copy drifting).
@@ -31,6 +32,48 @@ describe('create-vibecarbon E2E', () => {
 
   afterAll(() => {
     cleanupTempDir(tempDir);
+  });
+
+  describe('a state passphrase exported in the shell', () => {
+    it('belongs to another project: create makes its own and records that one', () => {
+      const other = 'x'.repeat(43);
+      // No shell: the path and arguments go to node as they are.
+      const out = execFileSync(
+        'node',
+        [
+          join(process.cwd(), 'src/cli.js'),
+          'create',
+          'shell-pass',
+          '-y',
+          '-admin-email',
+          'test@e2e.local',
+          '-admin-password',
+          'testpass123',
+          '-skip-lockfile',
+        ],
+        {
+          cwd: tempDir,
+          encoding: 'utf-8',
+          timeout: 60000,
+          env: { ...pmScrubbedEnv(), VIBECARBON_STATE_PASSPHRASE: other },
+        },
+      );
+      // Says which variable, why, and never the value.
+      expect(out).toContain('VIBECARBON_STATE_PASSPHRASE');
+      expect(out).toContain('wins over .env.local');
+      expect(out).not.toContain(other);
+      const dir = join(tempDir, 'shell-pass');
+      const value = parseDotenv(
+        readFileSync(join(dir, '.env.local'), 'utf-8'),
+      ).VIBECARBON_STATE_PASSPHRASE;
+      expect(value).toBeDefined();
+      expect(value).not.toBe(other);
+      expect(
+        JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).stateEncryption,
+      ).toEqual({
+        fingerprint: statePassphraseFingerprint(value as string),
+      });
+    }, 60000);
   });
 
   describe('project creation with default options', () => {
@@ -129,6 +172,21 @@ describe('create-vibecarbon E2E', () => {
       // ignore the config entirely and lint gitignored output. create must flip it.
       const biome = JSON.parse(readFileSync(join(projectDir(), 'biome.json'), 'utf-8'));
       expect(biome.root).toBe(true);
+    });
+
+    it('makes the state passphrase in .env.local only and records its fingerprint', () => {
+      const local = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
+      const shipped = parseDotenv(readFileSync(join(projectDir(), '.env'), 'utf-8'));
+      const value = local.VIBECARBON_STATE_PASSPHRASE;
+      expect(value?.length).toBeGreaterThanOrEqual(43);
+      // SECURITY: .env is the file a deploy ships to servers.
+      expect(shipped.VIBECARBON_STATE_PASSPHRASE).toBeUndefined();
+      const config = readFileSync(join(projectDir(), '.vibecarbon.json'), 'utf-8');
+      expect(JSON.parse(config).stateEncryption.fingerprint).toBe(
+        statePassphraseFingerprint(value as string),
+      );
+      // The fingerprint is committed; the passphrase never is.
+      expect(config).not.toContain(value as string);
     });
 
     it('generates .env.local with secrets', () => {

@@ -307,7 +307,7 @@ export async function convergeClusterInfra({
 
   // Probe prior stack outputs for the k3sToken so we can replay it into
   // the real program. classifyK3sTokenProbe normalizes recovered/empty/
-  // errored into a tagged result so the visible logging path matches the
+  // missing into a tagged result so the visible logging path matches the
   // unit tests for this seam (see tests/unit/iac/probe-classify.test.ts).
   let probeOutputs = null;
   let probeError = null;
@@ -329,8 +329,28 @@ export async function convergeClusterInfra({
   } catch (err) {
     probeError = err instanceof Error ? err : new Error(String(err));
   }
-  probeSpinner.stop(`Prior cluster state read (${label})`);
-  const probe = classifyK3sTokenProbe({ outputs: probeOutputs, error: probeError });
+  // Throws on any failed read but a missing stack (R22): a passphrase
+  // failure, a stopped legacy migration or a held stack as they are, anything
+  // else as a K3sTokenProbeError. Each leaves a stack that may hold the
+  // cluster's token unread, and building the real program below without it
+  // would mint a fresh one into every new node's user data. The spinner line
+  // follows the verdict.
+  let probe;
+  try {
+    probe = classifyK3sTokenProbe({
+      outputs: probeOutputs,
+      error: probeError,
+      stackName: clusterEnv,
+    });
+  } catch (err) {
+    probeSpinner.stop(`Prior cluster state can't be read (${label})`, 1);
+    throw err;
+  }
+  probeSpinner.stop(
+    probe.status === 'missing'
+      ? `No prior cluster state (${label})`
+      : `Prior cluster state read (${label})`,
+  );
   const priorK3sToken = probe.priorK3sToken;
   switch (probe.status) {
     case 'recovered':
@@ -343,14 +363,10 @@ export async function convergeClusterInfra({
         `${label}: ${probe.reason}. Proceeding with newly-minted k3sToken, master-replace defense will block any destructive plan.`,
       );
       break;
-    case 'errored':
-      // Genuine backend failure (S3 outage, expired creds, corrupt
-      // state). Surface as an error so it doesn't blend into routine
-      // info noise. The real `up` below will resurface the same problem
-      // with a cleaner message.
-      p.log.error(
-        `${label}: ${probe.reason}. Master-replace defense remains armed; if it doesn't fire, fix the backend before scaling.`,
-      );
+    case 'missing':
+      // The state backend has no such stack: nothing to replay, and the up
+      // below creates it with the token this run makes.
+      p.log.warn(`${label}: ${probe.reason}, so this run makes its k3s token.`);
       break;
     default:
       // Future-proof: classifyK3sTokenProbe is the single source of

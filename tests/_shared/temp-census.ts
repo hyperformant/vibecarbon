@@ -7,12 +7,15 @@ import { join } from 'node:path';
  * the file ends fails it. These are the names it may leave, each with why no
  * test can remove it. The root is removed either way.
  */
-export const TEMP_CENSUS_EXEMPT: ReadonlyArray<{ name: RegExp; why: string }> = [
+export const TEMP_CENSUS_EXEMPT: ReadonlyArray<{ name: RegExp; why: string; file?: true }> = [
   {
-    name: /^automation-/,
+    // A file only: the SDK's own workspace dirs (automation-*) are no longer
+    // made, since every workspace gets one of ours (src/lib/iac/workspace-dir.js).
+    name: /^automation-\d{6}$/,
+    file: true,
     why:
-      "the Pulumi automation SDK's default LocalWorkspace workDir: the SDK makes one per " +
-      'workspace and never removes it',
+      "the Pulumi automation SDK's importStack file: it writes the state there and removes it " +
+      'only when the import succeeds, so a test of a refused import (a held lock) leaves one',
   },
   {
     name: /^node-compile-cache$/,
@@ -41,7 +44,12 @@ export const TEMP_CENSUS_KEPT_ROOTS: ReadonlyArray<{ name: RegExp; why: string }
 export function tempLeftovers(dir: string): string[] {
   const left: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (TEMP_CENSUS_EXEMPT.some(({ name }) => name.test(entry.name))) continue;
+    if (
+      TEMP_CENSUS_EXEMPT.some(
+        ({ name, file }) => name.test(entry.name) && (!file || entry.isFile()),
+      )
+    )
+      continue;
     if (entry.isDirectory() && TEMP_CENSUS_KEPT_ROOTS.some(({ name }) => name.test(entry.name))) {
       for (const inner of readdirSync(join(dir, entry.name))) left.push(`${entry.name}/${inner}`);
       continue;

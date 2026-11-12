@@ -18,7 +18,7 @@
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -46,6 +46,9 @@ const hasPulumi = (() => {
 const PROJECT = 'droptest';
 const dir = mkdtempSync(join(tmpdir(), 'vc-deploy-drop-'));
 const backend = join(dir, 'state');
+// projectDir keeps the state passphrase check (and the fingerprint it
+// records in .vibecarbon.json) in this test's temp dir, not the checkout.
+const opts = { projectName: PROJECT, projectDir: dir };
 const ADDRESS = '203.0.113.77';
 const stackFile = (stack: string) => join(backend, '.pulumi/stacks', PROJECT, `${stack}.json`);
 
@@ -57,10 +60,10 @@ type Resource = { urn: string; type: string; [k: string]: unknown };
  * run that lost the backend from passing against the operator's own store.
  */
 async function oldDigitalOceanStack(name: string) {
-  await upStack(name, async () => ({}), { projectName: PROJECT });
+  await upStack(name, async () => ({}), opts);
   expect(existsSync(stackFile(name))).toBe(true);
   const stack = await getOrCreateStack(name, async () => ({}), {
-    projectName: PROJECT,
+    ...opts,
     requireExisting: true,
   });
   const state = await stack.exportStack();
@@ -109,7 +112,7 @@ async function oldDigitalOceanStack(name: string) {
 
 const typesIn = async (name: string) => {
   const stack = await getOrCreateStack(name, async () => ({}), {
-    projectName: PROJECT,
+    ...opts,
     requireExisting: true,
   });
   const state = await stack.exportStack();
@@ -130,9 +133,11 @@ describe.runIf(hasPulumi || process.env.CI)("the deploy's dropRetired on the rea
   // every test, and without this the CLI falls back to ~/.vibecarbon/pulumi-state.
   beforeEach(() => {
     process.env.PULUMI_BACKEND_URL = `file://${backend}`;
+    process.env.VIBECARBON_STATE_PASSPHRASE = 'deploy-drop-integration-passphrase-0123456789abcdef';
   });
   beforeAll(() => {
     mkdirSync(backend);
+    writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
   });
   afterAll(() => {
     rmSync(dir, { recursive: true, force: true });
@@ -152,6 +157,7 @@ describe.runIf(hasPulumi || process.env.CI)("the deploy's dropRetired on the rea
       providerToken: 'dop_v1_test',
       s3Config: null,
       projectName: PROJECT,
+      projectDir: dir,
       updateConfig,
     });
     await dropRetired('prod');
@@ -181,6 +187,7 @@ describe.runIf(hasPulumi || process.env.CI)("the deploy's dropRetired on the rea
       providerToken: 'dop_v1_test',
       s3Config: null,
       projectName: PROJECT,
+      projectDir: dir,
       updateConfig,
     })('e4-standby');
     expect(config.environments.e4).toEqual({
@@ -200,6 +207,7 @@ describe.runIf(hasPulumi || process.env.CI)("the deploy's dropRetired on the rea
       providerToken: 'dop_v1_test',
       s3Config: null,
       projectName: PROJECT,
+      projectDir: dir,
       updateConfig,
     });
     await expect(dropRetired('ghost')).rejects.toThrow(/was not found/);

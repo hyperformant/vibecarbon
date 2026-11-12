@@ -116,6 +116,11 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
+import {
+  asStateUndecryptableError,
+  isStackOpenInterrupted,
+  isStatePassphraseFailure,
+} from './lib/iac/state-error.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfTimer } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -1403,6 +1408,24 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
     });
     s.stop(`Standby stack state reachable (${standbyStack})`);
   } catch (err) {
+    // The backend answered: this project's passphrase cannot open the
+    // state. That error says what it means and what still works, and
+    // "unreachable or missing" would send the operator after the wrong fault.
+    if (isStatePassphraseFailure(err)) {
+      s.stop(`Standby stack state can't be read (${standbyStack})`);
+      p.log.error(
+        `${/** @type {Error} */ (asStateUndecryptableError(err, standbyStack)).message} Nothing was changed.`,
+      );
+      process.exit(1);
+    }
+    // The backend answered here too: another run holds the stack, or the
+    // one-time legacy migration stopped. Its own message says what happened
+    // and that running this again is the way on.
+    if (isStackOpenInterrupted(err)) {
+      s.stop(`Standby stack state not read (${standbyStack})`);
+      p.log.error(`${firstErrorLine(err)} Failover changed no servers.`);
+      process.exit(1);
+    }
     s.stop('Standby stack state unreachable');
     p.log.error(
       `Could not read standby stack '${standbyStack}' from the state backend ` +
@@ -1614,6 +1637,16 @@ async function _provisionStandbyCapacityImpl({
 
     return { provisioned: true };
   } catch (err) {
+    // The converge's k3s token probe couldn't read the standby stack, and it
+    // stops before building anything (R22): nothing to revert, and a revert
+    // would probe the same stack again and report leftovers never made. By
+    // name: this module takes no top-level iac/index.js import.
+    if (err?.name === 'K3sTokenProbeError') {
+      throw new AbortProvisioningError(
+        `Failover aborted, the primary is untouched. ${err.message}`,
+        { cause: err },
+      );
+    }
     // Generic abort: ANY provisioning failure converges the standby back to 0
     // workers (the primary is still serving and was never touched), then aborts.
     const cause = firstErrorLine(err);

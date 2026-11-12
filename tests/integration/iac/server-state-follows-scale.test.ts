@@ -27,6 +27,7 @@ import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { afterAll, describe, expect, it } from 'vitest';
 import { retargetServerResource } from '../../../src/lib/iac/server-state.js';
+import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 
 const hasPulumi = (() => {
   try {
@@ -68,13 +69,16 @@ async function stackFor(name: string, size: string) {
   return LocalWorkspace.createOrSelectStack(
     { stackName: name, projectName: 'vcstate', program: program(size) },
     {
+      // Removed after this file by the test setup, as the CLI's are at exit.
+      workDir: makeWorkspaceDir(),
       projectSettings: {
         name: 'vcstate',
         runtime: 'nodejs',
         backend: { url: `file://${backend}` },
       },
       envVars: {
-        PULUMI_CONFIG_PASSPHRASE: 'test',
+        // Same shape the CLI hands Pulumi: a per-project passphrase, never ''.
+        PULUMI_CONFIG_PASSPHRASE: 'integration-test-passphrase-0123456789abcdefghij',
         PULUMI_SKIP_UPDATE_CHECK: 'true',
         FAKECLOUD_FILE: cloudFile,
         PATH: `${PLUGIN_DIR}:${process.env.PATH}`,

@@ -32,9 +32,19 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
 vi.mock('../../../src/lib/cli/progress.js', () => ({
   progressLog: (...args: unknown[]) => progressLogMock(...args),
 }));
+// upStack opens the stack through getOrCreateStack, whose real passphrase
+// check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json (the repo root here), so it is stubbed;
+// state-passphrase-census.test.ts covers the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
 
 const { dropStackResources } = await import('../../../src/lib/iac/retired-resources.js');
-const { dropRetiredStackResources, upStack } = await import('../../../src/lib/iac/index.js');
+const { __resetStateProbesForTests, dropRetiredStackResources, upStack } = await import(
+  '../../../src/lib/iac/index.js'
+);
 const { StackHeldError } = await import('../../../src/lib/iac/stack-lock.js');
 const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
@@ -42,6 +52,9 @@ const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 beforeEach(() => {
   selectStackMock.mockReset();
   progressLogMock.mockReset();
+  // Each test's upStack is the stack's first open in the process: its
+  // passphrase probe is the export the surgery and the refresh check read.
+  __resetStateProbesForTests();
 });
 
 const P = 'urn:pulumi:prod::acme';
@@ -405,7 +418,7 @@ describe('upStack runs the surgery before the refresh and the up', () => {
     expect(order.indexOf('refresh')).toBeLessThan(order.indexOf('up'));
   });
 
-  it('DigitalOcean: one export serves the surgery and the refresh check', async () => {
+  it("DigitalOcean: one export (the open's passphrase probe) serves the surgery and the refresh check", async () => {
     const order: string[] = [];
     const stack = fakeStack(doCheckpoint(), order);
     selectStackMock.mockResolvedValue(stack);

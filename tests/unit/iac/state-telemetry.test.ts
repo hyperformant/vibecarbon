@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
  * The telemetry exists so a failure log can answer "were we over the store's
@@ -12,6 +13,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const selectStackMock = vi.fn();
 const progressLogMock = vi.fn();
+
+// These tests drive getOrCreateStack against a mocked LocalWorkspace. The real
+// state-passphrase check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json, so it is stubbed; state-passphrase-census.test.ts covers
+// the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
 
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
@@ -59,6 +69,8 @@ beforeEach(() => {
 afterEach(async () => {
   const { resetStateTelemetryForTest } = await import('../../../src/lib/iac/state-telemetry.js');
   resetStateTelemetryForTest();
+  // Each test opens stacks through its own module copies (resetModules above).
+  await removeCurrentWorkspaceDirs();
 });
 
 describe('state telemetry — wiring through upStack', () => {

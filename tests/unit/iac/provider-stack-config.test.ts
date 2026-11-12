@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listProviders } from '../../../src/lib/providers/index.js';
+import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
  * A provider's own Pulumi settings reach every stack the CLI opens.
@@ -19,6 +20,15 @@ import { listProviders } from '../../../src/lib/providers/index.js';
 const selectStackMock = vi.fn();
 const createStackMock = vi.fn();
 
+// These tests drive getOrCreateStack against a mocked LocalWorkspace. The real
+// state-passphrase check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json, so it is stubbed; state-passphrase-census.test.ts covers
+// the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
+
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
     selectStack: (...args: unknown[]) => selectStackMock(...args),
@@ -34,17 +44,21 @@ const open = async (provider: string | undefined, stackName = 'production') => {
   await getOrCreateStack(stackName, async () => ({}), {
     provider,
     projectName: 'acme',
-    configPassphrase: 'x',
   });
   return selectStackMock.mock.calls[0]?.[1] ?? createStackMock.mock.calls[0]?.[1];
 };
+
+// Each test opens stacks through its own module copies (resetModules below).
+afterEach(removeCurrentWorkspaceDirs);
 
 beforeEach(() => {
   vi.resetModules();
   selectStackMock.mockReset();
   createStackMock.mockReset();
-  selectStackMock.mockResolvedValue({ name: 'production' });
-  createStackMock.mockResolvedValue({ name: 'production' });
+  // getOrCreateStack reads the state it opens once (the passphrase probe).
+  const stack = { name: 'production', exportStack: async () => ({ deployment: {} }) };
+  selectStackMock.mockResolvedValue(stack);
+  createStackMock.mockResolvedValue(stack);
 });
 
 describe('provider stack config', () => {
@@ -66,7 +80,6 @@ describe('provider stack config', () => {
     await getOrCreateStack('production', async () => ({}), {
       provider: 'hetzner',
       projectName: 'acme',
-      configPassphrase: 'x',
     });
     const [, wsOpts] = createStackMock.mock.calls[0];
     expect(wsOpts.stackSettings.production.config).toEqual({

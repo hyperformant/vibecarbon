@@ -27,7 +27,9 @@ const hasPulumi = (() => {
 const PROJECT = 'locktest';
 const dir = mkdtempSync(join(tmpdir(), 'vc-stack-lock-'));
 const backend = join(dir, 'state');
-const opts = { projectName: PROJECT };
+// projectDir keeps the passphrase check (and its .vibecarbon.json) in this
+// test's temp dir instead of the repo checkout.
+const opts = { projectName: PROJECT, projectDir: dir };
 const emptyProgram = async () => ({});
 
 const lockDir = (stack: string) => join(backend, '.pulumi/locks/organization', PROJECT, stack);
@@ -58,9 +60,11 @@ describe.runIf(hasPulumi || process.env.CI)('stale locks on the real engine', ()
   // every test, and without this the CLI falls back to ~/.vibecarbon/pulumi-state.
   beforeEach(() => {
     process.env.PULUMI_BACKEND_URL = `file://${backend}`;
+    process.env.VIBECARBON_STATE_PASSPHRASE = 'stack-lock-integration-passphrase-0123456789abcdef';
   });
   beforeAll(() => {
     mkdirSync(backend);
+    writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
   });
   afterAll(() => {
     rmSync(dir, { recursive: true, force: true });

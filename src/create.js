@@ -37,6 +37,7 @@ import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
 import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from './lib/images.js';
 import { writeLogoSvgs } from './lib/logo-generator.js';
+import { readOperatorVar } from './lib/operator-env.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import {
   adaptDockerfileForPackageManager,
@@ -45,8 +46,9 @@ import {
   writePnpmWorkspaceSettings,
   writeTemplateLockfile,
 } from './lib/package-manager.js';
-import { validateGitignore } from './lib/project.js';
+import { getBootstrappedKeys, validateGitignore } from './lib/project.js';
 import { generateBucketSalt, generatePassword, generateReplPassword } from './lib/secrets.js';
+import { ensureStatePassphrase, STATE_PASSPHRASE_KEY } from './lib/state-passphrase.js';
 import { projectPathFor, templatePathFor } from './lib/template-paths.js';
 import { createTracker } from './lib/tracker.js';
 import { getUpgradeableFiles } from './lib/upgrade-policy.js';
@@ -1384,6 +1386,20 @@ ${runCmd} test:prepush
       }),
     projectDir,
   );
+  // This project's own Pulumi state passphrase: the value into .env.local
+  // only (never .env, which ships to servers), its fingerprint into the
+  // .vibecarbon.json the initial commit captures. A value inherited from the
+  // shell was not made for this project, so a new project makes its own.
+  if (
+    readOperatorVar(STATE_PASSPHRASE_KEY).value &&
+    !getBootstrappedKeys().has(STATE_PASSPHRASE_KEY)
+  ) {
+    p.log.warn(
+      `Your shell exports ${STATE_PASSPHRASE_KEY}, which vibecarbon didn't make for this new project. This project made its own in .env.local. Unset the shell one before you deploy: a shell value wins over .env.local and won't match.`,
+    );
+  }
+  delete process.env[STATE_PASSPHRASE_KEY];
+  await ensureStatePassphrase(projectDir);
   await tick();
 
   // Create the initial commit so the user starts from a clean, tracked

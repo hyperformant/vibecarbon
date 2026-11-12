@@ -784,6 +784,33 @@ export const CONFIG_KEYS = [
     scope: 'state',
   },
 
+  // ---- State: per-project Pulumi secrets passphrase ----
+  // Generated once per project by src/lib/state-passphrase.js and kept ONLY in
+  // .env.local (setEnvVar localOnly): it encrypts the secrets inside the
+  // Pulumi state, so a copy in .env, a bundle or a server would defeat it.
+  // The committed .vibecarbon.json records only its fingerprint. Deliberately
+  // not named PULUMI_CONFIG_PASSPHRASE: a shell export of that name for
+  // another project would silently win over this one.
+  {
+    key: 'VIBECARBON_STATE_PASSPHRASE',
+    class: 'operator-secret',
+    feature: 'providers',
+    kind: 'secret',
+    optional: true,
+    // SECURITY: the fingerprint is committed, so a guess at the value can be
+    // checked against it offline. It is scrypt (state-passphrase.js), which
+    // makes each guess slow, and this rule asks for the generated value's
+    // length and alphabet (32 random bytes, base64url). It checks length and
+    // alphabet only: a long value a person typed passes, entropy or not.
+    shape: {
+      regex: /^[A-Za-z0-9_-]{43,}$/,
+      describe: 'at least 43 letters, digits, dashes or underscores',
+    },
+    sample: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ-_0123',
+    where: '.env.local',
+    scope: 'state',
+  },
+
   // ---- TLS: ACME CA override ----
   // Points at Let's Encrypt staging (or another ACME directory) instead of
   // production — e2e/dev envs avoiding LE's production rate limits (see

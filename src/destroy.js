@@ -67,6 +67,11 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
+import {
+  findStatePassphraseError,
+  isStatePassphraseFailure,
+  passphraseMadeThisRunText,
+} from './lib/iac/state-error.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
@@ -82,6 +87,11 @@ import {
 import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
 import { sshKeyPathFor } from './lib/ssh.js';
+import {
+  findStatePassphraseProblem,
+  STATE_PASSPHRASE_KEY,
+  statePassphraseProvenance,
+} from './lib/state-passphrase.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';
@@ -2223,6 +2233,14 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
     keeps: true,
     why: 'the stack record in the state bucket, which the re-run destroys or removes',
   },
+  'unreadable-stack': {
+    keeps: false,
+    why:
+      'a k8s stack whose state no value this project has can decrypt, its record removed ' +
+      'unread once the API sweeps ran in place of `pulumi destroy` (settleUnreadableStacks): a ' +
+      're-run finds no record, and what the sweeps left is on lines of its own; the hint names ' +
+      'the console delete',
+  },
   'compose-ha teardown': { keeps: true, why: 'the re-run runs the whole HA teardown again' },
   'storage-key': {
     keeps: true,
@@ -2349,11 +2367,13 @@ export function keepsEntry(entry) {
  * `because` names the IPs in the provider's own word (`RESERVED_IP_NAME`:
  * Floating IP on Hetzner, flexible IP on Scaleway, reserved IP elsewhere).
  *
+ * Exported for unit testing.
+ *
  * @param {{pulumiDestroyFailed?: boolean, unreleasedReservedIps?: string[], unsweptReservedIpScopes?: string[], leaks?: {entries: Array<{severity: string, resourceClass: string, resource: string}>}}} results
  * @param {object} envConfig - the environment, for its provider's word
  * @returns {{unverified: true, because: string} | {unreleased: string[], unswept: string[], rerunnable: string[], because: string} | null}
  */
-function entryKeptReason(results, envConfig) {
+export function entryKeptReason(results, envConfig) {
   if (results.pulumiDestroyFailed) {
     return { unverified: true, because: 'its Pulumi destroy was not verified' };
   }
@@ -3190,6 +3210,324 @@ export function recordPulumiDestroyFailure({
     reason: `pulumi destroy failed: ${error?.message}, every Pulumi-managed resource in this stack (servers, firewall, network, SSH key, floating IP) is unverified`,
     hint: `Check for leftover resources in the ${providerName} console, then run \`${finish}\` again to finish. Pulumi state was preserved for this stack.`,
   });
+}
+
+/**
+ * Why this project's passphrase cannot open a stack's state, as a short
+ * clause. A StatePassphraseError (refused before Pulumi ran) anywhere in the
+ * cause chain names its own reason; anything else is Pulumi refusing the
+ * passphrase it was given.
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function unreadableStateReason(error) {
+  switch (findStatePassphraseError(error)?.reason) {
+    case 'missing':
+      return `${STATE_PASSPHRASE_KEY} isn't set`;
+    case 'mismatch':
+      return `your ${STATE_PASSPHRASE_KEY} doesn't match the fingerprint in .vibecarbon.json`;
+    case 'invalid':
+      return `your ${STATE_PASSPHRASE_KEY} is too weak to be this project's`;
+    default:
+      return "this project's passphrase doesn't decrypt it";
+  }
+}
+
+/**
+ * What to do about a passphrase refused before Pulumi ran
+ * (StatePassphraseError), per reason and per store the value came from: a
+ * shell value wins over .env.local, so fixing the file alone changes
+ * nothing. Ends with the way out when the right value is gone for good.
+ *
+ * Exported for unit testing.
+ *
+ * @param {{ reason?: string, source?: string }} error
+ * @param {string} environment
+ * @param {{purgeBackups?: boolean}} [args] - this destroy's flags, for the
+ *   rerun (retryDestroyCommand): a kept record keeps the entry, and with it
+ *   every bucket a -purge would delete.
+ * @returns {string}
+ */
+export function passphraseRecoveryHint(error, environment, args) {
+  const again = `run \`${retryDestroyCommand(environment, args)}\` again`;
+  const then = `then ${again}: Pulumi then removes whatever is left of this stack`;
+  const inShell = error?.source === 'shell';
+  const entry = 'the `stateEncryption` entry from .vibecarbon.json';
+  // What to clear when the right value is gone for good. A value still in
+  // the shell would be adopted as this project's passphrase by the next run
+  // (and lives nowhere else), and a weak one is refused whatever is recorded,
+  // so those go too, from where they live.
+  const unsetShell = `unset ${STATE_PASSPHRASE_KEY} in your shell and delete ${entry}`;
+  let fix;
+  let lost = `delete ${entry}`;
+  if (error?.reason === 'mismatch') {
+    fix = inShell
+      ? `The ${STATE_PASSPHRASE_KEY} in your shell environment wins over .env.local and isn't this project's. Unset it so vibecarbon reads .env.local, or set it to this project's value, ${then}.`
+      : `The ${STATE_PASSPHRASE_KEY} in .env.local isn't this project's. Replace it with the value you saved for this project, ${then}.`;
+    if (inShell) lost = unsetShell;
+  } else if (error?.reason === 'invalid') {
+    fix = inShell
+      ? `The ${STATE_PASSPHRASE_KEY} in your shell environment is too weak to be this project's. Unset it so vibecarbon reads .env.local, or set it to the value you saved for this project, ${then}.`
+      : `The ${STATE_PASSPHRASE_KEY} in .env.local is too weak to be this project's. Replace it with the value you saved for this project, ${then}.`;
+    lost = inShell
+      ? unsetShell
+      : `delete the ${STATE_PASSPHRASE_KEY} line from .env.local and ${entry}`;
+  } else {
+    fix = `Copy this project's ${STATE_PASSPHRASE_KEY} into .env.local from where you saved it, ${then}.`;
+  }
+  return `${fix} If it's lost for good, ${lost}, then ${again}, and once more if it asks: this state can't be read without the old passphrase, so destroy removes the record.`;
+}
+
+/**
+ * What to do when Pulumi refused a passphrase this clone made
+ * (statePassphraseProvenance): the project's real passphrase most likely
+ * exists, just not in this clone, so the record was kept.
+ *
+ *   - this run made it (ensure found neither a value nor a fingerprint):
+ *     deploy's StateUndecryptableError says the same (passphraseMadeThisRunText);
+ *   - an earlier run made it, and git's HEAD doesn't record its fingerprint;
+ *   - git couldn't say.
+ *
+ * The way out when the passphrase that wrote the state is gone: in a git
+ * checkout, commit .vibecarbon.json so the fingerprint is the project's, then
+ * destroy again; outside one, the next run no longer counts as making it,
+ * so a plain rerun removes the record. When no commit holds the file at all
+ * (`untracked`: .gitignore lists it, or it was never added), the hint says
+ * to take it out of .gitignore and commit it: the team relies on it.
+ *
+ * Exported for unit testing.
+ *
+ * @param {string} environment
+ * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} provenance
+ * @param {{purgeBackups?: boolean}} [args] - this destroy's flags, for the
+ *   rerun (retryDestroyCommand).
+ * @returns {string}
+ */
+export function passphraseMadeThisRunHint(environment, provenance, args) {
+  const again = `run \`${retryDestroyCommand(environment, args)}\` again`;
+  const removes = 'that run removes the record.';
+  const teammate = `If a teammate deployed this project, pull the latest .vibecarbon.json and copy their ${STATE_PASSPHRASE_KEY} into .env.local, then ${again}.`;
+  if (provenance.thisRun) {
+    const commit = provenance.untracked
+      ? "take .vibecarbon.json out of .gitignore if it's listed there and commit it"
+      : 'commit .vibecarbon.json';
+    const lost =
+      provenance.head === 'no-git'
+        ? `If it's lost for good, ${again} as it is: ${removes}`
+        : `If it's lost for good, ${commit}, then ${again}: ${removes}`;
+    return `${passphraseMadeThisRunText('this state', again)} ${lost}`;
+  }
+  if (provenance.head === 'unknown') {
+    return (
+      `vibecarbon couldn't check with git whether this clone's .vibecarbon.json fingerprint is committed (git said: ${provenance.detail}), so it kept the record: the passphrase that reads it may be a teammate's. ` +
+      `${teammate} ` +
+      `If the passphrase that wrote this state is lost for good, fix what git reports and commit .vibecarbon.json, then ${again}: ${removes}`
+    );
+  }
+  const lost = `If the passphrase that wrote this state is lost for good, commit .vibecarbon.json, then ${again}: ${removes}`;
+  if (provenance.untracked) {
+    // No commit holds the file at all, so a commit can never make the
+    // fingerprint the project's until the file is tracked.
+    return (
+      "This clone's .vibecarbon.json isn't in any commit (.gitignore lists it, or it was never added), so the state passphrase fingerprint it records counts as made here, and that passphrase can't read this state. " +
+      `${teammate} ` +
+      'Your team relies on .vibecarbon.json: if .gitignore lists it, take it out, and commit the file once it records the passphrase your team uses. ' +
+      lost
+    );
+  }
+  return (
+    "This clone's .vibecarbon.json records a state passphrase fingerprint that isn't committed, so the passphrase was most likely made here, and it can't read this state. " +
+    `${teammate} ${lost}`
+  );
+}
+
+/**
+ * Why the record stayed, for a passphrase this clone made.
+ * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} provenance
+ */
+function madeHereReason(provenance) {
+  if (provenance.thisRun) return "the passphrase this run made doesn't decrypt it";
+  if (provenance.head === 'unknown') {
+    return "this project's passphrase doesn't decrypt it, and git couldn't say whether this clone made it";
+  }
+  return "the passphrase this clone made, whose fingerprint isn't committed, doesn't decrypt it";
+}
+
+/** No sign this clone made the passphrase (the default for a caller that can't tell). */
+const NOT_MADE_HERE = Object.freeze({ madeHere: false, thisRun: false, head: 'no-git' });
+
+/**
+ * The sentence for a record left alone because the environment's
+ * object-storage credentials did not resolve.
+ * @param {string} environment
+ * @param {{purgeBackups?: boolean}} [args] - this destroy's flags, for the
+ *   rerun (retryDestroyCommand).
+ * @returns {string}
+ */
+function stateCredentialsHint(environment, args) {
+  return `This environment's object-storage credentials couldn't be resolved, so the record was left where it is; have them available when you run \`${retryDestroyCommand(environment, args)}\` again.`;
+}
+
+/**
+ * Warn, before the sweeps run, that a k8s stack's state can't be read and
+ * what removes its servers instead. The stack itself is settled after the
+ * sweeps, by settleUnreadableStacks.
+ *
+ * Exported for unit testing.
+ *
+ * @param {{ error: unknown, stackEnv: string, providerName: string, backstop: boolean }} params
+ */
+export function warnUnreadableStackState({ error, stackEnv, providerName, backstop }) {
+  const byName = backstop
+    ? ", and the stack's firewall, network, SSH key and reserved IP by name"
+    : '';
+  p.log.warn(
+    `vibecarbon can't read the Pulumi state for ${stackEnv} (${unreadableStateReason(error)}), so Pulumi can't remove that stack. ` +
+      `Your servers are still removed through the ${providerName} API${byName}.`,
+  );
+}
+
+/**
+ * Settle the k8s stacks whose Pulumi state this project's passphrase cannot
+ * open (isStatePassphraseFailure), once destroyK8sTier's API sweeps have run
+ * in place of `pulumi destroy`. A stack's record is removed (`stack rm
+ * --force`, which reads nothing) when it holds nothing usable:
+ *
+ *   (a) Pulumi refused a passphrase that passed vibecarbon's own check: no
+ *       value this project has can read that state, so no destroy will ever
+ *       reach what it lists. Removed on every provider, so the next deploy
+ *       starts clean; what the sweeps could not cover is reported.
+ *   (b) Refused before Pulumi ran (a StatePassphraseError anywhere in the
+ *       cause chain: missing, mismatched or invalid), or refused by Pulumi
+ *       when this clone made the passphrase (statePassphraseProvenance: this
+ *       run made it, or, in a git checkout, HEAD doesn't record its
+ *       fingerprint, or git can't tell; the real one likely exists in a
+ *       teammate's clone). The right value may come back, and the record is
+ *       what Pulumi would then destroy. Removed only when a
+ *       K8S_DESTROY_BACKSTOP provider's by-name sweeps cover the stack and
+ *       the ledger is clean; otherwise kept, with how to get the value back.
+ *
+ * A kept record keeps the environment entry (`pulumiDestroyFailed`, and its
+ * `pulumi-stack` line): it is what a destroy with the right value opens. A
+ * removed record keeps nothing itself (its line is `unreadable-stack`, which
+ * ENTRY_KEEP_BY_CLASS says a re-run cannot act on); what the sweeps left
+ * keeps the entry or not by its own lines' classes, as on any destroy, and a
+ * retry that the entry allows re-runs them (it finds no record, which
+ * destroyStack answers with `{destroyed: false}`). Leftovers stay in the
+ * ledger either way, so the exit code says something was left whenever it was.
+ *
+ * Exported for unit testing.
+ *
+ * @param {object} params
+ * @param {Array<{ stackEnv: string, dirLabel: string, error: unknown }>} params.stacks
+ * @param {string} params.environment - the user-facing environment name.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags: every
+ *   rerun a kept record's line names carries -purge when this destroy had it
+ *   (retryDestroyCommand), since a kept entry keeps the buckets for it.
+ * @param {string} params.projectName
+ * @param {object} params.results - the shared destroy `results` accumulator (mutated).
+ * @param {string} params.providerName - `Provider.NAME`.
+ * @param {boolean} params.backstop - the provider's by-name sweeps ran for these stacks.
+ * @param {boolean} [params.reservedIpsSwept] - sweepK8sBackstopTargets' label
+ *   sweep ran for these stacks; a stack whose listing failed is in
+ *   `results.unsweptReservedIpScopes`.
+ * @param {string} [params.reservedIpName] - the provider's word for them
+ *   (`RESERVED_IP_NAME`).
+ * @param {boolean} params.backendResolved - false when the environment has an S3
+ *   backend whose credentials could not be resolved: a removal would reach the
+ *   local fallback backend and miss the real stack.
+ * @param {import('./lib/state-passphrase.js').StatePassphraseProvenance} [params.passphraseProvenance]
+ *   statePassphraseProvenance for the project; absent, nothing says this
+ *   clone made it.
+ * @param {(stackEnv: string) => Promise<unknown>} params.removeRecord
+ * @param {{ start: Function, stop: Function }} params.s
+ */
+export async function settleUnreadableStacks({
+  stacks,
+  environment,
+  args,
+  projectName,
+  results,
+  providerName,
+  backstop,
+  reservedIpsSwept = false,
+  reservedIpName = 'reserved IP',
+  backendResolved,
+  passphraseProvenance = NOT_MADE_HERE,
+  removeRecord,
+  s,
+}) {
+  // Judged once, before any line below is added, so both stacks of a
+  // k8s-ha pair are judged against the same sweeps.
+  const counts = results.leaks.counts();
+  const sweptClean = counts.leak + counts.unverified === 0;
+  for (const { stackEnv, dirLabel, error } of stacks) {
+    const resource = `${stackEnv}${dirLabel}`;
+    const precheck = findStatePassphraseError(error);
+    const madeNow = !precheck && passphraseProvenance.madeHere === true;
+    const why = madeNow ? madeHereReason(passphraseProvenance) : unreadableStateReason(error);
+    if (!backendResolved || ((precheck || madeNow) && !(backstop && sweptClean))) {
+      results.pulumiDestroyFailed = true;
+      const hints = [];
+      if (precheck) hints.push(passphraseRecoveryHint(precheck, environment, args));
+      else if (madeNow) {
+        hints.push(passphraseMadeThisRunHint(environment, passphraseProvenance, args));
+      }
+      if (!backendResolved) hints.push(stateCredentialsHint(environment, args));
+      results.leaks.unverified({
+        resourceClass: 'pulumi-stack',
+        resource,
+        reason: `its Pulumi state can't be read (${why}), so \`pulumi destroy\` did not run and its stack record was kept; the ${providerName} API sweeps ran in its place`,
+        hint: hints.join(' '),
+      });
+      continue;
+    }
+    s.start(`Removing the Pulumi stack record for ${stackEnv} without reading it`);
+    try {
+      await removeRecord(stackEnv);
+    } catch (err) {
+      s.stop(`Failed to remove the Pulumi stack record for ${stackEnv}: ${err.message}`);
+      results.pulumiDestroyFailed = true;
+      results.leaks.unverified({
+        resourceClass: 'pulumi-stack',
+        resource,
+        reason: `its Pulumi state can't be read (${why}), and removing its stack record failed: ${err.message}`,
+        hint: `Run \`${retryDestroyCommand(environment, args)}\` again: it removes the record without reading it.`,
+      });
+      continue;
+    }
+    s.stop(`Pulumi stack record removed: ${stackEnv}`);
+    // What the sweeps left keeps the environment entry through its own lines
+    // (ENTRY_KEEP_BY_CLASS); this record, gone now, keeps nothing.
+    // The label and by-name sweeps cover what this provider's k8s program
+    // makes that bills or blocks a redeploy (DigitalOcean's Tag does neither:
+    // it is free and creating it again is a no-op, so nothing sweeps it), and
+    // they left nothing behind.
+    if (backstop && sweptClean) continue;
+    // Whether the label sweep came back for this stack: it ran
+    // (reservedIpsSwept) and its listing did not fail (sweepTaggedReservedIps
+    // records a failed one in unsweptReservedIpScopes). When it did, it
+    // released the stack's labelled IPs and named any it could not, so only
+    // what no sweep reaches is left to the console.
+    const labelChecked =
+      reservedIpsSwept && !(results.unsweptReservedIpScopes ?? []).includes(stackEnv);
+    const consoleList = labelChecked
+      ? 'firewall, network, SSH key and placement group'
+      : `firewall, network, ${reservedIpName}, SSH key and placement group`;
+    const ipNote = labelChecked
+      ? ` Its ${reservedIpName}s labelled for this stack, if any, were released; any that weren't are listed in this report.`
+      : reservedIpsSwept
+        ? ` The check for ${reservedIpName}s labelled for this stack failed (this report says why), so one may still be there.`
+        : '';
+    results.leaks.unverified({
+      resourceClass: 'unreadable-stack',
+      resource,
+      reason: `its Pulumi state can't be read (${why}), so \`pulumi destroy\` did not run; its stack record was removed without being read`,
+      hint: backstop
+        ? `Nothing can reach what that state listed through Pulumi any more. Anything the ${providerName} API sweeps could not remove is listed in this report; delete it in the ${providerName} console.`
+        : `Nothing can reach what that state listed through Pulumi any more. Delete the stack's ${consoleList} in the ${providerName} console; their names start with ${projectName}-${stackEnv}.${ipNote}`,
+    });
+  }
 }
 
 /**
@@ -4257,6 +4595,18 @@ async function destroyK8sTier({
     }
 
     const { destroyK8s: destroyK8sStack } = await import('./lib/deploy/k8s/index.js');
+    // Whether the by-name backstop below runs for these stacks, and whether
+    // its label sweep releases their labelled reserved IPs
+    // (sweepK8sBackstopTargets' byName and byLabel).
+    const backstop = Provider.K8S_DESTROY_BACKSTOP === true && !!providerToken;
+    const reservedIpsSwept =
+      !!providerToken &&
+      Boolean(projectConfig.projectName) &&
+      typeof provider.deleteReservedIpsByLabels === 'function';
+    // Stacks whose state this project's passphrase cannot open: Pulumi never
+    // ran a destroy for them, so the sweeps below are their teardown, and
+    // settleUnreadableStacks decides about their records once those ran.
+    const unreadableStacks = [];
     // HA: tear down primary + standby Pulumi stacks in parallel. Each stack
     // owns disjoint Hetzner resources (different network, different servers)
     // so there's no shared state to race on. Saves ~200s on k8s-ha critical
@@ -4299,6 +4649,14 @@ async function destroyK8sTier({
               : `  Pulumi destroy for "${stackEnv}"${dirLabel} looks unverified — see the destroy summary's issues`,
           );
         } catch (error) {
+          // The passphrase cannot open this stack's state: Pulumi never ran a
+          // destroy, and the server sweep and backstop below are what remove
+          // it. Said now; settled after the sweeps.
+          if (isStatePassphraseFailure(error)) {
+            warnUnreadableStackState({ error, stackEnv, providerName: Provider.NAME, backstop });
+            unreadableStacks.push({ stackEnv, dirLabel, error });
+            return;
+          }
           console.log(`  Pulumi destroy failed${dirLabel}: ${error.message}`);
           p.log.warn(
             `You may need to manually clean up resources${dirLabel} in the ${Provider.NAME} console.`,
@@ -4333,8 +4691,24 @@ async function destroyK8sTier({
           labelsNameEnvironment(provider, labels, projectConfig.projectName, clusterNames)
         );
       });
+      // An incomplete listing proves nothing about the pages it never read,
+      // whether or not it found servers on the ones it did. settleUnreadableStacks
+      // reads a clean ledger as "the sweeps covered this stack", so a
+      // truncated listing must leave this line even after deleting what it found.
+      const recordInconclusiveScan = () =>
+        results.leaks.unverified({
+          resourceClass: 'server',
+          resource: `orphaned-server scan: ${clusterNames.join(', ')}`,
+          reason:
+            'the server listing came back incomplete, so "no orphaned servers" could not be established',
+          hint: `Check the ${Provider.NAME} console for servers labelled project=${projectConfig.projectName} in this environment.`,
+        });
       if (orphanedServers.length > 0) {
-        s.stop(`Found ${orphanedServers.length} orphaned server(s)`);
+        s.stop(
+          complete
+            ? `Found ${orphanedServers.length} orphaned server(s)`
+            : `Found ${orphanedServers.length} orphaned server(s) in an incomplete server listing`,
+        );
         for (const sv of orphanedServers) {
           s.start(`Deleting orphaned server: ${sv.name} (${Provider.getPublicIP(sv) || sv.id})`);
           try {
@@ -4358,15 +4732,10 @@ async function destroyK8sTier({
             });
           }
         }
+        if (!complete) recordInconclusiveScan();
       } else if (!complete) {
         s.stop('Orphaned-server check inconclusive, server listing was incomplete');
-        results.leaks.unverified({
-          resourceClass: 'server',
-          resource: `orphaned-server scan: ${clusterNames.join(', ')}`,
-          reason:
-            'the server listing came back incomplete, so "no orphaned servers" could not be established',
-          hint: `Check the ${Provider.NAME} console for servers labelled project=${projectConfig.projectName} in this environment.`,
-        });
+        recordInconclusiveScan();
       } else {
         s.stop('No orphaned servers found');
       }
@@ -4444,6 +4813,34 @@ async function destroyK8sTier({
           hint: `Delete it via the ${Provider.NAME} console — this key is created OUTSIDE Pulumi, so no destroy retry's \`pulumi destroy\` will remove it, and the next preflight scan flags it every run.`,
         });
       }
+    }
+
+    // Every sweep that stands in for `pulumi destroy` has run: settle the
+    // stacks Pulumi could not read, against what the sweeps left.
+    if (unreadableStacks.length > 0) {
+      const { removeStackState } = await import('./lib/iac/index.js');
+      await settleUnreadableStacks({
+        stacks: unreadableStacks,
+        environment,
+        args,
+        projectName: projectConfig.projectName,
+        results,
+        providerName: Provider.NAME,
+        backstop,
+        reservedIpsSwept,
+        reservedIpName: Provider.RESERVED_IP_NAME ?? 'reserved IP',
+        backendResolved: !(envConfig.s3 && !destroyS3Config),
+        // The project dir getOrCreateStack checked the passphrase in. Asks
+        // git, so only here, once a stack has been refused.
+        passphraseProvenance: statePassphraseProvenance(process.cwd()),
+        removeRecord: (stackEnv) =>
+          removeStackState(stackEnv, {
+            projectName: projectConfig.projectName,
+            provider: providerIdFor(envConfig),
+            s3Config: destroyS3Config,
+          }),
+        s,
+      });
     }
   }
 
@@ -4708,6 +5105,20 @@ async function removePulumiStackStateEffect(ctx) {
       });
     }
     return;
+  }
+
+  // Removing the record decrypts nothing (`stack rm --force`, with
+  // removeStackState's `decrypts: false`), so a passphrase that cannot open
+  // the state does not stop it. Said once, so the operator knows why the
+  // destroy went around the state and that their next deploy will need it.
+  const passphraseProblem = findStatePassphraseProblem(ctx.cwd ?? process.cwd());
+  if (passphraseProblem) {
+    p.log.warn(
+      `vibecarbon can't read the Pulumi state for ${plan.stackEnvs.join(', ')} ` +
+        `(${unreadableStateReason(passphraseProblem)}). This destroy doesn't need to: your ` +
+        `servers were removed through the ${Provider.NAME} API, and the stack record is ` +
+        'removed without being read.',
+    );
   }
 
   const { removeStackState } = await import('./lib/iac/index.js');

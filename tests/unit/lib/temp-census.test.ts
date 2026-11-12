@@ -36,6 +36,9 @@ describe('the temp-dir census', () => {
   it('flags what a test left, allows the exempt names, and looks inside a kept root', () => {
     const { tmp } = fixtureRoot([
       ['automation-a1b2', 'dir'],
+      ['automation-123456', 'file'],
+      ['automation-654321', 'dir'],
+      ['vibecarbon-pulumi-c3d4', 'dir'],
       ['node-compile-cache', 'dir'],
       ['tsx-1000', 'dir'],
       ['vc-deploy-bundle-x1', 'dir'],
@@ -46,12 +49,18 @@ describe('the temp-dir census', () => {
       ['stray.pem', 'file'],
     ]);
     expect(tempLeftovers(tmp)).toEqual([
+      // The SDK's own workspace dir: every workspace now gets one of ours,
+      // which the test setup removes before the census looks. Only the
+      // SDK's import file may stay, and only as a file.
+      'automation-654321',
+      'automation-a1b2',
       'stray.pem',
       // A deploy bundle holds the app's .env: never allowed to stay.
       'vc-deploy-bundle-x1',
       'vc-k8s-ha-dns-Ab12Cd',
       'vibecarbon-1000/delta-1',
       'vibecarbon-1002',
+      'vibecarbon-pulumi-c3d4',
     ]);
   });
 
@@ -62,7 +71,7 @@ describe('the temp-dir census', () => {
     );
     expect(existsSync(leaky.root)).toBe(false);
 
-    const clean = fixtureRoot([['automation-a1b2', 'dir']]);
+    const clean = fixtureRoot([['node-compile-cache', 'dir']]);
     expect(closeTempRoot(clean.root, clean.tmp)).toBeNull();
     expect(existsSync(clean.root)).toBe(false);
   });

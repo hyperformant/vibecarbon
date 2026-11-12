@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { removeCurrentWorkspaceDirs } from '../../_shared/workspace-dirs.js';
 
 /**
  * Pulumi state keys are scoped per PROJECT: `.pulumi/stacks/<project>/<stack>.json`.
@@ -20,6 +21,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const selectStackMock = vi.fn();
 const createWorkspaceMock = vi.fn();
+
+// These tests drive getOrCreateStack against a mocked LocalWorkspace. The real
+// state-passphrase check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json, so it is stubbed; state-passphrase-census.test.ts covers
+// the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
 
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
@@ -52,6 +62,9 @@ const healthyStack = (name: string) => ({
     summary: { result: 'succeeded' },
   }),
 });
+
+// Each test opens stacks through its own module copies (resetModules below).
+afterEach(removeCurrentWorkspaceDirs);
 
 beforeEach(() => {
   vi.resetModules();

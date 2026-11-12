@@ -13,6 +13,7 @@
 
 import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
+import { isStatePassphraseFailure } from '../../iac/state-error.js';
 
 // Re-exported so the orchestrator's public health probe (outside
 // src/lib/deploy/k8s/) can watch cert-manager for terminally-failed ACME
@@ -84,6 +85,13 @@ export async function destroyK8s(options) {
     s.stop(`Infrastructure destroyed: ${environment}`);
     return result;
   } catch (error) {
+    if (isStatePassphraseFailure(error)) {
+      // Not a failed destroy: Pulumi never ran one. The caller says what that
+      // means and sweeps the servers through the provider API; Pulumi's own
+      // text (set PULUMI_CONFIG_PASSPHRASE) would only mislead here.
+      s.stop(`Pulumi state for ${environment} can't be read`);
+      throw error;
+    }
     s.stop('Destruction failed');
     // destroyStack's error is a one-line summary that names what is left; the
     // full Pulumi output rides on `cause`. Log both: the summary is what the

@@ -121,6 +121,7 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 | `HETZNER_API_TOKEN` | `HCLOUD_TOKEN` env at deploy time (read by the Pulumi hcloud provider); also stored in the project's `.env.local` | Quarterly |
 | `CLOUDFLARE_API_TOKEN` | Project `.env.local`; passed to Pulumi as plain config at deploy time | Quarterly |
 | `REDIS_PASSWORD` | `.env.local`, K8s secret | Yearly |
+| `VIBECARBON_STATE_PASSPHRASE` | Your `.env.local` only, never `.env`, never uploaded or shipped to a server. Encrypts the secret values in your Pulumi state. Made by `create`, or by the first `upgrade`, `deploy`, `scale`, `failover` or Kubernetes `destroy` on a project without one. See [State encryption](#state-encryption) | Not rotated. Keep a copy in your password manager |
 | Docker Hub token | Operator-level env vars only (`DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN`), shell or CI. Never written to a project's `.env.local` | Per Docker Hub policy |
 | GHCR token | Piped via stdin to `kubectl apply`, never stored in argv or committed | Per GitHub Actions policy |
 
@@ -217,6 +218,27 @@ Each environment's app gets the narrowest object storage key its provider allows
 | `shared` | Hetzner by default, Scaleway, Vultr | The account-wide key: every environment's uploads, all backups and the Pulumi state. |
 
 Scaleway could mint a one-bucket key only if the deploy key held org-wide IAM write, which would let the deploy credential mint org-wide keys, so it stays shared. Vultr has one key pair per subscription. The evidence is in [research/2026-10-object-storage-key-scoping.md](./research/2026-10-object-storage-key-scoping.md); the Hetzner paste steps are in [deploy-hetzner.md](./deploy-hetzner.md#the-apps-storage-key).
+
+### State encryption
+
+vibecarbon keeps a record of what it built (servers, networks, firewalls, SSH keys and IP addresses) in a Pulumi state file in your object storage. Pulumi can encrypt the secret values in that file with a passphrase. Every project has its own passphrase, so one project's passphrase never opens another project's state. Today the passphrase protects the values Pulumi marks secret; moving the remaining token-bearing values under it is planned.
+
+**Where it lives.** The passphrase is `VIBECARBON_STATE_PASSPHRASE` in your project's `.env.local`. That file is git-ignored. vibecarbon never writes this value to `.env`, uploads it to GitHub or ships it to a server, and it is stripped from bundles. `vibecarbon create` makes it. A project from an older version gets one the first time `upgrade`, `deploy`, `scale`, `failover` or a Kubernetes `destroy` runs. Keep a copy in your password manager: `.env.local` is the only place it is stored.
+
+**What `.vibecarbon.json` records.** Only a fingerprint of the passphrase (`stateEncryption.fingerprint`, a slow scrypt hash, so guessing the passphrase from it is slow too), never the passphrase itself. Commit it. The fingerprint is how vibecarbon tells you "this isn't the passphrase this project was set up with" before it touches your state, instead of failing halfway through a deploy. Anyone who can read the repo can test guesses against that fingerprint, so use the passphrase vibecarbon makes. If you set your own, make it random (at least 43 characters, letters, digits, `-` and `_`), never a phrase someone could guess.
+
+**A teammate.** They pull the repo, then copy the passphrase from your password manager into their `.env.local` as `VIBECARBON_STATE_PASSPHRASE=<value>`. A value exported in their shell works too, and wins over `.env.local`. If it doesn't match the committed fingerprint, vibecarbon says so and stops. Pull before you run any command once a teammate has upgraded or deployed: a clone without the committed fingerprint makes a passphrase of its own, and that one can't read the team's state.
+
+**If a command says it can't decrypt your state.** The likely cause is a teammate's passphrase. Pull the latest `.vibecarbon.json`, copy their `VIBECARBON_STATE_PASSPHRASE` into `.env.local`, and run the command again. A Kubernetes destroy run before that still removes the servers, and when this clone made its own passphrase it keeps the stack's record for the teammate's passphrase to read (on DigitalOcean and Linode it removes the record once its own sweep has removed everything the record lists). In a git checkout, a fingerprint in `.vibecarbon.json` that isn't committed yet counts as made in this clone, and so does every fingerprint in a `.vibecarbon.json` that `.gitignore` lists. Your team relies on that file, so take it out of `.gitignore` and commit it. Outside a git checkout, or without git installed, only the command that made the passphrase counts.
+
+**Older projects.** Before this, every project's state was encrypted with an empty passphrase. A stack that holds encrypted values (Linode and Vultr keep server passwords there) is re-encrypted with your project's passphrase the first time a command opens it, and vibecarbon tells you once. A stack with none (Hetzner, DigitalOcean, Scaleway) reads as it is and moves to the new passphrase on its next deploy, without a notice. Once a stack has moved, vibecarbon 0.52 and earlier can't open it, so upgrade everyone who deploys this project together.
+
+**If you lose it.** `vibecarbon status`, `vibecarbon backup` and a compose `vibecarbon destroy` never open the state, so they keep working. A Kubernetes destroy can't read the state without the passphrase, so it removes the project's servers through your provider's API and lists anything left for you to delete (on DigitalOcean and Linode, vibecarbon also sweeps the project's leftovers itself). The state itself can't be read again, so to start over:
+
+1. Run `vibecarbon backup <env>` for each environment you deployed with the old passphrase, to keep a copy of its database. Destroy removes the servers, and the database with them.
+2. Delete the `stateEncryption` entry from `.vibecarbon.json`.
+3. Run `vibecarbon destroy <env>` for each of those environments. It removes the servers. If it says it kept the stack's record (the passphrase it just made is new to this clone), commit `.vibecarbon.json` and run it once more: the new fingerprint is now the project's, so that run removes the unreadable record. Outside a git checkout, skip the commit.
+4. Run `vibecarbon deploy <env>` again. vibecarbon makes a new passphrase the first time it needs one.
 
 ### Network security
 

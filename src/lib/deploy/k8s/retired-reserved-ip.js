@@ -210,6 +210,9 @@ export function createDropRetired({
  * @param {string} o.providerToken
  * @param {object|null} o.s3Config - the state backend (PULUMI_BACKEND_URL overrides it)
  * @param {string} o.projectName
+ * @param {string} [o.projectDir] - the project whose state passphrase opens
+ *   the stack (getOrCreateStack); the working directory when omitted, as for
+ *   every command the CLI runs in the project
  * @param {(fn: (config: object) => void) => unknown} [o.updateConfig]
  * @returns {(stackName: string) => Promise<void>}
  */
@@ -219,6 +222,7 @@ export function createDeployDropRetired({
   providerToken,
   s3Config,
   projectName,
+  projectDir,
   updateConfig = updateProjectConfig,
 }) {
   return createDropRetired({
@@ -230,6 +234,7 @@ export function createDeployDropRetired({
         providerToken,
         s3Config,
         projectName,
+        ...(projectDir && { projectDir }),
         requireExisting: true,
       });
     },

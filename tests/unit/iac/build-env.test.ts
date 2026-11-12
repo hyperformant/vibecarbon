@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
 import { buildEnv } from '../../../src/lib/iac/index.js';
@@ -26,9 +27,13 @@ const TOKEN_ENV_VARS = [
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',
   'PULUMI_CONFIG_PASSPHRASE',
+  'PULUMI_CONFIG_PASSPHRASE_FILE',
+  'VIBECARBON_STATE_PASSPHRASE',
   'PULUMI_SKIP_UPDATE_CHECK',
   'PULUMI_BACKEND_URL',
 ];
+
+const PASSPHRASE = 'A'.repeat(43);
 
 beforeEach(() => {
   for (const key of TOKEN_ENV_VARS) vi.stubEnv(key, undefined);
@@ -82,14 +87,56 @@ describe('buildEnv', () => {
       expect(env.AWS_SECRET_ACCESS_KEY).toBe('s3cret');
     });
 
-    it('defaults PULUMI_CONFIG_PASSPHRASE to empty string', () => {
+    it('sets PULUMI_CONFIG_PASSPHRASE to the project passphrase', () => {
+      vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', PASSPHRASE);
       const env = buildEnv({ provider, providerToken: 'secret-token' });
-      expect(env.PULUMI_CONFIG_PASSPHRASE).toBe('');
+      expect(env.PULUMI_CONFIG_PASSPHRASE).toBe(PASSPHRASE);
     });
 
-    it('honors an explicit configPassphrase', () => {
-      const env = buildEnv({ provider, providerToken: 'secret-token', configPassphrase: 'pw' });
-      expect(env.PULUMI_CONFIG_PASSPHRASE).toBe('pw');
+    it('leaves both passphrase vars unset (never an empty string) without a project passphrase', () => {
+      const env = buildEnv({ provider, providerToken: 'secret-token' });
+      expect(env.PULUMI_CONFIG_PASSPHRASE).toBeUndefined();
+      expect(env.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
+    });
+
+    it('drops an inherited PULUMI_CONFIG_PASSPHRASE and _FILE', () => {
+      vi.stubEnv('PULUMI_CONFIG_PASSPHRASE', 'from-another-project');
+      vi.stubEnv('PULUMI_CONFIG_PASSPHRASE_FILE', '/tmp/other-project-passphrase');
+      const none = buildEnv({ provider });
+      expect(none.PULUMI_CONFIG_PASSPHRASE).toBeUndefined();
+      expect(none.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
+      vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', PASSPHRASE);
+      const own = buildEnv({ provider });
+      expect(own.PULUMI_CONFIG_PASSPHRASE).toBe(PASSPHRASE);
+      expect(own.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
+    });
+
+    it('the spawned pulumi child sees no inherited passphrase var (the SDK spreads process.env under envVars)', () => {
+      vi.stubEnv('PULUMI_CONFIG_PASSPHRASE', 'from-another-project');
+      vi.stubEnv('PULUMI_CONFIG_PASSPHRASE_FILE', '/tmp/other-project-passphrase');
+      const probe = (env: Record<string, string | undefined>) =>
+        JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              '-e',
+              'console.log(JSON.stringify([process.env.PULUMI_CONFIG_PASSPHRASE ?? null, process.env.PULUMI_CONFIG_PASSPHRASE_FILE ?? null]))',
+            ],
+            // Same merge the Automation SDK's execa call performs.
+            { env: { ...process.env, ...env }, encoding: 'utf8' },
+          ),
+        );
+      expect(probe(buildEnv({ provider }))).toEqual([null, null]);
+      vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', PASSPHRASE);
+      expect(probe(buildEnv({ provider }))).toEqual([PASSPHRASE, null]);
+      expect(probe(buildEnv({ provider, decrypts: false }))).toEqual([PASSPHRASE, null]);
+    });
+
+    it('refuses a malformed project passphrase, unless the caller decrypts nothing', () => {
+      vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', 'short');
+      expect(() => buildEnv({ provider })).toThrow(/too weak/);
+      const env = buildEnv({ provider, decrypts: false });
+      expect(env.PULUMI_CONFIG_PASSPHRASE).toBeUndefined();
     });
 
     it('sets PULUMI_SKIP_UPDATE_CHECK', () => {

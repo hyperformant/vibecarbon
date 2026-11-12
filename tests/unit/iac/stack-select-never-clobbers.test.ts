@@ -39,6 +39,15 @@ const createStackMock = vi.fn();
 const workspaceCreateMock = vi.fn();
 const progressLogMock = vi.fn();
 
+// These tests drive getOrCreateStack against a mocked LocalWorkspace. The real
+// state-passphrase check would write a passphrase into the cwd's .env.local and
+// .vibecarbon.json, so it is stubbed; state-passphrase-census.test.ts covers
+// the real wiring.
+vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
+  ensureStatePassphrase: async () => 'test-passphrase',
+}));
+
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
     selectStack: (...a: unknown[]) => selectStackMock(...a),
@@ -61,7 +70,9 @@ function stackNotFound(stackName = 'e4-standby') {
   return err;
 }
 
-const fakeStack = (name: string) => ({ name, __real: true });
+// getOrCreateStack reads every stack it opens once (the passphrase probe).
+const exportStack = async () => ({ deployment: {} });
+const fakeStack = (name: string) => ({ name, __real: true, exportStack });
 
 /** `listStacks` builds its own workspace, then calls listStacks() on it. */
 function backendLists(names: string[]) {
@@ -117,6 +128,28 @@ describe('getOrCreateStack — a stale select must never create over real state'
 
     expect(stack).toEqual(fakeStack('e9'));
     expect(createStackMock).toHaveBeenCalledTimes(1);
+  });
+
+  // The passphrase probe reads every stack an open selects, but not one it
+  // just created: that stack was made with the project's passphrase and
+  // holds nothing to migrate, and reading its checkpoint right back is a
+  // read-after-write the store may not answer yet. A later open in the same
+  // process does not read it first either.
+  it('does not read back a stack it just created, now or on a later open', async () => {
+    backendLists([]);
+    const created = { name: 'e9', exportStack: vi.fn(async () => ({ deployment: {} })) };
+    selectStackMock.mockRejectedValueOnce(stackNotFound('e9')).mockResolvedValueOnce(created);
+    createStackMock.mockResolvedValue(created);
+
+    const { __resetStateProbesForTests, getOrCreateStack } = await import(
+      '../../../src/lib/iac/index.js'
+    );
+    __resetStateProbesForTests();
+    await getOrCreateStack('e9', () => ({}), { projectName: 'testproj' });
+    await getOrCreateStack('e9', () => ({}), { projectName: 'testproj' });
+
+    expect(createStackMock).toHaveBeenCalledTimes(1);
+    expect(created.exportStack).not.toHaveBeenCalled();
   });
 
   // A fresh deploy must not pay a retry ladder for a stack that legitimately
@@ -227,6 +260,7 @@ describe('read / mutate-existing entry points refuse to create', () => {
 
   it('getStackOutputs never creates a stack', async () => {
     selectStackMock.mockResolvedValue({
+      exportStack,
       outputs: vi.fn().mockResolvedValue({ masterIp: { value: '1.2.3.4' } }),
     });
 

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { withStateBackendRetry } from '../../../src/lib/iac/index.js';
 // @ts-expect-error — JS module without types
 import { classifyStateError } from '../../../src/lib/iac/state-error.js';
+import { STATE_ERROR_CORPUS } from './fixtures/state-error-corpus.js';
 
 const noSleep = () => Promise.resolve();
 
@@ -59,6 +60,16 @@ describe('withStateBackendRetry', () => {
       'no stack named foo',
     );
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('never retries a passphrase refusal: the same key gives the same answer', async () => {
+    for (const c of STATE_ERROR_CORPUS.filter((e) => e.expect.cause === 'passphrase')) {
+      const fn = vi.fn().mockRejectedValue(new Error(c.message));
+      await expect(withStateBackendRetry(fn, c.operation, { sleep: noSleep })).rejects.toThrow(
+        /passphrase/,
+      );
+      expect(fn, c.id).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('gives up after the attempt budget and rethrows the throttle', async () => {

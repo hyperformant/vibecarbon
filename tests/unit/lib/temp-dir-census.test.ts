@@ -21,7 +21,11 @@
  *      Where in the function the removal sits (a finally, a catch) is not
  *      checked; the behaviour tests own that
  *      (tests/unit/deploy/deploy-bundle-lifetime.test.ts and the per-site
- *      tests), and the exit sweep is the backstop.
+ *      tests), and the exit sweep is the backstop. A maker whose dir an
+ *      object it hands out keeps using until the process ends is listed in
+ *      EXIT_OWNED_MAKERS with its file and why: the exit sweep owns that dir,
+ *      so neither the maker nor its callers are held to this rule, unless
+ *      another file defines a function of the same name.
  *   4. every temp-dir prefix src/ makes is either one the stale sweep removes
  *      (STALE_SECRET_PREFIXES: it held secrets, so a leftover from an earlier
  *      version or a killed run must go) or listed below with why it never
@@ -63,7 +67,42 @@ const NO_SECRET_PREFIXES: Record<string, string> = {
   DELTA_DIR_PREFIX:
     "the app image's layers, under the private per-user root that sweepStaleDeltaDirs clears",
   'vibecarbon-script-': 'runShellScript, which nothing in src/ calls',
+  'vibecarbon-pulumi-':
+    "a Pulumi workspace: Pulumi.yaml with the state backend URL (the credentials go in the engine's env) and the stack's encryption salt, which the state backend holds too",
 };
+
+/**
+ * Makers whose dir the exit sweep owns, each in the one file that may define
+ * it, with why: an object they hand out runs in the dir until the process
+ * ends, so no function that holds it can remove it. Rule 3 follows neither
+ * the maker's own makeTempDir (in that file) nor its callers; rule 4 still
+ * classifies the dir's prefix.
+ */
+const EXIT_OWNED_MAKERS: Record<string, { file: string; why: string }> = {
+  makeWorkspaceDir: {
+    file: join('src', 'lib', 'iac', 'workspace-dir.js'),
+    why:
+      'a Pulumi workspace dir: the Stack handed out runs every later command in it (the ' +
+      'passphrase probe, the migration, refresh, up, destroy), and a caller can hold that ' +
+      'Stack until the command ends',
+  },
+};
+
+/**
+ * Whether the exit sweep owns the dirs `maker`'s calls return: it is listed
+ * (an own key, never an Object.prototype name like `toString`), and no file
+ * but its listed one defines a top-level function of that name. Calls are
+ * followed by name alone, so a second definition anywhere holds every call to
+ * the rule again.
+ */
+function exitOwned(maker: string, sources: Source[]): boolean {
+  if (!Object.hasOwn(EXIT_OWNED_MAKERS, maker)) return false;
+  const { file } = EXIT_OWNED_MAKERS[maker];
+  const definers = sources
+    .filter((src) => src.fns.some((fn) => fn.name === maker))
+    .map((src) => src.file);
+  return definers.length > 0 && definers.every((f) => f === file);
+}
 
 /**
  * The prefix each temp dir src/ makes is named by: the string (or the
@@ -297,12 +336,21 @@ function tempViolations(files: Record<string, string>): string[] {
   for (const src of sources) {
     if (src.file === HELPER) continue;
     for (const maker of makers) {
+      // The exit sweep owns an exit-owned maker's dir, at every caller.
+      if (exitOwned(maker, sources)) continue;
       for (const m of callsOf(src, maker)) {
         const at = m.index ?? 0;
         const where = `${src.file}:${lineOf(src.text, at)} ${maker}()`;
         const fn = fnAt(src, at);
         if (!fn) {
           bad.push(`${where} is outside any top-level function, so nothing is seen to remove it`);
+          continue;
+        }
+        // And in the exit-owned maker itself, in its own file only.
+        if (
+          Object.hasOwn(EXIT_OWNED_MAKERS, fn.name) &&
+          EXIT_OWNED_MAKERS[fn.name].file === src.file
+        ) {
           continue;
         }
         // `return maker(...)`: this function hands the dir on, and its callers
@@ -371,6 +419,24 @@ describe('temp dir census (src/)', () => {
     expect(legacyViolations(LEGACY_SECRET_TEMP, found)).toEqual([]);
   });
 
+  it('every exit-owned maker is one the census finds, and says why', () => {
+    const sources = Object.entries(files).map(([file, text]) => source(file, text));
+    const makers = returningMakers(sources);
+    for (const [name, { file, why }] of Object.entries(EXIT_OWNED_MAKERS)) {
+      // A name that no longer returns a dir it made would excuse nothing,
+      // or would excuse a function that no longer needs it; and it is
+      // defined in its listed file, and nowhere else.
+      expect(makers.has(name), name).toBe(true);
+      const definers = sources.filter((src) => src.fns.some((fn) => fn.name === name));
+      expect(
+        definers.map((src) => src.file),
+        name,
+      ).toEqual([file]);
+      expect(exitOwned(name, sources), name).toBe(true);
+      expect(why.length).toBeGreaterThan(20);
+    }
+  });
+
   it('every allowed file still calls tmpdir(), and says why', () => {
     for (const [file, why] of Object.entries(TMPDIR_ALLOWED)) {
       const text = readFileSync(file, 'utf-8');
@@ -435,6 +501,57 @@ describe('the census bites', () => {
       tempViolations({ 'src/a.js': maker + handOn, 'src/b.js': caller('renderMore') }),
     ).toEqual([expect.stringMatching(/renderMore\(\) in deploy: out is never removed/)]);
     expect(tempViolations({ 'src/a.js': maker, 'src/b.js': remover })).toEqual([]);
+  });
+
+  it('an exit-owned maker and its callers keep their dirs; any other maker is held to the rule', () => {
+    const maker = (name: string) =>
+      `export function ${name}() {\n  const d = makeTempDir('w-');\n  dirs.add(d);\n  return d;\n}\n`;
+    const caller = (name: string) =>
+      `export function open() {\n  return sdk({ workDir: ${name}() });\n}\n`;
+    const own = join('src', 'lib', 'iac', 'workspace-dir.js');
+    expect(
+      tempViolations({ [own]: maker('makeWorkspaceDir'), 'src/b.js': caller('makeWorkspaceDir') }),
+    ).toEqual([]);
+    expect(
+      tempViolations({ 'src/a.js': maker('makeScratchDir'), 'src/b.js': caller('makeScratchDir') }),
+    ).toEqual([
+      expect.stringMatching(/in makeScratchDir: returns d but never removes it when it throws/),
+      expect.stringMatching(/src\/b\.js:2 makeScratchDir\(\) in open is not held in a variable/),
+    ]);
+  });
+
+  it("the exemption is the listed file's: the same name anywhere else is held to the rule", () => {
+    const maker = (name: string) =>
+      `export function ${name}() {\n  const d = makeTempDir('w-');\n  dirs.add(d);\n  return d;\n}\n`;
+    const caller = 'export function open() {\n  return sdk({ workDir: makeWorkspaceDir() });\n}\n';
+    const own = join('src', 'lib', 'iac', 'workspace-dir.js');
+    // Only in another file: held there, and at its callers.
+    expect(tempViolations({ 'src/a.js': maker('makeWorkspaceDir'), 'src/b.js': caller })).toEqual([
+      expect.stringMatching(/src\/a\.js:2 makeTempDir\(\) in makeWorkspaceDir: returns d/),
+      expect.stringMatching(/src\/b\.js:2 makeWorkspaceDir\(\) in open is not held/),
+    ]);
+    // In its own file and a second one: the second is held, and so is every
+    // call, which the census cannot tell apart by name.
+    expect(
+      tempViolations({
+        [own]: maker('makeWorkspaceDir'),
+        'src/a.js': maker('makeWorkspaceDir'),
+        'src/b.js': caller,
+      }),
+    ).toEqual([
+      expect.stringMatching(/src\/a\.js:2 makeTempDir\(\) in makeWorkspaceDir: returns d/),
+      expect.stringMatching(/src\/b\.js:2 makeWorkspaceDir\(\) in open is not held/),
+    ]);
+    // An Object.prototype name is never listed: held in itself and at its callers.
+    expect(
+      tempViolations({
+        'src/a.js': maker('toString'),
+        'src/b.js': 'export function open() {\n  return sdk({ workDir: toString() });\n}\n',
+      }),
+    ).toEqual([
+      expect.stringMatching(/in toString: returns d but never removes it when it throws/),
+      expect.stringMatching(/src\/b\.js:2 toString\(\) in open is not held/),
+    ]);
   });
 
   it('a maker that returns its dir must remove it when it throws', () => {
