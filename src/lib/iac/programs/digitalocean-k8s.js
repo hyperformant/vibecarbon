@@ -333,7 +333,7 @@ export function buildDigitalOceanK8sProgram(config) {
         vpcUuid: network.id,
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({ ...labels, role: 'master', cluster: clusterName }),
-        userData: transliterateToAscii(masterUserDataRaw),
+        userData: pulumi.secret(transliterateToAscii(masterUserDataRaw)),
         dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
       },
       // dependsOn firewall (M3 Task 5b): DO firewalls attach by tag, not by
@@ -381,7 +381,7 @@ export function buildDigitalOceanK8sProgram(config) {
           'node-pool': 'db-pool',
           cluster: clusterName,
         }),
-        userData: dbUserData,
+        userData: pulumi.secret(dbUserData),
         dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
       },
       // dependsOn firewall explicitly (M3 Task 5b), not just transitively
@@ -427,7 +427,7 @@ export function buildDigitalOceanK8sProgram(config) {
               'cluster-autoscaler/node': 'static',
               cluster: clusterName,
             }),
-            userData: workerUserData,
+            userData: pulumi.secret(workerUserData),
             dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
           },
           // dependsOn firewall explicitly (M3 Task 5b), not just
@@ -457,7 +457,7 @@ export function buildDigitalOceanK8sProgram(config) {
       workerIps: workers.map((w) => w.ipv4Address),
       networkId: network.id,
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
-      k3sToken,
+      k3sToken: pulumi.secret(k3sToken),
       clusterName,
       // M3 Task 9c: the Vpc's actual ipRange (a plain string — Vpc.ipRange
       // is an input we set, not a Pulumi-computed Output, so no .apply()

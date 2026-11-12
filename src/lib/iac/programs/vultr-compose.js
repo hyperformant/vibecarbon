@@ -1,4 +1,5 @@
 import * as vultr from '@ediri/vultr';
+import * as pulumi from '@pulumi/pulumi';
 import { cidrToVultrRuleFields, encodeLabels } from '../../providers/vultr.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
@@ -134,7 +135,7 @@ export function buildVultrComposeProgram(config) {
         osId: 2760,
         sshKeyIds: [sshKeyIdForInstance],
         // RAW — see the module doc's encoding VERIFY note.
-        userData,
+        userData: pulumi.secret(userData),
         firewallGroupId: firewall.id,
         tags: encodeLabels({ ...labels, role: 'compose' }),
       },

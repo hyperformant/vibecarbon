@@ -1,3 +1,4 @@
+import * as pulumi from '@pulumi/pulumi';
 import * as scaleway from '@pulumiverse/scaleway';
 import {
   assertAsciiCloudInit,
@@ -155,7 +156,7 @@ export function buildScalewayComposeProgram(config) {
         },
         // Plain text under the `cloud-init` user-data key (audit: the
         // key-value user-data store; no base64/gzip leg).
-        userData: { 'cloud-init': userData },
+        userData: pulumi.secret({ 'cloud-init': userData }),
         tags: encodeLabels({ ...labels, role: 'compose' }),
       },
       // Bounded create: a provider host that never finishes the create fails the

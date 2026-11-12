@@ -135,7 +135,9 @@ export function serverResourceOptions(type, extra = {}) {
  * whose master was replaced would keep joining one that is gone, so those go
  * into a `replacementTrigger`. The k3s token is deliberately not in it: the
  * master ignores its own user data too, so it keeps the token it booted with,
- * and the token in state is a secret. Pulumi compares a trigger only between
+ * and a trigger is stored in state as written, so the token would sit there as
+ * plain text (the programs wrap user data and the exported token in
+ * pulumi.secret instead). Pulumi compares a trigger only between
  * two defined values, so adding it to an existing worker replaces nothing.
  *
  * Building that trigger needs the master's id, and the SDK resolves a trigger

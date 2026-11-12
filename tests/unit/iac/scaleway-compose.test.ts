@@ -114,7 +114,7 @@ describe('scaleway-compose.js source pins', () => {
   });
 
   it('delivers cloud-init under the `cloud-init` user-data key (the key-value store contract)', () => {
-    expect(programSource).toContain("userData: { 'cloud-init': userData }");
+    expect(programSource).toContain("userData: pulumi.secret({ 'cloud-init': userData })");
   });
 
   it('uses the NAMESPACED exports with the audited casings (SshKey not SSHKey; Ip not IP)', () => {

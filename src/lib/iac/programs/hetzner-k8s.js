@@ -286,7 +286,7 @@ export function buildHetznerK8sProgram(config) {
         networks: [
           { networkId: network.id.apply((id) => Number.parseInt(id, 10)), ip: '10.0.1.1' },
         ],
-        userData: masterUserData,
+        userData: pulumi.secret(masterUserData),
       },
       serverResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
     );
@@ -326,7 +326,7 @@ export function buildHetznerK8sProgram(config) {
         networks: [
           { networkId: network.id.apply((id) => Number.parseInt(id, 10)), ip: '10.0.1.2' },
         ],
-        userData: dbUserData,
+        userData: pulumi.secret(dbUserData),
       },
       serverResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
     );
@@ -370,7 +370,7 @@ export function buildHetznerK8sProgram(config) {
                 ip: `10.0.1.${10 + i}`,
               },
             ],
-            userData: workerUserData,
+            userData: pulumi.secret(workerUserData),
           },
           workerResourceOptions('hcloud:index/server:Server', {
             dependsOn: [subnet],
@@ -401,7 +401,7 @@ export function buildHetznerK8sProgram(config) {
       floatingIp: floatingIp.ipAddress,
       networkId: network.id,
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
-      k3sToken,
+      k3sToken: pulumi.secret(k3sToken),
       clusterName,
     };
   };

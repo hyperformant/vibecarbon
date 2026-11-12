@@ -1,4 +1,5 @@
 import * as linode from '@pulumi/linode';
+import * as pulumi from '@pulumi/pulumi';
 import {
   encodeLabels,
   splitCidrsByFamily,
@@ -153,7 +154,7 @@ export function buildLinodeComposeProgram(config) {
         authorizedKeys: [config.sshPublicKey.trim()],
         // Base64-encoded by US (the provider does not encode) — verified on
         // the registry's instance docs 2026-08-07.
-        metadatas: [{ userData: userDataB64 }],
+        metadatas: pulumi.secret([{ userData: userDataB64 }]),
         firewallId: firewall.id.apply((id) => Number.parseInt(id, 10)),
         tags: encodeLabels({ ...labels, role: 'compose' }),
       },

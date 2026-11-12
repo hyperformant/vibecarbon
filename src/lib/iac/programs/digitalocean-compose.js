@@ -1,4 +1,5 @@
 import * as digitalocean from '@pulumi/digitalocean';
+import * as pulumi from '@pulumi/pulumi';
 import { encodeLabels } from '../../providers/digitalocean.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
@@ -159,7 +160,7 @@ export function buildDigitalOceanComposeProgram(config) {
         // types as number[]).
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({ ...labels, role: 'compose' }),
-        userData,
+        userData: pulumi.secret(userData),
         // Skip DO's Droplet Console agent (44-68s of vendor cloud-init per boot).
         dropletAgent: false,
       },

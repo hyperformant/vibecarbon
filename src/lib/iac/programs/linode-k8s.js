@@ -31,6 +31,7 @@
 
 import { randomBytes } from 'node:crypto';
 import * as linode from '@pulumi/linode';
+import * as pulumi from '@pulumi/pulumi';
 import {
   encodeLabel,
   encodeLabels,
@@ -252,7 +253,7 @@ export function buildLinodeK8sProgram(config) {
         interfaceGeneration: 'legacy_config',
         interfaces: interfaces(MASTER_IP),
         ipv4s: [reservedIp.address],
-        metadatas: [{ userData: toB64(masterUserData) }],
+        metadatas: pulumi.secret([{ userData: toB64(masterUserData) }]),
         firewallId,
         tags: encodeLabels({ ...labels, role: 'master', cluster: clusterName }),
       },
@@ -274,7 +275,7 @@ export function buildLinodeK8sProgram(config) {
         authorizedKeys,
         interfaceGeneration: 'legacy_config',
         interfaces: interfaces(DB_IP),
-        metadatas: [{ userData: toB64(dbUserData) }],
+        metadatas: pulumi.secret([{ userData: toB64(dbUserData) }]),
         firewallId,
         tags: encodeLabels({
           ...labels,
@@ -304,7 +305,7 @@ export function buildLinodeK8sProgram(config) {
             authorizedKeys,
             interfaceGeneration: 'legacy_config',
             interfaces: interfaces(`10.0.1.${WORKER_IP_BASE + i}`),
-            metadatas: [{ userData: toB64(workerUserData) }],
+            metadatas: pulumi.secret([{ userData: toB64(workerUserData) }]),
             firewallId,
             // 'cluster-autoscaler/node': 'static' marks Pulumi-owned workers
             // apart from autoscaler-spawned ones for the destroy sweep.
@@ -346,7 +347,7 @@ export function buildLinodeK8sProgram(config) {
       floatingIp: reservedIp.address,
       networkId: network.id.apply((id) => String(id)),
       sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
-      k3sToken,
+      k3sToken: pulumi.secret(k3sToken),
       clusterName,
       vpcCidr: VPC_CIDR,
     };
