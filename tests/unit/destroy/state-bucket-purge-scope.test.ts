@@ -202,8 +202,10 @@ describe('the last environment under -purge, when its entry is kept', () => {
     const line = messages.find((m) => m.startsWith('stop:Pulumi state bucket kept'));
     expect(line).toContain(STATE);
     expect(line).toMatch(why);
-    expect(line).toContain('`vibecarbon destroy prod`');
-    expect(line).toContain('`vibecarbon destroy prod -purge`');
+    // Only the -purge rerun: a plain one would move the entry and keep the
+    // bucket where no destroy reaches it (retryDestroyCommand).
+    expect(line).toContain('your next `vibecarbon destroy prod -purge` needs this bucket to retry');
+    expect(line).not.toContain('`vibecarbon destroy prod`');
     expect(line).not.toMatch(/\u2014/);
   });
 

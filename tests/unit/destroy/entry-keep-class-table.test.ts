@@ -545,6 +545,23 @@ describe('a destroy step that throws', () => {
     },
   );
 
+  it('names the -purge rerun when the destroy had -purge, in the re-run and the by-hand step alike', async () => {
+    const effects = DESTROY_EFFECTS as Record<string, (c: unknown, a: unknown) => Promise<void>>;
+    for (const [effect, step] of [
+      ['removePulumiStackState', 'remove-stack-state'],
+      ['updateProjectConfig', 'update-project-config'],
+    ]) {
+      for (const purge of [true, false]) {
+        const ctx = { ...throwingCtx(), args: purge ? { purgeBackups: true } : {} };
+        await effects[effect](ctx, {});
+        const [line] = ctx.results.leaks.entries as Entry[];
+        expect(line.resource).toBe(step);
+        const command = purge ? 'vibecarbon destroy prod -purge' : 'vibecarbon destroy prod';
+        expect(line.hint, `${step} ${purge}`).toContain(`\`${command}\` again`);
+      }
+    }
+  });
+
   it('in the compose plans, no step after the stack-state step keeps the entry', async () => {
     for (const tier of ['compose', 'compose-ha']) {
       const steps = planDestroy(tier, {});

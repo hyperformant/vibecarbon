@@ -179,4 +179,25 @@ describe('recordPulumiDestroyOutcome', () => {
     expect(verified).toBe(true);
     expect(results.pulumiDestroyFailed).toBe(false);
   });
+
+  it("names the environment's rerun, with -purge exactly when the destroy had it", () => {
+    for (const [args, command] of [
+      [{ purgeBackups: true }, '`vibecarbon destroy prod -purge`'],
+      [{}, '`vibecarbon destroy prod`'],
+    ] as const) {
+      const results = makeResults();
+      recordPulumiDestroyOutcome({
+        destroyResult: { destroyed: true, resourceCount: 0 },
+        envConfig: { servers: [{ ip: '1.2.3.4' }] },
+        stackEnv: 'prod-primary',
+        dirLabel: ' (prod-primary)',
+        environment: 'prod',
+        args,
+        results,
+        providerName: 'DigitalOcean',
+      });
+      const { hint } = results.leaks.entries[0];
+      expect(hint).toContain(`then re-run ${command} to retry`);
+    }
+  });
 });

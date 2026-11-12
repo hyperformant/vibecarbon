@@ -28,6 +28,7 @@
 
 import { backupsTargetOf } from '../backups-bucket.js';
 import { readOperatorVar } from '../operator-env.js';
+import { retryDestroyCommand } from './retry-command.js';
 
 /**
  * @param {object} params
@@ -105,7 +106,7 @@ export function checkS3CredentialMismatch({
   // pulumi-stack lines), and the k8s tiers' `pulumi destroy` finds an empty
   // stack and is marked unverified. Either way the entry is kept, and that
   // rerun can run, so the hint names it, with -purge when this one has it.
-  const rerun = `vibecarbon destroy ${environment}${purgeBackups ? ' -purge' : ''}`;
+  const rerun = retryDestroyCommand(environment, { purgeBackups });
   // Off a TTY nothing else can supply the keys, so the destroy cannot open
   // the stack state, which keeps the entry (on k8s, whenever the environment
   // records infrastructure: recordPulumiDestroyOutcome), and a kept entry

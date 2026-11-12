@@ -215,6 +215,25 @@ describe('removePulumiStackState effect', () => {
     expect(entries[0].resource).toContain('civ1');
   });
 
+  it('names the -purge rerun when the destroy had -purge, in every line it leaves', async () => {
+    vi.stubEnv('HETZNER_ACCESS_KEY', '');
+    vi.stubEnv('HETZNER_SECRET_KEY', '');
+    const noKeys = makeCtx({ args: { purgeBackups: true } });
+    await runEffect(noKeys);
+    expect(noKeys.results.leaks.entries[0].hint).toContain(
+      'then run `vibecarbon destroy civ1 -purge` again to remove it',
+    );
+
+    vi.stubEnv('HETZNER_ACCESS_KEY', 'test-access');
+    vi.stubEnv('HETZNER_SECRET_KEY', 'test-secret');
+    removeStackStateMock.mockRejectedValue(new Error('SlowDown'));
+    const failed = makeCtx({ args: { purgeBackups: true } });
+    await runEffect(failed);
+    expect(failed.results.leaks.entries[0].hint).toContain(
+      'Run `vibecarbon destroy civ1 -purge` again to remove it',
+    );
+  });
+
   it('keeps going after a first-stack failure so the second stack still gets reconciled', async () => {
     removeStackStateMock
       .mockRejectedValueOnce(new Error('SlowDown'))

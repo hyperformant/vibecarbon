@@ -216,6 +216,10 @@ describe('a -purge destroy that keeps the entry keeps its buckets for the rerun'
     expect(ctx.results.leaks.entries.map((e) => [e.severity, e.resourceClass])).toEqual([
       ['unverified', 'pulumi-stack'],
     ]);
+    // Its rerun is the -purge one, the one that deletes the buckets kept for it.
+    expect(ctx.results.leaks.entries[0].hint).toContain(
+      '`vibecarbon destroy staging -purge` again',
+    );
     expect(onDisk().environments.staging).toBeDefined();
   });
 

@@ -54,6 +54,7 @@ import {
 import { fallbackCsiVolumeIds, runCsiDetachStep } from './lib/destroy/csi-detach.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
+import { ORPHANS_DESTROY_COMMAND, retryDestroyCommand } from './lib/destroy/retry-command.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
 import { sweepEnvironmentServers } from './lib/destroy/server-sweep.js';
 import {
@@ -436,7 +437,7 @@ export async function preDestroyBackup(
         'Finish the scale, or roll it back if DNS never moved, then destroy:',
         `  vibecarbon scale ${envName}`,
         'Or destroy without a backup:',
-        `  vibecarbon destroy ${envName} -force`,
+        `  ${retryDestroyCommand(envName, { purgeBackups: purge }, ['-force'])}`,
       ].join('\n'),
     );
     exit(1);
@@ -454,15 +455,17 @@ export async function preDestroyBackup(
       log.error(
         [
           `backup ${what} (${why}); destroy stopped: a backup is running; wait for it and rerun`,
-          `  vibecarbon destroy ${envName}`,
+          `  ${retryDestroyCommand(envName, { purgeBackups: purge })}`,
           'Or destroy without a backup:',
-          `  vibecarbon destroy ${envName} -force`,
+          `  ${retryDestroyCommand(envName, { purgeBackups: purge }, ['-force'])}`,
         ].join('\n'),
       );
       exit(1);
       return;
     }
-    log.error(`backup ${what} (${why}); destroy stopped; rerun with -force to destroy anyway`);
+    log.error(
+      `backup ${what} (${why}); destroy stopped; run \`${retryDestroyCommand(envName, { purgeBackups: purge }, ['-force'])}\` to destroy anyway`,
+    );
     exit(1);
   };
 
@@ -1322,7 +1325,7 @@ async function handleBackupBucket(
     spinner.stop(
       `Backups kept: ${envBackupPrefix} in ${bucketName}. This destroy keeps ${environment}'s ` +
         `entry because ${entryKept.because}, and a kept environment keeps its backups; a clean ` +
-        `\`vibecarbon destroy ${environment} -purge\` deletes them then.`,
+        `\`${retryDestroyCommand(environment, args)}\` deletes them then.`,
     );
     return { purged: false };
   }
@@ -1562,9 +1565,8 @@ async function retainStateBucket(
     spinner.start('Pulumi state bucket');
     spinner.stop(
       `Pulumi state bucket kept: ${stateBucket}. This destroy keeps ${environment}'s entry ` +
-        `because ${entryKept.because}, and your next \`vibecarbon destroy ${environment}\` ` +
-        `needs this bucket to retry; a clean \`vibecarbon destroy ${environment} -purge\` ` +
-        'deletes it then.',
+        `because ${entryKept.because}, and your next \`${retryDestroyCommand(environment, args)}\` ` +
+        'needs this bucket to retry, and deletes it once it runs clean.',
     );
     return { purged: false };
   }
@@ -1824,7 +1826,7 @@ async function deleteAppBucketEffect(ctx) {
     spinner.stop(
       `S3 bucket kept with its uploads: ${s3BucketName}. This destroy keeps ${environment}'s ` +
         `entry because ${entryKept.because}, and a kept environment keeps its uploads; a clean ` +
-        `\`vibecarbon destroy ${environment} -purge\` deletes it then.`,
+        `\`${retryDestroyCommand(environment, args)}\` deletes it then.`,
     );
     return;
   }
@@ -2214,9 +2216,9 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
           `Delete the GitHub environment ${env} in the repository's settings if it is still there.`,
       },
       'update-project-config': {
-        byHand: (env) =>
-          `If .vibecarbon.json still lists ${env}, run \`vibecarbon destroy ${env}\` again ` +
-          'to remove it.',
+        byHand: (env, args) =>
+          `If .vibecarbon.json still lists ${env}, run \`${retryDestroyCommand(env, args)}\` ` +
+          'again to remove it.',
       },
       'cleanup-local-files': {
         byHand: (env) =>
@@ -2236,7 +2238,7 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
  * The verdict ENTRY_KEEP_BY_CLASS gives one ledger line: `true` when it keeps
  * the environment's entry, or the by-hand step when it does not.
  * @param {{severity: string, resourceClass: string, resource: string}} entry
- * @returns {true | {byHand: (env: string) => string} | false}
+ * @returns {true | {byHand: (env: string, args?: {purgeBackups?: boolean}) => string} | false}
  */
 function entryVerdict({ severity, resourceClass, resource }) {
   if (severity !== 'leak' && severity !== 'unverified') return false;
@@ -2377,19 +2379,6 @@ function decidedProjectLevelFields(results) {
       results.fenceFound?.length ||
       results.fenceLocated?.length,
   );
-}
-
-/**
- * The destroy that retries this one: with -purge when this one had it, so
- * the retry also deletes what this one kept for it (a kept entry keeps its
- * buckets under -purge: deleteAppBucketEffect, handleBackupBucket,
- * retainStateBucket). A retry without it would move the entry and leave
- * those buckets, with no destroy left that can reach them.
- * @param {string} environment
- * @param {{purgeBackups?: boolean}} [args]
- */
-function retryDestroyCommand(environment, args) {
-  return `vibecarbon destroy ${environment}${args?.purgeBackups ? ' -purge' : ''}`;
 }
 
 // 5. Remove the destroyed environment from project config.
@@ -2710,6 +2699,7 @@ async function destroyComposeHATier({
   envConfig,
   projectConfig,
   environment,
+  args,
   providerToken,
   results,
   tracker,
@@ -2756,7 +2746,7 @@ async function destroyComposeHATier({
       resourceClass: 'compose-ha teardown',
       resource: `${projectConfig.projectName}-${environment}`,
       reason: `teardown threw before completing: ${error.message}, servers/firewalls/SSH key/DNS have no verdict`,
-      hint: `Check the ${Provider.NAME} console for surviving servers and firewalls, then re-run \`vibecarbon destroy ${environment}\`.`,
+      hint: `Check the ${Provider.NAME} console for surviving servers and firewalls, then re-run \`${retryDestroyCommand(environment, args)}\`.`,
     });
   }
 
@@ -2775,6 +2765,7 @@ async function destroyComposeHATier({
     leaks: results.leaks,
     projectName: projectConfig.projectName,
     environment,
+    args,
     deployMode: 'compose-ha',
     roles: (envConfig.servers || []).map((sv) => sv.role),
     alreadyHandledIds: handledServerIds,
@@ -2811,6 +2802,7 @@ async function destroyComposeHATier({
         results,
         s: tracker.spinner(),
         environment,
+        args,
       });
     }
   }
@@ -2825,6 +2817,7 @@ async function destroyComposeTier({
   envConfig,
   projectConfig,
   environment,
+  args,
   providerToken,
   results,
   spinner: s,
@@ -2930,6 +2923,7 @@ async function destroyComposeTier({
       leaks: results.leaks,
       projectName: projectConfig.projectName,
       environment,
+      args,
       deployMode: envConfig.deployMode,
       roles: (envConfig.servers || []).map((sv) => sv.role),
       alreadyHandledIds: (envConfig.servers || []).map((sv) => sv.id).filter(Boolean),
@@ -2963,6 +2957,7 @@ async function destroyComposeTier({
       results,
       s,
       environment,
+      args,
     });
   }
 
@@ -3078,8 +3073,10 @@ function pulumiResourceClass(type) {
  * @param {string} params.stackEnv
  * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
  * @param {string} params.environment - the user-facing environment name.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags, for
+ *   the default finish command (retryDestroyCommand).
  * @param {string} [params.finishCommand] - the command that finishes the
- *   teardown; defaults to `vibecarbon destroy <environment>`.
+ *   teardown; defaults to retryDestroyCommand(environment, args).
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`, for the hint.
  */
@@ -3088,12 +3085,13 @@ export function recordPulumiDestroyFailure({
   stackEnv,
   dirLabel,
   environment,
+  args,
   finishCommand,
   results,
   providerName,
 }) {
   results.pulumiDestroyFailed = true;
-  const finish = finishCommand ?? `vibecarbon destroy ${environment}`;
+  const finish = finishCommand ?? retryDestroyCommand(environment, args);
   const hint = `Run \`${finish}\` again to finish; it refreshes the stack and deletes what is left. If it fails the same way, delete it in the ${providerName} console, then run it once more.`;
   const remaining = Array.isArray(error?.remainingResources) ? error.remainingResources : null;
   if (remaining && remaining.length > 0) {
@@ -3165,6 +3163,9 @@ export function recordPulumiDestroyFailure({
  * @param {object} params.envConfig
  * @param {string} params.stackEnv
  * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
+ * @param {string} [params.environment] - the user-facing environment name, for
+ *   the retry command; the stack's own name when absent.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags.
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`, for the issue hint.
  * @returns {boolean} true if recorded as a verified success.
@@ -3174,6 +3175,8 @@ export function recordPulumiDestroyOutcome({
   envConfig,
   stackEnv,
   dirLabel,
+  environment = stackEnv,
+  args,
   results,
   providerName,
 }) {
@@ -3197,8 +3200,8 @@ export function recordPulumiDestroyOutcome({
         'state-backend mismatch (the wrong, empty stack was found). Pulumi state was preserved.',
       hint:
         `Verify directly in the ${providerName} console (servers, firewall, VPC/network, ` +
-        'SSH key, reserved/floating IP), then re-run `vibecarbon destroy` to retry against ' +
-        'the same Pulumi state.',
+        `SSH key, reserved/floating IP), then re-run \`${retryDestroyCommand(environment, args)}\` ` +
+        'to retry against the same Pulumi state.',
     });
     return false;
   }
@@ -3444,12 +3447,13 @@ function keepUnreleased(results, address) {
 /**
  * The retry line every reserved IP of ours that is not released carries.
  * @param {string} environment - as the operator names it
+ * @param {{purgeBackups?: boolean} | undefined} args - this destroy's flags
  * @param {{NAME: string, RESERVED_IP_NAME?: string}} Provider
  */
-function reservedIpRetryHint(environment, Provider) {
+function reservedIpRetryHint(environment, args, Provider) {
   const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
   return (
-    `Run \`vibecarbon destroy ${environment}\` again to retry it: the environment ` +
+    `Run \`${retryDestroyCommand(environment, args)}\` again to retry it: the environment ` +
     'stays in .vibecarbon.json until it is released. Or release it in the ' +
     `${Provider.NAME} console, where it is listed with your ${noun}s.`
   );
@@ -3569,10 +3573,11 @@ async function releaseRecordedReservedIp({
  * kept on record like any other of ours, so the next destroy retries it.
  * Exported for unit testing.
  *
- * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string}} args
+ * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string, args?: {purgeBackups?: boolean}}} params
  *   `stackEnv`: the stack's environment label (k8s-ha: `<env>-primary` or
  *   `<env>-standby`; compose and single k8s: the environment).
- *   `environment`: as the operator names it, for the retry line.
+ *   `environment`: as the operator names it, and `args`, this destroy's
+ *   flags, for the retry line (retryDestroyCommand).
  */
 export async function sweepTaggedReservedIps({
   provider,
@@ -3582,6 +3587,7 @@ export async function sweepTaggedReservedIps({
   results,
   s,
   environment,
+  args,
 }) {
   const Provider = provider.constructor;
   const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
@@ -3605,10 +3611,10 @@ export async function sweepTaggedReservedIps({
         resourceClass: 'reserved-ip',
         resource: failure.address,
         hint: failure.serverTerminating
-          ? `Run \`vibecarbon destroy ${environment}\` again once the server is gone: the ` +
+          ? `Run \`${retryDestroyCommand(environment, args)}\` again once the server is gone: the ` +
             'environment stays in .vibecarbon.json, and that destroy releases it. Or release it ' +
             `in the ${Provider.NAME} console after the server is deleted.`
-          : reservedIpRetryHint(environment, Provider),
+          : reservedIpRetryHint(environment, args, Provider),
       };
       if (failure.held) {
         results.leaks.leak({
@@ -3633,7 +3639,7 @@ export async function sweepTaggedReservedIps({
       resource: `${noun}s labelled ${scope}`,
       reason: `the listing failed: ${error.message}, so vibecarbon could not confirm none is left`,
       hint:
-        `Run \`vibecarbon destroy ${environment}\` again to retry the check: the environment ` +
+        `Run \`${retryDestroyCommand(environment, args)}\` again to retry the check: the environment ` +
         `stays in .vibecarbon.json until it runs clean. Or look in the ${Provider.NAME} console ` +
         `for a ${noun} labelled ${scope}; it keeps billing until it is released.`,
     });
@@ -3656,8 +3662,9 @@ export async function sweepTaggedReservedIps({
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
- * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string}} args
- *   `environment`: the environment as the operator names it, for the retry line.
+ * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string, args?: {purgeBackups?: boolean}}} params
+ *   `environment`: the environment as the operator names it, and `args`,
+ *   this destroy's flags, for the retry line (retryDestroyCommand).
  */
 export async function sweepK8sBackstopTargets({
   provider,
@@ -3666,6 +3673,7 @@ export async function sweepK8sBackstopTargets({
   s,
   projectName,
   environment,
+  args,
 }) {
   const Provider = provider.constructor;
   const byName = Provider.K8S_DESTROY_BACKSTOP === true;
@@ -3675,7 +3683,9 @@ export async function sweepK8sBackstopTargets({
   // (or reported) twice.
   const recorded = byName ? targets.flatMap((t) => t.reservedIps.map((r) => r.address)) : [];
   for (const target of targets) {
-    if (byName) await sweepByName({ provider, target, results, s, projectName, environment });
+    if (byName) {
+      await sweepByName({ provider, target, results, s, projectName, environment, args });
+    }
     if (byLabel) {
       await sweepTaggedReservedIps({
         provider,
@@ -3685,6 +3695,7 @@ export async function sweepK8sBackstopTargets({
         results,
         s,
         environment,
+        args,
       });
     }
     if (byName) await deleteBackstopNetwork({ provider, target, results, s });
@@ -3694,9 +3705,9 @@ export async function sweepK8sBackstopTargets({
 /**
  * The name and address half of the backstop for one stack: firewall, SSH
  * key, then each recorded reserved IP.
- * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string}} args
+ * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string, args?: {purgeBackups?: boolean}}} params
  */
-async function sweepByName({ provider, target, results, s, projectName, environment }) {
+async function sweepByName({ provider, target, results, s, projectName, environment, args }) {
   const Provider = provider.constructor;
   // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
   const firewallName = target.firewallName;
@@ -3767,7 +3778,7 @@ async function sweepByName({ provider, target, results, s, projectName, environm
   // DigitalOcean's delete counts it released only once the read by address
   // answers 404 (DigitalOceanProvider.deleteReservedIpByAddress): DO has
   // answered a DELETE with success and kept the IP.
-  const retry = reservedIpRetryHint(environment, Provider);
+  const retry = reservedIpRetryHint(environment, args, Provider);
   for (const { address, stacks } of target.reservedIps) {
     await releaseRecordedReservedIp({ provider, address, stacks, projectName, results, s, retry });
   }
@@ -3823,6 +3834,7 @@ async function destroyK8sTier({
   envConfig,
   projectConfig,
   environment,
+  args,
   providerToken,
   results,
   spinner: s,
@@ -4209,6 +4221,8 @@ async function destroyK8sTier({
             envConfig,
             stackEnv,
             dirLabel,
+            environment,
+            args,
             results,
             providerName: Provider.NAME,
           });
@@ -4227,6 +4241,7 @@ async function destroyK8sTier({
             stackEnv,
             dirLabel,
             environment,
+            args,
             results,
             providerName: Provider.NAME,
           });
@@ -4272,7 +4287,7 @@ async function destroyK8sTier({
                 region: provider.serverRegion(sv),
               }),
               reason: `orphaned server delete failed: ${error.message}`,
-              hint: `Run \`vibecarbon destroy ${environment}\` again to retry: the environment stays in .vibecarbon.json, and the re-run's orphaned-server sweep finds it by its labels. Or delete it via the ${Provider.NAME} console; it is outside Pulumi state.`,
+              hint: `Run \`${retryDestroyCommand(environment, args)}\` again to retry: the environment stays in .vibecarbon.json, and the re-run's orphaned-server sweep finds it by its labels. Or delete it via the ${Provider.NAME} console; it is outside Pulumi state.`,
             });
           }
         }
@@ -4335,6 +4350,7 @@ async function destroyK8sTier({
         s,
         projectName: projectConfig.projectName,
         environment,
+        args,
       });
     }
 
@@ -4493,7 +4509,7 @@ async function destroyK8sTier({
         resource: `volume listing (${[...clusterLocations].join(', ') || 'all regions'})`,
         reason:
           'the provider volume listing came back incomplete, surviving pvc-* volumes cannot be ruled out',
-        hint: `Check the ${Provider.NAME} console (Volumes) for unattached pvc-* volumes in this environment's region(s), or re-run the destroy once the API settles.`,
+        hint: `Check the ${Provider.NAME} console (Volumes) for unattached pvc-* volumes in this environment's region(s), or run \`${retryDestroyCommand(environment, args)}\` again once the API settles.`,
       });
     }
   } catch (error) {
@@ -4532,6 +4548,7 @@ async function destroyComposeServicesEffect(ctx) {
     envConfig: ctx.envConfig,
     projectConfig: ctx.projectConfig,
     environment: ctx.environment,
+    args: ctx.args,
     providerToken: ctx.providerToken,
     results: ctx.results,
     spinner: ctx.spinner,
@@ -4578,14 +4595,14 @@ async function destroyComposeServicesEffect(ctx) {
  * the loop continues so compose-ha's second stack still gets reconciled.
  */
 async function removePulumiStackStateEffect(ctx) {
-  const { plan, envConfig, projectConfig, environment, results, spinner: s } = ctx;
+  const { plan, envConfig, projectConfig, environment, args, results, spinner: s } = ctx;
 
   const kept = entryKeptReason(results, envConfig);
   if (kept) {
     p.log.warn(
       `Pulumi stack state kept for ${plan.stackEnvs.join(', ')}: this destroy keeps the ` +
         `environment's entry because ${kept.because}. The state records what may still be ` +
-        `deployed, and the next \`vibecarbon destroy ${environment}\` that runs clean removes it.`,
+        `deployed, and the next \`${retryDestroyCommand(environment, args)}\` that runs clean removes it.`,
     );
     return;
   }
@@ -4619,7 +4636,7 @@ async function removePulumiStackStateEffect(ctx) {
           'stack-state removal skipped: no object-storage credentials for its state backend, ' +
           'so the stack still describes the deleted resources',
         hint:
-          `Set ${keys}, then run \`vibecarbon destroy ${environment}\` again to remove it: the ` +
+          `Set ${keys}, then run \`${retryDestroyCommand(environment, args)}\` again to remove it: the ` +
           'environment stays in .vibecarbon.json until its stack state is removed.',
       });
     }
@@ -4649,7 +4666,7 @@ async function removePulumiStackStateEffect(ctx) {
         resource: stackEnv,
         reason: `stack-state removal failed: ${error.message}`,
         hint:
-          `Run \`vibecarbon destroy ${environment}\` again to remove it: the environment stays ` +
+          `Run \`${retryDestroyCommand(environment, args)}\` again to remove it: the environment stays ` +
           'in .vibecarbon.json until its stack state is removed. The kept stack still describes ' +
           'deleted resources, and a deploy of this environment that selects it may fail ' +
           'deleting them (provider 404s).',
@@ -4664,6 +4681,7 @@ async function destroyComposeHaEffect(ctx) {
     envConfig: ctx.envConfig,
     projectConfig: ctx.projectConfig,
     environment: ctx.environment,
+    args: ctx.args,
     providerToken: ctx.providerToken,
     results: ctx.results,
     tracker: ctx.tracker,
@@ -4677,6 +4695,7 @@ async function destroyK8sInfraEffect(ctx) {
     envConfig: ctx.envConfig,
     projectConfig: ctx.projectConfig,
     environment: ctx.environment,
+    args: ctx.args,
     providerToken: ctx.providerToken,
     results: ctx.results,
     spinner: ctx.spinner,
@@ -4724,10 +4743,10 @@ function finishThenReport(stepLabel, effect) {
         ...entry,
         hint:
           verdict === true
-            ? `Run \`vibecarbon destroy ${ctx.environment}\` again once the cause is addressed: ` +
+            ? `Run \`${retryDestroyCommand(ctx.environment, ctx.args)}\` again once the cause is addressed: ` +
               'the environment stays in .vibecarbon.json, and the re-run runs this step again ' +
               'to finish what it left. The remaining steps still ran.'
-            : ['The remaining steps still ran.', verdict?.byHand?.(ctx.environment)]
+            : ['The remaining steps still ran.', verdict?.byHand?.(ctx.environment, ctx.args)]
                 .filter(Boolean)
                 .join(' '),
       });
@@ -4932,7 +4951,7 @@ async function main(argv = []) {
             stackEnv: orphan.name,
             dirLabel: '',
             environment: orphan.name,
-            finishCommand: 'vibecarbon destroy -orphans',
+            finishCommand: ORPHANS_DESTROY_COMMAND,
             results: orphanResults,
             providerName: orphanProvider.NAME,
           });
