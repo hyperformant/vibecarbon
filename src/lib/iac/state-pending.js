@@ -25,6 +25,16 @@
  *     no ownership labels. The user is told to check the console, and the
  *     deploy after the one that said so clears it. The ledger keeps what was
  *     reported (pendingReported), so "then deploy again" is what clears it.
+ *     An up re-makes a resource the program still declares whose create was
+ *     left pending, tracks it at the same URN and keeps the record (3.259.0,
+ *     the fake cloud, Task 7 review): that one is live and this project's, so
+ *     the user is told its id as the one to keep and asked only about
+ *     another of that type and name besides it. A record with nothing at its
+ *     URN (the program no longer declares it) is told as before.
+ *
+ * A resource is named as the provider's console shows it (its `name`,
+ * `label` or Vultr's `description`), else as "an unnamed <type>", never by
+ * its name in the program, which no console shows.
  *
  * Never logs or prints an input value beyond a resource's name.
  */
@@ -34,7 +44,8 @@ import { SERVER_OWNER_LABELS } from './create-timeout.js';
 /**
  * @typedef {Record<string, string>} Ownership
  * @typedef {{ urn: string, noun: string, name: string, owner: Ownership }} PendingServer
- * @typedef {{ urn: string, what: string, name: string, billing: boolean }} PendingOther
+ * @typedef {{ id: string, name: string | null }} Kept
+ * @typedef {{ urn: string, what: string, name: string | null, billing: boolean, kept: Kept | null }} PendingOther
  * @typedef {PendingServer & { id: string }} ListedServer
  */
 
@@ -86,12 +97,15 @@ export function recordedOwnership(inputs, labelsInput) {
 
 /**
  * `deployment`'s pending operations, split into the server creates the
- * provider can be asked about and everything else.
- * @param {{ deployment?: { pending_operations?: Array<{ type?: string, resource?: { urn?: string, type?: string, inputs?: Record<string, unknown> } }> } }} deployment
+ * provider can be asked about and everything else. Each other one carries
+ * `kept`: the resource the state tracks at its URN (an up made it again), or
+ * null when there is none.
+ * @param {{ deployment?: { resources?: Array<{ urn?: string, id?: unknown, delete?: boolean, inputs?: Record<string, unknown>, outputs?: Record<string, unknown> }>, pending_operations?: Array<{ type?: string, resource?: { urn?: string, type?: string, inputs?: Record<string, unknown> } }> } }} deployment
  * @param {Readonly<Record<string, { noun: string, nameInput: string, labelsInput: string }>>} types - SERVER_RESOURCE_TYPES
  * @returns {{ servers: PendingServer[], others: PendingOther[] }}
  */
 export function classifyPendingCreates(deployment, types) {
+  const tracked = trackedByUrn(deployment);
   const servers = [];
   const others = [];
   for (const op of deployment?.deployment?.pending_operations ?? []) {
@@ -106,12 +120,28 @@ export function classifyPendingCreates(deployment, types) {
       others.push({
         urn,
         what: serverClass?.noun ?? kindOf(resource.type),
-        name: nameOf(resource, urn),
+        name: nameOf(resource.inputs),
         billing: Boolean(serverClass) || bills(resource.type),
+        kept: tracked.get(urn) ?? null,
       });
     }
   }
   return { servers, others };
+}
+
+/**
+ * The resources the state tracks, by URN, with the id and name each has at
+ * the provider. One being deleted (a replace's old half) is never the one to
+ * keep.
+ * @returns {Map<string, Kept>}
+ */
+function trackedByUrn(deployment) {
+  const byUrn = new Map();
+  for (const r of deployment?.deployment?.resources ?? []) {
+    if (!r?.urn || r.id == null || r.id === '' || r.delete) continue;
+    byUrn.set(String(r.urn), { id: String(r.id), name: nameOf(r.outputs) ?? nameOf(r.inputs) });
+  }
+  return byUrn;
 }
 
 /** The class name in a Pulumi type token: `hcloud:index/floatingIp:FloatingIp` → `FloatingIp`. */
@@ -136,12 +166,30 @@ function kindOf(type) {
 /** Whether a resource of `type` is billed while it exists: volumes, IPs, load balancers, buckets. */
 const bills = (type) => /(Volume|Ip|LoadBalancer|Bucket)$/.test(classOf(type));
 
-/** The provider-side name a resource was given, else its name in the program. */
-function nameOf(resource, urn) {
-  const { name, label } = resource.inputs ?? {};
-  if (typeof name === 'string' && name) return name;
-  if (typeof label === 'string' && label) return label;
-  return urn.split('::').pop() || urn;
+/**
+ * The name a resource has at the provider, as its console lists it: `name`,
+ * `label` (Linode, Vultr), or `description` (a Vultr firewall group's only
+ * name). Null for one with none (a Scaleway flexible IP, a Linode reserved
+ * IP): its name in the program is in no console.
+ * @param {Record<string, unknown> | undefined} fields - a resource's inputs or outputs
+ * @returns {string | null}
+ */
+function nameOf(fields) {
+  for (const key of ['name', 'label', 'description']) {
+    const value = fields?.[key];
+    if (typeof value === 'string' && value) return value;
+  }
+  return null;
+}
+
+/**
+ * A create as the progress log names it: `firewall p-e1-firewall`,
+ * `unnamed IP`, `server p-e1-worker-1`.
+ * @param {PendingServer | PendingOther} create
+ */
+export function pendingLabel(create) {
+  const what = 'what' in create ? create.what : create.noun;
+  return create.name ? `${what} ${create.name}` : `unnamed ${what}`;
 }
 
 /** A provider id as the state and the API both spell it: Scaleway's state adds `<zone>/`. */
@@ -222,23 +270,35 @@ export function forgetPendingReported(ledger, stackName) {
   ledger.invalidateStep(pendingReportStep(stackName));
 }
 
-/** `a`, `a and b`, `a, b and c`. */
-function listing(items) {
+/** `a`, `a and b`, `a, b and c` (or `a or b` with `joiner` 'or'). */
+function listing(items, joiner = 'and') {
   if (items.length <= 1) return items.join('');
-  return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+  return `${items.slice(0, -1).join(', ')} ${joiner} ${items.at(-1)}`;
 }
 
-/** `the floating IP p-e1-ip`: a resource by its type and name. */
-const theOther = (o) => `the ${o.what} ${o.name}`;
+/** A sentence that starts with a lowercase name, capitalized. */
+const capitalized = (sentence) => sentence[0].toUpperCase() + sentence.slice(1);
+
+/** `the floating IP p-e1-ip`, `an unnamed IP`: a resource as the console shows it. */
+const theOther = (o) => (o.name ? `the ${o.what} ${o.name}` : `an unnamed ${o.what}`);
+
+/** `the floating IP p-e1-ip (id 4711)`, `an unnamed IP (id fr-par-1/…)`: the one the state tracks. */
+const theKept = (o) =>
+  `${o.kept.name ? `the ${o.what} ${o.kept.name}` : `an unnamed ${o.what}`} (id ${o.kept.id})`;
+
+/** `another floating IP named p-e1-ip`, `another unnamed IP`: what the earlier create may have made. */
+const another = (o) => (o.name ? `another ${o.what} named ${o.name}` : `another unnamed ${o.what}`);
 
 const opening = (stackName) =>
   `Your servers in ${stackName} are updated, but vibecarbon left their user data in plain text in the Pulumi state.`;
 
 /**
  * What the user reads when unfinished creates may have left something in
- * their account: servers of ours the provider lists untracked, and resources
- * vibecarbon can't tell were made, naming each one that bills while it
- * exists. Each needs the console, then another deploy, which clears the
+ * their account: servers of ours the provider lists untracked, resources
+ * vibecarbon can't tell were made, and resources a later run made again,
+ * which the user keeps (named by id), with only another of the same type and
+ * name to look for. Names each one that bills while it exists, never the one
+ * to keep. Each needs the console, then another deploy, which clears the
  * records and seals. A server that only shares a name is never in it.
  * @param {string} stackName
  * @param {{ untracked: ListedServer[], others: PendingOther[], providerName: string }} found
@@ -256,15 +316,35 @@ export function pendingCreatesBlock(stackName, { untracked, others, providerName
       `${listing(untracked.map((s) => `${s.name} (id ${s.id})`))} ${them ? 'are' : 'is'} running in your account without Pulumi tracking ${them ? 'them' : 'it'}, so you're billed for ${them ? 'them' : 'it'} and no vibecarbon command will remove ${them ? 'them' : 'it'}: delete ${them ? 'them' : 'it'} in your ${providerName} console.`,
     );
   }
-  if (others.length > 0) {
-    const them = others.length > 1;
+  const unconfirmed = others.filter((o) => !o.kept);
+  if (unconfirmed.length > 0) {
+    const them = unconfirmed.length > 1;
     sentences.push(
-      `vibecarbon can't tell whether ${them ? 'those creates' : 'that create'} made ${listing(others.map(theOther))}, so check your ${providerName} console for ${them ? 'them' : 'it'} and delete ${them ? "any that are this project's" : "it if it's this project's"}.`,
+      `vibecarbon can't tell whether ${them ? 'those creates' : 'that create'} made ${listing(unconfirmed.map(theOther))}, so check your ${providerName} console for ${them ? 'them' : 'it'} and delete ${them ? "any that are this project's" : "it if it's this project's"}.`,
     );
-    const billing = others.filter((o) => o.billing);
+    const billing = unconfirmed.filter((o) => o.billing);
     if (billing.length > 0) {
-      const sentence = `${listing(billing.map(theOther))} may be billing you while ${billing.length > 1 ? 'they exist' : 'it exists'}.`;
-      sentences.push(sentence[0].toUpperCase() + sentence.slice(1));
+      sentences.push(
+        capitalized(
+          `${listing(billing.map(theOther))} may be billing you while ${billing.length > 1 ? 'they exist' : 'it exists'}.`,
+        ),
+      );
+    }
+  }
+  const remade = others.filter((o) => o.kept);
+  if (remade.length > 0) {
+    const them = remade.length > 1;
+    sentences.push(
+      `Keep ${listing(remade.map(theKept))}: a later run made ${them ? 'them' : 'it'} again, and ${them ? "they're the ones" : "it's the one"} this project uses.`,
+      `vibecarbon can't tell whether the earlier ${them ? 'creates' : 'create'} also made ${listing(remade.map(another), 'or')}, so check your ${providerName} console for ${them ? 'those' : 'one'} and delete ${them ? "any that are this project's" : "it if it's this project's"}.`,
+    );
+    const billing = remade.filter((o) => o.billing);
+    if (billing.length > 0) {
+      sentences.push(
+        capitalized(
+          `${listing(billing.map(another))} would be billing you while ${billing.length > 1 ? 'they exist' : 'it exists'}.`,
+        ),
+      );
     }
   }
   sentences.push(
@@ -285,7 +365,7 @@ export function pendingLookupFailed(stackName, servers, reason) {
   return [
     opening(stackName),
     `An earlier run started creating ${listing(servers.map((s) => `the ${s.noun} ${s.name}`))} and didn't finish.`,
-    `Before it drops the record of that create, vibecarbon checks whether ${them ? 'those servers exist' : 'that server exists'}, and the check failed (${reason.replace(/\.$/, '')}).`,
+    `Before it drops ${them ? 'the records of those creates' : 'the record of that create'}, vibecarbon checks whether ${them ? 'those servers exist' : 'that server exists'}, and the check failed (${reason.replace(/\.$/, '')}).`,
     'The next deploy checks again.',
   ].join(' ');
 }

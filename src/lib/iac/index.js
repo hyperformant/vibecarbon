@@ -60,6 +60,7 @@ import {
   classifyPendingCreates,
   forgetPendingReported,
   pendingCreatesBlock,
+  pendingLabel,
   pendingLookupFailed,
   pendingReported,
   recordPendingReported,
@@ -1635,7 +1636,11 @@ async function resolvePendingCreates(stack, exported, options) {
     progressLog(
       `[pulumi] state seal for ${stack.name} waits on ${creates}: ${[
         ...untracked.map((s) => `${s.name} (id ${s.id}) running untracked`),
-        ...others.map((o) => `${o.what} ${o.name}, which vibecarbon can't confirm`),
+        ...others.map((o) =>
+          o.kept
+            ? `another ${pendingLabel(o)} besides id ${o.kept.id}, which vibecarbon can't confirm`
+            : `${pendingLabel(o)}, which vibecarbon can't confirm`,
+        ),
       ].join(', ')}`,
     );
     if (others.length > 0) recordPendingReported(ledger, stack.name, others);
@@ -1657,7 +1662,7 @@ async function resolvePendingCreates(stack, exported, options) {
   );
   forgetPendingReported(ledger, stack.name);
   progressLog(
-    `[pulumi] cleared ${creates} from ${stack.name}'s state: ${[...servers, ...others].map((c) => c.name).join(', ')}`,
+    `[pulumi] cleared ${creates} from ${stack.name}'s state: ${[...servers, ...others].map(pendingLabel).join(', ')}`,
   );
   const cleared = await withStateBackendRetry(
     () => stack.exportStack(),

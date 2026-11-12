@@ -614,6 +614,31 @@ function withOps(state: ReturnType<typeof legacyState>, ops: unknown[]) {
 }
 
 /**
+ * `state` as the deploy's up leaves it over each pending create in `ops`
+ * whose resource the program still declares: the up made it again and tracks
+ * it at the same URN under `ids[i]`, and the record stays (CLI 3.259.0, the
+ * fake cloud, Task 7 review).
+ */
+function remadeOver(
+  state: ReturnType<typeof legacyState>,
+  ops: Array<{ resource: { urn: string; type: string; inputs: Record<string, unknown> } }>,
+  ids: string[],
+) {
+  const next = withOps(state, ops);
+  ops.forEach((op, i) => {
+    next.deployment.resources.push({
+      urn: op.resource.urn,
+      custom: true,
+      id: ids[i],
+      type: op.resource.type,
+      inputs: structuredClone(op.resource.inputs),
+      outputs: structuredClone(op.resource.inputs),
+    } as never);
+  });
+  return next;
+}
+
+/**
  * e1 exports `before` until a refresh clears its pending creates, `after`
  * from then on, as the engine does. Returns the options of each clearing
  * refresh.
@@ -679,7 +704,7 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
       expect(isEnvelope(serverOf(deployment).inputs.userData)).toBe(true);
     }
     expect(logged).toContain(
-      "[pulumi] cleared 1 unfinished create from e1's state: proj-e1-worker-1",
+      "[pulumi] cleared 1 unfinished create from e1's state: server proj-e1-worker-1",
     );
     expect(warnings).toEqual([]);
     expect(stateSealRecorded(ledger, 'e1')).toBe(true);
@@ -752,13 +777,13 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
         "proj-e1-worker-1 (id 780): same name, but without this environment's ownership labels, so not vibecarbon's",
     );
     expect(logged).toContain(
-      "[pulumi] cleared 1 unfinished create from e1's state: proj-e1-worker-1",
+      "[pulumi] cleared 1 unfinished create from e1's state: server proj-e1-worker-1",
     );
     expect(logged.join('\n')).not.toMatch(/delete/i);
     expect(stateSealRecorded(ledger, 'e1')).toBe(true);
   });
 
-  it('a server create that recorded no ownership labels: never looked up, told by type and as billing, then cleared', async () => {
+  it('a server create that recorded no ownership labels: never looked up; the server the up made again is the one to keep, told once, then cleared', async () => {
     const unowned = {
       type: 'creating',
       resource: {
@@ -768,7 +793,8 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
         inputs: { name: 'proj-e1-web', userData: CLOUD_INIT },
       },
     };
-    const clears = clearingExports(withOps(LEGACY, [unowned]), LEGACY);
+    const remade = remadeOver(LEGACY, [unowned], ['22']);
+    const clears = clearingExports(remade, withOps(remade, []));
 
     await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
 
@@ -777,9 +803,11 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     expect(warnings).toEqual([
       `${OPENING} An earlier run started creating the server proj-e1-web and didn't finish, ` +
         'and the state keeps a record of that create, which has to go before vibecarbon can seal it. ' +
-        "vibecarbon can't tell whether that create made the server proj-e1-web, so check your Hetzner Cloud " +
-        "console for it and delete it if it's this project's. The server proj-e1-web may be billing you while it " +
-        'exists. Then deploy again: the next deploy clears the record and seals the state.',
+        "Keep the server proj-e1-web (id 22): a later run made it again, and it's the one this project uses. " +
+        "vibecarbon can't tell whether the earlier create also made another server named proj-e1-web, so check " +
+        "your Hetzner Cloud console for one and delete it if it's this project's. Another server named " +
+        'proj-e1-web would be billing you while it exists. Then deploy again: the next deploy clears the ' +
+        'record and seals the state.',
     ]);
     expect(warnings.join('\n')).not.toContain(TOKEN);
 
@@ -791,8 +819,9 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(true);
   });
 
-  it('a create vibecarbon has no lookup for: the deploy says to check the console, and the next deploy clears and seals', async () => {
-    const clears = clearingExports(withOps(LEGACY, [pendingFirewall()]), LEGACY);
+  it('a create vibecarbon has no lookup for, of a firewall the up made again: that one is named by id as the one to keep, only another is asked about, and the next deploy clears and seals', async () => {
+    const remade = remadeOver(LEGACY, [pendingFirewall()], ['88']);
+    const clears = clearingExports(remade, withOps(remade, []));
 
     await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
 
@@ -802,10 +831,18 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     expect(warnings).toEqual([
       `${OPENING} An earlier run started creating the firewall proj-e1-firewall and didn't finish, ` +
         'and the state keeps a record of that create, which has to go before vibecarbon can seal it. ' +
-        "vibecarbon can't tell whether that create made the firewall proj-e1-firewall, so check your Hetzner Cloud " +
-        "console for it and delete it if it's this project's. Then deploy again: the next deploy clears the record " +
-        'and seals the state.',
+        "Keep the firewall proj-e1-firewall (id 88): a later run made it again, and it's the one this " +
+        "project uses. vibecarbon can't tell whether the earlier create also made another firewall named " +
+        "proj-e1-firewall, so check your Hetzner Cloud console for one and delete it if it's this " +
+        "project's. Then deploy again: the next deploy clears the record and seals the state.",
     ]);
+    // Never the bare "delete it if it's this project's" about the live one.
+    expect(warnings[0]).not.toContain(
+      "can't tell whether that create made the firewall proj-e1-firewall",
+    );
+    expect(logged).toContain(
+      "[pulumi] state seal for e1 waits on 1 unfinished create: another firewall proj-e1-firewall besides id 88, which vibecarbon can't confirm",
+    );
     expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(false);
 
     // "Then deploy again".
@@ -815,6 +852,13 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     expect(clears).toHaveLength(1);
     expect(fakePulumi.imports).toHaveLength(2);
     expect(warnings).toEqual([]);
+    // The clear drops the record, never the firewall the state tracks.
+    for (const imported of fakePulumi.imports) {
+      const resources = (imported.deployment as ReturnType<typeof withOps>).deployment.resources;
+      expect(resources.find((r) => r.urn === pendingFirewall().resource.urn)).toMatchObject({
+        id: '88',
+      });
+    }
     const after = ledgerIn(ledgerDir);
     expect(stateSealRecorded(after, 'e1')).toBe(true);
     // The report is gone with the creates it named.
@@ -823,13 +867,39 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     );
   });
 
+  it('a create with nothing at its URN (the program no longer declares it): told to check the console for it, then cleared', async () => {
+    const clears = clearingExports(withOps(LEGACY, [pendingFirewall()]), LEGACY);
+
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    expect(clears).toEqual([]);
+    expect(warnings).toEqual([
+      `${OPENING} An earlier run started creating the firewall proj-e1-firewall and didn't finish, ` +
+        'and the state keeps a record of that create, which has to go before vibecarbon can seal it. ' +
+        "vibecarbon can't tell whether that create made the firewall proj-e1-firewall, so check your Hetzner Cloud " +
+        "console for it and delete it if it's this project's. Then deploy again: the next deploy clears the record " +
+        'and seals the state.',
+    ]);
+
+    nextDeploy();
+    await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
+
+    expect(clears).toHaveLength(1);
+    expect(warnings).toEqual([]);
+    expect(stateSealRecorded(ledgerIn(ledgerDir), 'e1')).toBe(true);
+  });
+
   it('a create that appears after the warning is reported too, not cleared unseen', async () => {
-    clearingExports(withOps(LEGACY, [pendingFirewall()]), LEGACY);
+    clearingExports(remadeOver(LEGACY, [pendingFirewall()], ['88']), LEGACY);
     await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
 
     nextDeploy();
     const clears = clearingExports(
-      withOps(LEGACY, [pendingFirewall(), pendingFirewall('net', 'proj-e1-network')]),
+      remadeOver(
+        LEGACY,
+        [pendingFirewall(), pendingFirewall('net', 'proj-e1-network')],
+        ['88', '89'],
+      ),
       LEGACY,
     );
     await upStack('e1', async () => ({}), { ...BASE, ledger: ledgerIn(ledgerDir) });
@@ -837,8 +907,10 @@ describe('unfinished creates: the deploy clears them itself before it seals (sta
     expect(clears).toEqual([]);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(
-      "vibecarbon can't tell whether those creates made the firewall proj-e1-firewall and the firewall " +
-        "proj-e1-network, so check your Hetzner Cloud console for them and delete any that are this project's.",
+      'Keep the firewall proj-e1-firewall (id 88) and the firewall proj-e1-network (id 89): a later run ' +
+        "made them again, and they're the ones this project uses. vibecarbon can't tell whether the " +
+        'earlier creates also made another firewall named proj-e1-firewall or another firewall named ' +
+        "proj-e1-network, so check your Hetzner Cloud console for those and delete any that are this project's.",
     );
     expect(warnings[0]).toContain('the next deploy clears the records and seals the state.');
   });

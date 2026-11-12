@@ -26,7 +26,12 @@
  *       didn't finish, its user data plain: the provider (a fake) lists no
  *       server by that name, so the deploy clears the record with the SDK's
  *       refresh({ clearPendingCreates: true }) and seals, and the sentinel
- *       the record carried is gone from the backend too.
+ *       the record carried is gone from the backend too;
+ *   (e) a legacy stack that records an unfinished create of a reserved IP
+ *       the program still declares: the deploy's up makes it again and
+ *       tracks it at the same URN, and the record stays, so the user is told
+ *       that IP's id as the one to keep and asked only about another by its
+ *       name. The deploy after clears the record, never the IP, and seals.
  *
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
@@ -132,6 +137,12 @@ class FakeServer extends pulumi.CustomResource {
     opts?: pulumi.CustomResourceOptions,
   ) {
     super('fakecloud:index:Server', name, { ...args, ip: undefined }, opts);
+  }
+}
+
+class FakeReservedIp extends pulumi.CustomResource {
+  constructor(name: string, args: { name: string }, opts?: pulumi.CustomResourceOptions) {
+    super('fakecloud:index:ReservedIp', name, { ...args, ipAddress: undefined }, opts);
   }
 }
 
@@ -397,7 +408,7 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
       "[pulumi] state seal for e4 leaves alone sealtest-e4-ghost (id not-ours-1): same name, but without this environment's ownership labels, so not vibecarbon's",
     );
     expect(logged).toContain(
-      "[pulumi] cleared 1 unfinished create from e4's state: sealtest-e4-ghost",
+      "[pulumi] cleared 1 unfinished create from e4's state: server sealtest-e4-ghost",
     );
     expect(sealCounts()).toEqual(['e4:2']);
     const exported = (await rawStack('e4').then((s) => s.exportStack())).deployment;
@@ -406,5 +417,99 @@ describe.runIf(hasPulumi || process.env.CI)('the seal after an up (real engine)'
     expect(sentinelFiles()).toEqual([]);
     expect(stateSealRecorded(ledger, 'e4')).toBe(true);
     expect(cloudServers()).toEqual(before);
+  });
+
+  it('(e) an unfinished create of a reserved IP the program still declares: the up makes it again, the user is told its id as the one to keep, and the next deploy clears the record, never the IP, and seals', async () => {
+    await writeLegacyStack('e5');
+    // An earlier run's create of the ingress IP, interrupted before Pulumi
+    // recorded any IP: only the record of the create.
+    const file = checkpoint('e5');
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    const latest = saved.checkpoint.latest;
+    const server = latest.resources.find(
+      (r: { type: string }) => r.type === 'fakecloud:index:Server',
+    );
+    const ipUrn = server.urn.replace(
+      /fakecloud:index:Server::server$/,
+      'fakecloud:index:ReservedIp::ingress',
+    );
+    latest.pending_operations = [
+      {
+        type: 'creating',
+        resource: {
+          urn: ipUrn,
+          custom: true,
+          type: 'fakecloud:index:ReservedIp',
+          inputs: { name: 'sealtest-e5-ip' },
+          parent: server.parent,
+          provider: server.provider,
+        },
+      },
+    ];
+    writeFileSync(file, JSON.stringify(saved));
+    const withIp = async () => {
+      const made = await program(true)();
+      new FakeReservedIp('ingress', { name: 'sealtest-e5-ip' });
+      return made;
+    };
+    const ips = () =>
+      Object.keys(
+        JSON.parse(readFileSync(cloudFile, 'utf8')).things?.['fakecloud:index:ReservedIp'] ?? {},
+      );
+    lookup.calls.length = 0;
+
+    await upStack('e5', withIp, {
+      ...opts,
+      ledger: ledgerFor('e5'),
+      provider: 'hetzner',
+      providerToken: 't',
+    });
+
+    // The engine's own shape: the IP made again and tracked, the record kept.
+    expect(ips()).toHaveLength(1);
+    const [ipId] = ips();
+    const afterUp = (await rawStack('e5').then((s) => s.exportStack())).deployment;
+    expect(afterUp.resources.find((r: { urn: string }) => r.urn === ipUrn)).toMatchObject({
+      id: ipId,
+    });
+    expect(
+      afterUp.pending_operations.map((o: { resource: { urn: string } }) => o.resource.urn),
+    ).toEqual([ipUrn]);
+    expect(lookup.calls).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(
+      `Keep the reserved IP sealtest-e5-ip (id ${ipId}): a later run made it again, and it's the one this project uses. ` +
+        "vibecarbon can't tell whether the earlier create also made another reserved IP named sealtest-e5-ip, " +
+        "so check your Hetzner Cloud console for one and delete it if it's this project's. " +
+        'Another reserved IP named sealtest-e5-ip would be billing you while it exists.',
+    );
+    expect(warnings[0]).not.toContain("can't tell whether that create made");
+    expect(sealCounts(), 'nothing imported over the record').toEqual([]);
+    expect(stateSealRecorded(ledgerFor('e5'), 'e5')).toBe(false);
+
+    // "Then deploy again".
+    logged.length = 0;
+    warnings.length = 0;
+    __resetStateProbesForTests();
+    await upStack('e5', withIp, {
+      ...opts,
+      ledger: ledgerFor('e5'),
+      provider: 'hetzner',
+      providerToken: 't',
+    });
+
+    expect(warnings).toEqual([]);
+    expect(logged).toContain(
+      "[pulumi] cleared 1 unfinished create from e5's state: reserved IP sealtest-e5-ip",
+    );
+    expect(sealCounts()).toEqual(['e5:2']);
+    const sealed = (await rawStack('e5').then((s) => s.exportStack())).deployment;
+    expect(sealed.pending_operations ?? []).toEqual([]);
+    expect(sealed.resources.find((r: { urn: string }) => r.urn === ipUrn)).toMatchObject({
+      id: ipId,
+    });
+    expect(ips(), 'the IP to keep was kept').toEqual([ipId]);
+    expect(sentinelFiles()).toEqual([]);
+    expect(stateSealRecorded(ledgerFor('e5'), 'e5')).toBe(true);
   });
 });

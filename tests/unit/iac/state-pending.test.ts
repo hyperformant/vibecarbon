@@ -13,6 +13,7 @@ const {
   forgetPendingReported,
   OWNERSHIP_KEYS,
   pendingCreatesBlock,
+  pendingLabel,
   pendingLookupFailed,
   pendingReported,
   recordedOwnership,
@@ -123,23 +124,32 @@ describe('classifyPendingCreates', () => {
         what: 'droplet',
         name: 'p-e1-web',
         billing: true,
+        kept: null,
       },
       {
         urn: 'urn:pulumi:e1::proj::hcloud:index/server:Server::db',
         what: 'server',
         name: 'p-e1-db',
         billing: true,
+        kept: null,
       },
     ]);
     expect(JSON.stringify(others)).not.toContain(TOKEN);
   });
 
-  it('anything else is a create vibecarbon has no lookup for, named by its type and provider-side name', () => {
+  it('anything else is a create vibecarbon has no lookup for, named by its type and the name its console shows', () => {
     const { servers, others } = classifyPendingCreates(
       withOps([
         create('hcloud:index/firewall:Firewall', 'fw', { name: 'p-e1-firewall' }),
         create('digitalocean:index/reservedIpAssignment:ReservedIpAssignment', 'ip', {}),
         create('linode:index/firewall:Firewall', 'lfw', { label: 'p-e1-fw' }),
+        // A Vultr firewall group's only name is its description.
+        create('vultr:index/firewallGroup:FirewallGroup', 'firewall', {
+          description: 'p-e1-firewall',
+        }),
+        // No name at the provider: the program's names (`ip`, `ingress`) are in no console.
+        create('scaleway:instance/ip:Ip', 'ip', { type: 'routed_ipv4', tags: OWNER_TAGS }),
+        create('linode:index/reservedIp:ReservedIp', 'ingress', { tags: OWNER_TAGS }),
         // A server whose inputs carry no name: nothing to ask the provider.
         create('hcloud:index/server:Server', 'nameless', { userData: TOKEN, labels: OWNER }),
         { type: 'updating', resource: { urn: 'urn:pulumi:e1::proj::x:y:Z::z', type: 'x:y:Z' } },
@@ -147,14 +157,65 @@ describe('classifyPendingCreates', () => {
       SERVER_RESOURCE_TYPES,
     );
     expect(servers).toEqual([]);
-    expect(others.map((o) => `${o.what} ${o.name}`)).toEqual([
+    expect(others.map(pendingLabel)).toEqual([
       'firewall p-e1-firewall',
-      'reserved IP assignment ip',
+      'unnamed reserved IP assignment',
       'firewall p-e1-fw',
-      'server nameless',
-      'z z',
+      'firewall group p-e1-firewall',
+      'unnamed IP',
+      'unnamed reserved IP',
+      'unnamed server',
+      'unnamed z',
+    ]);
+    expect(others.map((o) => o.name)).toEqual([
+      'p-e1-firewall',
+      null,
+      'p-e1-fw',
+      'p-e1-firewall',
+      null,
+      null,
+      null,
+      null,
     ]);
     expect(JSON.stringify(others)).not.toContain(TOKEN);
+  });
+
+  it('a create whose URN the state tracks a resource at (an up made it again) carries that one, by id and name, as the one to keep', () => {
+    const FW = 'urn:pulumi:e1::proj::hcloud:index/firewall:Firewall::fw';
+    const IP = 'urn:pulumi:e1::proj::scaleway:instance/ip:Ip::ip';
+    const { others } = classifyPendingCreates(
+      withOps(
+        [
+          create('hcloud:index/firewall:Firewall', 'fw', { name: 'p-e1-firewall' }),
+          create('scaleway:instance/ip:Ip', 'ip', { tags: OWNER_TAGS }),
+          create('hcloud:index/network:Network', 'network', { name: 'p-e1-network' }),
+        ],
+        [
+          {
+            urn: FW,
+            type: 'hcloud:index/firewall:Firewall',
+            id: '4711',
+            inputs: { name: 'p-e1-firewall' },
+            outputs: { name: 'p-e1-firewall' },
+          },
+          { urn: IP, type: 'scaleway:instance/ip:Ip', id: 'fr-par-1/0b1c', outputs: {} },
+          // The old half of a replace, on its way out: never the one to keep.
+          {
+            urn: 'urn:pulumi:e1::proj::hcloud:index/network:Network::network',
+            type: 'hcloud:index/network:Network',
+            id: '12',
+            delete: true,
+            outputs: { name: 'p-e1-network' },
+          },
+        ],
+      ),
+      SERVER_RESOURCE_TYPES,
+    );
+    expect(others.map((o) => o.kept)).toEqual([
+      { id: '4711', name: 'p-e1-firewall' },
+      { id: 'fr-par-1/0b1c', name: null },
+      null,
+    ]);
   });
 
   it.each([
@@ -176,7 +237,7 @@ describe('classifyPendingCreates', () => {
       SERVER_RESOURCE_TYPES,
     );
     expect(others).toEqual([
-      { urn: `urn:pulumi:e1::proj::${type}::r`, what, name: 'p-e1-r', billing },
+      { urn: `urn:pulumi:e1::proj::${type}::r`, what, name: 'p-e1-r', billing, kept: null },
     ]);
   });
 
@@ -307,7 +368,7 @@ describe('what the user reads', () => {
         { urn: 'u1', noun: 'droplet', name: 'p-e1-worker-1', owner: OWNER, id: '11' },
         { urn: 'u2', noun: 'droplet', name: 'p-e1-worker-2', owner: OWNER, id: '12' },
       ],
-      others: [{ urn: 'u3', what: 'firewall', name: 'p-e1-firewall', billing: false }],
+      others: [{ urn: 'u3', what: 'firewall', name: 'p-e1-firewall', billing: false, kept: null }],
       providerName: 'DigitalOcean',
     });
     expect(text).toBe(
@@ -326,8 +387,8 @@ describe('what the user reads', () => {
     const one = pendingCreatesBlock('e1', {
       untracked: [],
       others: [
-        { urn: 'u1', what: 'floating IP', name: 'p-e1-ip', billing: true },
-        { urn: 'u2', what: 'firewall', name: 'p-e1-firewall', billing: false },
+        { urn: 'u1', what: 'floating IP', name: 'p-e1-ip', billing: true, kept: null },
+        { urn: 'u2', what: 'firewall', name: 'p-e1-firewall', billing: false, kept: null },
       ],
       providerName: 'Hetzner Cloud',
     });
@@ -342,8 +403,8 @@ describe('what the user reads', () => {
     const two = pendingCreatesBlock('e1', {
       untracked: [],
       others: [
-        { urn: 'u1', what: 'reserved IP', name: 'p-e1-ip', billing: true },
-        { urn: 'u2', what: 'instance', name: 'p-e1-web', billing: true },
+        { urn: 'u1', what: 'reserved IP', name: 'p-e1-ip', billing: true, kept: null },
+        { urn: 'u2', what: 'instance', name: 'p-e1-web', billing: true, kept: null },
       ],
       providerName: 'Linode',
     });
@@ -352,17 +413,82 @@ describe('what the user reads', () => {
     );
     const none = pendingCreatesBlock('e1', {
       untracked: [],
-      others: [{ urn: 'u2', what: 'firewall', name: 'p-e1-firewall', billing: false }],
+      others: [{ urn: 'u2', what: 'firewall', name: 'p-e1-firewall', billing: false, kept: null }],
       providerName: 'Vultr',
     });
     expect(none).not.toContain('billing');
+  });
+
+  it('a resource a later run made again: named by its id as the one to keep, and only another of its type and name to look for', () => {
+    const text = pendingCreatesBlock('e1', {
+      untracked: [],
+      others: [
+        {
+          urn: 'u1',
+          what: 'floating IP',
+          name: 'p-e1-ip',
+          billing: true,
+          kept: { id: '4711', name: 'p-e1-ip' },
+        },
+      ],
+      providerName: 'Hetzner Cloud',
+    });
+    expect(text).toBe(
+      `${OPENING} An earlier run started creating the floating IP p-e1-ip and didn't finish, and the ` +
+        'state keeps a record of that create, which has to go before vibecarbon can seal it. Keep the ' +
+        "floating IP p-e1-ip (id 4711): a later run made it again, and it's the one this project uses. " +
+        "vibecarbon can't tell whether the earlier create also made another floating IP named p-e1-ip, " +
+        "so check your Hetzner Cloud console for one and delete it if it's this project's. Another " +
+        'floating IP named p-e1-ip would be billing you while it exists. Then deploy again: the next ' +
+        'deploy clears the record and seals the state.',
+    );
+    // Never "the floating IP p-e1-ip may be billing you": that one is live, and kept.
+    expect(text).not.toContain('may be billing');
+  });
+
+  it('several made again, unnamed ones by id, beside one nothing was made for', () => {
+    const text = pendingCreatesBlock('e1', {
+      untracked: [],
+      others: [
+        {
+          urn: 'u1',
+          what: 'firewall',
+          name: 'p-e1-firewall',
+          billing: false,
+          kept: { id: '88', name: 'p-e1-firewall' },
+        },
+        {
+          urn: 'u2',
+          what: 'IP',
+          name: null,
+          billing: true,
+          kept: { id: 'fr-par-1/0b1c', name: null },
+        },
+        { urn: 'u3', what: 'SSH key', name: 'p-e1-key', billing: false, kept: null },
+      ],
+      providerName: 'Scaleway',
+    });
+    expect(text).toBe(
+      `${OPENING} An earlier run started creating the firewall p-e1-firewall, an unnamed IP and the SSH ` +
+        "key p-e1-key and didn't finish, and the state keeps a record of each create, which has to go " +
+        "before vibecarbon can seal it. vibecarbon can't tell whether that create made the SSH key " +
+        "p-e1-key, so check your Scaleway console for it and delete it if it's this project's. Keep the " +
+        'firewall p-e1-firewall (id 88) and an unnamed IP (id fr-par-1/0b1c): a later run made them ' +
+        "again, and they're the ones this project uses. vibecarbon can't tell whether the earlier " +
+        'creates also made another firewall named p-e1-firewall or another unnamed IP, so check your ' +
+        "Scaleway console for those and delete any that are this project's. Another unnamed IP would " +
+        'be billing you while it exists. Then deploy again: the next deploy clears the records and ' +
+        'seals the state.',
+    );
+    // The program's own names for them, which no console shows, never appear.
+    expect(text).not.toMatch(/\bthe IP ip\b|\bIP u2\b/);
   });
 
   it('never a raw pulumi command, never an em dash', () => {
     const texts = [
       pendingCreatesBlock('e1', {
         untracked: [{ urn: 'u', noun: 'server', name: 'n', owner: OWNER, id: '1' }],
-        others: [{ urn: 'v', what: 'floating IP', name: 'f', billing: true }],
+        others: [{ urn: 'v', what: 'floating IP', name: 'f', billing: true, kept: null }],
         providerName: 'Hetzner Cloud',
       }),
       pendingLookupFailed(
@@ -378,6 +504,13 @@ describe('what the user reads', () => {
         ],
         'HTTP 503',
       ),
+      pendingCreatesBlock('e1', {
+        untracked: [],
+        others: [
+          { urn: 'v', what: 'firewall', name: 'f', billing: false, kept: { id: '1', name: 'f' } },
+        ],
+        providerName: 'Hetzner Cloud',
+      }),
     ];
     for (const text of texts) {
       // A command, not the prose "the Pulumi state".
@@ -386,7 +519,10 @@ describe('what the user reads', () => {
       expect(text).not.toContain('—');
     }
     expect(texts[2]).toContain(
-      'checks whether those servers exist, and the check failed (HTTP 503).',
+      'Before it drops the records of those creates, vibecarbon checks whether those servers exist, and the check failed (HTTP 503).',
+    );
+    expect(texts[1]).toContain(
+      'Before it drops the record of that create, vibecarbon checks whether that server exists',
     );
     expect(texts[1]).toContain('(HTTP 503). The next deploy checks again.');
   });
