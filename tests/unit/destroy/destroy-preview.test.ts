@@ -67,7 +67,7 @@ describe('destroyPreviewBody', () => {
     );
     expect(body).toMatch(/excitingai-prod .*may not exist/);
     expect(body).toMatch(
-      /excitingai-88d16c-prod-storage \(kept; deleted with -purge\) .*may not exist/,
+      /excitingai-88d16c-prod-storage \(kept; -purge would delete it\) .*may not exist/,
     );
     expect(body).toMatch(/excitingai-88d16c-backups .*may not exist/);
     expect(body).toContain('Destroy checks each one and skips what is already gone');
@@ -89,7 +89,7 @@ describe('destroyPreviewBody', () => {
     );
     expect(body).not.toContain('may not exist');
     expect(body).toContain('excitingai-prod (203.0.113.7)');
-    expect(body).toContain('Bucket: excitingai-88d16c-prod-storage (kept; deleted with -purge)');
+    expect(body).toContain('Bucket: excitingai-88d16c-prod-storage (kept; -purge would delete it)');
     expect(body).not.toContain('all objects will be deleted');
   });
 
@@ -123,7 +123,7 @@ describe('destroyPreviewBody app bucket under -purge', () => {
     expect(body).toContain(
       'Bucket: excitingai-88d16c-prod-storage (WILL BE DELETED, because you passed -purge)',
     );
-    expect(body).not.toContain('kept; deleted with -purge');
+    expect(body).not.toContain('kept; -purge would delete it');
   });
 
   it('keeps a bucket that is not the environment’s own (a legacy per-project bucket), as the destroy does', () => {

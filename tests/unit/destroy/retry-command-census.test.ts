@@ -10,6 +10,11 @@
  * `vibecarbon destroy` itself, and never says "re-run the destroy" or
  * "destroy again" without naming the command. Comments may.
  *
+ * Nor does it say "delete with -purge". After a plain destroy that moves the
+ * entry, `destroy <env> -purge` stops at "Environment not found", so a line
+ * that names -purge as the way to delete something names the command, and
+ * only while the entry is kept (keptAppBucketNext, keptStateBucketNext).
+ *
  * Allowed by hand: retry-command.js, which is the one spelling; and the
  * `-h` examples in destroy.js's SPEC, which are help, not a rerun.
  */
@@ -34,6 +39,11 @@ function destroySources(): string[] {
 /** A rerun spelled by hand, or asked for without naming the command. */
 const HAND_SPELLED = /vibecarbon destroy/g;
 const UNNAMED_RERUN = /\bre-?run (?:the )?destroy\b|\bdestroy again\b|\brun destroy\b/gi;
+/**
+ * A later -purge named without its command, which may no longer find the
+ * environment. In a template the backtick around it is escaped in the source.
+ */
+const WITH_PURGE = /\bwith (?:\\?`)?-purge\b/gi;
 /** A `-h` example in a command SPEC: help text, not a rerun. */
 const SPEC_EXAMPLE = /^\s*(?:\{\s*)?command: '/;
 
@@ -44,7 +54,7 @@ function handSpelledReruns(rel: string, text: string): string[] {
   if (errors.length > 0) return errors.map((e) => `${rel}: cannot lex: ${e}`);
   const lines = text.split('\n');
   const out: string[] = [];
-  for (const pattern of [HAND_SPELLED, UNNAMED_RERUN]) {
+  for (const pattern of [HAND_SPELLED, UNNAMED_RERUN, WITH_PURGE]) {
     for (const m of text.matchAll(pattern)) {
       const at = m.index ?? 0;
       if (mask[at] !== STRING) continue;
@@ -81,6 +91,28 @@ describe('destroy names every rerun through retryDestroyCommand', () => {
       `${rel}:1: const h = 'or re-run the destroy once it settles';`,
     ]);
     expect(handSpelledReruns(rel, "const h = 'Run destroy again later';\n")).toHaveLength(1);
+  });
+
+  it('bites: a later -purge named without its command is flagged', () => {
+    const rel = 'src/destroy.js';
+    expect(
+      handSpelledReruns(
+        rel,
+        "const h = 'S3 bucket kept with its uploads: b (delete with -purge)';\n",
+      ),
+    ).toHaveLength(1);
+    expect(
+      handSpelledReruns(rel, "const h = 'Bucket: b (kept; deleted with -purge)';\n"),
+    ).toHaveLength(1);
+    expect(handSpelledReruns(rel, 'const h = `rerun it with \\`-purge\\` later`;\n')).toHaveLength(
+      1,
+    );
+    expect(
+      handSpelledReruns(rel, '// a later destroy with -purge deletes it\nconst a = 1;\n'),
+    ).toEqual([]);
+    expect(
+      handSpelledReruns(rel, "const h = 'Bucket: b (kept; -purge would delete it)';\n"),
+    ).toEqual([]);
   });
 
   it('passes a comment, the helper, a SPEC example and the one spelling', () => {

@@ -1641,7 +1641,8 @@ async function retainStateBucket(
   spinner.start('Pulumi state bucket');
   spinner.stop(
     `Pulumi state bucket kept for reuse: ${stateBucket} (recorded as retainedStateBucket; ` +
-      'the next deploy resumes this warm state backend; delete with -purge)',
+      'the next deploy resumes this warm state backend). ' +
+      keptStateBucketNext(environment, entryKept, others),
   );
   // Deliberately NOT a ledger entry. All four severities mean something this
   // is not: leak/unverified feed `survivors` and fail the exit code, `foreign`
@@ -1737,6 +1738,67 @@ function otherEnvironmentNames(projectConfig, environment) {
 }
 
 /**
+ * What deletes the app bucket a plain destroy keeps. The keep rule is final
+ * when the bucket steps run (entryKeptReason), so the line knows whether the
+ * environment stays listed. While it does, a clean -purge of it deletes the
+ * bucket. Once this destroy moves it to destroyedEnvironments, `destroy <env>`
+ * stops at "not found", and no command deletes a destroyed environment's
+ * bucket (-orphans removes Pulumi stacks only): a redeploy reuses it, and the
+ * console deletes it.
+ *
+ * @param {string} environment
+ * @param {{ because: string } | null} entryKept - entryKeptReason's verdict
+ * @param {string} providerName
+ */
+function keptAppBucketNext(environment, entryKept, providerName) {
+  if (entryKept) {
+    return (
+      `This destroy keeps ${environment}'s entry because ${entryKept.because}, so a clean ` +
+      `\`${retryDestroyCommand(environment, { purgeBackups: true })}\` deletes it.`
+    );
+  }
+  return (
+    `A redeploy of ${environment} reuses it. This destroy moves ${environment} out of your ` +
+    'environments, so no later destroy reaches the bucket: to delete it, empty it via the ' +
+    `${providerName} Object Storage console, then DeleteBucket; it keeps billing until removed.`
+  );
+}
+
+/**
+ * What deletes the derived Pulumi state bucket a plain destroy keeps. Every
+ * environment of the project keeps its stacks in it, and only a -purge of
+ * the project's last environment deletes it (retainStateBucket). While this
+ * environment stays listed and is the only one, that is a clean -purge of it.
+ * With no environment left, nothing is there to destroy until a deploy
+ * resumes the bucket. The line never sends you to the console: a plain
+ * destroy records the name (retainedStateBucket) without rotating
+ * stateBucketGeneration, so the next deploy would recreate a bucket you just
+ * deleted, the same-name recreate that lost acked writes on 2026-08-07.
+ *
+ * @param {string} environment
+ * @param {{ because: string } | null} entryKept - entryKeptReason's verdict
+ * @param {string[]} others - the project's other live environments
+ */
+function keptStateBucketNext(environment, entryKept, others) {
+  if (others.length > 0) {
+    return (
+      `${others.join(', ')} still ${others.length === 1 ? 'uses' : 'use'} it, so a -purge ` +
+      "destroy of the project's last environment deletes it."
+    );
+  }
+  if (entryKept) {
+    return (
+      `This destroy keeps ${environment}'s entry because ${entryKept.because}, so a clean ` +
+      `\`${retryDestroyCommand(environment, { purgeBackups: true })}\` deletes it.`
+    );
+  }
+  return (
+    'No environment is left to destroy, so it waits for your next deploy; a -purge destroy ' +
+    "of the project's last environment deletes it then."
+  );
+}
+
+/**
  * Is the environment's recorded app bucket its OWN: the per-environment name
  * deriveEnvAppBucketName gives it, and not pinned? Only such a bucket is this
  * environment's alone. An env still on an older CLI's per-project bucket
@@ -1788,16 +1850,11 @@ async function deleteAppBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, results, spinner } = ctx;
   const s3BucketName = envConfig.s3?.bucket;
   if (!s3BucketName) return;
-  if (!args?.purgeBackups) {
-    // Kept by design, so not a ledger entry (see retainStateBucket).
-    spinner.start('S3 bucket');
-    spinner.stop(`S3 bucket kept with its uploads: ${s3BucketName} (delete with -purge)`);
-    return;
-  }
   // A PINNED bucket (envConfig.s3.bucketPin, the E6 escape hatch) may be the
   // old per-project bucket that several environments pin, so -purge on one
   // of them must not delete the others' uploads. Kept always, like a pinned
-  // state bucket in retainStateBucket.
+  // state bucket in retainStateBucket, and the line says so on a plain
+  // destroy too: no -purge deletes it.
   if (envConfig.s3?.bucketPin) {
     spinner.start('S3 bucket');
     spinner.stop(
@@ -1819,8 +1876,18 @@ async function deleteAppBucketEffect(ctx) {
   // state bucket. The keep rule is final by now: the teardown, the key
   // revoke and the stack state ran first, and the steps after this one add
   // only lines that keep nothing. The next clean -purge deletes it and
-  // records appBucketPurged.
+  // records appBucketPurged. A plain destroy keeps it either way, and the
+  // same verdict tells its line what can delete it (keptAppBucketNext).
   const entryKept = entryKeptReason(results, envConfig);
+  if (!args?.purgeBackups) {
+    // Kept by design, so not a ledger entry (see retainStateBucket).
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept with its uploads: ${s3BucketName}. ` +
+        keptAppBucketNext(environment, entryKept, providerFor(envConfig).NAME),
+    );
+    return;
+  }
   if (entryKept) {
     spinner.start('S3 bucket');
     spinner.stop(

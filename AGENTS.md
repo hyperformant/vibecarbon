@@ -87,7 +87,12 @@ deploy stops on a live record whose bucket is gone. Its kept lines name the
 that names a rerun spells it through `retryDestroyCommand`
 (`src/lib/destroy/retry-command.js`), which carries `-purge` exactly when the
 destroy had it: a plain rerun would move the entry and strand the kept buckets
-(census: `retry-command-census.test.ts`). A line a re-run cannot act on
+(census: `retry-command-census.test.ts`). A bucket a destroy keeps after it
+moves the entry is out of reach of every destroy, since `destroy <env>` then
+stops at "not found", so its line never says "with -purge". It names what
+still works: the console and a redeploy for the app bucket, a `-purge` of the
+project's last environment for the state bucket (`keptAppBucketNext`,
+`keptStateBucketNext`). The census fails on that spelling too. A line a re-run cannot act on
 (a DNS record, a health check, a bucket) keeps neither, and its hint names the
 by-hand step. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see

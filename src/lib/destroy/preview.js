@@ -103,14 +103,16 @@ export function destroyPreviewBody({
   // The env's own app bucket: plain destroy keeps it and its uploads (with
   // the env's backups), -purge deletes it. A pinned bucket or a legacy
   // per-project bucket may serve other environments, so destroy never
-  // deletes either (deleteAppBucketEffect).
+  // deletes either (deleteAppBucketEffect). The plain line says what -purge
+  // would do in this destroy, not in a later one: once this destroy moves
+  // the entry, no destroy reaches the bucket (keptAppBucketNext).
   const storageLine = envConfig.s3?.bucketPin
     ? `${c.success('•')} Bucket: ${envConfig.s3.bucket} (kept: pinned, delete manually)`
     : !appBucketOwned
       ? `${c.success('•')} Bucket: ${envConfig.s3?.bucket} (kept: legacy shared bucket, delete manually)`
       : purgeBackups
         ? `${c.error('•')} Bucket: ${envConfig.s3?.bucket} (WILL BE DELETED, because you passed -purge)`
-        : `${c.success('•')} Bucket: ${envConfig.s3?.bucket} (kept; deleted with -purge)`;
+        : `${c.success('•')} Bucket: ${envConfig.s3?.bucket} (kept; -purge would delete it)`;
   const storageBlock = envConfig.s3?.bucket
     ? `${c.bold('S3 Storage:')}
     ${storageLine}${mark(bucketsKnown)}

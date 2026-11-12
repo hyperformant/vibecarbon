@@ -160,7 +160,11 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
     expect(s3.deletePrefix).not.toHaveBeenCalled();
     expect(text).toContain(STAGING_BUCKET);
     expect(text).toContain('kept');
-    expect(text).toContain('-purge');
+    // The destroy moves staging's entry, so `destroy staging -purge` would
+    // stop at "not found": the line gives the console, not a -purge.
+    expect(text).toContain('A redeploy of staging reuses it');
+    expect(text).toContain('Object Storage console, then DeleteBucket');
+    expect(text).not.toContain('-purge');
     expect(results.s3Bucket).toBeNull();
     noSurvivors(results);
   });
