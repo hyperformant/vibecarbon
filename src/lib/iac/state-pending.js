@@ -29,8 +29,12 @@
  *     left pending, tracks it at the same URN and keeps the record (3.259.0,
  *     the fake cloud, Task 7 review): that one is live and this project's, so
  *     the user is told its id as the one to keep and asked only about
- *     another of that type and name besides it. A record with nothing at its
- *     URN (the program no longer declares it) is told as before.
+ *     another of that type and name besides it. A program that declares the
+ *     resource under a new name in the code tracks it at another URN: the one
+ *     resource the state tracks with the create's type and console name is
+ *     then the one to keep. A record with neither (the program no longer
+ *     declares it, or two tracked resources share that name) is told as
+ *     before.
  *
  * A resource is named as the provider's console shows it (its `name`,
  * `label` or Vultr's `description`), else as "an unnamed <type>", never by
@@ -98,14 +102,15 @@ export function recordedOwnership(inputs, labelsInput) {
 /**
  * `deployment`'s pending operations, split into the server creates the
  * provider can be asked about and everything else. Each other one carries
- * `kept`: the resource the state tracks at its URN (an up made it again), or
- * null when there is none.
+ * `kept`: the resource the state tracks at its URN (an up made it again),
+ * else the only one it tracks with the create's type and console name (an up
+ * made it again under a new URN), or null when there is none.
  * @param {{ deployment?: { resources?: Array<{ urn?: string, id?: unknown, delete?: boolean, inputs?: Record<string, unknown>, outputs?: Record<string, unknown> }>, pending_operations?: Array<{ type?: string, resource?: { urn?: string, type?: string, inputs?: Record<string, unknown> } }> } }} deployment
  * @param {Readonly<Record<string, { noun: string, nameInput: string, labelsInput: string }>>} types - SERVER_RESOURCE_TYPES
  * @returns {{ servers: PendingServer[], others: PendingOther[] }}
  */
 export function classifyPendingCreates(deployment, types) {
-  const tracked = trackedByUrn(deployment);
+  const { byUrn, byTypeAndName } = trackedResources(deployment);
   const servers = [];
   const others = [];
   for (const op of deployment?.deployment?.pending_operations ?? []) {
@@ -117,31 +122,44 @@ export function classifyPendingCreates(deployment, types) {
     if (op?.type === 'creating' && serverClass && typeof name === 'string' && name && owner) {
       servers.push({ urn, noun: serverClass.noun, name, owner });
     } else {
+      const consoleName = nameOf(resource.inputs);
+      const sameName = consoleName
+        ? byTypeAndName.get(typeAndName(resource.type, consoleName))
+        : [];
       others.push({
         urn,
         what: serverClass?.noun ?? kindOf(resource.type),
-        name: nameOf(resource.inputs),
+        name: consoleName,
         billing: Boolean(serverClass) || bills(resource.type),
-        kept: tracked.get(urn) ?? null,
+        kept: byUrn.get(urn) ?? (sameName?.length === 1 ? sameName[0] : null),
       });
     }
   }
   return { servers, others };
 }
 
+/** The key a resource's type and console name are looked up by. */
+const typeAndName = (type, name) => `${type}\0${name}`;
+
 /**
- * The resources the state tracks, by URN, with the id and name each has at
- * the provider. One being deleted (a replace's old half) is never the one to
- * keep.
- * @returns {Map<string, Kept>}
+ * The resources the state tracks, by URN and by type and console name, with
+ * the id (as the console shows it, bareId) and name each has at the provider.
+ * One being deleted (a replace's old half) is never the one to keep.
+ * @returns {{ byUrn: Map<string, Kept>, byTypeAndName: Map<string, Kept[]> }}
  */
-function trackedByUrn(deployment) {
+function trackedResources(deployment) {
   const byUrn = new Map();
+  const byTypeAndName = new Map();
   for (const r of deployment?.deployment?.resources ?? []) {
     if (!r?.urn || r.id == null || r.id === '' || r.delete) continue;
-    byUrn.set(String(r.urn), { id: String(r.id), name: nameOf(r.outputs) ?? nameOf(r.inputs) });
+    const kept = { id: bareId(r.id), name: nameOf(r.outputs) ?? nameOf(r.inputs) };
+    byUrn.set(String(r.urn), kept);
+    if (kept.name && r.type) {
+      const key = typeAndName(r.type, kept.name);
+      byTypeAndName.set(key, [...(byTypeAndName.get(key) ?? []), kept]);
+    }
   }
-  return byUrn;
+  return { byUrn, byTypeAndName };
 }
 
 /** The class name in a Pulumi type token: `hcloud:index/floatingIp:FloatingIp` → `FloatingIp`. */
@@ -282,7 +300,7 @@ const capitalized = (sentence) => sentence[0].toUpperCase() + sentence.slice(1);
 /** `the floating IP p-e1-ip`, `an unnamed IP`: a resource as the console shows it. */
 const theOther = (o) => (o.name ? `the ${o.what} ${o.name}` : `an unnamed ${o.what}`);
 
-/** `the floating IP p-e1-ip (id 4711)`, `an unnamed IP (id fr-par-1/…)`: the one the state tracks. */
+/** `the floating IP p-e1-ip (id 4711)`, `an unnamed IP (id 0b1c…)`: the one the state tracks. */
 const theKept = (o) =>
   `${o.kept.name ? `the ${o.what} ${o.kept.name}` : `an unnamed ${o.what}`} (id ${o.kept.id})`;
 

@@ -213,9 +213,85 @@ describe('classifyPendingCreates', () => {
     );
     expect(others.map((o) => o.kept)).toEqual([
       { id: '4711', name: 'p-e1-firewall' },
-      { id: 'fr-par-1/0b1c', name: null },
+      // As the Scaleway console shows it: the uuid without the state's zone.
+      { id: '0b1c', name: null },
       null,
     ]);
+  });
+
+  // A program that declares the same resource under a new name in the code
+  // (a new URN) tracks it there, live and this project's: the record's URN
+  // then holds nothing, so the tracked one with the create's type and
+  // console name is the one to keep, never one to delete.
+  it('a create whose resource the state tracks at another URN, by its type and name, carries that one to keep', () => {
+    const FW_TYPE = 'hcloud:index/firewall:Firewall';
+    const { others } = classifyPendingCreates(
+      withOps(
+        [
+          create(FW_TYPE, 'fw', { name: 'p-e1-firewall' }),
+          create('hcloud:index/network:Network', 'net', { name: 'p-e1-network' }),
+          create('hcloud:index/sshKey:SshKey', 'key', { name: 'p-e1-key' }),
+          // No console name: nothing to match it by.
+          create('scaleway:instance/ip:Ip', 'ip', { tags: OWNER_TAGS }),
+        ],
+        [
+          {
+            urn: `urn:pulumi:e1::proj::${FW_TYPE}::firewall`,
+            type: FW_TYPE,
+            id: '4711',
+            inputs: { name: 'p-e1-firewall' },
+            outputs: { name: 'p-e1-firewall' },
+          },
+          // Same name, another type: not the one.
+          {
+            urn: 'urn:pulumi:e1::proj::hcloud:index/firewall:Firewall::p-e1-network',
+            type: FW_TYPE,
+            id: '9',
+            outputs: { name: 'p-e1-network' },
+          },
+          // Same type, another name: not the one.
+          {
+            urn: 'urn:pulumi:e1::proj::hcloud:index/sshKey:SshKey::other',
+            type: 'hcloud:index/sshKey:SshKey',
+            id: '10',
+            outputs: { name: 'p-e1-other-key' },
+          },
+          {
+            urn: 'urn:pulumi:e1::proj::scaleway:instance/ip:Ip::flex',
+            type: 'scaleway:instance/ip:Ip',
+            id: 'fr-par-1/77aa',
+            outputs: {},
+          },
+        ],
+      ),
+      SERVER_RESOURCE_TYPES,
+    );
+    expect(others.map((o) => o.kept)).toEqual([
+      { id: '4711', name: 'p-e1-firewall' },
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  // Two tracked resources sharing the create's type and name: neither is
+  // shown to be the one, and naming one would leave the other to be deleted.
+  it('a type and name two tracked resources share keeps none', () => {
+    const FW_TYPE = 'hcloud:index/firewall:Firewall';
+    const tracked = (logical: string, id: string) => ({
+      urn: `urn:pulumi:e1::proj::${FW_TYPE}::${logical}`,
+      type: FW_TYPE,
+      id,
+      outputs: { name: 'p-e1-firewall' },
+    });
+    const { others } = classifyPendingCreates(
+      withOps(
+        [create(FW_TYPE, 'fw', { name: 'p-e1-firewall' })],
+        [tracked('a', '1'), tracked('b', '2')],
+      ),
+      SERVER_RESOURCE_TYPES,
+    );
+    expect(others[0].kept).toBeNull();
   });
 
   it.each([
@@ -462,7 +538,7 @@ describe('what the user reads', () => {
           what: 'IP',
           name: null,
           billing: true,
-          kept: { id: 'fr-par-1/0b1c', name: null },
+          kept: { id: '0b1c', name: null },
         },
         { urn: 'u3', what: 'SSH key', name: 'p-e1-key', billing: false, kept: null },
       ],
@@ -473,7 +549,7 @@ describe('what the user reads', () => {
         "key p-e1-key and didn't finish, and the state keeps a record of each create, which has to go " +
         "before vibecarbon can seal it. vibecarbon can't tell whether that create made the SSH key " +
         "p-e1-key, so check your Scaleway console for it and delete it if it's this project's. Keep the " +
-        'firewall p-e1-firewall (id 88) and an unnamed IP (id fr-par-1/0b1c): a later run made them ' +
+        'firewall p-e1-firewall (id 88) and an unnamed IP (id 0b1c): a later run made them ' +
         "again, and they're the ones this project uses. vibecarbon can't tell whether the earlier " +
         'creates also made another firewall named p-e1-firewall or another unnamed IP, so check your ' +
         "Scaleway console for those and delete any that are this project's. Another unnamed IP would " +
@@ -482,6 +558,22 @@ describe('what the user reads', () => {
     );
     // The program's own names for them, which no console shows, never appear.
     expect(text).not.toMatch(/\bthe IP ip\b|\bIP u2\b/);
+  });
+
+  // The id the user is told to keep is the one their console shows: Scaleway's
+  // state spells it `<zone>/<uuid>`, its console only the uuid.
+  it('a kept Scaleway resource is named by the id its console shows', () => {
+    const IP = 'urn:pulumi:e1::proj::scaleway:instance/ip:Ip::ip';
+    const { others } = classifyPendingCreates(
+      withOps(
+        [create('scaleway:instance/ip:Ip', 'ip', { tags: OWNER_TAGS })],
+        [{ urn: IP, type: 'scaleway:instance/ip:Ip', id: 'fr-par-1/6f1e-uuid', outputs: {} }],
+      ),
+      SERVER_RESOURCE_TYPES,
+    );
+    const text = pendingCreatesBlock('e1', { untracked: [], others, providerName: 'Scaleway' });
+    expect(text).toContain('Keep an unnamed IP (id 6f1e-uuid)');
+    expect(text).not.toContain('fr-par-1/');
   });
 
   it('never a raw pulumi command, never an em dash', () => {
