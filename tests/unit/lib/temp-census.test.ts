@@ -49,9 +49,11 @@ describe('the temp-dir census', () => {
       ['stray.pem', 'file'],
     ]);
     expect(tempLeftovers(tmp)).toEqual([
-      // The SDK's own workspace dir: every workspace now gets one of ours,
-      // which the test setup removes before the census looks. Only the
-      // SDK's import file may stay, and only as a file.
+      // The SDK's own workspace dir and its importStack file: every workspace
+      // now gets one of ours, which the test setup removes before the census
+      // looks, and every import goes through importStackState
+      // (src/lib/iac/index.js), whose dir comes from temp-dir.js.
+      'automation-123456',
       'automation-654321',
       'automation-a1b2',
       'stray.pem',

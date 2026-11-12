@@ -9,15 +9,6 @@ import { join } from 'node:path';
  */
 export const TEMP_CENSUS_EXEMPT: ReadonlyArray<{ name: RegExp; why: string; file?: true }> = [
   {
-    // A file only: the SDK's own workspace dirs (automation-*) are no longer
-    // made, since every workspace gets one of ours (src/lib/iac/workspace-dir.js).
-    name: /^automation-\d{6}$/,
-    file: true,
-    why:
-      "the Pulumi automation SDK's importStack file: it writes the state there and removes it " +
-      'only when the import succeeds, so a test of a refused import (a held lock) leaves one',
-  },
-  {
     name: /^node-compile-cache$/,
     why: "Node's module compile cache, which corepack's pnpm turns on and keeps across runs",
   },

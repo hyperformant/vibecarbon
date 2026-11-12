@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDeployDropRetired } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
-import { getOrCreateStack, upStack } from '../../../src/lib/iac/index.js';
+import { getOrCreateStack, importStackState, upStack } from '../../../src/lib/iac/index.js';
 
 // The surgery's progress line ([pulumi] took ... out of ...'s state) and the
 // state telemetry ([state] ...) go to the progress log: kept here, where the
@@ -106,7 +106,7 @@ async function oldDigitalOceanStack(name: string) {
       propertyDependencies: { ipAddress: [ipUrn] },
     },
   );
-  await stack.importStack(state);
+  await importStackState(stack, state);
   return stack;
 }
 
