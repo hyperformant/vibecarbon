@@ -5,8 +5,9 @@
  * Sweeps every Linode resource whose label carries the active namespace's
  * scratch prefix (`citest-` in CI, `testapp-` locally), via
  * sweepOrphanedLinodeResources: instances, volumes (project-tagged pvc-*
- * only), firewalls, profile ssh keys, NodeBalancers, VPCs, and Object
- * Storage buckets.
+ * only), firewalls, profile ssh keys, NodeBalancers, VPCs, Object Storage
+ * buckets, and the prefix's `project:` and `cluster:` tags once nothing
+ * carries them (sweep-run-tags.ts; a tag never fails the step).
  *
  * Self-skips with exit 0 when LINODE_API_TOKEN is absent, so the CI step is
  * inert until the e2e-infra environment carries the Linode secrets. Exits 1

@@ -24,6 +24,7 @@
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { isBucketAlreadyGone } from './bucket-already-gone.js';
+import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
  * Buckets that must NEVER be swept, no matter what prefix matches them.
@@ -499,6 +500,34 @@ export async function sweepOrphanedDigitalOceanResources(
       }
     }
   }
+
+  // 5. Empty run tags (sweep-run-tags.ts), last, so the droplets and volumes
+  // that carried them are gone. Only `project:` is the run's here: the k8s
+  // `cluster:` tag is a Pulumi resource (digitalocean.Tag) that destroy
+  // removes, and a live deploy's can be empty before its droplets exist.
+  const { encodeLabel } = (await import('../../../src/lib/providers/digitalocean.js')) as {
+    encodeLabel: (key: string, value: string) => string;
+  };
+  await sweepRunTags(tag, runTagOwner(projectName, ['project'], encodeLabel), {
+    async list() {
+      const { items, complete } = await walkPages<{ name: string }>('/tags', 'tags');
+      return { names: items.map((t) => t.name), complete };
+    },
+    async resourceCount(name) {
+      const res = await fetchImpl(`${API_BASE}/tags/${encodeURIComponent(name)}`);
+      if (res.status === 404) return 0;
+      if (!res.ok) return null;
+      const body = (await res.json()) as { tag?: { resources?: { count?: unknown } } };
+      const count = body.tag?.resources?.count;
+      return typeof count === 'number' ? count : null;
+    },
+    async remove(name) {
+      const res = await fetchImpl(`${API_BASE}/tags/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      });
+      return res.ok || res.status === 404;
+    },
+  });
 
   // Regression banner — same grep-stable `[sweep] REGRESSION` marker as the
   // Hetzner sweep, and the clean line names the cloud it actually verified.
