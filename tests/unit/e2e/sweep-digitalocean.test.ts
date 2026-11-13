@@ -60,6 +60,46 @@ function fakeFetch(pages: Record<string, unknown>): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+/**
+ * fetch stub for the DO tag API: the list, one tag's resource count, and
+ * DELETE. Every call is logged so a test can check what ran and in what order.
+ */
+function doTagFetch(
+  tags: Record<string, number>,
+  log: string[],
+  opts: { listStatus?: number } = {},
+): typeof fetch {
+  return vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    const u = new URL(String(url));
+    const one = u.pathname.match(/^\/v2\/tags\/(.+)$/);
+    if (init?.method === 'DELETE') {
+      if (one) log.push(`delete ${decodeURIComponent(one[1])}`);
+      return { ok: true, status: 204, json: async () => ({}) };
+    }
+    if (one) {
+      const name = decodeURIComponent(one[1]);
+      log.push(`count ${name}`);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ tag: { name, resources: { count: tags[name] ?? 0 } } }),
+      };
+    }
+    if (u.pathname === '/v2/tags') {
+      const status = opts.listStatus ?? 200;
+      return {
+        ok: status < 400,
+        status,
+        json: async () => ({
+          tags: Object.entries(tags).map(([name, count]) => ({ name, resources: { count } })),
+          links: {},
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  }) as unknown as typeof fetch;
+}
+
 const TAG = '[test]';
 
 describe('sweepOrphanedDigitalOceanResources', () => {
@@ -256,6 +296,61 @@ describe('sweepOrphanedDigitalOceanResources', () => {
       .map(([url]) => String(url));
     expect(deletes).toEqual(['https://api.digitalocean.com/v2/spaces/keys/SENTINEL_AK_1']);
     expect(counts.storageKeys).toBe(1);
+    expect(enumFailed).toBe(false);
+  });
+
+  it("deletes the run's empty project tag once its droplets are gone, and no other tag", async () => {
+    const log: string[] = [];
+    const provider = fakeProvider({
+      listServersDetailed: vi.fn().mockResolvedValue({
+        items: [{ id: 1, name: 'testapp-d3-master' }],
+        complete: true,
+      }),
+      deleteServer: vi.fn(async () => {
+        log.push('deleteServer');
+      }),
+    });
+    const fetchImpl = doTagFetch(
+      {
+        'project:testapp-d3': 0,
+        'project:otherapp-d1': 0,
+        // Pulumi owns the k8s cluster tag (digitalocean.Tag) and destroy
+        // deletes it; a live deploy's can be empty before its droplets exist.
+        'cluster:testapp-d3-d3': 0,
+        'role:master': 0,
+        'environment:d3': 0,
+      },
+      log,
+    );
+    const { enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider,
+      spaces: fakeSpaces(),
+      fetchImpl,
+    });
+    expect(log).toEqual(['deleteServer', 'count project:testapp-d3', 'delete project:testapp-d3']);
+    expect(enumFailed).toBe(false);
+  });
+
+  it('keeps a project tag that is still on a resource, and the sweep stays clean', async () => {
+    const log: string[] = [];
+    const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider: fakeProvider(),
+      spaces: fakeSpaces(),
+      fetchImpl: doTagFetch({ 'project:testapp-d3': 1 }, log),
+    });
+    expect(log).toEqual(['count project:testapp-d3']);
+    expect(enumFailed).toBe(false);
+    expect(Object.values(counts).every((n) => n === 0)).toBe(true);
+  });
+
+  it('an unreadable tag list is a warning, not a failed sweep (tags cost nothing)', async () => {
+    const log: string[] = [];
+    const { enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider: fakeProvider(),
+      spaces: fakeSpaces(),
+      fetchImpl: doTagFetch({ 'project:testapp-d3': 0 }, log, { listStatus: 500 }),
+    });
+    expect(log).toEqual([]);
     expect(enumFailed).toBe(false);
   });
 });

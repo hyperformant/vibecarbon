@@ -18,6 +18,7 @@
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { isBucketAlreadyGone } from './bucket-already-gone.js';
+import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately EMPTY
@@ -504,6 +505,38 @@ export async function sweepOrphanedLinodeResources(
       }
     }
   }
+
+  // 6. Empty run tags (sweep-run-tags.ts), last, so the instances and volumes
+  // that carried them are gone. Linode tags are made only by tagging a
+  // resource, so `cluster:<run>-<env>` is the run's too. Linode squeezes a tag
+  // over 50 characters (linode.js TAG_MAX), which k8s-ha's cluster tags are.
+  const { encodeLabel } = (await import('../../../src/lib/providers/linode.js')) as {
+    encodeLabel: (key: string, value: string) => string;
+  };
+  await sweepRunTags(
+    tag,
+    runTagOwner(projectName, ['project', 'cluster'], encodeLabel, { squeezeMax: 50 }),
+    {
+      async list() {
+        const { items, complete } = await walkPages<{ label: string }>('/tags');
+        return { names: items.map((t) => t.label), complete };
+      },
+      async resourceCount(name) {
+        // GET /tags/{label} lists the tagged objects; `results` is their count.
+        const res = await fetchImpl(`${API_BASE}/tags/${encodeURIComponent(name)}?page_size=25`);
+        if (res.status === 404) return 0;
+        if (!res.ok) return null;
+        const body = (await res.json()) as { results?: unknown };
+        return typeof body.results === 'number' ? body.results : null;
+      },
+      async remove(name) {
+        const res = await fetchImpl(`${API_BASE}/tags/${encodeURIComponent(name)}`, {
+          method: 'DELETE',
+        });
+        return res.ok || res.status === 404;
+      },
+    },
+  );
 
   // Regression banner — same grep-stable `[sweep] REGRESSION` marker as the
   // sibling sweeps; the clean line names the cloud it actually verified.

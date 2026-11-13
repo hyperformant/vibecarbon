@@ -6,8 +6,9 @@
  * namespace's scratch prefix (`citest-` in CI, `testapp-` locally — the
  * same scoping the runner uses for provisioning), via
  * sweepOrphanedDigitalOceanResources: droplets, volumes (project-tagged
- * pvc-* only), firewalls, ssh keys, load balancers, VPCs, and Spaces
- * buckets (with the vc-local-e2e anchor guard).
+ * pvc-* only), firewalls, ssh keys, load balancers, VPCs, Spaces buckets
+ * (with the vc-local-e2e anchor guard), and the prefix's `project:` tags once
+ * nothing carries them (sweep-run-tags.ts; a tag never fails the step).
  *
  * Self-skips with exit 0 when DIGITALOCEAN_API_TOKEN is absent, so the CI
  * step is inert until the e2e-infra environment carries the DO secrets.

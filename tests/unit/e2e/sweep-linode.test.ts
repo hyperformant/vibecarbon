@@ -65,6 +65,47 @@ function fakeFetch(pages: Record<string, unknown>): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+/**
+ * fetch stub for the Linode tag API: the list, one tag's tagged objects
+ * (`results` is their count), and DELETE. Every call is logged in order.
+ */
+function linodeTagFetch(
+  tags: Record<string, number>,
+  log: string[],
+  opts: { listStatus?: number } = {},
+): typeof fetch {
+  return vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    const u = new URL(String(url));
+    const one = u.pathname.match(/^\/v4\/tags\/(.+)$/);
+    if (init?.method === 'DELETE') {
+      if (one) log.push(`delete ${decodeURIComponent(one[1])}`);
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    if (one) {
+      const name = decodeURIComponent(one[1]);
+      log.push(`count ${name}`);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [], page: 1, pages: 1, results: tags[name] ?? 0 }),
+      };
+    }
+    if (u.pathname === '/v4/tags') {
+      const status = opts.listStatus ?? 200;
+      return {
+        ok: status < 400,
+        status,
+        json: async () => ({
+          data: Object.keys(tags).map((label) => ({ label })),
+          page: 1,
+          pages: 1,
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ data: [], page: 1, pages: 1 }) };
+  }) as unknown as typeof fetch;
+}
+
 const TAG = '[test]';
 
 describe('sweepOrphanedLinodeResources', () => {
@@ -356,5 +397,66 @@ describe('sweepOrphanedLinodeResources', () => {
     expect(deletes).toEqual(['https://api.linode.com/v4/object-storage/keys/11']);
     expect(counts.storageKeys).toBe(1);
     expect(enumFailed).toBe(false);
+  });
+
+  it("deletes the run's empty project and cluster tags once its instances are gone", async () => {
+    const log: string[] = [];
+    const project = 'testapp-k8s-ha-1794526158726-5ke0dz';
+    // k8s-ha's cluster tag is over Linode's 50-character cap, so it is squeezed.
+    const squeezedCluster = encodeLabel('cluster', `${project}-l4-primary`);
+    expect(squeezedCluster).toHaveLength(50);
+    const provider = fakeProvider({
+      listServersDetailed: vi.fn().mockResolvedValue({
+        items: [{ id: 1, label: `${project}-l4-primary-master` }],
+        complete: true,
+      }),
+      deleteServer: vi.fn(async () => {
+        log.push('deleteServer');
+      }),
+    });
+    const { enumFailed } = await sweepOrphanedLinodeResources(TAG, project, {
+      provider,
+      objectStorage: fakeStorage(),
+      fetchImpl: linodeTagFetch(
+        {
+          [encodeLabel('project', project)]: 0,
+          [squeezedCluster]: 0,
+          [encodeLabel('cluster', `${project}-l4-standby`)]: 0,
+          'project:testapp-compose-1794525058414-zwwxmh': 0,
+          'environment:l4-primary': 0,
+          'role:db': 0,
+        },
+        log,
+      ),
+    });
+    expect(log[0]).toBe('deleteServer');
+    expect(log.filter((l) => l.startsWith('delete ')).sort()).toEqual(
+      [
+        `delete ${encodeLabel('cluster', `${project}-l4-standby`)}`,
+        `delete ${encodeLabel('project', project)}`,
+        `delete ${squeezedCluster}`,
+      ].sort(),
+    );
+    expect(enumFailed).toBe(false);
+  });
+
+  it('keeps a run tag that is still on an object, and an unreadable list fails nothing', async () => {
+    const log: string[] = [];
+    const kept = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
+      provider: fakeProvider(),
+      objectStorage: fakeStorage(),
+      fetchImpl: linodeTagFetch({ 'project:testapp-l1': 1 }, log),
+    });
+    expect(log).toEqual(['count project:testapp-l1']);
+    expect(kept.enumFailed).toBe(false);
+
+    const unreadable: string[] = [];
+    const listFailed = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
+      provider: fakeProvider(),
+      objectStorage: fakeStorage(),
+      fetchImpl: linodeTagFetch({ 'project:testapp-l1': 0 }, unreadable, { listStatus: 500 }),
+    });
+    expect(unreadable).toEqual([]);
+    expect(listFailed.enumFailed).toBe(false);
   });
 });
