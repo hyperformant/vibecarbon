@@ -24,6 +24,8 @@ import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
  */
 
 const REPO_BUNDLED_K8S = join(process.cwd(), 'carbon', 'k8s');
+// Module scope: the tests below mock process.cwd() to a temp project.
+const REPO_K3S_CLOUD_INIT = join(process.cwd(), 'carbon', 'cloud-init', 'k3s');
 // digestDir of an empty/missing tree — the "we digested nothing" sentinel a
 // wrong BUNDLED_K8S_DIR path would silently produce.
 const EMPTY_TREE_DIGEST = digestDir(join(tmpdir(), 'vc-definitely-not-a-real-dir'));
@@ -62,6 +64,16 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
     expect(BUNDLED_K8S_DIR.endsWith(join('carbon', 'k8s'))).toBe(true);
     // Absent `restore` normalizes to '' so the hash is stable across runs.
     expect(inputs.restore).toBe('');
+  });
+
+  it('digests the k3s boot scripts the autoscaler config embeds', () => {
+    // The apply renders worker-init.sh into the cluster autoscaler's config
+    // Secret, so a CLI whose only change is a boot script (2026-11-13: the
+    // container-signals sysctl) must still re-apply, or the autoscaler keeps
+    // booting new workers with the old script.
+    const inputs = buildK3sApplyInputs(baseArgs());
+    expect(inputs.bundledCloudInitDigest).toBe(digestDir(REPO_K3S_CLOUD_INIT));
+    expect(inputs.bundledCloudInitDigest).not.toBe(EMPTY_TREE_DIGEST);
   });
 
   it('is stable across calls (content-only digest — no mtimes/absolute paths)', () => {

@@ -22,7 +22,8 @@ const __dirname = dirname(__filename);
 
 // Cloud-init scripts live in carbon/cloud-init/k3s/.
 // Relative to this file: src/lib/iac/ → ../../../carbon/cloud-init/k3s
-const CLOUD_INIT_DIR = join(__dirname, '../../../carbon/cloud-init/k3s');
+// Exported for the k3s-apply gate, which digests the tree (buildK3sApplyInputs).
+export const CLOUD_INIT_DIR = join(__dirname, '../../../carbon/cloud-init/k3s');
 
 /**
  * `# @include <basename>` on a line of its own. Resolved by
