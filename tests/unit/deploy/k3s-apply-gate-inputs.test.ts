@@ -326,6 +326,73 @@ describe('buildK3sApplyInputs — a replaced provider token opens the gate', () 
   });
 });
 
+// The apply renders the autoscaler's worker pool (type, floor, ceiling, a
+// standby's dormant floor) into kube-system/carbon-autoscaler-config, and no
+// manifest digest sees it. 2026-11-13: a scale's re-patch of that Secret raced
+// the master's reboot (3 of 8 matrix scales) and the next deploy skipped the
+// apply, so nothing ever wrote the new worker type: the gate keys on the pool.
+describe('buildK3sApplyInputs: the autoscaler worker pool opens the gate', () => {
+  let dir: string;
+  let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = createTempDir('vc-k3s-gate-pool-');
+    mkdirSync(join(dir, 'k8s', 'base'), { recursive: true });
+    writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: []\n');
+    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  });
+  afterEach(() => {
+    cwdSpy.mockRestore();
+    cleanupTempDir(dir);
+  });
+
+  const pool = { workerServerType: 'cx23', minWorkers: 1, maxWorkers: 3 };
+  const inputs = (change: Record<string, unknown> = {}) =>
+    buildK3sApplyInputs({
+      imageTag: 'registry:5000/app:abc123',
+      dbImageTag: 'ghcr.io/o/db:v1',
+      projectDir: dir,
+      ...pool,
+      ...change,
+    });
+  const deployed = () => {
+    const t = new StateTracker('proj', 'prod');
+    t.startStep('k3s-apply', inputs());
+    t.completeStep('k3s-apply');
+  };
+
+  it.each([
+    ['a new worker type', { workerServerType: 'cx33' }],
+    ['a new worker floor', { minWorkers: 2 }],
+    ['a new worker ceiling', { maxWorkers: 5 }],
+    ["a standby's dormant floor", { caBoundsMin: 1 }],
+  ])('%s opens the gate', (_why, change) => {
+    deployed();
+    expect(new StateTracker('proj', 'prod').shouldSkip('k3s-apply', inputs(change))).toBe(false);
+  });
+
+  it('the same pool keeps it shut', () => {
+    deployed();
+    expect(new StateTracker('proj', 'prod').shouldSkip('k3s-apply', inputs())).toBe(true);
+  });
+
+  it('deployK3s hands the gate the same pool the apply renders', () => {
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
+    const gateArgs = gateCall.slice(0, gateCall.indexOf('});'));
+    for (const arg of ['workerServerType,', 'minWorkers,', 'maxWorkers,']) {
+      expect(gateArgs).toContain(`\n    ${arg}\n`);
+    }
+    expect(gateArgs).toMatch(/\n\s+caBoundsMin: options\.caBoundsMin,\n/);
+    // The apply takes the same const, so the two can't drift apart.
+    const applyCall = body.slice(body.indexOf('applyK3sManifests({'));
+    const applyArgs = applyCall.slice(0, applyCall.indexOf('\n      }),'));
+    expect(applyArgs).toMatch(/\n\s+workerServerType,\n/);
+    expect(applyArgs).toMatch(/\n\s+caBoundsMin: options\.caBoundsMin,\n/);
+  });
+});
+
 describe('deployK3s feeds the k3s-apply gate its pilot-light role and storage targets', () => {
   it('deployK3s hands the gate the app config and the backups target', () => {
     const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');

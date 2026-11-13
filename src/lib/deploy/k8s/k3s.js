@@ -441,8 +441,17 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * it really is) skipped the apply, and the app Secret kept the wrong region.
  * Adding it re-applies every k8s environment once (unchanged content).
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, apiToken?: string, backupConfig?: {schedule?: string, retentionDays?: number}, s3Config?: {bucket?: string, region?: string, endpoint?: string}|null, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, providerTokenDigest: string, storageTargets: string, imageSetDigest: string, manifestDigest: string, bundledManifestDigest: string }}
+ * `autoscalerWorkerPool` is the cluster autoscaler's worker pool: the server
+ * type, the worker floor and ceiling, and the dormant floor a k8s-ha standby
+ * keeps (`caBoundsMin`). The apply renders them into
+ * kube-system/carbon-autoscaler-config (renderCarbonAutoscalerConfig), and no
+ * manifest digest sees them: without this key a deploy after a `scale` that
+ * changed the worker type, or whose own re-patch of that Secret failed,
+ * skipped the apply and the autoscaler kept making workers of the old type.
+ * Adding it re-applies every k8s environment once (unchanged content).
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, apiToken?: string, backupConfig?: {schedule?: string, retentionDays?: number}, s3Config?: {bucket?: string, region?: string, endpoint?: string}|null, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null, workerServerType?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, providerTokenDigest: string, storageTargets: string, autoscalerWorkerPool: string, imageSetDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -456,6 +465,10 @@ export function buildK3sApplyInputs({
   backupConfig,
   s3Config,
   backupTarget,
+  workerServerType,
+  minWorkers,
+  maxWorkers,
+  caBoundsMin,
 }) {
   const backup = resolveBackupSettings(backupConfig);
   return {
@@ -475,6 +488,9 @@ export function buildK3sApplyInputs({
     providerTokenDigest: apiToken ? fingerprintSecret(apiToken) : '',
     storageTargets: [s3Config, backupTarget]
       .map((t) => `${t?.bucket ?? ''}@${t?.region ?? ''}@${t?.endpoint ?? ''}`)
+      .join(' '),
+    autoscalerWorkerPool: [workerServerType, minWorkers, maxWorkers, caBoundsMin]
+      .map((v) => v ?? '')
       .join(' '),
     imageSetDigest: createHash('sha256').update(JSON.stringify(currentImageSet())).digest('hex'),
     manifestDigest: digestDir(join(projectDir, 'k8s')),
@@ -6533,6 +6549,9 @@ async function deployK3sSteps(options, inFlight) {
   // The gate folds the CONTENT of BOTH applied manifest trees (the project
   // copy and the CLI's own bundled `carbon/k8s`) into its inputs — see
   // buildK3sApplyInputs for why each one is load-bearing.
+  // The autoscaler's worker type, one value for the gate and the apply.
+  const workerServerType =
+    options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE;
   const applyInputs = buildK3sApplyInputs({
     imageTag,
     dbImageTag,
@@ -6554,6 +6573,11 @@ async function deployK3sSteps(options, inFlight) {
     // Secrets and the db StatefulSet.
     s3Config: options.s3Config,
     backupTarget: options.backupTarget,
+    // The autoscaler's worker pool, rendered into its config Secret.
+    workerServerType,
+    minWorkers,
+    maxWorkers,
+    caBoundsMin: options.caBoundsMin,
   });
   const skipApply = await shouldSkipK3sApply({
     state,
@@ -6611,8 +6635,7 @@ async function deployK3sSteps(options, inFlight) {
         // Task 6: dormant CA bounds — undefined on single-cluster/primary
         // (applyK3sManifests defaults caBoundsMin to minWorkers itself).
         caBoundsMin: options.caBoundsMin,
-        workerServerType:
-          options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
+        workerServerType,
         k3sToken: infraOutputs.k3sToken,
         // The image delivery's target (the master only) and the base pull
         // started at infra-ready, which deliverImage awaits.

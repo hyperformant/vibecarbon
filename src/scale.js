@@ -2591,6 +2591,197 @@ export function applyCaBoundsToConfig(configJson, { newMin, newMax, newType }) {
 }
 
 /**
+ * Poll the cluster's /healthz until the API server answers (5 min budget).
+ * Shared by the autoscaler re-patch and the post-resize Ready wait.
+ *
+ * @param {string} kubeconfigPath
+ * @param {string} label
+ */
+async function waitForApiServer(kubeconfigPath, label) {
+  // Wait for the API server to be reachable BEFORE running any kubectl
+  // commands. RCA from k8s scale failure 2026-05-07 (e2e run
+  // bt5zvlw7n): Pulumi's upStack returns when the Hetzner VM is back up
+  // and k3s reports ready inside the master, but the floating IP that
+  // kubeconfig points at re-attaches asynchronously — there's a 30-90s
+  // window where `kubectl --kubeconfig ...` returns
+  // `ServiceUnavailable: the server is currently unable to handle the
+  // request`. The next call (`kubectl rollout status` for hcloud-csi-node)
+  // exits in <1s with that error, then `kubectl wait --for=Ready pods`
+  // does the same, and scale fails for what looks like "pods didn't
+  // settle" but is actually "API server wasn't reachable yet". Poll
+  // `--raw=/healthz` until we see ok before continuing — k3s's healthz
+  // returns "ok" only when the apiserver + scheduler + controller-manager
+  // are all alive, so a single success here means the cluster control
+  // plane has truly stabilized post-resize.
+  const apiSpinner = spinner();
+  apiSpinner.start(`Waiting for API server to be reachable (${label})`);
+  const API_READY_BUDGET_MS = 300_000;
+  // Fixed 5s interval (backoffFactor: 1) under a 300s budget — the probe
+  // throws while the floating IP is re-attaching (runCommand rejects on
+  // nonzero exit when silent), and pollUntil retries a throwing probe.
+  // Timeout still throws (preserving the old fail-fast); we re-wrap so the
+  // operator-facing message and last-error detail are unchanged.
+  try {
+    await pollUntil(
+      () => {
+        runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'get', '--raw=/healthz'], {
+          silent: true,
+          timeout: 10_000,
+        });
+        return true;
+      },
+      {
+        budgetMs: API_READY_BUDGET_MS,
+        initialDelayMs: 5000,
+        backoffFactor: 1,
+        description: 'k8s API healthy after resize',
+      },
+    );
+    apiSpinner.stop(`API server reachable (${label})`);
+  } catch (err) {
+    apiSpinner.stop(`API server (${label}) not reachable within 5 min`);
+    const cause = err.cause;
+    const lastApiErr = cause
+      ? cause.message?.split('\n')[0]?.slice(0, 120) || String(cause).slice(0, 120)
+      : '';
+    throw new Error(
+      `Kube API server for ${label} never returned /healthz=ok within 5 min after Pulumi resize. ` +
+        `Last error: ${lastApiErr}`,
+    );
+  }
+}
+
+/**
+ * Re-patch one cluster's carbon-autoscaler-config Secret (`config.json`'s
+ * worker-pool bounds and server type) after a scale changed them. Waits for
+ * the cluster's API server first (waitForApiServer): a type change reboots the
+ * master, and the reads below would otherwise fail while it is down. A failure
+ * after that is a warning, not an abort: the servers are already resized and
+ * the scale still has to record them. The warning names the deploy that writes
+ * the settings again (the k3s-apply gate keys on them).
+ */
+async function repatchClusterAutoscaler({
+  clusterEnv,
+  label,
+  newMin,
+  newMax,
+  newType,
+  environment,
+  workerTypeChanged,
+}) {
+  const kubeconfigPath = localKubeconfigPath(process.cwd(), clusterEnv);
+  if (!existsSync(kubeconfigPath)) {
+    p.log.warn(`kubeconfig missing at ${kubeconfigPath} (${label}); skipping CA re-patch`);
+    return;
+  }
+  await waitForApiServer(kubeconfigPath, label);
+  // Re-patch the carbon-autoscaler-config Secret's config.json in
+  // place: read both keys (config.json + token) off the live Secret,
+  // mutate ONLY the worker-pool node group's maxSize/serverType via
+  // the pure applyCaBoundsToConfig helper, and re-apply via the same
+  // stdin `kubectl apply -f -` pattern applyK3sManifests uses to
+  // create this Secret (src/lib/deploy/k8s/k3s.js) — secrets never
+  // touch argv. A rollout restart repoints both CA containers at the
+  // fresh mount; the sidecar also hot-reloads on its own
+  // mtime-watched Refresh, but the restart keeps `scale`'s completion
+  // deterministic instead of polling for the sidecar to notice.
+  const caSpinner = spinner();
+  caSpinner.start(`Re-patching cluster-autoscaler config (${label})`);
+  try {
+    // .data values in a kubectl-returned Secret are ALWAYS base64 (k8s
+    // stores stringData as base64 under the hood too) — decode both
+    // keys before treating them as plain text/JSON. runCommand returns
+    // the captured stdout string when `silent: true`.
+    const configB64Raw = runCommand(
+      [
+        'kubectl',
+        '--kubeconfig',
+        kubeconfigPath,
+        '-n',
+        'kube-system',
+        'get',
+        'secret',
+        'carbon-autoscaler-config',
+        '-o',
+        'jsonpath={.data.config\\.json}',
+      ],
+      { silent: true },
+    );
+    const tokenB64Raw = runCommand(
+      [
+        'kubectl',
+        '--kubeconfig',
+        kubeconfigPath,
+        '-n',
+        'kube-system',
+        'get',
+        'secret',
+        'carbon-autoscaler-config',
+        '-o',
+        'jsonpath={.data.token}',
+      ],
+      { silent: true },
+    );
+    const configJson = Buffer.from(
+      typeof configB64Raw === 'string' ? configB64Raw.trim() : '',
+      'base64',
+    ).toString('utf8');
+    const token = Buffer.from(
+      typeof tokenB64Raw === 'string' ? tokenB64Raw.trim() : '',
+      'base64',
+    ).toString('utf8');
+    const mutatedConfigJson = applyCaBoundsToConfig(configJson, { newMin, newMax, newType });
+    // Mirrors renderCarbonAutoscalerConfig's Secret YAML shape in
+    // applyK3sManifests (k3s.js) exactly: stringData keeps both the
+    // token and the JSON off argv, piped via stdin.
+    const caSecretYaml = [
+      'apiVersion: v1',
+      'kind: Secret',
+      'metadata:',
+      '  name: carbon-autoscaler-config',
+      '  namespace: kube-system',
+      'type: Opaque',
+      'stringData:',
+      `  token: ${JSON.stringify(token)}`,
+      `  config.json: ${JSON.stringify(mutatedConfigJson)}`,
+      '',
+    ].join('\n');
+    runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'apply', '-f', '-'], {
+      silent: true,
+      input: caSecretYaml,
+    });
+    runCommand(
+      [
+        'kubectl',
+        '--kubeconfig',
+        kubeconfigPath,
+        '-n',
+        'kube-system',
+        'rollout',
+        'restart',
+        'deploy/cluster-autoscaler',
+      ],
+      { silent: true },
+    );
+    const maxSize = Math.max(0, newMax - newMin);
+    caSpinner.stop(`cluster-autoscaler re-patched (${label}): worker-pool 0:${maxSize}:${newType}`);
+    if (workerTypeChanged) {
+      p.log.warn(
+        `CA-spawned workers (if any) are still on the old type. ` +
+          `Drain them with kubectl drain so CA respawns at the new type.`,
+      );
+    }
+  } catch (err) {
+    caSpinner.stop(`CA re-patch failed (${label})`);
+    p.log.warn(
+      `Could not update the cluster autoscaler's worker settings (${label}): ${
+        err.message?.split('\n')[0] || err
+      }. It still makes new workers with the old ones. Run \`vibecarbon deploy ${environment}\` to write them again.`,
+    );
+  }
+}
+
+/**
  * k8s/k8s-ha `apply-scale-changes` effect: apply server-type changes via
  * Pulumi (in-place resize per node, ~2 min reboot) to the primary (or single)
  * cluster, then — when HA — to the standby cluster, each gated by the
@@ -2623,6 +2814,9 @@ async function scaleApplyK8sChanges(ctx) {
     infraChanges,
     Provider,
   } = ctx;
+
+  /** @type {Array<{clusterEnv: string, label: string, newMin: number, newMax: number, newType: string}>} */
+  const caRepatches = [];
 
   async function applyScaleChanges({ clusterEnv, clusterRegion, label, overrides, caBounds }) {
     // Apply server type changes to this cluster via the hardened, reusable
@@ -2676,134 +2870,32 @@ async function scaleApplyK8sChanges(ctx) {
     // resized workers), CA-spawned workers should also be drained so CA
     // re-spawns them at the new type. That drain step is deferred to a
     // follow-up — for now we surface a 1-line warning.
+    //
+    // Recorded here and done in repatchClusterAutoscaler once every cluster
+    // is resized and its API server answers: a type change reboots the
+    // master, and reading the Secret right after the up raced that reboot
+    // (3 of 8 k8s scales in the 2026-11-13 matrix lost it, and CA kept
+    // spawning the old type).
     const needsCaRepatch = changes.includes('workerType') || changes.includes('workerBounds');
     if (needsCaRepatch) {
-      const kubeconfigPath = localKubeconfigPath(process.cwd(), clusterEnv);
-      if (!existsSync(kubeconfigPath)) {
-        p.log.warn(`kubeconfig missing at ${kubeconfigPath} (${label}); skipping CA re-patch`);
-      } else {
-        // The pilot-light standby is a special case: Pulumi's static worker
-        // floor stays 0/0 (see `overrides` above), but the cluster-autoscaler
-        // config's `maxSize` must keep the DORMANT bounds a failover relies on
-        // — deploy renders the standby's CA with min=caBoundsMin (the primary's
-        // floor) and max=the primary's max, so a failover only flips CA's
-        // replica count 0→1 and NEVER re-renders its config. Rendering the
-        // standby CA from its 0/0 overrides would destroy those bounds.
-        // `caBounds` carries the dormant floor/max explicitly for the
-        // standby invocation; primary/single keep deriving from
-        // overrides→envConfig.
-        const newMin = caBounds
-          ? caBounds.min
-          : (overrides.minWorkers ?? envConfig.minWorkers ?? DEFAULT_WORKER_MIN);
-        const newMax = caBounds
-          ? caBounds.max
-          : (overrides.maxWorkers ?? envConfig.maxWorkers ?? DEFAULT_WORKER_MAX);
-        const newType = overrides.workerType ?? currentWorkerType;
-        // Re-patch the carbon-autoscaler-config Secret's config.json in
-        // place: read both keys (config.json + token) off the live Secret,
-        // mutate ONLY the worker-pool node group's maxSize/serverType via
-        // the pure applyCaBoundsToConfig helper, and re-apply via the same
-        // stdin `kubectl apply -f -` pattern applyK3sManifests uses to
-        // create this Secret (src/lib/deploy/k8s/k3s.js) — secrets never
-        // touch argv. A rollout restart repoints both CA containers at the
-        // fresh mount; the sidecar also hot-reloads on its own
-        // mtime-watched Refresh, but the restart keeps `scale`'s completion
-        // deterministic instead of polling for the sidecar to notice.
-        const caSpinner = spinner();
-        caSpinner.start(`Re-patching cluster-autoscaler config (${label})`);
-        try {
-          // .data values in a kubectl-returned Secret are ALWAYS base64 (k8s
-          // stores stringData as base64 under the hood too) — decode both
-          // keys before treating them as plain text/JSON. runCommand returns
-          // the captured stdout string when `silent: true`.
-          const configB64Raw = runCommand(
-            [
-              'kubectl',
-              '--kubeconfig',
-              kubeconfigPath,
-              '-n',
-              'kube-system',
-              'get',
-              'secret',
-              'carbon-autoscaler-config',
-              '-o',
-              'jsonpath={.data.config\\.json}',
-            ],
-            { silent: true },
-          );
-          const tokenB64Raw = runCommand(
-            [
-              'kubectl',
-              '--kubeconfig',
-              kubeconfigPath,
-              '-n',
-              'kube-system',
-              'get',
-              'secret',
-              'carbon-autoscaler-config',
-              '-o',
-              'jsonpath={.data.token}',
-            ],
-            { silent: true },
-          );
-          const configJson = Buffer.from(
-            typeof configB64Raw === 'string' ? configB64Raw.trim() : '',
-            'base64',
-          ).toString('utf8');
-          const token = Buffer.from(
-            typeof tokenB64Raw === 'string' ? tokenB64Raw.trim() : '',
-            'base64',
-          ).toString('utf8');
-          const mutatedConfigJson = applyCaBoundsToConfig(configJson, { newMin, newMax, newType });
-          // Mirrors renderCarbonAutoscalerConfig's Secret YAML shape in
-          // applyK3sManifests (k3s.js) exactly: stringData keeps both the
-          // token and the JSON off argv, piped via stdin.
-          const caSecretYaml = [
-            'apiVersion: v1',
-            'kind: Secret',
-            'metadata:',
-            '  name: carbon-autoscaler-config',
-            '  namespace: kube-system',
-            'type: Opaque',
-            'stringData:',
-            `  token: ${JSON.stringify(token)}`,
-            `  config.json: ${JSON.stringify(mutatedConfigJson)}`,
-            '',
-          ].join('\n');
-          runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'apply', '-f', '-'], {
-            silent: true,
-            input: caSecretYaml,
-          });
-          runCommand(
-            [
-              'kubectl',
-              '--kubeconfig',
-              kubeconfigPath,
-              '-n',
-              'kube-system',
-              'rollout',
-              'restart',
-              'deploy/cluster-autoscaler',
-            ],
-            { silent: true },
-          );
-          const maxSize = Math.max(0, newMax - newMin);
-          caSpinner.stop(
-            `cluster-autoscaler re-patched (${label}): worker-pool 0:${maxSize}:${newType}`,
-          );
-          if (changes.includes('workerType')) {
-            p.log.warn(
-              `CA-spawned workers (if any) are still on the old type. ` +
-                `Drain them with kubectl drain so CA respawns at the new type.`,
-            );
-          }
-        } catch (err) {
-          caSpinner.stop(`CA re-patch failed (${label})`);
-          p.log.warn(
-            `Could not re-patch cluster-autoscaler: ${err.message?.split('\n')[0] || err}`,
-          );
-        }
-      }
+      // The pilot-light standby is a special case: Pulumi's static worker
+      // floor stays 0/0 (see `overrides` above), but the cluster-autoscaler
+      // config's `maxSize` must keep the DORMANT bounds a failover relies on
+      // — deploy renders the standby's CA with min=caBoundsMin (the primary's
+      // floor) and max=the primary's max, so a failover only flips CA's
+      // replica count 0→1 and NEVER re-renders its config. Rendering the
+      // standby CA from its 0/0 overrides would destroy those bounds.
+      // `caBounds` carries the dormant floor/max explicitly for the
+      // standby invocation; primary/single keep deriving from
+      // overrides→envConfig.
+      const newMin = caBounds
+        ? caBounds.min
+        : (overrides.minWorkers ?? envConfig.minWorkers ?? DEFAULT_WORKER_MIN);
+      const newMax = caBounds
+        ? caBounds.max
+        : (overrides.maxWorkers ?? envConfig.maxWorkers ?? DEFAULT_WORKER_MAX);
+      const newType = overrides.workerType ?? currentWorkerType;
+      caRepatches.push({ clusterEnv, label, newMin, newMax, newType });
     }
   }
 
@@ -2862,6 +2954,16 @@ async function scaleApplyK8sChanges(ctx) {
       },
     });
   }
+
+  // After every resize, so the standby's converge still overlaps the
+  // primary's reboot: each re-patch first waits for its own API server.
+  for (const repatch of caRepatches) {
+    await repatchClusterAutoscaler({
+      ...repatch,
+      environment,
+      workerTypeChanged: changes.includes('workerType'),
+    });
+  }
 }
 
 /**
@@ -2898,6 +3000,33 @@ async function scaleReestablishHaTunnel(ctx) {
     p.log.warn(
       'Could not resolve HA database node IPs from config, skipping post-resize WireGuard ' +
         're-establish. If replication is down, run `vibecarbon deploy` to restore it.',
+    );
+    return;
+  }
+  // The gateway restart below runs kubectl on each master, and the resize may
+  // still be rebooting one: wait for both API servers first, as the autoscaler
+  // re-patch does (that one lost this race in the 2026-11-13 matrix).
+  const haRoles = resolveHaClusterRoles({
+    environment,
+    envConfig,
+    region: ctx.region,
+    secondaryRegion: ctx.secondaryRegion,
+    isHA,
+  });
+  try {
+    for (const [role, side] of [
+      ['primary', haRoles.primary],
+      ['standby', haRoles.standby],
+    ]) {
+      const kubeconfigPath = localKubeconfigPath(process.cwd(), side.clusterEnv);
+      if (existsSync(kubeconfigPath)) {
+        await waitForApiServer(kubeconfigPath, `${role}: ${side.clusterRegion}`);
+      }
+    }
+  } catch (err) {
+    p.log.warn(
+      `Could not re-establish the replication tunnel after resize: ${err.message?.split('\n')[0] || err}. ` +
+        'Run `vibecarbon deploy` to fully restore replication.',
     );
     return;
   }
@@ -2988,57 +3117,7 @@ async function scaleVerifyK8sReady(ctx) {
       );
       continue;
     }
-    // Wait for the API server to be reachable BEFORE running any kubectl
-    // commands. RCA from k8s scale failure 2026-05-07 (e2e run
-    // bt5zvlw7n): Pulumi's upStack returns when the Hetzner VM is back up
-    // and k3s reports ready inside the master, but the floating IP that
-    // kubeconfig points at re-attaches asynchronously — there's a 30-90s
-    // window where `kubectl --kubeconfig ...` returns
-    // `ServiceUnavailable: the server is currently unable to handle the
-    // request`. The next call (`kubectl rollout status` for hcloud-csi-node)
-    // exits in <1s with that error, then `kubectl wait --for=Ready pods`
-    // does the same, and scale fails for what looks like "pods didn't
-    // settle" but is actually "API server wasn't reachable yet". Poll
-    // `--raw=/healthz` until we see ok before continuing — k3s's healthz
-    // returns "ok" only when the apiserver + scheduler + controller-manager
-    // are all alive, so a single success here means the cluster control
-    // plane has truly stabilized post-resize.
-    const apiSpinner = spinner();
-    apiSpinner.start(`Waiting for API server to be reachable (${label})`);
-    const API_READY_BUDGET_MS = 300_000;
-    // Fixed 5s interval (backoffFactor: 1) under a 300s budget — the probe
-    // throws while the floating IP is re-attaching (runCommand rejects on
-    // nonzero exit when silent), and pollUntil retries a throwing probe.
-    // Timeout still throws (preserving the old fail-fast); we re-wrap so the
-    // operator-facing message and last-error detail are unchanged.
-    try {
-      await pollUntil(
-        () => {
-          runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'get', '--raw=/healthz'], {
-            silent: true,
-            timeout: 10_000,
-          });
-          return true;
-        },
-        {
-          budgetMs: API_READY_BUDGET_MS,
-          initialDelayMs: 5000,
-          backoffFactor: 1,
-          description: 'k8s API healthy after resize',
-        },
-      );
-      apiSpinner.stop(`API server reachable (${label})`);
-    } catch (err) {
-      apiSpinner.stop(`API server (${label}) not reachable within 5 min`);
-      const cause = err.cause;
-      const lastApiErr = cause
-        ? cause.message?.split('\n')[0]?.slice(0, 120) || String(cause).slice(0, 120)
-        : '';
-      throw new Error(
-        `Kube API server for ${label} never returned /healthz=ok within 5 min after Pulumi resize. ` +
-          `Last error: ${lastApiErr}`,
-      );
-    }
+    await waitForApiServer(kubeconfigPath, label);
     // A resize powers each server off and back on, and the provider's answer
     // comes back when the power does. Every wait below reads Ready conditions,
     // and until a dead kubelet is noticed those still say Ready: on Hetzner

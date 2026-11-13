@@ -136,6 +136,7 @@ import {
   type DeployedEnv,
   deployedScaleTarget,
 } from '../utils/region-resolver.js';
+import { autoscalerRepatchProblem } from '../utils/scale-output.js';
 import { fetchServerTypes } from '../utils/server-types.js';
 import {
   e2eSshOpts,
@@ -3377,6 +3378,13 @@ EOF`;
             throw new Error(
               `Scale was a no-op — output contained: ${combined.match(hardFailRe)?.[0]}\n--- scale stdout tail ---\n${stdoutClean.slice(-500)}`,
             );
+          }
+
+          // 1b. k8s: every cluster's autoscaler took the new worker type. Scale
+          //     only warns when that re-patch fails (tests/e2e/utils/scale-output.ts).
+          const caProblem = autoscalerRepatchProblem(combined, config.mode);
+          if (caProblem) {
+            throw new Error(`${caProblem}\n--- scale stdout tail ---\n${stdoutClean.slice(-800)}`);
           }
 
           // 2. Type-comparison path (preferred). Both pre and post snapshots
