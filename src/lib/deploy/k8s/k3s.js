@@ -61,6 +61,7 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
+import { CLOUD_INIT_DIR } from '../../iac/cloud-init.js';
 import { infraStepSkips } from '../../iac/state-seal.js';
 import {
   carbonAutoscalerImageRef,
@@ -478,6 +479,10 @@ export function buildK3sApplyInputs({
     imageSetDigest: createHash('sha256').update(JSON.stringify(currentImageSet())).digest('hex'),
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
+    // The worker boot script is rendered into the cluster autoscaler's config
+    // Secret at apply, so a CLI whose only change is a k3s boot script still
+    // re-applies and the autoscaler's next node boots the new script.
+    bundledCloudInitDigest: digestDir(CLOUD_INIT_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
   };
 }

@@ -98,6 +98,8 @@ fi
 hostnamectl set-hostname "$NODE_NAME"
 echo "Node name: $NODE_NAME"
 
+# @include _container-signals.sh
+
 # Configure containerd to mirror pulls for the local registry running on
 # the master, at the master's private IP. The program fixes that VPC address
 # (10.0.1.2), so it is known at render time and this node is created in

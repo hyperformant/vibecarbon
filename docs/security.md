@@ -256,6 +256,24 @@ The one exception is a server an older version made for a `compose` environment 
 - **NetworkPolicies** (K8s): default-deny, explicit service-to-service allowlists, DB reachable only from authorised services, egress restricted to HTTPS.
 - **TLS**: Let's Encrypt certificates, auto-renewed 30 days before expiry.
 
+### Kubernetes nodes and AppArmor
+
+Ubuntu 26.04 turns on `kernel.apparmor_restrict_unprivileged_unconfined`. On its newer kernels, that setting gives every k3s container a longer AppArmor label than the one containerd's profile names in its own signal rule, so the processes inside a container can no longer signal each other and the database never starts (containerd/containerd#14485). Every Kubernetes node vibecarbon creates turns that one setting off before it installs k3s, in `/etc/sysctl.d/99-vibecarbon-container-signals.conf`.
+
+- Containers stay confined by containerd's profile.
+- The user-namespace restriction (`kernel.apparmor_restrict_unprivileged_userns`) stays on.
+- What you give up is Ubuntu's limit on unprivileged local users switching AppArmor profiles. Only root logs in to these nodes.
+- Compose servers keep Ubuntu's default: Docker's runtime keeps the plain label.
+
+vibecarbon drops the setting once k3s ships containerd's fix.
+
+A cluster an earlier vibecarbon made does not have the setting. Its nodes keep working until one boots a newer kernel, for example after a resize or a provider reboot. Run this as root on each node to add it (nodes the cluster autoscaler adds after your next deploy get it on their own):
+
+```sh
+printf 'kernel.apparmor_restrict_unprivileged_unconfined = 0\n' > /etc/sysctl.d/99-vibecarbon-container-signals.conf
+sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+```
+
 ### Database connections
 
 The app is the database's only client on the public path. Each app replica

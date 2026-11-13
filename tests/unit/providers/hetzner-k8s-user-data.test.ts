@@ -52,6 +52,11 @@
  * itself, applyCloudSecrets), installs k3s with `--agent-token` instead of
  * `--token`, and the comments around both say so. The worker and db fixtures
  * are unchanged. The diff is confined to those lines.
+ * RE-CAPTURED 2026-11-13 (container signals): every role gained the
+ * `_container-signals.sh` snippet, which turns off
+ * kernel.apparmor_restrict_unprivileged_unconfined before the k3s install
+ * (tests/unit/deploy/container-signals-census.test.ts). The diff is the
+ * snippet's lines and the blank line after it.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

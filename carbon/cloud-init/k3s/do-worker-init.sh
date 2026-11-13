@@ -64,6 +64,8 @@ if ! echo "$DROPLET_ID" | grep -qE '^[0-9]+$'; then
 fi
 echo "Droplet ID: $DROPLET_ID"
 
+# @include _container-signals.sh
+
 # Configure containerd to mirror pulls for the local registry running on
 # the master, to the master's private IP. The master's private IP IS
 # known at render time here (workers are rendered with the master already
