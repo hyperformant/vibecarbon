@@ -98,6 +98,8 @@ fi
 hostnamectl set-hostname "$NODE_NAME"
 echo "Node name: $NODE_NAME"
 
+# @include _container-signals.sh
+
 # Configure containerd to mirror pulls for the local registry running on
 # THIS master, to this master's OWN private IP. Cluster-autoscaler-spawned
 # workers pull the app image from here on-demand (sideload only reaches

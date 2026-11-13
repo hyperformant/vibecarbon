@@ -47,6 +47,10 @@
  *
  * RE-CAPTURED 2026-11-05 (Kubernetes 1.37): the k3s version in the embedded
  * worker script, nothing else.
+ *
+ * RE-CAPTURED 2026-11-13 (container signals): the embedded worker script
+ * gained the `_container-signals.sh` snippet; `cloudInit` is the only field
+ * that changed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

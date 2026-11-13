@@ -26,6 +26,8 @@ if [ -z "$K3S_TARGET_VERSION" ]; then
 fi
 echo "Installing k3s version: $K3S_TARGET_VERSION"
 
+# @include _container-signals.sh
+
 # IDENTICAL block in master-init.sh / worker-init.sh / db-init.sh - keep in sync.
 # (Three-way duplication is acceptable here because the cloud-init scripts are
 # rendered independently per role; extracting a shared snippet would require
