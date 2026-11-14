@@ -879,6 +879,9 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
  */
 export const APP_HEALTH_PROBE_BUDGET_MS = 180_000;
 
+/** The pause between two probes when exec fails (a container restarting). */
+const APP_HEALTH_RETRY_PAUSE_MS = 1000;
+
 /**
  * The held probe: a node program that asks `localhost:3000<path>` every 200 ms
  * and exits 0 on the first 2xx, so the app is seen the moment it answers. It
@@ -941,8 +944,13 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   let attempts = 0;
   while (attempts === 0 || Date.now() < deadline) {
     if (attempts > 0) {
-      await new Promise((r) => setTimeout(r, Math.min(1000, Math.max(0, deadline - Date.now()))));
-      if (Date.now() >= deadline) break;
+      // Decide before the pause, not after it: a timer can fire a few ms
+      // before Date.now() reaches its time (Node checks timers against a loop
+      // clock that can trail it), and a probe started with 1 ms left still
+      // holds its ssh for up to 10 s more. When the pause would reach the
+      // deadline, no probe fits after it, so stop now.
+      if (deadline - Date.now() <= APP_HEALTH_RETRY_PAUSE_MS) break;
+      await new Promise((r) => setTimeout(r, APP_HEALTH_RETRY_PAUSE_MS));
     }
     attempts++;
     const remainingMs = Math.max(0, deadline - Date.now());
