@@ -31,8 +31,10 @@
  * bucket both initialize `.pulumi/meta.yaml`, and that race failed a k8s-ha
  * deploy (2026-04-28, `could not list bucket: blob (code=NotFound): NoSuchKey`).
  * 49 of the pairs above were that case and none failed, which only bounds it,
- * so an HA deploy that created its state bucket opens the backend once before
- * the pair starts (`openStateBackend`, the plans' `open-state-backend` step).
+ * so every HA deploy opens the backend once before the pair starts
+ * (`openStateBackend`, the plans' `open-state-backend` step). Every one, not
+ * only a run that created the bucket: a run that created it and stopped
+ * before the open leaves the next run a bucket with no meta.yaml.
  *
  * WHY NOT stagger or a wider retry ladder if this turns out wrong: every retry
  * is one more request against a store that is already failing to keep up. A

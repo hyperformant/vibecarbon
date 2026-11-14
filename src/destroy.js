@@ -1059,7 +1059,7 @@ async function cleanupOrphanedVolumes(
     if (identityComplete) {
       return {
         code: 'identity-complete',
-        why: "this environment's own PersistentVolume list was captured in full and does not contain it",
+        why: "this environment's own PersistentVolume list is complete (captured in full, or empty because it never had a cluster) and does not contain it",
       };
     }
     const region = provider.volumeRegion(volume);
@@ -3531,6 +3531,29 @@ export async function settleUnreadableStacks({
 }
 
 /**
+ * Whether the environment's record says infrastructure was made for it:
+ * servers, or an ingress or floating/reserved IP on either side. Pure.
+ * A k8s deploy records its servers in its final save and its ingress IP
+ * before DNS points at it, so a record with none of these is a deploy that
+ * stopped early, maybe before making anything (the skeleton entry). Where
+ * that matters, the caller pairs it with a second signal (destroyK8sTier: no
+ * kubeconfig; recordPulumiDestroyOutcome: what Pulumi's state says).
+ * @param {object} envConfig
+ * @returns {boolean}
+ */
+export function recordsInfrastructure(envConfig) {
+  return (
+    (envConfig.servers || []).length > 0 ||
+    !!envConfig.ingressIp ||
+    !!envConfig.ha?.primary?.ingressIp ||
+    !!envConfig.ha?.standby?.ingressIp ||
+    !!envConfig.floatingIp ||
+    !!envConfig.ha?.primary?.floatingIp ||
+    !!envConfig.ha?.standby?.floatingIp
+  );
+}
+
+/**
  * Decide what one stackEnv's `destroyK8s` (Pulumi) result means and record
  * it into `results` — either the "(all via Pulumi)" success shorthand, or a
  * loud, non-zero-exit issue (M3 Task 9f fix round 1).
@@ -3585,14 +3608,29 @@ export function recordPulumiDestroyOutcome({
   results,
   providerName,
 }) {
-  const hasRecordedInfra =
-    (envConfig.servers || []).length > 0 ||
-    !!envConfig.ingressIp ||
-    !!envConfig.ha?.primary?.ingressIp ||
-    !!envConfig.ha?.standby?.ingressIp ||
-    !!envConfig.floatingIp ||
-    !!envConfig.ha?.primary?.floatingIp ||
-    !!envConfig.ha?.standby?.floatingIp;
+  const hasRecordedInfra = recordsInfrastructure(envConfig);
+
+  // No state bucket in any region (stackConfirmedAbsent). For an environment
+  // whose deploy stopped before making anything, that is the whole answer:
+  // nothing was deleted, so nothing is claimed. An environment that records
+  // servers had state somewhere once, and with it gone what Pulumi held is
+  // unknown.
+  if (destroyResult?.stateBucketMissing) {
+    if (!hasRecordedInfra) return true;
+    results.pulumiDestroyFailed = true;
+    results.leaks.unverified({
+      resourceClass: 'pulumi-stack',
+      resource: `${stackEnv}${dirLabel}`,
+      reason:
+        'its Pulumi state bucket is in no region of the object store, though this environment ' +
+        'records infrastructure (servers/floating IP), so every Pulumi-managed resource is UNVERIFIED',
+      hint:
+        `Check the ${providerName} console (servers, firewall, VPC/network, SSH key, ` +
+        'reserved/floating IP) and delete what is left there: with its state gone, Pulumi ' +
+        "cannot remove this stack's resources.",
+    });
+    return false;
+  }
 
   if (destroyResult?.resourceCount === 0 && hasRecordedInfra) {
     results.pulumiDestroyFailed = true;
@@ -4288,6 +4326,12 @@ async function destroyK8sTier({
     // Pulumi owns the servers, firewalls, SSH keys, and networks — `pulumi
     // destroy` tears them all down in one pass.
 
+    // No infrastructure on record and no kubeconfig: the deploy stopped before
+    // it had a cluster to talk to. Gates the two kubeconfig steps below.
+    const neverHadCluster =
+      !recordsInfrastructure(envConfig) &&
+      stackEnvs.every((stackEnv) => !existsSync(localKubeconfigPath(cwd, stackEnv)));
+
     // LAYER 1 — identity capture from the cluster itself, BEFORE anything is
     // torn down. Every CSI volume a cluster owns has a PersistentVolume whose
     // `spec.csi.volumeHandle` is the provider volume id — attached or not.
@@ -4302,9 +4346,22 @@ async function destroyK8sTier({
     // SYNCHRONOUS runCommand, so a Promise.all here would buy nothing but a
     // misleading log line. The per-request timeout bounds the dead-cluster
     // case (2 clusters × 20s worst case on the HA path).
-    console.log(`Capturing CSI volume identities from ${stackEnvs.length} cluster(s)...`);
+    //
+    // Skipped for an environment that never had a cluster: its record names
+    // no infrastructure and no kubeconfig exists, which a deploy fetches
+    // before it applies anything to the cluster (fetchKubeconfig runs ahead
+    // of applyK3sManifests), so no PersistentVolume, and no CSI volume, can be
+    // its own. Its identity set is complete and empty. Asking anyway recorded
+    // an unverified capture of a cluster that never existed (2026-11-13, a
+    // deploy that stopped while creating the app bucket).
     const captures = [];
-    for (const stackEnv of stackEnvs) {
+    const clustersToAsk = neverHadCluster ? [] : stackEnvs;
+    console.log(
+      neverHadCluster
+        ? `No cluster on record for ${environment} and no kubeconfig, so there are no CSI volumes to capture or release`
+        : `Capturing CSI volume identities from ${stackEnvs.length} cluster(s)...`,
+    );
+    for (const stackEnv of clustersToAsk) {
       const kubeconfigPath = localKubeconfigPath(cwd, stackEnv);
       const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
       const capture = captureClusterCsiVolumes(kubeconfigPath, { timeoutSeconds: 20 });
@@ -4327,7 +4384,8 @@ async function destroyK8sTier({
       }
       captures.push({ stackEnv, capture });
     }
-    identityComplete = captures.length > 0 && captures.every(({ capture }) => capture.ok);
+    identityComplete =
+      neverHadCluster || (captures.length > 0 && captures.every(({ capture }) => capture.ok));
     if (!identityComplete) {
       // Loud, and in the summary: without a capture, destroy can no longer
       // PROVE which volumes were this environment's, and the backstop that
@@ -4396,9 +4454,11 @@ async function destroyK8sTier({
       // armed when the pre-scan actually seeded a region.
       s.stop(
         `Volume pre-scan failed: ${error.message} — ${
-          identityComplete
-            ? 'relying on the captured PersistentVolume identities'
-            : 'no identity source left for this environment'
+          neverHadCluster
+            ? 'this environment never had a cluster'
+            : identityComplete
+              ? 'relying on the captured PersistentVolume identities'
+              : 'no identity source left for this environment'
         }`,
       );
       if (!identityComplete) {
@@ -4482,12 +4542,15 @@ async function destroyK8sTier({
     // matching kubeconfig file. Helper is best-effort; the post-destroy
     // sweep below catches anything left over.
     // HA: release CSI volumes on primary + standby in parallel — each
-    // cluster's controller is independent.
-    console.log(
-      `Releasing CSI volumes via cluster finalizers across ${stackEnvs.length} cluster(s)...`,
-    );
+    // cluster's controller is independent. Nothing to release without a
+    // cluster (neverHadCluster, said once above).
+    if (!neverHadCluster) {
+      console.log(
+        `Releasing CSI volumes via cluster finalizers across ${stackEnvs.length} cluster(s)...`,
+      );
+    }
     await Promise.allSettled(
-      stackEnvs.map(async (stackEnv) => {
+      clustersToAsk.map(async (stackEnv) => {
         const kubeconfigPath = localKubeconfigPath(cwd, stackEnv);
         const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
         try {
@@ -4644,9 +4707,11 @@ async function destroyK8sTier({
             providerName: Provider.NAME,
           });
           console.log(
-            verified
-              ? `  Pulumi infrastructure destroyed${dirLabel}`
-              : `  Pulumi destroy for "${stackEnv}"${dirLabel} looks unverified — see the destroy summary's issues`,
+            !verified
+              ? `  Pulumi destroy for "${stackEnv}"${dirLabel} looks unverified — see the destroy summary's issues`
+              : destroyResult?.stateBucketMissing
+                ? `  No Pulumi stack for ${stackEnv}${dirLabel}: its state bucket doesn't exist, so there was nothing to destroy`
+                : `  Pulumi infrastructure destroyed${dirLabel}`,
           );
         } catch (error) {
           // The passphrase cannot open this stack's state: Pulumi never ran a

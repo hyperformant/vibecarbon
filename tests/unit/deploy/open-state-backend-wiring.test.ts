@@ -1,10 +1,17 @@
 /**
  * Who asks for the open-state-backend step (open-state-backend.test.ts proves
  * what the step does). Drives the real executeDeployment up to its plan, with
- * a fake object store: the plan's ctx names a backend to open only when this
- * very run's CreateBucket made the state bucket. A warm deploy that skips the
- * storage setup, and a first deploy into a state bucket that already exists,
- * pay nothing.
+ * a fake object store, then runs the plan's real gates and the real open
+ * effect against a fake Pulumi workspace: every HA deploy opens the state
+ * backend once before the pair starts, whoever created the bucket.
+ *
+ * F5 (audit, 2026-11-14): the open ran only when this very run's CreateBucket
+ * made the state bucket. A first HA deploy that created the bucket and then
+ * stopped before the open (the restore-point resolve, the app key mint, or the
+ * open itself on a brand-new bucket) left a rerun that found the bucket
+ * already there, skipped the open, and let the primary and standby engines
+ * write `.pulumi/meta.yaml` together: the race that failed a k8s-ha deploy
+ * with `could not list bucket: ... NoSuchKey` (2026-04-28).
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +24,23 @@ const run = vi.hoisted(() => ({
   stateBucketCreated: true,
   skipStorageSetup: false,
   buckets: [] as string[],
+  /** The backend URL of each workspace the open made, in order. */
+  opened: [] as string[],
+  whoAmI: 0,
+}));
+
+vi.mock('@pulumi/pulumi/automation/index.js', () => ({
+  LocalWorkspace: {
+    create: async (opts: { projectSettings: { backend: { url: string } } }) => {
+      run.opened.push(opts.projectSettings.backend.url);
+      return {
+        whoAmI: async () => {
+          run.whoAmI += 1;
+          return { user: 'me' };
+        },
+      };
+    },
+  },
 }));
 
 const clackMock = vi.hoisted(() => ({
@@ -103,10 +127,20 @@ vi.mock('../../../src/lib/deploy/state.js', () => ({
     }
   },
 }));
+// The plan's own gates decide which steps run; of those, only the open runs
+// (for real), and the deploy stops before the pair starts.
 vi.mock('../../../src/lib/deploy/plan/runner.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
-  runPlan: async (_steps: unknown, ctx: Record<string, unknown>) => {
+  runPlan: async (
+    steps: Array<{ name: string; effect: string; when?: (ctx: unknown) => boolean }>,
+    ctx: Record<string, unknown>,
+  ) => {
     run.ctx = ctx;
+    const { EFFECTS } = await import('../../../src/lib/deploy/effects/index.js');
+    for (const step of steps) {
+      if (step.when && !step.when(ctx)) continue;
+      if (step.effect === 'openStateBackend') await EFFECTS.openStateBackend(ctx);
+    }
     throw new Error('FAKE_PLAN_STOP');
   },
 }));
@@ -196,7 +230,14 @@ async function planCtx(deployMode: string) {
 
 const MODES = ['compose-ha', 'kubernetes'];
 
-describe('the HA plan asks to open the state backend', () => {
+/** The state bucket's backend, opened exactly once. */
+function expectOpenedOnce() {
+  expect(run.whoAmI).toBe(1);
+  expect(run.opened).toHaveLength(1);
+  expect(run.opened[0]).toMatch(/^s3:\/\/wireapp-[a-z0-9-]*pulumi-state[a-z0-9-]*\?/);
+}
+
+describe('every HA deploy opens the state backend before the pair starts', () => {
   // Each case runs in a scratch project dir: the deploy's command log goes to
   // <cwd>/.vibecarbon/logs, never the repo's.
   let scratch = '';
@@ -212,6 +253,8 @@ describe('the HA plan asks to open the state backend', () => {
     run.stateBucketCreated = true;
     run.skipStorageSetup = false;
     run.buckets.length = 0;
+    run.opened.length = 0;
+    run.whoAmI = 0;
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -219,26 +262,23 @@ describe('the HA plan asks to open the state backend', () => {
   });
 
   it.each(MODES)('%s: when this run created the state bucket', async (mode) => {
-    const ctx = await planCtx(mode);
+    await planCtx(mode);
     expect(run.buckets.some((b) => b.includes('pulumi-state'))).toBe(true);
-    expect(ctx.newStateBackend).toMatchObject({
-      provider: 'hetzner',
-      projectName: 'wireapp',
-      s3Config: { stateBucket: expect.stringContaining('pulumi-state') },
-    });
+    expectOpenedOnce();
   });
 
-  it.each(MODES)('%s: not when the state bucket already existed', async (mode) => {
+  // F5: the first run created the bucket and stopped before the open.
+  it.each(MODES)('%s: a rerun into the state bucket an earlier run created', async (mode) => {
     run.stateBucketCreated = false;
-    const ctx = await planCtx(mode);
+    await planCtx(mode);
     expect(run.buckets.some((b) => b.includes('pulumi-state'))).toBe(true);
-    expect(ctx.newStateBackend).toBeNull();
+    expectOpenedOnce();
   });
 
-  it.each(MODES)('%s: not on a warm deploy that skipped the storage setup', async (mode) => {
+  it.each(MODES)('%s: a warm deploy that skipped the storage setup', async (mode) => {
     run.skipStorageSetup = true;
-    const ctx = await planCtx(mode);
+    await planCtx(mode);
     expect(run.buckets).toEqual([]);
-    expect(ctx.newStateBackend).toBeNull();
+    expectOpenedOnce();
   });
 });
