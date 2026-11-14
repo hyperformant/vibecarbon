@@ -85,6 +85,24 @@ describe('classify', () => {
     expect(classify(k('.pulumi/history/p/e1/x.json'), NOW)).toBe('other');
   });
 
+  it('an undated run tag from a run that started 2 hours ago is in-flight', () => {
+    const tag = (ms: number) => row({ kind: 'tag', name: `project:testapp-k8s-${ms}-abc123` });
+    expect(classify(tag(NOW - 2 * H), NOW)).toBe('in-flight');
+    expect(classify(tag(NOW - 7 * H), NOW)).toBe('residue');
+  });
+
+  it('an undated test-shaped server with no time in its name is residue', () => {
+    expect(classify(row({ name: 'testapp-compose-master' }), NOW)).toBe('residue');
+  });
+
+  it('a dated row uses its own date even when its name carries an older start time', () => {
+    // The provider's own created-at is a fact about this resource; the name is
+    // only a label, so the row's date wins over the start time in the name.
+    const name = `testapp-k8s-${NOW - 9 * H}-abc123-master`;
+    expect(classify(row({ name, createdAt: ago(1 * H) }), NOW)).toBe('in-flight');
+    expect(classify(row({ name, createdAt: ago(8 * H) }), NOW)).toBe('residue');
+  });
+
   it('reads a run start time out of a scratch stack key', () => {
     const young = `.pulumi/stacks/testapp-compose-${NOW - 1 * H}-abc123/e1.json`;
     const old = `.pulumi/stacks/testapp-compose-${NOW - 9 * H}-abc123/e1.json`;

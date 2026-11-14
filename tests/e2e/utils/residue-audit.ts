@@ -108,18 +108,18 @@ export function classify(row: InventoryRow, now: number): Verdict {
   )
     return 'fixture';
 
-  const stamp = row.createdAt ? Date.parse(row.createdAt) : Number.NaN;
-  const settle = (t: number) => (now - t < RESIDUE_MIN_AGE_MS ? 'in-flight' : 'residue');
-  // An undated row has no proof it is young, so it counts as old.
-  const byRowAge = () => (Number.isFinite(stamp) ? settle(stamp) : 'residue');
+  // One age rule for every test-shaped row: the row's own date when it has
+  // one (the provider's clock for this very resource), else the run start time
+  // in its name, else no proof it is young, so it counts as old.
+  const byAge = (): Verdict => {
+    const own = row.createdAt ? Date.parse(row.createdAt) : Number.NaN;
+    const t = Number.isFinite(own) ? own : parseScratchProject(row.name)?.createdAtMs;
+    return t !== undefined && now - t < RESIDUE_MIN_AGE_MS ? 'in-flight' : 'residue';
+  };
 
-  if (row.kind === 'state-object') {
-    if (!STATE_RESIDUE.test(row.name)) return 'other';
-    const run = parseScratchProject(row.name);
-    return run ? settle(run.createdAtMs) : byRowAge();
-  }
-  if (row.kind === 'dns-record') return TEST_DNS.test(row.name) ? byRowAge() : 'other';
-  if (TEST_NAME.test(row.name)) return byRowAge();
+  if (row.kind === 'state-object') return STATE_RESIDUE.test(row.name) ? byAge() : 'other';
+  if (row.kind === 'dns-record') return TEST_DNS.test(row.name) ? byAge() : 'other';
+  if (TEST_NAME.test(row.name)) return byAge();
   if (row.kind === 'tag' && GENERIC_TAG.test(row.name)) return 'expected';
   return 'other';
 }
