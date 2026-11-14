@@ -1512,9 +1512,6 @@ export async function executeDeployment(args, gatheredConfig) {
   const s3SetupTimer = perfTimer('deploy.preamble.s3Setup');
   s3Spinner.start('Verifying S3 buckets');
   const skipS3Setup = await state.shouldSkipWithVerify('s3-setup', s3Inputs, verifyBucketsExist);
-  // Read from this run's CreateBucket, never from the step ledger: a warm
-  // deploy restores that ledger and must not count as a new bucket.
-  let stateBucketCreated = false;
   s3Spinner.stop(skipS3Setup ? 'S3 buckets ready' : 'S3 setup needed');
   if (!skipS3Setup) {
     state.startStep('s3-setup', s3Inputs);
@@ -1611,7 +1608,6 @@ export async function executeDeployment(args, gatheredConfig) {
       s3Spinner.start(`Creating Pulumi state bucket: ${stateBucket}`);
       const stateBucketResult = await s3Provider.forRegion(stateRegion).createBucket(stateBucket);
       assertBucketReady(stateBucketResult, 'Pulumi state');
-      stateBucketCreated = stateBucketResult.created;
       s3Spinner.stop(
         stateBucketResult.created
           ? `Pulumi state bucket created: ${stateBucket}`
@@ -1779,15 +1775,16 @@ export async function executeDeployment(args, gatheredConfig) {
   // `deploy -restore` resolution, the app key mint): the backups record then
   // names a bucket that exists, and the next deploy keeps it.
   saveSkeletonEnv();
-  // The HA plans open a backend this run brought into being, once, before the
-  // pair starts (open-state-backend). Any other deploy has nothing to open.
-  const newStateBackend = stateBucketCreated
-    ? {
-        provider: providerIdFor(envConfig),
-        s3Config,
-        projectName: projectConfig.projectName,
-      }
-    : null;
+  // The state backend the HA plans open once, before the pair starts
+  // (open-state-backend), on every HA deploy: whether `.pulumi/meta.yaml`
+  // exists does not follow from who created the bucket. A first run that
+  // created it and stopped before the open left a rerun that found the bucket
+  // and skipped the open, so both engines initialized the backend together.
+  const stateBackend = {
+    provider: providerIdFor(envConfig),
+    s3Config,
+    projectName: projectConfig.projectName,
+  };
 
   // DR (`deploy -restore latest|<base>|<ISO-8601>`, k8s tiers): resolve the
   // exact base backup now, from the stop sentinels in the bucket and prefix
@@ -2248,7 +2245,7 @@ export async function executeDeployment(args, gatheredConfig) {
       isComposeLocal,
       localImageTag,
       composeLocalBuildPromise,
-      newStateBackend,
+      stateBackend,
       attemptId,
     };
 
@@ -2443,7 +2440,7 @@ export async function executeDeployment(args, gatheredConfig) {
       // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
       // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
       // not race the 0.0.0.0 warm-up write of the same apex record.
-      const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, newStateBackend };
+      const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, stateBackend };
       await perfAsync('deploy.ha.k8s.full', () =>
         runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
       );

@@ -167,15 +167,17 @@ export const setupBackupCronStep = () =>
   defineStep({ name: 'setup-backup-cron', effect: 'setupBackupCron' });
 
 /**
- * Both HA plans, first: open a new state backend once, so the pair never
- * initializes it together. Only when this deploy created the state bucket: the
- * orchestrator sets ctx.newStateBackend, and every other deploy skips this.
+ * Both HA plans, first: open the state backend (ctx.stateBackend) once, so the
+ * pair never initializes it together. Every HA deploy, not only one whose run
+ * created the state bucket: a rerun after a first run that created it and
+ * stopped before this step finds an uninitialized backend in a bucket that
+ * already exists. On a backend already open it is one read of meta.yaml.
  */
 export const openStateBackendStep = () =>
   defineStep({
     name: 'open-state-backend',
     effect: 'openStateBackend',
-    when: (ctx) => !!ctx.newStateBackend,
+    required: true,
   });
 
 // ============================================================================

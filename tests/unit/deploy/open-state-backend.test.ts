@@ -1,9 +1,10 @@
 /**
- * A state bucket this deploy just created has no `.pulumi/meta.yaml`, and an HA
- * pair must not meet there: two engines initializing one backend can fail with
- * `could not list bucket: ... NoSuchKey`, which nothing retries (2026-04-28,
- * k8s-ha). So the plan opens the backend once, before the fan-out, and a bucket
- * that already existed pays nothing.
+ * A state bucket with no `.pulumi/meta.yaml` (one this deploy just created, or
+ * one a run that stopped early created) is where an HA pair must not meet: two
+ * engines initializing one backend can fail with `could not list bucket: ...
+ * NoSuchKey`, which nothing retries (2026-04-28, k8s-ha). So the plan opens the
+ * backend once, before the fan-out, on every HA deploy (which deploys get here
+ * is open-state-backend-wiring.test.ts).
  *
  * Runs the real plans, gates and effect with a fake Pulumi workspace. Every
  * other effect only records its name.
@@ -66,24 +67,27 @@ beforeEach(() => {
 });
 
 describe.each(TIERS)('%s', (tier) => {
-  it('opens a new backend once, before the fan-out', async () => {
-    await runPlan(planDeploy(tier, {}), { newStateBackend: backend() }, effects());
+  it('opens the backend once, before the fan-out', async () => {
+    await runPlan(planDeploy(tier, {}), { stateBackend: backend() }, effects());
     expect(pulumi.order.filter((name) => name === 'whoAmI')).toHaveLength(1);
     expect(pulumi.order.indexOf('whoAmI')).toBeLessThan(pulumi.order.indexOf(FAN_OUT[tier]));
     expect(pulumi.order.filter((name) => name === FAN_OUT[tier])).toHaveLength(1);
   });
 
-  it('does nothing at all on a bucket that already existed', async () => {
-    await runPlan(planDeploy(tier, {}), { newStateBackend: null }, effects());
-    expect(pulumi.create).not.toHaveBeenCalled();
+  // The open is never skipped: a ctx that names no backend is a wiring bug,
+  // and the pair must not start on a backend nobody opened.
+  it('no backend to open stops the deploy before anything is provisioned', async () => {
+    await expect(runPlan(planDeploy(tier, {}), {}, effects())).rejects.toThrow(
+      /\[step:open-state-backend\]/,
+    );
     expect(pulumi.whoAmI).not.toHaveBeenCalled();
-    expect(pulumi.order).toContain(FAN_OUT[tier]);
+    expect(pulumi.order).not.toContain(FAN_OUT[tier]);
   });
 
   it('a backend that will not open stops the deploy before anything is provisioned', async () => {
     pulumi.whoAmI.mockRejectedValue(new Error('error: could not list bucket'));
     await expect(
-      runPlan(planDeploy(tier, {}), { newStateBackend: backend() }, effects()),
+      runPlan(planDeploy(tier, {}), { stateBackend: backend() }, effects()),
     ).rejects.toThrow(/\[step:open-state-backend\].*could not list bucket/);
     expect(pulumi.whoAmI).toHaveBeenCalledOnce();
     expect(pulumi.order).not.toContain(FAN_OUT[tier]);
@@ -92,7 +96,7 @@ describe.each(TIERS)('%s', (tier) => {
 
 describe('every provider', () => {
   it.each(Object.keys(PROVIDERS))('%s opens the backend its stacks will use', async (provider) => {
-    await EFFECTS.openStateBackend({ newStateBackend: backend(provider) });
+    await EFFECTS.openStateBackend({ stateBackend: backend(provider) });
     expect(pulumi.create).toHaveBeenCalledOnce();
     const [opts] = pulumi.create.mock.calls[0];
     expect(opts.projectSettings).toMatchObject({

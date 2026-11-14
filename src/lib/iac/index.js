@@ -2286,7 +2286,10 @@ export async function listStacks(options = {}) {
  *
  * `pulumi whoami` is the cheapest operation that does it. On a new bucket, on
  * all five providers (2026-11-06): GET meta.yaml, LIST, PUT meta.yaml, LIST, in
- * 0.5 to 1.8 s, one request fewer than `pulumi stack ls`.
+ * 0.5 to 1.8 s, one request fewer than `pulumi stack ls`. On a backend already
+ * open it finds meta.yaml and writes nothing, so every HA deploy runs it
+ * rather than probing for meta.yaml first: the probe would be the same GET
+ * it starts with, plus a code path of its own.
  *
  * Throws, unlike `listStacks`: nothing is provisioned yet, and a backend that
  * will not open now would only fail the pair later.

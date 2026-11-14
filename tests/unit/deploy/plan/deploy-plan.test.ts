@@ -231,9 +231,9 @@ describe('planDeploy(k8s-ha)', () => {
     // deployK8sHA gated its firewall (apiToken), DNS (domain/provider) and
     // degraded handling INSIDE the function body, not at the phase boundary —
     // so no phase carries a when-predicate, mirroring compose-ha's provisioning.
-    // open-state-backend is the one gated step: it runs only on a new bucket.
+    // open-state-backend included: it runs on every HA deploy (F5).
     const gated = planDeploy('k8s-ha', {}).filter((step) => step.when);
-    expect(planStepNames(gated)).toEqual(['open-state-backend']);
+    expect(planStepNames(gated)).toEqual([]);
   });
 
   it('marks the DR gate + replication + finalize steps `required` (unskippable)', () => {
@@ -279,7 +279,7 @@ describe('planDeploy(k8s-ha)', () => {
       haK8sFinalize: record('finalize'),
     };
     const coldCtx = {
-      newStateBackend: { provider: 'hetzner', projectName: 'testapp' },
+      stateBackend: { provider: 'hetzner', projectName: 'testapp' },
       options: {
         projectName: 'testapp',
         environment: 'e4',
