@@ -8,7 +8,9 @@ import {
   FIXTURES,
   type InventoryRow,
   inventory,
+  KIND_CONCURRENCY,
   listBucketsOnly,
+  mapBounded,
   RESIDUE_MIN_AGE_MS,
   renderSummary,
 } from '../../e2e/utils/residue-audit.js';
@@ -267,6 +269,38 @@ describe('inventory', () => {
     const cf = await inventory('cloudflare', ENV, f, { s3: s3Empty, makeStore: okStore() });
     expect(cf.complete).toBe(true);
     expect(calls.length).toBeGreaterThan(20);
+  });
+
+  it('reads at most KIND_CONCURRENCY kinds of one provider at once, and still in parallel', async () => {
+    // Scaleway has the widest fan-out (zones times kinds): about 60 kinds.
+    let inFlight = 0;
+    let peak = 0;
+    const f = (async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      return json({});
+    }) as unknown as typeof fetch;
+    const out = await inventory('scaleway', ENV, f, { s3: s3Empty, makeStore: okStore() });
+    expect(out.complete, out.incomplete.join('; ')).toBe(true);
+    expect(peak).toBeLessThanOrEqual(KIND_CONCURRENCY);
+    expect(peak).toBeGreaterThan(1);
+  });
+
+  it('mapBounded keeps input order and never exceeds its limit', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const out = await mapBounded([5, 1, 4, 2, 3], 2, async (ms) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, ms));
+      inFlight--;
+      return ms * 10;
+    });
+    expect(out).toEqual([50, 10, 40, 20, 30]);
+    expect(peak).toBe(2);
+    expect(await mapBounded([], 8, async (x) => x)).toEqual([]);
   });
 
   it('only ever sends GET (or HEAD), only ever asks the state store to list, and never removes', async () => {
