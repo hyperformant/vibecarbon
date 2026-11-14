@@ -237,6 +237,31 @@ interface Kind {
   run: () => Promise<InventoryRow[]>;
 }
 
+/**
+ * Kinds one provider reads at once. Scaleway alone has about 60 (zones times
+ * resource kinds), and all providers run together, so an unbounded fan-out
+ * invites a 429 that turns the week's audit incomplete. A cap, not a retry.
+ */
+export const KIND_CONCURRENCY = 8;
+
+/** `fn` over `items` with at most `limit` running at once; results in input order. */
+export async function mapBounded<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 export async function inventory(
   provider: string,
   env: Env,
@@ -675,18 +700,16 @@ export async function inventory(
     kinds = kinds.filter((k) => !k.label.startsWith('dns '));
   }
 
-  // Run every kind; a failure is classified, never swallowed.
+  // Run every kind, KIND_CONCURRENCY at a time; a failure is classified, never swallowed.
   let ok = 0;
   const refused: number[] = [];
-  const results = await Promise.all(
-    kinds.map(async (k) => {
-      try {
-        return { k, rows: await k.run() };
-      } catch (e) {
-        return { k, error: e };
-      }
-    }),
-  );
+  const results = await mapBounded(kinds, KIND_CONCURRENCY, async (k) => {
+    try {
+      return { k, rows: await k.run() };
+    } catch (e) {
+      return { k, error: e };
+    }
+  });
   for (const r of results) {
     if (!('error' in r)) {
       ok++;
