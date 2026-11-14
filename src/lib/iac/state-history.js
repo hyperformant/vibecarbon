@@ -28,6 +28,7 @@ import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { gunzipSync, zstdDecompressSync } from 'node:zlib';
+import { progressLog } from '../cli/progress.js';
 import { plainValueCount } from './state-seal.js';
 
 const CHECKPOINT = /\.checkpoint\.json(\.gz|\.zst)?$/;
@@ -79,12 +80,14 @@ function fileBackend(url) {
  * Null for a bucket that isn't the deploy's state bucket (an operator's own
  * PULUMI_BACKEND_URL): vibecarbon has no client for it.
  * @param {string} url
- * @param {{ s3Config?: { stateBucket?: string, bucket?: string, accessKey?: string, secretKey?: string, stateBucketRegion?: string, region?: string }, provider?: string }} options
+ * @param {{ s3Config?: { stateBucket?: string, bucket?: string, accessKey?: string, secretKey?: string, stateBucketRegion?: string, region?: string }, provider?: string, s3?: object }} options
  * @returns {Promise<HistoryBackend | null>}
  */
-async function s3Backend(url, { s3Config, provider }) {
+async function s3Backend(url, { s3Config, provider, s3 }) {
   const parsed = new URL(url);
   const bucket = parsed.hostname;
+  // A caller's own client (a test's) stands in for the one built below.
+  if (s3) return storeBackend(s3, bucket);
   const stateBucket = s3Config?.stateBucket ?? s3Config?.bucket;
   if (!stateBucket || bucket !== stateBucket) return null;
   if (!provider || !s3Config?.accessKey || !s3Config?.secretKey) {
@@ -103,6 +106,15 @@ async function s3Backend(url, { s3Config, provider }) {
       `the state bucket's client would reach ${host(store.endpoint)}, but Pulumi uses ${host(parsed.searchParams.get('endpoint'))}`,
     );
   }
+  return storeBackend(store, bucket);
+}
+
+/**
+ * @param {{ listObjectKeys?: Function, getObjectBytes?: Function, deleteObjectKeys: Function }} store
+ * @param {string} bucket
+ * @returns {HistoryBackend}
+ */
+function storeBackend(store, bucket) {
   return {
     list: (prefix) => store.listObjectKeys(bucket, prefix),
     read: (key) => store.getObjectBytes(bucket, key),
@@ -114,7 +126,7 @@ async function s3Backend(url, { s3Config, provider }) {
  * The backend at `url`, or null for one vibecarbon doesn't manage (an
  * operator's PULUMI_BACKEND_URL naming Pulumi Cloud, for example).
  * @param {string} url
- * @param {{ s3Config?: object, provider?: string }} options
+ * @param {{ s3Config?: object, provider?: string, s3?: object }} options
  * @returns {Promise<HistoryBackend | null>}
  */
 async function historyBackend(url, options) {
@@ -184,4 +196,53 @@ export async function removePlainHistory({
   }
   if (plain.length > 0) await backend.remove(plain);
   return { managed: true, checked: keys.length, removed: plain.length, unreadable };
+}
+
+/**
+ * Delete `.pulumi/stacks/<project>/<stack>.json.bak`, the previous copy Pulumi
+ * keeps beside a stack's state and leaves behind when `stack rm` removes the
+ * stack. Call it only once the stack's resources are known to be gone: until
+ * then the copy is the last record of what may have leaked.
+ *
+ * Goes through the same backend the state is read through: the filesystem for
+ * file://, the state bucket's own client (the provider's object storage
+ * client, with its endpoint, region, keys and timeouts) for s3://. `s3` is a
+ * client to use instead, for a test. A missing copy counts as gone (an S3
+ * delete of a missing key answers 204, and the file is removed with `force`).
+ * Never throws and never logs a key or a value.
+ *
+ * @param {object} args
+ * @param {string} args.backendUrl - what the stack's Pulumi uses (resolveBackendUrl)
+ * @param {string} args.pulumiProject
+ * @param {string} args.stackName
+ * @param {object} [args.s3] - a client with `deleteObjectKeys(bucket, keys)`
+ * @param {object} [args.s3Config]
+ * @param {string} [args.provider]
+ * @returns {Promise<boolean>} true when the copy is gone, false when it could
+ *   not be removed or the backend is not one vibecarbon manages
+ */
+export async function removeStackBackup({
+  backendUrl,
+  pulumiProject,
+  stackName,
+  s3,
+  s3Config,
+  provider,
+}) {
+  try {
+    const backend = await historyBackend(backendUrl, { s3Config, provider, s3 });
+    if (!backend) {
+      progressLog(
+        `[pulumi] ${stackName}'s Pulumi backend isn't one vibecarbon manages, so its previous-state copy (.bak) stays`,
+      );
+      return false;
+    }
+    await backend.remove([`.pulumi/stacks/${pulumiProject}/${stackName}.json.bak`]);
+    return true;
+  } catch (err) {
+    progressLog(
+      `[pulumi] couldn't remove ${stackName}'s previous-state copy (.bak) (${err?.code ?? err?.name ?? 'unknown error'})`,
+    );
+    return false;
+  }
 }
