@@ -13,7 +13,7 @@ function fakeDocker({
 }: {
   inspect: string | Error;
   run: string | Error;
-  ps?: string;
+  ps?: string | Error;
   image?: string | Error;
 }) {
   const calls: string[][] = [];
@@ -137,11 +137,11 @@ describe('the check is quiet and cheap when it can be', () => {
     expect(opts.run?.timeout).toBe(120_000);
   });
 
-  it('skips the read when this project db is running on exactly this image', () => {
+  it('skips the read when this project db is healthy on exactly this image', () => {
     const { docker, calls } = fakeDocker({
       inspect: INSPECT,
       run: '15\n',
-      ps: `running ${IMAGE}:${TAG}\n`,
+      ps: `running\tUp 3 minutes (healthy)\t${IMAGE}:${TAG}\n`,
     });
     expect(check(docker)).toEqual({ ok: true });
     expect(calls.some((c) => c[0] === 'run')).toBe(false);
@@ -151,11 +151,26 @@ describe('the check is quiet and cheap when it can be', () => {
   });
 
   it.each([
-    ['a different tag', `running ${IMAGE}:16.4-walg3.0.9-r1\n`],
-    ['an exited container', `exited ${IMAGE}:${TAG}\n`],
+    ['a different tag', `running\tUp 3 minutes (healthy)\t${IMAGE}:16.4-walg3.0.9-r1\n`],
+    ['a container still starting', `running\tUp 5 seconds (health: starting)\t${IMAGE}:${TAG}\n`],
+    ['an unhealthy container', `running\tUp 3 minutes (unhealthy)\t${IMAGE}:${TAG}\n`],
+    ['an exited container', `exited\tExited (1) 2 minutes ago\t${IMAGE}:${TAG}\n`],
   ])('still reads the volume when the db is on %s', (_name, ps) => {
     const { docker, calls } = fakeDocker({ inspect: INSPECT, run: '15\n', ps });
     expect(check(docker)).toMatchObject({ ok: false, dataMajor: 15 });
+    expect(calls.some((c) => c[0] === 'run')).toBe(true);
+  });
+});
+
+describe('the container lookup', () => {
+  it('gets 10 s, and a lookup that fails still reads the volume', () => {
+    const { docker, calls, opts } = fakeDocker({
+      inspect: INSPECT,
+      run: '15\n',
+      ps: new Error('spawnSync docker ETIMEDOUT'),
+    });
+    expect(check(docker)).toMatchObject({ ok: false, dataMajor: 15 });
+    expect(opts.ps?.timeout).toBe(10_000);
     expect(calls.some((c) => c[0] === 'run')).toBe(true);
   });
 });

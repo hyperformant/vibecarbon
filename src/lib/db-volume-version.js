@@ -29,18 +29,35 @@ function dockerCli(argv, { timeout } = {}) {
   });
 }
 
-/** True when this compose project's db container is running exactly `ref`. */
-function dbRunningOn(docker, composeProject, ref) {
-  const out = docker([
-    'ps',
-    '--filter',
-    `label=com.docker.compose.project=${composeProject}`,
-    '--filter',
-    'label=com.docker.compose.service=db',
-    '--format',
-    '{{.State}} {{.Image}}',
-  ]);
-  return out.split('\n').some((line) => line.trim() === `running ${ref}`);
+/** Longest the container lookup may take before it counts as "not running". */
+const PS_TIMEOUT_MS = 10_000;
+
+/**
+ * True when this compose project's db container is running exactly `ref` and
+ * reports healthy: it has then opened the data, so the read is unnecessary.
+ * A crash-looping db is never healthy. Any lookup failure means "no".
+ */
+function dbHealthyOn(docker, composeProject, ref) {
+  try {
+    const out = docker(
+      [
+        'ps',
+        '--filter',
+        `label=com.docker.compose.project=${composeProject}`,
+        '--filter',
+        'label=com.docker.compose.service=db',
+        '--format',
+        '{{.State}}\t{{.Status}}\t{{.Image}}',
+      ],
+      { timeout: PS_TIMEOUT_MS },
+    );
+    return out.split('\n').some((line) => {
+      const [state, status, image] = line.trim().split('\t');
+      return state === 'running' && image === ref && String(status).includes('(healthy)');
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -64,8 +81,8 @@ export function checkDbVolumeVersion({
   if (imageMajor === null) return { ok: true };
   try {
     const [info] = JSON.parse(docker(['volume', 'inspect', volume]));
-    // A db already running on this very image has opened the data: skip the read.
-    if (dbRunningOn(docker, composeProject, ref)) return { ok: true };
+    // A healthy db on this very image has opened the data: skip the read.
+    if (dbHealthyOn(docker, composeProject, ref)) return { ok: true };
     try {
       docker(['image', 'inspect', ref]);
     } catch {
