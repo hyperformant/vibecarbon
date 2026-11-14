@@ -15,9 +15,10 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c, link } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
 import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
+import { checkDbVolumeVersion } from './lib/db-volume-version.js';
 import { devS3Endpoint, devS3Port } from './lib/dev-s3.js';
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
-import { localComposeEnv } from './lib/images.js';
+import { localComposeEnv, resolveDbImage } from './lib/images.js';
 import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
@@ -329,6 +330,24 @@ export function assertComposeFloor({ read = readComposeVersion } = {}) {
   process.exit(1);
 }
 
+/**
+ * Stop `up` with the plain reason when the db volume holds another PostgreSQL
+ * major than this project runs (see lib/db-volume-version.js).
+ */
+export function reportDbVolumeMismatch(result) {
+  if (result.ok) return;
+  const { volume, dataMajor, imageMajor, createdAt } = result;
+  const date = createdAt ? ` (created ${createdAt.slice(0, 10)})` : '';
+  p.log.error(
+    `Docker volume ${volume} holds PostgreSQL ${dataMajor} data${date}, and this project runs PostgreSQL ${imageMajor}, which cannot open it.`,
+  );
+  p.log.info(
+    `If you do not need that data, run \`vibecarbon down\`, then \`docker volume rm ${volume}\`. That deletes it for good.`,
+  );
+  p.log.info('To keep it, give this project its own name: set COMPOSE_PROJECT_NAME in .env.');
+  process.exit(1);
+}
+
 export async function run(args = []) {
   const { handled } = parseFlagsOrExit(args, SPEC);
   if (handled) return;
@@ -401,6 +420,12 @@ export async function run(args = []) {
     );
   }
   process.env.COMPOSE_PROJECT_NAME = resolved.name;
+  // A db volume left holding another PostgreSQL major crash-loops the db with
+  // only "unhealthy" from compose; say so before anything else starts.
+  const db = resolveDbImage();
+  reportDbVolumeMismatch(
+    checkDbVolumeVersion({ composeProject: resolved.name, image: db.image, tag: db.tag }),
+  );
   // dev:start recreates the resolved stack, so it is never an orphan of itself.
   warnAboutOrphanStacks({ exclude: [resolved.name], list: () => stacks });
 
