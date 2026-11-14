@@ -135,7 +135,22 @@ describe('haK8sProvisionClusters pilot-light asymmetry', () => {
     // deploy (applyCloudSecrets, k8s-cloud-secrets.test.ts), so the standby
     // needs the token as much as the primary does.
     const apiToken = 'vc-sentinel-token-fanout';
-    await runFanOut({ environment: 'e4', region: 'nbg1', secondaryRegion: 'hel1', apiToken });
+    // With a token, the early transport prep opens UDP 51821 in each
+    // cluster's firewall through the provider API: answered here, never by
+    // api.hetzner.cloud.
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const firewallSpies = [
+      vi.spyOn(HetznerProvider.prototype, 'findFirewallByName').mockResolvedValue({
+        id: 7,
+        rules: [],
+      } as never),
+      vi.spyOn(HetznerProvider.prototype, 'setFirewallRules').mockResolvedValue(undefined as never),
+    ];
+    try {
+      await runFanOut({ environment: 'e4', region: 'nbg1', secondaryRegion: 'hel1', apiToken });
+    } finally {
+      for (const spy of firewallSpies) spy.mockRestore();
+    }
     const calls = deployK3s.mock.calls.map(([o]) => o as Record<string, unknown>);
     expect(calls.map((o) => [o.role, o.apiToken]).sort()).toEqual([
       ['primary', apiToken],

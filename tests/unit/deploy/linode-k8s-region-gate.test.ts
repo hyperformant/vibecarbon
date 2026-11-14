@@ -146,6 +146,10 @@ describe('deploy: Linode k8s tiers refuse regions without a VPC', () => {
       if (message === 'Region:') return initialValue;
       throw new Error('stop');
     });
+    // The walk ends at the S3 key prompt, before the storage placement asks
+    // Linode's API which endpoints the account has (k8s has no standby
+    // prompt to stop it sooner).
+    vi.spyOn(LinodeProvider, 'promptObjectStorageCredentials').mockRejectedValue(new Error('stop'));
     await gatherDeploymentConfig({ env: 'prod', ...mode }).catch(() => {});
     expect(lists['Region:']).toContain('us-iad');
     expect(lists['Region:']).not.toContain('us-east');

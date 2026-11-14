@@ -617,12 +617,14 @@ export async function checkSslValid(
     sleep?: (ms: number) => Promise<void>;
     /** The CLI recorded TLS pending for this env (envConfig.tls.state). */
     tlsPending?: boolean;
+    /** resolveCheckIp's unpinned lookup: resolvePublicIp unless a test injects one. */
+    resolvePublic?: (domain: string) => Promise<string | null>;
   } = {},
 ): Promise<VerificationResult> {
   const start = process.hrtime();
 
   // Resolve IP via custom DNS (like other checks) to bypass stale system DNS cache.
-  const ip = await resolveCheckIp(domain);
+  const ip = await resolveCheckIp(domain, deps.resolvePublic);
 
   // First try with full CA validation. Since the harness trusts the Let's
   // Encrypt STAGING roots explicitly (tests/e2e/utils/e2e-env.js), the
