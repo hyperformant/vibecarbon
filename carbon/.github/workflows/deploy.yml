@@ -337,9 +337,10 @@ jobs:
       - name: Apply root GitRepository + Kustomizations
         # Template at carbon/k8s/flux/clusters/primary/vibecarbon.yaml
         # (copied to k8s/flux/clusters/primary/vibecarbon.yaml in the
-        # customer repo by `vibecarbon create`). `{{GITHUB_OWNER}}` +
-        # `{{PROJECT_NAME}}` in that template are substituted at create
-        # time, so by the time Actions runs this file has the real URL.
+        # customer repo by `vibecarbon create`). Its GitRepository URL names
+        # the real owner and repo once `vibecarbon configure cicd` has run,
+        # so by the time Actions runs this file has the real URL. (No
+        # create-time tokens in this file: configure installs it as is.)
         run: |
           kubectl apply --server-side --force-conflicts \
             --field-manager=github-actions-deploy \

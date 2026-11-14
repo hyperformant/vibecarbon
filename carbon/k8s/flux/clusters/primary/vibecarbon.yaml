@@ -118,6 +118,19 @@ spec:
       target:
         kind: Deployment
         name: traefik
+    # Volumes are the CLI's too. An add-on's PersistentVolumeClaim names the
+    # provider's StorageClass ({{K8S_STORAGE_CLASS}}), rendered per cluster by
+    # the CLI's deploy, and a claim's class can't change once it exists. A
+    # target with no name takes every claim; kustomize still wants a name in
+    # the patch itself. Each claim carries prune: disabled.
+    - patch: |
+        $patch: delete
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: every-claim
+      target:
+        kind: PersistentVolumeClaim
   healthChecks:
     - apiVersion: apps/v1
       kind: StatefulSet

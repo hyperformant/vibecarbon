@@ -43,8 +43,10 @@ import {
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
 import { alpineK8sImageRef, traefikVersion } from '../../images.js';
+import { GITHUB_REF_FILES, originGitHubRepo, writeGitHubRefs } from '../../template-edits.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { k8sTlsIdentity } from './k3s.js';
+import { describeFluxPlaceholders, fluxPlaceholders } from './unrendered-placeholders.js';
 
 /**
  * Build the operator-facing warning when observability is installed but this
@@ -93,12 +95,12 @@ function renderInPlace(path, vars) {
  * Resolve the real `{owner, name}` of the deploy target repo.
  *
  * At `vibecarbon create` time both placeholders bake to `projectName`
- * (see src/create.js:616), producing `ghcr.io/<project>/<project>` image
- * refs and `github.com/<project>/<project>` Flux URLs. Those paths only
- * match reality when the user later runs `vibecarbon configure` → CI/CD
- * with project name == repo name (which calls updateImageReferences()).
- * E2E tests (and any user whose repo slug differs) need the real
- * owner/repo wired in at deploy time, which is what this helper handles.
+ * (see src/create.js), producing `ghcr.io/<project>/<project>` image refs
+ * and `github.com/<project>/<project>` Flux URLs. Those paths only match
+ * reality once `vibecarbon configure` → CI/CD has rewritten them
+ * (updateImageReferences). E2E tests (and any user whose repo slug differs)
+ * need the real owner/repo wired in at deploy time, which is what this
+ * helper handles.
  */
 function resolveOwnerAndRepo(projectDir) {
   try {
@@ -115,56 +117,56 @@ function resolveOwnerAndRepo(projectDir) {
     const [owner, name] = out.split('/');
     if (owner && name) return { owner, name };
   } catch {}
-  try {
-    const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
-      cwd: projectDir,
-      env: gitSafeEnv(),
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    const m = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
-    if (m) return { owner: m[1], name: m[2] };
-  } catch {}
-  return null;
-}
-
-function escapeForRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const origin = originGitHubRepo(projectDir);
+  return origin ? { owner: origin.owner, name: origin.repo } : null;
 }
 
 /**
- * Rewrite stale `<project>/<project>` owner+repo pairs in ghcr.io image
- * refs and github.com Flux URLs to the real `<owner>/<repoName>` pair.
- * Idempotent: after one pass the paths no longer match the stale pattern
- * so subsequent calls are no-ops.
+ * The files the GitOps deploy points at the real owner and repo: the
+ * GitHub-ref files under k8s/, the tree it commits. docker-compose.prod.yml
+ * is configure's alone, and rewriting it here would leave it uncommitted.
  */
-function rewriteOwnerAndRepo(projectDir, projectName, owner, repoName) {
-  const pn = escapeForRegex(projectName);
-  // ghcr.io/<stale>/<project>[-db|-backup]  → ghcr.io/<owner>/<repoName>[-db|-backup]
-  const ghcrRe = new RegExp(`ghcr\\.io/[^/\\s:]+/${pn}(-db|-backup)?\\b`, 'g');
-  // github.com/<stale>/<project>  → github.com/<owner>/<repoName>
-  //   Match plain `github.com/a/b` plus optional `.git` suffix. Avoid
-  //   devouring a trailing path segment (e.g. branch names) by anchoring
-  //   on word-boundary / end.
-  const ghRe = new RegExp(`github\\.com/[^/\\s:]+/${pn}(?=\\.git\\b|[^\\w-]|$)`, 'g');
+const GITOPS_REF_FILES = GITHUB_REF_FILES.filter((rel) => rel.startsWith('k8s/'));
 
-  const files = [
-    'k8s/base/app/deployment.yaml',
-    'k8s/base/backup/cronjob.yaml',
-    'k8s/overlays/production/kustomization.yaml',
-    'k8s/flux/clusters/primary/vibecarbon.yaml',
-    'k8s/flux/clusters/standby/vibecarbon.yaml',
-  ];
+/** The app Deployment, where the GitOps deploy renders `{{IMAGE_TAG}}`. */
+const APP_DEPLOYMENT = 'k8s/base/app/deployment.yaml';
 
-  for (const rel of files) {
-    const path = join(projectDir, rel);
-    if (!existsSync(path)) continue;
-    const before = readFileSync(path, 'utf-8');
-    const after = before
-      .replace(ghcrRe, (_match, suffix) => `ghcr.io/${owner}/${repoName}${suffix ?? ''}`)
-      .replace(ghRe, `github.com/${owner}/${repoName}`);
-    if (after !== before) writeFileSync(path, after);
+/**
+ * Refuse, before anything is written or committed, a tree Flux would apply
+ * with a `{{TOKEN}}` still in it: Flux cannot fill one, and it reaches the
+ * cluster literally (an image of `{{TRAEFIK_IMAGE}}` is an InvalidImageName
+ * rollout). Mostly it is a Flux cluster file older than k8s/base, which the
+ * new cluster file fixes; a token no cluster file of ours strips has to be
+ * replaced where it is.
+ *
+ * @param {string} projectDir
+ * @param {{ fills?: Record<string, string[]> }} [opts] - tokens this deploy
+ *   fills itself before it commits, per file (the app's `{{IMAGE_TAG}}`)
+ */
+export function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
+  const findings = fluxPlaceholders(projectDir)
+    .map((f) => ({
+      ...f,
+      placeholders: f.placeholders.filter((p) => !(fills[f.file] ?? []).includes(p)),
+    }))
+    .filter((f) => f.placeholders.length > 0);
+  if (findings.length === 0) return;
+  const steps = [];
+  const upgrade = [...new Set(findings.filter((f) => f.upgradeStrips).map((f) => f.via))];
+  if (upgrade.length > 0) {
+    steps.push(
+      `Your ${upgrade.join(' and ')} is older than k8s/base: the one this vibecarbon ships keeps those objects out of Flux's build. ` +
+        `Run vibecarbon upgrade and take the new ${upgrade.join(' and ')} (or apply its .upgrade-new)`,
+    );
   }
+  for (const f of findings.filter((x) => !x.upgradeStrips)) {
+    steps.push(`Put the real value in place of ${f.placeholders.join(', ')} in ${f.file}`);
+  }
+  throw new Error(
+    'GitOps deploy stopped before changing anything: Flux applies the committed k8s/ tree as it is and ' +
+      `cannot fill placeholders. ${describeFluxPlaceholders(findings).join('; ')}. ` +
+      `${steps.join('. ')}. Then run this again.`,
+  );
 }
 
 /**
@@ -433,9 +435,13 @@ export async function deployK8sGitOps(args) {
     p.log.warn(obsWarning);
   }
 
-  // Before anything is committed or seeded: a deploy.yml that would write a
-  // stale provider token, and a malformed backup config, fail here.
+  // Before anything is written, committed or seeded: a deploy.yml that would
+  // write a stale provider token, a tree Flux would apply with a token in it,
+  // and a malformed backup config, fail here.
   refuseLegacyProviderTokenStep(projectDir, ProviderClass);
+  refuseFluxPlaceholders(projectDir, {
+    fills: imageTag ? { [APP_DEPLOYMENT]: ['{{IMAGE_TAG}}'] } : {},
+  });
   const backupSettings = resolveBackupSettings(backupConfig);
   // The Certificate deploy.yml renders, validated before anything is seeded.
   const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
@@ -463,8 +469,13 @@ export async function deployK8sGitOps(args) {
         `Run 'gh repo view' or 'git remote get-url origin' and ensure origin points at github.com.`,
     );
   }
-  rewriteOwnerAndRepo(projectDir, projectName, repoOwner, repoName);
-  const appDeployment = join(projectDir, 'k8s', 'base', 'app', 'deployment.yaml');
+  writeGitHubRefs(projectDir, {
+    projectName,
+    owner: repoOwner,
+    repo: repoName,
+    files: GITOPS_REF_FILES,
+  });
+  const appDeployment = join(projectDir, APP_DEPLOYMENT);
   if (existsSync(appDeployment) && imageTag) {
     // Only substitute — don't touch tags that are already concrete. The
     // default template uses `:main`; callers passing a pinned imageTag can

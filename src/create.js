@@ -725,7 +725,7 @@ async function bootstrap(cliArgs) {
   const variables = {
     PROJECT_NAME: projectName,
     PROJECT_DISPLAY_NAME: displayName,
-    GITHUB_OWNER: projectName, // Default to project name; rewritten by `vibecarbon configure` → CI/CD (or by deploy's rewriteOwnerAndRepo fallback)
+    GITHUB_OWNER: projectName, // Default to project name; rewritten by `vibecarbon configure` → CI/CD and the GitOps deploy (writeGitHubRefs, lib/template-edits.js)
     DB_PASSWORD: dbPassword,
     APP_DB_PASSWORD: appDbPassword,
     BETTER_AUTH_SECRET: betterAuthSecret,

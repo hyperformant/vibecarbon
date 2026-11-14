@@ -4,6 +4,11 @@ metadata:
   name: redis-pvc
   labels:
     app: redis
+  # The CLI's deploy owns this claim: {{K8S_STORAGE_CLASS}} is rendered per
+  # cluster, and Flux drops every claim from its build (flux/clusters/*).
+  # prune: disabled keeps Flux's garbage collection off it too.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes:
     - ReadWriteOnce
@@ -18,7 +23,9 @@ spec:
   # Resolved to a real class BEFORE apply by renderK8sStorageClassPlaceholder
   # (storageClassName is immutable once the PVC exists, so it cannot be patched
   # afterwards).
-  storageClassName: {{K8S_STORAGE_CLASS}}
+  # Quoted: Flux builds k8s/base as it is before it drops this claim, and
+  # unquoted the token reads as a YAML map that fails the whole build.
+  storageClassName: "{{K8S_STORAGE_CLASS}}"
   resources:
     requests:
       storage: 1Gi

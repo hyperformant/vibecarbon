@@ -26,9 +26,11 @@ import { dirname, join, relative } from 'node:path';
 import { dump, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { PLACEHOLDERS, SECRET_PLACEHOLDERS } from '../../../src/create.js';
+import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
+const SERVICES = join(ROOT, 'services');
 const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
@@ -53,6 +55,44 @@ function createdBase(into: string) {
   }
 }
 
+/**
+ * Every add-on `vibecarbon add` wires into k8s/base (it declares a
+ * kustomization entry), with the directory it lands in under base/.
+ */
+const BASE_ADDONS = readdirSync(SERVICES).flatMap((name) => {
+  const manifest = join(SERVICES, name, 'manifest.json');
+  let parsed: Doc;
+  try {
+    parsed = JSON.parse(readFileSync(manifest, 'utf-8'));
+  } catch {
+    return [];
+  }
+  const into: string | undefined = parsed.files?.['k8s/'];
+  const entry: string | undefined = parsed.kustomization?.entry;
+  return into && entry ? [{ name, entry, into: relative('k8s/base', into) }] : [];
+});
+
+/**
+ * Install those add-ons into a created base the way `add` does: their k8s
+ * files copied (add fills none of the k8s tokens, the claims keep
+ * {{K8S_STORAGE_CLASS}} for the deploy) and each entry listed.
+ */
+function addBaseAddons(into: string) {
+  const kustomization = join(into, 'base', 'kustomization.yaml');
+  for (const { name, entry, into: sub } of BASE_ADDONS) {
+    const from = join(SERVICES, name, 'k8s');
+    for (const src of walkFiles(from)) {
+      const dest = join(into, 'base', sub, relative(from, src));
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, readFileSync(src, 'utf-8'));
+    }
+    writeFileSync(
+      kustomization,
+      addKustomizationEntry(readFileSync(kustomization, 'utf-8'), entry),
+    );
+  }
+}
+
 function fluxBasePatches(cluster: string): Doc[] {
   const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
   const ks = (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
@@ -61,11 +101,15 @@ function fluxBasePatches(cluster: string): Doc[] {
   return ks?.spec?.patches ?? [];
 }
 
-/** `kubectl kustomize` of the created base with `patches` applied; returns stdout. */
-function fluxBuild(patches: Doc[]): string {
+/**
+ * `kubectl kustomize` of the created base (with every base add-on when
+ * `addons`) with `patches` applied; returns stdout.
+ */
+function fluxBuild(patches: Doc[], { addons = false } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), 'vc-flux-census-'));
   try {
     createdBase(dir);
+    if (addons) addBaseAddons(dir);
     writeFileSync(
       join(dir, 'kustomization.yaml'),
       dump({
@@ -117,10 +161,32 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
       expect(cfg?.data?.BACKUP_RETENTION_DAYS).toBeUndefined();
     }, 60_000);
 
+    it(`${cluster}: with every add-on that joins k8s/base, the build still carries no placeholder`, () => {
+      // An add-on's claim names the provider's StorageClass, rendered per
+      // cluster by the CLI's deploy and immutable once the claim exists: the
+      // cluster file leaves every claim to the deploy.
+      expect(BASE_ADDONS.length).toBeGreaterThan(2);
+      const out = fluxBuild(fluxBasePatches(cluster), { addons: true });
+      expect([...new Set(out.match(PLACEHOLDER) ?? [])]).toEqual([]);
+      const docs = (loadAll(out) as Doc[]).filter(Boolean);
+      expect(docs.filter((d) => d.kind === 'PersistentVolumeClaim')).toEqual([]);
+      // Positive controls: the add-ons are in the build, and so are their
+      // claims before the cluster file's patches.
+      for (const { name } of BASE_ADDONS) {
+        expect(
+          docs.some((d) => d.kind === 'Service' && d.metadata?.name === name),
+          `${name} Service`,
+        ).toBe(true);
+      }
+      const unpatched = (loadAll(fluxBuild([], { addons: true })) as Doc[]).filter(Boolean);
+      expect(unpatched.some((d) => d.kind === 'PersistentVolumeClaim')).toBe(true);
+    }, 60_000);
+
     it(`${cluster}: every object stripped with $patch: delete carries prune: disabled`, () => {
       // Stripping an object from Flux's build makes it an orphan in Flux's
       // inventory; without the annotation Flux's garbage collection deletes
-      // the live object the CLI applied (in either handoff order).
+      // the live object the CLI applied (in either handoff order). A target
+      // with no name strips every object of its kind.
       const stripped = fluxBasePatches(cluster)
         .filter((p: Doc) => /\$patch: delete/.test(String(p.patch)))
         .map((p: Doc) => ({ kind: p.target?.kind, name: p.target?.name }));
@@ -130,16 +196,21 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
           { kind: 'Deployment', name: 'local-registry' },
           { kind: 'CronJob', name: 'backup' },
           { kind: 'Certificate', name: 'vibecarbon-tls' },
+          { kind: 'PersistentVolumeClaim', name: undefined },
         ]),
       );
-      const docs = (loadAll(fluxBuild([])) as Doc[]).filter(Boolean);
+      const docs = (loadAll(fluxBuild([], { addons: true })) as Doc[]).filter(Boolean);
       for (const { kind, name } of stripped) {
-        const obj = docs.find((d) => d.kind === kind && d.metadata?.name === name);
-        expect(obj, `${kind}/${name} is in base`).toBeDefined();
-        expect(
-          obj.metadata.annotations?.['kustomize.toolkit.fluxcd.io/prune'],
-          `${kind}/${name}`,
-        ).toBe('disabled');
+        const objs = docs.filter(
+          (d) => d.kind === kind && (name === undefined || d.metadata?.name === name),
+        );
+        expect(objs.length, `${kind}/${name ?? '*'} is in base`).toBeGreaterThan(0);
+        for (const obj of objs) {
+          expect(
+            obj.metadata.annotations?.['kustomize.toolkit.fluxcd.io/prune'],
+            `${kind}/${obj.metadata.name}`,
+          ).toBe('disabled');
+        }
       }
     }, 60_000);
 
