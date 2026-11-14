@@ -337,6 +337,19 @@ This project uses Claude Code's experimental agent teams feature. A **lead-coord
 
 > **Known issue**: `permissionMode: delegate` has a [bug](https://github.com/anthropics/claude-code/issues/23447) that strips file system tools from teammates. The coordination-only constraint is enforced via the lead-coordinator's system prompt instead. Enable `permissionMode: delegate` once the bug is fixed.
 
+## Claude Code hooks
+
+Two hooks keep your checkout tidy so finished work does not pile up.
+
+- `ff-main.sh` fast-forwards your local default branch to `origin` when a session starts and after `gh pr merge`, so new branches start from current code. It only fast-forwards: it never merges, resets or discards anything.
+- `clean-merged.sh` removes local worktrees and branches whose work has merged, at the same two moments.
+
+A branch counts as merged only on proof: its tip equals the head of a merged PR with the same branch name (this needs `gh`), or it was merged into the default branch with a merge commit. A branch that sits on the default branch's own line, such as one you just cut from it, is never treated as merged.
+
+A worktree stays, and the hook tells you why, when this session is working in it, when it has uncommitted changes or untracked files, when another process is working in it, when the hook cannot tell, or when git refuses to remove it (for example, it is locked). Removing a worktree deletes its ignored files too, such as `node_modules` and `.env` files, as `git worktree remove` does.
+
+Both hooks do nothing without an `origin` remote. They are registered in `.claude/settings.json`.
+
 ## Working on Template Files
 
 When modifying files in `carbon/`, follow `carbon/AGENTS.md` for architecture, patterns, and mandatory security rules. (`carbon/CLAUDE.md`, `carbon/.github/copilot-instructions.md`, and `carbon/.cursor/rules/vibecarbon.mdc` are thin pointers to it.)

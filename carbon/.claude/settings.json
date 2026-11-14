@@ -24,6 +24,46 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ff-main.sh",
+            "timeout": 30,
+            "statusMessage": "Fast-forwarding the default branch"
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/clean-merged.sh",
+            "timeout": 60,
+            "statusMessage": "Cleaning up merged worktrees"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ff-main.sh",
+            "if": "Bash(gh pr merge*)",
+            "async": true,
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/clean-merged.sh",
+            "if": "Bash(gh pr merge*)",
+            "async": true,
+            "timeout": 120
+          }
+        ]
+      }
     ]
   }
 }

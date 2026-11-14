@@ -423,6 +423,17 @@ describe('create-vibecarbon E2E', () => {
       expect(existsSync(join(projectDir(), '.claude/settings.json'))).toBe(true);
       expect(existsSync(join(projectDir(), '.claude/hooks/teammate-idle-gate.sh'))).toBe(true);
       expect(existsSync(join(projectDir(), '.claude/hooks/task-completed-gate.sh'))).toBe(true);
+      // The hooks that keep a project's worktrees and default branch tidy
+      // ship, run, and are executable. Never run them here.
+      const settings = readFileSync(join(projectDir(), '.claude/settings.json'), 'utf-8');
+      for (const script of ['clean-merged.sh', 'ff-main.sh']) {
+        const path = join(projectDir(), '.claude/hooks', script);
+        expect(existsSync(path), `missing .claude/hooks/${script}`).toBe(true);
+        expect(statSync(path).mode & 0o111, `${script} is not executable`).not.toBe(0);
+        expect(settings, `settings.json does not run ${script}`).toContain(
+          `.claude/hooks/${script}`,
+        );
+      }
     });
   });
 
