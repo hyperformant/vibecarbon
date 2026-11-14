@@ -10,7 +10,7 @@ services:
     # included). Servers never pull this: docker-compose.prod.yml swaps in our
     # amd64 ghcr mirror of the SAME tag, so a cloud IP's anonymous Docker Hub
     # quota cannot stall a deploy (tests/unit/deploy/core-images-from-mirror-census.test.ts).
-    image: traefik:v3.7.17@sha256:92627e6a99f71b8e46634acea28130b9f14bec5d9887ad15161007e1b652afe1
+    image: traefik:v3.7.19@sha256:aa942a00bce033c909bf1f7e861d93761be4b31a035f10d2410d33e38a8f41cf
     container_name: ${PROJECT_NAME}-traefik
     restart: unless-stopped
     security_opt:
