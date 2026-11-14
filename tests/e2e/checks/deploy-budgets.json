@@ -1,5 +1,5 @@
 {
-  "rule": "owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS (15, or ceil5 of the TLS first-look statistic when above 15). Regenerate with scripts/calibrate-deploy-budgets.js.",
+  "rule": "owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS (15, or ceil5 of the TLS first-look statistic when above 15). A provider + mode with no samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers. Regenerate with scripts/calibrate-deploy-budgets.js.",
   "since": "2026-11-05T12:00:00.000Z",
   "budgets": {
     "digitalocean": {
@@ -171,6 +171,21 @@
           "endToEndS": 345,
           "tlsAllowanceS": 15,
           "samples": 1
+        }
+      },
+      "k8s-ha": {
+        "standard": {
+          "ownedS": 335,
+          "endToEndS": 350,
+          "tlsAllowanceS": 15,
+          "samples": 0,
+          "seededFrom": [
+            "digitalocean/k8s-ha/any",
+            "digitalocean/k8s-ha/intel",
+            "digitalocean/k8s-ha/regular",
+            "hetzner/k8s-ha/any",
+            "hetzner/k8s-ha/cpx"
+          ]
         }
       }
     },

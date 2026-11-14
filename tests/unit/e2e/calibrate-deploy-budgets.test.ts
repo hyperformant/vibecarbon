@@ -4,11 +4,14 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  addSeeds,
   budgetFromSamples,
   buildTable,
   ceil5,
   percentile,
   readSamples,
+  renderReport,
+  seededRow,
 } from '../../../scripts/calibrate-deploy-budgets.js';
 
 const s = (ownedS: number, tlsS = 5) => ({ ownedS, tlsS });
@@ -140,11 +143,87 @@ describe('reading the results db', () => {
     for (const unsupported of ['vultr/k8s', 'scaleway/k8s-ha']) {
       expect(listed).not.toContain(unsupported);
     }
-    expect(listed).toContain('vultr/compose');
-    // Linode runs all four modes, so its k8s rows are listed until they have data.
+    // Linode runs all four modes, and no provider has a k8s row here, so
+    // nothing can seed them: listed until they have data.
     expect(listed).toContain('linode/k8s');
     expect(listed).toContain('linode/k8s-ha');
     expect(listed).not.toContain('hetzner/compose');
+    // vultr/compose has no samples but other providers have compose rows: seeded.
+    expect(listed).not.toContain('vultr/compose');
+    expect(built.seeds.map((x) => `${x.provider}/${x.mode}/${x.cls}`)).toContain(
+      'vultr/compose/any',
+    );
+  });
+
+  it('seeds a provider + mode with no samples from the calibrated rows on the others', () => {
+    const { table, seeds } = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
+    // compose rows: hetzner any 180, hetzner cx 210, linode standard 220 (190 + 30).
+    const want = {
+      ownedS: 205, // mean 203.3 -> 205
+      endToEndS: 225, // + cx's 20 s TLS allowance (mean 16.7 -> 20)
+      tlsAllowanceS: 20,
+      samples: 0,
+      seededFrom: ['hetzner/compose/any', 'hetzner/compose/cx', 'linode/compose/standard'],
+    };
+    // A classed provider's seed goes in `any`, the row a run of any class
+    // falls back to (a classless one's in `standard`: see the next test).
+    expect(table.budgets.vultr.compose).toEqual({ any: want });
+    expect(table.budgets.digitalocean.compose).toEqual({ any: want });
+    // Seeds never feed seeds: every seed names calibrated rows only.
+    for (const x of seeds) {
+      for (const name of x.seededFrom) {
+        const [p, m, c] = name.split('/');
+        expect(table.budgets[p][m][c].samples, name).toBeGreaterThan(0);
+      }
+    }
+    expect(renderReport({ rows: [], seeds, noData: [] }, 'x')).toMatch(
+      /- vultr\/compose\/any: owned 205 s, end-to-end 225 s, from hetzner\/compose\/any/,
+    );
+  });
+
+  it('never computes a seed from another seed', () => {
+    const budgets = {
+      hetzner: { k8s: { cpx: { ownedS: 300, endToEndS: 315, tlsAllowanceS: 15, samples: 6 } } },
+      digitalocean: {
+        k8s: {
+          any: {
+            ownedS: 900,
+            endToEndS: 915,
+            tlsAllowanceS: 15,
+            samples: 0,
+            seededFrom: ['vultr/k8s/vc2'],
+          },
+        },
+      },
+    };
+    expect(seededRow(budgets, 'linode', 'k8s')).toMatchObject({
+      ownedS: 300,
+      seededFrom: ['hetzner/k8s/cpx'],
+    });
+  });
+
+  it('never seeds a provider from its own rows, or a mode that has a row', () => {
+    const budgets = {
+      hetzner: { k8s: { cpx: { ownedS: 300, endToEndS: 315, tlsAllowanceS: 15, samples: 6 } } },
+      linode: {
+        compose: { standard: { ownedS: 225, endToEndS: 265, tlsAllowanceS: 40, samples: 8 } },
+      },
+    };
+    expect(seededRow(budgets, 'hetzner', 'k8s')).toBeUndefined();
+    const { seeds } = addSeeds(budgets);
+    const keys = seeds.map((x) => `${x.provider}/${x.mode}`);
+    expect(keys).toContain('linode/k8s');
+    expect(keys).not.toContain('hetzner/k8s');
+    expect(keys).not.toContain('linode/compose');
+    expect(budgets.linode.k8s).toEqual({
+      standard: {
+        ownedS: 300,
+        endToEndS: 315,
+        tlsAllowanceS: 15,
+        samples: 0,
+        seededFrom: ['hetzner/k8s/cpx'],
+      },
+    });
   });
 
   it('ignores a sample of an unsupported mode', () => {

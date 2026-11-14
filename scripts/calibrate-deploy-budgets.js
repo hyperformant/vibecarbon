@@ -27,8 +27,14 @@
  *               its ceil5 is the allowance instead of 15.
  * ceil5 rounds up to a multiple of 5.
  *
- * A combination with no samples gets no row; the check then fails with
- * `no budget yet`.
+ * Seeds: a provider + mode with no samples at all (a mode a provider supports
+ * but has never passed a cold deploy in) gets a seeded row, so its first run
+ * is judged against a number instead of failing with `no budget yet`. The
+ * seed is the mean of every calibrated row of that mode on the other
+ * providers, ceil5'd, with `samples: 0` and `seededFrom` naming those rows. A
+ * seed is never an input to another seed, and the first passing cold deploy
+ * replaces it with a calibrated row. A mode with no calibrated row on any
+ * provider gets no seed; the check then fails with `no budget yet`.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -75,6 +81,58 @@ export function budgetFromSamples(samples) {
     samples.length >= MIN_P90_SAMPLES ? percentile(tlsValues, 0.9) : Math.max(...tlsValues);
   const tlsAllowanceS = tlsRaw > TLS_ALLOWANCE_FLOOR_S ? ceil5(tlsRaw) : TLS_ALLOWANCE_FLOOR_S;
   return { ownedS, endToEndS: ownedS + tlsAllowanceS, tlsAllowanceS, samples: samples.length };
+}
+
+/**
+ * The seed for `provider` + `mode` from the calibrated rows (samples > 0) of
+ * that mode on every other provider, or undefined when there are none.
+ * @returns {{ownedS: number, endToEndS: number, tlsAllowanceS: number, samples: 0, seededFrom: string[]} | undefined}
+ */
+export function seededRow(budgets, provider, mode) {
+  const from = [];
+  for (const [p, modes] of Object.entries(budgets)) {
+    if (p === provider) continue;
+    for (const [cls, row] of Object.entries(modes[mode] ?? {})) {
+      if (row.samples > 0) from.push({ name: `${p}/${mode}/${cls}`, row });
+    }
+  }
+  if (from.length === 0) return undefined;
+  const mean = (k) => from.reduce((sum, f) => sum + f.row[k], 0) / from.length;
+  const ownedS = ceil5(mean('ownedS'));
+  const tlsAllowanceS = Math.max(TLS_ALLOWANCE_FLOOR_S, ceil5(mean('tlsAllowanceS')));
+  return {
+    ownedS,
+    endToEndS: ownedS + tlsAllowanceS,
+    tlsAllowanceS,
+    samples: 0,
+    seededFrom: from.map((f) => f.name).sort(),
+  };
+}
+
+/** The row key a provider's seed goes in: `standard` when classless, else `any`. */
+export function seedClass(provider) {
+  return declaredClasses(provider).includes(STANDARD_CLASS) ? STANDARD_CLASS : ANY_CLASS;
+}
+
+/**
+ * Seed every supported provider + mode that has no row. Seeds are computed
+ * from the calibrated table alone, so none feeds another. Mutates and returns
+ * `budgets`, plus the seeds it added.
+ */
+export function addSeeds(budgets) {
+  const seeds = [];
+  for (const provider of Object.keys(PROVIDERS).sort()) {
+    for (const mode of supportedModes(provider)) {
+      if (budgets[provider]?.[mode]) continue;
+      const row = seededRow(budgets, provider, mode);
+      if (row) seeds.push({ provider, mode, cls: seedClass(provider), ...row });
+    }
+  }
+  for (const { provider, mode, cls, ...row } of seeds) {
+    budgets[provider] ??= {};
+    budgets[provider][mode] = { [cls]: row };
+  }
+  return { budgets, seeds };
 }
 
 /** The modes a provider can really run (its SUPPORTED_TIERS). */
@@ -156,6 +214,8 @@ export function buildTable({ groups }, since) {
     budgets[g.provider][g.mode][g.cls] = row;
     rows.push({ ...g, ...row });
   }
+  const { seeds } = addSeeds(budgets);
+  // What is left has no number at all: the check fails with `no budget yet`.
   const noData = [];
   for (const provider of Object.keys(PROVIDERS).sort()) {
     for (const mode of supportedModes(provider)) {
@@ -163,17 +223,20 @@ export function buildTable({ groups }, since) {
     }
   }
   const table = {
-    rule:
-      'owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS ' +
-      '(15, or ceil5 of the TLS first-look statistic when above 15). Regenerate with ' +
-      'scripts/calibrate-deploy-budgets.js.',
+    rule: RULE,
     since,
     budgets,
   };
-  return { table, rows, noData };
+  return { table, rows, seeds, noData };
 }
 
-export function renderReport({ rows, noData }, since) {
+export const RULE =
+  'owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS ' +
+  '(15, or ceil5 of the TLS first-look statistic when above 15). A provider + mode with no ' +
+  "samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the " +
+  'other providers. Regenerate with scripts/calibrate-deploy-budgets.js.';
+
+export function renderReport({ rows, seeds = [], noData }, since) {
   const out = [
     `# Deploy budgets (runs since ${since})`,
     '',
@@ -184,6 +247,13 @@ export function renderReport({ rows, noData }, since) {
         `| ${r.provider} | ${r.mode} | ${r.cls} | ${r.samples} | ${r.ownedS} | ${r.endToEndS} | ${r.tlsAllowanceS} | ${
           r.samples >= MIN_P90_SAMPLES ? 'p90 + 15' : 'max + 30'
         } |`,
+    ),
+    '',
+    '## Seeded (no samples yet; the mean of the other providers until a cold deploy passes)',
+    '',
+    ...seeds.map(
+      (x) =>
+        `- ${x.provider}/${x.mode}/${x.cls}: owned ${x.ownedS} s, end-to-end ${x.endToEndS} s, from ${x.seededFrom.join(', ')}`,
     ),
     '',
     '## No data (no number; the check fails with `no budget yet`)',
