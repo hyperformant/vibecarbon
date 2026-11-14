@@ -41,12 +41,22 @@ interface Construction {
   type: string;
 }
 
+const badImports: string[] = [];
+
 function constructions(): Construction[] {
   const out: Construction[] = [];
   for (const file of walk(join(ROOT, 'src', 'lib'))) {
     const src = readFileSync(file, 'utf8');
     // import * as <ns> from '<pkg>'
     const ns: Record<string, string> = {};
+    for (const m of src.matchAll(/^\s*(?:import|export)\b[^;]*?from\s+['"]([^'"]+)['"]/gm)) {
+      if (
+        SDKS[m[1]] &&
+        !new RegExp(`^\\s*import \\* as \\w+ from ['"]${m[1]}['"]`, 'm').test(m[0])
+      ) {
+        badImports.push(`${file}: ${m[0].trim()}`);
+      }
+    }
     for (const m of src.matchAll(/import \* as (\w+) from ['"]([^'"]+)['"]/g)) {
       if (SDKS[m[2]]) ns[m[1]] = m[2];
     }
@@ -66,6 +76,13 @@ function constructions(): Construction[] {
 const found = constructions();
 
 describe('stack probe census', () => {
+  it('every SDK import is `import * as X from <pkg>`, the one form the walk reads', () => {
+    expect(
+      badImports,
+      `these files import a provider SDK in a form the census cannot follow (a named or default import hides its constructions); use import * as X: ${badImports.join('; ')}`,
+    ).toEqual([]);
+  });
+
   it('finds the constructions (guards against an empty walk)', () => {
     expect(found.map((c) => c.type)).toContain('hcloud:index/server:Server');
     expect(new Set(found.map((c) => c.provider)).size).toBe(5);

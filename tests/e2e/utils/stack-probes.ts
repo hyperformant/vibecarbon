@@ -154,11 +154,16 @@ export function probeFor(
     provider === 'scaleway' ? { 'X-Auth-Token': o.token } : { Authorization: `Bearer ${o.token}` };
   const get: Get = async (url) => {
     try {
+      // Never follow a redirect: one that ends in a 404 must not read gone.
       const res = await doFetch(url, {
         method: 'GET',
         headers,
+        redirect: 'manual',
         signal: AbortSignal.timeout(30_000),
       });
+      try {
+        await res.body?.cancel();
+      } catch {}
       return res.status;
     } catch {
       return 'error';

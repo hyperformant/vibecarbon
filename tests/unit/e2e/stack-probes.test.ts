@@ -6,6 +6,7 @@ interface Seen {
   url: string;
   headers: Record<string, string>;
   method: string;
+  redirect?: RequestRedirect;
 }
 
 function rig(status: number | ((url: string) => number) = 404) {
@@ -15,6 +16,7 @@ function rig(status: number | ((url: string) => number) = 404) {
       url: String(url),
       headers: (init?.headers ?? {}) as Record<string, string>,
       method: init?.method ?? 'GET',
+      redirect: init?.redirect,
     });
     const s = typeof status === 'function' ? status(String(url)) : status;
     return new Response(null, { status: s });
@@ -191,11 +193,10 @@ const cases: Case[] = [
 ];
 
 const res = (c: Case): RecordedResource => ({ type: c.type, id: c.id, ...c.extra });
-const opts = (fetchImpl: typeof fetch, provider: string) => ({
+const opts = (fetchImpl: typeof fetch, _provider: string) => ({
   token: 'tok',
   env: {},
   fetchImpl,
-  ...(provider === 'x' ? {} : {}),
 });
 
 describe('probeFor: one URL per type', () => {
@@ -270,6 +271,39 @@ describe('probeFor: edges', () => {
     const probe = probeFor('vultr', opts(r.fetchImpl, 'vultr'));
     await probe({ type: T('vultr', 'Instance'), id: '../x?y' });
     expect(r.seen[0].url).toBe('https://api.vultr.com/v2/instances/..%2Fx%3Fy');
+  });
+});
+
+describe('probeFor: transport', () => {
+  it('never follows redirects, and a 301 is unknown', async () => {
+    const r = rig(301);
+    const probe = probeFor('hetzner', opts(r.fetchImpl, 'hetzner'));
+    expect(await probe({ type: T('hetzner', 'Server'), id: '1' })).toBe('unknown');
+    expect(r.seen[0].redirect).toBe('manual');
+  });
+
+  it('cancels the response body after reading the status', async () => {
+    let cancelled = 0;
+    const fetchImpl = (async () => ({
+      status: 404,
+      body: { cancel: async () => void cancelled++ },
+    })) as unknown as typeof fetch;
+    const probe = probeFor('hetzner', opts(fetchImpl, 'hetzner'));
+    expect(await probe({ type: T('hetzner', 'Server'), id: '1' })).toBe('gone');
+    expect(cancelled).toBe(1);
+  });
+
+  it('a body that will not cancel does not change the answer', async () => {
+    const fetchImpl = (async () => ({
+      status: 200,
+      body: {
+        cancel: async () => {
+          throw new Error('locked');
+        },
+      },
+    })) as unknown as typeof fetch;
+    const probe = probeFor('hetzner', opts(fetchImpl, 'hetzner'));
+    expect(await probe({ type: T('hetzner', 'Server'), id: '1' })).toBe('present');
   });
 });
 

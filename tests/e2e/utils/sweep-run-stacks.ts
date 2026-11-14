@@ -19,8 +19,11 @@
  *   unreadable file and an incomplete listing all keep the stack, with one
  *   log line naming why. A wrong delete orphans live cloud resources; a wrong
  *   keep costs one S3 object.
- * - Delete history and locks first and the stack file last, so a half-done
- *   delete leaves a stack the next sweep finds and finishes.
+ * - A pending operation keeps the stack, and so does an incomplete stacks
+ *   listing (nothing is deleted that pass).
+ * - Delete history and locks first, then the backup, then the stack file in
+ *   its own call, so a half-done delete leaves a stack the next sweep finds
+ *   and finishes.
  * - Never a failed sweep. Stacks cost nothing, so every failure is a warning.
  */
 
@@ -66,6 +69,16 @@ export function recordedResources(stackFile: unknown): RecordedResource[] {
       typeof r.id === 'string' &&
       r.id !== '',
   );
+}
+
+/**
+ * An in-flight create from a killed run has no id yet and may exist at the
+ * provider (shape: src/lib/iac/state-pending.js), so it is not "recorded".
+ */
+function hasPendingOperations(stackFile: unknown): boolean {
+  const ops = (stackFile as { checkpoint?: { latest?: { pending_operations?: unknown } } } | null)
+    ?.checkpoint?.latest?.pending_operations;
+  return Array.isArray(ops) && ops.length > 0;
 }
 
 interface StackKeys {
@@ -131,12 +144,13 @@ export async function sweepRunStacks(
   let stacks: StackKeys[];
   try {
     const listing = await store.list(STACKS);
-    if (!listing.complete) {
-      console.warn(
-        `${tag} [sweep] State listing incomplete; stacks past the last readable page stay`,
-      );
-    }
     stacks = groupStacks(listing.keys, ownsProject);
+    if (!listing.complete) {
+      // A .json on an unreadable page next to its .bak on a readable one
+      // looks like an orphan .bak, and the stale backup would decide.
+      console.warn(`${tag} [sweep] State listing incomplete; no stack is deleted this pass`);
+      return { deleted, kept: stacks.map((s) => `${s.project}/${s.stack}`) };
+    }
   } catch (e) {
     console.warn(`${tag} [sweep] Stack cleanup skipped: ${errText(e)}`);
     return { deleted, kept };
@@ -154,6 +168,10 @@ export async function sweepRunStacks(
       const file = await store.read(decidedOn);
       if (file == null) {
         keep(`could not read ${decidedOn}`);
+        continue;
+      }
+      if (hasPendingOperations(file)) {
+        keep('it has a pending operation (a create may exist at the provider)');
         continue;
       }
       const resources = recordedResources(file);
@@ -180,9 +198,18 @@ export async function sweepRunStacks(
         keep('history or lock delete incomplete');
         continue;
       }
-      const files = [s.bak, s.json].filter((k): k is string => k !== undefined);
-      const filesGone = await store.remove(files);
-      if (files.some((k) => !filesGone.includes(k))) {
+      // The backup first and the stack file in its own later call, so a
+      // half failure leaves the .json, never a stale orphan .bak judged alone.
+      let incomplete = false;
+      for (const key of [s.bak, s.json]) {
+        if (key === undefined) continue;
+        const gone = await store.remove([key]);
+        if (!gone.includes(key)) {
+          incomplete = true;
+          break;
+        }
+      }
+      if (incomplete) {
         keep('stack file delete incomplete');
         continue;
       }

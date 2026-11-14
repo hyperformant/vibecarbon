@@ -187,6 +187,60 @@ describe('sweepRunStacks', () => {
     expect(f.removed).toEqual([]);
   });
 
+  it('deletes nothing when the stacks listing is incomplete (a stale .bak must not decide)', async () => {
+    const f = fake({ [STACK]: stackFile([srv('1')]), [BAK]: stackFile([]) });
+    const list = f.store.list;
+    f.store.list = async (p) =>
+      p === '.pulumi/stacks/' ? { keys: [BAK], complete: false } : list(p);
+    const probe = vi.fn(allGone);
+    const r = await sweepRunStacks('T', owns, f.store, probe);
+    expect(f.removed).toEqual([]);
+    expect(probe).not.toHaveBeenCalled();
+    expect(r).toEqual({ deleted: [], kept: ['p/s'] });
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('keeps a stack with a pending operation (an in-flight create may exist at the provider)', async () => {
+    const file = stackFile([]);
+    (file.checkpoint.latest as Record<string, unknown>).pending_operations = [
+      { type: 'creating', resource: { urn: 'urn:x', type: 'hcloud:index/server:Server' } },
+    ];
+    const f = fake({ [STACK]: file });
+    const r = await sweepRunStacks('T', owns, f.store, allGone);
+    expect(r).toEqual({ deleted: [], kept: ['p/s'] });
+    expect(f.removed).toEqual([]);
+  });
+
+  it('deletes a stack whose pending_operations is an empty list', async () => {
+    const file = stackFile([]);
+    (file.checkpoint.latest as Record<string, unknown>).pending_operations = [];
+    const f = fake({ [STACK]: file });
+    expect((await sweepRunStacks('T', owns, f.store, allGone)).deleted).toEqual(['p/s']);
+  });
+
+  it('removes in separate calls, in order: history and locks, then the backup, then the stack file', async () => {
+    const f = fake({ [STACK]: stackFile([]), [BAK]: stackFile([]) }, [...HIST, ...LOCK]);
+    await sweepRunStacks('T', owns, f.store, allGone);
+    const removes = f.calls
+      .filter((c) => c.startsWith('remove '))
+      .map((c) => c.slice(7).split(','));
+    expect(removes.length).toBe(3);
+    expect([...removes[0]].sort()).toEqual([...HIST, ...LOCK].sort());
+    expect(removes[1]).toEqual([BAK]);
+    expect(removes[2]).toEqual([STACK]);
+  });
+
+  it('leaves the stack file when the backup removal fails', async () => {
+    const f = fake({ [STACK]: stackFile([]), [BAK]: stackFile([]) });
+    f.store.remove = async (ks) => {
+      f.removed.push(...ks);
+      return ks.filter((k) => k !== BAK);
+    };
+    const r = await sweepRunStacks('T', owns, f.store, allGone);
+    expect(r.kept).toEqual(['p/s']);
+    expect(f.removed).not.toContain(STACK);
+  });
+
   it('runs at most 4 probes at a time', async () => {
     const f = fake({ [STACK]: stackFile(Array.from({ length: 12 }, (_, i) => srv(String(i)))) });
     let active = 0;
