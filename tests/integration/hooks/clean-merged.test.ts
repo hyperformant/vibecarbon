@@ -48,8 +48,11 @@ function context(stdout: string): string {
 afterEach(() => {
   for (const p of procs.splice(0)) p.kill('SIGKILL');
   for (const r of rigs.splice(0)) {
-    git(r.repo, 'worktree', 'prune');
-    r.cleanup();
+    try {
+      git(r.repo, 'worktree', 'prune');
+    } finally {
+      r.cleanup();
+    }
   }
   for (const d of extraDirs.splice(0)) spawnSync('rm', ['-rf', d]);
 });
@@ -259,5 +262,57 @@ describe('.claude/hooks/clean-merged.sh', () => {
     expect(context(out.stdout)).toContain(
       `Left ${wt.path} (feat-n): cannot tell whether something is working in it`,
     );
+  });
+
+  it('leaves a locked worktree and says git would not remove it', () => {
+    const r = rig();
+    const wt = addBranchWorktree(r, 'feat-lock');
+    squashMerge(r, 'feat-lock');
+    setMergedPrs(r, [`feat-lock ${wt.tip}`]);
+    git(r.repo, 'worktree', 'lock', wt.path);
+    const out = run(r);
+    expect(out.status).toBe(0);
+    expect(existsSync(wt.path)).toBe(true);
+    expect(branches(r.repo)).toContain('feat-lock');
+    expect(context(out.stdout)).toContain(`Left ${wt.path} (feat-lock): git would not remove it`);
+  });
+
+  it("removes a detached worktree whose HEAD was merged with a merge commit, and keeps one detached on the default branch's first-parent line", () => {
+    const r = rig();
+    const feat = addBranchWorktree(r, 'feat-det');
+    const merged = join(r.root, 'wt-det-merged');
+    const fresh = join(r.root, 'wt-det-fresh');
+    git(r.repo, 'worktree', 'add', '-q', '--detach', merged, feat.tip);
+    git(r.repo, 'worktree', 'add', '-q', '--detach', fresh, r.def);
+    git(r.repo, 'merge', '-q', '--no-ff', '-m', 'merge feat-det', 'origin/feat-det');
+    git(r.repo, 'push', '-q', 'origin', r.def);
+    // The branch's own worktree is on the same tip; keep it busy so only the detached ones matter.
+    const out = run(r, { path: makeBareBin(r) });
+    expect(out.status).toBe(0);
+    expect(existsSync(merged)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(context(out.stdout)).toContain(`Removed merged worktree ${merged} (detached)`);
+  });
+
+  it("matches a merged PR by the upstream's name when the local branch is named differently", () => {
+    const r = rig();
+    git(r.repo, 'checkout', '-q', '-b', 'tmp-x', r.def);
+    writeFileSync(join(r.repo, 'x.txt'), 'x\n');
+    git(r.repo, 'add', '.');
+    git(r.repo, 'commit', '-q', '-m', 'x');
+    const tip = git(r.repo, 'rev-parse', 'HEAD');
+    git(r.repo, 'push', '-q', 'origin', 'tmp-x:feat-x');
+    git(r.repo, 'checkout', '-q', '-b', 'feat-x', r.def);
+    writeFileSync(join(r.repo, 'y.txt'), 'y\n');
+    git(r.repo, 'add', '.');
+    git(r.repo, 'commit', '-q', '-m', 'y');
+    git(r.repo, 'checkout', '-q', r.def);
+    git(r.repo, 'branch', '--track', 'wip', 'origin/feat-x');
+    git(r.repo, 'branch', '-D', 'tmp-x');
+    setMergedPrs(r, [`feat-x ${tip}`]);
+    const out = run(r);
+    expect(branches(r.repo)).not.toContain('wip');
+    expect(branches(r.repo)).toContain('feat-x');
+    expect(context(out.stdout)).toContain('Deleted merged branch wip');
   });
 });

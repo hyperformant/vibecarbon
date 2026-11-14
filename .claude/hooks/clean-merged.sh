@@ -14,7 +14,12 @@
 #
 # A worktree is left alone, with a reason in the output, when this session is
 # working in it, when it has uncommitted changes, or when another process has
-# its working directory inside it. Nothing is ever forced.
+# its working directory inside it. Nothing is ever forced. If git itself
+# refuses (a locked worktree, submodules), the worktree and its branch stay.
+#
+# Removing a worktree deletes everything in its directory, ignored files
+# included (node_modules, .env files), exactly as `git worktree remove` does.
+# Only tracked changes and untracked files keep a worktree.
 #
 # Test-only override: CLEAN_MERGED_PROC_DIR replaces /proc in the process scan.
 #
@@ -171,7 +176,10 @@ while IFS='|' read -r WT_PATH WT_HEAD WT_BRANCH; do
     add_line "Left $WT_PATH ($LABEL): $REASON"
     continue
   fi
-  git worktree remove "$WT_PATH" >/dev/null 2>&1 || continue
+  if ! git worktree remove "$WT_PATH" >/dev/null 2>&1; then
+    add_line "Left $WT_PATH ($LABEL): git would not remove it"
+    continue
+  fi
   add_line "Removed merged worktree $WT_PATH ($LABEL)"
   if [ -n "$WT_BRANCH" ]; then
     git branch -D "$WT_BRANCH" >/dev/null 2>&1 || true
