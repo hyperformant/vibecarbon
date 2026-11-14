@@ -37,8 +37,9 @@
  * max + 30) put about one in ten cold deploys over budget on runs it had not
  * seen, which fails most 16-scenario matrices. Judged leave-one-out over 198
  * cold deploys since 2026-11-05 (102 GitHub, 96 local), this rule missed 1%
- * on GitHub and none locally, while every budget stays near 1.8x a typical
- * deploy (2x at most), so a deploy that doubles still fails. The +60 is the
+ * on GitHub and none locally. Every budget sits 1.7x to 2.03x its row's
+ * median, so a deploy that doubles fails on every row but the two fastest
+ * (Hetzner compose, about 2 minutes), where it just passes. The +60 is the
  * laptop's fixed overhead: local medians ran 1.4-1.5x GitHub's on the short
  * Hetzner compose deploys and about 1.07x elsewhere.
  *
