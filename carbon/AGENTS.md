@@ -330,6 +330,19 @@ This project uses Claude Code's agent teams with a **lead-coordinator** that orc
 
 **Configuration**: the agent definitions live in `.claude/agents/`, one `.md` per agent — edit them to teach the team about your project. `.claude/settings.json` registers the hooks and the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var required for agent teams, and each agent keeps notes under `.claude/agent-memory/<agent>/`.
 
+## Claude Code hooks
+
+Two hooks keep your checkout tidy so finished work does not pile up.
+
+- `ff-main.sh` fast-forwards your local default branch to `origin` when a session starts and after `gh pr merge`, so new branches start from current code. It only fast-forwards: it never merges, resets or discards anything.
+- `clean-merged.sh` removes local worktrees and branches whose work has merged, at the same two moments.
+
+A branch counts as merged only on proof: its tip equals the head of a merged PR with the same branch name (this needs `gh`), or it was merged into the default branch with a merge commit. A branch that sits on the default branch's own line, such as one you just cut from it, is never treated as merged.
+
+A worktree stays, and the hook tells you why, when this session is working in it, when it has uncommitted changes or untracked files, when another process is working in it, when the hook cannot tell, or when git refuses to remove it (for example, it is locked). Removing a worktree deletes its ignored files too, such as `node_modules` and `.env` files, as `git worktree remove` does.
+
+Both hooks do nothing without an `origin` remote. They are registered in `.claude/settings.json`.
+
 ## File Uploads (signed URLs)
 
 Files go from the browser straight to the S3 bucket. They never touch the server's disk and never pass through Hono, so uploads stay fast and the VPS stays small. The server only signs short-lived URLs (`src/server/lib/storage.ts`).

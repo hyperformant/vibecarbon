@@ -31,6 +31,11 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('volumes/db/wal-archive.sh')).toBe('safe');
   });
 
+  it('classifies Claude hook scripts as safe so projects get fixes', () => {
+    expect(getFilePolicy('.claude/hooks/clean-merged.sh')).toBe('safe');
+    expect(getFilePolicy('.claude/hooks/ff-main.sh')).toBe('safe');
+  });
+
   it('classifies user-blended files as merge', () => {
     expect(getFilePolicy('docker-compose.yml')).toBe('merge');
     expect(getFilePolicy('package.json')).toBe('merge');
