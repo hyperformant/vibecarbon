@@ -406,6 +406,18 @@ export async function run(args = []) {
     );
     process.exit(1);
   }
+  // A db volume left holding another PostgreSQL major crash-loops the db with
+  // only "unhealthy" from compose; say so before anything else starts or is
+  // written, so a refused run leaves .env and any old stack as they were.
+  const db = resolveDbImage();
+  reportDbVolumeMismatch(
+    checkDbVolumeVersion({
+      composeProject: resolved.name,
+      image: db.image,
+      tag: db.tag,
+      notify: (msg) => p.log.info(msg),
+    }),
+  );
   if (resolved.action === 'adopt') {
     p.log.info(
       `this project moved from ${formatStackPath(resolved.from)}, so vibecarbon is reusing its local database`,
@@ -420,12 +432,6 @@ export async function run(args = []) {
     );
   }
   process.env.COMPOSE_PROJECT_NAME = resolved.name;
-  // A db volume left holding another PostgreSQL major crash-loops the db with
-  // only "unhealthy" from compose; say so before anything else starts.
-  const db = resolveDbImage();
-  reportDbVolumeMismatch(
-    checkDbVolumeVersion({ composeProject: resolved.name, image: db.image, tag: db.tag }),
-  );
   // dev:start recreates the resolved stack, so it is never an orphan of itself.
   warnAboutOrphanStacks({ exclude: [resolved.name], list: () => stacks });
 
