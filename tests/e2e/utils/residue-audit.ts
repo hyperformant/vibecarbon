@@ -5,8 +5,8 @@
  *
  * Read-only by construction:
  * - every HTTP call goes through `get`, which sends GET and nothing else;
- * - object storage is touched by ListBuckets (one guarded client per region,
- *   any other command throws) and by the state store's `where`/`list`;
+ * - object storage is touched by ListBuckets (one client per region, wrapped by
+ *   listBucketsOnly so any other command throws) and by the state store's `where`/`list`;
  *   `remove` is never called.
  *
  * Public output: this repo and its Actions logs are public. The summary names
@@ -89,9 +89,15 @@ export const FIXTURES: readonly {
   },
 ];
 
-const TEST_NAME = /(testapp|citest)-/;
+// A scratch project name at the start of a name or after a separator (`project:`,
+// `cluster:`, `environment:`, a path slash), so `mytestapp-site` is not ours.
+// Shapes seen: `citest-<mode>-<ms>-<id>-master`, `testapp-...-storage`, tags
+// `project:<name>`, `cluster:<name>`, and the SCRATCH_PROJECT form.
+const TEST_NAME = /(?:^|[:/\s])(?:testapp|citest)-/;
 // <envPrefix>-<6 hex run tag>[rN], as a whole DNS label (fresh-dns-names.ts).
-const TEST_DNS = /(?:^|\.)(?:ci[a-z]?|[a-z])\d-[0-9a-f]{6}(?:r\d+)?(?:\.|$)/;
+// Env prefixes are e/d/l/v/s + digit, or ci + optional letter + digit under the
+// ci namespace (remapEnvPrefix), so `x1-abcdef.example.io` is not ours.
+const TEST_DNS = /(?:^|\.)(?:[edlvs]|ci[dlvs]?)\d-[0-9a-f]{6}(?:r\d+)?(?:\.|$)/;
 const GENERIC_TAG = /^(role|environment|node-pool|managed-by|os-flavor|cluster-autoscaler-node):/;
 const STATE_RESIDUE = /^\.pulumi\/(stacks|locks)\/|\.json\.bak$/;
 
@@ -182,6 +188,23 @@ class HttpError extends Error {
   }
 }
 class PaginationError extends Error {}
+
+/**
+ * The only way the audit holds an S3 client: `send` refuses every command but
+ * ListBuckets, so even the real SDK client cannot write through it.
+ */
+export function listBucketsOnly(client: S3Like): S3Like {
+  return {
+    send: async (command: any) => {
+      if (command?.constructor?.name !== 'ListBucketsCommand') {
+        throw new Error(
+          `read-only audit: refusing ${command?.constructor?.name ?? 'unknown'} command`,
+        );
+      }
+      return client.send(command);
+    },
+  };
+}
 
 export interface AuditDeps {
   /** Builds the S3 client for ListBuckets in one region (test seam). */
@@ -358,9 +381,9 @@ export async function inventory(
           region,
           endpoint: cls.ENDPOINTS[region],
         };
-        const client: S3Like = deps.s3
-          ? deps.s3(cfg)
-          : new cls(cfg.accessKey, cfg.secretKey, region).getClient();
+        const client = listBucketsOnly(
+          deps.s3 ? deps.s3(cfg) : new cls(cfg.accessKey, cfg.secretKey, region).getClient(),
+        );
         const { ListBucketsCommand } = await import('@aws-sdk/client-s3');
         let out: any;
         try {
@@ -644,6 +667,12 @@ export async function inventory(
     });
   } else if (!(provider in testConfig.e2e.providers) && provider !== 'cloudflare') {
     incomplete.push(`${provider}: no inventory for this provider`);
+  }
+
+  // No e2e zone configured: say so, and request nothing for DNS.
+  if (!zone) {
+    incomplete.push(`${provider}: no e2e zone configured`);
+    kinds = kinds.filter((k) => !k.label.startsWith('dns '));
   }
 
   // Run every kind; a failure is classified, never swallowed.

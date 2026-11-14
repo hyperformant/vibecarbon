@@ -1,5 +1,5 @@
 /** The weekly read-only residue audit: classifier, summary, exit code, and the GET-only guarantee. */
-import { ListBucketsCommand } from '@aws-sdk/client-s3';
+import { DeleteBucketCommand, ListBucketsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { describe, expect, it } from 'vitest';
 import { testConfig } from '../../config.js';
 import {
@@ -8,6 +8,7 @@ import {
   FIXTURES,
   type InventoryRow,
   inventory,
+  listBucketsOnly,
   RESIDUE_MIN_AGE_MS,
   renderSummary,
 } from '../../e2e/utils/residue-audit.js';
@@ -125,6 +126,63 @@ describe('classify', () => {
 
   it('everything else is other', () => {
     expect(classify(row({ name: 'my-real-app' }), NOW)).toBe('other');
+  });
+});
+
+describe('test-shaped names', () => {
+  it('a real name that merely contains testapp- is not test-shaped', () => {
+    const rows = [
+      row({ name: 'mytestapp-site' }),
+      row({ kind: 'tag', name: 'project:mytestapp-site' }),
+      row({ kind: 'dns-record', name: 'x1-abcdef.example.io' }),
+    ];
+    for (const r of rows) expect(classify(r, NOW)).toBe('other');
+    const md = renderSummary(
+      rows.map((r) => ({ ...r, verdict: classify(r, NOW) })),
+      [],
+    );
+    expect(md).not.toContain('mytestapp-site');
+    expect(md).not.toContain('example.io');
+  });
+
+  it('still catches every real name shape', () => {
+    const ms = NOW - 9 * H;
+    const names: Array<[string, string]> = [
+      ['server', `citest-k8s-${ms}-abc123-master`],
+      ['server', `testapp-compose-ha-${ms}-abc123-primary`],
+      ['volume', `testapp-compose-${ms}-abc123-data`],
+      ['bucket', `testapp-compose-${ms}-abc123-storage`],
+      ['firewall', `citest-compose-${ms}-abc123-firewall`],
+      ['tag', `project:testapp-k8s-${ms}-abc123`],
+      ['tag', `cluster:citest-k8s-ha-${ms}-abc123`],
+      ['tag', 'environment:testapp-d3'],
+      ['dns-record', 'e1-abc123.carbonstack.dev'],
+      ['dns-record', 'cil1-abc123r2.linode.appcarbon.dev'],
+      ['dns-record', 'api.d2-abc123.do.appcarbon.dev'],
+    ];
+    for (const [kind, name] of names) {
+      expect(classify(row({ kind, name, createdAt: ago(9 * H) }), NOW), name).toBe('residue');
+    }
+  });
+});
+
+describe('listBucketsOnly', () => {
+  it('the bucket listing client refuses any command but ListBuckets', async () => {
+    const sent: string[] = [];
+    const wrapped = listBucketsOnly({
+      send: async (c: { constructor: { name: string } }) => {
+        sent.push(c.constructor.name);
+        return { Buckets: [] };
+      },
+    });
+    await expect(wrapped.send(new ListBucketsCommand({}))).resolves.toEqual({ Buckets: [] });
+    await expect(wrapped.send(new DeleteBucketCommand({ Bucket: 'b' }))).rejects.toThrow(
+      /refusing/,
+    );
+    await expect(wrapped.send(new PutObjectCommand({ Bucket: 'b', Key: 'k' }))).rejects.toThrow(
+      /refusing/,
+    );
+    expect(sent).toEqual(['ListBucketsCommand']);
   });
 });
 
@@ -302,6 +360,25 @@ describe('inventory', () => {
       's2',
       's3',
     ]);
+  });
+
+  it('a provider with no e2e zone is incomplete and never requests name=undefined', async () => {
+    const domains = testConfig.e2e.domains as Record<string, string>;
+    const saved = domains.hetzner;
+    const urls: string[] = [];
+    const f = (async (u: string) => {
+      urls.push(String(u));
+      return json({});
+    }) as unknown as typeof fetch;
+    try {
+      delete domains.hetzner;
+      const out = await inventory('hetzner', ENV, f, { s3: s3Empty, makeStore: okStore() });
+      expect(out.complete).toBe(false);
+      expect(out.incomplete.join(' ')).toContain('hetzner: no e2e zone configured');
+      expect(urls.some((u) => /undefined|\/zones/.test(u))).toBe(false);
+    } finally {
+      domains.hetzner = saved;
+    }
   });
 
   it('a 403 on one kind is not covered, not incomplete', async () => {
