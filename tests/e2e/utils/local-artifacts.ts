@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 /**
  * Best-effort docker call: capture stdout, swallow everything else. A missing
@@ -106,6 +106,19 @@ export function parseScratchProject(
   return m ? { projectName: m[1], createdAtMs: Number(m[2]) } : null;
 }
 
+/** Checkout roots of every worktree of this repository (`git worktree list`). */
+function gitWorktrees(): string[] {
+  const out = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  return out
+    .split('\n')
+    .filter((l) => l.startsWith('worktree '))
+    .map((l) => l.slice('worktree '.length));
+}
+
 /**
  * Remove what EARLIER runs left on this machine, at the start of a run.
  * reapLocalBuildArtifacts only runs at the end of its own scenario, so a
@@ -126,6 +139,8 @@ export async function reapStaleLocalArtifacts(
     tempMaxAgeMs?: number;
     tmpRoot?: string;
     rigDir?: string;
+    /** Checkout roots to read rig sentinels from; defaults to `git worktree list`. */
+    worktreeLister?: () => string[];
     liveProjects?: Set<string>;
     docker?: (argv: readonly string[]) => string;
   } = {},
@@ -139,21 +154,38 @@ export async function reapStaleLocalArtifacts(
 
   try {
     let live = o.liveProjects;
+    const liveDirs: string[] = [];
     if (!live) {
       live = new Set<string>();
-      const rigDir = o.rigDir ?? join(process.cwd(), 'tests', 'results');
-      try {
-        for (const f of readdirSync(rigDir)) {
-          if (!f.startsWith('.rig-') || !f.endsWith('.json')) continue;
-          try {
-            const rig = JSON.parse(readFileSync(join(rigDir, f), 'utf8'));
-            if (typeof rig?.projectName === 'string') live.add(rig.projectName);
-          } catch {
-            // an unreadable sentinel names nothing
+      let rigDirs: string[];
+      if (o.rigDir) {
+        rigDirs = [o.rigDir];
+      } else {
+        rigDirs = [join(process.cwd(), 'tests', 'results')];
+        try {
+          for (const root of (o.worktreeLister ?? gitWorktrees)()) {
+            const dir = join(root, 'tests', 'results');
+            if (!rigDirs.includes(dir)) rigDirs.push(dir);
           }
+        } catch {
+          // git failed: the cwd sentinels alone
         }
-      } catch {
-        // no results dir, no kept rigs
+      }
+      for (const rigDir of rigDirs) {
+        try {
+          for (const f of readdirSync(rigDir)) {
+            if (!f.startsWith('.rig-') || !f.endsWith('.json')) continue;
+            try {
+              const rig = JSON.parse(readFileSync(join(rigDir, f), 'utf8'));
+              if (typeof rig?.projectName === 'string') live.add(rig.projectName);
+              if (typeof rig?.projectDir === 'string') liveDirs.push(resolve(rig.projectDir));
+            } catch {
+              // an unreadable sentinel names nothing
+            }
+          }
+        } catch {
+          // no results dir, no kept rigs
+        }
       }
     }
 
@@ -186,6 +218,9 @@ export async function reapStaleLocalArtifacts(
       for (const name of readdirSync(tmpRoot)) {
         if (!name.startsWith('vibecarbon-e2e-')) continue;
         const path = join(tmpRoot, name);
+        // A kept rig's project dir lives inside a run's temp dir, whose own
+        // mtime does not move while iter-step works in it.
+        if (liveDirs.some((d) => d === path || d.startsWith(path + sep))) continue;
         try {
           const st = statSync(path);
           const isCaBundle = st.isFile() && /^vibecarbon-e2e-ca-bundle-.*\.pem$/.test(name);

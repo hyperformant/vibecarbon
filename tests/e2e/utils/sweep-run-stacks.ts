@@ -72,6 +72,23 @@ export function recordedResources(stackFile: unknown): RecordedResource[] {
 }
 
 /**
+ * Whether a stack file has the shape recordedResources reads: an object with
+ * a `checkpoint` object whose `latest` is absent (an empty stack) or an
+ * object whose `resources` is absent or an array. Anything else (another
+ * state version, a string, `{}`) may hold resources this code cannot see, so
+ * the sweep keeps it instead of reading it as empty.
+ */
+export function isRecognizedStackFile(stackFile: unknown): boolean {
+  const isObj = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isObj(stackFile) || !isObj(stackFile.checkpoint)) return false;
+  const latest = stackFile.checkpoint.latest;
+  if (latest === undefined) return true;
+  if (!isObj(latest)) return false;
+  return latest.resources === undefined || Array.isArray(latest.resources);
+}
+
+/**
  * An in-flight create from a killed run has no id yet and may exist at the
  * provider (shape: src/lib/iac/state-pending.js), so it is not "recorded".
  */
@@ -86,6 +103,8 @@ interface StackKeys {
   stack: string;
   json?: string;
   bak?: string;
+  /** A `<stack>.json.gz` / `.json.zst` exists: a stack file this sweep cannot read. */
+  compressed?: string;
 }
 
 function groupStacks(keys: string[], ownsProject: (p: string) => boolean): StackKeys[] {
@@ -95,13 +114,20 @@ function groupStacks(keys: string[], ownsProject: (p: string) => boolean): Stack
     const parts = key.slice(STACKS.length).split('/');
     if (parts.length !== 2) continue;
     const [project, file] = parts;
+    const compression = /\.json\.(gz|zst)$/.exec(file);
     const isBak = file.endsWith('.json.bak');
-    if (!isBak && !file.endsWith('.json')) continue;
+    if (!compression && !isBak && !file.endsWith('.json')) continue;
     if (!ownsProject(project)) continue;
-    const stack = file.slice(0, file.length - (isBak ? '.json.bak'.length : '.json'.length));
+    const suffixLength = compression
+      ? compression[0].length
+      : isBak
+        ? '.json.bak'.length
+        : '.json'.length;
+    const stack = file.slice(0, file.length - suffixLength);
     const id = `${project}/${stack}`;
     const entry = byName.get(id) ?? { project, stack };
-    if (isBak) entry.bak = key;
+    if (compression) entry.compressed = key;
+    else if (isBak) entry.bak = key;
     else entry.json = key;
     byName.set(id, entry);
   }
@@ -138,12 +164,13 @@ export async function sweepRunStacks(
   ownsProject: (pulumiProject: string) => boolean,
   store: StateStoreApi,
   probe: ResourceProbe,
+  listPrefix: string = STACKS,
 ): Promise<{ deleted: string[]; kept: string[] }> {
   const deleted: string[] = [];
   const kept: string[] = [];
   let stacks: StackKeys[];
   try {
-    const listing = await store.list(STACKS);
+    const listing = await store.list(listPrefix);
     stacks = groupStacks(listing.keys, ownsProject);
     if (!listing.complete) {
       // A .json on an unreadable page next to its .bak on a readable one
@@ -164,10 +191,18 @@ export async function sweepRunStacks(
     };
     const warn = (msg: string) => console.warn(`${tag} [sweep] Stack ${name}: ${msg}`);
     try {
+      if (s.compressed) {
+        keep('compressed stack file, not judged');
+        continue;
+      }
       const decidedOn = s.json ?? (s.bak as string);
       const file = await store.read(decidedOn);
       if (file == null) {
         keep(`could not read ${decidedOn}`);
+        continue;
+      }
+      if (!isRecognizedStackFile(file)) {
+        keep('unrecognized stack file');
         continue;
       }
       if (hasPendingOperations(file)) {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  isRecognizedStackFile,
   type ProbeResult,
   type RecordedResource,
   recordedResources,
@@ -66,6 +67,20 @@ describe('recordedResources', () => {
     expect(recordedResources(stackFile(undefined))).toEqual([]);
     expect(recordedResources(null)).toEqual([]);
     expect(recordedResources('x')).toEqual([]);
+  });
+  it('recognizes only the checkpoint shape', () => {
+    expect(isRecognizedStackFile(stackFile(undefined))).toBe(true);
+    expect(isRecognizedStackFile(stackFile([srv('1')]))).toBe(true);
+    for (const bad of [
+      'x',
+      null,
+      {},
+      { version: 4, deployment: { resources: [srv('1')] } },
+      { checkpoint: { latest: { resources: 'nope' } } },
+      { checkpoint: { latest: 'x' } },
+    ]) {
+      expect(isRecognizedStackFile(bad)).toBe(false);
+    }
   });
 });
 
@@ -288,5 +303,33 @@ describe('sweepRunStacks', () => {
       kept: ['p/s'],
     });
     expect(warn).toHaveBeenCalled();
+  });
+
+  it('keeps a stack file it does not recognize, never probing', async () => {
+    for (const bad of ['x', {}, { version: 4, deployment: { resources: [srv('1')] } }]) {
+      const f = fake({ [STACK]: bad });
+      const probe = vi.fn(async (): Promise<ProbeResult> => 'present');
+      const r = await sweepRunStacks('T', owns, f.store, probe);
+      expect(r.deleted).toEqual([]);
+      expect(r.kept).toEqual(['p/s']);
+      expect(f.removed).toEqual([]);
+      expect(probe).not.toHaveBeenCalled();
+    }
+  });
+
+  it('keeps a stack with a compressed stack file beside a leftover backup', async () => {
+    for (const ext of ['gz', 'zst']) {
+      const f = fake({ [BAK]: stackFile([]) }, [`.pulumi/stacks/p/s.json.${ext}`]);
+      const r = await sweepRunStacks('T', owns, f.store, allGone);
+      expect(r.deleted).toEqual([]);
+      expect(r.kept).toEqual(['p/s']);
+      expect(f.removed).toEqual([]);
+    }
+  });
+
+  it('lists only the prefix it is given', async () => {
+    const f = fake({ [STACK]: stackFile([]) });
+    await sweepRunStacks('T', owns, f.store, allGone, '.pulumi/stacks/p/');
+    expect(f.calls[0]).toBe('list .pulumi/stacks/p/');
   });
 });

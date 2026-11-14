@@ -451,12 +451,16 @@ jobs:
         run: npx tsx tests/e2e/sweep-scaleway-ci.ts
 
       - name: Stale state sweep (CI namespace only)
-        # Every leg: removes the Pulumi stacks of past CI runs whose recorded
-        # resources are all gone (404 by id), from this leg's provider state
-        # bucket. Only citest- projects that started over 12 hours ago are
-        # judged, so a run in flight is never touched. Advisory: always exits
-        # 0 and prints a warning for a bucket it cannot reach. A provider
-        # whose storage secrets are absent prints "skipped (no credentials)".
+        # Runs on every leg and sweeps all five providers each time (a
+        # provider whose secrets are absent prints "skipped (no credentials)").
+        # The repetition is harmless: deletes are idempotent. Removes the
+        # Pulumi stacks of past CI runs whose recorded resources are all gone
+        # (404 by id). Only citest- projects that started over 12 hours ago
+        # are judged, so a run in flight is never touched. Advisory: exits 0
+        # and warns on a bucket it cannot reach; continue-on-error and the
+        # timeout keep a crash or a hang from reddening the leg.
+        continue-on-error: true
+        timeout-minutes: 15
         if: always()
         env:
           E2E_NAMESPACE: ci

@@ -148,6 +148,18 @@ describe('e2eStateStore', () => {
     await expect(s?.remove(['a'])).resolves.toEqual([]);
   });
 
+  it('a truncated page without a continuation token ends the listing incomplete', async () => {
+    const s3 = () => ({
+      send: async (cmd: { constructor: { name: string } }) =>
+        cmd.constructor.name === 'HeadBucketCommand'
+          ? {}
+          : { Contents: [{ Key: 'k1' }], IsTruncated: true },
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const s = e2eStateStore('hetzner', HETZNER_ENV, { s3 });
+    expect(await s?.list('.pulumi/stacks/')).toEqual({ keys: ['k1'], complete: false });
+  });
+
   it('returns null without storage credentials', () => {
     expect(e2eStateStore('hetzner', {})).toBeNull();
     expect(e2eStateStore('hetzner', { HETZNER_ACCESS_KEY: 'a' })).toBeNull();

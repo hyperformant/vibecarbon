@@ -218,6 +218,10 @@ export function e2eStateStore(
             new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
           );
           for (const o of page.Contents ?? []) if (o.Key) keys.push(o.Key);
+          if (page.IsTruncated && !page.NextContinuationToken) {
+            console.warn(`[state-store] ${provider}: listing ${prefix} was cut off with no way on`);
+            return { keys, complete: false };
+          }
           token = page.IsTruncated ? page.NextContinuationToken : undefined;
         } while (token);
       } catch (e) {

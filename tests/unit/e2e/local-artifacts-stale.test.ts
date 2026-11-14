@@ -155,4 +155,54 @@ describe('reapStaleLocalArtifacts', () => {
     });
     expect(r).toEqual({ images: 0, volumes: 0, tempDirs: 0 });
   });
+
+  it("keeps the run temp dir that holds a kept rig's project, whatever its age", async () => {
+    const oldAt = (NOW - STALE_TEMP_MAX_AGE_MS - HOUR) / 1000;
+    const holder = join(tmpRoot, 'vibecarbon-e2e-run1');
+    const project = join(holder, 'testapp-k8s-1-abc123');
+    const unrelated = join(tmpRoot, 'vibecarbon-e2e-run2');
+    mkdirSync(project, { recursive: true });
+    mkdirSync(unrelated);
+    for (const d of [holder, unrelated]) utimesSync(d, oldAt, oldAt);
+    writeFileSync(
+      join(rigDir, '.rig-hetzner-k8s.json'),
+      JSON.stringify({ projectName: 'x', projectDir: project }),
+    );
+    const { docker } = fakeDocker([], []);
+    const r = await reapStaleLocalArtifacts('[t]', { now: NOW, rigDir, tmpRoot, docker });
+    expect(r.tempDirs).toBe(1);
+    expect(existsSync(project)).toBe(true);
+    expect(existsSync(unrelated)).toBe(false);
+  });
+
+  it('reads rig sentinels from every worktree the lister reports', async () => {
+    const other = join(root, 'wt2');
+    mkdirSync(join(other, 'tests', 'results'), { recursive: true });
+    writeFileSync(
+      join(other, 'tests', 'results', '.rig-do-k8s.json'),
+      JSON.stringify({ projectName: OLD_NAME }),
+    );
+    const { docker, calls } = fakeDocker([`${OLD_NAME}-app:local`], []);
+    const r = await reapStaleLocalArtifacts('[t]', {
+      now: NOW,
+      tmpRoot,
+      docker,
+      worktreeLister: () => [join(root, 'nonexistent'), other],
+    });
+    expect(r.images).toBe(0);
+    expect(calls.some((c) => c[0] === 'rmi')).toBe(false);
+  });
+
+  it('falls back to the cwd sentinels when the worktree lister throws', async () => {
+    const { docker } = fakeDocker([`${OLD_NAME}-app:local`], []);
+    const r = await reapStaleLocalArtifacts('[t]', {
+      now: NOW,
+      tmpRoot,
+      docker,
+      worktreeLister: () => {
+        throw new Error('no git');
+      },
+    });
+    expect(r.images).toBe(1);
+  });
 });

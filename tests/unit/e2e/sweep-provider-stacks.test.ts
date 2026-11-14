@@ -68,6 +68,9 @@ describe('sweepProjectOrphans stack sweep', () => {
     expect(owns('testapp-compose-1700000000000-abc123')).toBe(true);
     expect(owns('testapp-compose-1700000000000-abc124')).toBe(false);
     expect(owns('testapp-compose-1700000000000-abc123x')).toBe(false);
+    expect((h.sweepRunStacks.mock.calls[0] as unknown[])[4]).toBe(
+      '.pulumi/stacks/testapp-compose-1700000000000-abc123/',
+    );
   });
 
   it('skips the stack sweep when the resource sweep could not enumerate', async () => {

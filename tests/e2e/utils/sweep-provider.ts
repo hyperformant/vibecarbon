@@ -56,6 +56,7 @@ export async function sweepProjectOrphans(o: {
           (p) => p === o.projectName,
           store,
           probeFor(o.provider, { token: o.token, env: o.env }),
+          `.pulumi/stacks/${o.projectName}/`,
         );
       }
     } catch (e) {
