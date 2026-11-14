@@ -23,6 +23,7 @@ import {
   CHANNEL_IMAGES,
   K3S_SYSTEM_IMAGE_MIRRORS,
   K3S_VERSION,
+  TRAEFIK_MIRROR,
 } from '../../../src/lib/images.js';
 import { CHANNEL_SCHEMA, parseChannelFile, versionOf } from '../../../src/lib/version-channel.js';
 
@@ -224,7 +225,9 @@ describe('planChannel', () => {
   it('a new major leaves the list alone and is reported', async () => {
     const out = await plan({ tags: tagsFor('library/traefik', 'v4.0.0') });
     expect(out.changed).toBe(false);
-    expect(out.majors).toEqual([{ name: 'library/traefik', current: 'v3.7.17', newest: 'v4.0.0' }]);
+    expect(out.majors).toEqual([
+      { name: 'library/traefik', current: TRAEFIK_MIRROR.tag, newest: 'v4.0.0' },
+    ]);
   });
 
   it('a whole Kubernetes set moves when every part of it is there', async () => {

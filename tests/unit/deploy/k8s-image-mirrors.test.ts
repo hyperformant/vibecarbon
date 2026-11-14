@@ -203,9 +203,10 @@ describe('mirror set shape', () => {
     expect(registryImageRef()).toBe(byRepo('library/registry'));
     expect(socatImageRef()).toBe(byRepo('alpine/socat'));
     expect(alpineK8sImageRef()).toBe(byRepo('alpine/k8s'));
-    expect(traefikImageRef()).toMatch(
-      /^ghcr\.io\/hyperformant\/traefik:v3\.7\.17@sha256:[a-f0-9]{64}$/,
+    expect(traefikImageRef()).toBe(
+      `ghcr.io/hyperformant/traefik:${TRAEFIK_MIRROR.tag}@${TRAEFIK_MIRROR.digest}`,
     );
+    expect(TRAEFIK_MIRROR.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
   it('mirror targets are FLAT under the org — upstream basename, upstream tag', () => {
@@ -646,8 +647,8 @@ describe('publish workflow mirrors exactly the set', () => {
     );
     // Docker Hub mirrors ride the same matrix: the copy reads docker.io.
     expect(matrix).toContainEqual({
-      src: 'docker.io/library/traefik:v3.7.17',
-      dst: 'ghcr.io/hyperformant/traefik:v3.7.17',
+      src: `docker.io/library/traefik:${TRAEFIK_MIRROR.tag}`,
+      dst: `ghcr.io/hyperformant/traefik:${TRAEFIK_MIRROR.tag}`,
       digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       index: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
@@ -714,9 +715,17 @@ describe('publish workflow mirrors exactly the set', () => {
     expect(runs).toMatch(
       /drift\.md" \|\| rc=\$\?\n\s*cat "\$RUNNER_TEMP\/drift\.md" >> "\$GITHUB_STEP_SUMMARY"\n\s*exit "\$rc"/,
     );
-    // One issue, fixed title: updated when open, created otherwise, untouched
-    // when the report carries the no-drift marker.
+    // One issue, fixed title: updated when open, created otherwise, closed
+    // when the report carries the no-drift marker (the bumps have landed).
     expect(runs).toContain(`grep -q '^${NO_DRIFT_MARKER}$'`);
+    const noDrift = runs.slice(runs.indexOf(`grep -q '^${NO_DRIFT_MARKER}$'`));
+    expect(noDrift.slice(0, noDrift.indexOf('exit 0'))).toMatch(
+      /if \[ -n "\$NUM" \]; then\n\s*gh issue close "\$NUM" --comment /,
+    );
+    // The lookup runs before the marker check, so a close has a number.
+    expect(runs.indexOf('map(select(.title == env.TITLE))')).toBeLessThan(
+      runs.indexOf(`grep -q '^${NO_DRIFT_MARKER}$'`),
+    );
     expect(runs).toMatch(/gh issue edit "\$NUM" --body-file/);
     expect(runs).toMatch(/gh issue create --title "\$TITLE" --body-file/);
     expect(runs).toContain('map(select(.title == env.TITLE))[0].number');

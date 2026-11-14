@@ -17,7 +17,7 @@
  * sidecars only with the CSI driver release, so neither is listed. Held
  * entries are named under the table, not counted. When nothing is
  * actionable the report carries the marker `<!-- mirror-drift: none -->`,
- * which the workflow reads to leave the issue alone.
+ * which the workflow reads to close the issue (the bumps have landed).
  *
  * Tags are read from each upstream registry's `/v2/<repo>/tags/list`
  * (anonymous bearer token when the registry asks for one, following `Link`

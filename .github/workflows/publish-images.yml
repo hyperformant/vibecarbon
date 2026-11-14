@@ -130,7 +130,8 @@ jobs:
   # scripts/mirror-drift.mjs hold back tags we must not take (alpine/k8s past
   # one minor of K3S_VERSION, registry 3.x, k3s system images and CSI
   # sidecars, which move only with K3S_VERSION / the CSI driver). With
-  # anything to take it opens, or updates, ONE issue with a fixed title.
+  # anything to take it opens, or updates, ONE issue with a fixed title, and
+  # closes that issue once nothing is left to take.
   # Schedule only: a lookup failure fails this job loudly, and must never
   # turn a dispatched publish red. No environment, no login (tags/list takes
   # an anonymous token); the only write is `issues`.
@@ -139,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write   # open or update the one drift issue
+      issues: write   # open, update or close the one drift issue
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: List newer upstream tags per mirrored repo
@@ -158,12 +159,16 @@ jobs:
           TITLE: 'Mirror drift: newer upstream tags for ghcr mirrors'
         run: |
           set -euo pipefail
-          if grep -q '^<!-- mirror-drift: none -->$' "$RUNNER_TEMP/drift.md"; then
-            echo "no actionable drift"
-            exit 0
-          fi
           NUM=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number,title \
             --jq "map(select(.title == env.TITLE))[0].number // empty")
+          if grep -q '^<!-- mirror-drift: none -->$' "$RUNNER_TEMP/drift.md"; then
+            echo "no actionable drift"
+            # The bumps landed: an open issue would report drift that is gone.
+            if [ -n "$NUM" ]; then
+              gh issue close "$NUM" --comment "Nothing left to take: every mirrored image is on its newest allowed upstream tag."
+            fi
+            exit 0
+          fi
           if [ -n "$NUM" ]; then
             gh issue edit "$NUM" --body-file "$RUNNER_TEMP/drift.md"
           else

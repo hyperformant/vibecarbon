@@ -570,9 +570,9 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 export const TRAEFIK_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'library/traefik',
-  tag: 'v3.7.17',
-  digest: 'sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a',
-  index: 'sha256:92627e6a99f71b8e46634acea28130b9f14bec5d9887ad15161007e1b652afe1',
+  tag: 'v3.7.19',
+  digest: 'sha256:44b61e76a251fe586d17d881fc900452d0a7b4a4b08c97ce6eac86d45b4c8b9d',
+  index: 'sha256:aa942a00bce033c909bf1f7e861d93761be4b31a035f10d2410d33e38a8f41cf',
 };
 /** @type {MirroredImage} compose prod's two socket proxies (traefik's and the app's) */
 export const DOCKER_SOCKET_PROXY_MIRROR = {
@@ -1016,7 +1016,7 @@ export function k3sVersion() {
  * The tag a Traefik ref carries. The CRDs come from the same Traefik tag
  * (k8s/infra/traefik-crds): a field newer than the CRD schema is pruned
  * silently, so the two move together.
- * @returns {string} e.g. "v3.7.17"
+ * @returns {string} e.g. "v3.7.19"
  */
 export function traefikVersion() {
   const ref = traefikImageRef();
