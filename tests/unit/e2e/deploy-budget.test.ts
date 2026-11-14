@@ -5,6 +5,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { seedClass, seededRow } from '../../../scripts/calibrate-deploy-budgets.js';
 import {
   type BudgetKey,
   type BudgetTable,
@@ -198,13 +199,35 @@ describe('budgets are keyed on provider + mode + class', () => {
   });
 
   it('the calibrated table has no hand-edit shape errors', () => {
+    // The calibrated rows alone, which is all a seed may be computed from.
+    const calibrated: BudgetTable = {};
+    for (const [provider, modes] of Object.entries(DEPLOY_BUDGET_TABLE)) {
+      for (const [mode, classes] of Object.entries(modes)) {
+        for (const [cpuClass, row] of Object.entries(classes)) {
+          if (row.samples === 0) continue;
+          calibrated[provider] = {
+            ...calibrated[provider],
+            [mode]: { ...calibrated[provider]?.[mode as DeployMode], [cpuClass]: row },
+          };
+        }
+      }
+    }
     for (const [provider, modes] of Object.entries(DEPLOY_BUDGET_TABLE)) {
       for (const [mode, classes] of Object.entries(modes)) {
         for (const [cpuClass, row] of Object.entries(classes)) {
           const where = `${provider}/${mode}/${cpuClass}`;
           expect(row.ownedS % 5, where).toBe(0);
           expect(row.endToEndS, where).toBeGreaterThanOrEqual(row.ownedS + 15);
-          expect(row.samples, where).toBeGreaterThan(0);
+          if (row.samples === 0) {
+            // A seed: the only row of its provider + mode, and exactly what the
+            // calibration script computes from the other providers' rows.
+            expect(Object.keys(classes), where).toEqual([cpuClass]);
+            expect(cpuClass, where).toBe(seedClass(provider));
+            expect(row, where).toEqual(seededRow(calibrated, provider, mode));
+          } else {
+            expect(row.samples, where).toBeGreaterThan(0);
+            expect(row.seededFrom, where).toBeUndefined();
+          }
           expect(
             budgetFor(DEPLOY_BUDGET_TABLE, mode as DeployMode, { provider, cpuClass })?.row,
             where,
@@ -212,6 +235,40 @@ describe('budgets are keyed on provider + mode + class', () => {
         }
       }
     }
+  });
+
+  it('a seeded row is judged like any other, and the verdict says it is a seed', () => {
+    const seed = {
+      ownedS: 200,
+      endToEndS: 215,
+      samples: 0,
+      seededFrom: ['hetzner/compose/cx', 'vultr/compose/vc2'],
+    };
+    const table: BudgetTable = { linode: { compose: { standard: seed } } };
+    const key = { provider: 'linode', cpuClass: 'standard' };
+    const fast = fixture('compose', { total: 150_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const pass = judge(fast, 'compose', key, table);
+    expect(pass.ok).toBe(true);
+    expect(pass.message).toMatch(
+      /seeded budget: linode\/compose\/standard has no samples yet, so it is the mean of hetzner\/compose\/cx, vultr\/compose\/vc2/,
+    );
+    expect(pass.details).toMatchObject({ budgetSeededFrom: seed.seededFrom });
+    const slow = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const fail = judge(slow, 'compose', key, table);
+    expect(fail.ok).toBe(false);
+    expect(fail.message).toMatch(
+      /^deploy-owned 245s > 200s .*\(seeded budget: linode\/compose\/standard /,
+    );
+  });
+
+  it('linode/k8s-ha has a seeded budget until its first cold deploy passes', () => {
+    const row = budgetFor(DEPLOY_BUDGET_TABLE, 'k8s-ha', {
+      provider: 'linode',
+      cpuClass: 'standard',
+    });
+    expect(row?.row).toBe('linode/k8s-ha/standard');
+    // Seeded or calibrated, never missing: the first run is judged, not failed.
+    expect(row?.ownedS).toBeGreaterThan(0);
   });
 });
 

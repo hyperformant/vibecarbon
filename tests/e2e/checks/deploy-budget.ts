@@ -15,8 +15,11 @@
  * and the local preflight) and ends at the success outro.
  *
  * Budgets are keyed on provider + mode + CPU class (deploy-budgets.json). A
- * combination with no calibrated row fails with `no budget yet`: it is never a
- * pass for want of a number.
+ * provider + mode that has never passed a cold deploy is judged against a
+ * seeded row (`samples: 0`, the mean of that mode's calibrated rows on the
+ * other providers), and the verdict says the number is a seed. A combination
+ * with no row at all fails with `no budget yet`: it is never a pass for want
+ * of a number.
  *
  * Hard limits, no uplink exemption: the cold image delta's bytes are asserted
  * too (10 MB), so a slow uplink moves a deploy by seconds, not minutes. If
@@ -50,8 +53,10 @@ export interface BudgetKey {
 export interface BudgetRow {
   ownedS: number;
   endToEndS: number;
-  /** Samples the row was calibrated from. */
+  /** Samples the row was calibrated from; 0 for a seeded row. */
   samples: number;
+  /** A seeded row: the calibrated rows (other providers, same mode) it averages. */
+  seededFrom?: string[];
 }
 
 /** provider -> mode -> CPU class -> seconds. Only combinations with data have a row. */
@@ -59,7 +64,8 @@ export type BudgetTable = Record<string, Partial<Record<DeployMode, Record<strin
 
 /**
  * The calibrated table, written by scripts/calibrate-deploy-budgets.js from the
- * e2e results db (rule: ceil5(p90 + 15) at n >= 4, else ceil5(max + 30)).
+ * e2e results dbs, local and GitHub pooled (rule: ceil5(1.5 x median + 60), plus
+ * the seeds for provider + mode combinations with no samples yet).
  * Never edited by hand.
  */
 export const DEPLOY_BUDGET_TABLE: BudgetTable = (
@@ -293,6 +299,7 @@ export function checkDeployBudget(
     tlsFirstLookS: s(tlsMs),
     ownedS: ownedMs === null ? null : s(ownedMs),
     budgetRow: budget?.row ?? null,
+    budgetSeededFrom: budget?.seededFrom ?? null,
     ownedBudgetS: budget?.ownedS ?? null,
     endToEndBudgetS: budget?.endToEndS ?? null,
     deltaBytes,
@@ -300,13 +307,17 @@ export function checkDeployBudget(
     slowest,
   };
 
+  // A seeded number is an estimate from other providers, and the verdict says so.
+  const seedNote = budget?.seededFrom?.length
+    ? ` (seeded budget: ${budget.row} has no samples yet, so it is the mean of ${budget.seededFrom.join(', ')})`
+    : '';
   if (failures.length > 0) {
     const cause = slowest.length ? ` | slowest: ${slowest.join(', ')}` : '';
-    const message = `${failures.join('; ')}${cause}`;
+    const message = `${failures.join('; ')}${seedNote}${cause}`;
     return { checkName, status: 'fail', ok: false, message, errorMessage: message, details };
   }
   const message =
     `deploy-owned ${details.ownedS}s ≤ ${budget?.ownedS}s, ` +
-    `end-to-end ${details.totalS}s ≤ ${budget?.endToEndS}s`;
+    `end-to-end ${details.totalS}s ≤ ${budget?.endToEndS}s${seedNote}`;
   return { checkName, status: 'pass', ok: true, message, details };
 }
