@@ -1,3 +1,25 @@
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/**
+ * Best-effort docker call: capture stdout, swallow everything else. A missing
+ * docker binary or a daemon hiccup must not derail cleanup.
+ */
+function bestEffortDocker(argv: readonly string[], timeoutMs = 30_000): string {
+  try {
+    return execFileSync('docker', argv, {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 8 * 1024 * 1024,
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Reap operator-side Docker images and volumes left behind by THIS scenario's
  * local builds. The provider orphan sweeps handle the CLOUD side; this handles
@@ -22,22 +44,7 @@
  * preserved (VC_KEEP_*), because the kept images are what the operator iterates.
  */
 export async function reapLocalBuildArtifacts(tag: string, projectName: string): Promise<void> {
-  const { execFileSync } = await import('node:child_process');
-
-  // Best-effort docker call: capture stdout, swallow everything else. A missing
-  // docker binary or a daemon hiccup must not derail cleanup.
-  const docker = (argv: readonly string[], timeoutMs = 30_000): string => {
-    try {
-      return execFileSync('docker', argv, {
-        encoding: 'utf8',
-        timeout: timeoutMs,
-        stdio: ['ignore', 'pipe', 'ignore'],
-        maxBuffer: 8 * 1024 * 1024,
-      }).trim();
-    } catch {
-      return '';
-    }
-  };
+  const docker = bestEffortDocker;
 
   try {
     // Images: match on repository (the part before the last ':'), not the whole
@@ -77,4 +84,132 @@ export async function reapLocalBuildArtifacts(tag: string, projectName: string):
       `${tag} [reap] Local artifact reap failed (non-fatal): ${e instanceof Error ? e.message : e}`,
     );
   }
+}
+
+/** A run younger than this may still be running on this machine (a concurrent run). */
+export const STALE_RUN_MAX_AGE_MS = 43_200_000; // 12 h
+/** Temp dirs and CA bundles older than this are leftovers, not a run in flight. */
+export const STALE_TEMP_MAX_AGE_MS = 604_800_000; // 7 days
+
+const SCRATCH_PROJECT = /((?:testapp|citest)-[a-z0-9]+(?:-ha)?-(\d{13})-[a-z0-9]{6})(?![a-z0-9])/;
+
+/**
+ * Find the scratch project in an image repository or volume name. Covers every
+ * tag scheme (`10.0.1.2:5000/<p>`, `vibecarbon-local/<p>`, `<p>-app`, and
+ * compose volumes `<p>_db_data`, which Docker prefixes with the compose
+ * project). `createdAtMs` is the run's start time, which the name carries.
+ */
+export function parseScratchProject(
+  ref: string,
+): { projectName: string; createdAtMs: number } | null {
+  const m = SCRATCH_PROJECT.exec(ref);
+  return m ? { projectName: m[1], createdAtMs: Number(m[2]) } : null;
+}
+
+/**
+ * Remove what EARLIER runs left on this machine, at the start of a run.
+ * reapLocalBuildArtifacts only runs at the end of its own scenario, so a
+ * killed run or a kept rig never reaches it: 29 image tags and 20 volumes
+ * had piled up by 2026-11-13. Rules:
+ * - Only scratch projects (`testapp-` / `citest-`), by the start time in the
+ *   name, and only past 12 hours, so a concurrent run's artifacts stay.
+ * - Never a kept rig's project: tests/results/.rig-*.json names it, and those
+ *   images are what the operator iterates.
+ * - Temp dirs and CA bundles by mtime, past 7 days.
+ * - Never fatal: a failure here must not stop the run it prepares.
+ */
+export async function reapStaleLocalArtifacts(
+  tag: string,
+  o: {
+    now?: number;
+    maxAgeMs?: number;
+    tempMaxAgeMs?: number;
+    tmpRoot?: string;
+    rigDir?: string;
+    liveProjects?: Set<string>;
+    docker?: (argv: readonly string[]) => string;
+  } = {},
+): Promise<{ images: number; volumes: number; tempDirs: number }> {
+  const result = { images: 0, volumes: 0, tempDirs: 0 };
+  const now = o.now ?? Date.now();
+  const maxAgeMs = o.maxAgeMs ?? STALE_RUN_MAX_AGE_MS;
+  const tempMaxAgeMs = o.tempMaxAgeMs ?? STALE_TEMP_MAX_AGE_MS;
+  const tmpRoot = o.tmpRoot ?? tmpdir();
+  const docker = o.docker ?? ((argv: readonly string[]) => bestEffortDocker(argv));
+
+  try {
+    let live = o.liveProjects;
+    if (!live) {
+      live = new Set<string>();
+      const rigDir = o.rigDir ?? join(process.cwd(), 'tests', 'results');
+      try {
+        for (const f of readdirSync(rigDir)) {
+          if (!f.startsWith('.rig-') || !f.endsWith('.json')) continue;
+          try {
+            const rig = JSON.parse(readFileSync(join(rigDir, f), 'utf8'));
+            if (typeof rig?.projectName === 'string') live.add(rig.projectName);
+          } catch {
+            // an unreadable sentinel names nothing
+          }
+        }
+      } catch {
+        // no results dir, no kept rigs
+      }
+    }
+
+    const isStale = (name: string): boolean => {
+      const p = parseScratchProject(name);
+      return p !== null && now - p.createdAtMs >= maxAgeMs && !live.has(p.projectName);
+    };
+
+    const images = docker(['images', '--format', '{{.Repository}}:{{.Tag}}'])
+      .split('\n')
+      .map((r) => r.trim())
+      .filter(Boolean)
+      .filter((ref) => isStale(ref.slice(0, ref.lastIndexOf(':'))));
+    if (images.length > 0) {
+      docker(['rmi', '-f', ...images]);
+      result.images = images.length;
+    }
+
+    const volumes = docker(['volume', 'ls', '--format', '{{.Name}}'])
+      .split('\n')
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .filter(isStale);
+    if (volumes.length > 0) {
+      docker(['volume', 'rm', '-f', ...volumes]);
+      result.volumes = volumes.length;
+    }
+
+    try {
+      for (const name of readdirSync(tmpRoot)) {
+        if (!name.startsWith('vibecarbon-e2e-')) continue;
+        const path = join(tmpRoot, name);
+        try {
+          const st = statSync(path);
+          const isCaBundle = st.isFile() && /^vibecarbon-e2e-ca-bundle-.*\.pem$/.test(name);
+          if (!st.isDirectory() && !isCaBundle) continue;
+          if (now - st.mtimeMs < tempMaxAgeMs) continue;
+          rmSync(path, { recursive: true, force: true });
+          result.tempDirs++;
+        } catch {
+          // one stubborn entry must not stop the rest
+        }
+      }
+    } catch {
+      // unreadable temp root
+    }
+  } catch (e) {
+    console.warn(
+      `${tag} [reap] Stale artifact reap failed (non-fatal): ${e instanceof Error ? e.message : e}`,
+    );
+  }
+
+  if (result.images + result.volumes + result.tempDirs > 0) {
+    console.log(
+      `${tag} [reap] Removed ${result.images} image(s), ${result.volumes} volume(s), ${result.tempDirs} temp dir(s) left by earlier runs`,
+    );
+  }
+  return result;
 }
