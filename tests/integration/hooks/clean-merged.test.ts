@@ -25,12 +25,20 @@ function rig(def = 'main'): Rig {
   return r;
 }
 
-function run(r: Rig, opts: { projectDir?: string; path?: string } = {}) {
+function run(
+  r: Rig,
+  opts: { projectDir?: string; path?: string; env?: Record<string, string> } = {},
+) {
   return runHook('clean-merged.sh', {
     cwd: r.repo,
+    env: opts.env,
     projectDir: opts.projectDir,
     path: opts.path ?? `${r.binDir}:${process.env.PATH}`,
   });
+}
+
+function hasTool(name: string): boolean {
+  return spawnSync('sh', ['-c', `command -v ${name}`]).status === 0;
 }
 
 function context(stdout: string): string {
@@ -133,7 +141,7 @@ describe('.claude/hooks/clean-merged.sh', () => {
     squashMerge(r, 'feat-f');
     const contained = addBranchWorktree(r, 'feat-g');
     git(r.repo, 'fetch', '-q', 'origin');
-    git(r.repo, 'merge', '-q', '--ff-only', 'origin/feat-g');
+    git(r.repo, 'merge', '-q', '--no-ff', '-m', 'merge feat-g', 'origin/feat-g');
     git(r.repo, 'push', '-q', 'origin', r.def);
     const out = run(r, { path: makeBareBin(r) });
     expect(out.status).toBe(0);
@@ -186,5 +194,70 @@ describe('.claude/hooks/clean-merged.sh', () => {
     expect(parsed.hookSpecificOutput.hookEventName).toBe('SessionStart');
     expect(parsed.hookSpecificOutput.additionalContext).toContain('feat-i');
     expect(run(r).stdout).toBe('');
+  });
+
+  it('keeps a fresh worktree cut from the default branch that has no commits of its own', () => {
+    const r = rig();
+    const path = join(r.root, 'wt-fresh');
+    git(r.repo, 'worktree', 'add', '-q', '-b', 'fresh', path, r.def);
+    const noGh = run(r, { path: makeBareBin(r) });
+    expect(noGh.status).toBe(0);
+    expect(noGh.stdout).toBe('');
+    setMergedPrs(r, []);
+    const stubbed = run(r);
+    expect(stubbed.stdout).toBe('');
+    expect(existsSync(path)).toBe(true);
+    expect(branches(r.repo)).toContain('fresh');
+  });
+
+  it('keeps a branch that was fast-forwarded into the default branch when gh cannot prove it merged', () => {
+    const r = rig();
+    const wt = addBranchWorktree(r, 'feat-ff');
+    git(r.repo, 'fetch', '-q', 'origin');
+    git(r.repo, 'merge', '-q', '--ff-only', 'origin/feat-ff');
+    git(r.repo, 'push', '-q', 'origin', r.def);
+    const out = run(r, { path: makeBareBin(r) });
+    expect(out.stdout).toBe('');
+    expect(existsSync(wt.path)).toBe(true);
+    expect(branches(r.repo)).toContain('feat-ff');
+  });
+
+  it.skipIf(process.platform !== 'linux' || !hasTool('lsof'))(
+    'leaves a worktree another process is working in, found by lsof',
+    () => {
+      const r = rig();
+      const wt = addBranchWorktree(r, 'feat-l');
+      squashMerge(r, 'feat-l');
+      setMergedPrs(r, [`feat-l ${wt.tip}`]);
+      const missing = join(r.root, 'no-proc');
+      // No process: lsof finds nothing, the worktree goes.
+      const free = addBranchWorktree(r, 'feat-m');
+      squashMerge(r, 'feat-m');
+      setMergedPrs(r, [`feat-l ${wt.tip}`, `feat-m ${free.tip}`]);
+      const child = spawn('sleep', ['30'], { cwd: wt.path, stdio: 'ignore' });
+      procs.push(child);
+      const out = run(r, { env: { CLEAN_MERGED_PROC_DIR: missing } });
+      expect(existsSync(wt.path)).toBe(true);
+      expect(context(out.stdout)).toContain(
+        `Left ${wt.path} (feat-l): another process is working in it`,
+      );
+      expect(existsSync(free.path)).toBe(false);
+    },
+  );
+
+  it('leaves a worktree when it cannot tell whether something is working in it', () => {
+    const r = rig();
+    const wt = addBranchWorktree(r, 'feat-n');
+    git(r.repo, 'fetch', '-q', 'origin');
+    git(r.repo, 'merge', '-q', '--no-ff', '-m', 'merge feat-n', 'origin/feat-n');
+    git(r.repo, 'push', '-q', 'origin', r.def);
+    const out = run(r, {
+      path: makeBareBin(r),
+      env: { CLEAN_MERGED_PROC_DIR: join(r.root, 'no-proc') },
+    });
+    expect(existsSync(wt.path)).toBe(true);
+    expect(context(out.stdout)).toContain(
+      `Left ${wt.path} (feat-n): cannot tell whether something is working in it`,
+    );
   });
 });

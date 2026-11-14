@@ -105,25 +105,25 @@ export function setMergedPrs(rig: Rig, lines: string[]): void {
   writeFileSync(rig.ghOut, lines.length ? `${lines.join('\n')}\n` : '');
 }
 
+/** Every command clean-merged.sh and ff-main.sh run; gh and lsof are deliberately absent. */
+const HOOK_COMMANDS = [
+  'git',
+  'bash',
+  'sed',
+  'awk',
+  'grep',
+  'cat',
+  'head',
+  'readlink',
+  'mktemp',
+  'rm',
+];
+
 /** A bin dir holding only the tools the hooks need, so `gh` is not on PATH. */
 export function makeBareBin(rig: Rig): string {
   const dir = join(rig.root, 'bin-nogh');
   mkdirSync(dir);
-  for (const tool of [
-    'git',
-    'bash',
-    'sed',
-    'awk',
-    'grep',
-    'cat',
-    'head',
-    'tr',
-    'sort',
-    'readlink',
-    'dirname',
-    'basename',
-    'ls',
-  ]) {
+  for (const tool of HOOK_COMMANDS) {
     const found = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
     if (found) symlinkSync(found, join(dir, tool));
   }

@@ -5,13 +5,18 @@
 # A branch counts as merged only on proof, and a missed proof just leaves it:
 #   1. A merged PR has the same head branch name and the same commit as the
 #      branch tip (covers squash and rebase merges), or
-#   2. the branch tip is an ancestor of origin/<default branch>.
+#   2. the branch tip is reachable from origin/<default branch> but is not on
+#      its first-parent line, which is how a merge commit brings a branch in.
+#      A tip ON the first-parent line is where new work starts (a fresh
+#      worktree, or a branch fast-forwarded to main), so it proves nothing.
 # Needs only git, sed, awk and grep. The merged-PR proof also needs `gh` on
 # PATH and logged in; without it only proof 2 applies. `lsof` is optional.
 #
 # A worktree is left alone, with a reason in the output, when this session is
 # working in it, when it has uncommitted changes, or when another process has
 # its working directory inside it. Nothing is ever forced.
+#
+# Test-only override: CLEAN_MERGED_PROC_DIR replaces /proc in the process scan.
 #
 # Output: one JSON line with additionalContext listing what was removed or
 # left, and nothing at all when there was nothing to report.
@@ -45,6 +50,18 @@ if [ -z "$DEF" ]; then
 fi
 git rev-parse --verify --quiet "refs/remotes/origin/$DEF" >/dev/null || exit 0
 
+# The default branch's first-parent line, one sha per line.
+FIRST_PARENT=$(mktemp 2>/dev/null) || exit 0
+trap 'rm -f "$FIRST_PARENT"' EXIT
+git rev-list --first-parent "refs/remotes/origin/$DEF" >"$FIRST_PARENT" 2>/dev/null || exit 0
+
+# Is "$1" reachable from origin/<default> but off its first-parent line?
+contained() {
+  git merge-base --is-ancestor "$1" "refs/remotes/origin/$DEF" 2>/dev/null || return 1
+  grep -qxF "$1" "$FIRST_PARENT" && return 1
+  return 0
+}
+
 # Merged PR heads, "<branch> <sha>" per line.
 MERGED_PRS=""
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
@@ -70,7 +87,7 @@ PROJECT_DIR=""
 is_merged() {
   _b=$1
   _tip=$2
-  if git merge-base --is-ancestor "$_tip" "refs/remotes/origin/$DEF" 2>/dev/null; then
+  if contained "$_tip"; then
     return 0
   fi
   [ -n "$MERGED_PRS" ] || return 1
@@ -99,8 +116,9 @@ busy_reason() {
     echo "it has uncommitted changes"
     return 0
   fi
-  if [ -r /proc/self/cwd ]; then
-    for _d in /proc/[0-9]*/cwd; do
+  _proc=${CLEAN_MERGED_PROC_DIR:-/proc}
+  if [ -r "$_proc/self/cwd" ]; then
+    for _d in "$_proc"/[0-9]*/cwd; do
       _t=$(readlink "$_d" 2>/dev/null) || continue
       if inside "$1" "$_t"; then
         echo "another process is working in it"
@@ -145,7 +163,7 @@ while IFS='|' read -r WT_PATH WT_HEAD WT_BRANCH; do
   if [ -n "$WT_BRANCH" ]; then
     is_merged "$WT_BRANCH" "$WT_HEAD" || continue
   else
-    git merge-base --is-ancestor "$WT_HEAD" "refs/remotes/origin/$DEF" 2>/dev/null || continue
+    contained "$WT_HEAD" || continue
   fi
   LABEL=${WT_BRANCH:-detached}
   PHYS=$(physical "$WT_PATH")
