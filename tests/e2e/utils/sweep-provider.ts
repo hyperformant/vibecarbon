@@ -14,9 +14,12 @@
  * with no sweep gets a loud REGRESSION line and counts as not enumerated.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { probeFor } from './stack-probes.js';
+import { e2eStateStore } from './state-store.js';
 import { sweepOrphanedDigitalOceanResources } from './sweep-digitalocean.js';
 import { sweepOrphanedHetznerResources } from './sweep-hetzner.js';
 import { sweepOrphanedLinodeResources } from './sweep-linode.js';
+import { sweepRunStacks } from './sweep-run-stacks.js';
 import { sweepOrphanedScalewayResources } from './sweep-scaleway.js';
 import { sweepOrphanedVultrResources } from './sweep-vultr.js';
 
@@ -33,6 +36,37 @@ export interface ProjectSweep {
  *   region, Scaleway's access key and project id).
  */
 export async function sweepProjectOrphans(o: {
+  tag: string;
+  provider: string;
+  projectName: string;
+  token: string;
+  env: Record<string, string | undefined>;
+}): Promise<ProjectSweep> {
+  const result = await sweepResources(o);
+  // The stack that recorded this run's resources goes once every one of them
+  // reads 404, and only after a COMPLETE resource sweep: an enumeration that
+  // failed cannot vouch for anything. No age floor: this runs at the end of
+  // its own run. Advisory: nothing here changes the verdict.
+  if (!result.enumFailed) {
+    try {
+      const store = e2eStateStore(o.provider, o.env);
+      if (store) {
+        await sweepRunStacks(
+          o.tag,
+          (p) => p === o.projectName,
+          store,
+          probeFor(o.provider, { token: o.token, env: o.env }),
+          `.pulumi/stacks/${o.projectName}/`,
+        );
+      }
+    } catch (e) {
+      console.warn(`${o.tag} [sweep] Stack cleanup skipped: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return result;
+}
+
+async function sweepResources(o: {
   tag: string;
   provider: string;
   projectName: string;

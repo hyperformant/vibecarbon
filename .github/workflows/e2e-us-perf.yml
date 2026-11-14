@@ -450,6 +450,39 @@ jobs:
         # configured, so this step is inert until the SCALEWAY_* secrets exist.
         run: npx tsx tests/e2e/sweep-scaleway-ci.ts
 
+      - name: Stale state sweep (CI namespace only)
+        # Runs on every leg and sweeps all five providers each time (a
+        # provider whose secrets are absent prints "skipped (no credentials)").
+        # The repetition is harmless: deletes are idempotent. Removes the
+        # Pulumi stacks of past CI runs whose recorded resources are all gone
+        # (404 by id). Only citest- projects that started over 12 hours ago
+        # are judged, so a run in flight is never touched. Advisory: exits 0
+        # and warns on a bucket it cannot reach; continue-on-error and the
+        # timeout keep a crash or a hang from reddening the leg.
+        continue-on-error: true
+        timeout-minutes: 15
+        if: always()
+        env:
+          E2E_NAMESPACE: ci
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_SECRET_KEY }}
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SECRET_KEY }}
+          LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_ACCESS_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_SECRET_KEY }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_STORAGE_REGION }}
+          VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_ACCESS_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_SECRET_KEY }}
+          VULTR_STORAGE_REGION: ${{ secrets.VULTR_STORAGE_REGION }}
+          SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+          SCALEWAY_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
+          SCALEWAY_DEFAULT_PROJECT_ID: ${{ secrets.SCALEWAY_DEFAULT_PROJECT_ID }}
+        run: npx tsx tests/e2e/sweep-stale-stacks-ci.ts
+
   publish-perf:
     name: Publish perf table
     needs: matrix

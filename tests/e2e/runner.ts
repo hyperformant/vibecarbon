@@ -103,6 +103,7 @@ import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { assertStorageDns } from './utils/dns-gate.js';
 import { resolveE2EAcmeCa, setupE2EEnv } from './utils/e2e-env.js';
 import { attemptTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
+import { reapStaleLocalArtifacts } from './utils/local-artifacts.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
@@ -706,6 +707,11 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     // open by contract (see scratch-repo-sweep.ts).
     await sweepStaleScratchRepos({});
   }
+
+  // Hygiene, not a gate: remove the Docker images, volumes and temp dirs that
+  // earlier runs left on this machine (a killed run or a kept rig never
+  // reaches its own end-of-scenario reap). Never fatal by contract.
+  await reapStaleLocalArtifacts('[runner]');
 
   // The effective feature set for this run — CLI override wins over the
   // baseline in tests/config.ts. An empty `--features=` is honored (no
