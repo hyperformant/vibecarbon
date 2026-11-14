@@ -42,6 +42,7 @@ import { appendToEnv, loadEnvVariables, loadManifest, setEnvVar } from './lib/pr
 import { assertInProjectDir } from './lib/project-guard.js';
 import { symlinkedComponent } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
+import { addKustomizationEntry, removeKustomizationEntry } from './lib/template-edits.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -276,25 +277,12 @@ function updateBaseKustomization(kustomizationEntry) {
     return;
   }
 
-  let content = readFileSync(kustomizationPath, 'utf-8');
-  const entry = `  - ${kustomizationEntry}`;
-
-  if (content.includes(entry)) {
-    return;
-  }
-
-  // Insert before labels/commonLabels section so entry stays in resources block
-  const labelsIndex = content.indexOf('labels:');
-  const commonLabelsIndex = content.indexOf('commonLabels:');
-  const insertBefore = labelsIndex !== -1 ? labelsIndex : commonLabelsIndex;
-
-  if (insertBefore !== -1) {
-    content = `${content.slice(0, insertBefore).trimEnd()}\n${entry}\n\n${content.slice(insertBefore)}`;
-  } else {
-    content = `${content.trimEnd()}\n${entry}\n`;
-  }
-
-  writeFileSync(kustomizationPath, content);
+  // The one form of this edit: `upgrade` makes it again on the template's
+  // copy and undoes it before comparing (lib/template-edits.js), so the
+  // file still upgrades as unmodified and keeps the entry.
+  const content = readFileSync(kustomizationPath, 'utf-8');
+  const next = addKustomizationEntry(content, kustomizationEntry);
+  if (next !== content) writeFileSync(kustomizationPath, next);
 }
 
 function removeFromBaseKustomization(kustomizationEntry) {
@@ -308,14 +296,11 @@ function removeFromBaseKustomization(kustomizationEntry) {
     return;
   }
 
-  let content = readFileSync(kustomizationPath, 'utf-8');
-  const entry = `  - ${kustomizationEntry}`;
-
-  content = content.replace(`${entry}\n\n`, '');
-  content = content.replace(`${entry}\n`, '');
-  content = content.replace(entry, '');
-
-  writeFileSync(kustomizationPath, content);
+  // The exact inverse of the add, so an add then a remove leaves the file
+  // as the template had it.
+  const content = readFileSync(kustomizationPath, 'utf-8');
+  const next = removeKustomizationEntry(content, kustomizationEntry);
+  if (next !== content) writeFileSync(kustomizationPath, next);
 }
 
 // ============================================================================

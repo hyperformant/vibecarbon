@@ -20,6 +20,7 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { checkDependency, gitSafeEnv, runCommand, runCommandAsync } from './command.js';
 import { loadProjectConfig } from './config.js';
+import { recordInstalledFile, writeGitHubRefs } from './template-edits.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,6 +41,16 @@ const WORKFLOW_TEMPLATE_PATH = join(
 
 const PROJECT_WORKFLOW_PATH = '.github/workflows/vibecarbon-build.yml';
 const PROJECT_DEPLOY_WORKFLOW_PATH = '.github/workflows/deploy.yml';
+
+/**
+ * The workflows `configure cicd` installs into a project (create does not).
+ * Before their checksums were recorded at install, upgrade read every one of
+ * them as yours; it replaces one that has none, keeping a backup.
+ */
+export const CICD_WORKFLOW_FILES = Object.freeze([
+  PROJECT_WORKFLOW_PATH,
+  PROJECT_DEPLOY_WORKFLOW_PATH,
+]);
 
 // The build workflow resolves its Node version from the project's `.nvmrc`
 // (`node-version-file`), so that file is a hard prerequisite — setup-node
@@ -357,7 +368,9 @@ export function installNodeVersionFile(cwd = process.cwd()) {
       `Node version template not found at ${NODE_VERSION_TEMPLATE_PATH}, vibecarbon install is incomplete`,
     );
   }
-  writeFileSync(target, readFileSync(NODE_VERSION_TEMPLATE_PATH, 'utf-8'));
+  const content = readFileSync(NODE_VERSION_TEMPLATE_PATH, 'utf-8');
+  writeFileSync(target, content);
+  recordInstalledFile(cwd, PROJECT_NODE_VERSION_PATH, content);
   return true;
 }
 
@@ -384,6 +397,7 @@ export function installWorkflowFile(cwd = process.cwd()) {
   const content = readFileSync(WORKFLOW_TEMPLATE_PATH, 'utf-8');
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, content);
+  recordInstalledFile(cwd, PROJECT_WORKFLOW_PATH, content);
   return true;
 }
 
@@ -434,60 +448,44 @@ export function installDeployWorkflowFile(cwd = process.cwd()) {
   const content = readFileSync(DEPLOY_WORKFLOW_TEMPLATE_PATH, 'utf-8');
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, content);
+  recordInstalledFile(cwd, PROJECT_DEPLOY_WORKFLOW_PATH, content);
   return true;
 }
 
 /**
- * Update Docker/K8s image references + Flux GitRepository URLs with the
- * correct GitHub owner. At `vibecarbon create` time, GITHUB_OWNER defaults
+ * Point the Docker/K8s image refs and the Flux GitRepository URLs at the real
+ * GitHub owner and repo. At `vibecarbon create` time GITHUB_OWNER defaults
  * to the project name (see create.js); `configure` → CI/CD learns the real
- * owner via `gh api user` (or the operator-supplied owner) and rewrites
- * every place that baked in the wrong owner.
- *
- * Two substitution passes:
- *   - `ghcr.io/<wrong>/<project>` → `ghcr.io/<owner>/<project>`
- *     (app image refs in docker-compose, k8s Deployment + overlays)
- *   - `github.com/<wrong>/<project>` → `github.com/<owner>/<project>`
- *     (Flux GitRepository source URL in both cluster overlays)
+ * pair from `gh repo view` (or the operator-supplied owner) and rewrites
+ * every place that baked in the wrong one:
+ *   - `ghcr.io/<wrong>/<project>` (app image refs in docker-compose, the k8s
+ *     Deployment, the backup CronJob and the production overlay)
+ *   - `github.com/<wrong>/<project>` (the Flux GitRepository source URL in
+ *     both cluster files)
  *
  * The Flux URL rewrite was missing before 2026-04-22 and caused the
- * GitRepository to fail with "authentication required" — the URL owner
- * was the project name, the auth token was scoped to the real repo,
- * so source-controller's git clone 403'd. Flux Kustomizations then
- * sat with "Source artifact not found, retrying in 30s" forever and
- * deploy.yml's `kubectl wait` for vibecarbon-base hit 10m timeout.
+ * GitRepository to fail with "authentication required": the URL owner was
+ * the project name, the auth token was scoped to the real repo, so
+ * source-controller's git clone 403'd and deploy.yml's `kubectl wait` for
+ * vibecarbon-base hit its 10m timeout.
  *
- * Mirrored at deploy time by rewriteOwnerAndRepo() in lib/deploy/k8s/
- * gitops-deploy.js for projects that reach deploy without configuring
- * CI/CD first — keep the two helpers in sync.
+ * One writer with the GitOps deploy's rewrite (writeGitHubRefs,
+ * lib/template-edits.js), which also records the pair so `upgrade` keeps it
+ * on every file it replaces and reads these edits as the CLI's, not yours.
+ *
+ * @param {string} projectName
+ * @param {string} githubOwner
+ * @param {string} [cwd]
+ * @param {string} [repoName] - the GitHub repo (and ghcr package) name
+ * @returns {string[]} the files whose content changed
  */
-export function updateImageReferences(projectName, githubOwner, cwd = process.cwd()) {
-  const filesToUpdate = [
-    'docker-compose.prod.yml',
-    'k8s/base/app/deployment.yaml',
-    'k8s/base/backup/cronjob.yaml',
-    'k8s/overlays/production/kustomization.yaml',
-    'k8s/flux/clusters/primary/vibecarbon.yaml',
-    'k8s/flux/clusters/standby/vibecarbon.yaml',
-  ];
-
-  // Match the main app image plus the `-db` and `-backup` suffix variants
-  // older manifests pulled.
-  const imagePattern = new RegExp(`ghcr\\.io/[^/]+/${projectName}(-db|-backup)?\\b`, 'g');
-  const fluxPattern = new RegExp(`github\\.com/[^/]+/${projectName}\\b`, 'g');
-
-  for (const file of filesToUpdate) {
-    const filePath = join(cwd, file);
-    if (existsSync(filePath)) {
-      let content = readFileSync(filePath, 'utf-8');
-      content = content.replace(
-        imagePattern,
-        (_m, suffix) => `ghcr.io/${githubOwner}/${projectName}${suffix ?? ''}`,
-      );
-      content = content.replace(fluxPattern, `github.com/${githubOwner}/${projectName}`);
-      writeFileSync(filePath, content);
-    }
-  }
+export function updateImageReferences(
+  projectName,
+  githubOwner,
+  cwd = process.cwd(),
+  repoName = projectName,
+) {
+  return writeGitHubRefs(cwd, { projectName, owner: githubOwner, repo: repoName });
 }
 
 /**

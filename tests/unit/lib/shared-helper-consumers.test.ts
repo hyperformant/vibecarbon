@@ -206,6 +206,46 @@ const REGISTRY = [
       'tests/unit/deploy/hetzner-app-key-fence.test.ts',
     ],
   },
+  {
+    // configure cicd (updateImageReferences) and the GitOps deploy
+    // (rewriteOwnerAndRepo) each had their own owner rewrite, "kept in sync"
+    // by a comment, with different regexes; and upgrade knew neither, so it
+    // read every rewritten file as the user's and left the Flux cluster
+    // files behind while k8s/base moved (a literal {{TRAEFIK_IMAGE}} on the
+    // cluster). One writer now, and upgrade applies the same edit.
+    helper: 'writeGitHubRefs',
+    definition: 'src/lib/template-edits.js',
+    consumers: [
+      'src/lib/ci-setup.js', // updateImageReferences (configure cicd)
+      'src/lib/deploy/k8s/gitops-deploy.js', // deployK8sGitOps, before it commits
+    ],
+    deepTests: [
+      'tests/unit/lib/template-edits.test.ts',
+      'tests/integration/cli/upgrade/upgrade.test.ts',
+    ],
+  },
+  {
+    // upgrade re-applies (and undoes, before it compares) the edits the CLI
+    // makes after create; the commands that make them use the same functions.
+    helper: 'templateEdits',
+    definition: 'src/lib/template-edits.js',
+    consumers: ['src/upgrade.js'],
+    deepTests: ['tests/unit/lib/template-edits.test.ts'],
+  },
+  {
+    helper: 'addKustomizationEntry',
+    definition: 'src/lib/template-edits.js',
+    consumers: ['src/add.js'],
+    deepTests: ['tests/unit/lib/template-edits.test.ts'],
+  },
+  {
+    // The Flux build's placeholder walk: the GitOps deploy refuses on it,
+    // upgrade warns on it.
+    helper: 'fluxPlaceholders',
+    definition: 'src/lib/deploy/k8s/unrendered-placeholders.js',
+    consumers: ['src/lib/deploy/k8s/gitops-deploy.js', 'src/upgrade.js'],
+    deepTests: ['tests/unit/deploy/flux-placeholders.test.ts'],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');

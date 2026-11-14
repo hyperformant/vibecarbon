@@ -43,8 +43,10 @@ import {
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
 import { alpineK8sImageRef, traefikVersion } from '../../images.js';
+import { GITHUB_REF_FILES, originGitHubRepo, writeGitHubRefs } from '../../template-edits.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { k8sTlsIdentity } from './k3s.js';
+import { describeFluxPlaceholders, fluxPlaceholders } from './unrendered-placeholders.js';
 
 /**
  * Build the operator-facing warning when observability is installed but this
@@ -93,12 +95,12 @@ function renderInPlace(path, vars) {
  * Resolve the real `{owner, name}` of the deploy target repo.
  *
  * At `vibecarbon create` time both placeholders bake to `projectName`
- * (see src/create.js:616), producing `ghcr.io/<project>/<project>` image
- * refs and `github.com/<project>/<project>` Flux URLs. Those paths only
- * match reality when the user later runs `vibecarbon configure` → CI/CD
- * with project name == repo name (which calls updateImageReferences()).
- * E2E tests (and any user whose repo slug differs) need the real
- * owner/repo wired in at deploy time, which is what this helper handles.
+ * (see src/create.js), producing `ghcr.io/<project>/<project>` image refs
+ * and `github.com/<project>/<project>` Flux URLs. Those paths only match
+ * reality once `vibecarbon configure` → CI/CD has rewritten them
+ * (updateImageReferences). E2E tests (and any user whose repo slug differs)
+ * need the real owner/repo wired in at deploy time, which is what this
+ * helper handles.
  */
 function resolveOwnerAndRepo(projectDir) {
   try {
@@ -115,56 +117,37 @@ function resolveOwnerAndRepo(projectDir) {
     const [owner, name] = out.split('/');
     if (owner && name) return { owner, name };
   } catch {}
-  try {
-    const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
-      cwd: projectDir,
-      env: gitSafeEnv(),
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    const m = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
-    if (m) return { owner: m[1], name: m[2] };
-  } catch {}
-  return null;
-}
-
-function escapeForRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const origin = originGitHubRepo(projectDir);
+  return origin ? { owner: origin.owner, name: origin.repo } : null;
 }
 
 /**
- * Rewrite stale `<project>/<project>` owner+repo pairs in ghcr.io image
- * refs and github.com Flux URLs to the real `<owner>/<repoName>` pair.
- * Idempotent: after one pass the paths no longer match the stale pattern
- * so subsequent calls are no-ops.
+ * The files the GitOps deploy points at the real owner and repo: the
+ * GitHub-ref files under k8s/, the tree it commits. docker-compose.prod.yml
+ * is configure's alone, and rewriting it here would leave it uncommitted.
  */
-function rewriteOwnerAndRepo(projectDir, projectName, owner, repoName) {
-  const pn = escapeForRegex(projectName);
-  // ghcr.io/<stale>/<project>[-db|-backup]  → ghcr.io/<owner>/<repoName>[-db|-backup]
-  const ghcrRe = new RegExp(`ghcr\\.io/[^/\\s:]+/${pn}(-db|-backup)?\\b`, 'g');
-  // github.com/<stale>/<project>  → github.com/<owner>/<repoName>
-  //   Match plain `github.com/a/b` plus optional `.git` suffix. Avoid
-  //   devouring a trailing path segment (e.g. branch names) by anchoring
-  //   on word-boundary / end.
-  const ghRe = new RegExp(`github\\.com/[^/\\s:]+/${pn}(?=\\.git\\b|[^\\w-]|$)`, 'g');
+const GITOPS_REF_FILES = GITHUB_REF_FILES.filter((rel) => rel.startsWith('k8s/'));
 
-  const files = [
-    'k8s/base/app/deployment.yaml',
-    'k8s/base/backup/cronjob.yaml',
-    'k8s/overlays/production/kustomization.yaml',
-    'k8s/flux/clusters/primary/vibecarbon.yaml',
-    'k8s/flux/clusters/standby/vibecarbon.yaml',
-  ];
-
-  for (const rel of files) {
-    const path = join(projectDir, rel);
-    if (!existsSync(path)) continue;
-    const before = readFileSync(path, 'utf-8');
-    const after = before
-      .replace(ghcrRe, (_match, suffix) => `ghcr.io/${owner}/${repoName}${suffix ?? ''}`)
-      .replace(ghRe, `github.com/${owner}/${repoName}`);
-    if (after !== before) writeFileSync(path, after);
-  }
+/**
+ * Refuse, before anything is committed, a tree Flux would apply with a
+ * `{{TOKEN}}` still in it: Flux cannot fill one, and it reaches the cluster
+ * literally (an image of `{{TRAEFIK_IMAGE}}` is an InvalidImageName rollout).
+ * It happens when k8s/base and a Flux cluster file come from different
+ * template versions.
+ *
+ * @param {string} projectDir
+ */
+export function refuseFluxPlaceholders(projectDir) {
+  const findings = fluxPlaceholders(projectDir);
+  if (findings.length === 0) return;
+  const via = [...new Set(findings.map((f) => f.via))];
+  throw new Error(
+    'GitOps deploy stopped before committing: Flux applies the committed k8s/ tree as it is and ' +
+      `cannot fill placeholders. ${describeFluxPlaceholders(findings).join('; ')}. ` +
+      'This happens when k8s/base and a Flux cluster file come from different template versions. ' +
+      `Run vibecarbon upgrade and take the new ${via.join(' and ')} ` +
+      '(or apply its .upgrade-new), then run this again.',
+  );
 }
 
 /**
@@ -463,7 +446,12 @@ export async function deployK8sGitOps(args) {
         `Run 'gh repo view' or 'git remote get-url origin' and ensure origin points at github.com.`,
     );
   }
-  rewriteOwnerAndRepo(projectDir, projectName, repoOwner, repoName);
+  writeGitHubRefs(projectDir, {
+    projectName,
+    owner: repoOwner,
+    repo: repoName,
+    files: GITOPS_REF_FILES,
+  });
   const appDeployment = join(projectDir, 'k8s', 'base', 'app', 'deployment.yaml');
   if (existsSync(appDeployment) && imageTag) {
     // Only substitute — don't touch tags that are already concrete. The
@@ -471,6 +459,12 @@ export async function deployK8sGitOps(args) {
     // rewrite that via renderInPlace if the template exposes {{IMAGE_TAG}}
     // (follow-up: switch template to use {{IMAGE_TAG}} so SHAs can pin).
     renderInPlace(appDeployment, { IMAGE_TAG: imageTag });
+  }
+  try {
+    refuseFluxPlaceholders(projectDir);
+  } catch (err) {
+    s.stop('Manifests not committed');
+    throw err;
   }
   s.stop('Manifests rendered');
 

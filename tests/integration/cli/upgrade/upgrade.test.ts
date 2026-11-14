@@ -21,6 +21,8 @@ import {
   assertExitWith,
   assertSuccess,
   destroyRealProject,
+  type ExecStubs,
+  installExecStubs,
   realProject,
   runCli,
 } from '../../_harness/index.js';
@@ -461,5 +463,208 @@ describe('vibecarbon upgrade', () => {
     expect(after['retired/old-file.yml']).toBeUndefined();
     expect(after[rel]).toBe(hashContent(older));
     expect(after['observability-integration.md']).toBe(hashContent('doc\n'));
+  });
+});
+
+// A project that ran `vibecarbon configure cicd` before the template moved
+// Traefik's image to the version set. configure rewrote the Flux cluster
+// files (and the app's image refs) to the real GitHub owner, so upgrade read
+// them as edited by the user: `-y` only wrote .upgrade-new beside them, while
+// k8s/base/traefik/deployment.yaml (untouched) was replaced with its
+// `{{TRAEFIK_IMAGE}}` token. Flux then applied ./k8s/base with the old
+// cluster files, which do not strip the Traefik Deployment, and shipped the
+// literal placeholder.
+describe('vibecarbon upgrade after configure cicd', () => {
+  const OWNER = 'acme';
+  const CLUSTERS = ['primary', 'standby'];
+  const TRAEFIK = 'k8s/base/traefik/deployment.yaml';
+  const fluxFile = (cluster: string) => `k8s/flux/clusters/${cluster}/vibecarbon.yaml`;
+  const TRAEFIK_STRIP =
+    / {4}# Traefik's image comes from[\s\S]*?\n {6}target:\n {8}kind: Deployment\n {8}name: traefik\n/;
+
+  let project: string;
+  let stubs: ExecStubs;
+  beforeEach(() => {
+    project = realProject();
+    stubs = installExecStubs([
+      { command: 'gh', matches: /^auth status/, respond: { exitCode: 0 } },
+      {
+        command: 'gh',
+        matches: /^repo view/,
+        respond: { stdout: JSON.stringify({ owner: { login: OWNER }, name: 'test-app' }) },
+      },
+    ]);
+  });
+  afterEach(() => {
+    stubs.teardown();
+    destroyRealProject(project);
+  });
+
+  const read = (rel: string) => readFileSync(join(project, rel), 'utf-8');
+  /**
+   * The current template's copy of a file as create lays it down (owner and
+   * repo both the project name), then with the GitHub refs configure points
+   * at the real owner: the image and clone URLs, not prose.
+   */
+  const shipped = (rel: string, owner: string) =>
+    readFileSync(join(process.cwd(), 'carbon', rel), 'utf-8')
+      .replaceAll('{{GITHUB_OWNER}}', 'test-app')
+      .replaceAll('{{PROJECT_NAME}}', 'test-app')
+      .replaceAll('github.com/test-app/test-app', `github.com/${owner}/test-app`)
+      .replaceAll('ghcr.io/test-app/test-app', `ghcr.io/${owner}/test-app`);
+
+  /**
+   * Turn the fresh project into one created before the Traefik move: a literal
+   * image in the base Deployment, Flux cluster files that do not strip it, and
+   * the checksums that older create recorded for them.
+   */
+  function createdBeforeTheTraefikMove() {
+    const aged: Record<string, string> = {
+      [TRAEFIK]: read(TRAEFIK).replace('"{{TRAEFIK_IMAGE}}"', 'traefik:v3.6.11'),
+    };
+    for (const cluster of CLUSTERS) {
+      aged[fluxFile(cluster)] = read(fluxFile(cluster)).replace(TRAEFIK_STRIP, '');
+    }
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    for (const [rel, text] of Object.entries(aged)) {
+      expect(text, `${rel} aged`).not.toBe(read(rel));
+      writeFileSync(join(project, rel), text);
+      config.fileChecksums[rel] = hashContent(text);
+    }
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  }
+
+  function configureCicd() {
+    const r = runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 });
+    assertSuccess(r);
+    for (const cluster of CLUSTERS) {
+      expect(read(fluxFile(cluster))).toContain(`url: https://github.com/${OWNER}/test-app`);
+    }
+  }
+
+  it('-y replaces the Flux cluster files configure rewrote, keeping the real owner', () => {
+    createdBeforeTheTraefikMove();
+    configureCicd();
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    // The base moved to the version-set token, as it did before this fix...
+    expect(read(TRAEFIK)).toContain('"{{TRAEFIK_IMAGE}}"');
+    // ...and the Flux cluster files moved with it, so Flux strips the
+    // Traefik Deployment instead of applying the literal token. The owner
+    // configure found stays: a reverted github.com/test-app/test-app URL is
+    // a GitRepository that 403s on every clone.
+    for (const cluster of CLUSTERS) {
+      expect(read(fluxFile(cluster)), cluster).toBe(shipped(fluxFile(cluster), OWNER));
+      expect(existsSync(join(project, `${fluxFile(cluster)}.upgrade-new`)), cluster).toBe(false);
+    }
+    expect(read('k8s/base/app/deployment.yaml')).toContain(`image: ghcr.io/${OWNER}/test-app:main`);
+  });
+
+  it('a Flux file the user changed is offered with the real owner, and upgrade says Flux would apply the token', () => {
+    createdBeforeTheTraefikMove();
+    configureCicd();
+    const primary = fluxFile('primary');
+    const custom = `${read(primary)}# site-specific\n`;
+    writeFileSync(join(project, primary), custom);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    // Kept as the user had it; the version on offer (what Replace writes)
+    // points at the owner configure found, not github.com/test-app/test-app.
+    expect(read(primary)).toBe(custom);
+    expect(read(`${primary}.upgrade-new`)).toBe(shipped(primary, OWNER));
+    // The other cluster file was the CLI's own, so it moved.
+    expect(read(fluxFile('standby'))).toBe(shipped(fluxFile('standby'), OWNER));
+    // The kept file still builds the Traefik Deployment with its token:
+    // upgrade names the file, the token and the file to review.
+    const out = (r.stdout + r.stderr).replace(/\s+/g, ' ');
+    expect(out).toContain(`${TRAEFIK} would reach the cluster with {{TRAEFIK_IMAGE}}`);
+    expect(out).toContain(`${primary}.upgrade-new`);
+  });
+
+  it('records the workflows configure installs, so the next upgrade can replace them', () => {
+    configureCicd();
+    const recorded = JSON.parse(read('.vibecarbon.json')).fileChecksums;
+    for (const rel of ['.github/workflows/deploy.yml', '.github/workflows/vibecarbon-build.yml']) {
+      expect(recorded[rel], rel).toBe(hashContent(read(rel)));
+    }
+    expect(JSON.parse(read('.vibecarbon.json')).github).toEqual({ owner: OWNER, repo: 'test-app' });
+  });
+
+  it('replaces a workflow configure installed before it recorded checksums, keeping a backup', () => {
+    // Every project that ran configure cicd before this change has its
+    // deploy.yml with no checksum. Left as it was, the workflow keeps
+    // applying k8s/infra/traefik-crds raw, and upgrade just moved that file
+    // to its {{TRAEFIK_VERSION}} token.
+    configureCicd();
+    const rel = '.github/workflows/deploy.yml';
+    const older = read(rel).replace(/\n {6}- name: Install cert-manager[\s\S]*?\n\n/, '\n');
+    expect(older).not.toBe(read(rel));
+    writeFileSync(join(project, rel), older);
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    delete config.fileChecksums[rel];
+    delete config.fileChecksums['.github/workflows/vibecarbon-build.yml'];
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(read(rel)).toBe(readFileSync(join(process.cwd(), 'carbon', rel), 'utf-8'));
+    expect(read(`${rel}.upgrade-backup`)).toBe(older);
+    expect(existsSync(join(project, `${rel}.upgrade-new`))).toBe(false);
+  });
+});
+
+// The same trap from `vibecarbon add`: it lists the add-on in
+// k8s/base/kustomization.yaml, so upgrade read the file as the user's once
+// the template moved, and Replace (the interactive default) wrote the
+// template's copy without the entry. Flux prunes what leaves its build, so
+// the add-on went with it.
+describe('vibecarbon upgrade after vibecarbon add', () => {
+  const REL = 'k8s/base/kustomization.yaml';
+  let project: string;
+  beforeEach(() => {
+    project = realProject();
+  });
+  afterEach(() => {
+    destroyRealProject(project);
+  });
+
+  it('-y replaces a base kustomization only add edited, and keeps the add-on entry', () => {
+    assertSuccess(runCli('add', ['redis', '-y'], { cwd: project, timeoutMs: 30_000 }));
+    const path = join(project, REL);
+    expect(readFileSync(path, 'utf-8')).toContain('  - redis/\n');
+
+    // As if the project came from an older template: the stored checksum is
+    // of that older file, and add's entry sits on top of it.
+    const older = (text: string) => text.replace('labels:', '# older template\nlabels:');
+    writeFileSync(path, older(readFileSync(path, 'utf-8')));
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.fileChecksums[REL] = hashContent(
+      older(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8')),
+    );
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    const after = readFileSync(path, 'utf-8');
+    expect(after).not.toContain('# older template');
+    expect(after).toContain('  - traefik/\n  - redis/\n\nlabels:');
+    expect(existsSync(`${path}.upgrade-new`)).toBe(false);
+    // Recorded without add's entry, like create recorded it.
+    expect(JSON.parse(readFileSync(configPath, 'utf-8')).fileChecksums[REL]).toBe(
+      hashContent(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8')),
+    );
   });
 });

@@ -1035,10 +1035,10 @@ async function promptCicd() {
   }
 
   // Rewrite ghcr.io / github.com refs in compose + k8s manifests so they
-  // point at the real owner. Idempotent — re-running with the same owner
-  // is a no-op.
+  // point at the real owner and repo, and record the pair so upgrade keeps
+  // it. Idempotent: re-running with the same pair is a no-op.
   s.start('Updating Docker / Flux image references');
-  updateImageReferences(projectName, githubOwner, cwd);
+  updateImageReferences(projectName, githubOwner, cwd, repoName);
   s.stop('Image references updated');
 
   try {

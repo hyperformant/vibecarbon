@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
 import {
+  addonKustomizationEntries,
   addonOwnedPaths,
   addonUpgradeEntries,
   installedAddonNames,
@@ -29,7 +30,8 @@ import {
 } from './lib/addon-upgrade-files.js';
 import { runDependencyAudit } from './lib/audit-advisories.js';
 import { isBinaryFile } from './lib/binary-files.js';
-import { hashContent, hashFile } from './lib/checksum.js';
+import { hashContent } from './lib/checksum.js';
+import { CICD_WORKFLOW_FILES } from './lib/ci-setup.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -37,6 +39,10 @@ import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
+import {
+  describeFluxPlaceholders,
+  fluxPlaceholders,
+} from './lib/deploy/k8s/unrendered-placeholders.js';
 import { resolveDisplayName } from './lib/display-name.js';
 import { parseDotenv } from './lib/dotenv.js';
 import {
@@ -72,6 +78,7 @@ import {
   statePassphraseGeneratedThisRun,
 } from './lib/state-passphrase.js';
 import { parseComposePs } from './lib/status/compose-ps.js';
+import { recordedGitHubRepo, templateEdits } from './lib/template-edits.js';
 import { templatePathFor } from './lib/template-paths.js';
 import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
 import { VERSION } from './lib/version.js';
@@ -457,14 +464,16 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
     );
   }
   const env = loadEnvVariables(cwd);
-  const manifest = loadManifest(cwd);
 
   const variables = {
     PROJECT_NAME: env.PROJECT_NAME || env.VITE_PROJECT_NAME || '',
     // Projects created before PROJECT_DISPLAY_NAME existed have no record of
     // it; resolveDisplayName falls back to titleizing the slug.
     PROJECT_DISPLAY_NAME: resolveDisplayName(env),
-    GITHUB_OWNER: manifest.services?.cicd?.owner || env.PROJECT_NAME || '',
+    // What create writes (the project name). The real owner and repo are
+    // the CLI's own edit on top (templateEdits), made again on every file
+    // upgrade writes and undone before every comparison.
+    GITHUB_OWNER: env.PROJECT_NAME || '',
     DB_PASSWORD: env.DB_PASSWORD || env.POSTGRES_PASSWORD || '',
     SITE_URL: env.SITE_URL || 'http://localhost:5173',
     ADMIN_EMAIL: env.ADMIN_EMAIL || '',
@@ -637,6 +646,21 @@ async function main(cliArgs) {
     );
   }
   const variables = reconstructVariables(cwd, { dryRun: args.dryRun });
+  // The CLI's own edits to template files after create (configure's GitHub
+  // owner and repo, add's k8s/base entries): made on what upgrade writes,
+  // undone before it compares with a stored checksum, so a file only the
+  // CLI changed reads as unmodified and keeps the edits when replaced.
+  const edits = templateEdits({
+    projectName: variables.PROJECT_NAME,
+    github: recordedGitHubRepo(cwd, manifest),
+    addonEntries: addonKustomizationEntries(
+      installedAddonNames(manifest, SERVICES_DIR),
+      SERVICES_DIR,
+    ),
+  });
+  /** The checksum a file's content records: always without the CLI's edits. */
+  const recordedHash = (relPath, content) => hashContent(edits.restore(relPath, content));
+  const cicdWorkflows = new Set(manifest.cicdEnabled === true ? CICD_WORKFLOW_FILES : []);
   // What upgrade ships: the template's files, plus the files of every add-on
   // the project installed, read from the bundled services/<name>/ through
   // the add-on's manifest (the map `vibecarbon add` copied by). A path an
@@ -784,6 +808,7 @@ async function main(cliArgs) {
       }
     }
 
+    newContent = edits.apply(relPath, newContent);
     const newHash = hashContent(newContent);
     incomingHash.set(relPath, newHash);
 
@@ -822,12 +847,18 @@ async function main(cliArgs) {
     // — and since replacing re-records the template hash, restoring the
     // customization sets the same trap for the next upgrade. -force still
     // resets everything below, by explicit request.
-    if (!args.force && storedHash && newHash === storedHash) {
+    if (
+      !args.force &&
+      storedHash &&
+      (newHash === storedHash || recordedHash(relPath, newContent) === storedHash)
+    ) {
       unchanged.push(relPath);
       continue;
     }
 
-    const userModified = storedHash ? currentHash !== storedHash : true;
+    const userModified = storedHash
+      ? currentHash !== storedHash && recordedHash(relPath, currentContent) !== storedHash
+      : true;
 
     if (args.force) {
       // Force mode: replace everything, backup modified files. No backup,
@@ -858,11 +889,14 @@ async function main(cliArgs) {
           writeFileSync(projectFilePath, newContent);
           if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
         }
-      } else if (addon && !storedHash) {
+      } else if ((addon || cicdWorkflows.has(relPath)) && !storedHash) {
         // An add-on file with no recorded checksum: `vibecarbon add` did not
         // record one before, so this is every add-on file of an existing
         // project, and leaving it would leave the add-on as old as the day
         // it was added (the observability add-on kept issuing grafana-tls).
+        // The same for a CI workflow `configure cicd` installed before it
+        // recorded one: an old deploy.yml applies k8s/infra/traefik-crds
+        // raw, a file upgrade just moved to its {{TRAEFIK_VERSION}} token.
         // Replaced as -force does, the previous content kept beside it.
         if (!args.dryRun && !writeSidecar(`${projectFilePath}.upgrade-backup`, currentContent)) {
           warnSymlinkSkip(relPath, `${relPath}.upgrade-backup`);
@@ -1171,17 +1205,22 @@ async function main(cliArgs) {
     const newChecksums = Object.fromEntries(
       Object.entries(storedChecksums).filter(([relPath]) => shippedPaths.has(relPath)),
     );
+    // Recorded without the CLI's own edits (templateEdits), like every
+    // stored checksum.
     for (const { relPath } of upgradeEntries) {
       if (isBinaryFile(relPath)) continue;
       const projectFilePath = join(cwd, relPath);
-      let onDisk = null;
+      let content = null;
       try {
-        onDisk = existsSync(projectFilePath) ? hashFile(projectFilePath) : null;
+        content = existsSync(projectFilePath) ? readFileSync(projectFilePath, 'utf-8') : null;
       } catch {
-        onDisk = null;
+        content = null;
       }
-      if (onDisk && (written.has(relPath) || onDisk === incomingHash.get(relPath))) {
-        newChecksums[relPath] = onDisk;
+      if (
+        content !== null &&
+        (written.has(relPath) || hashContent(content) === incomingHash.get(relPath))
+      ) {
+        newChecksums[relPath] = recordedHash(relPath, content);
       }
     }
 
@@ -1191,6 +1230,22 @@ async function main(cliArgs) {
       config.templateVersion = VERSION;
       config.fileChecksums = newChecksums;
     }, cwd);
+  }
+
+  // A GitOps project whose Flux cluster files were left as they were while
+  // k8s/base moved: Flux applies the tree as it is and cannot fill a token,
+  // so say which file would reach the cluster with one, before the push.
+  if (!args.dryRun && manifest.cicdEnabled === true) {
+    const findings = fluxPlaceholders(cwd);
+    if (findings.length > 0) {
+      const review = [...new Set(findings.map((f) => f.via))].map((via) =>
+        existsSync(join(cwd, `${via}.upgrade-new`)) ? `${via}.upgrade-new` : via,
+      );
+      p.log.warn(
+        `Flux applies your committed k8s/ tree as it is, and it can't fill placeholders: ${describeFluxPlaceholders(findings).join('; ')}. ` +
+          `Review ${review.join(' and ')} before you push, or the next Flux sync ships that token to the cluster.`,
+      );
+    }
   }
 
   // Summary

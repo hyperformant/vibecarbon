@@ -46,6 +46,21 @@ function readManifest(servicesDir, name) {
 }
 
 /**
+ * The k8s/base/kustomization.yaml entries `add` listed for these add-ons
+ * (each manifest's `kustomization.entry`; an add-on with none, like
+ * observability, contributes nothing), in the order given.
+ *
+ * @param {string[]} names - installed add-on names (installedAddonNames)
+ * @param {string} servicesDir
+ * @returns {string[]}
+ */
+export function addonKustomizationEntries(names, servicesDir) {
+  return names
+    .map((name) => readManifest(servicesDir, name)?.kustomization?.entry)
+    .filter((entry) => typeof entry === 'string' && entry.length > 0);
+}
+
+/**
  * True when `relPath` is a relative project path that stays inside the
  * project: not empty, not absolute (posix or Windows), and with no `..`
  * segment under either separator. `.` alone (the project root) is refused.
