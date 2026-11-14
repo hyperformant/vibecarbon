@@ -204,6 +204,24 @@ describe('templateEdits', () => {
     expect(edits.apply('k8s/base/app/hpa.yaml', other)).toBe(other);
   });
 
+  it('restore is null for a file the edits are missing from: the user took them out', () => {
+    // Without the edit the file reads as create made it, which matches the
+    // stored checksum; the user changed it all the same.
+    const rel = 'k8s/flux/clusters/primary/vibecarbon.yaml';
+    expect(edits.restore(rel, created(rel))).toBeNull();
+    expect(edits.restore(BASE_KUSTOMIZATION, created(BASE_KUSTOMIZATION))).toBeNull();
+    // Add-on entries in the order they were added still restore: upgrade
+    // knows which add-ons are installed, not in what order.
+    const two = templateEdits({ projectName: PROJECT, addonEntries: ['metabase/', 'redis/'] });
+    const base = created(BASE_KUSTOMIZATION);
+    const redisFirst = addKustomizationEntry(addKustomizationEntry(base, 'redis/'), 'metabase/');
+    expect(redisFirst).not.toBe(two.apply(BASE_KUSTOMIZATION, base));
+    expect(two.restore(BASE_KUSTOMIZATION, redisFirst)).toBe(base);
+    // Partly there is not there either.
+    const mixed = `${edits.apply(rel, created(rel))}# ghcr.io/test-app/test-app\nimage: ghcr.io/test-app/test-app\n`;
+    expect(edits.restore(rel, mixed)).toBeNull();
+  });
+
   it('applies and restores the add-on entries on the base kustomization', () => {
     const base = created(BASE_KUSTOMIZATION);
     const applied = edits.apply(BASE_KUSTOMIZATION, base);

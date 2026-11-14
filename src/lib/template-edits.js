@@ -213,7 +213,8 @@ export function removeKustomizationEntry(content, entry) {
  * The CLI's edits for one project, as two functions over a file's content:
  * `apply` makes them (on what upgrade writes), `restore` undoes them (before
  * upgrade compares with, or records, a checksum). A file no edit touches
- * passes through both unchanged.
+ * passes through both unchanged. `restore` gives null for content the edits
+ * did not make (one missing, or only partly there), so it never matches.
  *
  * The GitHub pair is the one configure recorded; a project configured before
  * it was recorded falls back to its `origin` remote, read locally, only when
@@ -223,29 +224,38 @@ export function removeKustomizationEntry(content, entry) {
  * @param {{ projectName: string, github?: { owner: string, repo: string } | null,
  *   addonEntries?: string[] }} edits
  * @returns {{ apply: (rel: string, content: string) => string,
- *   restore: (rel: string, content: string) => string }}
+ *   restore: (rel: string, content: string) => string | null }}
  */
 export function templateEdits({ projectName, github = null, addonEntries = [] }) {
   const refs = projectName && github?.owner && github?.repo ? { projectName, ...github } : null;
   const isRefFile = (rel) => refs && GITHUB_REF_FILES.includes(rel);
-  return {
-    apply(rel, content) {
-      let out = content;
-      if (isRefFile(rel)) out = rewriteGitHubRefs(out, refs);
-      if (rel === BASE_KUSTOMIZATION) {
-        for (const entry of addonEntries) out = addKustomizationEntry(out, entry);
-      }
-      return out;
-    },
-    restore(rel, content) {
-      let out = content;
-      if (isRefFile(rel)) out = restoreGitHubRefs(out, refs);
-      if (rel === BASE_KUSTOMIZATION) {
-        for (const entry of addonEntries) out = removeKustomizationEntry(out, entry);
-      }
-      return out;
-    },
+  const apply = (rel, content) => {
+    let out = content;
+    if (isRefFile(rel)) out = rewriteGitHubRefs(out, refs);
+    if (rel === BASE_KUSTOMIZATION) {
+      for (const entry of addonEntries) out = addKustomizationEntry(out, entry);
+    }
+    return out;
   };
+  // Only the edits' own output restores: a file the user took an edit out
+  // of (a ref put back, an add-on entry deleted) undoes to exactly what
+  // create made, and would read as untouched while it is the user's.
+  const restore = (rel, content) => {
+    let out = content;
+    if (isRefFile(rel)) {
+      out = restoreGitHubRefs(out, refs);
+      if (rewriteGitHubRefs(out, refs) !== content) return null;
+    }
+    if (rel === BASE_KUSTOMIZATION) {
+      // Present is enough: add lists them in the order they were added,
+      // which the project does not record.
+      const lines = new Set(out.split('\n').map((l) => l.trimEnd()));
+      if (!addonEntries.every((entry) => lines.has(`  - ${entry}`))) return null;
+      for (const entry of addonEntries) out = removeKustomizationEntry(out, entry);
+    }
+    return out;
+  };
+  return { apply, restore };
 }
 
 /**

@@ -19,8 +19,23 @@
  * template with a real kustomize build; this checks a project's own files.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { templatePathFor } from '../../template-paths.js';
+
+/** The template this CLI ships, the source of what `upgrade` writes. */
+const TEMPLATE_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  '..',
+  'carbon',
+);
+
+/** The workflow that applies a GitOps project's Flux cluster file. */
+const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
 
 const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 const KUSTOMIZATION_FILES = ['kustomization.yaml', 'kustomization.yml', 'Kustomization'];
@@ -110,8 +125,9 @@ export function unrenderedPlaceholders(dir, { root = dir, strip = [] } = {}) {
     const file = relative(root, path);
     found.set(file, [...new Set([...(found.get(file) ?? []), ...hits])]);
   };
+  // A strip with no name takes every object of its kind.
   const stripped = (doc) =>
-    strip.some(({ kind, name }) => kind === kindOf(doc) && name === nameOf(doc));
+    strip.some(({ kind, name }) => kind === kindOf(doc) && (name == null || name === nameOf(doc)));
   const seen = new Set();
   const visit = (kdir) => {
     const kfile = kustomizationFile(kdir);
@@ -136,62 +152,151 @@ export function unrenderedPlaceholders(dir, { root = dir, strip = [] } = {}) {
   return [...found].map(([file, placeholders]) => ({ file, placeholders }));
 }
 
+const indentOf = (line) => line.match(/^[ \t]*/)[0].length;
+
+/** A list item's line read as its key's: `  - target:` as `    target:`. */
+const asKey = (line) => line.replace(/^([ \t]*)-[ \t]+/, (_, lead) => `${lead}  `);
+
+/** The `key: value` lines one level under the line at `at`. */
+function childFields(lines, at) {
+  const parent = indentOf(asKey(lines[at]));
+  const fields = {};
+  let child = null;
+  for (const line of lines.slice(at + 1)) {
+    if (!line.trim()) continue;
+    const lead = indentOf(line);
+    if (lead <= parent) break;
+    child ??= lead;
+    if (lead !== child) continue;
+    const m = line.match(/^[ \t]*([\w.$-]+):[ \t]*(.*)$/);
+    if (m) fields[m[1]] = unquote(m[2]);
+  }
+  return fields;
+}
+
 /**
- * The objects a Flux Kustomization document strips with `$patch: delete`.
+ * The objects a Flux Kustomization document strips with `$patch: delete`:
+ * each patch's `target` (one with no name takes every object of its kind),
+ * or the patch's own kind and name when it has no target. A target that
+ * also selects by label or annotation is not read as a strip, so the walk
+ * can report more than Flux applies, never less.
  *
  * @param {string} doc
- * @returns {Array<{ kind: string, name: string }>}
+ * @returns {Array<{ kind: string, name: string | null }>}
  */
 function strippedByFlux(doc) {
+  const lines = uncommented(doc).split('\n');
+  const starts = lines.flatMap((l, i) => (/^[ \t]*-[ \t]+(patch|target):/.test(l) ? [i] : []));
   const out = [];
-  const re =
-    /\$patch:[ \t]*delete[ \t]*\n(?:[ \t]+.*\n)*?[ \t]+kind:[ \t]*(\S+)[ \t]*\n(?:[ \t]+.*\n)*?[ \t]+name:[ \t]*(\S+)/g;
-  for (const m of uncommented(doc).matchAll(re))
-    out.push({ kind: unquote(m[1]), name: unquote(m[2]) });
+  for (const [n, start] of starts.entries()) {
+    const itemIndent = indentOf(lines[start]);
+    let end = starts[n + 1] ?? lines.length;
+    for (let i = start + 1; i < end; i++) {
+      if (lines[i].trim() && indentOf(lines[i]) <= itemIndent) {
+        end = i;
+        break;
+      }
+    }
+    const item = lines.slice(start, end);
+    if (!item.some((l) => /^[ \t]*\$patch:[ \t]*delete[ \t]*$/.test(l))) continue;
+    const targetAt = item.findIndex((l) => /^[ \t]*(-[ \t]+)?target:[ \t]*$/.test(l));
+    if (targetAt !== -1) {
+      const target = childFields(item, targetAt);
+      if (!target.kind || target.labelSelector || target.annotationSelector) continue;
+      out.push({ kind: target.kind, name: target.name || null });
+      continue;
+    }
+    const patchAt = item.findIndex((l) => /^[ \t]*(-[ \t]+)?patch:[ \t]*\|/.test(l));
+    if (patchAt === -1) continue;
+    const bodyIndent = indentOf(asKey(item[patchAt]));
+    const body = [];
+    for (const line of item.slice(patchAt + 1)) {
+      if (line.trim() && indentOf(line) <= bodyIndent) break;
+      body.push(line);
+    }
+    // A loop, not Math.min(...spread): a long body would overflow the stack.
+    let lead = Number.POSITIVE_INFINITY;
+    for (const l of body) if (l.trim()) lead = Math.min(lead, indentOf(l));
+    if (!Number.isFinite(lead)) continue;
+    const text = body.map((l) => l.slice(lead)).join('\n');
+    const kind = kindOf(text);
+    const name = nameOf(text);
+    if (kind && name) out.push({ kind, name });
+  }
   return out;
 }
 
-/** The project's Flux cluster files, relative to the project. */
-function fluxClusterFiles(projectDir) {
-  const clusters = join(projectDir, 'k8s', 'flux', 'clusters');
-  if (!existsSync(clusters)) return [];
-  return readdirSync(clusters, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .flatMap((e) =>
-      readdirSync(join(clusters, e.name))
-        .filter((f) => /\.ya?ml$/.test(f))
-        .map((f) => relative(projectDir, join(clusters, e.name, f))),
-    )
+/**
+ * The Flux cluster files the project's deploy workflow applies, relative to
+ * the project: what puts Flux's Kustomizations on a cluster. The template's
+ * workflow applies clusters/primary/vibecarbon.yaml on every cluster, the
+ * standby's too. No workflow, none.
+ *
+ * @param {string} projectDir
+ * @returns {string[]}
+ */
+export function fluxClusterFilesApplied(projectDir) {
+  const workflow = join(projectDir, DEPLOY_WORKFLOW);
+  if (!existsSync(workflow)) return [];
+  // The suffix is checked apart: in the pattern, `[\w.-]+` before `\.ya?ml`
+  // would backtrack over a long run of dots.
+  const named = uncommented(readFileSync(workflow, 'utf-8')).match(
+    /(?<![\w./-])k8s\/flux\/clusters\/[\w.-]+\/[\w.-]+/g,
+  );
+  return [...new Set(named ?? [])]
+    .filter((rel) => /\.ya?ml$/.test(rel) && existsSync(join(projectDir, rel)))
     .sort();
 }
 
 /**
- * Every placeholder Flux would apply from this project: in each cluster file
- * (the deploy workflow applies it as it is) and in what each of its
- * Kustomizations builds from a path in the repo, minus what it strips.
+ * The placeholders each Kustomization in a cluster file's text builds from a
+ * path in the project, minus what it strips.
  *
  * @param {string} projectDir
- * @returns {Array<{ file: string, placeholders: string[], via: string }>}
+ * @param {string} clusterText
+ * @returns {Array<{ file: string, placeholders: string[] }>}
+ */
+function builtPlaceholders(projectDir, clusterText) {
+  const out = [];
+  for (const doc of documents(clusterText)) {
+    if (kindOf(doc) !== 'Kustomization') continue;
+    const m = uncommented(doc).match(/^[ \t]+path:[ \t]*(\S+)/m);
+    if (!m) continue;
+    const dir = join(projectDir, unquote(m[1]));
+    const inRepo = relative(projectDir, dir);
+    if (inRepo.startsWith('..') || isAbsolute(inRepo) || !existsSync(dir)) continue;
+    out.push(...unrenderedPlaceholders(dir, { root: projectDir, strip: strippedByFlux(doc) }));
+  }
+  return out;
+}
+
+/**
+ * Every placeholder Flux would apply from this project: in each cluster file
+ * the deploy workflow applies (it goes on as it is) and in what each of its
+ * Kustomizations builds from a path in the repo, minus what it strips.
+ *
+ * `upgradeStrips` says whether the cluster file this CLI ships strips all of
+ * a finding's tokens: then taking the new cluster file (`vibecarbon
+ * upgrade`) is the way out. Otherwise no cluster file of ours will, and the
+ * token itself has to go.
+ *
+ * @param {string} projectDir
+ * @returns {Array<{ file: string, placeholders: string[], via: string, upgradeStrips: boolean }>}
  */
 export function fluxPlaceholders(projectDir) {
   const out = [];
-  for (const via of fluxClusterFiles(projectDir)) {
+  for (const via of fluxClusterFilesApplied(projectDir)) {
     const text = readFileSync(join(projectDir, via), 'utf-8');
     const own = uncommented(text).match(PLACEHOLDER);
-    if (own) out.push({ file: via, placeholders: [...new Set(own)], via });
-    for (const doc of documents(text)) {
-      if (kindOf(doc) !== 'Kustomization') continue;
-      const m = uncommented(doc).match(/^[ \t]+path:[ \t]*(\S+)/m);
-      if (!m) continue;
-      const dir = join(projectDir, unquote(m[1]));
-      const inRepo = relative(projectDir, dir);
-      if (inRepo.startsWith('..') || isAbsolute(inRepo) || !existsSync(dir)) continue;
-      for (const hit of unrenderedPlaceholders(dir, {
-        root: projectDir,
-        strip: strippedByFlux(doc),
-      })) {
-        out.push({ ...hit, via });
-      }
+    if (own) out.push({ file: via, placeholders: [...new Set(own)], via, upgradeStrips: false });
+    const shipped = join(TEMPLATE_DIR, templatePathFor(via));
+    const left = existsSync(shipped)
+      ? builtPlaceholders(projectDir, readFileSync(shipped, 'utf-8'))
+      : null;
+    for (const hit of builtPlaceholders(projectDir, text)) {
+      const stays = left?.find((f) => f.file === hit.file)?.placeholders ?? [];
+      const upgradeStrips = left !== null && !hit.placeholders.some((p) => stays.includes(p));
+      out.push({ ...hit, via, upgradeStrips });
     }
   }
   return out;

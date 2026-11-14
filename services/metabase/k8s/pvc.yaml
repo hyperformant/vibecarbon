@@ -4,6 +4,11 @@ metadata:
   name: metabase-plugins-pvc
   labels:
     app: metabase
+  # The CLI's deploy owns this claim: {{K8S_STORAGE_CLASS}} is rendered per
+  # cluster, and Flux drops every claim from its build (flux/clusters/*).
+  # prune: disabled keeps Flux's garbage collection off it too.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   accessModes:
     - ReadWriteOnce
@@ -12,7 +17,9 @@ spec:
   # classes by creationTimestamp, so this can silently land on node-local
   # disk. Resolved before apply by renderK8sStorageClassPlaceholder
   # (storageClassName is immutable once the PVC exists).
-  storageClassName: {{K8S_STORAGE_CLASS}}
+  # Quoted: Flux builds k8s/base as it is before it drops this claim, and
+  # unquoted the token reads as a YAML map that fails the whole build.
+  storageClassName: "{{K8S_STORAGE_CLASS}}"
   resources:
     requests:
       storage: 1Gi

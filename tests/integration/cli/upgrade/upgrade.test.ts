@@ -597,29 +597,90 @@ describe('vibecarbon upgrade after configure cicd', () => {
     expect(JSON.parse(read('.vibecarbon.json')).github).toEqual({ owner: OWNER, repo: 'test-app' });
   });
 
-  it('replaces a workflow configure installed before it recorded checksums, keeping a backup', () => {
-    // Every project that ran configure cicd before this change has its
-    // deploy.yml with no checksum. Left as it was, the workflow keeps
-    // applying k8s/infra/traefik-crds raw, and upgrade just moved that file
-    // to its {{TRAEFIK_VERSION}} token.
+  it('a GitOps project with an add-on that keeps a volume gets no Flux warning', () => {
+    // The add-on's claim names {{K8S_STORAGE_CLASS}}, which the CLI's deploy
+    // renders per cluster; the cluster file leaves every claim to it. Before
+    // that, upgrade warned on every run and could never clear it.
     configureCicd();
-    const rel = '.github/workflows/deploy.yml';
-    const older = read(rel).replace(/\n {6}- name: Install cert-manager[\s\S]*?\n\n/, '\n');
-    expect(older).not.toBe(read(rel));
-    writeFileSync(join(project, rel), older);
+    assertSuccess(runCli('add', ['redis', '-y'], { cwd: project, timeoutMs: 30_000 }));
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+    expect(read('k8s/base/kustomization.yaml')).toContain('  - redis/\n');
+    expect(r.stdout + r.stderr).not.toMatch(/would reach the cluster/);
+  });
+
+  it("names the way out for a token no cluster file strips: the token's own file", () => {
+    configureCicd();
+    const app = 'k8s/base/app/deployment.yaml';
+    writeFileSync(
+      join(project, app),
+      read(app).replace(/image: ghcr\.io\/acme\/test-app:main/g, 'image: "{{APP_IMAGE}}"'),
+    );
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+    const out = (r.stdout + r.stderr).replace(/\s+/g, ' ');
+    expect(out).toContain(`${app} would reach the cluster with {{APP_IMAGE}}`);
+    expect(out).toContain(`put the real value in place of {{APP_IMAGE}} in ${app}`);
+    expect(out).not.toMatch(/vibecarbon\.yaml\.upgrade-new|take the new k8s\/flux/);
+  });
+
+  const DEPLOY_YML = '.github/workflows/deploy.yml';
+  /** The workflows as `configure cicd` left them before it recorded checksums. */
+  function workflowsWithoutChecksums(deployYml: string) {
+    configureCicd();
+    writeFileSync(join(project, DEPLOY_YML), deployYml);
     const configPath = join(project, '.vibecarbon.json');
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    delete config.fileChecksums[rel];
+    delete config.fileChecksums[DEPLOY_YML];
     delete config.fileChecksums['.github/workflows/vibecarbon-build.yml'];
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  }
+
+  it('replaces a workflow a released configure installed before it recorded checksums', () => {
+    // Every project that ran configure cicd before this change has its
+    // deploy.yml with no checksum. The one v0.50.1 installed applies
+    // k8s/infra/traefik-crds raw, a file upgrade moves to its
+    // {{TRAEFIK_VERSION}} token. Byte for byte one this CLI shipped, so it is
+    // the CLI's to replace.
+    const shipped = readFileSync(
+      join(process.cwd(), 'tests/fixtures/deploy-workflow-v0.50.1.yml'),
+      'utf-8',
+    );
+    expect(shipped).toContain('kubectl apply -k k8s/infra/traefik-crds/');
+    workflowsWithoutChecksums(shipped);
 
     const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
     if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
     assertSuccess(r);
 
-    expect(read(rel)).toBe(readFileSync(join(process.cwd(), 'carbon', rel), 'utf-8'));
-    expect(read(`${rel}.upgrade-backup`)).toBe(older);
-    expect(existsSync(join(project, `${rel}.upgrade-new`))).toBe(false);
+    expect(read(DEPLOY_YML)).toBe(readFileSync(join(process.cwd(), 'carbon', DEPLOY_YML), 'utf-8'));
+    expect(existsSync(join(project, `${DEPLOY_YML}.upgrade-new`))).toBe(false);
+    expect(JSON.parse(read('.vibecarbon.json')).fileChecksums[DEPLOY_YML]).toBe(
+      hashContent(read(DEPLOY_YML)),
+    );
+  });
+
+  it('offers, never replaces, a deploy workflow with no checksum that no release shipped', () => {
+    // A workflow the user wrote (or edited) looks the same to upgrade as one
+    // configure installed before checksums: no record. Only a byte-for-byte
+    // shipped copy is the CLI's; anything else is the user's to review.
+    const theirs = `${readFileSync(
+      join(process.cwd(), 'tests/fixtures/deploy-workflow-v0.50.1.yml'),
+      'utf-8',
+    )}# deploys our staging cluster too\n`;
+    workflowsWithoutChecksums(theirs);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(read(DEPLOY_YML)).toBe(theirs);
+    expect(read(`${DEPLOY_YML}.upgrade-new`)).toBe(
+      readFileSync(join(process.cwd(), 'carbon', DEPLOY_YML), 'utf-8'),
+    );
+    expect(existsSync(join(project, `${DEPLOY_YML}.upgrade-backup`))).toBe(false);
   });
 });
 
@@ -666,5 +727,28 @@ describe('vibecarbon upgrade after vibecarbon add', () => {
     expect(JSON.parse(readFileSync(configPath, 'utf-8')).fileChecksums[REL]).toBe(
       hashContent(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8')),
     );
+  });
+
+  it('-y keeps a base kustomization the user took the add-on entry out of', () => {
+    assertSuccess(runCli('add', ['redis', '-y'], { cwd: project, timeoutMs: 30_000 }));
+    const path = join(project, REL);
+    // From an older template, with redis taken back out of Flux's build by
+    // hand: the older template's file exactly, which is no reason to read it
+    // as untouched. add's entry is missing, and that is the user's edit.
+    const older = (text: string) => text.replace('labels:', '# older template\nlabels:');
+    const theirs = older(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8'));
+    expect(readFileSync(path, 'utf-8')).toContain('  - redis/\n');
+    writeFileSync(path, theirs);
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.fileChecksums[REL] = hashContent(theirs);
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(readFileSync(path, 'utf-8')).toBe(theirs);
+    expect(readFileSync(`${path}.upgrade-new`, 'utf-8')).toContain('  - redis/\n');
   });
 });

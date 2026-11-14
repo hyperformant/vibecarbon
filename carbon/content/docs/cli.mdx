@@ -369,11 +369,15 @@ repo (`github`). It runs in every deploy mode. `vibecarbon upgrade` reads these
 edits as its own, not yours: a file only the CLI changed is upgraded like an
 untouched one and keeps your owner and repo.
 
-Before stage 2 commits anything, it checks what Flux would build from your
-`k8s/` tree. Flux applies the files as they are and can't fill a placeholder
-such as `{{TRAEFIK_IMAGE}}`, so if one would reach the cluster (a `k8s/base`
-and a Flux cluster file from different template versions), the command stops,
-names the file and the placeholder, and tells you which file to update.
+Before stage 2 changes anything, it checks what Flux would build from your
+`k8s/` tree through the cluster file `deploy.yml` applies. Flux applies the
+files as they are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so
+if one would reach the cluster, the command stops and names the file and the
+placeholder. When your Flux cluster file is older than `k8s/base`, it tells you
+to take the new one from `vibecarbon upgrade`; for any other placeholder, it
+names the file to fill in. An add-on's volume (redis, n8n, metabase) is not
+Flux's: the claim names your provider's storage class, so
+`vibecarbon deploy <env>` creates it, like the database's.
 
 **Stage 2** connects to the cluster, installs Flux, seeds the GitHub
 Environment secrets/vars, uploads `KUBECONFIG_B64`, and triggers the first
@@ -420,7 +424,7 @@ Files are classified into three categories:
 
 The add-ons you installed with `vibecarbon add` are upgraded too: their compose, Kubernetes and volume files are compared against the add-on as this CLI ships it, under the same three categories. Each add-on's integration doc stays yours.
 
-Some files the CLI edits after `create`: `vibecarbon configure cicd` points the image references and the Flux repository URL at your GitHub owner and repo, and `vibecarbon add` lists an add-on in `k8s/base/kustomization.yaml`. `upgrade` counts those edits as its own, so a file only the CLI changed is replaced like an untouched one, and every version it writes or offers keeps them. A CI workflow `configure cicd` installed before this was tracked is replaced too, with the previous copy kept as `.upgrade-backup`. On a GitOps project, if a file you kept would make Flux apply a placeholder it can't fill, `upgrade` names the file and the placeholder so you can review it before you push.
+Some files the CLI edits after `create`: `vibecarbon configure cicd` points the image references and the Flux repository URL at your GitHub owner and repo, and `vibecarbon add` lists an add-on in `k8s/base/kustomization.yaml`. `upgrade` counts those edits as its own, so a file only the CLI changed is replaced like an untouched one, and every version it writes or offers keeps them. If you take one of those edits back out (an add-on entry you removed by hand, say), the file counts as yours and is offered for review. A CI workflow `configure cicd` installed before it was tracked is replaced when it is exactly a copy some release installed; one you changed is offered for review. On a GitOps project, if a file you kept would make Flux apply a placeholder it can't fill, `upgrade` names the file, the placeholder and what to do before you push.
 
 A project created before sign-in moved into the app gets a `BETTER_AUTH_SECRET` in `.env.local` and `.env`, and `upgrade` warns you that a server you already deployed needs a fresh database: accounts are not carried over, and the old tables still point at the previous auth service. Run `vibecarbon backup` if you want a copy of the old data, then `vibecarbon destroy` and `vibecarbon deploy`.
 

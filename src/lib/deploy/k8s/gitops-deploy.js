@@ -128,25 +128,44 @@ function resolveOwnerAndRepo(projectDir) {
  */
 const GITOPS_REF_FILES = GITHUB_REF_FILES.filter((rel) => rel.startsWith('k8s/'));
 
+/** The app Deployment, where the GitOps deploy renders `{{IMAGE_TAG}}`. */
+const APP_DEPLOYMENT = 'k8s/base/app/deployment.yaml';
+
 /**
- * Refuse, before anything is committed, a tree Flux would apply with a
- * `{{TOKEN}}` still in it: Flux cannot fill one, and it reaches the cluster
- * literally (an image of `{{TRAEFIK_IMAGE}}` is an InvalidImageName rollout).
- * It happens when k8s/base and a Flux cluster file come from different
- * template versions.
+ * Refuse, before anything is written or committed, a tree Flux would apply
+ * with a `{{TOKEN}}` still in it: Flux cannot fill one, and it reaches the
+ * cluster literally (an image of `{{TRAEFIK_IMAGE}}` is an InvalidImageName
+ * rollout). Mostly it is a Flux cluster file older than k8s/base, which the
+ * new cluster file fixes; a token no cluster file of ours strips has to be
+ * replaced where it is.
  *
  * @param {string} projectDir
+ * @param {{ fills?: Record<string, string[]> }} [opts] - tokens this deploy
+ *   fills itself before it commits, per file (the app's `{{IMAGE_TAG}}`)
  */
-export function refuseFluxPlaceholders(projectDir) {
-  const findings = fluxPlaceholders(projectDir);
+export function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
+  const findings = fluxPlaceholders(projectDir)
+    .map((f) => ({
+      ...f,
+      placeholders: f.placeholders.filter((p) => !(fills[f.file] ?? []).includes(p)),
+    }))
+    .filter((f) => f.placeholders.length > 0);
   if (findings.length === 0) return;
-  const via = [...new Set(findings.map((f) => f.via))];
+  const steps = [];
+  const upgrade = [...new Set(findings.filter((f) => f.upgradeStrips).map((f) => f.via))];
+  if (upgrade.length > 0) {
+    steps.push(
+      `Your ${upgrade.join(' and ')} is older than k8s/base: the one this vibecarbon ships keeps those objects out of Flux's build. ` +
+        `Run vibecarbon upgrade and take the new ${upgrade.join(' and ')} (or apply its .upgrade-new)`,
+    );
+  }
+  for (const f of findings.filter((x) => !x.upgradeStrips)) {
+    steps.push(`Put the real value in place of ${f.placeholders.join(', ')} in ${f.file}`);
+  }
   throw new Error(
-    'GitOps deploy stopped before committing: Flux applies the committed k8s/ tree as it is and ' +
+    'GitOps deploy stopped before changing anything: Flux applies the committed k8s/ tree as it is and ' +
       `cannot fill placeholders. ${describeFluxPlaceholders(findings).join('; ')}. ` +
-      'This happens when k8s/base and a Flux cluster file come from different template versions. ' +
-      `Run vibecarbon upgrade and take the new ${via.join(' and ')} ` +
-      '(or apply its .upgrade-new), then run this again.',
+      `${steps.join('. ')}. Then run this again.`,
   );
 }
 
@@ -416,9 +435,13 @@ export async function deployK8sGitOps(args) {
     p.log.warn(obsWarning);
   }
 
-  // Before anything is committed or seeded: a deploy.yml that would write a
-  // stale provider token, and a malformed backup config, fail here.
+  // Before anything is written, committed or seeded: a deploy.yml that would
+  // write a stale provider token, a tree Flux would apply with a token in it,
+  // and a malformed backup config, fail here.
   refuseLegacyProviderTokenStep(projectDir, ProviderClass);
+  refuseFluxPlaceholders(projectDir, {
+    fills: imageTag ? { [APP_DEPLOYMENT]: ['{{IMAGE_TAG}}'] } : {},
+  });
   const backupSettings = resolveBackupSettings(backupConfig);
   // The Certificate deploy.yml renders, validated before anything is seeded.
   const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
@@ -452,19 +475,13 @@ export async function deployK8sGitOps(args) {
     repo: repoName,
     files: GITOPS_REF_FILES,
   });
-  const appDeployment = join(projectDir, 'k8s', 'base', 'app', 'deployment.yaml');
+  const appDeployment = join(projectDir, APP_DEPLOYMENT);
   if (existsSync(appDeployment) && imageTag) {
     // Only substitute — don't touch tags that are already concrete. The
     // default template uses `:main`; callers passing a pinned imageTag can
     // rewrite that via renderInPlace if the template exposes {{IMAGE_TAG}}
     // (follow-up: switch template to use {{IMAGE_TAG}} so SHAs can pin).
     renderInPlace(appDeployment, { IMAGE_TAG: imageTag });
-  }
-  try {
-    refuseFluxPlaceholders(projectDir);
-  } catch (err) {
-    s.stop('Manifests not committed');
-    throw err;
   }
   s.stop('Manifests rendered');
 

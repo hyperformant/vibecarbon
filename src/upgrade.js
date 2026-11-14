@@ -31,7 +31,6 @@ import {
 import { runDependencyAudit } from './lib/audit-advisories.js';
 import { isBinaryFile } from './lib/binary-files.js';
 import { hashContent } from './lib/checksum.js';
-import { CICD_WORKFLOW_FILES } from './lib/ci-setup.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -70,6 +69,7 @@ import {
 import { assertInProjectDir } from './lib/project-guard.js';
 import { sidecarBlocked, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
+import { isShippedWorkflow } from './lib/shipped-workflows.js';
 import {
   ensureStatePassphrase,
   findStatePassphraseProblem,
@@ -658,9 +658,15 @@ async function main(cliArgs) {
       SERVICES_DIR,
     ),
   });
-  /** The checksum a file's content records: always without the CLI's edits. */
-  const recordedHash = (relPath, content) => hashContent(edits.restore(relPath, content));
-  const cicdWorkflows = new Set(manifest.cicdEnabled === true ? CICD_WORKFLOW_FILES : []);
+  /**
+   * The checksum a file's content records: always without the CLI's edits.
+   * Null when the content is not the edits' own output (one the user took
+   * out, or never there): that content records nothing upgrade wrote.
+   */
+  const recordedHash = (relPath, content) => {
+    const canonical = edits.restore(relPath, content);
+    return canonical === null ? null : hashContent(canonical);
+  };
   // What upgrade ships: the template's files, plus the files of every add-on
   // the project installed, read from the bundled services/<name>/ through
   // the add-on's manifest (the map `vibecarbon add` copied by). A path an
@@ -856,9 +862,15 @@ async function main(cliArgs) {
       continue;
     }
 
+    // With a checksum: the file as recorded, the CLI's edits in it (a file
+    // the user took one out of reads as create made it, and is still
+    // theirs). Without one: the user's, unless it is byte for byte a CI
+    // workflow some release of `configure cicd` installed before it
+    // recorded checksums (an old deploy.yml applies k8s/infra/traefik-crds
+    // raw, a file upgrade moves to its {{TRAEFIK_VERSION}} token).
     const userModified = storedHash
-      ? currentHash !== storedHash && recordedHash(relPath, currentContent) !== storedHash
-      : true;
+      ? recordedHash(relPath, currentContent) !== storedHash
+      : !isShippedWorkflow(relPath, currentContent);
 
     if (args.force) {
       // Force mode: replace everything, backup modified files. No backup,
@@ -889,14 +901,11 @@ async function main(cliArgs) {
           writeFileSync(projectFilePath, newContent);
           if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
         }
-      } else if ((addon || cicdWorkflows.has(relPath)) && !storedHash) {
+      } else if (addon && !storedHash) {
         // An add-on file with no recorded checksum: `vibecarbon add` did not
         // record one before, so this is every add-on file of an existing
         // project, and leaving it would leave the add-on as old as the day
         // it was added (the observability add-on kept issuing grafana-tls).
-        // The same for a CI workflow `configure cicd` installed before it
-        // recorded one: an old deploy.yml applies k8s/infra/traefik-crds
-        // raw, a file upgrade just moved to its {{TRAEFIK_VERSION}} token.
         // Replaced as -force does, the previous content kept beside it.
         if (!args.dryRun && !writeSidecar(`${projectFilePath}.upgrade-backup`, currentContent)) {
           warnSymlinkSkip(relPath, `${relPath}.upgrade-backup`);
@@ -1220,7 +1229,7 @@ async function main(cliArgs) {
         content !== null &&
         (written.has(relPath) || hashContent(content) === incomingHash.get(relPath))
       ) {
-        newChecksums[relPath] = recordedHash(relPath, content);
+        newChecksums[relPath] = recordedHash(relPath, content) ?? hashContent(content);
       }
     }
 
@@ -1238,12 +1247,20 @@ async function main(cliArgs) {
   if (!args.dryRun && manifest.cicdEnabled === true) {
     const findings = fluxPlaceholders(cwd);
     if (findings.length > 0) {
-      const review = [...new Set(findings.map((f) => f.via))].map((via) =>
-        existsSync(join(cwd, `${via}.upgrade-new`)) ? `${via}.upgrade-new` : via,
+      // A cluster file older than k8s/base: the new one strips what it
+      // applies. Any other token stays until it is replaced where it is.
+      const steps = [...new Set(findings.filter((f) => f.upgradeStrips).map((f) => f.via))].map(
+        (via) =>
+          existsSync(join(cwd, `${via}.upgrade-new`))
+            ? `apply ${via}.upgrade-new`
+            : `take the new ${via} when vibecarbon upgrade offers it`,
       );
+      for (const f of findings.filter((x) => !x.upgradeStrips)) {
+        steps.push(`put the real value in place of ${f.placeholders.join(', ')} in ${f.file}`);
+      }
       p.log.warn(
         `Flux applies your committed k8s/ tree as it is, and it can't fill placeholders: ${describeFluxPlaceholders(findings).join('; ')}. ` +
-          `Review ${review.join(' and ')} before you push, or the next Flux sync ships that token to the cluster.`,
+          `Before you push, ${steps.join(', and ')}, or the next Flux sync ships that token to the cluster.`,
       );
     }
   }
