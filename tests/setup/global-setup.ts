@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Every test file gets its own temp root, and os.tmpdir() points inside it
@@ -40,6 +40,22 @@ process.env.VIBECARBON_UPLINK_LOCK_DIR = join(fileRoot, 'uplink', 'uplink-push.l
 // real ~/.vibecarbon.
 process.env.VIBECARBON_FINGERPRINT_KEY_DIR = join(fileRoot, 'fpkey');
 mkdirSync(process.env.VIBECARBON_FINGERPRINT_KEY_DIR, { mode: 0o700 });
+
+// Pulumi records each workspace's selected stack under PULUMI_HOME/workspaces,
+// one file per throwaway project: one laptop's ~/.pulumi held 8,700 of them.
+// Every file gets its own home, inside the census root so it is removed with
+// it. The installed plugins and the CLI are shared by symlink, so nothing is
+// downloaded again; only the two that exist are linked, and the real home is
+// only read, never written.
+const realPulumiHome = realEnv.PULUMI_HOME || join(homedir(), '.pulumi');
+const fileDirPulumi = join(fileRoot, 'pulumi-home');
+mkdirSync(fileDirPulumi);
+for (const shared of ['plugins', 'bin']) {
+  if (existsSync(join(realPulumiHome, shared))) {
+    symlinkSync(join(realPulumiHome, shared), join(fileDirPulumi, shared));
+  }
+}
+process.env.PULUMI_HOME = fileDirPulumi;
 
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { removeWorkspaceDirs } from '../../src/lib/iac/workspace-dir.js';
