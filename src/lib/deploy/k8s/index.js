@@ -82,7 +82,11 @@ export async function destroyK8s(options) {
       projectName,
     });
 
-    s.stop(`Infrastructure destroyed: ${environment}`);
+    s.stop(
+      result.destroyed
+        ? `Infrastructure destroyed: ${environment}`
+        : `No Pulumi stack to destroy: ${environment}`,
+    );
     return result;
   } catch (error) {
     if (isStatePassphraseFailure(error)) {

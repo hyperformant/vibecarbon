@@ -1712,7 +1712,9 @@ function undecryptable(err, stackName, projectDir) {
 
 /**
  * Run `pulumi destroy` and remove the stack. Idempotent — if the stack
- * doesn't exist the function resolves without error.
+ * doesn't exist the function resolves `{ destroyed: false }`, with
+ * `stateBucketMissing: true` when its whole state bucket is confirmed missing
+ * (stackConfirmedAbsent).
  *
  * Loud partial detection (M3 Task 9f): two live DO k8s destroys left
  * firewall/VPC/SSH-key/reserved-IP orphans while this function RESOLVED —
@@ -1769,11 +1771,10 @@ export async function destroyStack(stackName, program, options = {}) {
     // nothing while the real resources live on (2026-08-06 RCA).
     stack = await getOrCreateStack(stackName, program, { ...options, requireExisting: true });
   } catch (err) {
-    // Durably absent — treat as a no-op so destroy is idempotent. Reaching
-    // here now means the staleness window was polled through first.
-    if (err?.stackNotFound || /no stack named/i.test(err.message || '')) {
-      return { destroyed: false };
-    }
+    // Durably absent, the stack or its whole state bucket: a no-op, so
+    // destroy is idempotent. The same rule as removeStackState's.
+    const absent = await stackConfirmedAbsent(err, options);
+    if (absent) return { destroyed: false, ...absent };
     throw err;
   }
   // Refresh first so destroy tolerates resources that were already reaped
@@ -2054,12 +2055,8 @@ export async function removeStackState(stackName, options = {}) {
       decrypts: false,
     });
   } catch (err) {
-    if (err?.stackNotFound || /no stack named/i.test(err.message || '')) {
-      return { removed: false };
-    }
-    if (await stateBucketConfirmedMissing(err, options)) {
-      return { removed: false, stateBucketMissing: true };
-    }
+    const absent = await stackConfirmedAbsent(err, options);
+    if (absent) return { removed: false, ...absent };
     throw err;
   }
   // A deploy that died mid-update leaves its lock, and a locked stack refuses
@@ -2077,11 +2074,32 @@ export async function removeStackState(stackName, options = {}) {
 }
 
 /**
+ * Whether a requireExisting select failure says the stack is durably absent,
+ * for the two destroy-side openers (destroyStack, removeStackState), so the
+ * same failure gets the same answer on every tier.
+ *
+ * Absent when the select found no such stack, or when its state bucket is
+ * confirmed missing in every region (stateBucketConfirmedMissing). Anything
+ * else (access denied, a 5xx, a locate that could not finish) is null, and the
+ * caller rethrows.
+ *
+ * @param {Error} err - what getOrCreateStack threw
+ * @param {Parameters<typeof stateBucketConfirmedMissing>[1]} options
+ * @returns {Promise<{ stateBucketMissing?: true } | null>}
+ */
+async function stackConfirmedAbsent(err, options) {
+  if (err?.stackNotFound || /no stack named/i.test(err?.message || '')) return {};
+  if (await stateBucketConfirmedMissing(err, options)) return { stateBucketMissing: true };
+  return null;
+}
+
+/**
  * True only when a stack-select failure says the state BUCKET does not exist
  * AND an independent check finds that bucket in no region of the store.
  *
  * A deploy that fails before the state bucket is created (excitingai,
- * 2026-10-16: wrong S3 keys, so no bucket was ever made) leaves an env whose
+ * 2026-10-16: wrong S3 keys, so no bucket was ever made; hetzner/k8s e2e,
+ * 2026-11-13: stopped while creating the app bucket) leaves an env whose
  * backend URL names a bucket that never existed. `pulumi stack select` then
  * fails with NoSuchBucket, and destroy recorded that as an UNVERIFIED
  * pulumi-stack and exited 2, though there is no state to remove.
