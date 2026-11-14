@@ -199,6 +199,20 @@ export async function removePlainHistory({
 }
 
 /**
+ * What a failed delete can say without quoting it: the error's code, else its
+ * name when it is not the generic `Error`, else the HTTP status, else nothing
+ * specific. Never the message, which can carry a key or a URL.
+ * @param {any} err
+ * @returns {string}
+ */
+function failureSignal(err) {
+  if (err?.code) return String(err.code);
+  if (err?.name && err.name !== 'Error') return String(err.name);
+  const status = err?.$metadata?.httpStatusCode;
+  return status ? `HTTP ${status}` : 'unknown error';
+}
+
+/**
  * Delete `.pulumi/stacks/<project>/<stack>.json.bak`, the previous copy Pulumi
  * keeps beside a stack's state and leaves behind when `stack rm` removes the
  * stack. Call it only once the stack's resources are known to be gone: until
@@ -231,17 +245,16 @@ export async function removeStackBackup({
 }) {
   try {
     const backend = await historyBackend(backendUrl, { s3Config, provider, s3 });
+    // Not a backend vibecarbon manages (Pulumi Cloud, azblob, another bucket):
+    // nothing of ours to remove, and nothing worth saying on every destroy.
     if (!backend) {
-      progressLog(
-        `[pulumi] ${stackName}'s Pulumi backend isn't one vibecarbon manages, so its previous-state copy (.bak) stays`,
-      );
       return false;
     }
     await backend.remove([`.pulumi/stacks/${pulumiProject}/${stackName}.json.bak`]);
     return true;
   } catch (err) {
     progressLog(
-      `[pulumi] couldn't remove ${stackName}'s previous-state copy (.bak) (${err?.code ?? err?.name ?? 'unknown error'})`,
+      `[pulumi] couldn't remove ${stackName}'s previous-state copy (.bak) (${failureSignal(err)})`,
     );
     return false;
   }

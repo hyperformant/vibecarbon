@@ -11,6 +11,7 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import * as progress from '../../../src/lib/cli/progress.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const { removeStackBackup } = await import('../../../src/lib/iac/state-history.js');
@@ -94,6 +95,59 @@ describe('removeStackBackup', () => {
     });
     expect(gone).toBe(false);
     expect(s3.objects).toEqual([KEY]);
+  });
+
+  it('says nothing for a backend vibecarbon does not manage', async () => {
+    const log = vi.spyOn(progress, 'progressLog').mockImplementation(() => {});
+    try {
+      expect(
+        await removeStackBackup({
+          backendUrl: 'azblob://container',
+          pulumiProject: 'proj',
+          stackName: 'e1',
+        }),
+      ).toBe(false);
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('names the HTTP status when the error has no code', async () => {
+    const log = vi.spyOn(progress, 'progressLog').mockImplementation(() => {});
+    try {
+      const err = Object.assign(new Error('x'), { $metadata: { httpStatusCode: 403 } });
+      const s3 = fakeS3([KEY], err);
+      const gone = await removeStackBackup({
+        backendUrl: 's3://state-bucket?endpoint=fsn1.your-objectstorage.com',
+        pulumiProject: 'proj',
+        stackName: 'e1',
+        s3,
+      });
+      expect(gone).toBe(false);
+      expect(String(log.mock.calls[0]?.[0])).toContain('HTTP 403');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('the failure line never contains the error message', async () => {
+    const log = vi.spyOn(progress, 'progressLog').mockImplementation(() => {});
+    try {
+      const s3 = fakeS3([KEY], new Error('boom SENTINEL-secret-9f3 https://x/state-bucket/key'));
+      const gone = await removeStackBackup({
+        backendUrl: 's3://state-bucket?endpoint=fsn1.your-objectstorage.com',
+        pulumiProject: 'proj',
+        stackName: 'e1',
+        s3,
+      });
+      expect(gone).toBe(false);
+      expect(log).toHaveBeenCalled();
+      expect(JSON.stringify(log.mock.calls)).not.toContain('SENTINEL-secret-9f3');
+      expect(JSON.stringify(log.mock.calls)).toContain('unknown error');
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('a backend vibecarbon does not manage is not touched and reports false', async () => {
