@@ -32,10 +32,9 @@ const fileEnv = existsSync(envFile) ? parseDotenv(readFileSync(envFile, 'utf-8')
 const env: Record<string, string | undefined> = { ...fileEnv };
 for (const [k, v] of Object.entries(process.env)) if (v) env[k] = v;
 
-const owns = ownsStaleScratchProject(Date.now(), env as NodeJS.ProcessEnv);
-
 for (const [provider, entry] of Object.entries(testConfig.e2e.providers)) {
   try {
+    const owns = ownsStaleScratchProject(Date.now(), env as NodeJS.ProcessEnv);
     const token = env[entry.computeTokenEnv];
     const store = token ? e2eStateStore(provider, env, { dryRun }) : null;
     if (!store || !token) {
@@ -44,7 +43,9 @@ for (const [provider, entry] of Object.entries(testConfig.e2e.providers)) {
     }
     const at = await store.where();
     if (!at) {
-      console.warn(`${TAG} ${provider}: no state bucket found or reachable, nothing to sweep`);
+      // list() logs why (not found, or the answer that stopped the look).
+      await store.list('.pulumi/stacks/');
+      console.warn(`${TAG} ${provider}: state bucket not located, nothing swept`);
       continue;
     }
     const { deleted, kept } = await sweepRunStacks(

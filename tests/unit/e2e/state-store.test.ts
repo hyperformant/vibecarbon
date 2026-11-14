@@ -62,13 +62,90 @@ describe('e2eStateStore', () => {
     expect((listed?.input as { Bucket: string } | undefined)?.Bucket).toBe('vc-e2e-state-ci-xyz');
   });
 
-  it('falls back to the derived name, per namespace, without an override', async () => {
+  describe('another namespace swaps the namespace segment', () => {
+    const headBuckets = async (env: Record<string, string>, namespace: 'local' | 'ci') => {
+      const f = fakeS3('nowhere');
+      const s = e2eStateStore('hetzner', { ...HETZNER_ENV, ...env }, { namespace, s3: f.s3 });
+      await s?.where();
+      return [
+        ...new Set(
+          f.sent
+            .filter((x) => x.name === 'HeadBucketCommand')
+            .map((x) => (x.input as { Bucket: string }).Bucket),
+        ),
+      ];
+    };
+    it('local to ci', async () => {
+      expect(await headBuckets({ VC_E2E_STATE_BUCKET: 'vc-e2e-state-local-6586f2' }, 'ci')).toEqual(
+        ['vc-e2e-state-ci-6586f2'],
+      );
+    });
+    it('ci to local', async () => {
+      expect(
+        await headBuckets(
+          { E2E_NAMESPACE: 'ci', VC_E2E_STATE_BUCKET: 'vc-e2e-state-ci-6586f2' },
+          'local',
+        ),
+      ).toEqual(['vc-e2e-state-local-6586f2']);
+    });
+    it('a name without a suffix', async () => {
+      expect(await headBuckets({}, 'ci')).toEqual(['vc-e2e-state-ci']);
+    });
+    it('a custom override shape returns null and says why', () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      expect(
+        e2eStateStore(
+          'hetzner',
+          { ...HETZNER_ENV, VC_E2E_STATE_BUCKET: 'my-own-state' },
+          { namespace: 'ci' },
+        ),
+      ).toBeNull();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0][0])).toContain('my-own-state');
+      log.mockRestore();
+    });
+  });
+
+  it('a bucket found nowhere lists as incomplete, never as empty', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const s = e2eStateStore('hetzner', HETZNER_ENV, { s3: fakeS3('nowhere').s3 });
+    expect(await s?.list('.pulumi/stacks/')).toEqual({ keys: [], complete: false });
+    expect(await s?.remove(['k'])).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it('a candidate region that could not be worked out carries its error into the warning', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { LinodeObjectStorageProvider } = await import(
+      '../../../src/lib/providers/linode-objectstorage.js'
+    );
+    const spy = vi
+      .spyOn(LinodeObjectStorageProvider, 'resolveAccountS3Region')
+      .mockImplementation(async (region: string) => {
+        if (region === 'us-iad') throw new Error('endpoint list refused');
+        return 'us-ord-1';
+      });
     const f = fakeS3('nowhere');
-    const s = e2eStateStore('hetzner', HETZNER_ENV, { namespace: 'ci', s3: f.s3 });
-    expect((await s?.where()) === null).toBe(true);
-    const sent = f.sent.filter((x) => x.name === 'HeadBucketCommand');
-    expect(sent.length).toBeGreaterThan(0);
-    for (const x of sent) expect((x.input as { Bucket: string }).Bucket).toBe('vc-e2e-state-ci');
+    const s = e2eStateStore(
+      'linode',
+      { LINODE_ACCESS_KEY: 'a', LINODE_SECRET_KEY: 's', LINODE_API_TOKEN: 't' },
+      { s3: f.s3 },
+    );
+    expect(await s?.list('.pulumi/stacks/')).toEqual({ keys: [], complete: false });
+    expect(warn.mock.calls.flat().join('\n')).toContain('endpoint list refused');
+    spy.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('remove never rejects, even when the client cannot be built', async () => {
+    let n = 0;
+    const s3 = () => {
+      if (++n > 1) throw new Error('client broke');
+      return { send: async () => ({}) };
+    };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const s = e2eStateStore('hetzner', HETZNER_ENV, { s3 });
+    await expect(s?.remove(['a'])).resolves.toEqual([]);
   });
 
   it('returns null without storage credentials', () => {

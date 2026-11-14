@@ -71,8 +71,8 @@ const isNotFound = (e: unknown) =>
  * storage credentials are missing.
  *
  * @param opts.namespace - which namespace's bucket (default: the active one).
- *   A namespace other than the env's own ignores VC_E2E_STATE_BUCKET, which
- *   names one namespace's bucket only.
+ *   A namespace other than the env's own swaps the namespace segment of the
+ *   env's bucket name; a name of another shape returns null.
  * @param opts.dryRun - `remove` logs `would delete <key>` and deletes nothing.
  * @param opts.s3 - test seam: builds the client for a region.
  */
@@ -93,10 +93,21 @@ export function e2eStateStore(
 
   const own = activeNamespace(env as NodeJS.ProcessEnv) ?? 'local';
   const wanted = opts.namespace ?? own;
-  const nameEnv: Record<string, string | undefined> = { ...env };
-  if (wanted !== own) delete nameEnv.VC_E2E_STATE_BUCKET;
-  nameEnv.E2E_NAMESPACE = wanted === 'local' ? undefined : wanted;
-  const bucket = sharedStateBucketName(nameEnv as NodeJS.ProcessEnv);
+  let bucket = sharedStateBucketName(env as NodeJS.ProcessEnv);
+  if (wanted !== own) {
+    // The override names one namespace's bucket. Another namespace's is the
+    // same name with the namespace segment swapped; any other shape cannot be
+    // mapped, and guessing a bare name would read a bucket that does not exist
+    // as empty and clean.
+    const shape = new RegExp(`^vc-e2e-state-${own}(-.+)?$`).exec(bucket);
+    if (!shape) {
+      console.log(
+        `[state-store] ${provider}: cannot name the ${wanted} bucket from "${bucket}" (not vc-e2e-state-${own}[-suffix])`,
+      );
+      return null;
+    }
+    bucket = `vc-e2e-state-${wanted}${shape[1] ?? ''}`;
+  }
   const dryRun = opts.dryRun === true;
 
   let cls: StorageClass | undefined;
@@ -112,6 +123,8 @@ export function e2eStateStore(
     return opts.s3 ? opts.s3(cfg) : new cls(accessKey, secretKey, region).getClient();
   };
 
+  /** Candidate regions that could not be worked out, with why. */
+  const unprobed: string[] = [];
   const candidateRegions = async (): Promise<string[]> => {
     cls ??= await Provider.getObjectStorageProviderClass();
     const pinned = Provider.S3_REGION_ENV ? env[Provider.S3_REGION_ENV]?.trim() : undefined;
@@ -132,7 +145,9 @@ export function e2eStateStore(
     for (const region of prefs?.regions ?? []) {
       try {
         found.add(await cls.resolveAccountS3Region(region, { apiToken: token }));
-      } catch {}
+      } catch (e) {
+        unprobed.push(`${region}: ${errText(e)}`);
+      }
     }
     return [...found];
   };
@@ -154,6 +169,10 @@ export function e2eStateStore(
           if (isNotFound(e)) continue;
           throw new Error(`${region} answered "${errText(e)}" when asked for bucket ${bucket}`);
         }
+      }
+      if (unprobed.length > 0) {
+        // Not found where we looked, but not everywhere: absent is unproven.
+        throw new Error(`not found in the regions probed; unprobed: ${unprobed.join('; ')}`);
       }
       return null;
     })();
@@ -184,8 +203,12 @@ export function e2eStateStore(
         console.warn(`[state-store] ${provider}: cannot tell where ${bucket} is: ${errText(e)}`);
         return { keys: [], complete: false };
       }
-      // No such bucket: no stacks, and nothing is unread.
-      if (!at) return { keys: [], complete: true };
+      // Absent, unreachable and unprobed cannot be told apart from here, so
+      // an unlocated bucket is never an empty one.
+      if (!at) {
+        console.warn(`[state-store] ${provider}: bucket ${bucket} was not found in any region`);
+        return { keys: [], complete: false };
+      }
       const keys: string[] = [];
       try {
         const client = await clientFor(at.region);
@@ -227,11 +250,11 @@ export function e2eStateStore(
       } catch {
         return gone;
       }
-      // No bucket: every key is already gone.
-      if (!at) return [...keys];
-      const client = await clientFor(at.region);
+      // Not located: absence is unproven, so nothing is reported gone.
+      if (!at) return gone;
       for (const key of keys) {
         try {
+          const client = await clientFor(at.region);
           await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
           gone.push(key);
         } catch (e) {
