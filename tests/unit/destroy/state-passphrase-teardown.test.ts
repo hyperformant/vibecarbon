@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { fakePulumi } from '../../_shared/fake-pulumi-workspace.js';
+import { fakeHetznerStateStore } from '../../_shared/fake-state-store.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
@@ -95,6 +96,7 @@ vi.mock('../../../src/lib/csi-volumes.js', async (orig) => ({
 
 // ── The cloud: a recording provider that owns one labelled server ──
 const cloudCalls: string[] = [];
+const stateStore = fakeHetznerStateStore();
 let backstop = true;
 let firewallDeleteFails = false;
 /** Whether the reserved-IP label listing answers or throws. */
@@ -172,7 +174,14 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
       storageKeys ? { accessKey: 'AK', secretKey: 'SK' } : null,
   });
   Object.defineProperty(FakeProvider, 'K8S_DESTROY_BACKSTOP', { get: () => backstop });
-  return { ...real, providerFor: () => FakeProvider };
+  return {
+    ...real,
+    providerFor: () => FakeProvider,
+    // A destroy that removes the stack record deletes its previous-state copy
+    // (.json.bak) through the state bucket's client.
+    getObjectStorageProvider: (...args: Parameters<typeof stateStore.getObjectStorageProvider>) =>
+      stateStore.getObjectStorageProvider(...args),
+  };
 });
 
 const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');

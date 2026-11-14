@@ -31,6 +31,11 @@ const certError: Attempt = {
   responseTimeMs: 40,
   errorMessage: 'SSL validation failed: self-signed certificate',
 };
+// attemptFn stands in for the connection, so nothing needs an address: the
+// public lookup answers none, as for a name not yet published, and the real
+// one never asks 1.1.1.1 and 8.8.8.8.
+const resolvePublic = async () => null;
+
 const servedDefault: Attempt = {
   checkName: 'ssl_valid',
   status: 'pass',
@@ -41,7 +46,11 @@ const servedDefault: Attempt = {
 describe('checkSslValid strict trust policy', () => {
   it('passes immediately on a trusted chain', async () => {
     const attemptFn = vi.fn(async () => trustedPass);
-    const res = await checkSslValid('d4.example.test', { attemptFn, sleep: async () => {} });
+    const res = await checkSslValid('d4.example.test', {
+      attemptFn,
+      sleep: async () => {},
+      resolvePublic,
+    });
     expect(res.status).toBe('pass');
     expect(attemptFn).toHaveBeenCalledTimes(1);
   });
@@ -50,7 +59,11 @@ describe('checkSslValid strict trust policy', () => {
     const attemptFn = vi.fn(async (rejectUnauthorized: boolean) =>
       rejectUnauthorized ? certError : servedDefault,
     );
-    const res = await checkSslValid('d4.example.test', { attemptFn, sleep: async () => {} });
+    const res = await checkSslValid('d4.example.test', {
+      attemptFn,
+      sleep: async () => {},
+      resolvePublic,
+    });
     expect(res.status).toBe('fail');
     expect(res.errorMessage).toContain('certificate not trusted');
     expect(res.errorMessage).toContain('TRAEFIK DEFAULT CERT');
@@ -64,7 +77,11 @@ describe('checkSslValid strict trust policy', () => {
       calls += 1;
       return calls >= 3 ? trustedPass : certError;
     });
-    const res = await checkSslValid('d4.example.test', { attemptFn, sleep: async () => {} });
+    const res = await checkSslValid('d4.example.test', {
+      attemptFn,
+      sleep: async () => {},
+      resolvePublic,
+    });
     expect(res.status).toBe('pass');
     expect(calls).toBe(3);
   });
@@ -76,7 +93,11 @@ describe('checkSslValid strict trust policy', () => {
       responseTimeMs: 10_000,
       errorMessage: 'SSL connection timed out after 10000ms',
     }));
-    const res = await checkSslValid('d4.example.test', { attemptFn, sleep: async () => {} });
+    const res = await checkSslValid('d4.example.test', {
+      attemptFn,
+      sleep: async () => {},
+      resolvePublic,
+    });
     expect(res.status).toBe('fail');
     expect(res.errorMessage).toContain('timed out');
   });
@@ -90,7 +111,7 @@ describe('checkSslValid strict trust policy', () => {
       rejectUnauthorized ? certError : servedDefault,
     );
     const sleep = vi.fn(async () => {});
-    const res = await checkSslValid('d4.example.test', { attemptFn, sleep });
+    const res = await checkSslValid('d4.example.test', { attemptFn, sleep, resolvePublic });
     expect(res.status).toBe('fail');
     expect(sleep).toHaveBeenCalledTimes(12);
     expect(sleep).toHaveBeenCalledWith(15_000);
@@ -102,7 +123,12 @@ describe('checkSslValid strict trust policy', () => {
       rejectUnauthorized ? certError : servedDefault,
     );
     const sleep = vi.fn(async () => {});
-    const res = await checkSslValid('d4.example.test', { attemptFn, sleep, tlsPending: true });
+    const res = await checkSslValid('d4.example.test', {
+      attemptFn,
+      sleep,
+      tlsPending: true,
+      resolvePublic,
+    });
     expect(res.status).toBe('fail');
     expect(sleep).toHaveBeenCalledTimes(32);
     expect(res.errorMessage).toContain('after 480s');

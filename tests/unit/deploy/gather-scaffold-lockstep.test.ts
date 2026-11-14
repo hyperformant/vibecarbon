@@ -61,6 +61,7 @@ vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
 import { gatherDeploymentConfig } from '../../../src/lib/deploy/prompts.js';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { S3CompatibleProvider } from '../../../src/lib/providers/s3-base.js';
 
 const REFUSAL =
   "This project's scaffold predates the wal-g role file. Run `vibecarbon upgrade`, then deploy again.";
@@ -102,6 +103,10 @@ beforeEach(() => {
   vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockImplementation(async () => {
     later.s3Keys();
     return { accessKey: 'ABCDEFGHIJ0123456789', secretKey: 'x'.repeat(40), source: 'prompt' };
+  });
+  // The keys check right after the S3 prompt would ask the real bucket host.
+  vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
+    valid: true,
   });
   restoreCatalog = seedCatalog(HetznerProvider, '2026-10-22/hetzner');
 });

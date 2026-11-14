@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importingWorkspace } from '../../_shared/fake-stack-import.js';
+import { fakeHetznerStateStore } from '../../_shared/fake-state-store.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
@@ -232,6 +233,15 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
       return { listStacks: async () => [], whoAmI: async () => 'me' };
     },
   },
+}));
+
+// destroyStack deletes the stack's previous-state copy (.json.bak) through the
+// state bucket's client once Pulumi has destroyed everything.
+const stateStore = fakeHetznerStateStore();
+vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  getObjectStorageProvider: (...args: Parameters<typeof stateStore.getObjectStorageProvider>) =>
+    stateStore.getObjectStorageProvider(...args),
 }));
 
 const { upStack, getStackOutputs, destroyStack, removeStackState, listStacks, openStateBackend } =
