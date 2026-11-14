@@ -58,6 +58,7 @@ const WORKFLOWS = [
   join('.github', 'workflows', 'codeql.yml'),
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'docker-newest.yml'),
+  join('.github', 'workflows', 'e2e-residue-audit.yml'),
   join('.github', 'workflows', 'e2e-us-perf.yml'),
   join('.github', 'workflows', 'mirror-images.yml'),
   join('.github', 'workflows', 'native-multiarch-image.yml'),
