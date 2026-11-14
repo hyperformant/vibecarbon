@@ -57,7 +57,7 @@ import {
   isStatePassphraseFailure,
   StateMigrationError,
 } from './state-error.js';
-import { removePlainHistory } from './state-history.js';
+import { removePlainHistory, removeStackBackup } from './state-history.js';
 import {
   classifyPendingCreates,
   forgetPendingReported,
@@ -1857,6 +1857,9 @@ export async function destroyStack(stackName, program, options = {}) {
   }
 
   await stack.workspace.removeStack(stackName);
+  // Every resource the stack listed was destroyed and counted above, so the
+  // copy `stack rm` leaves (.json.bak) records nothing worth keeping.
+  await removeStackBackup(backupArgs(stackName, options));
   return { destroyed: true, resourceCount: resourceCountBefore ?? deleteCount };
 }
 
@@ -1989,6 +1992,22 @@ async function describeDestroyFailure(stack, stackName, err) {
 }
 
 /**
+ * What removeStackBackup needs for `stackName`: the backend the stack's Pulumi
+ * used, and the state bucket's own credentials.
+ * @param {string} stackName
+ * @param {{ projectName?: string, s3Config?: object, provider?: string }} options
+ */
+function backupArgs(stackName, options) {
+  return {
+    backendUrl: resolveBackendUrl(options.s3Config, options.provider),
+    pulumiProject: requirePulumiProject(options),
+    stackName,
+    s3Config: options.s3Config,
+    provider: options.provider,
+  };
+}
+
+/**
  * Remove a stack's state record WITHOUT running `pulumi destroy` — the
  * compose-side twin of the removal destroyStack performs for the k8s tiers.
  *
@@ -2012,6 +2031,11 @@ async function describeDestroyFailure(stack, stackName, err) {
  * the environment's entry goes (entryKeptReason, ENTRY_KEEP_BY_CLASS). A
  * leak a re-run cannot act on, such as a DNS record or a health check,
  * keeps neither; any line a re-run can act on keeps both.
+ *
+ * `options.removeBackup: true` also deletes the previous copy Pulumi leaves
+ * (`<stack>.json.bak`). Only a caller that knows the stack's resources are gone
+ * passes it: that copy is the last record of what a forced removal may have
+ * leaked.
  *
  * Idempotent: a durably-absent stack resolves `{ removed: false }`. Any
  * other select failure (backend/credential errors) propagates — silently
@@ -2043,6 +2067,12 @@ export async function removeStackState(stackName, options = {}) {
   // exited with the standby's `up` still running, and destroy reported its
   // state as a leak.
   await runPastStaleLock(stack, () => stack.workspace.removeStack(stackName, { force: true }));
+  // Forced, so the stack may still list resources: only a caller that has
+  // verified them gone says so (removeBackup). Otherwise the previous copy
+  // (.json.bak) is the last record of what may have leaked, and stays.
+  if (options.removeBackup === true) {
+    await removeStackBackup(backupArgs(stackName, options));
+  }
   return { removed: true };
 }
 

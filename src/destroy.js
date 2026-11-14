@@ -4833,8 +4833,12 @@ async function destroyK8sTier({
         // The project dir getOrCreateStack checked the passphrase in. Asks
         // git, so only here, once a stack has been refused.
         passphraseProvenance: statePassphraseProvenance(process.cwd()),
+        // removeBackup stays false: the state here could not be read, the
+        // sweeps stand in for `pulumi destroy`, and the previous copy
+        // (.json.bak) is the last record of anything they missed.
         removeRecord: (stackEnv) =>
           removeStackState(stackEnv, {
+            removeBackup: false,
             projectName: projectConfig.projectName,
             provider: providerIdFor(envConfig),
             s3Config: destroyS3Config,
@@ -5125,7 +5129,10 @@ async function removePulumiStackStateEffect(ctx) {
   for (const stackEnv of plan.stackEnvs) {
     s.start(`Removing Pulumi stack state: ${stackEnv}`);
     try {
+      // This step runs only when the entry is not kept (entryKeptReason), that
+      // is, every resource the stack listed is verified deleted.
       const { removed, stateBucketMissing } = await removeStackState(stackEnv, {
+        removeBackup: true,
         projectName: projectConfig.projectName,
         provider: providerIdFor(envConfig),
         s3Config,
