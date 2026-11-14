@@ -64,7 +64,7 @@ export type BudgetTable = Record<string, Partial<Record<DeployMode, Record<strin
 
 /**
  * The calibrated table, written by scripts/calibrate-deploy-budgets.js from the
- * e2e results db (rule: ceil5(p90 + 15) at n >= 4, else ceil5(max + 30), plus
+ * e2e results dbs, local and GitHub pooled (rule: ceil5(1.5 x median + 60), plus
  * the seeds for provider + mode combinations with no samples yet).
  * Never edited by hand.
  */

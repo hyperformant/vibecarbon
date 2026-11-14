@@ -21,32 +21,39 @@ describe('the budget rule', () => {
     expect([ceil5(0), ceil5(1), ceil5(5), ceil5(5.01), ceil5(212)]).toEqual([0, 5, 5, 10, 215]);
   });
 
-  it('p90 is nearest-rank', () => {
-    expect(percentile([1, 2, 3, 4], 0.9)).toBe(4);
-    expect(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.9)).toBe(9);
+  it('the median is nearest-rank', () => {
+    expect(percentile([1, 2, 3, 4], 0.5)).toBe(2);
+    expect(percentile([5, 1, 3], 0.5)).toBe(3);
   });
 
-  it('n >= 4: ceil5(p90 + 15)', () => {
+  it('owned is ceil5(1.5 x median + 60) at any sample count', () => {
     const r = budgetFromSamples([100, 110, 120, 131].map((x) => s(x)));
-    expect(r.ownedS).toBe(150); // p90 = 131 -> 146 -> 150
+    expect(r.ownedS).toBe(225); // median 110 -> 165 + 60
     expect(r.samples).toBe(4);
+    expect(budgetFromSamples([s(200)]).ownedS).toBe(360);
+    // One slow outlier moves the median, not the budget.
+    expect(budgetFromSamples([100, 110, 120, 400].map((x) => s(x))).ownedS).toBe(225);
   });
 
-  it('n < 4: ceil5(max + 30)', () => {
-    expect(budgetFromSamples([s(100), s(131)]).ownedS).toBe(165); // 161 -> 165
-    expect(budgetFromSamples([s(200)]).ownedS).toBe(230);
+  it('a deploy twice as slow as usual fails its budget once a typical deploy passes 2 minutes', () => {
+    // 2t > 1.5t + 60 when t > 120; under that, the 60 s pad (a laptop's fixed
+    // overhead) lets a short deploy slow down a little more before it fails.
+    for (const typical of [130, 200, 300]) {
+      const r = budgetFromSamples([typical, typical, typical].map((x) => s(x)));
+      expect(2 * typical, `typical ${typical}`).toBeGreaterThan(r.ownedS);
+    }
   });
 
-  it('end-to-end is owned + 15 when the TLS first look is quick', () => {
+  it('end-to-end is owned + 60 when the TLS first look is quick', () => {
     const r = budgetFromSamples([s(100, 3), s(110, 12)]);
-    expect(r.tlsAllowanceS).toBe(15);
-    expect(r.endToEndS).toBe(r.ownedS + 15);
+    expect(r.tlsAllowanceS).toBe(60);
+    expect(r.endToEndS).toBe(r.ownedS + 60);
   });
 
-  it('end-to-end carries the TLS first look when it needs more than 15 s', () => {
+  it('end-to-end carries 1.5 x the slowest TLS first look when that is more', () => {
     const r = budgetFromSamples([s(100, 3), s(110, 128)]);
-    expect(r.tlsAllowanceS).toBe(130);
-    expect(r.endToEndS).toBe(r.ownedS + 130);
+    expect(r.tlsAllowanceS).toBe(195); // 192 -> 195
+    expect(r.endToEndS).toBe(r.ownedS + 195);
   });
 });
 
@@ -127,13 +134,13 @@ describe('reading the results db', () => {
       'hetzner/compose/cx:1',
       'linode/compose/standard:1',
     ]);
-    expect(table.budgets.hetzner.compose.cx.ownedS).toBe(210); // 180 + 30
-    expect(table.budgets.hetzner.compose.cx.tlsAllowanceS).toBe(20);
+    expect(table.budgets.hetzner.compose.cx.ownedS).toBe(330); // 1.5 x 180 + 60
+    expect(table.budgets.hetzner.compose.cx.tlsAllowanceS).toBe(60); // 1.5 x 20 = 30, floor 60
   });
 
   it('puts a sample without a recorded class in the `any` row, never a guessed class', () => {
     const { table } = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
-    expect(table.budgets.hetzner.compose.any.ownedS).toBe(180); // 150 + 30
+    expect(table.budgets.hetzner.compose.any.ownedS).toBe(285); // 1.5 x 150 + 60
     expect(table.budgets.hetzner.compose.ccx).toBeUndefined();
   });
 
@@ -157,11 +164,11 @@ describe('reading the results db', () => {
 
   it('seeds a provider + mode with no samples from the calibrated rows on the others', () => {
     const { table, seeds } = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
-    // compose rows: hetzner any 180, hetzner cx 210, linode standard 220 (190 + 30).
+    // compose rows: hetzner any 285, hetzner cx 330, linode standard 345 (1.5 x 190 + 60).
     const want = {
-      ownedS: 205, // mean 203.3 -> 205
-      endToEndS: 225, // + cx's 20 s TLS allowance (mean 16.7 -> 20)
-      tlsAllowanceS: 20,
+      ownedS: 320, // mean 320
+      endToEndS: 380, // + the 60 s TLS floor every row has
+      tlsAllowanceS: 60,
       samples: 0,
       seededFrom: ['hetzner/compose/any', 'hetzner/compose/cx', 'linode/compose/standard'],
     };
@@ -177,7 +184,7 @@ describe('reading the results db', () => {
       }
     }
     expect(renderReport({ rows: [], seeds, noData: [] }, 'x')).toMatch(
-      /- vultr\/compose\/any: owned 205 s, end-to-end 225 s, from hetzner\/compose\/any/,
+      /- vultr\/compose\/any: owned 320 s, end-to-end 380 s, from hetzner\/compose\/any/,
     );
   });
 
@@ -218,8 +225,8 @@ describe('reading the results db', () => {
     expect(budgets.linode.k8s).toEqual({
       standard: {
         ownedS: 300,
-        endToEndS: 315,
-        tlsAllowanceS: 15,
+        endToEndS: 360, // the TLS floor (60) applies to a seed too
+        tlsAllowanceS: 60,
         samples: 0,
         seededFrom: ['hetzner/k8s/cpx'],
       },
@@ -229,6 +236,32 @@ describe('reading the results db', () => {
   it('ignores a sample of an unsupported mode', () => {
     const { rows } = buildTable(readSamples(dbPath, '2026-11-05T00:00:00Z'), 'x');
     expect(rows.some((r) => r.provider === 'vultr' && r.mode === 'k8s')).toBe(false);
+  });
+
+  it('pools several dbs and counts a step that is in two of them once', async () => {
+    const copy = path.join(dir, 'copy.db');
+    const src = new Database(dbPath, { readonly: true });
+    await src.backup(copy);
+    src.close();
+    // The copy also holds one deploy the original does not (another leg's run).
+    const extra = new Database(copy);
+    extra.exec(`
+      INSERT INTO runs VALUES ('r9', '2026-11-06T10:00:00Z');
+      INSERT INTO scenarios VALUES ('sc-extra', 'r9', 'compose', 'hetzner');
+      INSERT INTO steps VALUES ('st-extra', 'sc-extra', 'deploy', 'pass', 'cold');
+      INSERT INTO perf_substep (step_id, name, duration_ms) VALUES ('st-extra', 'deploy.total', 210000);
+      INSERT INTO verifications VALUES ('v-extra', 'st-extra', 'deploy_budget', '{"cpuClass":"cx"}');
+    `);
+    extra.close();
+    const counts = (dbs: string | string[]) =>
+      buildTable(readSamples(dbs, '2026-11-05T13:00:00Z'), 'x').rows.map(
+        (r) => `${r.provider}/${r.mode}/${r.cls}:${r.samples}`,
+      );
+    const one = counts(dbPath);
+    expect(one).toContain('hetzner/compose/cx:1');
+    expect(counts([dbPath, copy])).toEqual(
+      one.map((k) => (k === 'hetzner/compose/cx:1' ? 'hetzner/compose/cx:2' : k)),
+    );
   });
 
   it('never writes the db', () => {

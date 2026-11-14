@@ -1,190 +1,224 @@
 {
-  "rule": "owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS (15, or ceil5 of the TLS first-look statistic when above 15). A provider + mode with no samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers. Regenerate with scripts/calibrate-deploy-budgets.js.",
+  "rule": "owned = ceil5(1.5 x median + 60) over local and GitHub cold deploys pooled; endToEnd = owned + tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A provider + mode with no samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers. Regenerate with scripts/calibrate-deploy-budgets.js.",
   "since": "2026-11-05T12:00:00.000Z",
   "budgets": {
     "digitalocean": {
       "compose-ha": {
+        "amd": {
+          "ownedS": 465,
+          "endToEndS": 525,
+          "tlsAllowanceS": 60,
+          "samples": 1
+        },
         "any": {
-          "ownedS": 250,
-          "endToEndS": 265,
-          "tlsAllowanceS": 15,
+          "ownedS": 390,
+          "endToEndS": 450,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "intel": {
-          "ownedS": 245,
-          "endToEndS": 260,
-          "tlsAllowanceS": 15,
-          "samples": 5
+          "ownedS": 335,
+          "endToEndS": 395,
+          "tlsAllowanceS": 60,
+          "samples": 6
         },
         "regular": {
-          "ownedS": 250,
-          "endToEndS": 265,
-          "tlsAllowanceS": 15,
-          "samples": 1
+          "ownedS": 390,
+          "endToEndS": 450,
+          "tlsAllowanceS": 60,
+          "samples": 6
         }
       },
       "compose": {
         "any": {
-          "ownedS": 200,
-          "endToEndS": 215,
-          "tlsAllowanceS": 15,
+          "ownedS": 315,
+          "endToEndS": 375,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "regular": {
-          "ownedS": 195,
-          "endToEndS": 235,
-          "tlsAllowanceS": 40,
-          "samples": 8
+          "ownedS": 280,
+          "endToEndS": 340,
+          "tlsAllowanceS": 60,
+          "samples": 16
         }
       },
       "k8s-ha": {
+        "amd": {
+          "ownedS": 530,
+          "endToEndS": 590,
+          "tlsAllowanceS": 60,
+          "samples": 1
+        },
         "any": {
-          "ownedS": 320,
-          "endToEndS": 335,
-          "tlsAllowanceS": 15,
+          "ownedS": 400,
+          "endToEndS": 460,
+          "tlsAllowanceS": 60,
           "samples": 2
         },
         "intel": {
-          "ownedS": 340,
-          "endToEndS": 355,
-          "tlsAllowanceS": 15,
-          "samples": 5
+          "ownedS": 390,
+          "endToEndS": 450,
+          "tlsAllowanceS": 60,
+          "samples": 6
         },
         "regular": {
-          "ownedS": 325,
-          "endToEndS": 340,
-          "tlsAllowanceS": 15,
-          "samples": 1
+          "ownedS": 435,
+          "endToEndS": 495,
+          "tlsAllowanceS": 60,
+          "samples": 4
         }
       },
       "k8s": {
+        "amd": {
+          "ownedS": 315,
+          "endToEndS": 375,
+          "tlsAllowanceS": 60,
+          "samples": 2
+        },
         "any": {
-          "ownedS": 270,
-          "endToEndS": 285,
-          "tlsAllowanceS": 15,
+          "ownedS": 420,
+          "endToEndS": 480,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "regular": {
-          "ownedS": 295,
-          "endToEndS": 380,
-          "tlsAllowanceS": 85,
-          "samples": 6
+          "ownedS": 410,
+          "endToEndS": 535,
+          "tlsAllowanceS": 125,
+          "samples": 13
         }
       }
     },
     "hetzner": {
       "compose-ha": {
         "any": {
-          "ownedS": 335,
-          "endToEndS": 350,
-          "tlsAllowanceS": 15,
+          "ownedS": 400,
+          "endToEndS": 460,
+          "tlsAllowanceS": 60,
           "samples": 9
         },
         "cpx": {
-          "ownedS": 180,
-          "endToEndS": 195,
-          "tlsAllowanceS": 15,
-          "samples": 4
+          "ownedS": 305,
+          "endToEndS": 365,
+          "tlsAllowanceS": 60,
+          "samples": 9
         },
         "cx": {
-          "ownedS": 260,
-          "endToEndS": 275,
-          "tlsAllowanceS": 15,
-          "samples": 1
+          "ownedS": 405,
+          "endToEndS": 465,
+          "tlsAllowanceS": 60,
+          "samples": 5
         }
       },
       "compose": {
         "any": {
-          "ownedS": 275,
-          "endToEndS": 300,
-          "tlsAllowanceS": 25,
+          "ownedS": 375,
+          "endToEndS": 435,
+          "tlsAllowanceS": 60,
           "samples": 3
         },
         "cpx": {
-          "ownedS": 175,
-          "endToEndS": 195,
-          "tlsAllowanceS": 20,
-          "samples": 4
+          "ownedS": 240,
+          "endToEndS": 300,
+          "tlsAllowanceS": 60,
+          "samples": 7
         },
         "cx": {
-          "ownedS": 175,
-          "endToEndS": 190,
-          "tlsAllowanceS": 15,
-          "samples": 1
+          "ownedS": 245,
+          "endToEndS": 305,
+          "tlsAllowanceS": 60,
+          "samples": 5
         }
       },
       "k8s-ha": {
         "any": {
-          "ownedS": 405,
-          "endToEndS": 420,
-          "tlsAllowanceS": 15,
+          "ownedS": 460,
+          "endToEndS": 520,
+          "tlsAllowanceS": 60,
           "samples": 6
         },
         "cpx": {
-          "ownedS": 265,
-          "endToEndS": 280,
-          "tlsAllowanceS": 15,
+          "ownedS": 425,
+          "endToEndS": 555,
+          "tlsAllowanceS": 130,
+          "samples": 9
+        },
+        "cx": {
+          "ownedS": 440,
+          "endToEndS": 500,
+          "tlsAllowanceS": 60,
           "samples": 4
         }
       },
       "k8s": {
         "any": {
-          "ownedS": 400,
-          "endToEndS": 415,
-          "tlsAllowanceS": 15,
+          "ownedS": 470,
+          "endToEndS": 530,
+          "tlsAllowanceS": 60,
           "samples": 3
         },
         "cpx": {
-          "ownedS": 300,
-          "endToEndS": 315,
-          "tlsAllowanceS": 15,
-          "samples": 6
+          "ownedS": 360,
+          "endToEndS": 420,
+          "tlsAllowanceS": 60,
+          "samples": 9
         },
         "cx": {
-          "ownedS": 255,
-          "endToEndS": 270,
-          "tlsAllowanceS": 15,
-          "samples": 2
+          "ownedS": 410,
+          "endToEndS": 470,
+          "tlsAllowanceS": 60,
+          "samples": 7
         }
       }
     },
     "linode": {
       "compose-ha": {
         "standard": {
-          "ownedS": 265,
-          "endToEndS": 280,
-          "tlsAllowanceS": 15,
-          "samples": 8
+          "ownedS": 375,
+          "endToEndS": 435,
+          "tlsAllowanceS": 60,
+          "samples": 13
         }
       },
       "compose": {
         "standard": {
-          "ownedS": 225,
-          "endToEndS": 265,
-          "tlsAllowanceS": 40,
-          "samples": 8
+          "ownedS": 335,
+          "endToEndS": 420,
+          "tlsAllowanceS": 85,
+          "samples": 13
         }
       },
       "k8s": {
         "standard": {
-          "ownedS": 330,
-          "endToEndS": 345,
-          "tlsAllowanceS": 15,
-          "samples": 1
+          "ownedS": 400,
+          "endToEndS": 475,
+          "tlsAllowanceS": 75,
+          "samples": 0,
+          "seededFrom": [
+            "digitalocean/k8s/amd",
+            "digitalocean/k8s/any",
+            "digitalocean/k8s/regular",
+            "hetzner/k8s/any",
+            "hetzner/k8s/cpx",
+            "hetzner/k8s/cx"
+          ]
         }
       },
       "k8s-ha": {
         "standard": {
-          "ownedS": 335,
-          "endToEndS": 350,
-          "tlsAllowanceS": 15,
+          "ownedS": 440,
+          "endToEndS": 510,
+          "tlsAllowanceS": 70,
           "samples": 0,
           "seededFrom": [
+            "digitalocean/k8s-ha/amd",
             "digitalocean/k8s-ha/any",
             "digitalocean/k8s-ha/intel",
             "digitalocean/k8s-ha/regular",
             "hetzner/k8s-ha/any",
-            "hetzner/k8s-ha/cpx"
+            "hetzner/k8s-ha/cpx",
+            "hetzner/k8s-ha/cx"
           ]
         }
       }
@@ -192,60 +226,60 @@
     "scaleway": {
       "compose-ha": {
         "any": {
-          "ownedS": 365,
-          "endToEndS": 380,
-          "tlsAllowanceS": 15,
+          "ownedS": 560,
+          "endToEndS": 620,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "DEV1": {
-          "ownedS": 330,
-          "endToEndS": 345,
-          "tlsAllowanceS": 15,
-          "samples": 2
+          "ownedS": 490,
+          "endToEndS": 550,
+          "tlsAllowanceS": 60,
+          "samples": 10
         }
       },
       "compose": {
         "any": {
-          "ownedS": 220,
-          "endToEndS": 240,
-          "tlsAllowanceS": 20,
+          "ownedS": 345,
+          "endToEndS": 405,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "BASIC3": {
-          "ownedS": 215,
-          "endToEndS": 250,
-          "tlsAllowanceS": 35,
-          "samples": 2
+          "ownedS": 260,
+          "endToEndS": 320,
+          "tlsAllowanceS": 60,
+          "samples": 10
         }
       }
     },
     "vultr": {
       "compose-ha": {
         "any": {
-          "ownedS": 270,
-          "endToEndS": 285,
-          "tlsAllowanceS": 15,
+          "ownedS": 420,
+          "endToEndS": 480,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "vc2": {
-          "ownedS": 290,
-          "endToEndS": 305,
-          "tlsAllowanceS": 15,
-          "samples": 6
+          "ownedS": 385,
+          "endToEndS": 445,
+          "tlsAllowanceS": 60,
+          "samples": 12
         }
       },
       "compose": {
         "any": {
-          "ownedS": 230,
-          "endToEndS": 245,
-          "tlsAllowanceS": 15,
+          "ownedS": 355,
+          "endToEndS": 415,
+          "tlsAllowanceS": 60,
           "samples": 1
         },
         "vc2": {
-          "ownedS": 205,
-          "endToEndS": 225,
-          "tlsAllowanceS": 20,
-          "samples": 5
+          "ownedS": 290,
+          "endToEndS": 350,
+          "tlsAllowanceS": 60,
+          "samples": 11
         }
       }
     }
