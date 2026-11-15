@@ -87,7 +87,7 @@
     "react-dom": "^19.3.1",
     "react-hook-form": "^7.92.0",
     "react-i18next": "^17.1.13",
-    "react-resizable-panels": "^4.18.1",
+    "react-resizable-panels": "^4.21.0",
     "react-router": "^8.5.1",
     "recharts": "^3.10.1",
     "rehype-autolink-headings": "^7.1.0",
