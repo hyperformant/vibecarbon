@@ -102,7 +102,6 @@ describe('layer 1 — identity captured from PersistentVolumes', () => {
       provider,
       'testapp',
       'prod',
-      [],
       /* knownVolumeIds (as captured from spec.csi.volumeHandle) */ ['100604631'],
       /* clusterLocations */ [],
       { report },
@@ -120,7 +119,7 @@ describe('layer 1 — identity captured from PersistentVolumes', () => {
     // never made it into clusterLocations. Only the PV capture knows.
     installRouter([[volume({ id: 55, name: PVC_A, location: { name: 'hel1' } })]]);
 
-    const { deleted } = await cleanupOrphanedVolumes(provider, 'testapp', 'prod', [], ['55'], [], {
+    const { deleted } = await cleanupOrphanedVolumes(provider, 'testapp', 'prod', ['55'], [], {
       report: () => {},
     });
 
@@ -136,7 +135,7 @@ describe('layer 1 — identity captured from PersistentVolumes', () => {
     ]);
     const { report, lines } = collectReport();
 
-    await cleanupOrphanedVolumes(provider, 'testapp', 'prod', [], ['1', '2'], [], { report });
+    await cleanupOrphanedVolumes(provider, 'testapp', 'prod', ['1', '2'], [], { report });
 
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain(PVC_A);
@@ -158,7 +157,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       provider,
       'testapp',
       'prod',
-      [],
       [],
       ['nbg1'],
       { identityComplete: false, foreignRegions: [], report: () => {} },
@@ -182,7 +180,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       provider,
       'testapp',
       'prod',
-      [],
       /* captured ids, none of which is volume 9 */ ['77'],
       ['nbg1'],
       { identityComplete: true, report },
@@ -221,7 +218,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       'testapp',
       'prod',
       [],
-      [],
       ['nbg1'],
       { identityComplete: false, foreignRegions: ['nbg1'], report: () => {} },
     );
@@ -250,7 +246,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       'testapp',
       'prod',
       [],
-      [],
       ['nbg1', 'hel1'],
       { identityComplete: false, foreignRegions: ['hel1'], report: () => {} },
     );
@@ -270,7 +265,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       provider,
       'testapp',
       'prod',
-      [],
       [],
       ['nbg1'],
       { identityComplete: false, report: () => {} },
@@ -305,7 +299,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       'testapp',
       'prod',
       [],
-      [],
       /* clusterLocations deliberately excludes fsn1 */ ['nbg1'],
       { identityComplete: false, report: () => {} },
     );
@@ -323,7 +316,6 @@ describe('layer 2 — the pvc-* heuristic and its gates', () => {
       provider,
       'testapp',
       'prod',
-      [],
       [],
       ['nbg1'],
       { identityComplete: false, detachWaitMs: 10_000, pollIntervalMs: 0, sleep: async () => {} },
@@ -346,7 +338,6 @@ describe('an unreadable listing can never produce a clean verdict', () => {
       provider,
       'testapp',
       'prod',
-      [],
       ['100604631', '100604632'],
       [],
       { detachWaitMs: 5, pollIntervalMs: 1, sleep: async () => {}, report: () => {} },
@@ -367,7 +358,6 @@ describe('an unreadable listing can never produce a clean verdict', () => {
       provider,
       'testapp',
       'prod',
-      [],
       ['100604631'],
       ['nbg1'],
       { identityComplete: true, report: () => {} },

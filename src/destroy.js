@@ -914,10 +914,18 @@ const idKey = (id) => String(id);
  *   - `knownVolumeIds` — captured from the cluster's own PersistentVolumes
  *     before teardown (lib/csi-volumes.js) and from the ids attached to this
  *     cluster's servers during the pre-scan;
- *   - the cluster name / a cluster server's name inside the volume name;
+ *   - the cluster name inside the volume name;
  *   - a `kubernetes.io/cluster=<clusterName>` label.
  * These are deleted whenever detached, and are the only ones the detach
  * re-sweep waits on.
+ *
+ * A server's name is NOT one of them. envConfig.servers records role words
+ * (`master`, `db`, `worker-1`), and a CSI volume is `pvc-` plus hex, so about
+ * one in sixteen of ANY cluster's volumes contains `db`. That match claimed an
+ * attached volume of another live cluster on the account (GitHub run
+ * 43680508383, linode/k8s): destroy waited for it to detach, which would have
+ * deleted it, then reported it LEAKED and kept the env's buckets.
+ * tests/unit/destroy/orphaned-volumes-foreign-name-match.test.ts holds this.
  *
  * HEURISTIC matches only prove the volume looks like SOME vibecarbon cluster's:
  *   - a `pvc-<uuid>` name in one of this cluster's regions,
@@ -972,7 +980,6 @@ async function cleanupOrphanedVolumes(
   provider,
   projectName,
   envName,
-  serverNames,
   knownVolumeIds = [],
   clusterLocations = [],
   {
@@ -1012,7 +1019,6 @@ async function cleanupOrphanedVolumes(
     if (volumeName.includes(clusterName)) return 'cluster-name';
     if (provider.volumeLabels(volume)['kubernetes.io/cluster'] === clusterName)
       return 'cluster-label';
-    if ((serverNames ?? []).some((s) => s && volumeName.includes(s))) return 'server-name';
     return null;
   };
 
@@ -4963,13 +4969,11 @@ async function destroyK8sTier({
 
   s.start('Cleaning up orphaned volumes');
   try {
-    const serverNames = (envConfig.servers || []).map((sv) => sv.name);
     const knownVolumeIds = [...new Set(allClusterVolumeIds.map(idKey))];
     const { deleted, unresolved, deferred, listingComplete } = await cleanupOrphanedVolumes(
       provider,
       projectConfig.projectName,
       environment,
-      serverNames,
       knownVolumeIds,
       [...clusterLocations],
       { identityComplete, foreignRegions: [...foreignRegions] },
