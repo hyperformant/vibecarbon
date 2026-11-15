@@ -72,6 +72,7 @@ const REGISTRY = [
     helper: 'classifyBucketDeleteError',
     definition: 'tests/e2e/utils/bucket-already-gone.ts',
     consumers: [
+      'tests/e2e/utils/sweep-hetzner.ts', // Object Storage bucket delete
       'tests/e2e/utils/sweep-digitalocean.ts', // Spaces bucket delete
       'tests/e2e/utils/sweep-vultr.ts', // Object Storage bucket delete
       'tests/e2e/utils/sweep-linode.ts', // Object Storage bucket delete

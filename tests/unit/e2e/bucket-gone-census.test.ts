@@ -67,14 +67,6 @@ const CALL_SITE_EXCEPTIONS: Array<{ file: string; call: string; reason: string }
       'skips the bucket for this region; it claims nothing clean, and it walks every region, ' +
       "so the bucket's own region deletes a real one.",
   },
-  {
-    file: 'tests/e2e/utils/sweep-hetzner.ts',
-    call: 'const { objectsRemoved } = await provider.emptyAndDeleteBucket(name);',
-    reason:
-      'Best-effort S3 half: it logs every bucket error as FAILED and never sets enumFailed (its ' +
-      'listing failures neither), so it never decides missing versus failed. Known gap, not ' +
-      'this class: a bucket it cannot delete there reads clean.',
-  },
 ];
 
 /** Regex literals that name a missing-bucket spelling, sanctioned because their input is text. */
@@ -189,7 +181,7 @@ function textMatchSites(): Array<{ file: string; line: number; body: string }> {
 describe('bucket-already-gone census', () => {
   it('finds the call sites it is meant to police (the walk itself works)', () => {
     const files = new Set(callSites().map((s) => s.file));
-    for (const sweep of ['digitalocean', 'linode', 'vultr', 'scaleway']) {
+    for (const sweep of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
       expect(files).toContain(`tests/e2e/utils/sweep-${sweep}.ts`);
     }
   });
