@@ -8,13 +8,12 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { c } from '../colors.js';
 import { VERSION } from '../version.js';
+import { vibecarbonHome } from '../vibecarbon-home.js';
 import { isNewerVersion } from './semver.js';
 
-const DEFAULT_DIR = join(homedir(), '.vibecarbon');
 const FILE_NAME = 'update-check.json';
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -30,7 +29,7 @@ const TTL_MS = 24 * 60 * 60 * 1000;
  * @param {{ currentVersion?: string, stateDir?: string }} [opts]
  * @returns {string|null}
  */
-export function getUpdateNotice({ currentVersion = VERSION, stateDir = DEFAULT_DIR } = {}) {
+export function getUpdateNotice({ currentVersion = VERSION, stateDir = vibecarbonHome() } = {}) {
   try {
     const cache = JSON.parse(readFileSync(join(stateDir, FILE_NAME), 'utf-8'));
     if (isNewerVersion(cache.latestVersion, currentVersion)) {
@@ -55,7 +54,7 @@ export function getUpdateNotice({ currentVersion = VERSION, stateDir = DEFAULT_D
  */
 export async function refreshUpdateCache({
   env = process.env,
-  stateDir = DEFAULT_DIR,
+  stateDir = vibecarbonHome(),
   fetchImpl = fetch,
 } = {}) {
   try {
@@ -111,7 +110,7 @@ let noticePrinted = false;
  */
 export function printUpdateNotice({
   currentVersion = VERSION,
-  stateDir = DEFAULT_DIR,
+  stateDir = vibecarbonHome(),
   isTTY = process.stdout.isTTY,
   leadingBlank = false,
   log = console.log,

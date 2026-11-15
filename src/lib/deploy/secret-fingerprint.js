@@ -11,8 +11,8 @@
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { vibecarbonHome } from '../vibecarbon-home.js';
 
 const KEY_BYTES = 32;
 const KEY_HEX = /^[0-9a-f]{64}$/;
@@ -21,7 +21,7 @@ const KEY_HEX = /^[0-9a-f]{64}$/;
 const cache = new Map();
 
 function keyDir(dir) {
-  return dir ?? process.env.VIBECARBON_FINGERPRINT_KEY_DIR ?? join(homedir(), '.vibecarbon');
+  return dir ?? vibecarbonHome();
 }
 
 /** The file's key if it is exactly 32 bytes of hex, else null. Tightens loose modes. */

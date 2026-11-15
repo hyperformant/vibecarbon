@@ -134,15 +134,13 @@ const RUNTIME_DETECTION: Record<string, string> = {
   CIRCLECI: 'CI-runner detection (create.js)',
   JENKINS_URL: 'CI-runner detection (create.js)',
   DEBUG: 'developer verbosity toggle (command.js)',
-  HOME: 'log-directory hint in a deploy error message (deploy.js)',
   PATH: 'prepended with a wrapper bin dir for the remote build (remote-build.js)',
   VITEST: 'test-runner detection so the deploy completion guard stays inert under vitest',
   npm_config_user_agent: 'package-manager detection set by npm/pnpm/yarn themselves (create.js)',
   COMPOSE_PROJECT_NAME: "docker compose's own project-name override for the dev stack (up.js)",
   VIBECARBON_PERF: 'internal perf-timer switch (perf.js)',
-  VIBECARBON_UPLINK_LOCK_DIR: 'internal override for the uplink lock directory (uplink-lock.js)',
-  VIBECARBON_FINGERPRINT_KEY_DIR:
-    'internal override for the secret-fingerprint HMAC key directory (secret-fingerprint.js)',
+  VIBECARBON_HOME:
+    "internal override for the CLI's per-user state directory, set per test file (vibecarbon-home.js)",
   VIBECARBON_BUNDLE_VERBOSE: 'internal bundle-render verbosity (orchestrator.js)',
   VIBECARBON_SKIP_CONFIG_SHAPES:
     'escape hatch for a vendor token-format change: downgrades shape problems to warnings in ' +

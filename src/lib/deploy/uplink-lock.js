@@ -32,20 +32,17 @@
 
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { progressLog } from '../cli/progress.js';
+import { vibecarbonHome } from '../vibecarbon-home.js';
 
 /**
- * Default host-wide lock location. VIBECARBON_UPLINK_LOCK_DIR overrides it —
- * the unit suite sets a per-worker temp dir there, because vitest workers are
- * real separate processes and would otherwise genuinely serialize the whole
- * test run through one home-dir lock (observed on this lock's first parallel
- * run). Operators never set it.
+ * Host-wide lock location, under the CLI's home (vibecarbon-home.js). The
+ * test tiers give each file its own home, because vitest workers are real
+ * separate processes and would otherwise genuinely serialize the whole test
+ * run through one lock (observed on this lock's first parallel run).
  */
-export const UPLINK_LOCK_DIR =
-  process.env.VIBECARBON_UPLINK_LOCK_DIR ||
-  join(homedir(), '.vibecarbon', 'locks', 'uplink-push.lock');
+export const UPLINK_LOCK_DIR = join(vibecarbonHome(), 'locks', 'uplink-push.lock');
 
 /** Above any legitimate push (settle ladders top out ~4 min). */
 const DEFAULT_STALE_MS = 600_000;

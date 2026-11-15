@@ -21,7 +21,6 @@
 
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
@@ -37,6 +36,7 @@ import {
   statePassphraseGeneratedThisRun,
 } from '../state-passphrase.js';
 import { makeTempDir, removeTempDir } from '../temp-dir.js';
+import { vibecarbonHome } from '../vibecarbon-home.js';
 import {
   createTimeoutError,
   parseCreateTimeouts,
@@ -83,7 +83,7 @@ import { makeWorkspaceDir } from './workspace-dir.js';
 // implementation, not two copies drifting apart.
 export { failingPulumiCommandVerb };
 
-const LOCAL_STATE_DIR = join(homedir(), '.vibecarbon', 'pulumi-state');
+const LOCAL_STATE_DIR = join(vibecarbonHome(), 'pulumi-state');
 
 // Pulumi's file:// backend requires the target directory to exist before
 // `stack select` runs, otherwise the first scenario to race for a stack

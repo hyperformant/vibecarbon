@@ -26,20 +26,18 @@ if (tmpdir() !== fileTmp) {
   );
 }
 
-// Per-file uplink-lock dir: vitest workers are real processes, and the
-// cross-process uplink lock (src/lib/deploy/uplink-lock.js) would otherwise
-// serialize unrelated test files through one real home-dir lock, and leave
-// lock residue behind on aborted runs. Isolation here, not fs mocking, per
-// the unit-test-mocking house rule. Beside the census dir, not in it.
-mkdirSync(join(fileRoot, 'uplink'));
-process.env.VIBECARBON_UPLINK_LOCK_DIR = join(fileRoot, 'uplink', 'uplink-push.lock');
-
-// The secret-fingerprint HMAC key (src/lib/deploy/secret-fingerprint.js) is
-// minted under the home dir by default; tests get a per-file dir so no
-// caller (digestEnvLocalSecrets, tokenFingerprint) touches the developer's
-// real ~/.vibecarbon.
-process.env.VIBECARBON_FINGERPRINT_KEY_DIR = join(fileRoot, 'fpkey');
-mkdirSync(process.env.VIBECARBON_FINGERPRINT_KEY_DIR, { mode: 0o700 });
+// The CLI's per-user state directory (src/lib/vibecarbon-home.js): deploy
+// logs, the project registry, local Pulumi state, SSH mux sockets, the
+// uplink lock, the fingerprint key, telemetry state. Every file gets its own,
+// and every CLI child a test spawns inherits it, so no test writes the
+// developer's real ~/.vibecarbon (one laptop had 751 test deploy logs and
+// 614 test registry entries there). It also keeps the cross-process uplink
+// lock from serializing unrelated files, since vitest workers are real
+// processes. Set here, before any test file loads a src module, because a
+// few of them build their path at load time. Beside the census dir, not in
+// it, and removed with the file root.
+process.env.VIBECARBON_HOME = join(fileRoot, 'vibecarbon-home');
+mkdirSync(process.env.VIBECARBON_HOME, { mode: 0o700 });
 
 // Pulumi records each workspace's selected stack under PULUMI_HOME/workspaces,
 // one file per throwaway project: one laptop's ~/.pulumi held 8,700 of them.

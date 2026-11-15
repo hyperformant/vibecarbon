@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { type Browser, chromium } from 'playwright-core';
+import { vibecarbonHome } from '../../../src/lib/vibecarbon-home.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { chromeHostResolverRules } from '../utils/dns-pin.js';
 import { resolveCheckIp } from './health.js';
@@ -152,7 +153,7 @@ function findChrome(): string | null {
 /** Save a screenshot to the diagnostics dir; returns the path or undefined. */
 async function captureScreenshot(page: import('playwright-core').Page, label: string) {
   try {
-    const dir = join(homedir(), '.vibecarbon', 'logs');
+    const dir = join(vibecarbonHome(), 'logs');
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `frontend-${label}-${Date.now()}.png`);
     await page.screenshot({ path, fullPage: true });

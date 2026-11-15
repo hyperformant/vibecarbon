@@ -6,10 +6,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { vibecarbonHome } from '../vibecarbon-home.js';
 
-const DEFAULT_DIR = join(homedir(), '.vibecarbon');
 const FILE_NAME = 'telemetry.json';
 
 function readState(stateDir) {
@@ -35,7 +34,7 @@ function writeState(state, stateDir) {
  * @param {string} [stateDir]
  * @returns {{ machineId: string, disabled: boolean, noticeShown: boolean }}
  */
-export function getTelemetryState(stateDir = DEFAULT_DIR) {
+export function getTelemetryState(stateDir = vibecarbonHome()) {
   const raw = readState(stateDir);
   if (raw && typeof raw.machineId === 'string' && raw.machineId.length === 36) {
     return { machineId: raw.machineId, disabled: !!raw.disabled, noticeShown: !!raw.noticeShown };
@@ -49,12 +48,12 @@ export function getTelemetryState(stateDir = DEFAULT_DIR) {
  * @param {boolean} disabled
  * @param {string} [stateDir]
  */
-export function setTelemetryDisabled(disabled, stateDir = DEFAULT_DIR) {
+export function setTelemetryDisabled(disabled, stateDir = vibecarbonHome()) {
   writeState({ ...getTelemetryState(stateDir), disabled }, stateDir);
 }
 
 /** @param {string} [stateDir] */
-export function markNoticeShown(stateDir = DEFAULT_DIR) {
+export function markNoticeShown(stateDir = vibecarbonHome()) {
   writeState({ ...getTelemetryState(stateDir), noticeShown: true }, stateDir);
 }
 
@@ -66,7 +65,7 @@ export function markNoticeShown(stateDir = DEFAULT_DIR) {
  * @param {string} [stateDir]
  * @returns {boolean}
  */
-export function isAnalyticsDisabled(env = process.env, stateDir = DEFAULT_DIR) {
+export function isAnalyticsDisabled(env = process.env, stateDir = vibecarbonHome()) {
   const truthy = (v) => v !== undefined && v !== '' && v !== '0';
   if (env.VIBECARBON_TELEMETRY_DISABLED === '1') return true;
   if (truthy(env.DO_NOT_TRACK)) return true;

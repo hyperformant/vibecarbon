@@ -30,11 +30,11 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { vibecarbonHome } from './vibecarbon-home.js';
 
 /** Same `~/.vibecarbon` convention (and 0700 mode) as the project registry. */
-export function defaultLedgerPath(configDir = join(homedir(), '.vibecarbon')) {
+export function defaultLedgerPath(configDir = vibecarbonHome()) {
   return join(configDir, 'leaked-volumes.json');
 }
 

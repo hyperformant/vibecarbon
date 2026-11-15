@@ -1,8 +1,8 @@
 import { createHmac } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { runCommandAsync } from './command.js';
+import { vibecarbonHome } from './vibecarbon-home.js';
 
 /**
  * Absolute path to the per-environment known_hosts file for SSH strict-checking.
@@ -75,7 +75,7 @@ export function knownHostsPathForKey(sshKeyPath) {
  * not mkdir the ControlPath parent) with owner-only permissions — a
  * world-readable socket dir would hand live sessions to any local user.
  */
-export const SSH_MUX_DIR = join(homedir(), '.vibecarbon', 'ssh-mux');
+export const SSH_MUX_DIR = join(vibecarbonHome(), 'ssh-mux');
 mkdirSync(SSH_MUX_DIR, { recursive: true, mode: 0o700 });
 
 /**
