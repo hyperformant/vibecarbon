@@ -550,8 +550,18 @@ async function haPersistPendingConfig(ctx) {
   });
   const primaryRegion = primary.region ?? region;
   const secondaryRegion = standby.region ?? standbyRegion;
+  // Built on the record as it is on disk now, never on envConfig (the record
+  // from before this deploy): the orchestrator's skeleton save has already
+  // written this deploy's own fields (imageSet, lastAttemptId), and spreading
+  // the older record put the previous deploy's back. haFinalizeConfig's save
+  // spreads this record, so the env kept them through the deploy: scale,
+  // restore and failover ran the previous deploy's image set, and the add-on
+  // status file never named the env's attempt (DigitalOcean compose-ha, GitHub
+  // run 43680508383). The orchestrator's final save reads the disk for the
+  // same reason.
+  const onDiskEnv = loadedProjectConfig.environments?.[environment] ?? envConfig;
   const pendingEnvConfig = {
-    ...envConfig,
+    ...onDiskEnv,
     status: 'deploying',
     deployMode: 'compose-ha',
     provider: envConfig.provider ?? 'hetzner',
@@ -585,6 +595,9 @@ async function haPersistPendingConfig(ctx) {
     ...(backupConfig && { backup: backupConfig }),
     services,
     lastAttempt: new Date().toISOString(),
+    // The id this deploy's add-on job runs with (haServiceOpts): readers
+    // trust the job's status file only when it names this.
+    lastAttemptId: ctx.attemptId ?? onDiskEnv.lastAttemptId,
   };
   persistComposeHaEnv(environment, envConfig, pendingEnvConfig);
   ctx.loadedProjectConfig = loadedProjectConfig;

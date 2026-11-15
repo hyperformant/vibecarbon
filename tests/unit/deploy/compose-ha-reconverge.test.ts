@@ -271,6 +271,7 @@ const { planComposeHaReconverge, assertComposeHaReconvergeReady } = roleSwap;
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 const composeHa = await import('../../../src/lib/deploy/compose/ha.js');
 const wireguard = await import('../../../src/lib/deploy/wireguard.js');
+const composeIndex = await import('../../../src/lib/deploy/compose/index.js');
 
 const servers = (primaryStackRole: string, standbyStackRole: string) => [
   {
@@ -589,6 +590,27 @@ describe('haProvisionServers on a swapped env', () => {
 });
 
 describe('reconverge effects', () => {
+  // The add-on job stamps its status file with the id its stack start carried,
+  // and readers trust the file only when it names the env's lastAttemptId.
+  // The pending and final saves rebuilt the env from the pre-deploy record and
+  // wrote that record's (last attempt's) id back (compose-ha-attempt-id-persist.test.ts).
+  it("saves the attempt id every stack start carried, not the last attempt's", async () => {
+    const env = envOnDisk() as Record<string, unknown>;
+    env.lastAttemptId = 'a1b2c3d4e5f6';
+    const ctx = baseCtx({
+      attemptId: 'a1b2c3d4e5f6',
+      envConfig: swappedEnv({ lastAttemptId: '000000000000' }),
+    });
+    vi.mocked(composeIndex.startComposeStack).mockClear();
+    await runReconverge(ctx);
+    const carried = vi
+      .mocked(composeIndex.startComposeStack)
+      .mock.calls.map((c) => (c[3] as { attemptId?: string } | undefined)?.attemptId);
+    expect(carried.length).toBeGreaterThan(0);
+    expect(new Set(carried)).toEqual(new Set(['a1b2c3d4e5f6']));
+    expect(envOnDisk().lastAttemptId).toBe('a1b2c3d4e5f6');
+  });
+
   it('(a) never stops, restarts or recreates the promoted node db', async () => {
     await runReconverge(baseCtx());
     const promoted = h.calls.filter((c) => c.ip === PROMOTED_IP).map((c) => c.command);
