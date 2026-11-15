@@ -173,21 +173,21 @@ keeps serving the retired address until its cached record expires. The
 `verify-failover` step therefore splits its assertions in two, and neither one
 measures the runner's own cache:
 
-- **Does the promoted node serve?** The step's HTTP checks run under a
-  resolution pin (`tests/e2e/utils/dns-pin.ts`, `compose-ha` only) that dials
-  the promoted node's IP directly while keeping the domain in the `Host` header
-  and the TLS SNI, so name-based routing and certificate validity are still
-  fully asserted, but a mid-TTL cache cannot redirect a check onto the retired
-  node. Before the pin, that is exactly what happened (hetzner/compose-ha,
-  2026-08-11): the battery split, some checks reaching the promoted node and
-  passing while others hit the stopped app tier on the demoted one.
+- **Does the promoted side serve?** The step's HTTP checks run under a
+  resolution pin (`tests/e2e/utils/dns-pin.ts`, both HA modes) that dials the
+  address the flip wrote directly (the promoted node on `compose-ha`, the
+  promoted cluster's ingress IP on `k8s-ha`: its floating IP, or a
+  DigitalOcean or Linode master's own address) while keeping the domain in the
+  `Host` header and the TLS SNI, so name-based routing and certificate
+  validity are still fully asserted, but a mid-TTL cache cannot redirect a
+  check onto the retired side. Before the pin, that is exactly what happened:
+  the battery split, some checks reaching the promoted side and passing while
+  others hit the stopped app tier on the retired one (hetzner/compose-ha,
+  2026-08-11; linode/k8s-ha, 2026-11-15, inside Linode's 300 s TTL).
 - **Did the flip publish?** The `dns_failover_flip` verification queries the
   zone's **authoritative nameservers** (which hold no cache of their own zone)
-  and asserts the A record now carries the promoted IP. It self-skips on
-  `k8s-ha`, whose flip repoints the record at the promoted cluster's ingress
-  IP (its floating IP, or a DigitalOcean master's own address), which this
-  node-IP comparison does not model; the DNS-provider read-back check covers
-  it.
+  and asserts the A record now carries that same address, on both HA modes.
+  The DNS-provider read-back check asserts it through the provider's API too.
 
 The propagation gate log line above is retained as the (now advisory) record of
 how long the runner's public resolvers took to converge. `verify-deploy` and the

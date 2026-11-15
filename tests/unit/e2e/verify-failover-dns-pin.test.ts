@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { testConfig } from '../../config.js';
 import {
   type AuthoritativeDeps,
   DNS_FLIP_CHECK_NAME,
@@ -48,8 +49,10 @@ import { dnsSafeFetch, resolveCheckIp, waitForDnsToPoint } from '../../e2e/check
 import {
   chromeHostResolverRules,
   currentResolutionPin,
+  failoverFlipsRecord,
   pinMatchesHost,
   pinnedIpFor,
+  postFailoverResolutionPin,
   type ResolutionPin,
   withResolutionPin,
 } from '../../e2e/utils/dns-pin.js';
@@ -419,11 +422,11 @@ describe('runDnsFailoverFlipCheck', () => {
     expect(res.errorMessage).toContain('(no A record)');
   });
 
-  it('skips (never passes) when the mode has no A-record flip to assert', async () => {
+  it('skips (never passes) when the failover flips no record (manual DNS)', async () => {
     const res = await runDnsFailoverFlipCheck({
       domain: DOMAIN,
       expectedIp: null,
-      skipReason: 'k8s-ha failover reassigns a floating IP',
+      skipReason: 'manual DNS: failover flips no record',
       deps: authoritative([RETIRED_IP]),
       sleep: noSleep,
     });
@@ -591,34 +594,61 @@ describe('_run-lifecycle.ts: verify-failover pin wiring', () => {
     expect(body).toMatch(/withResolutionPin\(verifyPin,\s*\(\)\s*=>\s*executeStep\(/);
   });
 
-  it('pins only the steps that moved the record: compose-ha failover and failback, restore', () => {
+  it('pins only the steps that moved the record: failover and failback on both HA modes, restore', () => {
     // verify-deploy stays on the public resolver deliberately: that is the
     // customer cold path, and pinning it would hide an unpublished record.
     // verify-scale is its own step with its own pin, for the same reason: see
     // verify-scale-dns-pin.test.ts.
-    expect(body).toMatch(
-      /isPostFailoverVerify\(stepName\) && config\.mode === 'compose-ha'[\s\S]{0,400}verifyPin = \{/,
+    const code = stripComments(body);
+    // Both HA modes flip the record (k8s-ha to the promoted cluster's ingress
+    // IP), so the post-failover pin carries no mode gate: l4 on 2026-11-15
+    // failed verify-failover because k8s-ha was left out of it.
+    expect(code).toMatch(
+      /if \(isPostFailoverVerify\(stepName\)\) \{\s*verifyPin = postFailoverResolutionPin\(\{/,
     );
-    // compose-ha's failback flips the records back, so its verify step is pinned too.
+    const pinBlock = code.slice(
+      code.indexOf('const promotedIp = isPostFailoverVerify(stepName)'),
+      code.indexOf('withResolutionPin(verifyPin'),
+    );
+    expect(pinBlock).toContain('postFailoverResolutionPin(');
+    expect(pinBlock).not.toMatch(/config\.mode/);
     expect(LIFECYCLE_SRC).toMatch(
       /function isPostFailoverVerify\(step: StepName\): boolean \{\s*return step === 'verify-failover' \|\| step === 'verify-failback';/,
     );
-    expect(body).toContain('resolveHaDbIps(config.projectDir, config.envPrefix)');
     // A restore pins to the published record whatever the mode, because a
     // record that never moved must still fail by dialing the destroyed server.
     expect(body).toMatch(
       /stepName === 'verify-restore'\) \{\s+const \{ ips, source \} = await resolveAuthoritativeA\(config\.domain\);[\s\S]{0,300}source === 'authoritative'[\s\S]{0,300}verifyPin = \{/,
     );
     // And nothing else computes a pin here.
-    expect(body.match(/verifyPin = \{/g)).toHaveLength(2);
+    expect(code.match(/verifyPin = \{/g)).toHaveLength(1);
+    expect(code.match(/verifyPin = postFailoverResolutionPin\(/g)).toHaveLength(1);
   });
 
-  it('runs dns_failover_flip at verify-failover, gated to the mode that flips DNS', () => {
-    expect(body).toContain('runDnsFailoverFlipCheck({');
-    expect(body).toMatch(
-      /expectedIp: config\.mode === 'compose-ha' \? \(sshCheckMasterIp \?\? null\) : null/,
+  it('pins, waits for and asserts the flip against ONE promoted address', () => {
+    // The pin, the propagation gate and dns_failover_flip must agree on what
+    // the record now carries: readServingIp, the promoted node on compose-ha
+    // and the promoted cluster's ingress IP on k8s-ha.
+    const code = stripComments(LIFECYCLE_SRC);
+    expect(code).toContain(
+      'const promotedIp = isPostFailoverVerify(stepName)\n      ? readServingIp(config.projectDir, config.envPrefix)\n      : null;',
     );
-    expect(body).toContain('skipReason:');
+    expect(code).toMatch(/postFailoverResolutionPin\(\{[^}]*servingIp: promotedIp,/);
+    expect(code).toContain('waitForDnsToPoint(config.domain, promotedIp');
+    expect(code).toMatch(
+      /runDnsFailoverFlipCheck\(\{\s*domain: config\.domain,\s*expectedIp: promotedIp,/,
+    );
+  });
+
+  it('runs dns_failover_flip at verify-failover on both HA modes, against the promoted address', () => {
+    // It is what keeps the pin honest: a pinned battery passes against a
+    // record that never published unless the authoritative read can fail it.
+    const code = stripComments(body);
+    expect(code).toContain('runDnsFailoverFlipCheck({');
+    expect(code).toMatch(
+      /runDnsFailoverFlipCheck\(\{\s*domain: config\.domain,\s*expectedIp: promotedIp,/,
+    );
+    expect(code).toMatch(/skipReason: failoverFlipsRecord\(config\.dnsProvider\)\s*\?\s*null/);
   });
 
   it('keeps the propagation gate as evidence for the docs/rto-rpo.md DNS tail', () => {
@@ -637,9 +667,132 @@ describe('post-failover DNS wait target', () => {
       fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
       'utf8',
     );
-    expect(lifecycle).toContain(
-      'const promotedIp = readServingIp(config.projectDir, config.envPrefix)',
-    );
+    expect(lifecycle).toContain('? readServingIp(config.projectDir, config.envPrefix)');
     expect(lifecycle).not.toContain('const promotedIp = sshCheckMasterIp');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. k8s-ha flips the record too (l4, run 43757126064, 2026-11-15)
+// ---------------------------------------------------------------------------
+//
+// verify-failover on linode/k8s-ha failed auth_protected (get-session 404, 14
+// ms) and file_upload_roundtrip ("404 page not found", 16 ms) while 24 checks
+// passed. The failover had flipped the A record to the promoted cluster
+// (us-ord) 38 s before the step began; the battery was unpinned on k8s-ha, so
+// each request dialed whatever 1.1.1.1 / 8.8.8.8 answered first, and some still
+// answered the retired primary (us-iad) inside Linode's 300 s TTL. Its app tier is at zero,
+// so its Traefik has no app route and answers "404 page not found". The k8s-ha
+// exclusion rested on "k8s-ha failover moves a floating IP and never rewrites
+// the A record", which was never true: src/failover.js STEP 7 rewrites apex +
+// wildcard whenever the DNS is automated, in both HA modes.
+
+const PROMOTED_INGRESS_IP = '198.51.100.20';
+const RETIRED_INGRESS_IP = '203.0.113.10';
+const LINODE_DOMAIN = 'l4-abc.linode.appcarbon.dev';
+
+describe('the post-failover pin and record flip, both HA modes', () => {
+  it('failoverFlipsRecord is true for every automated DNS provider, false for manual', () => {
+    for (const id of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway', 'cloudflare']) {
+      expect(failoverFlipsRecord(id), id).toBe(true);
+    }
+    expect(failoverFlipsRecord('manual')).toBe(false);
+    expect(failoverFlipsRecord(undefined)).toBe(false);
+  });
+
+  it('pins k8s-ha to the promoted ingress IP, keeping the domain', () => {
+    expect(
+      postFailoverResolutionPin({
+        stepName: 'verify-failover',
+        domain: LINODE_DOMAIN,
+        envPrefix: 'cil4',
+        dnsProvider: 'linode',
+        servingIp: PROMOTED_INGRESS_IP,
+      }),
+    ).toMatchObject({ domain: LINODE_DOMAIN, ip: PROMOTED_INGRESS_IP });
+  });
+
+  it('pins nothing when no record moved (manual DNS) or the address is unknown', () => {
+    const base = {
+      stepName: 'verify-failover',
+      domain: LINODE_DOMAIN,
+      envPrefix: 'cil4',
+    };
+    expect(
+      postFailoverResolutionPin({ ...base, dnsProvider: 'manual', servingIp: PROMOTED_INGRESS_IP }),
+    ).toBeNull();
+    expect(
+      postFailoverResolutionPin({ ...base, dnsProvider: 'linode', servingIp: null }),
+    ).toBeNull();
+  });
+
+  it('reproduces l4: a public resolver still on the retired IP no longer decides the dial', async () => {
+    const pin = postFailoverResolutionPin({
+      stepName: 'verify-failover',
+      domain: LINODE_DOMAIN,
+      envPrefix: 'cil4',
+      dnsProvider: 'linode',
+      servingIp: PROMOTED_INGRESS_IP,
+    });
+    const captured: CapturedRequest[] = [];
+    await withResolutionPin(pin, () =>
+      dnsSafeFetch(`https://${LINODE_DOMAIN}/api/v1/files/presign`, undefined, {
+        resolveIp: (domain) => resolveCheckIp(domain, async () => RETIRED_INGRESS_IP),
+        httpsRequest: stubHttps(captured),
+      }),
+    );
+    expect(captured[0].hostname).toBe(PROMOTED_INGRESS_IP);
+    expect(captured[0].servername).toBe(LINODE_DOMAIN);
+  });
+});
+
+describe('CENSUS: every HA scenario in the registry gets the pin and the TTL window', () => {
+  const haScenarios = Object.entries(testConfig.e2e.providers).flatMap(([provider, p]) =>
+    p.scenarios
+      .filter((s) => s.mode.endsWith('-ha'))
+      .map((s) => ({ provider, mode: s.mode, dnsProvider: s.dnsProvider, envPrefix: s.envPrefix })),
+  );
+
+  it('the census found both HA modes', () => {
+    expect(new Set(haScenarios.map((s) => s.mode))).toEqual(new Set(['compose-ha', 'k8s-ha']));
+  });
+
+  it.each(haScenarios)(
+    '$provider/$mode: its failover flips the record and its verify is pinned',
+    (s) => {
+      expect(failoverFlipsRecord(s.dnsProvider)).toBe(true);
+      expect(
+        postFailoverResolutionPin({
+          stepName: 'verify-failover',
+          domain: `${s.envPrefix}.example.dev`,
+          envPrefix: s.envPrefix,
+          dnsProvider: s.dnsProvider,
+          servingIp: PROMOTED_INGRESS_IP,
+        }),
+      ).toMatchObject({ ip: PROMOTED_INGRESS_IP });
+    },
+  );
+
+  it('every status probe after a failover gets the moved-record window from the same predicate', () => {
+    // `vibecarbon status` is a separate process the pin cannot reach, so after
+    // a flip its readiness probe can hit the retired side until the TTL runs
+    // out. Every call site decides that from failoverFlipsRecord, never from a
+    // mode literal (which is how k8s-ha was left with a non-retryable probe).
+    const code = stripComments(LIFECYCLE_SRC);
+    const sites = [...code.matchAll(/recordJustMoved[^,;\n]*[,;\n]/g)].map((m) => m[0]);
+    expect(sites.length).toBeGreaterThanOrEqual(3);
+    for (const site of sites) {
+      expect(site).not.toMatch(/config\.mode/);
+    }
+    expect(code).toContain('const recordJustMoved = failoverFlipsRecord(config.dnsProvider);');
+    expect(code).toContain('recordJustMoved: failoverFlipsRecord(config.dnsProvider),');
+  });
+
+  it('reconverge-deploy probes the promoted cluster through the pin too', () => {
+    // It runs a few minutes after the flip: still inside Linode's 300 s TTL.
+    const code = stripComments(LIFECYCLE_SRC);
+    expect(code).toMatch(
+      /withResolutionPin\(\s*postFailoverResolutionPin\(\{[\s\S]{0,400}\}\),\s*\(\) =>\s*runPostReconvergeObservability\(/,
+    );
   });
 });

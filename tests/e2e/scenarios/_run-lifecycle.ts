@@ -126,7 +126,12 @@ import {
   isClusterScopedStep,
 } from '../utils/cluster-diagnostics.js';
 import { hcloudChildEnv } from '../utils/compute-token.js';
-import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
+import {
+  failoverFlipsRecord,
+  postFailoverResolutionPin,
+  type ResolutionPin,
+  withResolutionPin,
+} from '../utils/dns-pin.js';
 import { resolveE2EAcmeCa } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
 import { collectHostDiagnostics, findClusterHosts } from '../utils/host-diagnostics.js';
@@ -1162,22 +1167,24 @@ export async function runLifecycle(
   async function runVerificationChecks(stepName: StepName): Promise<StepResult> {
     const command = `verify:${config.domain}`;
 
-    // ── Post-failover resolution pin (compose-ha verify-failover ONLY) ──
+    // ── Post-failover resolution pin (both HA modes) ──
     //
-    // compose-ha failover repoints the environment by rewriting the apex +
-    // wildcard A records. DNS-based failover inherently leaves clients on the
-    // OLD address until their cached record expires — docs/rto-rpo.md bounds
-    // that tail by the 60s TTL the flip writes and counts it as part of the
-    // published RTO, not as a deployment fault. The verifier used to inherit
-    // that tail and grade the deployment on it: on 2026-08-11 the operator's
-    // resolver chain held the retired address mid-TTL, so the battery SPLIT —
-    // auth_health/auth_signup/rest_api reached the promoted node and passed
-    // while spa_auth_callback, auth_signin, auth_admin_login, db_schema and
-    // storage_upload hit the DEMOTED node (app tier deliberately stopped) and
-    // failed. None of the failing request ids appeared in the promoted node's
-    // proxy access log; everything healed at TTL expiry.
+    // A failover on either HA mode repoints the environment by rewriting the
+    // apex + wildcard A records: compose-ha to the promoted node, k8s-ha to the
+    // promoted cluster's ingress IP. DNS-based failover inherently leaves
+    // clients on the OLD address until their cached record expires —
+    // docs/rto-rpo.md counts that tail as part of the published RTO, not as a
+    // deployment fault, and on Linode it is 300 s (its TTL floor). The verifier
+    // used to inherit that tail and grade the deployment on it: on 2026-08-11
+    // (hetzner/compose-ha) the battery SPLIT between the promoted node and the
+    // DEMOTED one (app tier deliberately stopped), and on 2026-11-15
+    // (linode/k8s-ha, run 43757126064) auth_protected and file_upload_roundtrip
+    // got the retired cluster's "404 page not found" in 14-16 ms while every
+    // request that reached the promoted cluster took 32 ms or more. k8s-ha was
+    // left out on the belief that its failover moves a floating IP without
+    // rewriting the record; it rewrites it.
     //
-    // Inside this pin every HTTP check dials the promoted node directly while
+    // Inside this pin every HTTP check dials the promoted address directly while
     // keeping the domain as Host + TLS SNI, so serving correctness (name-based
     // routing, certificate validity) is still fully asserted. Whether the flip
     // PUBLISHED is a separate assertion — `dns_failover_flip` below, against
@@ -1185,25 +1192,32 @@ export async function runLifecycle(
     // things, not measuring how long the operator's ISP cache holds a record.
     //
     // Scope is deliberately narrow: verify-deploy stays on the public-resolver
-    // path because that IS the customer cold path, and k8s-ha failover moves a
-    // floating IP without ever rewriting the A record.
+    // path because that IS the customer cold path.
+    //
+    // readServingIp is what the record now carries (the failover rewrote
+    // .vibecarbon.json: failoverComposeHA on compose-ha, swapHaRoles on k8s-ha);
+    // the pin, the propagation gate and dns_failover_flip all use it.
+    const promotedIp = isPostFailoverVerify(stepName)
+      ? readServingIp(config.projectDir, config.envPrefix)
+      : null;
     let verifyPin: ResolutionPin | null = null;
-    if (isPostFailoverVerify(stepName) && config.mode === 'compose-ha') {
-      const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-      if (primaryIp) {
-        verifyPin = {
-          domain: config.domain,
-          ip: primaryIp,
-          reason: `${stepName}: promoted primary for ${config.envPrefix}`,
-        };
+    if (isPostFailoverVerify(stepName)) {
+      verifyPin = postFailoverResolutionPin({
+        stepName,
+        domain: config.domain,
+        envPrefix: config.envPrefix,
+        dnsProvider: config.dnsProvider,
+        servingIp: promotedIp,
+      });
+      if (verifyPin) {
         console.log(
           `${tag} [${stepName}] pinning HTTP checks for ${config.domain} (and *.${config.domain}) ` +
-            `to the promoted primary ${primaryIp} — Host/SNI stay ${config.domain}`,
+            `to the promoted address ${verifyPin.ip} — Host/SNI stay ${config.domain}`,
         );
       } else {
         console.warn(
-          `${tag} [${stepName}] no promoted primary IP in .vibecarbon.json — HTTP checks fall ` +
-            'back to the public resolvers and may hit the retired node mid-TTL',
+          `${tag} [${stepName}] no pin (no promoted address in .vibecarbon.json, or manual DNS) — ` +
+            'HTTP checks fall back to the public resolvers and may hit the retired side mid-TTL',
         );
       }
     }
@@ -1455,29 +1469,22 @@ export async function runLifecycle(
         // fresh readServingIp is what the record now carries: the promoted
         // node on compose-ha, the promoted cluster's floating IP on k8s-ha.
         if (isPostFailoverVerify(stepName)) {
-          const promotedIp = readServingIp(config.projectDir, config.envPrefix);
           if (promotedIp) {
             console.log(
               `${tag} Waiting for ${config.domain} to resolve to promoted IP ${promotedIp}...`,
             );
-            // 360s ceiling: the A record's TTL is 60s (hetzner-dns.js HA_TTL /
-            // failover.js flip writes ttl:60), so a resolver that cached the old
-            // IP just before the flip serves it for at most ~60s. This is an
-            // early-exit poll — it returns the instant a pinned resolver serves
-            // the promoted IP (typically well under 120s), so the generous
-            // ceiling costs ~0 on a passing run and only bounds the failure path.
+            // Advisory since 2026-08-12, kept as the propagation-tail evidence
+            // docs/rto-rpo.md cites: the checks below are pinned, so nothing
+            // waits on this for correctness. It returns the instant ONE answer
+            // from the public resolvers carries the promoted IP, which says
+            // nothing about the next answer: l4 on 2026-11-15 passed this gate
+            // in under a second and its unpinned checks still reached the
+            // retired cluster afterwards.
             //
-            // The 60s premise is per-DNS-BACKEND, and one backend breaks it.
-            // Hetzner and Cloudflare write ttl:60 directly; DigitalOcean's floor
-            // is 30s so it carries 60 verbatim (digitalocean-dns.js header) —
-            // all three leave ~300s of headroom under this ceiling. Linode does
-            // NOT: `ttl_sec` is an enum whose floor is 300, and linode-dns.js
-            // nearestTtlSec() rounds our requested 60 up to it, so a stale
-            // resolver can legitimately serve the old IP for ~300s — only ~60s
-            // of headroom left. No Linode scenario reaches this gate today (l1
-            // is compose-only, no failover step), so nothing is at risk now;
-            // raise this ceiling when a Linode HA tier lands, rather than
-            // debugging it as a flake.
+            // 360s ceiling: past the longest TTL a failover flip can leave
+            // behind. Hetzner, DigitalOcean and Cloudflare carry the 60s the
+            // flip writes; Linode's `ttl_sec` floor is 300 (linode-dns.js
+            // nearestTtlSec), and l2's gate has waited about 200 s there.
             const pointed = await waitForDnsToPoint(config.domain, promotedIp, {
               budgetMs: 360_000,
             });
@@ -1485,31 +1492,27 @@ export async function runLifecycle(
               console.warn(
                 `${tag} ${config.domain} still not resolving to ${promotedIp} after 360s — the ` +
                   'operator resolver chain is still inside the record TTL. Advisory only since ' +
-                  '2026-08-12: the checks below are pinned to the promoted node, and whether the ' +
+                  '2026-08-12: the checks below are pinned to the promoted address, and whether the ' +
                   'flip published is asserted by dns_failover_flip against the authoritative NS.',
               );
             }
           }
 
           // Customer-honest half of the failover assertion, kept SEPARATE from
-          // serving correctness: the pinned checks below prove the promoted node
+          // serving correctness: the pinned checks below prove the promoted side
           // serves; this proves the A record actually moved. It queries the
           // zone's AUTHORITATIVE nameservers (never the OS resolver, never a
           // cache), so it reports the published truth rather than wherever the
-          // operator's resolver chain happens to sit inside the 60s TTL.
+          // operator's resolver chain happens to sit inside the TTL. Both HA
+          // modes: the record carries readServingIp's address, the promoted
+          // node on compose-ha, the promoted cluster's ingress IP on k8s-ha.
           allResults.push(
             await runDnsFailoverFlipCheck({
               domain: config.domain,
-              // k8s-ha failover repoints the A record at the promoted
-              // cluster's ingress IP (clusterIngressIp: its floating IP, or a
-              // DigitalOcean master's own address), which this node-IP
-              // comparison does not model; runDnsFlipVerified below asserts
-              // that flip, on every provider, through the DNS provider's API.
-              expectedIp: config.mode === 'compose-ha' ? (sshCheckMasterIp ?? null) : null,
-              skipReason:
-                config.mode === 'compose-ha'
-                  ? null
-                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (its floating/reserved IP, or a DigitalOcean master's own address), which readServingIp reads back in the DNS-provider check below; this node-IP comparison does not apply, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
+              expectedIp: promotedIp,
+              skipReason: failoverFlipsRecord(config.dnsProvider)
+                ? null
+                : 'manual DNS: failover flips no record, so there is nothing to assert',
             }),
           );
           // The same flip read back through the DNS provider's own API (the
@@ -4028,9 +4031,11 @@ EOF`;
       name: 'verify-status',
       run: () =>
         executeStep('verify-status', 'vibecarbon status -json', async () => {
-          // compose-ha flips the A record, so the probe gets past the longest
-          // TTL a provider's DNS allows. k8s-ha moves a floating IP.
-          const recordJustMoved = config.mode === 'compose-ha';
+          // Both HA modes flip the A record (k8s-ha to the promoted cluster's
+          // ingress IP), and status is the real CLI, which no pin reaches: its
+          // readiness probe can hit the retired side until the TTL runs out, so
+          // it keeps observing past the longest TTL a provider's DNS allows.
+          const recordJustMoved = failoverFlipsRecord(config.dnsProvider);
           const r = await checkStatusHealth({
             projectDir: config.projectDir,
             envName: config.envPrefix,
@@ -4085,7 +4090,7 @@ EOF`;
                 envName: config.envPrefix,
                 timeoutMs: 180_000,
                 retired: retiredAfterFailover('second-failover'),
-                recordJustMoved: config.mode === 'compose-ha',
+                recordJustMoved: failoverFlipsRecord(config.dnsProvider),
               }),
             ];
             requireAllPass(stepId, 'second-failover', results);
@@ -4380,29 +4385,41 @@ EOF`;
             // Grafana/Prometheus, so verify-failover skipped those checks
             // (scenarios/observability-step-plan.ts). This redeploy applied
             // observability to the promoted cluster as the full primary; prove
-            // it from the outside with a fresh super-admin session. No DNS pin:
-            // verify-failover already waited for the domain to resolve to the
-            // promoted cluster, and the ha.primary.stack assertion above proves
-            // this redeploy did not move it.
+            // it from the outside with a fresh super-admin session, pinned to
+            // the promoted cluster: this runs a few minutes after the failover's
+            // flip, still inside Linode's 300 s TTL, and verify-failover's DNS
+            // gate passing once never meant every resolver had moved (l4,
+            // 2026-11-15). The ha.primary.stack assertion above proves this
+            // redeploy did not move the record.
             if (provesObservabilityAfterReconverge(config.mode, config.features)) {
               if (!adminCreds) adminCreds = readAdminCredentials(config.projectDir);
-              const obsResults = await runPostReconvergeObservability(
-                {
+              const obsResults = await withResolutionPin(
+                postFailoverResolutionPin({
+                  stepName: 'reconverge-deploy',
                   domain: config.domain,
-                  adminEmail: adminCreds?.adminEmail,
-                  adminPassword: adminCreds?.adminPassword,
-                  // Grafana is Ready by now (waitReady); this covers Traefik
-                  // picking up its endpoints: 12 x 5s instead of the verify
-                  // steps' 4.
-                  attempts: 12,
-                },
-                {
-                  // The promoted cluster's first observability apply: Grafana
-                  // boots from an empty volume, up to its manifest's allowance.
-                  waitReady: () => waitForGrafanaReady(newPrimaryIp, sshKeyPath),
-                  signIn: adminSignIn,
-                  runChecks: runObservabilityChecks,
-                },
+                  envPrefix: config.envPrefix,
+                  dnsProvider: config.dnsProvider,
+                  servingIp: readServingIp(config.projectDir, config.envPrefix),
+                }),
+                () =>
+                  runPostReconvergeObservability(
+                    {
+                      domain: config.domain,
+                      adminEmail: adminCreds?.adminEmail,
+                      adminPassword: adminCreds?.adminPassword,
+                      // Grafana is Ready by now (waitReady); this covers Traefik
+                      // picking up its endpoints: 12 x 5s instead of the verify
+                      // steps' 4.
+                      attempts: 12,
+                    },
+                    {
+                      // The promoted cluster's first observability apply: Grafana
+                      // boots from an empty volume, up to its manifest's allowance.
+                      waitReady: () => waitForGrafanaReady(newPrimaryIp, sshKeyPath),
+                      signIn: adminSignIn,
+                      runChecks: runObservabilityChecks,
+                    },
+                  ),
               );
               collector.recordVerifications(stepId, obsResults);
               const obsFailures = obsResults.filter((r) => r.status === 'fail');
