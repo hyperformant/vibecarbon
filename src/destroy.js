@@ -686,21 +686,21 @@ async function cleanupLoadBalancers(provider, projectName, envName) {
     const lbName = lb.name || '';
     const lbLabels = lb.labels || {};
 
-    // CCM-created LBs have a label like: kubernetes.io/cluster/<cluster-name> = "owned"
-    // or the name contains the cluster identifier. Always match on the full cluster name
-    // (projectName + envName) to avoid deleting LBs belonging to other environments.
-    const clusterKey = Object.keys(lbLabels).find((k) => k.startsWith('kubernetes.io/cluster/'));
-    const matchesCluster = clusterKey?.includes(clusterName);
-    const matchesName = lbName.includes(clusterName);
-    // Also match by private network attachment — the CCM attaches LBs to the cluster network.
+    // Every match is EXACT. A name or label key that merely CONTAINS
+    // `<project>-<env>` is not ours: `app-prod` is inside `myapp-prod-…`
+    // (another project) and `app-prod2-…` (another environment), and the old
+    // `<project>-lb` named every environment of the project at once.
+    // tests/unit/destroy/cluster-name-exact-match.test.ts holds this.
+    //
+    // The network attachment is the match that finds a CCM LB (Hetzner's CCM
+    // names one by a random UID and attaches it to the cluster network); the
+    // exact label key and name cover an LB labelled or named for this cluster.
+    const matchesCluster = Object.hasOwn(lbLabels, `kubernetes.io/cluster/${clusterName}`);
     const matchesNetwork =
       clusterNetworkId !== null && lb.private_net?.some((n) => n.network_id === clusterNetworkId);
-    // Traefik service annotation uses {{PROJECT_NAME}}-lb (no envName suffix).
-    // Match both the short form and the long form to cover all conventions.
-    const matchesStandardName =
-      lbName === `${projectName}-lb` || lbName === `${projectName}-${envName}-lb`;
+    const matchesName = lbName === `${projectName}-${envName}-lb`;
 
-    if (matchesCluster || matchesName || matchesStandardName || matchesNetwork) {
+    if (matchesCluster || matchesName || matchesNetwork) {
       try {
         const ok = await provider.deleteLoadBalancer(lb.id);
         if (ok) deleted.push(lbName);
@@ -914,8 +914,7 @@ const idKey = (id) => String(id);
  *   - `knownVolumeIds` — captured from the cluster's own PersistentVolumes
  *     before teardown (lib/csi-volumes.js) and from the ids attached to this
  *     cluster's servers during the pre-scan;
- *   - the cluster name inside the volume name;
- *   - a `kubernetes.io/cluster=<clusterName>` label.
+ *   - a `kubernetes.io/cluster=<clusterName>` label (exact).
  * These are deleted whenever detached, and are the only ones the detach
  * re-sweep waits on.
  *
@@ -926,6 +925,12 @@ const idKey = (id) => String(id);
  * 43680508383, linode/k8s): destroy waited for it to detach, which would have
  * deleted it, then reported it LEAKED and kept the env's buckets.
  * tests/unit/destroy/orphaned-volumes-foreign-name-match.test.ts holds this.
+ *
+ * Nor is the cluster name inside a volume's name. Nothing vibecarbon creates
+ * names a volume that way (CSI volumes are `pvc-…`), and `<project>-<env>` is
+ * a substring of other projects' and environments' names (`app-prod` inside
+ * `myapp-prod-…` and `app-prod2-…`), so that match could only claim somebody
+ * else's volume. tests/unit/destroy/cluster-name-exact-match.test.ts.
  *
  * HEURISTIC matches only prove the volume looks like SOME vibecarbon cluster's:
  *   - a `pvc-<uuid>` name in one of this cluster's regions,
@@ -1015,8 +1020,6 @@ async function cleanupOrphanedVolumes(
   /** ENV-SCOPED ownership. Attachment-blind (see the caller loop). */
   const identityMatch = (volume) => {
     if (knownIdSet.has(idKey(volume.id))) return 'captured-id';
-    const volumeName = provider.volumeName(volume) || '';
-    if (volumeName.includes(clusterName)) return 'cluster-name';
     if (provider.volumeLabels(volume)['kubernetes.io/cluster'] === clusterName)
       return 'cluster-label';
     return null;
@@ -5793,6 +5796,7 @@ export async function run(args) {
 
 export {
   cleanupAutoscalerWorkers,
+  cleanupLoadBalancers,
   cleanupOrphanedVolumes,
   loadProjectConfig,
   main,
