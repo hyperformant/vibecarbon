@@ -35,6 +35,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { redactCredentials } from '../../../src/lib/redact-credentials.js';
 import { sshRun } from '../../../src/lib/ssh.js';
+import { capTail } from './diagnostic-cap.js';
 
 export type K3sUnit = 'k3s' | 'k3s-agent';
 
@@ -103,22 +104,6 @@ export function buildHostDiagnosticScript(unit: K3sUnit): string {
 /** The argv for sshRun, which POSIX-quotes each element. */
 export function hostDiagnosticArgv(unit: K3sUnit): string[] {
   return ['bash', '-c', buildHostDiagnosticScript(unit)];
-}
-
-/**
- * Cap at maxChars, keeping the tail (the newest lines) from a line boundary:
- * the partial line the cut leaves first is dropped. Callers pass redacted
- * text only: a cut made before redaction can split a token so that its
- * surviving half no longer matches any pattern.
- */
-function capTail(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  const cut = text.length - maxChars;
-  const kept = text.slice(cut);
-  const onBoundary = text[cut - 1] === '\n';
-  const nl = kept.indexOf('\n');
-  const body = onBoundary ? kept : nl === -1 ? '' : kept.slice(nl + 1);
-  return `(truncated to the last ${maxChars} chars, from a line boundary)\n${body}`;
 }
 
 const capFor = (name: string): number =>
