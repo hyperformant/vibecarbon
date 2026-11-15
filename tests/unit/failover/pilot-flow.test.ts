@@ -38,27 +38,48 @@ import {
   swapHaRoles,
   waitForWorkersReady,
 } from '../../../src/failover.js';
+import { WORKER_NODE_SELECTOR } from '../../../src/lib/deploy/k8s/node-roles.js';
 import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
 import { ConvergeBuildError } from '../../../src/lib/iac/converge-cluster.js';
 import { K3sTokenProbeError } from '../../../src/lib/iac/index.js';
 import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import {
+  DB_LABELS,
+  type FakeNode,
+  getNodesOutput,
+  MASTER_LABELS,
+} from '../../_shared/fake-nodes.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
-/** `kubectl get nodes --no-headers` output with `n` Ready worker rows (+ master). */
-function readyLines(n: number): string {
+/**
+ * A standby cluster as the API would list it: the master and the db node,
+ * both Ready, plus `n` Ready workers. The workers are named the way Linode
+ * names a long cluster's servers (cut to 50 characters, hash suffix, no
+ * `-worker-`), so only a lookup by label finds them.
+ */
+function standbyNodes(n: number, workerStatus = 'Ready'): FakeNode[] {
   return [
-    'proj-e4-standby-master   Ready   control-plane   10m   v1.30',
-    ...Array.from(
-      { length: n },
-      (_, i) => `proj-e4-standby-worker-${i}   Ready   <none>   5m   v1.30`,
-    ),
-  ].join('\n');
+    { name: 'testapp-k8s-ha-1794719879300-ptt2cz-l4-st-2dda9ed1', labels: MASTER_LABELS },
+    { name: 'testapp-k8s-ha-1794719879300-ptt2cz-l4-standby-db', labels: DB_LABELS },
+    ...Array.from({ length: n }, (_, i) => ({
+      name: `testapp-k8s-ha-1794719879300-ptt2cz-l4-st-d644a9d${i}`,
+      status: workerStatus,
+    })),
+  ];
 }
 
-/** A kubectl stub that always reports `n` Ready workers. */
+/**
+ * Every kubectl call the step made only read the cluster: the stale-worker
+ * reap lists worker nodes first, and deletes only what that list returned.
+ */
+function expectNoClusterWrites(kubectl: ReturnType<typeof vi.fn>) {
+  for (const [argv] of kubectl.mock.calls) expect(argv[0], JSON.stringify(argv)).toBe('get');
+}
+
+/** A kubectl stub over a cluster that always has `n` Ready workers. */
 function readyKubectl(n: number) {
-  return vi.fn(async () => readyLines(n));
+  return vi.fn(async (argv: string[]) => getNodesOutput(standbyNodes(n), argv));
 }
 
 /** Shared provisionStandbyCapacity args; each test supplies its own `deps`. */
@@ -163,7 +184,7 @@ describe('provisionStandbyCapacity', () => {
     expect(converge).toHaveBeenCalledTimes(2);
     expect(converge.mock.calls[1][0].overrides.minWorkers).toBe(0);
     // Provisioning failed before workers came up → zero cluster mutations.
-    expect(kubectl).not.toHaveBeenCalled();
+    expectNoClusterWrites(kubectl);
   });
 
   // x86-64 standardization (2026-07-30). The persisted
@@ -189,7 +210,7 @@ describe('provisionStandbyCapacity', () => {
       // The distinguishing property vs. the generic abort: ZERO converge calls,
       // so there is no up AND no revert.
       expect(converge).not.toHaveBeenCalled();
-      expect(kubectl).not.toHaveBeenCalled();
+      expectNoClusterWrites(kubectl);
     });
 
     it('names the source, a same-size x86 substitute, and the replace+restore fix', async () => {
@@ -357,7 +378,7 @@ describe('provisionStandbyCapacity', () => {
       // probe's reason, not a second "Failover aborted".
       expect(err.logLines).toEqual([stopped.message]);
       expect(converge).toHaveBeenCalledTimes(1);
-      expect(kubectl).not.toHaveBeenCalled();
+      expectNoClusterWrites(kubectl);
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
@@ -388,7 +409,7 @@ describe('provisionStandbyCapacity', () => {
       expect(err.message).toBe(`Failover aborted, the primary is untouched. ${stopped.message}`);
       expect(err.logLines).toEqual([stopped.message]);
       expect(converge).toHaveBeenCalledTimes(1);
-      expect(kubectl).not.toHaveBeenCalled();
+      expectNoClusterWrites(kubectl);
       expect(warn).not.toHaveBeenCalled();
       const said = JSON.stringify([err.logLines, warn.mock.calls, error.mock.calls]);
       expect(said).not.toMatch(/Leftover|Revert to 0 workers|Converging the standby back/);
@@ -412,15 +433,108 @@ describe('provisionStandbyCapacity', () => {
     expect(report).toContain('e4-standby');
     expect(report).toMatch(/vibecarbon failover/);
     expect(report).toMatch(/vibecarbon destroy/);
-    expect(kubectl).not.toHaveBeenCalled();
+    expectNoClusterWrites(kubectl);
+  });
+});
+
+// linode/k8s-ha, 2026-11-15: the failed failover's revert deleted the worker
+// machine and left its Node registered, with its k3s node password. Worker
+// names repeat, so a re-run's worker would register under that name with a
+// new password and be refused. The stale Node goes before provisioning (only
+// NotReady ones) and after a revert (all of them).
+describe('stale standby worker Nodes', () => {
+  const STALE = 'testapp-k8s-ha-1794719879300-ptt2cz-l4-st-d644a9d7';
+  /** A cluster kubectl: lists by selector, and `delete node` removes nodes. */
+  function clusterKubectl(nodes: FakeNode[]) {
+    return vi.fn(async (argv: string[]) => {
+      if (argv[0] === 'delete' && argv[1] === 'node') {
+        const gone = new Set(argv.slice(2).filter((a) => !a.startsWith('-')));
+        nodes.splice(0, nodes.length, ...nodes.filter((n) => !gone.has(n.name)));
+        return '';
+      }
+      return getNodesOutput(nodes, argv);
+    });
+  }
+  const deletes = (kubectl: ReturnType<typeof vi.fn>) =>
+    kubectl.mock.calls.map(([argv]) => argv).filter((argv) => argv[0] === 'delete');
+
+  it('removes a NotReady worker Node before provisioning, and keeps a Ready one', async () => {
+    const nodes: FakeNode[] = [
+      ...standbyNodes(0),
+      { name: STALE, status: 'NotReady' },
+      { name: 'testapp-k8s-ha-1794719879300-ptt2cz-l4-st-0a1b2c3d', status: 'Ready' },
+    ];
+    const kubectl = clusterKubectl(nodes);
+    const converge = vi.fn(async () => {
+      // The new worker joins under the stale one's name once that is gone.
+      nodes.push({ name: STALE, status: 'Ready' });
+      return { outputs: {} };
+    });
+    await provisionStandbyCapacity({
+      ...base,
+      workerSpec: { count: 2, serverType: 'cpx31' },
+      deps: { converge, kubectl, sleep: vi.fn(async () => {}) },
+    });
+    expect(deletes(kubectl)).toEqual([['delete', 'node', STALE, '--ignore-not-found']]);
+    // The delete ran before the converge made the new machine.
+    const delOrder =
+      kubectl.mock.invocationCallOrder[kubectl.mock.calls.findIndex(([a]) => a[0] === 'delete')];
+    expect(delOrder).toBeLessThan(converge.mock.invocationCallOrder[0]);
+  });
+
+  it('removes every worker Node after reverting to 0 workers', async () => {
+    const nodes: FakeNode[] = [...standbyNodes(0)];
+    const kubectl = clusterKubectl(nodes);
+    const converge = vi.fn(async (args: { overrides: { minWorkers: number } }) => {
+      if (args.overrides.minWorkers > 0) {
+        // The worker joined, but the step still fails (here: the wait budget).
+        nodes.push({ name: STALE, status: 'Ready' });
+        throw new Error('resource_unavailable');
+      }
+      return { outputs: {} };
+    });
+    const err = await provisionStandbyCapacity({ ...base, deps: { converge, kubectl } }).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(AbortProvisioningError);
+    expect(deletes(kubectl)).toEqual([['delete', 'node', STALE, '--ignore-not-found']]);
+    expect(nodes.map((n) => n.name)).not.toContain(STALE);
+  });
+
+  it('a reap that cannot reach the cluster warns and does not stop the failover', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      let call = 0;
+      const kubectl = vi.fn(async (argv: string[]) => {
+        if (call++ === 0)
+          throw new Error('ssh: connect to host 10.0.0.9 port 22: Connection timed out');
+        return getNodesOutput(standbyNodes(2), argv);
+      });
+      const result = await provisionStandbyCapacity({
+        ...base,
+        deps: {
+          converge: vi.fn(async () => ({ outputs: {} })),
+          kubectl,
+          sleep: vi.fn(async () => {}),
+        },
+      });
+      expect(result).toEqual({ provisioned: true });
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(
+        /Could not remove stale standby worker nodes/,
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
 describe('waitForWorkersReady', () => {
   it('resolves once the Ready worker count reaches the target', async () => {
-    const responses = [readyLines(0), readyLines(1), readyLines(2)];
+    const clusters = [standbyNodes(0), standbyNodes(1), standbyNodes(2)];
     let call = 0;
-    const kubectl = vi.fn(async () => responses[Math.min(call++, responses.length - 1)]);
+    const kubectl = vi.fn(async (argv: string[]) =>
+      getNodesOutput(clusters[Math.min(call++, clusters.length - 1)], argv),
+    );
     const sleep = vi.fn(async () => {});
 
     const ready = await waitForWorkersReady('10.0.0.9', '/key', 2, { deps: { kubectl, sleep } });
@@ -428,12 +542,43 @@ describe('waitForWorkersReady', () => {
     expect(ready).toBe(2);
     expect(kubectl).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
-    // Polls node list, no headers.
-    expect(kubectl).toHaveBeenCalledWith(['get', 'nodes', '--no-headers']);
+    // Polls the worker nodes by label, no headers.
+    expect(kubectl).toHaveBeenCalledWith([
+      'get',
+      'nodes',
+      '-l',
+      WORKER_NODE_SELECTOR,
+      '--no-headers',
+    ]);
+  });
+
+  // linode/k8s-ha, 2026-11-15: the failover's worker joined the standby as
+  // `...-l4-st-d644a9d7` (Linode cut its 55-character label to 50) and was
+  // waited on for 600 s, then torn down, because the wait counted names with
+  // `-worker-` in them.
+  it('counts a worker whose name does not say worker', async () => {
+    const kubectl = readyKubectl(1);
+    const ready = await waitForWorkersReady('10.0.0.9', '/key', 1, {
+      deps: { kubectl, sleep: vi.fn(async () => {}) },
+    });
+    expect(ready).toBe(1);
+    expect(kubectl).toHaveBeenCalledTimes(1);
+  });
+
+  it('never counts the master or the db node, and not a NotReady worker', async () => {
+    const kubectl = vi.fn(async (argv: string[]) =>
+      getNodesOutput(standbyNodes(1, 'NotReady'), argv),
+    );
+    await expect(
+      waitForWorkersReady('10.0.0.9', '/key', 1, {
+        budgetMs: -1,
+        deps: { kubectl, sleep: vi.fn(async () => {}) },
+      }),
+    ).rejects.toThrow(/not Ready: 0\/1/);
   });
 
   it('throws when the ready budget is exceeded', async () => {
-    const kubectl = vi.fn(async () => readyLines(0));
+    const kubectl = readyKubectl(0);
     const sleep = vi.fn(async () => {});
     await expect(
       waitForWorkersReady('10.0.0.9', '/key', 2, { budgetMs: -1, deps: { kubectl, sleep } }),
