@@ -45,44 +45,44 @@
     },
     "digitalocean": {
       "run": {
-        "id": "a2c67c1",
-        "date": "2026-11-07",
+        "id": "d80e0b4",
+        "date": "2026-11-15",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 150852,
-          "warm-deploy": 46288,
-          "scale": 143895,
-          "backup": 5657,
-          "destroy": 30889,
-          "restore": 168631
+          "deploy": 139053,
+          "warm-deploy": 44683,
+          "scale": 168800,
+          "backup": 5094,
+          "destroy": 31028,
+          "restore": 168023
         },
         "compose-ha": {
-          "deploy": 218211,
-          "warm-deploy": 56479,
-          "scale": 182069,
-          "backup": 4503,
-          "destroy": 29283,
-          "restore": 308013,
-          "failover": 34802
+          "deploy": 178481,
+          "warm-deploy": 54603,
+          "scale": 150642,
+          "backup": 3880,
+          "destroy": 33323,
+          "restore": 203964,
+          "failover": 37934
         },
         "k8s": {
-          "deploy": 193212,
-          "warm-deploy": 8137,
-          "scale": 175795,
-          "backup": 43474,
-          "destroy": 126651,
-          "restore": 87745
+          "deploy": 224622,
+          "warm-deploy": 9645,
+          "scale": 182261,
+          "backup": 28341,
+          "destroy": 128688,
+          "restore": 79096
         },
         "k8s-ha": {
-          "deploy": 250057,
-          "warm-deploy": 25939,
-          "scale": 366720,
-          "backup": 60443,
-          "destroy": 171718,
-          "restore": 128516,
-          "failover": 196221
+          "deploy": 220914,
+          "warm-deploy": 23424,
+          "scale": 247372,
+          "backup": 27312,
+          "destroy": 147582,
+          "restore": 97711,
+          "failover": 142310
         }
       }
     },
