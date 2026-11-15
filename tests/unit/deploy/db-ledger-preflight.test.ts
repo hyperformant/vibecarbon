@@ -16,6 +16,7 @@ import {
   PRE_LEDGER_SQL,
   parseDbLedgerProbe,
 } from '../../../src/lib/deploy/compose/db-ledger-preflight.js';
+import { withStableFlowLabel } from '../../../src/lib/deploy/stable-flowlabel.js';
 
 const PROJECT = 'acme';
 const running = (answer: string) =>
@@ -113,7 +114,8 @@ describe('assertDbMadeByThisStack', () => {
     ).resolves.toBeUndefined();
     expect(sshRun).toHaveBeenCalledTimes(2);
     expect(sshRun.mock.calls.map((c) => c[0])).toEqual(['1.1.1.1', '2.2.2.2']);
-    expect(sshRun.mock.calls[0][2]).toBe(dbLedgerProbeCommand(PROJECT));
+    // The same session sets the stable flow label first (stable-flowlabel.js).
+    expect(sshRun.mock.calls[0][2]).toBe(withStableFlowLabel(dbLedgerProbeCommand(PROJECT)));
   });
 
   it('refuses a pre-ledger database with backup, destroy + deploy, and hand-carried rows', async () => {

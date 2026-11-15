@@ -16,7 +16,9 @@
  * image transfer or build and before the swap, so a refusal leaves the server
  * exactly as it was. One read per server, not a retry: setup-server already
  * proved SSH and docker work, so a failing read is reported as one rather
- * than guessed at.
+ * than guessed at. Being the first thing every deploy asks of a server, the
+ * read also carries the stable flow label (../stable-flowlabel.js) ahead of
+ * every pull.
  *
  * What it reads, on `<project>-db` (the compose container_name):
  *  - running: one psql query. No ledger AND tables in `public` means the
@@ -33,6 +35,7 @@
  *    operator starts the db from the compose files still on the server (the
  *    bundle is not uploaded yet) so the running path can read the ledger.
  */
+import { withStableFlowLabel } from '../stable-flowlabel.js';
 import { sshRunAsync } from './index.js';
 import { judgeServerVersions, withServerVersions } from './server-floors.js';
 
@@ -122,7 +125,12 @@ export async function assertDbMadeByThisStack(ips, sshKeyPath, projectName, opti
   for (const ip of ips) {
     let out;
     try {
-      out = await sshRun(ip, sshKeyPath, dbLedgerProbeCommand(projectName), { timeout: 30_000 });
+      // The first command every compose deploy sends each server, before any
+      // pull, so it also sets the stable flow label: a server created before
+      // v0.54.1 never got it from cloud-init (../stable-flowlabel.js).
+      out = await sshRun(ip, sshKeyPath, withStableFlowLabel(dbLedgerProbeCommand(projectName)), {
+        timeout: 30_000,
+      });
     } catch (err) {
       throw new Error(
         `Could not check the database on ${ip} before replacing the stack ` +
