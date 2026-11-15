@@ -121,7 +121,7 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "^5.0.5",
-    "autocannon": "^8.0.0",
+    "autocannon": "^9.0.0",
     "better-sqlite3": "^13.0.2",
     "conventional-changelog-conventionalcommits": "^10.2.0",
     "dotenv": "^18.0.1",
