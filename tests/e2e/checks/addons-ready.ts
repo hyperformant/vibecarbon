@@ -20,6 +20,7 @@ import {
   ADDON_STATE_DIR,
   ADDON_STATUS_READ_CMD,
   backgroundAddons,
+  parseAddonStatusFile,
   resolveAddonStates,
 } from '../../../src/lib/services/addon-start.js';
 import { enabledAddonNames } from '../../../src/lib/services/standby-policy.js';
@@ -124,7 +125,12 @@ export async function checkAddonsReady(opts: AddonsReadyOptions): Promise<Verifi
       containers,
     });
     const by = new Map(states.map((s) => [s.name, s]));
-    const failed = expected.filter((n) => ['failed', 'stopped'].includes(by.get(n)?.state ?? ''));
+    // `stopped` ends the wait only on a status read that worked: an unread
+    // file looks like no file and no live job, which is not a verdict.
+    const failed = expected.filter((n) => {
+      const state = by.get(n)?.state ?? '';
+      return state === 'failed' || (state === 'stopped' && read.ok);
+    });
     const done = expected.every((n) => by.get(n)?.state === 'running');
     if (done) {
       return {
@@ -150,12 +156,23 @@ export async function checkAddonsReady(opts: AddonsReadyOptions): Promise<Verifi
             `${n}: ${by.get(n)?.state ?? 'no status'}${by.get(n)?.reason ? ` (${by.get(n)?.reason})` : ''}`,
         )
         .join('; ');
+      // What the job's status file said, so a verdict from the containers can
+      // be told apart from one the job itself recorded.
+      const file = parseAddonStatusFile(read.ok ? read.output : '');
       return fail(
         checkName,
         failed.length > 0
           ? `add-on failed to start: ${summary}\n${logs.join('\n')}`
           : `add-ons not running after ${Math.round((now() - started) / 1000)}s: ${summary}\n${logs.join('\n')}`,
-        { states },
+        {
+          states,
+          statusFile: {
+            read: read.ok,
+            attempt: file.attempt,
+            expectedAttempt: opts.attemptId ?? null,
+            live: file.live,
+          },
+        },
       );
     }
     await sleep(POLL_MS);

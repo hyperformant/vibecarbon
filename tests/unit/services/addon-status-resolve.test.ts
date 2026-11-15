@@ -114,6 +114,25 @@ describe('resolveAddonStates', () => {
     ]);
   });
 
+  // DigitalOcean compose-ha, GitHub run 43680508383: the file was not current,
+  // the job was still extracting Prometheus's image, and "no prometheus
+  // container" read as stopped. A live job means the container may not exist yet.
+  it('from the containers, a missing one is starting while the job is alive', () => {
+    const states = resolveAddonStates({
+      text: '#attempt 0ldattempt000\n#live\n',
+      expected: [EXPECTED[0]],
+      attemptId: ATTEMPT,
+      containers: new Map([['grafana', healthy]]),
+    });
+    expect(states).toEqual([
+      {
+        name: 'observability',
+        state: 'starting',
+        reason: 'the add-on job is running; no loki container yet',
+      },
+    ]);
+  });
+
   it('all containers healthy with no file: running', () => {
     expect(
       resolveAddonStates({

@@ -208,6 +208,12 @@ export function parseAddonStatusFile(text) {
  * as a pass. An add-on the file still says is starting while no job is alive
  * reads `stopped`.
  *
+ * From the containers, an add-on with a service not created yet is
+ * `starting` while an add-on job is alive (it may still be pulling the image),
+ * and `stopped` only once none is. DigitalOcean compose-ha, GitHub run
+ * 43680508383: the job was still extracting Prometheus's image when the check
+ * read `stopped (no prometheus container)` and failed the deploy's verify.
+ *
  * @param {object} o
  * @param {string} o.text ADDON_STATUS_READ_CMD output
  * @param {Array<{name: string, services: string[]}>} o.expected
@@ -229,6 +235,13 @@ export function resolveAddonStates({ text, expected, attemptId, containers = new
   }
   return expected.map(({ name, services }) => {
     const missing = services.find((svc) => !containers.has(svc));
+    if (missing && file.live) {
+      return {
+        name,
+        state: 'starting',
+        reason: `the add-on job is running; no ${missing} container yet`,
+      };
+    }
     if (missing) return { name, state: 'stopped', reason: `no ${missing} container` };
     const bad = services.find((svc) => containers.get(svc).health === 'unhealthy');
     if (bad) return { name, state: 'failed', reason: `${bad} ${containers.get(bad).label}` };
