@@ -837,9 +837,14 @@ const BUDGET_TABLE = {
   },
 };
 
+// The only skip is a deploy with add-ons (budgets are for stock deploys): a
+// stock deploy, said outright or left implicit, is always judged.
+const STOCK_KEY = { ...BUDGET_KEY, features: [] };
+
 const DEPLOY_BUDGET_MARKERLESS: Record<string, Array<() => VerificationResult>> = {
   checkDeployBudget: (['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const).flatMap((mode) => [
     () => deployBudget.checkDeployBudget('', mode, BUDGET_KEY, BUDGET_TABLE),
+    () => deployBudget.checkDeployBudget('', mode, STOCK_KEY, BUDGET_TABLE),
     () =>
       deployBudget.checkDeployBudget(
         '◆  Deployment to e1 complete! (1m 2s)\n[perf] deploy.iac.upStack 1000ms',

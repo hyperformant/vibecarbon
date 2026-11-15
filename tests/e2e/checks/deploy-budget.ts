@@ -37,17 +37,33 @@
  * Never a hollow pass: a log without the markers a judgement rests on fails
  * (tests/unit/e2e/hollow-pass-census.test.ts registers this check). A failure
  * names the three slowest markers, so the message says where the time went.
+ *
+ * Budgets are for stock deploys (the app and its database, no add-ons: the
+ * e2e baseline, tests/config.ts). A deploy that ran with add-ons is not what
+ * a budget was calibrated from (scripts/calibrate-deploy-budgets.js counts
+ * stock samples only), so the check reports `skip` naming the add-ons,
+ * never a verdict.
  */
 import { readFileSync } from 'node:fs';
 import { getProviderClass } from '../../../src/lib/providers/index.js';
 import { parsePerfLines } from '../metrics/reporter.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
+import { isStockFeatures } from '../utils/feature-set.js';
 
 /** What a budget is keyed on: where the scenario deployed, and on which CPU class. */
 export interface BudgetKey {
   provider: string;
   /** `deployCpuClass()`: the class the deploy actually ran on. */
   cpuClass: string;
+}
+
+/** What checkDeployBudget judges a deploy by: its budget key, and the add-ons it ran with. */
+export interface BudgetInput extends BudgetKey {
+  /**
+   * The add-ons the scenario deployed (ScenarioConfig.features). Budgets are
+   * for stock deploys: any add-on makes the check a skip. Absent means stock.
+   */
+  features?: readonly string[];
 }
 
 export interface BudgetRow {
@@ -166,10 +182,23 @@ const s = (ms: number) => Math.round(ms / 1000);
 export function checkDeployBudget(
   output: string,
   mode: DeployMode,
-  key: BudgetKey,
+  key: BudgetInput,
   table: BudgetTable = DEPLOY_BUDGET_TABLE,
 ): DeployBudgetResult {
   const checkName = 'deploy_budget';
+  const features = key.features ?? [];
+  if (!isStockFeatures(features)) {
+    const skipped =
+      'budgets are for stock deploys (the app and its database, no add-ons), ' +
+      `and this one ran with add-ons: ${features.join(', ')}`;
+    return {
+      checkName,
+      status: 'skip',
+      ok: true,
+      message: skipped,
+      details: { skipped, mode, provider: key.provider, features: [...features] },
+    };
+  }
   const budget = budgetFor(table, mode, key);
   const clean = output.replace(ANSI, '');
   const perf = parsePerfLines(clean);

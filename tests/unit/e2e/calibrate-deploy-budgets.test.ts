@@ -64,7 +64,7 @@ describe('reading the results db', () => {
   const db = new Database(dbPath);
   db.exec(`
     CREATE TABLE runs (id TEXT PRIMARY KEY, started_at TEXT);
-    CREATE TABLE scenarios (id TEXT PRIMARY KEY, run_id TEXT, mode TEXT, provider TEXT);
+    CREATE TABLE scenarios (id TEXT PRIMARY KEY, run_id TEXT, mode TEXT, provider TEXT, features TEXT);
     CREATE TABLE steps (id TEXT PRIMARY KEY, scenario_id TEXT, name TEXT, status TEXT, cold_warm TEXT);
     CREATE TABLE perf_substep (id INTEGER PRIMARY KEY AUTOINCREMENT, step_id TEXT, name TEXT, duration_ms INTEGER);
     CREATE TABLE verifications (id TEXT PRIMARY KEY, step_id TEXT, check_name TEXT, details TEXT);
@@ -80,14 +80,17 @@ describe('reading the results db', () => {
     totalS: number;
     tlsS?: number;
     cpuClass?: string;
+    /** scenarios.features as recorded: stock (`[]`) by default. */
+    features?: string | null;
   }) => {
     n++;
     db.prepare('INSERT OR IGNORE INTO runs VALUES (?, ?)').run(o.run, o.started);
-    db.prepare('INSERT INTO scenarios VALUES (?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO scenarios VALUES (?, ?, ?, ?, ?)').run(
       `sc${n}`,
       o.run,
       o.mode,
       o.provider,
+      o.features === undefined ? '[]' : o.features,
     );
     db.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(
       `st${n}`,
@@ -115,6 +118,8 @@ describe('reading the results db', () => {
   deploy({ ...base, totalS: 999, status: 'fail', cpuClass: 'cx' }); // failed
   deploy({ ...base, totalS: 999, coldWarm: 'warm', cpuClass: 'cx' }); // warm
   deploy({ ...base, run: 'r1', started: '2026-11-05T01:00:00Z', totalS: 999, cpuClass: 'cx' }); // before --since
+  deploy({ ...base, totalS: 999, cpuClass: 'cx', features: '["observability"]' }); // add-ons
+  deploy({ ...base, totalS: 999, cpuClass: 'cx', features: null }); // features not recorded
   deploy({ ...base, totalS: 150 }); // classed provider, class not recorded: the `any` row
   deploy({ ...base, provider: 'linode', totalS: 190 });
   deploy({
@@ -136,6 +141,20 @@ describe('reading the results db', () => {
     ]);
     expect(table.budgets.hetzner.compose.cx.ownedS).toBe(330); // 1.5 x 180 + 60
     expect(table.budgets.hetzner.compose.cx.tlsAllowanceS).toBe(60); // 1.5 x 20 = 30, floor 60
+  });
+
+  it('counts only stock deploys (no add-ons) and reports how many it ignored', () => {
+    const samples = readSamples(dbPath, '2026-11-05T13:00:00Z');
+    // One deploy with add-ons, one with no feature set recorded: neither is
+    // proven stock, so neither sets a budget.
+    expect(samples.nonStock).toBe(2);
+    const built = buildTable(samples, 'x');
+    expect(built.table.budgets.hetzner.compose.cx.samples).toBe(1);
+    expect(built.nonStock).toBe(2);
+    expect(renderReport(built, 'x')).toMatch(
+      /Ignored 2 cold deploys that were not stock \(add-ons, or no feature set recorded\)/,
+    );
+    expect(renderReport({ ...built, nonStock: 0 }, 'x')).toMatch(/Ignored 0 cold deploys/);
   });
 
   it('puts a sample without a recorded class in the `any` row, never a guessed class', () => {
@@ -247,7 +266,7 @@ describe('reading the results db', () => {
     const extra = new Database(copy);
     extra.exec(`
       INSERT INTO runs VALUES ('r9', '2026-11-06T10:00:00Z');
-      INSERT INTO scenarios VALUES ('sc-extra', 'r9', 'compose', 'hetzner');
+      INSERT INTO scenarios VALUES ('sc-extra', 'r9', 'compose', 'hetzner', '[]');
       INSERT INTO steps VALUES ('st-extra', 'sc-extra', 'deploy', 'pass', 'cold');
       INSERT INTO perf_substep (step_id, name, duration_ms) VALUES ('st-extra', 'deploy.total', 210000);
       INSERT INTO verifications VALUES ('v-extra', 'st-extra', 'deploy_budget', '{"cpuClass":"cx"}');

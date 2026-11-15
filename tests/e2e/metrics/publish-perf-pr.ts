@@ -183,6 +183,11 @@ export interface SurfacePaths {
  * `updatePerfDataFromRun` — see the module doc for why per-leg sequential
  * merging is safe without a db merge.
  *
+ * Stock deploys only (the app and its database, no add-ons): a scenario whose
+ * recorded `scenarios.features` is not `[]` is ignored with a `[perf-data]`
+ * log line (collectProviderRunData), so a leg that ran with add-ons leaves
+ * its provider's published numbers as they were.
+ *
  * Never throws on a leg with no runs (or a missing/corrupt db) — returns a
  * result with `runId: null` instead, so one odd leg can't abort the whole
  * collector.
@@ -431,7 +436,7 @@ async function main(): Promise<void> {
 
   if (result.changedFiles.length === 0) {
     console.log(
-      'All surface files byte-identical after merging every leg — nothing to publish (no provider had full-green coverage, or every merged value already matched what was on disk).',
+      'All surface files byte-identical after merging every leg — nothing to publish (no provider had full-green coverage of stock scenarios, or every merged value already matched what was on disk).',
     );
     return;
   }

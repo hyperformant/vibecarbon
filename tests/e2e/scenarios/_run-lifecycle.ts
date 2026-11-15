@@ -12,7 +12,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
@@ -157,6 +157,7 @@ import {
   WARM_REDEPLOY_ROUTE_URL_PATH,
   warmRedeployMarker,
 } from '../utils/warm-redeploy-mutations.js';
+import { runAddFeaturesStep } from './add-features-step.js';
 import {
   OBSERVABILITY_CHECK_NAMES,
   observabilityPlanForStep,
@@ -2751,38 +2752,19 @@ EOF`;
     {
       name: 'add-features',
       run: () =>
-        executeStep(
-          'add-features',
-          `vibecarbon add ${[...config.features].join(' ')}`,
-          async () => {
-            if (config.features.length === 0) {
-              console.log(`${tag} No features to add, skipping`);
-              return;
-            }
-            const result = await runAddFeatures([...config.features], {
-              cwd: config.projectDir,
-              timeout: TIMEOUTS['add-features'],
-            });
-            if (result.exitCode !== 0) {
-              throw new Error(
-                `Add features exited with code ${result.exitCode}.\n` +
-                  `STDERR: ${(result.stderr || '').slice(-1000) || '(empty)'}\n` +
-                  `STDOUT tail: ${(result.stdout || '').slice(-2000) || '(empty)'}`,
-              );
-            }
-
-            // The CA the run chose (E2E_ACME_CA, default staging: much higher
-            // rate limits than production). One helper, no URL here.
-            if (config.mode.startsWith('compose')) {
-              const acme = resolveE2EAcmeCa();
-              const envPath = join(config.projectDir, '.env');
-              appendFileSync(
-                envPath,
-                `\n# ACME CA for e2e tests (E2E_ACME_CA=${acme.ca})\nACME_CA_SERVER=${acme.directory}\n`,
-              );
-              console.log(`${tag} Configured ACME ${acme.ca} CA in .env`);
-            }
-          },
+        executeStep('add-features', `vibecarbon add ${[...config.features].join(' ')}`, () =>
+          runAddFeaturesStep({
+            features: config.features,
+            mode: config.mode,
+            projectDir: config.projectDir,
+            acme: resolveE2EAcmeCa(),
+            add: (features) =>
+              runAddFeatures(features, {
+                cwd: config.projectDir,
+                timeout: TIMEOUTS['add-features'],
+              }),
+            log: (msg) => console.log(`${tag} ${msg}`),
+          }),
         ),
     },
 
@@ -2929,13 +2911,16 @@ EOF`;
                 config.provider,
                 config.mode.startsWith('k8s') ? env.masterServerType : env.serverType,
               );
+              // Budgets are for stock deploys: with add-ons the check is a
+              // skip, recorded and never a miss.
               const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode, {
                 provider: config.provider,
                 cpuClass,
+                features: config.features,
               });
               console.log(`${tag} [deploy] deploy_budget: ${budget.status} (${budget.message})`);
               collector.recordVerifications(stepId, [budget]);
-              if (budget.status !== 'pass') {
+              if (budget.status === 'fail') {
                 deployBudgetMiss = budget;
               }
             } else {

@@ -162,11 +162,13 @@ export const testConfig = {
       // 2026-08-13.
       scaleway: 'threadtrace.app',
     },
-    // Baseline feature set for e2e runs. Kept minimal so timing numbers
-    // reflect a typical first deploy, not a stress test. Callers can opt into
-    // the optional services via runner `--features=redis` (or any subset of
-    // installable add-ons); see `runner.ts` CLI parsing.
-    features: ['observability'] as const,
+    // Baseline feature set for e2e runs: stock, the app and its database with
+    // no add-ons, not even observability (owner decision 2026-11-15). Every
+    // e2e run, local and GitHub, and every published perf number is a stock
+    // deploy. Runner `--features=observability,redis` deploys add-ons on top;
+    // such a scenario's numbers never reach docs/perf-data.json or the deploy
+    // budgets (tests/e2e/utils/feature-set.js).
+    features: [] as readonly string[],
     adminEmail: 'test@vibecarbon.dev',
     adminPassword: 'TestPassword123!',
     // The region is resolved at preflight from `capacityPreferences` (see

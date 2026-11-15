@@ -1,7 +1,8 @@
 /**
  * Primary-only add-on e2e checks: name-list parsing, the lists read from the
- * standby policy, and skip-when-nothing-is-enabled (HA scenarios turn the
- * add-ons on; no SSH is involved, the remote is injected).
+ * standby policy, and skip-when-nothing-is-enabled (the e2e matrix is stock,
+ * so there they all skip; a run given `--features` with the add-ons proves
+ * them; no SSH is involved, the remote is injected).
  */
 import { describe, expect, it } from 'vitest';
 import type { RemoteRun } from '../../e2e/checks/ha-integrity.js';
@@ -12,7 +13,6 @@ import {
   checkPromotedPrimaryOnlyRunning,
   checkStandbyPrimaryOnlyAbsent,
   enabledAddons,
-  haScenarioFeatures,
   parseContainerNames,
   parseContainerStates,
   parseN8nKeyFingerprint,
@@ -54,14 +54,8 @@ describe('feature selection', () => {
   it('enabledAddons keeps only declared add-ons', () => {
     expect(enabledAddons(['n8n', 'bogus'])).toEqual(['n8n']);
   });
-  it('HA modes add every declared add-on, non-HA and overrides do not', () => {
-    const ha = haScenarioFeatures('compose-ha', ['observability'], false);
-    expect(ha).toEqual(expect.arrayContaining(['observability', 'n8n', 'metabase', 'redis']));
-    expect(new Set(ha).size).toBe(ha.length);
-    expect(haScenarioFeatures('k8s-ha', ['observability'], false)).toEqual(ha);
-    expect(haScenarioFeatures('compose', ['observability'], false)).toEqual(['observability']);
-    expect(haScenarioFeatures('k8s', ['observability'], false)).toEqual(['observability']);
-    expect(haScenarioFeatures('compose-ha', [], true)).toEqual([]);
+  it('the stock set enables no add-on', () => {
+    expect(enabledAddons([])).toEqual([]);
   });
 });
 

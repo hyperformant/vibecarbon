@@ -13,8 +13,12 @@
  *   pnpm test:e2e -- --scenario hetzner/compose   # Run a single scenario
  *   pnpm test:e2e -- --provider digitalocean      # DO's default selection
  *   pnpm test:e2e -- --provider all               # every provider's defaults
- *   pnpm test:e2e -- --features=observability,redis    # Override feature set
- *   pnpm test:e2e -- --features=              # Run with zero features
+ *   pnpm test:e2e -- --features=observability,redis    # Add-ons on top of stock
+ *
+ *   Every run is a stock deploy by default: the app and its database, no
+ *   add-ons (tests/config.ts `e2e.features` is []). A scenario run with
+ *   --features is recorded, but its numbers never reach the perf table or
+ *   the deploy budgets (tests/e2e/utils/feature-set.js).
  *
  *   Selection grammar (tests/e2e/selection.ts) — scenario tokens are always
  *   `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an
@@ -67,7 +71,6 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { testConfig } from '../config.js';
-import { haScenarioFeatures } from './checks/standby-addons.js';
 import { MetricsCollector } from './metrics/collector.js';
 import { E2EDb } from './metrics/db.js';
 import {
@@ -102,6 +105,7 @@ import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { assertStorageDns } from './utils/dns-gate.js';
 import { resolveE2EAcmeCa, setupE2EEnv } from './utils/e2e-env.js';
+import { parseFeaturesArg, resolveRunFeatures } from './utils/feature-set.js';
 import { attemptTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
 import { reapStaleLocalArtifacts } from './utils/local-artifacts.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
@@ -239,30 +243,10 @@ const skipSteps = parseSkipStepsArg();
 // where the +25-min CA scale-up/down poll is acceptable.
 const expanded = args.includes('--expanded');
 
-/**
- * Parse `--features=a,b,c` (or `--features a,b,c`). Empty string → no features.
- * Returns `null` when the flag is absent, so we can fall back to the config
- * default without conflating "flag omitted" with "flag present but empty".
- */
-function parseFeaturesArg(): string[] | null {
-  const eqIdx = args.findIndex((a) => a.startsWith('--features='));
-  if (eqIdx !== -1) {
-    const raw = args[eqIdx].slice('--features='.length);
-    return raw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-  const spIdx = args.indexOf('--features');
-  if (spIdx !== -1 && spIdx + 1 < args.length) {
-    return args[spIdx + 1]
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-  return null;
-}
-const featuresOverride = parseFeaturesArg();
+// `--features=a,b` (or `--features a,b`): add-ons on top of the stock
+// deploy. Absent -> null, so the stock baseline in tests/config.ts applies;
+// given with no value -> [] (stock too). See tests/e2e/utils/feature-set.js.
+const featuresOverride = parseFeaturesArg(args);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -370,9 +354,9 @@ interface RunnerOptions {
    */
   providers?: string[];
   /**
-   * Feature set to use for each scenario. Overrides `config.e2e.features`
-   * when provided. Pass `[]` to run with no optional services. When omitted,
-   * falls back to the CLI `--features=` flag, then to the config default.
+   * Add-ons each scenario deploys on top of stock. Overrides
+   * `config.e2e.features` (stock, `[]`) when provided. When omitted, falls
+   * back to the CLI `--features=` flag, then to the stock baseline.
    */
   features?: readonly string[];
   /**
@@ -466,7 +450,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   const include: string[] = Array.isArray(rawInclude) ? rawInclude : rawInclude ? [rawInclude] : [];
   const exclude: string[] = overrides?.scenarioExclude ?? scenarioExclude;
   const providers: string[] = overrides?.providers ?? providerArg;
-  const featureOverride = overrides?.features ?? featuresOverride;
   const isExpanded = overrides?.expanded ?? expanded;
 
   // tests/.env.e2e (gitignored operator token file — see
@@ -713,10 +696,14 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   // reaches its own end-of-scenario reap). Never fatal by contract.
   await reapStaleLocalArtifacts('[runner]');
 
-  // The effective feature set for this run — CLI override wins over the
-  // baseline in tests/config.ts. An empty `--features=` is honored (no
-  // optional services); omitting the flag keeps the baseline.
-  const effectiveFeatures: readonly string[] = featureOverride ?? config.features;
+  // The effective feature set for this run: the caller's option, then the
+  // `--features` flag, then the stock baseline in tests/config.ts. Every
+  // scenario, HA included, deploys exactly this set.
+  const effectiveFeatures: readonly string[] = resolveRunFeatures(
+    overrides?.features,
+    featuresOverride,
+    config.features,
+  );
 
   // (The hand-rolled `needsCloudflare && !cloudflareToken` throw that used to
   // sit here is gone — the registry-driven DNS credential gate above covers
@@ -877,7 +864,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   console.log(`  Mode:       ${isBatch ? 'batch (unattended)' : 'interactive'}`);
   console.log(`  Scenarios:  ${scenarios.map((s) => s.mode).join(', ')}`);
   console.log(
-    `  Features:   ${effectiveFeatures.length === 0 ? '(none)' : effectiveFeatures.join(', ')}`,
+    `  Features:   ${effectiveFeatures.length === 0 ? 'stock (no add-ons)' : `${effectiveFeatures.join(', ')} (add-ons: not published, not calibrated)`}`,
   );
   if (isExpanded) {
     console.log('  Tier:       expanded (k8s/k8s-ha get verify-autoscale)');
@@ -961,14 +948,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       /* no resolvectl or no systemd-resolved — nothing to flush */
     }
 
-    // HA scenarios also run the add-ons so the primary-only standby policy is
-    // proved end to end; non-HA modes and an explicit --features keep their set.
-    const scenarioFeatures = haScenarioFeatures(
-      mode,
-      effectiveFeatures,
-      featureOverride !== undefined,
-    );
-
     const scenarioConfig: ScenarioConfig = {
       mode: mode as DeployMode,
       dnsProvider,
@@ -977,7 +956,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       region,
       ...(secondaryRegion && { secondaryRegion }),
       domain,
-      features: scenarioFeatures,
+      features: effectiveFeatures,
       adminEmail: config.adminEmail,
       adminPassword: config.adminPassword,
       scaleTo,
@@ -993,7 +972,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       mode,
       dnsProvider,
       domain,
-      features: [...scenarioFeatures],
+      features: [...effectiveFeatures],
       // (project_name, env_prefix) tuple drives the cold/warm classifier in
       // db.classifyColdWarm — without these the scenario's steps default to
       // 'cold' regardless of run history.

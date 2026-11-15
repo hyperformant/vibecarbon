@@ -19,7 +19,12 @@
  * Samples: a deploy step that PASSED and is `cold` in the db (the same
  * cold/warm classification the check applies when it judges), from a run that
  * started at or after --since (so a run recorded before the current code
- * shape never sets a budget). The class is what the check recorded in the
+ * shape never sets a budget), of a STOCK scenario: `scenarios.features`
+ * recorded as `[]`, the app and its database with no add-ons. Budgets are for
+ * stock deploys, the e2e baseline (tests/config.ts); a deploy with add-ons,
+ * or one whose feature set was never recorded, is counted as ignored and
+ * reported, never sampled (tests/e2e/utils/feature-set.js, the same rule the
+ * perf table applies). The class is what the check recorded in the
  * step's `deploy_budget` verification details; a provider that declares no CPU
  * classes is always `standard`. A sample of a classed provider with no
  * recorded class goes in the provider + mode row `any`, never a guessed class.
@@ -57,6 +62,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { getProviderClass, PROVIDERS } from '../src/lib/providers/index.js';
+import { isStockFeaturesRecord } from '../tests/e2e/utils/feature-set.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_OUT = path.join(here, '..', 'tests', 'e2e', 'checks', 'deploy-budgets.json');
@@ -163,6 +169,7 @@ export function declaredClasses(provider) {
 
 const SAMPLE_SQL = `
   SELECT st.id AS step_id, COALESCE(s.provider, 'hetzner') AS provider, s.mode AS mode,
+    s.features AS features,
     (SELECT MAX(duration_ms) FROM perf_substep WHERE step_id = st.id AND name = 'deploy.total') AS total_ms,
     (SELECT COALESCE(SUM(duration_ms), 0) FROM perf_substep
        WHERE step_id = st.id AND name IN ('deploy.tls.ready', 'deploy.tls.snapshot')) AS tls_ms,
@@ -186,18 +193,19 @@ function recordedClass(details) {
 /**
  * Read the samples from one or more dbs, each opened read-only. A step id seen
  * in an earlier db (a copy of the same run) is not counted again. Returns the
- * grouped samples.
+ * grouped samples, and how many otherwise-eligible deploys were not stock.
  * @param {string | string[]} dbPaths
  * @param {string} since
  */
 export function readSamples(dbPaths, since) {
   const groups = new Map();
   const seen = new Set();
-  for (const dbPath of [dbPaths].flat()) readOne(dbPath, since, groups, seen);
-  return { groups: [...groups.values()] };
+  const counts = { nonStock: 0 };
+  for (const dbPath of [dbPaths].flat()) readOne(dbPath, since, groups, seen, counts);
+  return { groups: [...groups.values()], nonStock: counts.nonStock };
 }
 
-function readOne(dbPath, since, groups, seen) {
+function readOne(dbPath, since, groups, seen, counts) {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
     for (const row of db.prepare(SAMPLE_SQL).all(since)) {
@@ -206,6 +214,12 @@ function readOne(dbPath, since, groups, seen) {
       if (!MODES.includes(row.mode) || !Object.hasOwn(PROVIDERS, row.provider)) continue;
       if (!supportedModes(row.provider).includes(row.mode)) continue;
       if (row.total_ms == null) continue;
+      // Budgets are for stock deploys: one with add-ons (or no recorded
+      // feature set) would size a budget the stock matrix never runs.
+      if (!isStockFeaturesRecord(row.features)) {
+        counts.nonStock++;
+        continue;
+      }
       // No recorded class goes in the provider + mode `any` row: a class is
       // never guessed (the default type moves with capacity).
       const cls =
@@ -226,7 +240,7 @@ function readOne(dbPath, since, groups, seen) {
 }
 
 /** The table and the report from the samples. */
-export function buildTable({ groups }, since) {
+export function buildTable({ groups, nonStock = 0 }, since) {
   const budgets = {};
   const rows = [];
   for (const g of groups.sort((a, b) =>
@@ -251,16 +265,17 @@ export function buildTable({ groups }, since) {
     since,
     budgets,
   };
-  return { table, rows, seeds, noData };
+  return { table, rows, seeds, noData, nonStock };
 }
 
 export const RULE =
-  'owned = ceil5(1.5 x median + 60) over local and GitHub cold deploys pooled; endToEnd = owned + ' +
+  'owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled; ' +
+  'endToEnd = owned + ' +
   'tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A provider + mode with no ' +
   "samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the " +
   'other providers. Regenerate with scripts/calibrate-deploy-budgets.js.';
 
-export function renderReport({ rows, seeds = [], noData }, since) {
+export function renderReport({ rows, seeds = [], noData, nonStock = 0 }, since) {
   const out = [
     `# Deploy budgets (runs since ${since})`,
     '',
@@ -283,6 +298,10 @@ export function renderReport({ rows, seeds = [], noData }, since) {
     '## No data (no number; the check fails with `no budget yet`)',
     '',
     ...noData.map((n) => `- ${n.provider}/${n.mode}`),
+    '',
+    '## Not stock (budgets are for stock deploys: the app and its database, no add-ons)',
+    '',
+    `Ignored ${nonStock} cold deploys that were not stock (add-ons, or no feature set recorded).`,
     '',
   ];
   return out.join('\n');
