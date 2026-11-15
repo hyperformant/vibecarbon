@@ -295,7 +295,13 @@ export function runCommandAsync(cmd, options = {}) {
       if (timer) clearTimeout(timer);
       if (options.onStdoutLine && pendingLine) options.onStdoutLine(pendingLine);
 
-      if (signal === 'SIGINT' || code === 130) {
+      // A SIGINT or exit 130 is the operator's Ctrl-C only when we did not
+      // stop the child ourselves: docker 29 exits 130 on the SIGTERM an abort
+      // or a timeout sends. Reading that as a Ctrl-C exited the CLI mid-deploy
+      // and killed a sibling `pulumi up` that was still creating servers (run
+      // 43689099038). tests/unit/lib/command-self-stopped-child.test.ts.
+      const stoppedByUs = timedOut || options.signal?.aborted;
+      if (!stoppedByUs && (signal === 'SIGINT' || code === 130)) {
         process.exit(130);
       }
 
