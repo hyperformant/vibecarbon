@@ -16,9 +16,9 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parseDotenv } from './dotenv.js';
+import { vibecarbonHome } from './vibecarbon-home.js';
 
 /**
  * The project config's file name. Only this module builds its path, and only
@@ -411,14 +411,12 @@ export function loadS3Config(envName, cwd = process.cwd()) {
 // GLOBAL PROJECT REGISTRY (~/.vibecarbon/projects.json)
 // ============================================================================
 
-const DEFAULT_CONFIG_DIR = join(homedir(), '.vibecarbon');
-
 /**
  * Ensure the global config directory exists with secure permissions
  *
  * @param {string} [configDir] - Config directory (default: ~/.vibecarbon/)
  */
-function ensureConfigDir(configDir = DEFAULT_CONFIG_DIR) {
+function ensureConfigDir(configDir = vibecarbonHome()) {
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true, mode: 0o700 });
   }
@@ -430,7 +428,7 @@ function ensureConfigDir(configDir = DEFAULT_CONFIG_DIR) {
  * @param {string} [configDir] - Config directory for testability
  * @returns {{ projects: Array<{ name: string, path: string, createdAt: string, updatedAt: string }> }}
  */
-export function loadGlobalRegistry(configDir = DEFAULT_CONFIG_DIR) {
+export function loadGlobalRegistry(configDir = vibecarbonHome()) {
   const registryPath = join(configDir, 'projects.json');
   if (!existsSync(registryPath)) {
     return { projects: [] };
@@ -456,7 +454,7 @@ export function loadGlobalRegistry(configDir = DEFAULT_CONFIG_DIR) {
  * @param {string} projectPath - Project directory path
  * @param {string} [configDir] - Config directory for testability
  */
-export function registerProject(name, projectPath, configDir = DEFAULT_CONFIG_DIR) {
+export function registerProject(name, projectPath, configDir = vibecarbonHome()) {
   ensureConfigDir(configDir);
   const absPath = resolve(projectPath);
   const registry = loadGlobalRegistry(configDir);
@@ -480,7 +478,7 @@ export function registerProject(name, projectPath, configDir = DEFAULT_CONFIG_DI
  *
  * @param {string} [configDir] - Config directory for testability
  */
-export function cleanStaleProjects(configDir = DEFAULT_CONFIG_DIR) {
+export function cleanStaleProjects(configDir = vibecarbonHome()) {
   const registry = loadGlobalRegistry(configDir);
   const before = registry.projects.length;
   registry.projects = registry.projects.filter((p) => existsSync(p.path));

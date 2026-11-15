@@ -41,6 +41,7 @@ import {
   K8S_PROFILES,
 } from './lib/server-types.js';
 import { VERSION } from './lib/version.js';
+import { vibecarbonHome } from './lib/vibecarbon-home.js';
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -441,7 +442,7 @@ export async function run(args) {
   } catch (err) {
     // The logger has already restored stdout/stderr by the time we reach
     // this catch. Print where the log lives so the operator can review.
-    const logDirHint = `${process.env.HOME || '~'}/.vibecarbon/logs/`;
+    const logDirHint = `${vibecarbonHome()}/logs/`;
     console.error(`\nDeploy log saved under ${logDirHint}`);
     throw err;
   }

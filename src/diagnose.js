@@ -36,7 +36,6 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
@@ -51,6 +50,7 @@ import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { sshKeyPathFor, sshRun } from './lib/ssh.js';
+import { vibecarbonHome } from './lib/vibecarbon-home.js';
 
 /**
  * One-line note printed (and saved to the report) when `hcloud` is
@@ -1054,7 +1054,7 @@ export async function run(args) {
   });
 
   // Persist
-  const diagDir = join(homedir(), '.vibecarbon');
+  const diagDir = vibecarbonHome();
   if (!existsSync(diagDir)) mkdirSync(diagDir, { recursive: true });
   const outFile = join(diagDir, `diag-${envName}-${ts.replace(/[:.]/g, '-')}.txt`);
   writeFileSync(outFile, report.toString());

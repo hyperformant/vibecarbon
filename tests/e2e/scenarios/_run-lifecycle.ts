@@ -522,10 +522,10 @@ async function captureFailureDiagnostics(
   tag: string,
 ): Promise<void> {
   const { existsSync, mkdirSync, appendFileSync } = await import('node:fs');
-  const { homedir } = await import('node:os');
+  const { vibecarbonHome } = await import('../../../src/lib/vibecarbon-home.js');
   const { execFileSync } = await import('node:child_process');
 
-  const logDir = join(homedir(), '.vibecarbon', 'logs');
+  const logDir = join(vibecarbonHome(), 'logs');
   if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const logPath = join(logDir, `${config.envPrefix}-failure-${stepName}-${ts}.log`);

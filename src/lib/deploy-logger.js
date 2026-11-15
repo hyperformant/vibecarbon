@@ -20,10 +20,10 @@
  */
 
 import { closeSync, existsSync, mkdirSync, openSync, writeSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { armDeadAirGuard, disarmDeadAirGuard } from './cli/progress.js';
 import { perfEnabled } from './perf.js';
+import { vibecarbonHome } from './vibecarbon-home.js';
 
 // Strip ANSI CSI sequences (ESC + `[` + params + final byte), OSC sequences
 // (ESC + `]` ... BEL or ESC + backslash, which is how link() prints a hyperlink;
@@ -77,7 +77,7 @@ export function writeLogDetail(text) {
  * @returns {Promise<{result: any, logPath: string}>}
  */
 export async function withDeployLog(envName, fn) {
-  const logDir = join(homedir(), '.vibecarbon', 'logs');
+  const logDir = join(vibecarbonHome(), 'logs');
   if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const safeEnv = (envName || 'deploy').replace(/[^a-zA-Z0-9_-]/g, '_');

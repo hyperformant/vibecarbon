@@ -37,11 +37,11 @@ describe('withDeployLog', () => {
       });
     `;
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: { ...process.env, VIBECARBON_HOME: home },
       encoding: 'utf8',
     });
     expect(r.status).toBe(1);
-    const logsDir = join(home, '.vibecarbon', 'logs');
+    const logsDir = join(home, 'logs');
     const [file] = readdirSync(logsDir);
     const text = readFileSync(join(logsDir, file), 'utf8');
     expect(text).toContain('frame 199');
