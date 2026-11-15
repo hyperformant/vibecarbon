@@ -148,7 +148,7 @@ describe('cleanupOrphanedVolumes on Linode with a squeezed project tag', () => {
     const deleteVolume = vi.spyOn(linode, 'deleteVolume').mockResolvedValue(true);
 
     // No cluster regions, so only the project label can claim a volume.
-    const { deleted } = await cleanupOrphanedVolumes(linode, LONG, 'prod', [], [], [], {
+    const { deleted } = await cleanupOrphanedVolumes(linode, LONG, 'prod', [], [], {
       report: () => {},
     });
 

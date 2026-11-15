@@ -27,7 +27,7 @@ function setup(volumes: Array<ReturnType<typeof volume>>) {
 }
 // A real destroy passes the cluster's regions, which arms the region heuristic.
 const run = (provider: LinodeProvider) =>
-  cleanupOrphanedVolumes(provider, 'proj', 'prod', [], [], ['us-iad'], { report: () => {} });
+  cleanupOrphanedVolumes(provider, 'proj', 'prod', [], ['us-iad'], { report: () => {} });
 
 describe('cleanupOrphanedVolumes on Linode', () => {
   it('deletes a detached pvc volume carrying the project tag', async () => {
@@ -78,7 +78,6 @@ describe('cleanupOrphanedVolumes on Linode, with the PersistentVolumes captured'
       provider,
       'proj',
       'prod',
-      [],
       pvs.map((v) => v.volumeId),
       ['us-iad'],
       { identityComplete: true, report: () => {} },
