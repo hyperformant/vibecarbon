@@ -26,6 +26,8 @@
 # Placeholders (rendered by renderRegistryRelayManifest, never at runtime):
 #   __RELAY_LISTEN__   socat listen spec (wg0 address, standby-only range)
 #   __RELAY_TARGET__   socat target (primary master private IP : registry port)
+#   __RELAY_HOST__     the wg0 address the listen spec binds (readiness probe)
+#   __RELAY_PORT__     the port the listen spec binds (readiness probe)
 # =============================================================================
 apiVersion: v1
 kind: Pod
@@ -61,6 +63,18 @@ spec:
       args:
         - "__RELAY_LISTEN__"
         - "__RELAY_TARGET__"
+      # Ready means socat accepts on the address the copy dials. Without a
+      # probe, Ready only meant the process had started, and a copy that
+      # connected in the next 100-300 ms found nothing listening (linode/k8s-ha
+      # warm deploy, 2026-11-15). The kubelet dials from the node itself, which
+      # `range=` refuses, so each probe logs one `refusing connection` warning;
+      # the TCP connect has already succeeded, which is all the probe needs.
+      readinessProbe:
+        tcpSocket:
+          host: "__RELAY_HOST__"
+          port: __RELAY_PORT__
+        periodSeconds: 1
+        failureThreshold: 1
       resources:
         requests:
           cpu: 10m

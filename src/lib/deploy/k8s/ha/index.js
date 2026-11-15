@@ -143,6 +143,8 @@ export const REGISTRY_RELAY_SOURCE_HOST = `${WG_PRIMARY_IP}:${REGISTRY_RELAY_POR
 /**
  * Render the registry-relay Pod: listen only on the primary's wg0 address,
  * admit only the standby's tunnel IP, forward to the primary master's registry.
+ * Its readiness probe dials that same listen address, so Ready means socat
+ * accepts there.
  *
  * @param {object} o
  * @param {string} o.template - the raw registry-relay.yaml
@@ -158,7 +160,9 @@ export function renderRegistryRelayManifest({ template, primaryMasterPrivateIp }
       '__RELAY_LISTEN__',
       `TCP-LISTEN:${REGISTRY_RELAY_PORT},bind=${WG_PRIMARY_IP},fork,reuseaddr,range=${WG_STANDBY_IP}/32`,
     )
-    .replaceAll('__RELAY_TARGET__', `TCP:${primaryMasterPrivateIp}:5000`);
+    .replaceAll('__RELAY_TARGET__', `TCP:${primaryMasterPrivateIp}:5000`)
+    .replaceAll('__RELAY_HOST__', WG_PRIMARY_IP)
+    .replaceAll('__RELAY_PORT__', String(REGISTRY_RELAY_PORT));
 }
 
 /** The first line of a failed command's stderr (or message): one-line causes only. */
@@ -197,7 +201,12 @@ const RELAY_DELETE = 'kubectl delete pod registry-relay -n vibecarbon --ignore-n
  * Run `fn` while a registry-relay Pod is up on the primary. wg0 must already
  * be up. The relay is owned by the copy: a leftover from a dead process (or a
  * role swap) is deleted first, the new one is applied and waited Ready, and it
- * is deleted when `fn` settles. A failed cleanup is logged, never masks `fn`:
+ * is deleted when `fn` settles.
+ *
+ * Ready comes from a tcpSocket probe on the listen address, not from the
+ * process starting. Without the probe, Ready came 100 ms or more before socat
+ * listened, and a copy that dialed in that gap failed "primary registry
+ * unreachable through the relay" (linode/k8s-ha warm deploy, 2026-11-15). A failed cleanup is logged, never masks `fn`:
  * the next copy deletes a stray relay in step 1/2 anyway.
  *
  * @param {object} o
