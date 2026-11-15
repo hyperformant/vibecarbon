@@ -280,7 +280,7 @@ DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` w
 
 ## Performance
 
-Real numbers, not estimates. Every cell is wall-clock time for the CLI command it names, from the latest fully-green CI run of that provider against real cloud infrastructure. Measured from GitHub-hosted runners; methodology in [docs/tests.md](./docs/tests.md).
+Real numbers, not estimates. Every row is a stock deploy: the app and its database, no add-ons. Every cell is wall-clock time for the CLI command it names, from the latest fully-green CI run of that provider against real cloud infrastructure. Measured from GitHub-hosted runners; methodology in [docs/tests.md](./docs/tests.md).
 
 The rows are every provider and deploy scenario the CLI supports. An absent row means that scenario is not offered on that provider yet; _pending_ means it ships but has no measured CI baseline yet. The numbers refresh automatically from each provider's next green CI run.
 
