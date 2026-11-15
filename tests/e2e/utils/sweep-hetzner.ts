@@ -4,6 +4,53 @@
  * (./sweep-provider.ts) can reach it without loading the whole lifecycle.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { classifyBucketDeleteError } from './bucket-already-gone.js';
+
+/** One Object Storage location's view (each endpoint lists only its own buckets). */
+interface HetznerSweepObjectStorage {
+  /** Bucket names this location lists; throws when the listing fails. */
+  listBuckets(): Promise<string[]>;
+  emptyAndDeleteBucket(name: string): Promise<{ objectsRemoved: number }>;
+  /**
+   * The region holding the bucket (a HeadBucket in every region the keys
+   * reach), or null when none does; throws when a region cannot tell.
+   */
+  locateBucket(name: string): Promise<string | null>;
+}
+
+export interface HetznerSweepDeps {
+  /** Cloud API fetch (tests); defaults to the global fetch. */
+  fetchImpl?: typeof fetch;
+  /** One injected store per Object Storage location (tests). */
+  objectStorageByRegion?: Record<string, HetznerSweepObjectStorage>;
+}
+
+/** A store per location, built on the product's HetznerS3Provider. */
+async function defaultObjectStorageByRegion(
+  key: string,
+  secret: string,
+): Promise<Record<string, HetznerSweepObjectStorage>> {
+  // biome-ignore lint/suspicious/noExplicitAny: JS module interop
+  const { HetznerS3Provider } = (await import('../../../src/lib/providers/hetzner-s3.js')) as any;
+  const stores: Record<string, HetznerSweepObjectStorage> = {};
+  for (const region of Object.keys(HetznerS3Provider.ENDPOINTS)) {
+    const provider = new HetznerS3Provider(key, secret, region);
+    stores[region] = {
+      async listBuckets() {
+        const buckets = (await provider.listBuckets()) as Array<{ name?: string }>;
+        return buckets.map((b) => b.name).filter((n): n is string => !!n);
+      },
+      async emptyAndDeleteBucket(name: string) {
+        return provider.emptyAndDeleteBucket(name);
+      },
+      async locateBucket(name: string) {
+        // Hetzner keys reach every location (keyRegions 'all'): nbg1, fsn1, hel1.
+        return provider.locateBucket(name);
+      },
+    };
+  }
+  return stores;
+}
 
 /**
  * Sweep for orphaned cloud resources that `vibecarbon destroy` may have missed.
@@ -28,7 +75,9 @@ export async function sweepOrphanedHetznerResources(
   tag: string,
   projectName: string,
   hetznerToken: string,
+  deps: HetznerSweepDeps = {},
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
   console.log(`${tag} Sweeping orphaned Hetzner resources for ${projectName}...`);
   const counts: SweepBreakdown = {
     servers: 0,
@@ -50,7 +99,7 @@ export async function sweepOrphanedHetznerResources(
     let last: unknown;
     for (let i = 0; i < 3; i++) {
       try {
-        return await fetch(url, init);
+        return await fetchImpl(url, init);
       } catch (err) {
         last = err;
         await new Promise((r) => setTimeout(r, 3000));
@@ -405,60 +454,80 @@ export async function sweepOrphanedHetznerResources(
   // BucketNotEmpty from versioning or a stuck multipart upload) doesn't
   // strand buckets in the remaining regions. Emptying is delegated to
   // HetznerS3Provider.emptyAndDeleteBucket so we get version + multipart
-  // handling for free instead of re-implementing it inline.
+  // handling for free instead of re-implementing it inline. A bucket it
+  // cannot delete fails the sweep (enumFailed), unless the delete said "no
+  // such bucket" and no location holds it: a stale listing, the goal state.
+  // A sweep that could not look fails it too: missing storage keys, or a
+  // location whose ListBuckets failed, leave its buckets unchecked.
   try {
-    // Env-only (the credentials.json profiles fallback this used to have was
-    // retired — A5). runner.ts's loadE2EEnvFile() pre-populates process.env
-    // from tests/.env.e2e before this runs (A6).
-    const s3Creds = {
-      accessKey: process.env.HETZNER_ACCESS_KEY,
-      secretKey: process.env.HETZNER_SECRET_KEY,
-    };
-    if (!s3Creds?.accessKey || !s3Creds?.secretKey) throw new Error('No S3 credentials');
-
-    const { S3Client, ListBucketsCommand } = await import('@aws-sdk/client-s3');
-    // biome-ignore lint/suspicious/noExplicitAny: JS module interop
-    const { HetznerS3Provider } = (await import('../../../src/lib/providers/hetzner-s3.js')) as any;
+    let storesByRegion = deps.objectStorageByRegion;
+    if (!storesByRegion) {
+      // Env-only (the credentials.json profiles fallback this used to have was
+      // retired — A5). runner.ts's loadE2EEnvFile() pre-populates process.env
+      // from tests/.env.e2e before this runs (A6).
+      const accessKey = process.env.HETZNER_ACCESS_KEY;
+      const secretKey = process.env.HETZNER_SECRET_KEY;
+      if (accessKey && secretKey) {
+        storesByRegion = await defaultObjectStorageByRegion(accessKey, secretKey);
+      } else {
+        // Names only, never a value.
+        const missing = [
+          accessKey ? '' : 'HETZNER_ACCESS_KEY',
+          secretKey ? '' : 'HETZNER_SECRET_KEY',
+        ].filter(Boolean);
+        enumFailed = true;
+        console.warn(
+          `${tag} [sweep] S3 buckets not checked: ${missing.join(' and ')} not set, so leftover buckets cannot be ruled out`,
+        );
+      }
+    }
 
     // Hetzner Object Storage has three regions. A deploy's buckets live in
     // the storage region resolved from its primary region (whichever EU
     // location the resolver picked); an HA standby goes wherever
     // getDefaultStandbyRegion puts it. Scan all three so no bucket is
-    // stranded whichever location a scenario landed in.
-    for (const region of ['nbg1', 'fsn1', 'hel1']) {
+    // stranded whichever location a scenario landed in. Each endpoint lists
+    // only its own location's buckets (probed 2026-11-15), so a bucket is
+    // deleted through the location that listed it.
+    for (const [region, store] of Object.entries(storesByRegion ?? {})) {
+      let listed: string[];
       try {
-        const s3 = new S3Client({
-          endpoint: `https://${region}.your-objectstorage.com`,
-          region,
-          credentials: { accessKeyId: s3Creds.accessKey, secretAccessKey: s3Creds.secretKey },
-          forcePathStyle: true,
-        });
-
-        const resp = await s3.send(new ListBucketsCommand({}));
-        const matching = (resp.Buckets ?? []).filter(
-          (b): b is typeof b & { Name: string } => !!b.Name?.startsWith(projectName),
+        listed = await store.listBuckets();
+      } catch (listErr) {
+        enumFailed = true;
+        console.warn(
+          `${tag} [sweep] S3 bucket list failed in ${region}: ${listErr instanceof Error ? listErr.message : String(listErr)}; its leftover buckets cannot be ruled out`,
         );
-        for (const bucket of matching) {
-          const name = bucket.Name;
-          console.log(`${tag} [sweep] Deleting S3 bucket ${name} (${region})`);
-          try {
-            const provider = new HetznerS3Provider(s3Creds.accessKey, s3Creds.secretKey, region);
-            const { objectsRemoved } = await provider.emptyAndDeleteBucket(name);
-            console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-            counts.s3Buckets++;
-          } catch (bucketErr) {
-            console.warn(
-              `${tag} [sweep]   FAILED ${name}: ${bucketErr instanceof Error ? bucketErr.message : String(bucketErr)}`,
-            );
+        continue;
+      }
+      for (const name of listed.filter((n) => n.startsWith(projectName))) {
+        console.log(`${tag} [sweep] Deleting S3 bucket ${name} (${region})`);
+        try {
+          const { objectsRemoved } = await store.emptyAndDeleteBucket(name);
+          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
+          counts.s3Buckets++;
+        } catch (bucketErr) {
+          const verdict = await classifyBucketDeleteError(bucketErr, () =>
+            store.locateBucket(name),
+          );
+          if (verdict.gone) {
+            // Stale listing: destroy already removed it. Goal state, not an
+            // enumeration failure — see bucket-already-gone.ts. Caveat: a
+            // HEAD or LIST in a new bucket's first second can leave it
+            // answering NoSuchBucket for up to 15 minutes (bucketQuietMs in
+            // hetzner-s3.js), so such a live bucket could read as gone here.
+            // No worse than before this verdict, when every error read clean.
+            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
+          } else {
+            enumFailed = true;
+            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
           }
         }
-      } catch (regionErr) {
-        console.warn(
-          `${tag} [sweep] S3 region ${region} failed: ${regionErr instanceof Error ? regionErr.message : String(regionErr)}`,
-        );
       }
     }
   } catch (e) {
+    // The stores could not be built (module load), so no bucket was checked.
+    enumFailed = true;
     console.warn(`${tag} [sweep] S3 cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
