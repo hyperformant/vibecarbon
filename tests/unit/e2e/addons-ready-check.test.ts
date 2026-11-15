@@ -98,6 +98,55 @@ describe('addons_ready', () => {
     expect(r.errorMessage).toMatch(/observability: stopped \(no prometheus container\)/);
   });
 
+  // DigitalOcean compose-ha, GitHub run 43680508383: the file did not name the
+  // deploy's attempt, the job was still pulling, and the first read failed the
+  // check as "stopped (no prometheus container)".
+  it('waits while the job is alive and its containers do not exist yet', async () => {
+    const all =
+      'demo-grafana\trunning\tUp 1m (healthy)\ndemo-loki\trunning\tUp 1m\n' +
+      'demo-prometheus\trunning\tUp 1m\ndemo-alloy\trunning\tUp 1m\n' +
+      'demo-postgres-exporter\trunning\tUp 1m\ndemo-n8n\trunning\tUp 1m (healthy)\n';
+    let polls = 0;
+    const run = vi.fn(async (_ip: string, cmd: string) => {
+      if (cmd.startsWith('docker ps')) return { ok: true, output: polls >= 2 ? all : '' };
+      polls++;
+      return { ok: true, output: '#attempt 0ldattempt000\n#live\n' };
+    });
+    const r = await checkAddonsReady({ ...base, run });
+    expect(r.status).toBe('pass');
+    expect(polls).toBe(2);
+  });
+
+  it('an unread status file is not a verdict: it keeps waiting', async () => {
+    let polls = 0;
+    const run = vi.fn(async (_ip: string, cmd: string) => {
+      if (cmd.startsWith('docker ps')) return { ok: true, output: '' };
+      if (cmd.startsWith('tail')) return { ok: true, output: '' };
+      polls++;
+      return polls < 3
+        ? { ok: false, output: 'ssh: connect to host 1.1.1.1 port 22: Connection timed out' }
+        : { ok: true, output: `#attempt ${ATTEMPT}\nobservability\trunning\t\nn8n\trunning\t\n` };
+    });
+    const r = await checkAddonsReady({ ...base, run });
+    expect(r.status).toBe('pass');
+    expect(polls).toBe(3);
+  });
+
+  it('a failure records what the status file said', async () => {
+    const run = remote(['observability\trunning\t\nn8n\trunning\t\n'], '', {
+      attempt: 'f00f00f00f00',
+      live: false,
+    });
+    const r = await checkAddonsReady({ ...base, run });
+    expect(r.status).toBe('fail');
+    expect(r.details?.statusFile).toEqual({
+      read: true,
+      attempt: 'f00f00f00f00',
+      expectedAttempt: ATTEMPT,
+      live: false,
+    });
+  });
+
   it('M-A5: starting with no live job fails at once as stopped', async () => {
     const run = remote(['observability\trunning\t\nn8n\tstarting\t\n'], 'log', { live: false });
     const r = await checkAddonsReady({ ...base, run });
