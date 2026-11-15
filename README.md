@@ -222,7 +222,7 @@ Same family, different starting point. If your app already exists, those tools a
 </details>
 
 ### Infrastructure
-- New environments in minutes, and warm redeploys in seconds (<!-- perf:warm-deploy:hetzner/k8s -->13.5s<!-- /perf --> k8s / <!-- perf:warm-deploy:hetzner/compose -->31.7s<!-- /perf --> compose, [measured](#performance))
+- New environments in minutes, and warm redeploys in seconds (<!-- perf:warm-deploy:hetzner/k8s -->12.0s<!-- /perf --> k8s / <!-- perf:warm-deploy:hetzner/compose -->13.6s<!-- /perf --> compose, [measured](#performance))
 - Security hardened from day one, with automatic operator CIDR firewalling
 - Automated deployments via CI/CD
 - Auto-scaling (2-10+ replicas)
@@ -287,10 +287,10 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 <!-- BEGIN:perf-table -->
 | Provider | Scenario | Cold `deploy` | Warm `deploy` | `backup` | `restore` | `scale` | `destroy` | `failover` |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Hetzner Cloud | `compose` | 1m 49s | 31.7s | 4.2s | 3m 15s | 2m 12s | 25.5s | — |
-| | `compose-ha` | 2m 31s | 48.4s | 4.8s | 3m 3s | 2m 33s | 21.1s | 56.1s |
-| | `k8s` | 3m 38s | 13.5s | 31.3s | 1m 35s | 2m 35s | 1m 56s | — |
-| | `k8s-ha` | 3m 57s | 29.0s | 24.7s | 2m 33s | 3m 41s | 2m 0s | 3m 6s |
+| Hetzner Cloud | `compose` | 1m 52s | 13.6s | 5.0s | 2m 23s | 2m 36s | 20.3s | — |
+| | `compose-ha` | 2m 26s | 30.1s | 4.2s | 3m 25s | 2m 39s | 21.6s | 1m 7s |
+| | `k8s` | 2m 54s | 12.0s | 30.5s | 1m 29s | 2m 40s | 1m 57s | — |
+| | `k8s-ha` | 3m 33s | 27.2s | 24.1s | 2m 10s | 4m 46s | 2m 5s | 3m 39s |
 | DigitalOcean | `compose` | 2m 19s | 44.7s | 5.1s | 2m 48s | 2m 49s | 31.0s | — |
 | | `compose-ha` | 2m 58s | 54.6s | 3.9s | 3m 24s | 2m 31s | 33.3s | 37.9s |
 | | `k8s` | 3m 45s | 9.6s | 28.3s | 1m 19s | 3m 2s | 2m 9s | — |
@@ -299,12 +299,12 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | | `compose-ha` | 3m 52s | 20.0s | 4.6s | 4m 27s | 3m 41s | 12.2s | 1m 27s |
 | | `k8s` | 4m 47s | 5.1s | 37.4s | 1m 25s | 9m 58s | 1m 47s | — |
 | | `k8s-ha` | 5m 13s | 12.8s | 21.5s | 1m 36s | 15m 41s | 1m 53s | 4m 11s |
-| Vultr | `compose` | 2m 32s | 49.0s | 4.6s | 3m 3s | 2m 5s | 17.9s | — |
-| | `compose-ha` | 3m 54s | 1m 17s | 3.6s | 4m 7s | 2m 23s | 12.8s | 29.7s |
-| Scaleway | `compose` | 2m 23s | 16.7s | 5.0s | 2m 46s | 2m 28s | 29.0s | — |
-| | `compose-ha` | 3m 37s | 28.4s | 37.9s | 4m 27s | 4m 35s | 1m 22s | 55.6s |
+| Vultr | `compose` | 2m 31s | 13.6s | 6.4s | 2m 33s | 3m 24s | 15.6s | — |
+| | `compose-ha` | 3m 22s | 31.9s | 5.6s | 3m 23s | 3m 19s | 18.2s | 33.2s |
+| Scaleway | `compose` | 2m 28s | 14.9s | 5.5s | 2m 20s | 2m 32s | 34.0s | — |
+| | `compose-ha` | 3m 34s | 37.9s | 5.4s | 4m 16s | 3m 13s | 35.3s | 54.4s |
 
-_Latest green CI runs: Hetzner Cloud `0fc23e9` (2026-11-15) · DigitalOcean `d80e0b4` (2026-11-15) · Linode `c8c7f88` (2026-11-15) · Vultr `a68f139` (2026-11-15) · Scaleway `8ec8337` (2026-11-15) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `21409dc` (2026-11-15) · DigitalOcean `d80e0b4` (2026-11-15) · Linode `c8c7f88` (2026-11-15) · Vultr `b934fe8` (2026-11-15) · Scaleway `6eda650` (2026-11-15) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
