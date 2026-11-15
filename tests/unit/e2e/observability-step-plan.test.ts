@@ -197,7 +197,8 @@ describe('lifecycle wiring', () => {
     expect(proveAt).toBeGreaterThan(deployAt);
     expect(runAt).toBeGreaterThan(proveAt);
     const tail = step.slice(runAt, runAt + 2500);
-    expect(tail).toContain('signIn: adminSignIn, runChecks: runObservabilityChecks');
+    expect(tail).toContain('signIn: adminSignIn,');
+    expect(tail).toContain('runChecks: runObservabilityChecks,');
     expect(tail).toContain("filter((r) => r.status === 'fail')");
     expect(tail).toContain('throw new Error(');
   });

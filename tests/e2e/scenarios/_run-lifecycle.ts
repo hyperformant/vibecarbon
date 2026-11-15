@@ -47,6 +47,7 @@ import { resolveAuthoritativeA, runDnsFailoverFlipCheck } from '../checks/dns-fl
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
+import { waitForGrafanaReady } from '../checks/grafana-ready.js';
 import {
   type AttachStateRead,
   checkAppEndpointsReady,
@@ -4405,11 +4406,18 @@ EOF`;
                   domain: config.domain,
                   adminEmail: adminCreds?.adminEmail,
                   adminPassword: adminCreds?.adminPassword,
-                  // Grafana's pod may still be starting right after the apply:
-                  // 12 x 5s instead of the verify steps' 4.
+                  // Grafana is Ready by now (waitReady); this covers Traefik
+                  // picking up its endpoints: 12 x 5s instead of the verify
+                  // steps' 4.
                   attempts: 12,
                 },
-                { signIn: adminSignIn, runChecks: runObservabilityChecks },
+                {
+                  // The promoted cluster's first observability apply: Grafana
+                  // boots from an empty volume, up to its manifest's allowance.
+                  waitReady: () => waitForGrafanaReady(newPrimaryIp, sshKeyPath),
+                  signIn: adminSignIn,
+                  runChecks: runObservabilityChecks,
+                },
               );
               collector.recordVerifications(stepId, obsResults);
               const obsFailures = obsResults.filter((r) => r.status === 'fail');

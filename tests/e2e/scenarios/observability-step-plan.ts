@@ -81,6 +81,13 @@ interface AdminSession {
 }
 
 export interface PostReconvergeObservabilityDeps<Jar> {
+  /**
+   * waitForGrafanaReady from checks/grafana-ready.ts, run before anything is
+   * probed from outside: the reconverge is the promoted cluster's first
+   * observability apply, so Grafana boots from an empty volume and its route
+   * falls through to the app until the pod is Ready.
+   */
+  waitReady?: () => Promise<VerificationResult>;
   /** adminSignIn from checks/app-functional.ts. */
   signIn: (
     domain: string,
@@ -100,8 +107,8 @@ export interface PostReconvergeObservabilityDeps<Jar> {
 /**
  * Sign in as the super admin afresh (the verify-failover session belongs to a
  * step that may be long gone) and run the observability checks against the
- * reconverged primary. Returns auth_admin_login followed by the observability
- * results. Missing credentials are a FAIL here, not a skip: this is the only
+ * reconverged primary, once Grafana is Ready (waitReady). Returns grafana_ready,
+ * auth_admin_login, then the observability results. Missing credentials are a FAIL here, not a skip: this is the only
  * place k8s-ha proves Grafana after a failover, and a skip would let the run
  * go green without that proof.
  */
@@ -125,6 +132,11 @@ export async function runPostReconvergeObservability<Jar>(
       },
     ];
   }
+  // A Grafana that never became Ready within its own startup allowance is
+  // the finding; probing a route it cannot serve would only report the app's
+  // page instead.
+  const ready = deps.waitReady ? await deps.waitReady() : null;
+  if (ready && ready.status !== 'pass') return [ready];
   const session = await deps.signIn(opts.domain, opts.adminEmail, opts.adminPassword);
   const obs = await deps.runChecks({
     appDomain: opts.domain,
@@ -135,5 +147,5 @@ export async function runPostReconvergeObservability<Jar>(
       : 'auth_admin_login failed after reconverge-deploy',
     attempts: opts.attempts,
   });
-  return [session.result, ...obs];
+  return [...(ready ? [ready] : []), session.result, ...obs];
 }
