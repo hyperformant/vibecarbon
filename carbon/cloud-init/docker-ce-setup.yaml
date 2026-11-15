@@ -19,7 +19,23 @@
 # boot image pull has started, so Docker (and the pull) start as early as the
 # boot allows instead of waiting for these packages.
 
+# Stable IPv6 flow label, set before anything downloads: bootcmd runs before
+# runcmd, where the Docker install sits. Linux gives a TCP socket a new flow
+# label when duplicate data arrives with a new one; something on the path to
+# GitHub's package CDN (where ghcr.io serves every layer) picks the server by
+# flow label, so our ACKs then reach a server without the connection and the
+# pull is reset (`failed to copy: ... connection reset by peer`). Same setting
+# and reason as carbon/cloud-init/k3s/_stable-flowlabel.sh; the sysctl.d file
+# in write_files keeps it across reboots.
+bootcmd:
+  - [sh, -c, 'if [ -e /proc/sys/net/core/txrehash ]; then sysctl -q -w net.core.txrehash=0; fi']
+
 write_files:
+  - path: /etc/sysctl.d/99-vibecarbon-stable-flowlabel.conf
+    permissions: '0644'
+    content: |
+      net.core.txrehash = 0
+
   # The boot image pull: the pinned core images (the db image, the traefik and
   # docker-socket-proxy mirrors; the CLI fills the list from src/lib/images.js,
   # the same refs the compose files use) pulled in the background while the
@@ -73,8 +89,10 @@ write_files:
   # retries a failed layer download (max-download-attempts, default 5); the
   # containerd store's pull makes one attempt. Seven times from 2026-11-06 a
   # fresh server's first pull failed with `connection reset by peer` (six on
-  # Linode, from ghcr.io over IPv6) and a rerun always worked. The cause is
-  # still unknown, so Docker's own per-layer retry was chosen (2026-11-09).
+  # Linode, from ghcr.io over IPv6) and a rerun always worked, so Docker's own
+  # per-layer retry was chosen (2026-11-09). The resets' cause, found
+  # 2026-11-15, is the flow-label change bootcmd above turns off; the retry
+  # stays for any other drop.
   # write_files runs before runcmd, where each provider splices the Docker
   # install, so dockerd starts on the classic store and no image ever lands in
   # the other one. A server made before this change keeps the store it has: a

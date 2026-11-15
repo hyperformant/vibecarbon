@@ -57,6 +57,11 @@
  * kernel.apparmor_restrict_unprivileged_unconfined before the k3s install
  * (tests/unit/deploy/container-signals-census.test.ts). The diff is the
  * snippet's lines and the blank line after it.
+ * RE-CAPTURED 2026-11-15 (stable IPv6 flow label): every role gained the
+ * `_stable-flowlabel.sh` snippet right after it, which sets
+ * net.core.txrehash=0 before the k3s install
+ * (tests/unit/deploy/stable-flowlabel-census.test.ts). The diff is the
+ * snippet's lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

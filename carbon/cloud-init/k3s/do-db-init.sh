@@ -65,6 +65,7 @@ fi
 echo "Droplet ID: $DROPLET_ID"
 
 # @include _container-signals.sh
+# @include _stable-flowlabel.sh
 
 # Configure containerd to mirror pulls for the local registry running on
 # the master, to the master's private IP. The master's private IP IS
