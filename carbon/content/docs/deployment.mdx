@@ -93,7 +93,7 @@ vibecarbon deploy prod -mode k8s
 
 This command:
 1. Builds the app and sideloads images to every k3s node via SSH (no registry round-trip)
-2. Applies Kubernetes manifests with Kustomize overlays
+2. Applies the Kubernetes manifests in `k8s/base`, with their deploy-time values filled in
 3. Configures Traefik ingress with automatic SSL
 4. Sets up monitoring (Grafana, Prometheus, Loki) if observability is enabled
 
@@ -108,7 +108,7 @@ k8s/
 │   ├── traefik/         # Ingress routes and middlewares
 │   └── kustomization.yaml
 └── overlays/
-    └── production/      # Production-specific config
+    └── production/      # Example overlay on top of base (no deploy applies it)
 ```
 
 ### Node Scaling

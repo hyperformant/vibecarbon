@@ -1,16 +1,18 @@
 ---
-# Flux GitRepository + Kustomizations for the primary cluster.
+# Flux GitRepository + Kustomization for the primary cluster.
 #
 # URL is templated at project-create time via substitution of
 # {{GITHUB_OWNER}}/{{PROJECT_NAME}} (see src/create.js PLACEHOLDERS).
-# Applied once by the GitHub Actions deploy workflow at
-# .github/workflows/deploy.yml — after that, Flux reconciles the repo's
-# k8s/ directory every minute (GitRepository interval) and the
-# Kustomizations every 10 min.
+# Applied by the GitHub Actions deploy workflow (.github/workflows/deploy.yml)
+# on every run, on each cluster it deploys, a k8s-ha standby's too. From then
+# on Flux fetches the repo every minute (GitRepository interval) and
+# reconciles the Kustomization every 10 min.
 #
-# Layout in the customer's repo:
-#   k8s/base/                                # db + app + traefik + backup + etc.
-#   k8s/overlays/production-<region>/        # per-env overlay on top of base
+# One Kustomization, vibecarbon-base, builds ./k8s/base, the tree the CLI's
+# deploy applies. k8s/overlays/production is built on that same base, so a
+# second Kustomization pointed at it would apply the same objects again,
+# without the strips below. Every path here is a directory a new project has
+# (tests/unit/create/flux-kustomization-paths.test.ts).
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -154,25 +156,3 @@ spec:
       kind: Deployment
       name: cluster-autoscaler
       namespace: kube-system
----
-# Production overlay (region-specific patches on top of ./k8s/base).
-# Applied only when the region matches; the deploy workflow renders the
-# correct overlay name (production-nbg1, production-hel1, etc.) into a
-# Kustomization name specific to the cluster at apply time.
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: vibecarbon-production-nbg1
-  namespace: flux-system
-spec:
-  interval: 10m
-  targetNamespace: vibecarbon
-  sourceRef:
-    kind: GitRepository
-    name: vibecarbon
-  path: ./k8s/overlays/production-nbg1
-  prune: true
-  wait: true
-  timeout: 10m
-  dependsOn:
-    - name: vibecarbon-base

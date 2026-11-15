@@ -407,6 +407,19 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
 }
 
 /**
+ * Lay down the project's k8s/ tree. Optional add-ons like n8n are left out:
+ * `vibecarbon add` installs them. The one copy rule for k8s/, so a test can
+ * resolve what the Flux cluster files point at in the tree a new project
+ * really gets (tests/unit/create/flux-kustomization-paths.test.ts).
+ *
+ * @param {string} projectDir
+ * @param {Record<string, string>} variables
+ */
+export function copyK8sTemplate(projectDir, variables) {
+  copyTemplateDir('k8s', join(projectDir, 'k8s'), variables, ['n8n']);
+}
+
+/**
  * Validate that no unreplaced {{PLACEHOLDER}} patterns remain in generated files.
  * Only checks for placeholders that should have been replaced during creation
  * (those in PLACEHOLDERS minus SECRET_PLACEHOLDERS — the latter are intentionally
@@ -924,8 +937,7 @@ async function bootstrap(cliArgs) {
   // history: the app applies it at startup, and upgrade never writes to it.
   copyTemplateDir('db', join(projectDir, 'db'), variables);
 
-  // Kubernetes manifests (exclude optional features like n8n - they're added via `vibecarbon add`)
-  copyTemplateDir('k8s', join(projectDir, 'k8s'), variables, ['n8n']);
+  copyK8sTemplate(projectDir, variables);
 
   // Scripts (manifest-based docker/k8s commands)
   // generate-dev-configs.sh contains {{PLACEHOLDER}} tokens as its own substitution keys,
