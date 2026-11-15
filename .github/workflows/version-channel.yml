@@ -18,8 +18,11 @@ name: Version channel
 #   k3s-smoke      one k3s node with the flags in master-init.sh, its system
 #                  images coming only from our mirror
 #
-# What moves is decided in scripts/version-channel.mjs. A new major never moves
-# on its own: it stays out of the list, and escalate opens one issue for it.
+# What moves is decided in scripts/version-channel.mjs: patches only. An
+# installed CLI takes a channel version only on the major and minor it bundles,
+# so a new minor or major never moves on its own: it stays out of the list,
+# escalate opens one issue for it, and it reaches people with the CLI release
+# that bundles it.
 #
 # Every write here is scoped to the one job that needs it. This is the only
 # thing that writes the `channel` branch.
@@ -52,7 +55,7 @@ jobs:
       k3s: ${{ steps.plan.outputs.k3s }}
       traefik_image: ${{ steps.plan.outputs.traefik_image }}
       docker_socket_proxy_image: ${{ steps.plan.outputs.docker_socket_proxy_image }}
-      majors: ${{ steps.plan.outputs.majors }}
+      waiting: ${{ steps.plan.outputs.waiting }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -182,12 +185,12 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: One issue for a new major, one for a failed run
+      - name: One issue for a new minor or major, one for a failed run
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          MAJORS: ${{ needs.plan.outputs.majors }}
+          WAITING: ${{ needs.plan.outputs.waiting }}
           FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
           set -euo pipefail
@@ -200,9 +203,9 @@ jobs:
               gh issue create --title "$1" --body "$2"
             fi
           }
-          if [ -n "$MAJORS" ]; then
-            open_or_update 'A new major version is waiting for a decision' \
-              "The version channel leaves a new major where it is. Waiting: $MAJORS. Moving one is a change to src/lib/images.js and a CLI release, because the templates may need to change with it."
+          if [ -n "$WAITING" ]; then
+            open_or_update 'A new minor or major is waiting for a CLI release' \
+              "The version channel moves patches only: an installed CLI takes a channel version only on the major and minor it bundles. Waiting: $WAITING. Moving one is a change to src/lib/images.js and a CLI release, because the templates may need to change with it. Once main bundles it, the channel follows that minor's patches, and older CLIs keep their bundled copy of that image."
           fi
           if [ "$FAILED" = 'true' ]; then
             open_or_update 'The version channel did not publish' \

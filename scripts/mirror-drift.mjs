@@ -8,7 +8,8 @@
  * summary and to one GitHub issue. It REPORTS ONLY, never re-pins: a bundled
  * mirror bump is a reviewed edit of {tag, digest, index} in images.js, because
  * Dependabot cannot see refs that point at our mirror. The images the version
- * channel covers move on their own (scripts/version-channel.mjs).
+ * channel covers take their patches on their own (scripts/version-channel.mjs);
+ * a new minor or major of one is a bump here and a CLI release.
  *
  * CEILINGS (`holdFor`): some newer tags must not be taken, and listing them
  * would keep the issue open forever. alpine/k8s stays within one minor of

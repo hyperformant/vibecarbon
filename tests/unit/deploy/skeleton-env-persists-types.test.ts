@@ -344,7 +344,7 @@ describe('a deploy resolves one version set at its start and records it', () => 
     const set = bundledImageSet();
     return {
       schema: CHANNEL_SCHEMA,
-      images: { ...set.images, traefik: ref('traefik', 'v3.99.0') },
+      images: { ...set.images, traefik: ref('traefik', 'v3.7.99') },
       kubernetes: { ...set.kubernetes, k3s: 'v1.37.99+k3s1' },
     };
   }
@@ -370,8 +370,8 @@ describe('a deploy resolves one version set at its start and records it', () => 
     const read = stubChannel(channelFile());
     const env = await deployUntilFailure(gathered('compose', false, sizes));
     expect(read).toHaveBeenCalledTimes(1);
-    expect(env.imageSet.images.traefik).toBe(ref('traefik', 'v3.99.0'));
-    expect(traefikImageRef()).toBe(ref('traefik', 'v3.99.0'));
+    expect(env.imageSet.images.traefik).toBe(ref('traefik', 'v3.7.99'));
+    expect(traefikImageRef()).toBe(ref('traefik', 'v3.7.99'));
   });
 
   it('a bad channel falls back to the bundled copy with one quiet note, and the deploy goes on', async () => {
@@ -384,6 +384,22 @@ describe('a deploy resolves one version set at its start and records it', () => 
     const notes = clackMock.log.info.mock.calls.map(([line]) => String(line));
     expect(notes.filter((line) => line.includes('version channel not used'))).toHaveLength(1);
     expect(notes.join('\n')).not.toContain('evil');
+  });
+
+  it("a list a newer release moved to Traefik's next minor: bundled Traefik, the k3s patch, one line", async () => {
+    const file = channelFile();
+    file.images.traefik = ref('traefik', 'v3.8.0');
+    stubChannel(file);
+    clackMock.log.info.mockClear();
+    const env = await deployUntilFailure(gathered('kubernetes', false, sizes));
+    expect(env.imageSet.images.traefik).toBe(bundledImageSet().images.traefik);
+    expect(env.imageSet.kubernetes.k3s).toBe('v1.37.99+k3s1');
+    const notes = clackMock.log.info.mock.calls.map(([line]) => String(line));
+    expect(notes.filter((line) => line.includes('needs a newer vibecarbon'))).toEqual([
+      'a newer traefik needs a newer vibecarbon, so this deploy keeps the one this CLI was ' +
+        'tested with. update with npm i -g vibecarbon to get it',
+    ]);
+    expect(notes.join('\n')).not.toContain('version channel not used');
   });
 
   it.each([
@@ -414,7 +430,7 @@ describe('a deploy resolves one version set at its start and records it', () => 
       envConfig: { deployMode: 'kubernetes', deployedAt: '2026-11-01', imageSet: old },
     });
     expect(env.imageSet.kubernetes).toEqual(old.kubernetes);
-    expect(env.imageSet.images.traefik).toBe(ref('traefik', 'v3.99.0'));
+    expect(env.imageSet.images.traefik).toBe(ref('traefik', 'v3.7.99'));
     expect(k3sVersion()).toBe(old.kubernetes.k3s);
   });
 

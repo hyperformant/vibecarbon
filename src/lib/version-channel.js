@@ -20,15 +20,23 @@
  *     ends, which leaves no room for a newline, a quote or a shell character;
  *   - k3s is `v1.2.3+k3s4`, and that string reaches INSTALL_K3S_VERSION in a
  *     root shell, so it is held to the same standard as a ref;
- *   - a channel entry may not be older than this CLI's bundled copy, and may
- *     not change the major. The first stops a list rolling a fix back. The
- *     second is why an old CLI never runs a major its templates were not
- *     written for: when a person moves a major in a new CLI, older CLIs reject
- *     the file and stay on what they bundle.
+ *   - a channel entry may not be older than this CLI's bundled copy, which
+ *     stops a list rolling a fix back.
  *
  * Any of these failing rejects the whole file: there is no partial channel.
  * A reason names the key that failed and never repeats the file's content, so
  * a hostile file cannot write to the operator's terminal or log.
+ *
+ * THE RULE FOR WHAT A CLI TAKES (decided 2026-11-15): only its own line. An
+ * entry is taken when it has the major AND the minor this CLI bundles, at or
+ * above the bundled patch; a k3s `+k3sN` revision counts as patch. So a fix
+ * reaches every installed CLI with no release, and a minor or major reaches
+ * one only through a release that bundles it, because that release is what
+ * tested the templates with it. An entry on a newer minor or major is not a
+ * fault: it is the list a newer release moved. That key keeps the bundled copy,
+ * the rest of the file is still taken (`ahead` names the key, and the deploy
+ * says so once). A key is a ref with its own digest, and no key vouches for
+ * another, so keeping one bundled weakens nothing the shape rules protect.
  *
  * Reading never blocks or fails a deploy: a 3 s bound, and any problem means
  * the bundled copy and one quiet note.
@@ -102,16 +110,23 @@ export function versionOf(value) {
   return value.includes('@') ? value.slice(value.indexOf(':') + 1, value.indexOf('@')) : value;
 }
 
-/** A version may not go below `floor`, nor to another major. */
-function assertAboveFloor(version, floor, where) {
-  if (floor === undefined) return;
-  const [got, want] = [versionParts(version), versionParts(versionOf(floor))];
-  if (got[0] !== want[0]) reject(where, 'names another major than this CLI bundles');
-  if (compareParts(got, want) < 0) reject(where, 'is older than this CLI bundles');
+/**
+ * Where a channel version stands against the one this CLI bundles, by the
+ * rule above: 'take' on the bundled major and minor at or above its patch,
+ * 'older' below the bundled copy, 'ahead' on a newer minor or major.
+ *
+ * @param {string} version - e.g. "v3.7.18", "1.8.1.4", "v1.37.2+k3s2"
+ * @param {string} bundled - this CLI's version of the same key
+ * @returns {'take' | 'older' | 'ahead'}
+ */
+export function channelStep(version, bundled) {
+  const [got, want] = [versionParts(version), versionParts(bundled)];
+  if (compareParts(got, want) < 0) return 'older';
+  return got[0] === want[0] && got[1] === want[1] ? 'take' : 'ahead';
 }
 
 /** `ref` is exactly this key's package, a numeric version and a digest. */
-function parseRef(ref, image, where, floor) {
+function parseRef(ref, image, where) {
   if (typeof ref !== 'string') reject(where, 'is not a string');
   const prefix = `${K8S_MIRROR_ORG}/${mirroredImageName(image.repo)}:`;
   if (!ref.startsWith(prefix)) reject(where, 'is not this image in our ghcr org');
@@ -119,30 +134,28 @@ function parseRef(ref, image, where, floor) {
   if (rest.length > 0 || !VERSION.test(tag) || !DIGEST.test(digest ?? '')) {
     reject(where, 'is not a version and a sha256 digest');
   }
-  assertAboveFloor(tag, floor, where);
   return ref;
 }
 
-function parseRefs(value, table, where, floors) {
+function parseRefs(value, table, where) {
   return Object.fromEntries(
     Object.entries(table).map(([key, image]) => [
       key,
-      parseRef(value[key], image, `${where}.${key}`, floors?.[key]),
+      parseRef(value[key], image, `${where}.${key}`),
     ]),
   );
 }
 
 /**
- * Validate a set and return a fresh copy of it. Throws on anything else.
- *
- * `floor` is for what comes from the channel: the bundled copy. A recorded set
- * is held to the shape only, because a cluster older than this CLI is normal.
+ * Validate a set's shape and return a fresh copy of it. Throws on anything
+ * else. A recorded set is held to the shape only, because a cluster older
+ * than this CLI is normal; what comes from the channel also goes through the
+ * rule (parseChannelFile).
  *
  * @param {unknown} value
- * @param {{ floor?: import('./images.js').ImageSet }} [opts]
  * @returns {import('./images.js').ImageSet}
  */
-export function parseImageSet(value, { floor } = {}) {
+export function parseImageSet(value) {
   const set = /** @type {any} */ (value);
   assertExactKeys(set, ['images', 'kubernetes'], 'set');
   assertExactKeys(set.images, Object.keys(CHANNEL_IMAGES), 'images');
@@ -151,28 +164,65 @@ export function parseImageSet(value, { floor } = {}) {
   if (typeof k3s !== 'string' || !K3S_RELEASE.test(k3s)) {
     reject('kubernetes.k3s', 'is not a k3s release version');
   }
-  assertAboveFloor(k3s, floor?.kubernetes.k3s, 'kubernetes.k3s');
   return {
-    images: parseRefs(set.images, CHANNEL_IMAGES, 'images', floor?.images),
-    kubernetes: {
-      k3s,
-      ...parseRefs(set.kubernetes, CHANNEL_KUBERNETES_IMAGES, 'kubernetes', floor?.kubernetes),
-    },
+    images: parseRefs(set.images, CHANNEL_IMAGES, 'images'),
+    kubernetes: { k3s, ...parseRefs(set.kubernetes, CHANNEL_KUBERNETES_IMAGES, 'kubernetes') },
   };
 }
 
 /**
- * A channel.json document, parsed. Throws on anything but the exact shape.
+ * A channel.json document, parsed for a CLI that bundles `bundled`. Throws on
+ * anything but the exact shape, and on an entry older than the bundled copy.
+ * An entry on a newer minor or major keeps the bundled copy in `set` and is
+ * named in `ahead` (e.g. "images.traefik"). With no `bundled`, the shape only:
+ * that is the job that writes the list, reading the one it wrote.
  *
  * @param {unknown} value
- * @param {import('./images.js').ImageSet} floor - this CLI's bundled copy
- * @returns {import('./images.js').ImageSet}
+ * @param {import('./images.js').ImageSet} [bundled] - this CLI's bundled copy
+ * @returns {{ set: import('./images.js').ImageSet, ahead: string[] }}
  */
-export function parseChannelFile(value, floor) {
+export function parseChannelFile(value, bundled) {
   const file = /** @type {any} */ (value);
   assertExactKeys(file, ['schema', 'images', 'kubernetes'], 'file');
   if (file.schema !== CHANNEL_SCHEMA) reject('schema', 'is not one this CLI reads');
-  return parseImageSet({ images: file.images, kubernetes: file.kubernetes }, { floor });
+  const set = parseImageSet({ images: file.images, kubernetes: file.kubernetes });
+  const ahead = [];
+  if (!bundled) return { set, ahead };
+  for (const group of /** @type {const} */ (['images', 'kubernetes'])) {
+    for (const key of Object.keys(set[group])) {
+      const where = `${group}.${key}`;
+      const step = channelStep(versionOf(set[group][key]), versionOf(bundled[group][key]));
+      if (step === 'older') reject(where, 'is older than this CLI bundles');
+      if (step === 'ahead') {
+        set[group][key] = bundled[group][key];
+        ahead.push(where);
+      }
+    }
+  }
+  return { set, ahead };
+}
+
+/**
+ * The one line a deploy prints when the channel is ahead of this CLI. Names
+ * come from this CLI's own tables, never from the file.
+ *
+ * @param {string[]} ahead - keys as parseChannelFile names them
+ * @returns {string}
+ */
+export function aheadNote(ahead) {
+  const names = [
+    ...new Set(
+      ahead.map((where) => {
+        const [group, key] = where.split('.');
+        return group === 'kubernetes' ? 'Kubernetes' : mirroredImageName(CHANNEL_IMAGES[key].repo);
+      }),
+    ),
+  ];
+  const list =
+    names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+  return names.length === 1
+    ? `a newer ${list} needs a newer vibecarbon, so this deploy keeps the one this CLI was tested with. update with npm i -g vibecarbon to get it`
+    : `newer ${list} versions need a newer vibecarbon, so this deploy keeps the ones this CLI was tested with. update with npm i -g vibecarbon to get them`;
 }
 
 /**
@@ -180,7 +230,7 @@ export function parseChannelFile(value, floor) {
  * body included: the abort signal covers the whole exchange.
  *
  * @param {{ url?: string, fetchFn?: typeof fetch, timeoutMs?: number }} [opts]
- * @returns {Promise<{ set?: import('./images.js').ImageSet, problem?: string }>}
+ * @returns {Promise<{ set?: import('./images.js').ImageSet, ahead?: string[], problem?: string }>}
  */
 export async function readChannel({
   url = CHANNEL_URL,
@@ -195,7 +245,7 @@ export async function readChannel({
     if (!res.ok) return { problem: `it answered ${res.status}` };
     const text = await readCapped(res);
     if (text === null) return { problem: 'the file is too large' };
-    return { set: parseChannelFile(JSON.parse(text), bundledImageSet()) };
+    return parseChannelFile(JSON.parse(text), bundledImageSet());
   } catch (err) {
     if (err instanceof ImageSetRejected) return { problem: err.message };
     // Fixed text on purpose: JSON.parse quotes the input in its message.
@@ -274,10 +324,15 @@ function preChannelImageSet(envConfig) {
  * The set a deploy runs, resolved once at its start and activated. The caller
  * records it. Never throws: no problem here stops a deploy.
  *
+ * The one place a person hears that the channel is ahead of this CLI: a deploy
+ * is the only command that reads it, and the line names only what this deploy
+ * would have run. An existing cluster keeps its Kubernetes set whatever the
+ * channel says, and a compose deploy runs none, so neither hears about one.
+ *
  * @param {object} o
  * @param {any} o.envConfig - the environment as it stood before this deploy
  * @param {boolean} o.k8s - this deploy's tier runs Kubernetes
- * @param {() => Promise<{ set?: import('./images.js').ImageSet, problem?: string }>} [o.read]
+ * @param {() => Promise<{ set?: import('./images.js').ImageSet, ahead?: string[], problem?: string }>} [o.read]
  * @param {(line: string) => void} [o.note]
  * @returns {Promise<import('./images.js').ImageSet>}
  */
@@ -288,7 +343,11 @@ export async function resolveDeployImageSet({
   note = () => {},
 }) {
   const bundled = bundledImageSet();
-  const { set: channel = null, problem } = await read().catch(() => ({ problem: 'unreachable' }));
+  const {
+    set: channel = null,
+    ahead = [],
+    problem,
+  } = await read().catch(() => ({ problem: 'unreachable' }));
   if (!channel) {
     note(`version channel not used (${problem}), deploying the versions bundled with this CLI`);
   }
@@ -301,6 +360,9 @@ export async function resolveDeployImageSet({
     bundled,
     keepKubernetes: existingCluster ? (recorded ?? bundled).kubernetes : null,
   });
+  const takesKubernetes = k8s && !existingCluster;
+  const missed = ahead.filter((where) => takesKubernetes || !where.startsWith('kubernetes.'));
+  if (channel && missed.length > 0) note(aheadNote(missed));
   activateImageSet(set);
   return set;
 }

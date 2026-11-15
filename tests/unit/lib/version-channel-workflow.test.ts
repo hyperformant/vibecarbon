@@ -175,12 +175,15 @@ describe('version-channel workflow', () => {
     for (const ref of uses.filter(Boolean)) expect(ref).toMatch(/@[a-f0-9]{40}$/);
   });
 
-  it('a new major gets one issue, a failed run gets one issue, and neither is a new one each day', () => {
+  it('a new minor or major gets one issue, a failed run gets one issue, and neither is a new one each day', () => {
     const script = runs(jobs.escalate);
     expect(needs(jobs.escalate).sort()).toEqual(
       ['plan', 'mirror', 'pull-check', 'compose-smoke', 'k3s-smoke', 'publish'].sort(),
     );
-    expect(jobs.escalate.steps?.[0].env?.MAJORS).toContain('needs.plan.outputs.majors');
+    expect(jobs.escalate.steps?.[0].env?.WAITING).toContain('needs.plan.outputs.waiting');
+    // The rule the issue asks a person to act on: only a release moves a minor.
+    expect(script).toContain('A new minor or major is waiting for a CLI release');
+    expect(script).toMatch(/patches only/);
     expect(jobs.escalate.steps?.[0].env?.FAILED).toContain("contains(needs.*.result, 'failure')");
     expect(script).toContain('gh issue edit "$number"');
     expect(script).toContain('gh issue create --title "$1"');
@@ -194,12 +197,15 @@ describe('version-channel workflow', () => {
       changed: false,
       include: [],
       refs: ['a', 'b'],
-      majors: [{ name: 'x/y', current: '1.0', newest: '2.0' }],
+      waiting: [
+        { name: 'x/y', current: '1.0', newest: '1.1' },
+        { name: 'k3s', current: 'v1.37.2+k3s1', newest: 'v1.38.0+k3s1' },
+      ],
       notes: [],
     });
     expect(Object.keys(out).sort()).toEqual(Object.keys(jobs.plan.outputs ?? {}).sort());
     for (const [key, value] of Object.entries(out)) expect(value, key).not.toContain('\n');
-    expect(out.majors).toBe('x/y 1.0 to 2.0');
+    expect(out.waiting).toBe('x/y 1.0 to 1.1; k3s v1.37.2+k3s1 to v1.38.0+k3s1');
   });
 });
 
