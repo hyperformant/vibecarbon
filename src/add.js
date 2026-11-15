@@ -36,7 +36,7 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
-import { isHAConfigured, registerProject, updateProjectConfig } from './lib/config.js';
+import { registerProject, updateProjectConfig } from './lib/config.js';
 import { fetchWithRetry } from './lib/fetch-retry.js';
 import { appendToEnv, loadEnvVariables, loadManifest, setEnvVar } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -622,7 +622,6 @@ async function main(cliArgs) {
 
   const project = {
     projectName: projectConfig.projectName,
-    haConfigured: isHAConfigured(),
     provider: projectConfig.provider || 'hetzner',
     services: projectConfig.services || {},
   };
