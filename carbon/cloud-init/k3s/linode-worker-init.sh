@@ -99,6 +99,7 @@ hostnamectl set-hostname "$NODE_NAME"
 echo "Node name: $NODE_NAME"
 
 # @include _container-signals.sh
+# @include _stable-flowlabel.sh
 
 # Configure containerd to mirror pulls for the local registry running on
 # the master, at the master's private IP. The program fixes that VPC address

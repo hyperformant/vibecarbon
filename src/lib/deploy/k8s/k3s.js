@@ -5896,7 +5896,10 @@ export async function deliverAppImage({
  * No retry (Brandon, 2026-11-09): a download the network cut off says so and
  * that running the deploy again finishes it. On 2026-11-08 a linode/k8s
  * deploy lost its base this way (`connection reset by peer`) while kubelet
- * pulled about 15 images in the same minute; the cause is still open.
+ * pulled about 15 images in the same minute. Cause found 2026-11-15: Linux
+ * changed the socket's IPv6 flow label mid-download and another CDN server
+ * reset it; every node now boots with that off (carbon/cloud-init/k3s/
+ * _stable-flowlabel.sh, tests/unit/deploy/stable-flowlabel-census.test.ts).
  *
  * @param {object} o
  * @param {string} o.masterIp
