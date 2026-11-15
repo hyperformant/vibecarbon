@@ -191,7 +191,7 @@ to your Object Storage bucket).
 
 ### Certificates
 
-Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, and there is no wildcard certificate. Certificates need no DNS token on the servers: on compose your Hetzner token stays on your machine, and on Kubernetes cert-manager never reads the copy the cluster holds for its controllers (see [Prerequisites](#prerequisites)). On compose, the apex has its own certificate and `traefik.<domain>` shares one with grafana, n8n and metabase when you enable them. To add your own subdomain, give its Traefik router the label `traefik.http.routers.<name>.tls.certresolver=letsencrypt` and Traefik issues it a certificate of its own. On Kubernetes, routes are paths on your domain, so a new path needs nothing.
+Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, and there is no wildcard certificate. Certificates need no DNS token on the servers: on compose your Hetzner token stays on your machine, and on Kubernetes cert-manager never reads the copy the cluster holds for its controllers (see [Prerequisites](#prerequisites)). On compose, the apex has its own certificate and `traefik.<domain>` shares one with grafana and any other admin add-on when you enable them. To add your own subdomain, give its Traefik router the label `traefik.http.routers.<name>.tls.certresolver=letsencrypt` and Traefik issues it a certificate of its own. On Kubernetes, routes are paths on your domain, so a new path needs nothing.
 
 Your certificate is issued once and then reused. Right after a deploy finds it trusted, and on every scheduled backup after that, it is saved (with its key) to the environment's backup bucket. A restore, a scale onto new servers, or a failover puts that copy back instead of asking Let's Encrypt for a new one, so the new side serves your certificate as soon as it takes over and you stay clear of Let's Encrypt's rate limits. A plain `vibecarbon destroy` keeps the saved copy; `destroy -purge` removes it with the rest of the backups.
 
@@ -351,8 +351,8 @@ different, and each mode keeps its own failover path:
 
 - **`compose-ha`** keeps its existing always-warm architecture unchanged: two
   always-on VPSs, standby continuously replicating. The standby runs the app
-  tier, Redis and observability; n8n and Metabase write to the primary
-  database, so they stay at zero there until it becomes the primary.
+  tier, Redis and observability; an add-on that writes to the primary
+  database stays at zero there until the standby becomes the primary.
   `vibecarbon failover` promotes the standby database and repoints DNS.
   There's no idle floor to provision and no `-server-type` step, because
   nothing is cold.
@@ -368,7 +368,7 @@ Fail-back) describes **k8s-ha** specifically.
 The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated database node (the streaming replica database)
 - **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app and cluster-autoscaler)
-- **Add-ons held at zero:** every installed add-on (n8n, Metabase, Redis, observability) is scaled to zero with the app tier; failover scales n8n, Metabase and Redis back up with the app, and the follow-up `vibecarbon deploy` brings observability back
+- **Add-ons held at zero:** every installed add-on (Redis, observability) is scaled to zero with the app tier; failover scales Redis back up with the app, and the follow-up `vibecarbon deploy` brings observability back
 - **Reseeded at deploy:** Every deploy reseeds the standby database from the primary once both clusters are up, then verifies it is streaming. There is no first-boot seed
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 

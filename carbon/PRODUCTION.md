@@ -60,7 +60,7 @@ vibecarbon shell            # SSH to the server
 docker compose exec db psql -U postgres
 ```
 
-A BI tool or script that needs the database runs next to it (an add-on such as Metabase, or a job inside the app), never across the internet.
+A BI tool or script that needs the database runs next to it (an add-on, or a job inside the app), never across the internet.
 
 ### 2. Resource Limits
 
@@ -81,8 +81,6 @@ A BI tool or script that needs the database runs next to it (an add-on such as M
 ├── docker-compose.yml               # Base (local + production)
 ├── docker-compose.prod.yml          # Production enhancements
 ├── docker-compose.observability.yml # Optional: Grafana, Prometheus, Loki (via `vibecarbon add observability`)
-├── docker-compose.n8n.yml           # Optional: n8n workflow automation
-├── docker-compose.metabase.yml      # Optional: Metabase analytics
 ├── k8s/                             # Kubernetes manifests (deploy applies k8s/base)
 └── k8s/overlays/                    # Example overlay on top of k8s/base (no deploy applies it)
 ```
@@ -94,37 +92,14 @@ A BI tool or script that needs the database runs next to it (an add-on such as M
 docker compose up -d
 ```
 
-**Local with n8n:**
+**Local with observability:**
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.n8n.yml up -d
-# Access: http://n8n.localhost (requires super_admin login)
-```
-
-**Local with Metabase:**
-```bash
-docker compose -f docker-compose.yml -f docker-compose.metabase.yml up -d
-# Access: http://metabase.localhost (requires super_admin login)
-```
-
-**Local with all optional services:**
-```bash
-docker compose -f docker-compose.yml \
-  -f docker-compose.observability.yml \
-  -f docker-compose.n8n.yml \
-  -f docker-compose.metabase.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 ```
 
 **Production:**
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-```
-
-**Production with n8n + Metabase:**
-```bash
-docker compose -f docker-compose.yml \
-  -f docker-compose.prod.yml \
-  -f docker-compose.n8n.yml \
-  -f docker-compose.metabase.yml up -d
 ```
 
 ## Environment Variables
@@ -170,7 +145,7 @@ These `docker:*` scripts already ship in `package.json`:
 | Script | Purpose |
 |--------|---------|
 | `docker:up` | Start the local stack |
-| `docker:up:all` | Start the local stack plus optional services (n8n, Metabase, observability) |
+| `docker:up:all` | Start the local stack plus optional services (observability, Redis) |
 | `docker:down` | Stop the local stack |
 | `docker:down:all` | Stop the local stack plus optional services |
 | `docker:reset` | Stop the local stack and remove volumes/images |

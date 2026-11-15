@@ -16,6 +16,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { PARKED_FEATURES } from '../../../src/add.js';
 import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
@@ -103,8 +104,13 @@ describe('add-on database passwords', () => {
         expect(buildPerEnvSecrets({ [key]: 'p'.repeat(32) })[key]).toBe('p'.repeat(32));
       });
 
-      it(`.env.example documents ${key}`, () => {
-        expect(parseDotenv(read('carbon/.env.example'))[key]).toBeTruthy();
+      // A parked add-on is named in no user doc, .env.example included
+      // (tests/unit/docs/parked-addon-surface-census.test.ts); an offered one
+      // documents its key there.
+      it(`.env.example documents ${key} once ${name} is offered`, () => {
+        const documented = parseDotenv(read('carbon/.env.example'))[key];
+        if (PARKED_FEATURES.includes(name)) expect(documented).toBeUndefined();
+        else expect(documented).toBeTruthy();
       });
     });
   }
@@ -160,9 +166,9 @@ describe('add-on database passwords', () => {
       );
     });
 
-    it('every example env file leaves N8N_ENCRYPTION_KEY empty, so compose fails loudly without a real one', () => {
-      for (const f of ['carbon/.env.example']) {
-        expect(parseDotenv(read(f)), f).toHaveProperty('N8N_ENCRYPTION_KEY', '');
+    it('no example env file gives N8N_ENCRYPTION_KEY a value, so compose fails loudly without a real one', () => {
+      for (const f of ['carbon/.env.example', 'carbon/.env.local.example']) {
+        expect(parseDotenv(read(f)).N8N_ENCRYPTION_KEY || '', f).toBe('');
       }
     });
 

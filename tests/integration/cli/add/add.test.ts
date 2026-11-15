@@ -179,6 +179,17 @@ describe('vibecarbon add', () => {
       expect(existsSync(join(project, `docker-compose.${feature}.yml`))).toBe(false);
     });
 
+    it('neither the off-TTY hint nor a typo suggestion names a parked feature', () => {
+      const offTty = runCli('add', [], { cwd: project });
+      assertExitWith(offTty, 1, 'redis');
+      const typo = runCli('add', ['n8', '-y'], { cwd: project, timeoutMs: 30_000 });
+      expect(typo.exitCode).not.toBe(0);
+      for (const r of [offTty, typo]) {
+        const out = `${r.stdout}\n${r.stderr}`;
+        expect(out).not.toMatch(/n8n|metabase/i);
+      }
+    });
+
     it('-h lists available features but not parked ones', () => {
       const r = runCli('add', ['-h'], { cwd: project });
       assertSuccess(r);

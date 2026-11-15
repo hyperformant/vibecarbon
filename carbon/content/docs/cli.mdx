@@ -375,7 +375,7 @@ files as they are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so
 if one would reach the cluster, the command stops and names the file and the
 placeholder. When your Flux cluster file is older than `k8s/base`, it tells you
 to take the new one from `vibecarbon upgrade`; for any other placeholder, it
-names the file to fill in. An add-on's volume (redis, n8n, metabase) is not
+names the file to fill in. An add-on's volume (redis, for example) is not
 Flux's: the claim names your provider's storage class, so
 `vibecarbon deploy <env>` creates it, like the database's.
 
