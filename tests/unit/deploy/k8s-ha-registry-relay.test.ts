@@ -26,6 +26,29 @@ describe('registry relay manifest', () => {
     expect(out).not.toMatch(/__[A-Z_]+__/);
     expect(REGISTRY_RELAY_SOURCE_HOST).toBe('10.99.0.1:15000');
   });
+  // The copy waits for Ready, then connects once. With no probe, Ready only
+  // meant the process had started: on linode/k8s-ha's warm deploy
+  // (2026-11-15) socat was not listening yet and the copy failed "primary
+  // registry unreachable through the relay". Ready must mean socat accepts
+  // on the very address the copy dials.
+  it('is Ready only once socat accepts on the address the copy dials', () => {
+    // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
+    const pod = load(
+      renderRegistryRelayManifest({ template: TEMPLATE, primaryMasterPrivateIp: '10.0.1.1' }),
+    ) as any;
+    const relay = pod.spec.containers[0];
+    const listen = /^TCP-LISTEN:(\d+),bind=([\d.]+),/.exec(relay.args[0]);
+    expect(listen).not.toBeNull();
+    expect(relay.readinessProbe?.tcpSocket).toEqual({
+      host: listen?.[2],
+      port: Number(listen?.[1]),
+    });
+    expect(`${relay.readinessProbe.tcpSocket.host}:${relay.readinessProbe.tcpSocket.port}`).toBe(
+      REGISTRY_RELAY_SOURCE_HOST,
+    );
+    // Polled every second, so Ready lags listening by at most about that.
+    expect(relay.readinessProbe.periodSeconds).toBe(1);
+  });
   it('refuses an empty primary master IP', () => {
     expect(() =>
       renderRegistryRelayManifest({ template: TEMPLATE, primaryMasterPrivateIp: '' }),
