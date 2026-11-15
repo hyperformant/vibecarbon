@@ -543,12 +543,15 @@ const LOCAL_FEATURES = [
 // they all moved to `vibecarbon configure` since they wire up off-stack
 // providers rather than installing local containers.
 
-const ALL_FEATURES = [...LOCAL_FEATURES];
-
-// Features actually offered to users. Parked features are excluded from the
-// help body and the interactive prompt, but remain in ALL_FEATURES so typo
-// suggestions and the parked guard can still resolve their names.
+// Features actually offered to users: the help body, the interactive prompt,
+// the off-TTY hint and typo suggestions draw only from this list. The parked
+// guard reads LOCAL_FEATURES, so `add <parked>` still gets its explicit
+// refusal.
 const AVAILABLE_FEATURES = LOCAL_FEATURES.filter((f) => f.status !== 'parked');
+
+// Names of the parked features. Nothing a user reads may name one
+// (tests/unit/docs/parked-addon-surface-census.test.ts reads this list).
+const PARKED_FEATURES = LOCAL_FEATURES.filter((f) => f.status === 'parked').map((f) => f.name);
 
 /**
  * Whether a feature ships but is turned off for this release.
@@ -578,10 +581,13 @@ function levenshteinDistance(a, b) {
 }
 
 /**
- * Find the closest matching feature name for typo correction
+ * Find the closest offered feature name for typo correction. Never a parked
+ * one: suggesting it would offer what this release turned off.
+ * @param {string} input
+ * @returns {string | null}
  */
 function findClosestFeature(input) {
-  const featureNames = ALL_FEATURES.map((f) => f.name);
+  const featureNames = AVAILABLE_FEATURES.map((f) => f.name);
   let closest = null;
   let minDistance = Infinity;
 
@@ -594,6 +600,11 @@ function findClosestFeature(input) {
     }
   }
   return closest;
+}
+
+/** The off-TTY hint for a missing feature name, naming only offered features. */
+function featureRequirementHint() {
+  return `name a feature to add (e.g. ${AVAILABLE_FEATURES.map((f) => f.name).join(', ')})`;
 }
 
 // ============================================================================
@@ -639,7 +650,7 @@ async function main(cliArgs) {
       requirements: [
         {
           flag: 'features',
-          description: 'name a feature to add (e.g. observability, redis, n8n)',
+          description: featureRequirementHint(),
           satisfied: false,
         },
       ],
@@ -702,4 +713,12 @@ export async function run(args) {
 // EXPORTS FOR TESTING
 // ============================================================================
 
-export { fetchServiceManifest, loadManifest, removeFromBaseKustomization };
+export {
+  AVAILABLE_FEATURES,
+  featureRequirementHint,
+  fetchServiceManifest,
+  findClosestFeature,
+  loadManifest,
+  PARKED_FEATURES,
+  removeFromBaseKustomization,
+};
