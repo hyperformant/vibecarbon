@@ -319,6 +319,39 @@ describe('checkDeployBudget: each mode passes inside its budgets', () => {
   });
 });
 
+describe('checkDeployBudget: budgets are for stock deploys', () => {
+  const MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
+
+  it.each(MODES)('%s with add-ons skips, naming them, and never fails', (mode) => {
+    // Over every budget and missing every marker: none of it is judged.
+    for (const output of [fixture(mode, { total: 9_999_000 }), '']) {
+      const r = checkDeployBudget(output, mode, { ...KEY, features: ['observability', 'redis'] });
+      expect(r.status).toBe('skip');
+      expect(r.ok).toBe(true);
+      expect(r.checkName).toBe('deploy_budget');
+      expect(r.message).toMatch(/budgets are for stock deploys/);
+      expect(r.message).toMatch(/observability, redis/);
+      expect(r.details).toMatchObject({
+        skipped: expect.stringMatching(/stock/),
+        features: ['observability', 'redis'],
+      });
+    }
+  });
+
+  it('skips with add-ons even where no budget row exists', () => {
+    const r = judge('', 'compose', { provider: 'vultr', cpuClass: 'vc2', features: ['redis'] }, {});
+    expect(r.status).toBe('skip');
+  });
+
+  it.each(MODES)('%s stock (no add-ons) is judged as before', (mode) => {
+    expect(checkDeployBudget(fixture(mode), mode, { ...KEY, features: [] }).status).toBe('pass');
+    expect(checkDeployBudget('', mode, { ...KEY, features: [] }).status).toBe('fail');
+    expect(
+      checkDeployBudget(fixture(mode, { total: 9_999_000 }), mode, { ...KEY, features: [] }).status,
+    ).toBe('fail');
+  });
+});
+
 describe('checkDeployBudget: time budgets', () => {
   const cases = [
     // owned only: total - TLS over, total itself inside end-to-end

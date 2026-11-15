@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
@@ -68,6 +68,8 @@ function seedScenario(
     status?: string;
     stepDurationMs?: Partial<Record<string, number>>;
     missingSteps?: Set<string>;
+    /** The add-ons the scenario deployed; stock (none) by default. */
+    features?: string[];
   } = {},
 ): void {
   const scenarioId = randomUUID();
@@ -77,7 +79,7 @@ function seedScenario(
     mode,
     dnsProvider: 'manual',
     domain: `${mode}.example.test`,
-    features: [],
+    features: opts.features ?? [],
     projectName: `${provider}-${mode}`,
     envPrefix: 'e1',
     provider,
@@ -343,6 +345,56 @@ describe('collectAndRender', () => {
     const result = collectAndRender(paths, [{ provider: 'hetzner', dbPath }]);
     expect(result.changedFiles).toEqual([]);
     expect(result.legs[0].updated).toEqual([]);
+  });
+
+  it('a leg that ran with add-ons publishes nothing, logs each ignored scenario, and a stock leg still lands', () => {
+    // Published numbers are stock deploys only: the app and its database,
+    // no add-ons. A green leg that deployed observability is not one.
+    const root = createTempDir('vc-legs-non-stock-');
+    const hetzner = makeLegDb(root, 'hetzner');
+    const hetznerRunId = createTestRun(hetzner.db);
+    for (const mode of HETZNER_MODES) {
+      seedScenario(hetzner.db, hetznerRunId, 'hetzner', mode, { features: ['observability'] });
+    }
+    hetzner.db.completeRun(hetznerRunId, 'pass');
+    hetzner.db.close();
+
+    const digitalocean = makeLegDb(root, 'digitalocean');
+    const doRunId = createTestRun(digitalocean.db);
+    for (const mode of DO_MODES) seedScenario(digitalocean.db, doRunId, 'digitalocean', mode);
+    digitalocean.db.completeRun(doRunId, 'pass');
+    digitalocean.db.close();
+
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      lines.push(a.map(String).join(' '));
+    });
+    const paths = makeSurfacePaths();
+    let result: ReturnType<typeof collectAndRender>;
+    try {
+      result = collectAndRender(paths, discoverLegArtifacts(root));
+    } finally {
+      spy.mockRestore();
+    }
+
+    const byProvider = Object.fromEntries(result.legs.map((l) => [l.provider, l]));
+    expect(byProvider.hetzner.updated).toEqual([]);
+    expect(byProvider.digitalocean.updated).toEqual(['digitalocean']);
+    expect(Object.keys(loadPerfData(paths.dataPath).providers)).toEqual(['digitalocean']);
+    const readme = readFileSync(paths.readmePath, 'utf8');
+    expect(readme).toContain('| Hetzner Cloud | `compose` | _pending_ |');
+    const ignored = lines.filter((l) => /^\[perf-data\] hetzner\/.*ignored.*observability/.test(l));
+    expect(ignored).toHaveLength(HETZNER_MODES.length);
+
+    // Only the recorded features decide: the same leg, stock, does land.
+    const stockRoot = createTempDir('vc-legs-stock-');
+    const stock = makeLegDb(stockRoot, 'hetzner');
+    const stockRunId = createTestRun(stock.db);
+    for (const mode of HETZNER_MODES) seedScenario(stock.db, stockRunId, 'hetzner', mode);
+    stock.db.completeRun(stockRunId, 'pass');
+    stock.db.close();
+    const stockResult = collectAndRender(makeSurfacePaths(), discoverLegArtifacts(stockRoot));
+    expect(stockResult.legs[0].updated).toEqual(['hetzner']);
   });
 
   it("one leg failing does not block the other leg's numbers from landing", () => {

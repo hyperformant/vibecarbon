@@ -16,11 +16,14 @@
  * The merge keeps the per-provider publication rules the retired
  * per-provider block patcher enforced: full registry coverage, every
  * scenario green, anomaly-guarded via `opts.excludeProviders`, and only
- * green steps contribute numbers.
+ * green steps contribute numbers. Every published number is a stock deploy
+ * (the app and its database, no add-ons): a scenario recorded with add-ons
+ * counts as absent, so its provider keeps its existing entry.
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { testConfig } from '../../config.js';
+import { describeFeaturesRecord, isStockFeaturesRecord } from '../utils/feature-set.js';
 import type { E2EDb } from './db.js';
 import { formatDuration, PERF_TABLE_ROWS } from './reporter.js';
 
@@ -71,7 +74,9 @@ function isGreenStatus(status: string): boolean {
  * enforced): unknown provider or run, no/partial registry coverage, or any
  * non-green scenario. Within a green scenario only green steps contribute
  * numbers — a pass_after_retry scenario's one failed step stays absent
- * rather than surfacing a number.
+ * rather than surfacing a number. A scenario that did not record a stock
+ * deploy (`scenarios.features` other than `[]`) is ignored with a log line,
+ * so it leaves its mode uncovered.
  */
 export function collectProviderRunData(
   db: E2EDb,
@@ -88,6 +93,13 @@ export function collectProviderRunData(
   const scenariosByMode = new Map<string, (typeof details.scenarios)[number]>();
   for (const sc of details.scenarios) {
     if (sc.provider !== provider) continue;
+    if (!isStockFeaturesRecord(sc.features)) {
+      console.log(
+        `[perf-data] ${provider}/${sc.mode}: ignored, it ran with add-ons ` +
+          `(${describeFeaturesRecord(sc.features)}); published numbers are stock deploys only`,
+      );
+      continue;
+    }
     scenariosByMode.set(sc.mode, sc);
   }
   for (const mode of modes) {

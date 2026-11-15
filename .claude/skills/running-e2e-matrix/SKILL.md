@@ -7,6 +7,8 @@ description: Use when running vibecarbon's real-infra e2e tests (compose, compos
 
 The e2e matrix is the only test suite that provisions real cloud infrastructure end-to-end, on every provider the CLI supports (Hetzner, DigitalOcean, Linode, Vultr, Scaleway). It runs the full deploy → verify → scale → backup → destroy → restore → (failover) → final-destroy lifecycle for each scenario. A full matrix is ~3 hr; a single scenario is ~30–60 min.
 
+Every scenario is a **stock deploy**: the app and its database, no add-ons, not even observability (`tests/config.ts` `e2e.features` is `[]`, HA scenarios included). On a stock run the add-on checks (Grafana, Redis, `addons_ready`, the HA standby add-on checks) are off or `skip`. `--features=observability,redis` adds add-ons for a deliberate run, and nothing that run measures reaches the perf table or the deploy budgets (`tests/e2e/utils/feature-set.js`).
+
 ## Pick the right command
 
 | Goal | Command | Time |
@@ -128,9 +130,9 @@ pnpm test:e2e:batch -- --except hetzner/compose,hetzner/k8s
 # Trim k8s-ha to deploy + verify + failover only (~25 min)
 pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal
 
-# Override features
-pnpm test:e2e:batch -- --scenario hetzner/k8s --features=redis,n8n
-pnpm test:e2e:batch -- --scenario hetzner/k8s --features=               # zero features
+# Add-ons on top of the stock deploy (every run is stock by default: the app
+# and its database, no add-ons; a run with add-ons is never published or calibrated)
+pnpm test:e2e:batch -- --scenario hetzner/k8s --features=observability,redis
 
 # Another provider's default scenarios (opt-in), or every provider's
 pnpm test:e2e:batch -- --provider digitalocean

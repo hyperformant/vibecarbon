@@ -28,6 +28,17 @@ describe('_run-lifecycle.ts: a deploy budget miss fails verify-deploy, not deplo
     expect(deployBody).not.toMatch(/throw new Error\(`deploy: \$\{budget\.checkName\}/);
   });
 
+  it('judges with the scenario add-ons and stores only a fail, never a skip', () => {
+    // A deploy with add-ons is a deploy_budget skip (budgets are for stock
+    // deploys); a `!== 'pass'` gate would fail verify-deploy on it.
+    const deployBody = src.slice(budgetIdx, verifyDeployIdx);
+    expect(deployBody).toMatch(/checkDeployBudget\([\s\S]{0,200}features: config\.features,/);
+    expect(deployBody).toMatch(
+      /if \(budget\.status === 'fail'\) \{\s*deployBudgetMiss = budget;\s*\}/,
+    );
+    expect(deployBody).not.toMatch(/budget\.status !== 'pass'/);
+  });
+
   it('throws the stored miss at the end of verify-deploy, after its own failures', () => {
     const throwIdx = src.indexOf(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text of a template literal

@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
@@ -64,6 +64,8 @@ function seedScenario(
     stepDurationMs?: Partial<Record<string, number>>;
     stepStatus?: Partial<Record<string, string>>;
     missingSteps?: Set<string>;
+    /** The add-ons the scenario deployed; stock (none) by default. */
+    features?: string[];
   } = {},
 ): void {
   const scenarioId = randomUUID();
@@ -73,7 +75,7 @@ function seedScenario(
     mode,
     dnsProvider: 'manual',
     domain: `${mode}.example.test`,
-    features: [],
+    features: opts.features ?? [],
     projectName: `${provider}-${mode}`,
     envPrefix: 'e1',
     provider,
@@ -144,6 +146,79 @@ describe('loadPerfData', () => {
 // ---------------------------------------------------------------------------
 // updatePerfDataFromRun
 // ---------------------------------------------------------------------------
+
+describe('stock deploys only', () => {
+  // Every published number is a stock deploy (the app and its database, no
+  // add-ons). A scenario recorded with add-ons is ignored, with a log line,
+  // so its provider has no full coverage and keeps its existing entry.
+  const logs = () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      lines.push(a.map(String).join(' '));
+    });
+    return { lines, restore: () => spy.mockRestore() };
+  };
+
+  it('a provider with one scenario that ran with add-ons is not collected, and the log says why', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    for (const mode of HETZNER_MODES) {
+      seedScenario(db, runId, 'hetzner', mode, {
+        features: mode === 'k8s' ? ['observability'] : [],
+      });
+    }
+    db.completeRun(runId, 'pass');
+    const log = logs();
+    try {
+      expect(collectProviderRunData(db, runId, 'hetzner')).toBeNull();
+    } finally {
+      log.restore();
+    }
+    expect(log.lines.join('\n')).toMatch(/hetzner\/k8s.*ignored.*observability.*stock/);
+    db.close();
+  });
+
+  it('a stock scenario with the same steps is collected', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    db.completeRun(runId, 'pass');
+    expect(collectProviderRunData(db, runId, 'hetzner')?.scenarios.k8s?.deploy).toBe(60_000);
+    db.close();
+  });
+
+  it('updatePerfDataFromRun keeps a non-stock provider untouched while a stock sibling updates', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    for (const mode of HETZNER_MODES) {
+      seedScenario(db, runId, 'hetzner', mode, { features: ['observability'] });
+    }
+    for (const mode of DO_MODES) seedScenario(db, runId, 'digitalocean', mode);
+    db.completeRun(runId, 'pass');
+    const file = tempDataPath();
+    const kept: PerfData = {
+      providers: {
+        hetzner: {
+          run: { id: 'hhhhhhh', date: '2026-11-01' },
+          scenarios: { compose: { deploy: 1 } },
+        },
+      },
+    };
+    writeFileSync(file, serializePerfData(kept));
+    const log = logs();
+    let result: { updated: string[]; skipped: string[] };
+    try {
+      result = updatePerfDataFromRun(file, db, runId);
+    } finally {
+      log.restore();
+    }
+    expect(result.updated).toEqual(['digitalocean']);
+    expect(result.skipped).toContain('hetzner');
+    expect(loadPerfData(file).providers.hetzner).toEqual(kept.providers.hetzner);
+    expect(log.lines.filter((l) => /ignored/.test(l))).toHaveLength(HETZNER_MODES.length);
+    db.close();
+  });
+});
 
 describe('updatePerfDataFromRun', () => {
   it('writes every full-green provider of the run into the JSON with ms durations + provenance', () => {

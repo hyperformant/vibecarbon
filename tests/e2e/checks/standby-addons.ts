@@ -21,16 +21,17 @@
  *
  * Every list comes from src/lib/services/standby-policy.js, never a literal.
  * With no add-on of the relevant kind enabled a check reports `skip` (the
- * feature is off, so there is nothing to prove). With add-ons enabled but no
- * SSH handle it FAILS, never skips: HA scenarios always have a handle
- * (hollow-pass-census.test.ts). Remote commands are fixed text built from
- * the project name, never user input.
+ * feature is off, so there is nothing to prove). Every e2e run is stock (no
+ * add-ons, tests/config.ts), so on the matrix these all skip; they prove the
+ * standby policy on a run given `--features` with the add-ons. With add-ons
+ * enabled but no SSH handle a check FAILS, never skips: HA scenarios always
+ * have a handle (hollow-pass-census.test.ts). Remote commands are fixed text
+ * built from the project name, never user input.
  */
 
 import {
   composePromotionServices,
   composeStandbyScaledServices,
-  declaredAddonNames,
   enabledAddonNames,
   k8sFailoverAddonWorkloads,
 } from '../../../src/lib/services/standby-policy.js';
@@ -52,20 +53,6 @@ interface SshArgs {
 /** The enabled add-ons among a feature list, as the policy module names them. */
 export function enabledAddons(features: readonly string[]): string[] {
   return enabledAddonNames(Object.fromEntries(features.map((f) => [f, true])));
-}
-
-/**
- * The feature set an HA scenario runs: the base set plus every declared
- * add-on, so the standby policy is exercised. Non-HA modes and an explicit
- * `--features=` override are returned unchanged (no extra deploy time).
- */
-export function haScenarioFeatures(
-  mode: string,
-  base: readonly string[],
-  overridden: boolean,
-): readonly string[] {
-  if (overridden || !mode.endsWith('-ha')) return base;
-  return [...new Set([...base, ...declaredAddonNames()])];
 }
 
 const skip = (checkName: string, why: string): VerificationResult => ({
