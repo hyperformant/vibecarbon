@@ -325,8 +325,6 @@ All admin dashboards are protected by a unified Single Sign-On (SSO) system usin
 | Traefik Dashboard | http://traefik.localhost | https://traefik.yourdomain.com |
 | Grafana | http://grafana.localhost | https://grafana.yourdomain.com |
 
-(n8n and Metabase are parked add-ons: their dashboards only exist on projects that installed them before parking; same URL pattern as above.)
-
 #### Built-in Admin Pages
 
 | Page | Path | Purpose |

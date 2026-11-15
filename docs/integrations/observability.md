@@ -176,19 +176,6 @@ Then uncomment the `app` job in `volumes/prometheus/prometheus.yml`:
 3. Save to `volumes/grafana/dashboards/your-dashboard.json`
 4. Dashboard auto-loads on next restart
 
-## n8n Integration
-
-When both n8n (project-level) and observability (environment-level) are enabled:
-
-- **Prometheus** automatically scrapes n8n metrics at `n8n:5678/metrics`
-- **Alloy** collects n8n container logs via Docker discovery
-- All n8n data appears in existing dashboards
-
-To enable n8n metrics, set in n8n environment:
-```yaml
-N8N_METRICS=true
-```
-
 ## Configuration Files
 
 | File | Purpose |

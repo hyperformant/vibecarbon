@@ -42,7 +42,6 @@ const SURFACES = [
   'docs/deploy-hetzner.md',
   'docs/deploy-digitalocean.md',
   'docs/integrations/observability.md',
-  'docs/integrations/n8n.md',
   'carbon/PRODUCTION.md',
   'carbon/README.md',
 ];

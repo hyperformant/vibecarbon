@@ -74,7 +74,8 @@ the promote, the failover fences writes on the old primary at the database:
 `ALTER SYSTEM SET default_transaction_read_only = on`, a reload read back as
 applied, and every client session opened before the fence terminated and
 proven gone. Stopping the app tier first (the k8s quiesce, proven by its pods
-being gone; `docker stop` of the app and any n8n/metabase add-on on compose) is
+being gone; `docker stop` of the app and of any add-on that writes to the
+primary database on compose) is
 the outward signal; the database fence is the guarantee. Only then is the
 primary's WAL position final: the shared catch-up gate
 (`waitForStandbyCaughtUp` in `src/lib/deploy/replication.js`) captures it and
