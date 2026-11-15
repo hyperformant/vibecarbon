@@ -137,12 +137,13 @@ updates:
   # CSI sidecars, pause, traefik (on servers), docker-socket-proxy, alpine,
   # registry, socat, alpine/k8s and k3s's own system images. Their refs pin
   # upstream's linux/amd64 CHILD digest, which no ecosystem can propose (the
-  # mirror tag's own digest is the index the job mints). Most of them move with
-  # no CLI release: version-channel.yml mirrors the new tag, smoke-tests it and
-  # publishes channel.json, and the templates name them by tokens the deploy
-  # fills, so no file here carries one. The rest follow the registry.k8s.io
-  # flow: edit {tag, digest, index} in src/lib/images.js, merge, and
-  # publish-images mirrors the new tag. The base compose traefik (local `up`,
+  # mirror tag's own digest is the index the job mints). Most of them take a
+  # patch with no CLI release: version-channel.yml mirrors the new tag,
+  # smoke-tests it and publishes channel.json, and the templates name them by
+  # tokens the deploy fills, so no file here carries one. A new minor or major
+  # of those, and every bump of the rest, follow the registry.k8s.io flow: edit
+  # {tag, digest, index} in src/lib/images.js, merge, and publish-images mirrors
+  # the new tag (a minor then reaches people with the next CLI release). The base compose traefik (local `up`,
   # Docker Hub's multi-arch index) stays Dependabot's; its bump goes red until
   # TRAEFIK_MIRROR moves to the same tag.
   #

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   driverPinsIn,
+  k3sAhead,
   k3sCandidates,
   k8sMinorOfGoMod,
   parseK3sImages,
@@ -55,6 +56,18 @@ function upstream(overrides: Record<string, unknown> = {}) {
 
 const drivers = (minor = MINOR) => [{ repo: 'x/ccm', tag: 'v1', minor }];
 
+/** `version` one up at part `at` (0 major, 1 minor, 2 patch), later parts zeroed. */
+const bump = (version: string, at: number) => {
+  let i = -1;
+  return version.replace(/\d+/g, (d) => {
+    i += 1;
+    if (i < at) return d;
+    return i === at ? String(Number(d) + 1) : '0';
+  });
+};
+const TRAEFIK_PATCH = bump(TRAEFIK_MIRROR.tag, 2);
+const TRAEFIK_MINOR = bump(TRAEFIK_MIRROR.tag, 1);
+
 /** Tags of `tags` for one repo, the rest as bundled. */
 const tagsFor = (repo: string, ...more: string[]) =>
   async function tags(image: Image) {
@@ -62,9 +75,10 @@ const tagsFor = (repo: string, ...more: string[]) =>
   };
 
 describe('pickImage', () => {
-  it('takes the newest patch or minor', () => {
-    expect(pickImage('v3.7.17', ['v3.7.17', 'v3.7.18', 'v3.8.0'])).toEqual({
-      next: 'v3.8.0',
+  it('takes the newest patch, and leaves a new minor for a CLI release, named', () => {
+    expect(pickImage('v3.7.17', ['v3.7.17', 'v3.7.18', 'v3.8.0', 'v3.9.1'])).toEqual({
+      next: 'v3.7.18',
+      minor: 'v3.9.1',
       major: null,
     });
   });
@@ -72,6 +86,7 @@ describe('pickImage', () => {
   it('leaves a new major and names it', () => {
     expect(pickImage('v3.7.17', ['v3.7.17', 'v4.0.0', 'v4.1.0'])).toEqual({
       next: null,
+      minor: null,
       major: 'v4.1.0',
     });
   });
@@ -79,7 +94,16 @@ describe('pickImage', () => {
   it('moves the patch and still names the major', () => {
     expect(pickImage('1.8.1.3', ['1.8.1.4', '2.0.0.0'])).toEqual({
       next: '1.8.1.4',
+      minor: null,
       major: '2.0.0.0',
+    });
+  });
+
+  it('counts every part past the minor as patch', () => {
+    expect(pickImage('1.8.1.3', ['1.8.1.4', '1.8.2.0', '1.9.0.0'])).toEqual({
+      next: '1.8.2.0',
+      minor: '1.9.0.0',
+      major: null,
     });
   });
 
@@ -91,11 +115,15 @@ describe('pickImage', () => {
     ['a name', 'latest'],
     ['shell text', 'v3.8.0;reboot'],
   ])('ignores %s', (_what, tag) => {
-    expect(pickImage('v3.7.17', [tag])).toEqual({ next: null, major: null });
+    expect(pickImage('v3.7.17', [tag])).toEqual({ next: null, minor: null, major: null });
   });
 
   it('never goes back', () => {
-    expect(pickImage('v3.7.17', ['v3.7.16', 'v2.0.0'])).toEqual({ next: null, major: null });
+    expect(pickImage('v3.7.17', ['v3.7.16', 'v3.6.99', 'v2.0.0'])).toEqual({
+      next: null,
+      minor: null,
+      major: null,
+    });
   });
 });
 
@@ -163,16 +191,22 @@ describe('k3s-images.txt', () => {
 });
 
 describe('k3sCandidates', () => {
-  it('stable first, then each minor down to the current one, then the current', () => {
+  const channels = {
+    stable: 'v1.38.2+k3s1',
+    'v1.38': 'v1.38.2+k3s1',
+    'v1.37': 'v1.37.9+k3s2',
+    'v1.36': 'v1.36.5+k3s1',
+    'v1.35': 'v1.35.9+k3s1',
+  };
+
+  it('only the current minor: its own channel when stable is past it, then the current', () => {
+    expect(k3sCandidates('v1.36.1+k3s1', channels)).toEqual(['v1.36.5+k3s1', 'v1.36.1+k3s1']);
+  });
+
+  it('stable when stable is on the current minor', () => {
     expect(
-      k3sCandidates('v1.36.1+k3s1', {
-        stable: 'v1.38.2+k3s1',
-        'v1.38': 'v1.38.2+k3s1',
-        'v1.37': 'v1.37.9+k3s2',
-        'v1.36': 'v1.36.5+k3s1',
-        'v1.35': 'v1.35.9+k3s1',
-      }),
-    ).toEqual(['v1.38.2+k3s1', 'v1.37.9+k3s2', 'v1.36.5+k3s1', 'v1.36.1+k3s1']);
+      k3sCandidates('v1.37.2+k3s1', { stable: 'v1.37.4+k3s2', 'v1.37': 'v1.37.4+k3s2' }),
+    ).toEqual(['v1.37.4+k3s2', 'v1.37.2+k3s1']);
   });
 
   it("does not run ahead of stable on stable's own minor", () => {
@@ -193,6 +227,19 @@ describe('k3sCandidates', () => {
   });
 });
 
+describe('k3sAhead', () => {
+  it.each([
+    ['a newer minor in stable', { stable: 'v1.38.2+k3s1' }, 'v1.38.2+k3s1'],
+    ['a new major in stable', { stable: 'v2.0.0+k3s1' }, 'v2.0.0+k3s1'],
+    ['a patch of this minor', { stable: 'v1.37.9+k3s1' }, null],
+    ['an older stable', { stable: 'v1.36.9+k3s1' }, null],
+    ['a prerelease', { stable: 'v1.38.0-rc1+k3s1' }, null],
+    ['no stable', {}, null],
+  ])('%s', (_what, channels, ahead) => {
+    expect(k3sAhead('v1.37.2+k3s1', channels)).toBe(ahead);
+  });
+});
+
 describe('planChannel', () => {
   const plan = (over = {}, driverList = drivers(), file: unknown = published()) =>
     planChannel({ published: file, upstream: upstream(over), drivers: driverList });
@@ -202,7 +249,7 @@ describe('planChannel', () => {
     expect(out.changed).toBe(false);
     expect(out.file).toEqual(published());
     expect(out.include).toEqual([]);
-    expect(out.majors).toEqual([]);
+    expect(out.waiting).toEqual([]);
   });
 
   it('a patch moves that one ref and mirrors it, and the result passes the CLI validator', async () => {
@@ -218,19 +265,86 @@ describe('planChannel', () => {
         index: expect.stringMatching(/^sha256:/),
       },
     ]);
-    expect(() => parseChannelFile(out.file, bundled)).not.toThrow();
+    expect(parseChannelFile(out.file, bundled).ahead).toEqual([]);
     expect(out.refs).toContain(out.file.images.traefik);
   });
 
   it('a new major leaves the list alone and is reported', async () => {
     const out = await plan({ tags: tagsFor('library/traefik', 'v4.0.0') });
     expect(out.changed).toBe(false);
-    expect(out.majors).toEqual([
+    expect(out.waiting).toEqual([
       { name: 'library/traefik', current: TRAEFIK_MIRROR.tag, newest: 'v4.0.0' },
     ]);
   });
 
-  it('a whole Kubernetes set moves when every part of it is there', async () => {
+  it('a new minor leaves the list alone too: it waits for a CLI release, reported', async () => {
+    const out = await plan({ tags: tagsFor('library/traefik', TRAEFIK_MINOR) });
+    expect(out.changed).toBe(false);
+    expect(out.file.images.traefik).toBe(bundled.images.traefik);
+    expect(out.waiting).toEqual([
+      { name: 'library/traefik', current: TRAEFIK_MIRROR.tag, newest: TRAEFIK_MINOR },
+    ]);
+  });
+
+  it('a patch and a minor upstream: the patch moves, the minor waits', async () => {
+    const out = await plan({ tags: tagsFor('library/traefik', TRAEFIK_PATCH, TRAEFIK_MINOR) });
+    expect(versionOf(out.file.images.traefik)).toBe(TRAEFIK_PATCH);
+    expect(out.waiting.map((w: { newest: string }) => w.newest)).toEqual([TRAEFIK_MINOR]);
+  });
+
+  /** Upstream with a Kubernetes patch: k3s, cluster-autoscaler and kubectl. */
+  const kubernetesPatch = (extra: Record<string, string[]> = {}) => {
+    const k3s = `v1.${MINOR}.99+k3s1`;
+    const autoscaler = bump(versionOf(bundled.kubernetes.clusterAutoscaler), 2);
+    const kubectl = bump(versionOf(bundled.kubernetes.kubectl), 2);
+    const lists: Record<string, string[]> = {
+      'autoscaling/cluster-autoscaler': [autoscaler],
+      'alpine/k8s': [kubectl],
+    };
+    return {
+      k3s,
+      autoscaler,
+      kubectl,
+      over: {
+        k3sChannels: async () => ({ stable: k3s }),
+        tags: async (image: Image) => [
+          image.tag as string,
+          ...(lists[image.repo] ?? []),
+          ...(extra[image.repo] ?? []),
+        ],
+      },
+    };
+  };
+
+  it('a whole Kubernetes patch moves when every part of it is there', async () => {
+    const { k3s, autoscaler, kubectl, over } = kubernetesPatch();
+    const out = await plan(over);
+    expect(out.file.kubernetes.k3s).toBe(k3s);
+    expect(versionOf(out.file.kubernetes.clusterAutoscaler)).toBe(autoscaler);
+    expect(versionOf(out.file.kubernetes.kubectl)).toBe(kubectl);
+    expect(parseChannelFile(out.file, bundled).ahead).toEqual([]);
+    // System images are copied before the list names that k3s, and pulled by
+    // tag, the way k3s asks for them.
+    for (const image of K3S_SYSTEM_IMAGE_MIRRORS) {
+      const name = image.repo.split('/').pop();
+      expect(out.include.map((e: { dst: string }) => e.dst)).toContain(
+        `ghcr.io/hyperformant/${name}:${image.tag}`,
+      );
+      expect(out.refs).toContain(`ghcr.io/hyperformant/${name}:${image.tag}`);
+    }
+  });
+
+  it('a Kubernetes image takes the patch of its own minor, never the next minor', async () => {
+    const { autoscaler, kubectl, over } = kubernetesPatch({
+      'autoscaling/cluster-autoscaler': [`v1.${MINOR + 1}.2`],
+      'alpine/k8s': [`1.${MINOR + 1}.0`],
+    });
+    const out = await plan(over);
+    expect(versionOf(out.file.kubernetes.clusterAutoscaler)).toBe(autoscaler);
+    expect(versionOf(out.file.kubernetes.kubectl)).toBe(kubectl);
+  });
+
+  it('a new Kubernetes minor waits for a CLI release, even when every part of it is there', async () => {
     const next = `v1.${MINOR + 1}.0+k3s1`;
     const out = await plan(
       {
@@ -243,63 +357,40 @@ describe('planChannel', () => {
       },
       drivers(MINOR + 1),
     );
-    expect(out.file.kubernetes.k3s).toBe(next);
-    expect(versionOf(out.file.kubernetes.clusterAutoscaler)).toBe(`v1.${MINOR + 1}.2`);
-    expect(versionOf(out.file.kubernetes.kubectl)).toBe(`1.${MINOR + 1}.0`);
-    // System images are copied before the list names that k3s, and pulled by
-    // tag, the way k3s asks for them.
-    for (const image of K3S_SYSTEM_IMAGE_MIRRORS) {
-      const name = image.repo.split('/').pop();
-      expect(out.include.map((e: { dst: string }) => e.dst)).toContain(
-        `ghcr.io/hyperformant/${name}:${image.tag}`,
-      );
-      expect(out.refs).toContain(`ghcr.io/hyperformant/${name}:${image.tag}`);
-    }
+    expect(out.file.kubernetes).toEqual(bundled.kubernetes);
+    expect(out.changed).toBe(false);
+    expect(out.waiting).toEqual([{ name: 'k3s', current: K3S_VERSION, newest: next }]);
   });
 
   it.each([
-    [
-      'cluster-autoscaler has no matching minor',
-      { 'alpine/k8s': [`1.${MINOR + 1}.0`] },
-      drivers(MINOR + 1),
-      IMAGES_TXT,
-    ],
-    ['kubectl has no matching minor', {}, drivers(MINOR + 1), IMAGES_TXT],
-    [
-      'a driver is behind',
-      {
-        'autoscaling/cluster-autoscaler': [`v1.${MINOR + 1}.0`],
-        'alpine/k8s': [`1.${MINOR + 1}.0`],
-      },
-      [...drivers(MINOR + 1), { repo: 'x/csi', tag: 'v2', minor: MINOR }],
-      IMAGES_TXT,
-    ],
+    ['a driver is behind', [...drivers(), { repo: 'x/csi', tag: 'v2', minor: MINOR - 1 }], 'new'],
     [
       'k3s needs a system image we do not mirror',
-      {
-        'autoscaling/cluster-autoscaler': [`v1.${MINOR + 1}.0`],
-        'alpine/k8s': [`1.${MINOR + 1}.0`],
-      },
-      drivers(MINOR + 1),
+      drivers(),
       `${IMAGES_TXT}\ndocker.io/rancher/mirrored-new:1.0.0`,
     ],
-  ])('the set stays when %s', async (_what, tags, driverList, imagesTxt) => {
-    const next = `v1.${MINOR + 1}.0+k3s1`;
+  ])('k3s stays when %s', async (_what, driverList, imagesTxt) => {
+    const { k3s, over } = kubernetesPatch();
     const out = await plan(
       {
-        k3sChannels: async () => ({ stable: next }),
-        k3sImages: async (version: string) => (version === next ? imagesTxt : IMAGES_TXT),
-        tags: async (image: Image) =>
-          (tags as Record<string, string[]>)[image.repo] ?? [image.tag as string],
+        ...over,
+        k3sImages: async (version: string) =>
+          version === k3s && imagesTxt !== 'new' ? imagesTxt : IMAGES_TXT,
       },
       driverList,
     );
-    expect(out.file.kubernetes).toEqual(bundled.kubernetes);
-    expect(out.changed).toBe(false);
-    expect(out.notes.join('\n')).toContain(next);
+    expect(out.file.kubernetes.k3s).toBe(K3S_VERSION);
+    expect(out.notes.join('\n')).toContain(k3s);
   });
 
-  it('the newest complete set wins when stable is not complete', async () => {
+  it('nothing in the Kubernetes set moves when no k3s release is complete', async () => {
+    const { over } = kubernetesPatch();
+    const out = await plan(over, [...drivers(), { repo: 'x/csi', tag: 'v2', minor: MINOR - 1 }]);
+    expect(out.file.kubernetes).toEqual(bundled.kubernetes);
+    expect(out.changed).toBe(false);
+  });
+
+  it("a newer stable leaves this minor's patch to its own channel", async () => {
     const stable = `v1.${MINOR + 1}.0+k3s1`;
     const patch = `v1.${MINOR}.99+k3s1`;
     const out = await plan({
@@ -308,6 +399,7 @@ describe('planChannel', () => {
     expect(out.file.kubernetes.k3s).toBe(patch);
     expect(out.changed).toBe(true);
     expect(out.include.length).toBeGreaterThan(0);
+    expect(out.waiting).toEqual([{ name: 'k3s', current: K3S_VERSION, newest: stable }]);
   });
 
   it('a k3s patch with nothing else new still gives the mirror job work', async () => {
@@ -331,15 +423,32 @@ describe('planChannel', () => {
     );
   });
 
-  it('keeps a list that is ahead of the bundled copy', async () => {
+  it('keeps a list that is a patch ahead of the bundled copy', async () => {
     const ahead = published();
     ahead.images = {
       ...ahead.images,
-      traefik: `ghcr.io/hyperformant/traefik:v3.8.0@${digest('c')}`,
+      traefik: `ghcr.io/hyperformant/traefik:${TRAEFIK_PATCH}@${digest('c')}`,
     };
     const out = await plan({}, drivers(), ahead);
     expect(out.file.images.traefik).toBe(ahead.images.traefik);
     expect(out.changed).toBe(false);
+  });
+
+  it('puts a list that is off the bundled minor back on it, since no CLI built here takes it', async () => {
+    const ahead = published();
+    ahead.images = {
+      ...ahead.images,
+      traefik: `ghcr.io/hyperformant/traefik:${TRAEFIK_MINOR}@${digest('c')}`,
+    };
+    ahead.kubernetes = { ...ahead.kubernetes, k3s: `v1.${MINOR + 1}.0+k3s1` };
+    const out = await plan({}, drivers(), ahead);
+    expect(out.file.images.traefik).toBe(bundled.images.traefik);
+    expect(out.file.kubernetes.k3s).toBe(K3S_VERSION);
+    expect(out.changed).toBe(true);
+    expect(parseChannelFile(out.file, bundled).ahead).toEqual([]);
+    expect(out.include.map((e: { dst: string }) => e.dst)).toContain(
+      `ghcr.io/hyperformant/traefik:${CHANNEL_IMAGES.traefik.tag}`,
+    );
   });
 
   it('a published list that fails validation stops the job, loudly', async () => {
@@ -387,19 +496,34 @@ describe('the write command, the last check before a publish', () => {
     const { path, run } = write(JSON.stringify(published()));
     expect(run.status, run.stderr).toBe(0);
     const text = readFileSync(path, 'utf8');
-    expect(parseChannelFile(JSON.parse(text), bundled)).toEqual(bundled);
+    expect(parseChannelFile(JSON.parse(text), bundled)).toEqual({ set: bundled, ahead: [] });
     expect(text.endsWith('}\n')).toBe(true);
     write(JSON.stringify(published()));
     expect(readFileSync(path, 'utf8')).toBe(text);
   });
 
+  const offMinor = () => {
+    const file = structuredClone(published());
+    file.images.traefik = `ghcr.io/hyperformant/traefik:${TRAEFIK_MINOR}@${digest('c')}`;
+    return JSON.stringify(file);
+  };
+
   it.each([
     ['not JSON', 'nonsense'],
     ['a foreign ref', JSON.stringify({ ...published(), images: { traefik: 'evil' } })],
+    ['a list a CLI built here would not take whole', offMinor()],
   ])('refuses %s and leaves the file alone', (_what, channel) => {
     const before = readFileSync(join(dir, 'channel.json'), 'utf8');
     const { path, run } = write(channel);
     expect(run.status).not.toBe(0);
     expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
+  it('names the key that is off the bundled minor, and nothing from the file', () => {
+    const { run } = write(offMinor());
+    expect(run.stderr).toContain(
+      'images.traefik is on a newer minor or major than this CLI bundles',
+    );
+    expect(run.stderr).not.toContain(TRAEFIK_MINOR);
   });
 });

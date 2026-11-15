@@ -556,11 +556,12 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 //
 // BUMPING ONE: Dependabot cannot see these (the refs point at our mirror, and
 // the mirror tag's digest is the index the job mints, not this child digest).
-// The images in the version set (CHANNEL_IMAGES below) need no bump to reach a
-// deploy: version-channel.yml moves them, and an edit here only moves the floor a
-// CLI release ships with. For the rest, edit {tag, digest, index} here, merge,
-// and publish-images mirrors the new tag. The weekly `mirror-upstream-drift` job
-// lists newer upstream tags.
+// The images in the version set (CHANNEL_IMAGES below) need no bump for a
+// patch: version-channel.yml moves those. A new minor or major of one is an
+// edit here and a CLI release, since an installed CLI takes channel versions
+// only on the minor it bundles. For the rest, edit {tag, digest, index} here,
+// merge, and publish-images mirrors the new tag. The weekly
+// `mirror-upstream-drift` job lists newer upstream tags.
 //
 // Not here, deliberately: the add-ons (n8n, Metabase, Redis, observability)
 // and their alpine helpers, the diagnose-only probes, and BINFMT_IMAGE (runs
@@ -905,8 +906,10 @@ export const DIAG_NETSHOOT_IMAGE =
 //
 // The channel (.github/workflows/version-channel.yml) moves these with no CLI
 // release, so a patched image reaches deploys on its own. The constants above
-// are the BUNDLED copy: what a deploy runs when the channel cannot be read, and
-// the floor a channel entry may not go below. src/lib/version-channel.js picks
+// are the BUNDLED copy: what a deploy runs when the channel cannot be read, the
+// floor a channel entry may not go below, and the minor it may not leave (a
+// channel entry on another minor or major keeps this copy; moving a minor is a
+// CLI release, which is what tests the templates with it). src/lib/version-channel.js picks
 // the set for a command and activates it once; everything below reads that one
 // set, so both sides of an HA pair run the same refs by construction.
 //
