@@ -60,6 +60,7 @@ import {
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import { clusterIngressIp } from './lib/deploy/k8s/ingress-ip.js';
+import { countReadyNodes, WORKER_NODE_SELECTOR } from './lib/deploy/k8s/node-roles.js';
 import { awaitCertManagerLeader } from './lib/deploy/k8s/readiness.js';
 import {
   k8sTlsRestoreLine,
@@ -1612,6 +1613,16 @@ async function _provisionStandbyCapacityImpl({
     label: standbyStack,
   });
 
+  // A worker Node a failed attempt left behind (its machine deleted, the Node
+  // still registered) holds its name, and worker names repeat: k3s refuses a
+  // new machine that registers under a name with another's node password, so
+  // a re-run's worker could never join. Only NotReady ones: a re-run after a
+  // failover that got past this step finds its workers live and Ready.
+  await reapStaleStandbyWorkers(servers.standby.ip, sshKeyPathFor(envName), {
+    onlyNotReady: true,
+    deps,
+  });
+
   try {
     const up = await converge(convergeArgs({ minWorkers: count, workerServerType: serverType }));
 
@@ -1662,6 +1673,9 @@ async function _provisionStandbyCapacityImpl({
 
     try {
       await converge(convergeArgs({ minWorkers: 0 }));
+      // Pulumi just deleted every worker machine, so every worker Node left
+      // is stale: remove them, or a re-run's workers could not join.
+      await reapStaleStandbyWorkers(servers.standby.ip, sshKeyPathFor(envName), { deps });
       p.log.info('Standby converged back to 0 workers; no leftover capacity.');
     } catch (revertErr) {
       // Revert ALSO failed — capacity may be stranded. Report the stack + the
@@ -1695,11 +1709,56 @@ async function _provisionStandbyCapacityImpl({
 }
 
 /**
+ * Delete the standby's worker Node objects whose machines are gone, so a new
+ * worker of the same name can join. k3s keeps a node password per node name
+ * (kube-system/<name>.node-password.k3s) and refuses a machine that registers
+ * under that name with another password; deleting the Node deletes its
+ * password. Worker names repeat on every provider (`<cluster>-worker-1`, and
+ * on Linode the same cut label every time), so one worker Node left by a
+ * failed failover blocked every re-run's worker from joining.
+ *
+ * With onlyNotReady, a Ready worker is kept. Best effort: a failure is a
+ * warning, and the Ready wait then reports what happened.
+ *
+ * @param {string} masterIp
+ * @param {string} sshKeyPath
+ * @param {{ onlyNotReady?: boolean, deps?: { kubectl?: Function } }} [opts]
+ * @returns {Promise<string[]>} the Node names deleted
+ */
+export async function reapStaleStandbyWorkers(
+  masterIp,
+  sshKeyPath,
+  { onlyNotReady = false, deps = {} } = {},
+) {
+  const kubectl = deps.kubectl ?? ((argv) => sshKubectl(masterIp, sshKeyPath, argv));
+  try {
+    const out = await kubectl(['get', 'nodes', '-l', WORKER_NODE_SELECTOR, '--no-headers']);
+    const stale = String(out ?? '')
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/))
+      .filter(([name]) => name)
+      .filter(([, status = '']) => !onlyNotReady || !status.split(',').includes('Ready'))
+      .map(([name]) => name);
+    if (stale.length === 0) return [];
+    await kubectl(['delete', 'node', ...stale, '--ignore-not-found']);
+    p.log.info(`Removed ${stale.length} stale standby worker node(s): ${stale.join(', ')}`);
+    return stale;
+  } catch (err) {
+    p.log.warn(
+      `Could not remove stale standby worker nodes (${firstErrorLine(err)}); a new ` +
+        'worker that reuses one of their names cannot join until it is deleted ' +
+        '(kubectl delete node <name>).',
+    );
+    return [];
+  }
+}
+
+/**
  * Poll the standby master's node list until at least `count` worker nodes are
- * Ready, or the budget is exceeded. A worker row is a `kubectl get nodes`
- * line containing `-worker-` (the Pulumi-assigned worker node name segment) and
- * a standalone `Ready` status. Returns the Ready worker count on success;
- * throws once the budget elapses.
+ * Ready, or the budget is exceeded. Workers are picked by label
+ * (WORKER_NODE_SELECTOR, k8s/node-roles.js), never by name: Linode cuts a long
+ * instance label, so a worker's name need not say worker. Returns the Ready
+ * worker count on success; throws once the budget elapses.
  *
  * deps.kubectl (argv) => stdout and deps.sleep (ms) => Promise are injected by
  * tests so no SSH runs and no real 10s waits elapse.
@@ -1722,13 +1781,11 @@ export async function waitForWorkersReady(
   for (;;) {
     let out = '';
     try {
-      out = await kubectl(['get', 'nodes', '--no-headers']);
+      out = await kubectl(['get', 'nodes', '-l', WORKER_NODE_SELECTOR, '--no-headers']);
     } catch {
       out = '';
     }
-    const ready = (typeof out === 'string' ? out : '')
-      .split('\n')
-      .filter((l) => l.includes('-worker-') && /\bReady\b/.test(l)).length;
+    const ready = countReadyNodes(typeof out === 'string' ? out : '');
     if (ready >= count) return ready;
     if (Date.now() > deadline) {
       throw new Error(

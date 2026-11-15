@@ -38,6 +38,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { isWorkerNode } from '../../../src/lib/deploy/k8s/node-roles.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
 import { classifySshExecFailure, type SshExecFailureKind } from './replication.js';
@@ -46,7 +47,6 @@ const NAMESPACE = 'vibecarbon';
 const DB_STATEFULSET = 'db';
 const AUTOSCALER_NAMESPACE = 'kube-system';
 const AUTOSCALER_DEPLOYMENT = 'cluster-autoscaler';
-const WORKER_NAME_MARKER = '-worker-';
 const KUBECTL_ENV = 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml';
 
 const SSH_OPTS = e2eSshOpts(10);
@@ -138,14 +138,21 @@ export function parseDeploymentReplicaCount(json: string | null | undefined): nu
   }
 }
 
-/** Parse `kubectl get nodes -o json` into the list of node names containing `-worker-`. */
+/**
+ * Parse `kubectl get nodes -o json` into the names of the worker nodes, by
+ * label (isWorkerNode, src/lib/deploy/k8s/node-roles.js), never by name: a
+ * Linode worker's name is cut to 50 characters and need not say worker, so a
+ * name match passed on Linode with a worker still registered.
+ */
 export function findWorkerNodeNames(json: string | null | undefined): string[] | null {
   if (!json) return null;
   try {
-    const parsed = JSON.parse(json) as { items?: Array<{ metadata?: { name?: string } }> };
+    const parsed = JSON.parse(json) as {
+      items?: Array<{ metadata?: { name?: string; labels?: Record<string, string> } }>;
+    };
     return (parsed.items ?? [])
-      .map((item) => item.metadata?.name ?? '')
-      .filter((name) => name.includes(WORKER_NAME_MARKER));
+      .filter((item) => isWorkerNode(item.metadata?.labels))
+      .map((item) => item.metadata?.name ?? '');
   } catch {
     return null;
   }
@@ -446,7 +453,7 @@ async function checkZeroWorkerNodes(
       status: 'fail',
       responseTimeMs: Date.now() - start,
       errorMessage:
-        `${workerNodes.length} node(s) with '${WORKER_NAME_MARKER}' in the name found on ${label} ` +
+        `${workerNodes.length} worker node(s) found on ${label} ` +
         `(${ip}) (expected 0 — pilot-light standby's worker fleet must be provisioned down to zero): ` +
         `${workerNodes.join(', ')}`,
       details: { standbyIp: ip, workerNodes },

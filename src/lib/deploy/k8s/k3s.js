@@ -163,6 +163,7 @@ import {
 } from './image-delivery.js';
 import { infraFloatingIp } from './ingress-ip.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
+import { WORKER_NODE_SELECTOR } from './node-roles.js';
 import {
   removeRetiredObservabilityCertificate,
   retireObservabilityCertificateIfPresent,
@@ -5233,23 +5234,28 @@ export async function applyK3sManifests({
     await zeroWorkloadsOnStandby({ env, workloads: standbyAddonWorkloads });
 
     // Reap stale worker Node OBJECTS. A pilot standby has minWorkers:0, so
-    // ANY '-worker-' node here is stale by definition — after a failover,
+    // ANY worker node here is stale by definition — after a failover,
     // the reconverge deploy demotes the old primary to standby and Pulumi
     // deletes its worker VMs, but nothing deletes the Kubernetes Node
     // records those VMs left behind. Run 32620564611 caught
     // `...-primary-worker-1` still registered on the new standby while the
     // provider account held zero servers; whether the CCM eventually reaps
     // it is a race this deploy must not depend on (conditions, not timers).
-    // Fresh standbys list no workers and this is a no-op.
-    const nodesOut = await runKubectlWithRetry(['get', 'nodes', '-o', 'name'], {
-      env,
-      silent: true,
-      description: 'applyK3sManifests: list nodes for stale-worker reap (pilot standby)',
-    });
+    // Fresh standbys list no workers and this is a no-op. Workers are picked
+    // by label, never by name (k8s/node-roles.js): on Linode a worker's name
+    // is cut to 50 characters and need not say worker.
+    const nodesOut = await runKubectlWithRetry(
+      ['get', 'nodes', '-l', WORKER_NODE_SELECTOR, '-o', 'name'],
+      {
+        env,
+        silent: true,
+        description: 'applyK3sManifests: list nodes for stale-worker reap (pilot standby)',
+      },
+    );
     const staleWorkers = String(nodesOut ?? '')
       .split('\n')
       .map((l) => l.trim().replace(/^node\//, ''))
-      .filter((n) => n.includes('-worker-'));
+      .filter(Boolean);
     for (const node of staleWorkers) {
       await runKubectlWithRetry(['delete', 'node', node, '--ignore-not-found'], {
         env,

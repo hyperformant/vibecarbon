@@ -4,6 +4,12 @@ import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
+import {
+  DB_LABELS,
+  type FakeNode,
+  getNodesOutput,
+  MASTER_LABELS,
+} from '../../_shared/fake-nodes.js';
 import { namesHost } from '../../_shared/hosts.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
@@ -221,10 +227,11 @@ function fakeChild({
 let caSecretOut = '';
 let kubeSystemWorkloadsOut = '{"items":[]}';
 
-// `kubectl get nodes -o name` answer for the stale-worker reap (pilot
-// standby). Default: no nodes reported — every unrelated test sees an empty
-// cluster and the reap stays a no-op.
-let getNodesOut = '';
+// The cluster's nodes, which `kubectl get nodes -l <selector> -o name` (the
+// stale-worker reap, pilot standby) lists after applying the selector the
+// way the API server does. Default: none, so every unrelated test sees an
+// empty cluster and the reap stays a no-op.
+let clusterNodes: FakeNode[] = [];
 // `kubectl get statefulset <retired chart db>` answer. Default: absent, so
 // every test deploys onto a cluster with no chart-era database.
 let retiredChartStsOut = '';
@@ -329,9 +336,11 @@ function installSpawnMock() {
       argv.includes('nodes') &&
       argv.includes('-o')
     ) {
-      return fakeChild({ exitCode: 0, stdout: getNodesOut, argv: full }) as unknown as ReturnType<
-        typeof spawn
-      >;
+      return fakeChild({
+        exitCode: 0,
+        stdout: getNodesOutput(clusterNodes, argv),
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     if (
       cmd === 'kubectl' &&
@@ -1490,7 +1499,7 @@ describe('a replaced provider token restarts the cluster autoscaler', () => {
 describe('applyK3sManifests pilot-standby role', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
-    getNodesOut = '';
+    clusterNodes = [];
     cmdCalls = [];
     stdinCalls = [];
     deliverGate = null;
@@ -1498,14 +1507,21 @@ describe('applyK3sManifests pilot-standby role', () => {
     installSpawnMock();
   });
 
-  it('reaps stale -worker- Node objects on the pilot standby (run 32620564611)', async () => {
+  it('reaps stale worker Node objects on the pilot standby (run 32620564611)', async () => {
     // Post-failover reconverge: minWorkers:0 makes Pulumi delete the demoted
     // primary's worker VMs, but nothing deleted their k8s Node OBJECTS — the
     // first rerun night caught `...-primary-worker-1` still registered while
-    // the account held zero servers. On a pilot standby ANY '-worker-' node
-    // is stale by definition; reap declaratively, don't race the CCM.
+    // the account held zero servers. On a pilot standby ANY worker node is
+    // stale by definition; reap declaratively, don't race the CCM. Workers are
+    // found by label: the Linode one's name was cut to 50 characters and does
+    // not say worker (linode/k8s-ha, 2026-11-15).
     const { applyK3sManifests } = await k3sPromise;
-    getNodesOut = 'node/citest-k8s-ha-x-primary-worker-1\nnode/citest-k8s-ha-x-standby-master\n';
+    clusterNodes = [
+      { name: 'citest-k8s-ha-x-primary-worker-1', status: 'NotReady' },
+      { name: 'testapp-k8s-ha-1794719879300-ptt2cz-l4-st-d644a9d7', status: 'NotReady' },
+      { name: 'citest-k8s-ha-x-standby-master', labels: MASTER_LABELS },
+      { name: 'citest-k8s-ha-x-standby-db', labels: DB_LABELS },
+    ];
     const projectDir = makeProjectDir();
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
     const dels = cmdCalls.filter(
@@ -1514,15 +1530,17 @@ describe('applyK3sManifests pilot-standby role', () => {
     // ALL delete-node calls, not just the first: a reap whose filter widens
     // deletes the master as a SECOND call, which a .find()-based assertion
     // sails past (mutation-verified: filter(() => true) passed that shape).
-    expect(dels, 'exactly one stale worker must be deleted').toHaveLength(1);
+    expect(dels, 'exactly the two stale workers must be deleted').toHaveLength(2);
     expect(dels[0]).toContain('citest-k8s-ha-x-primary-worker-1');
-    expect(dels[0]).toContain('--ignore-not-found');
+    expect(dels[1]).toContain('testapp-k8s-ha-1794719879300-ptt2cz-l4-st-d644a9d7');
+    for (const d of dels) expect(d).toContain('--ignore-not-found');
     expect(JSON.stringify(dels)).not.toContain('standby-master');
+    expect(JSON.stringify(dels)).not.toContain('standby-db');
   });
 
   it('does NOT reap worker nodes on the primary role', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    getNodesOut = 'node/citest-k8s-ha-x-primary-worker-1\n';
+    clusterNodes = [{ name: 'citest-k8s-ha-x-primary-worker-1' }];
     const projectDir = makeProjectDir();
     await applyK3sManifests({ ...baseArgs(projectDir) });
     const del = cmdCalls.find(
