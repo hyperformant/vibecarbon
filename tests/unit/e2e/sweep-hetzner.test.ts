@@ -13,8 +13,12 @@
  * "The specified bucket does not exist.". So did a delete through another
  * location's endpoint while the bucket still lived in fsn1, which is why the
  * region search, not the code, decides.
+ *
+ * A sweep that could not look must not read clean either: a location whose
+ * ListBuckets fails, or missing storage keys, marks the sweep incomplete,
+ * as the other four sweeps do.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sweepOrphanedHetznerResources } from '../../e2e/utils/sweep-hetzner.js';
 
 type Deps = NonNullable<Parameters<typeof sweepOrphanedHetznerResources>[3]>;
@@ -111,5 +115,58 @@ describe('sweepOrphanedHetznerResources: buckets', () => {
     expect(enumFailed).toBe(true);
     // Not a missing-bucket answer, so there is nothing for a search to confirm.
     expect(locateBucket).not.toHaveBeenCalled();
+  });
+});
+
+describe('sweepOrphanedHetznerResources: a bucket sweep that could not look', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('a location whose listing throws marks the sweep incomplete, and the others are still swept', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const nbg1 = fakeStore({
+      listBuckets: vi.fn().mockRejectedValue(new Error('connect ETIMEDOUT')),
+    });
+    const fsn1 = fakeStore({
+      listBuckets: vi.fn().mockResolvedValue(['testapp-h1-backups']),
+    });
+    const { counts, enumFailed } = await sweepOrphanedHetznerResources(TAG, PROJECT, 'tok', {
+      fetchImpl: emptyCloud,
+      objectStorageByRegion: { nbg1, fsn1, hel1: fakeStore() },
+    });
+    expect(enumFailed).toBe(true);
+    expect(fsn1.emptyAndDeleteBucket).toHaveBeenCalledWith('testapp-h1-backups');
+    expect(counts.s3Buckets).toBe(1);
+    const warned = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warned).toMatch(/nbg1/);
+  });
+
+  it('a missing storage key marks the sweep incomplete and names the variable, never a value', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubEnv('HETZNER_ACCESS_KEY', 'HZTESTACCESSVALUE123');
+    vi.stubEnv('HETZNER_SECRET_KEY', undefined);
+    const { enumFailed } = await sweepOrphanedHetznerResources(TAG, PROJECT, 'tok', {
+      fetchImpl: emptyCloud,
+    });
+    expect(enumFailed).toBe(true);
+    const warned = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warned).toContain('HETZNER_SECRET_KEY');
+    expect(warned).not.toContain('HETZNER_ACCESS_KEY');
+    expect(warned).not.toContain('HZTESTACCESSVALUE123');
+  });
+
+  it('with both keys missing, both are named', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubEnv('HETZNER_ACCESS_KEY', undefined);
+    vi.stubEnv('HETZNER_SECRET_KEY', undefined);
+    const { enumFailed } = await sweepOrphanedHetznerResources(TAG, PROJECT, 'tok', {
+      fetchImpl: emptyCloud,
+    });
+    expect(enumFailed).toBe(true);
+    const warned = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warned).toContain('HETZNER_ACCESS_KEY');
+    expect(warned).toContain('HETZNER_SECRET_KEY');
   });
 });

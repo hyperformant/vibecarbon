@@ -457,6 +457,8 @@ export async function sweepOrphanedHetznerResources(
   // handling for free instead of re-implementing it inline. A bucket it
   // cannot delete fails the sweep (enumFailed), unless the delete said "no
   // such bucket" and no location holds it: a stale listing, the goal state.
+  // A sweep that could not look fails it too: missing storage keys, or a
+  // location whose ListBuckets failed, leave its buckets unchecked.
   try {
     let storesByRegion = deps.objectStorageByRegion;
     if (!storesByRegion) {
@@ -465,8 +467,19 @@ export async function sweepOrphanedHetznerResources(
       // from tests/.env.e2e before this runs (A6).
       const accessKey = process.env.HETZNER_ACCESS_KEY;
       const secretKey = process.env.HETZNER_SECRET_KEY;
-      if (!accessKey || !secretKey) throw new Error('No S3 credentials');
-      storesByRegion = await defaultObjectStorageByRegion(accessKey, secretKey);
+      if (accessKey && secretKey) {
+        storesByRegion = await defaultObjectStorageByRegion(accessKey, secretKey);
+      } else {
+        // Names only, never a value.
+        const missing = [
+          accessKey ? '' : 'HETZNER_ACCESS_KEY',
+          secretKey ? '' : 'HETZNER_SECRET_KEY',
+        ].filter(Boolean);
+        enumFailed = true;
+        console.warn(
+          `${tag} [sweep] S3 buckets not checked: ${missing.join(' and ')} not set, so leftover buckets cannot be ruled out`,
+        );
+      }
     }
 
     // Hetzner Object Storage has three regions. A deploy's buckets live in
@@ -476,40 +489,45 @@ export async function sweepOrphanedHetznerResources(
     // stranded whichever location a scenario landed in. Each endpoint lists
     // only its own location's buckets (probed 2026-11-15), so a bucket is
     // deleted through the location that listed it.
-    for (const [region, store] of Object.entries(storesByRegion)) {
+    for (const [region, store] of Object.entries(storesByRegion ?? {})) {
+      let listed: string[];
       try {
-        const matching = (await store.listBuckets()).filter((n) => n.startsWith(projectName));
-        for (const name of matching) {
-          console.log(`${tag} [sweep] Deleting S3 bucket ${name} (${region})`);
-          try {
-            const { objectsRemoved } = await store.emptyAndDeleteBucket(name);
-            console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-            counts.s3Buckets++;
-          } catch (bucketErr) {
-            const verdict = await classifyBucketDeleteError(bucketErr, () =>
-              store.locateBucket(name),
-            );
-            if (verdict.gone) {
-              // Stale listing: destroy already removed it. Goal state, not an
-              // enumeration failure — see bucket-already-gone.ts. Caveat: a
-              // HEAD or LIST in a new bucket's first second can leave it
-              // answering NoSuchBucket for up to 15 minutes (bucketQuietMs in
-              // hetzner-s3.js), so such a live bucket could read as gone here.
-              // No worse than before this verdict, when every error read clean.
-              console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-            } else {
-              enumFailed = true;
-              console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-            }
+        listed = await store.listBuckets();
+      } catch (listErr) {
+        enumFailed = true;
+        console.warn(
+          `${tag} [sweep] S3 bucket list failed in ${region}: ${listErr instanceof Error ? listErr.message : String(listErr)}; its leftover buckets cannot be ruled out`,
+        );
+        continue;
+      }
+      for (const name of listed.filter((n) => n.startsWith(projectName))) {
+        console.log(`${tag} [sweep] Deleting S3 bucket ${name} (${region})`);
+        try {
+          const { objectsRemoved } = await store.emptyAndDeleteBucket(name);
+          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
+          counts.s3Buckets++;
+        } catch (bucketErr) {
+          const verdict = await classifyBucketDeleteError(bucketErr, () =>
+            store.locateBucket(name),
+          );
+          if (verdict.gone) {
+            // Stale listing: destroy already removed it. Goal state, not an
+            // enumeration failure — see bucket-already-gone.ts. Caveat: a
+            // HEAD or LIST in a new bucket's first second can leave it
+            // answering NoSuchBucket for up to 15 minutes (bucketQuietMs in
+            // hetzner-s3.js), so such a live bucket could read as gone here.
+            // No worse than before this verdict, when every error read clean.
+            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
+          } else {
+            enumFailed = true;
+            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
           }
         }
-      } catch (regionErr) {
-        console.warn(
-          `${tag} [sweep] S3 region ${region} failed: ${regionErr instanceof Error ? regionErr.message : String(regionErr)}`,
-        );
       }
     }
   } catch (e) {
+    // The stores could not be built (module load), so no bucket was checked.
+    enumFailed = true;
     console.warn(`${tag} [sweep] S3 cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
