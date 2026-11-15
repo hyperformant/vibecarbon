@@ -24,6 +24,10 @@
  * k3s boot script and every provider's compose user data, not a hand list.
  * tests/unit/iac/docker-daemon-config-census.test.ts proves each compose
  * program hands its servers exactly getComposeUserData's text.
+ *
+ * Servers created before v0.54.1 never read this user data: every deploy sets
+ * the same file and value on them over SSH, ahead of its pulls
+ * (stable-flowlabel-deploy-census.test.ts).
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -138,6 +138,7 @@ import {
 } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
+import { withStableFlowLabel } from '../stable-flowlabel.js';
 import { caSlug, tlsSnapshotS3Prefix } from '../tls-snapshot.js';
 import {
   assertWalgBackupsWorking,
@@ -1501,9 +1502,13 @@ export async function prePullImages({ nodeIps, sshKeyPath, khPath, extraImages =
   if (images.length === 0 || targets.length === 0) {
     return { images: images.length, nodes: 0 };
   }
-  const script = images
-    .map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`)
-    .join('\n');
+  // This session reaches every node the deploy knows, on every deploy, as
+  // soon as k3s answers and minutes before the apply has kubelet pull
+  // anything, so it also sets the stable flow label on nodes created before
+  // v0.54.1 (../stable-flowlabel.js). Failover's standby pre-pull rides it too.
+  const script = withStableFlowLabel(
+    images.map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`).join('\n'),
+  );
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
   await Promise.all(
     targets.map((ip) =>
@@ -5905,7 +5910,10 @@ export async function deliverAppImage({
  * pulled about 15 images in the same minute. Cause found 2026-11-15: Linux
  * changed the socket's IPv6 flow label mid-download and another CDN server
  * reset it; every node now boots with that off (carbon/cloud-init/k3s/
- * _stable-flowlabel.sh, tests/unit/deploy/stable-flowlabel-census.test.ts).
+ * _stable-flowlabel.sh, tests/unit/deploy/stable-flowlabel-census.test.ts),
+ * and a master created before v0.54.1 gets it here, first in the same
+ * session as the pull (../stable-flowlabel.js). `run` is handed the script
+ * without it, so a test that runs the script locally never touches its host.
  *
  * @param {object} o
  * @param {string} o.masterIp
@@ -5923,7 +5931,12 @@ export async function pullK3sRuntimeBase({ masterIp, sshKeyPath, baseRef, run })
     '',
   ].join('\n');
   const exec =
-    run ?? ((sc) => sshRun(masterIp, sshKeyPath, ['sh', '-s'], { input: sc, timeout: 600_000 }));
+    run ??
+    ((sc) =>
+      sshRun(masterIp, sshKeyPath, ['sh', '-s'], {
+        input: withStableFlowLabel(sc),
+        timeout: 600_000,
+      }));
   try {
     await exec(script);
   } catch (err) {

@@ -246,6 +246,17 @@ const REGISTRY = [
     consumers: ['src/lib/deploy/k8s/gitops-deploy.js', 'src/upgrade.js'],
     deepTests: ['tests/unit/deploy/flux-placeholders.test.ts'],
   },
+  {
+    // The stable IPv6 flow label for servers created before v0.54.1: compose's
+    // first command per server and k8s's base pull and pre-pull per node.
+    helper: 'withStableFlowLabel',
+    definition: 'src/lib/deploy/stable-flowlabel.js',
+    consumers: ['src/lib/deploy/compose/db-ledger-preflight.js', 'src/lib/deploy/k8s/k3s.js'],
+    deepTests: [
+      'tests/unit/deploy/stable-flowlabel-deploy-census.test.ts',
+      'tests/unit/deploy/stable-flowlabel-census.test.ts',
+    ],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
