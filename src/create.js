@@ -1624,7 +1624,6 @@ ${formatDotenvLine('VITE_PLAUSIBLE_SCRIPT_URL', 'https://plausible.io/js/script.
 # These control which services appear in the admin dashboard
 # Set automatically when using 'vibecarbon add' or manual docker-compose files
 
-${formatDotenvLine('VITE_N8N_ENABLED', 'false')}
 ${formatDotenvLine('VITE_OBSERVABILITY_ENABLED', 'false')}
 
 # =============================================================================

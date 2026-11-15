@@ -114,7 +114,6 @@ const envLines = [
   formatDotenvLine('S3_SECRET_KEY', DEV.S3_SECRET_KEY),
   '',
   '# Optional services',
-  formatDotenvLine('VITE_N8N_ENABLED', 'false'),
   formatDotenvLine('VITE_OBSERVABILITY_ENABLED', 'false'),
   '',
   '# Analytics (Plausible - leave empty to disable)',

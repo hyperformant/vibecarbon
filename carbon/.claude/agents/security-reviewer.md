@@ -72,7 +72,7 @@ For every review, systematically evaluate changes against these security domains
   - Verify resource limits are set (prevents DoS).
   - Check RBAC configurations for least-privilege.
   - Ensure ingress has TLS configured.
-  - ForwardAuth must be configured for admin services (the Traefik dashboard, n8n, Metabase, Grafana).
+  - ForwardAuth must be configured for admin services (the Traefik dashboard, Grafana, any other admin add-on).
 - **Single public origin:** Traefik routes every public path to the app. Flag any new router that exposes another service publicly, any published database port, and any admin API reachable without ForwardAuth.
 
 ### 6. Frontend Security

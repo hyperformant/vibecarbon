@@ -120,10 +120,8 @@ cd test-app && npm run dev:start
 |-----------------|--------------|-------|
 | `docker-compose.yml` | `docker-compose.override.yml` | Core services (db, traefik, app, local S3) |
 | `docker-compose.observability.yml` | `docker-compose.observability.override.yml` | Grafana: volumes + no ForwardAuth (installed via `vibecarbon add observability`) |
-| `docker-compose.n8n.yml` | `docker-compose.n8n.override.yml` | n8n: no ForwardAuth |
-| `docker-compose.metabase.yml` | `docker-compose.metabase.override.yml` | Metabase: no ForwardAuth |
 
-> Optional services (observability, n8n, metabase, redis) are installed on
+> Optional services (observability, redis) are installed on
 > demand with `vibecarbon add <service>`; their compose overlays and config
 > files only appear after that.
 
@@ -165,12 +163,10 @@ Check if the service has restrictions on:
 
 Ensure both files have identical structure - only values should differ.
 
-### Admin services (n8n, Metabase, Grafana) in development
+### Admin services (Grafana) in development
 
-In production, these services use Traefik ForwardAuth to require `super_admin` role. In development, ForwardAuth is disabled via service-specific override files:
+In production, admin services use Traefik ForwardAuth to require `super_admin` role. In development, ForwardAuth is disabled via service-specific override files, such as:
 
-- `docker-compose.n8n.override.yml`
-- `docker-compose.metabase.override.yml`
 - `docker-compose.observability.override.yml`
 
 These override files set `traefik.http.routers.{service}.middlewares=` (empty) to remove the ForwardAuth requirement. Docker Compose labels are **additive**, so you must explicitly set the middleware label to empty to override it.
@@ -178,5 +174,5 @@ These override files set `traefik.http.routers.{service}.middlewares=` (empty) t
 **If you get 401 errors:**
 
 1. Ensure the override files are included in your compose command
-2. Force recreate the containers: `docker compose ... up -d --force-recreate n8n metabase grafana`
-3. Verify the router has no middlewares: `curl http://traefik.localhost/api/http/routers/n8n@docker | jq .middlewares`
+2. Force recreate the containers: `docker compose ... up -d --force-recreate grafana`
+3. Verify the router has no middlewares: `curl http://traefik.localhost/api/http/routers/grafana@docker | jq .middlewares`
