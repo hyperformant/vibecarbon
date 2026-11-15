@@ -65,6 +65,7 @@ function fakeStore(overrides: Partial<StoreLike> = {}): StoreLike {
   return {
     listBuckets: vi.fn().mockResolvedValue([]),
     emptyAndDeleteBucket: vi.fn().mockResolvedValue({ objectsRemoved: 0 }),
+    locateBucket: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
@@ -87,6 +88,13 @@ function fakeFetch(pages: Record<string, unknown>): typeof fetch {
 }
 
 const TAG = '[test]';
+
+/** What the sweep's delete threw in run 43757126064 (real SDK shape). */
+const STALE_LISTING_ERROR = Object.assign(new Error('UnknownError'), {
+  name: 'NoSuchBucket',
+  Code: 'NoSuchBucket',
+  $metadata: { httpStatusCode: 404 },
+});
 
 describe('sweepOrphanedScalewayResources', () => {
   it('zone/region constants stay in lockstep with the live provider classes', () => {
@@ -282,6 +290,43 @@ describe('sweepOrphanedScalewayResources', () => {
     expect(frDelete).toHaveBeenCalledWith('testapp-s1-backups');
     expect(amsDelete).toHaveBeenCalledWith('testapp-s1-state');
     expect(counts.s3Buckets).toBe(2);
+  });
+
+  it('a bucket destroy removed seconds earlier reads clean once no region holds it', async () => {
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const stores: NonNullable<StoresLike> = {
+      'fr-par': fakeStore({
+        listBuckets: vi.fn().mockResolvedValue(['testapp-s1-backups']),
+        emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+        locateBucket,
+      }),
+      'nl-ams': fakeStore(),
+    };
+    const { counts, enumFailed } = await sweepOrphanedScalewayResources(TAG, 'testapp-s1', {
+      provider: fakeProvider(),
+      objectStorageByRegion: stores,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(locateBucket).toHaveBeenCalledWith('testapp-s1-backups');
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('a NoSuchBucket for a bucket some region still holds FAILS the sweep', async () => {
+    const stores: NonNullable<StoresLike> = {
+      'fr-par': fakeStore({
+        listBuckets: vi.fn().mockResolvedValue(['testapp-s1-backups']),
+        emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+        locateBucket: vi.fn().mockResolvedValue('nl-ams'),
+      }),
+      'nl-ams': fakeStore(),
+    };
+    const { enumFailed } = await sweepOrphanedScalewayResources(TAG, 'testapp-s1', {
+      provider: fakeProvider(),
+      objectStorageByRegion: stores,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(enumFailed).toBe(true);
   });
 
   it('marks enumeration incomplete (enumFailed) when a listing cannot be walked', async () => {

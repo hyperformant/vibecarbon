@@ -45,7 +45,7 @@
  * unattached pvc-* volume is REPORTED, never deleted.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { isBucketAlreadyGone } from './bucket-already-gone.js';
+import { classifyBucketDeleteError } from './bucket-already-gone.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately
@@ -94,6 +94,11 @@ interface ScalewaySweepObjectStorage {
   /** Bucket names visible in ONE region; null = unreadable. */
   listBuckets(): Promise<string[] | null>;
   emptyAndDeleteBucket(name: string): Promise<{ objectsRemoved: number }>;
+  /**
+   * The region holding the bucket (a HeadBucket in every region the keys
+   * reach), or null when none does; throws when a region cannot tell.
+   */
+  locateBucket(name: string): Promise<string | null>;
 }
 
 export interface ScalewaySweepDeps {
@@ -148,6 +153,10 @@ async function defaultObjectStorage(
     },
     async emptyAndDeleteBucket(name: string) {
       return provider.emptyAndDeleteBucket(name);
+    },
+    async locateBucket(name: string) {
+      // Scaleway keys reach both regions (keyRegions 'all'): fr-par and nl-ams.
+      return provider.locateBucket(name);
     },
   };
 }
@@ -489,15 +498,14 @@ export async function sweepOrphanedScalewayResources(
         console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
         counts.s3Buckets++;
       } catch (err) {
-        if (isBucketAlreadyGone(err)) {
+        const verdict = await classifyBucketDeleteError(err, () => store.locateBucket(name));
+        if (verdict.gone) {
           // Stale listing: destroy already removed it. Goal state, not an
           // enumeration failure — see bucket-already-gone.ts.
-          console.log(`${tag} [sweep]   ${name} already gone (stale listing) — already clean`);
+          console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
         } else {
           enumFailed = true;
-          console.warn(
-            `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
         }
       }
     }

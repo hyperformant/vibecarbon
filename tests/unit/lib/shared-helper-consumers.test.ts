@@ -65,7 +65,11 @@ const REGISTRY = [
     deepTests: ['tests/unit/lib/delete-apex-and-wildcard.test.ts'],
   },
   {
-    helper: 'isBucketAlreadyGone',
+    // A stale listing names a bucket destroy already removed; its delete
+    // answers "no such bucket" by code, status or words (run 43757126064:
+    // only the code, the message was "UnknownError"). The census catches a
+    // new bucket-delete catch that skips this helper.
+    helper: 'classifyBucketDeleteError',
     definition: 'tests/e2e/utils/bucket-already-gone.ts',
     consumers: [
       'tests/e2e/utils/sweep-digitalocean.ts', // Spaces bucket delete
@@ -73,7 +77,10 @@ const REGISTRY = [
       'tests/e2e/utils/sweep-linode.ts', // Object Storage bucket delete
       'tests/e2e/utils/sweep-scaleway.ts', // Object Storage bucket delete
     ],
-    deepTests: ['tests/unit/e2e/bucket-already-gone.test.ts'],
+    deepTests: [
+      'tests/unit/e2e/bucket-already-gone.test.ts',
+      'tests/unit/e2e/bucket-gone-census.test.ts',
+    ],
   },
   {
     helper: 'e2eCliEnv',
