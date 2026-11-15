@@ -2,44 +2,44 @@
   "providers": {
     "hetzner": {
       "run": {
-        "id": "1904abc",
-        "date": "2026-11-07",
+        "id": "0fc23e9",
+        "date": "2026-11-15",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 111592,
-          "warm-deploy": 25824,
-          "scale": 156470,
-          "backup": 4243,
-          "destroy": 22739,
-          "restore": 156273
+          "deploy": 109400,
+          "warm-deploy": 31725,
+          "scale": 131825,
+          "backup": 4204,
+          "destroy": 25486,
+          "restore": 195175
         },
         "compose-ha": {
-          "deploy": 169400,
-          "warm-deploy": 50120,
-          "scale": 187583,
-          "backup": 5747,
-          "destroy": 27282,
-          "restore": 171394,
-          "failover": 43758
+          "deploy": 151404,
+          "warm-deploy": 48447,
+          "scale": 153189,
+          "backup": 4793,
+          "destroy": 21132,
+          "restore": 183458,
+          "failover": 56071
         },
         "k8s": {
-          "deploy": 164538,
-          "warm-deploy": 11084,
-          "scale": 181571,
-          "backup": 24806,
-          "destroy": 105561,
-          "restore": 119765
+          "deploy": 217831,
+          "warm-deploy": 13499,
+          "scale": 155423,
+          "backup": 31330,
+          "destroy": 116212,
+          "restore": 95435
         },
         "k8s-ha": {
-          "deploy": 253921,
-          "warm-deploy": 26802,
-          "scale": 300403,
-          "backup": 23745,
-          "destroy": 120014,
-          "restore": 150243,
-          "failover": 219283
+          "deploy": 237056,
+          "warm-deploy": 29036,
+          "scale": 220580,
+          "backup": 24723,
+          "destroy": 119998,
+          "restore": 153180,
+          "failover": 186185
         }
       }
     },
@@ -114,53 +114,53 @@
     },
     "vultr": {
       "run": {
-        "id": "1870cad",
-        "date": "2026-11-07",
+        "id": "a68f139",
+        "date": "2026-11-15",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 152555,
-          "warm-deploy": 39508,
-          "scale": 186691,
-          "backup": 5071,
-          "destroy": 18027,
-          "restore": 281889
+          "deploy": 151550,
+          "warm-deploy": 48952,
+          "scale": 125058,
+          "backup": 4595,
+          "destroy": 17918,
+          "restore": 182718
         },
         "compose-ha": {
-          "deploy": 213838,
-          "warm-deploy": 48814,
-          "scale": 220191,
-          "backup": 4862,
-          "destroy": 23123,
-          "restore": 678274,
-          "failover": 89663
+          "deploy": 233500,
+          "warm-deploy": 77240,
+          "scale": 142710,
+          "backup": 3599,
+          "destroy": 12817,
+          "restore": 247047,
+          "failover": 29701
         }
       }
     },
     "scaleway": {
       "run": {
-        "id": "109d04a",
-        "date": "2026-11-12",
+        "id": "8ec8337",
+        "date": "2026-11-15",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 152241,
-          "warm-deploy": 49752,
-          "scale": 182418,
-          "backup": 5484,
-          "destroy": 29657,
-          "restore": 177313
+          "deploy": 143434,
+          "warm-deploy": 16670,
+          "scale": 147963,
+          "backup": 4994,
+          "destroy": 28960,
+          "restore": 165504
         },
         "compose-ha": {
-          "deploy": 317820,
-          "warm-deploy": 91861,
-          "scale": 310176,
-          "backup": 6716,
-          "destroy": 41174,
-          "restore": 262519,
-          "failover": 62789
+          "deploy": 217267,
+          "warm-deploy": 28356,
+          "scale": 274641,
+          "backup": 37932,
+          "destroy": 81579,
+          "restore": 266884,
+          "failover": 55614
         }
       }
     }
