@@ -20,13 +20,13 @@
           "ownedS": 335,
           "endToEndS": 395,
           "tlsAllowanceS": 60,
-          "samples": 6
+          "samples": 8
         },
         "regular": {
-          "ownedS": 390,
-          "endToEndS": 450,
+          "ownedS": 400,
+          "endToEndS": 460,
           "tlsAllowanceS": 60,
-          "samples": 6
+          "samples": 7
         }
       },
       "compose": {
@@ -40,7 +40,7 @@
           "ownedS": 280,
           "endToEndS": 340,
           "tlsAllowanceS": 60,
-          "samples": 16
+          "samples": 19
         }
       },
       "k8s-ha": {
@@ -63,10 +63,10 @@
           "samples": 6
         },
         "regular": {
-          "ownedS": 435,
-          "endToEndS": 495,
+          "ownedS": 450,
+          "endToEndS": 510,
           "tlsAllowanceS": 60,
-          "samples": 4
+          "samples": 6
         }
       },
       "k8s": {
@@ -83,10 +83,10 @@
           "samples": 1
         },
         "regular": {
-          "ownedS": 410,
-          "endToEndS": 535,
+          "ownedS": 400,
+          "endToEndS": 525,
           "tlsAllowanceS": 125,
-          "samples": 13
+          "samples": 16
         }
       }
     },
@@ -99,10 +99,10 @@
           "samples": 9
         },
         "cpx": {
-          "ownedS": 305,
-          "endToEndS": 365,
+          "ownedS": 290,
+          "endToEndS": 350,
           "tlsAllowanceS": 60,
-          "samples": 9
+          "samples": 10
         },
         "cx": {
           "ownedS": 405,
@@ -119,10 +119,10 @@
           "samples": 3
         },
         "cpx": {
-          "ownedS": 240,
-          "endToEndS": 300,
+          "ownedS": 230,
+          "endToEndS": 290,
           "tlsAllowanceS": 60,
-          "samples": 7
+          "samples": 8
         },
         "cx": {
           "ownedS": 245,
@@ -139,10 +139,10 @@
           "samples": 6
         },
         "cpx": {
-          "ownedS": 425,
-          "endToEndS": 555,
+          "ownedS": 420,
+          "endToEndS": 550,
           "tlsAllowanceS": 130,
-          "samples": 9
+          "samples": 10
         },
         "cx": {
           "ownedS": 440,
@@ -162,7 +162,7 @@
           "ownedS": 360,
           "endToEndS": 420,
           "tlsAllowanceS": 60,
-          "samples": 9
+          "samples": 10
         },
         "cx": {
           "ownedS": 410,
@@ -178,48 +178,31 @@
           "ownedS": 375,
           "endToEndS": 435,
           "tlsAllowanceS": 60,
-          "samples": 13
+          "samples": 15
         }
       },
       "compose": {
         "standard": {
-          "ownedS": 335,
-          "endToEndS": 420,
+          "ownedS": 330,
+          "endToEndS": 415,
           "tlsAllowanceS": 85,
-          "samples": 13
-        }
-      },
-      "k8s": {
-        "standard": {
-          "ownedS": 400,
-          "endToEndS": 475,
-          "tlsAllowanceS": 75,
-          "samples": 0,
-          "seededFrom": [
-            "digitalocean/k8s/amd",
-            "digitalocean/k8s/any",
-            "digitalocean/k8s/regular",
-            "hetzner/k8s/any",
-            "hetzner/k8s/cpx",
-            "hetzner/k8s/cx"
-          ]
+          "samples": 15
         }
       },
       "k8s-ha": {
         "standard": {
-          "ownedS": 440,
-          "endToEndS": 510,
-          "tlsAllowanceS": 70,
-          "samples": 0,
-          "seededFrom": [
-            "digitalocean/k8s-ha/amd",
-            "digitalocean/k8s-ha/any",
-            "digitalocean/k8s-ha/intel",
-            "digitalocean/k8s-ha/regular",
-            "hetzner/k8s-ha/any",
-            "hetzner/k8s-ha/cpx",
-            "hetzner/k8s-ha/cx"
-          ]
+          "ownedS": 530,
+          "endToEndS": 590,
+          "tlsAllowanceS": 60,
+          "samples": 5
+        }
+      },
+      "k8s": {
+        "standard": {
+          "ownedS": 490,
+          "endToEndS": 550,
+          "tlsAllowanceS": 60,
+          "samples": 2
         }
       }
     },
@@ -235,7 +218,7 @@
           "ownedS": 490,
           "endToEndS": 550,
           "tlsAllowanceS": 60,
-          "samples": 10
+          "samples": 11
         }
       },
       "compose": {
@@ -249,7 +232,7 @@
           "ownedS": 260,
           "endToEndS": 320,
           "tlsAllowanceS": 60,
-          "samples": 10
+          "samples": 11
         }
       }
     },
@@ -262,10 +245,10 @@
           "samples": 1
         },
         "vc2": {
-          "ownedS": 385,
-          "endToEndS": 445,
+          "ownedS": 390,
+          "endToEndS": 450,
           "tlsAllowanceS": 60,
-          "samples": 12
+          "samples": 13
         }
       },
       "compose": {
@@ -276,10 +259,10 @@
           "samples": 1
         },
         "vc2": {
-          "ownedS": 290,
-          "endToEndS": 350,
+          "ownedS": 285,
+          "endToEndS": 345,
           "tlsAllowanceS": 60,
-          "samples": 11
+          "samples": 12
         }
       }
     }
