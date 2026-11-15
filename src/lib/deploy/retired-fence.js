@@ -92,7 +92,10 @@ const FLUX_SUSPENDED_BY_VALUE = 'retired-fence';
 /** The app Deployment the k8s fence zeroes (k8s/base/app/deployment.yaml). */
 const K8S_APP_DEPLOYMENT = 'app';
 const NS = 'vibecarbon';
-/** The Flux Kustomizations of k8s/flux/clusters/*: vibecarbon-base and its overlays. */
+/**
+ * The Flux Kustomizations the fence suspends: every vibecarbon-* one, which
+ * is vibecarbon-base (k8s/flux/clusters/*) and any an operator added.
+ */
 const FLUX_NS = 'flux-system';
 const FLUX_KUSTOMIZATION = 'kustomizations.kustomize.toolkit.fluxcd.io';
 const FLUX_PREFIX = 'vibecarbon-';

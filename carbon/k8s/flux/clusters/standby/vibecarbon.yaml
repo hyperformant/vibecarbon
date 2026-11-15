@@ -1,12 +1,14 @@
 ---
-# Flux GitRepository + Kustomizations for the standby cluster (HA setup).
+# Flux GitRepository + Kustomization for the standby cluster (HA setup).
 #
 # Mirror of clusters/primary/vibecarbon.yaml. The standby runs the same base
 # resources; its db StatefulSet streams from the primary's, and its app tier
 # stays at zero replicas until a failover. The path layout + templating is
-# identical.
+# identical: one Kustomization, vibecarbon-base, at ./k8s/base.
 #
-# Applied once by the deploy workflow at first standby-cluster bootstrap.
+# The deploy workflow (.github/workflows/deploy.yml) applies
+# clusters/primary/vibecarbon.yaml on every cluster, the standby's too, so
+# today no workflow applies this file.
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -135,21 +137,3 @@ spec:
       kind: Deployment
       name: local-registry
       namespace: vibecarbon
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: vibecarbon-production-hel1
-  namespace: flux-system
-spec:
-  interval: 10m
-  targetNamespace: vibecarbon
-  sourceRef:
-    kind: GitRepository
-    name: vibecarbon
-  path: ./k8s/overlays/production-hel1
-  prune: true
-  wait: true
-  timeout: 10m
-  dependsOn:
-    - name: vibecarbon-base

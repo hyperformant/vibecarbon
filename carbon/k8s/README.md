@@ -38,12 +38,11 @@ k8s/
 │   └── traefik/                  # Ingress controller
 ├── infra/                         # Infrastructure-level resources (applied once)
 │   └── cert-manager-resources/   # ClusterIssuers for TLS certificates
-├── overlays/                      # Environment-specific patches
-│   ├── production-nbg1/          # Primary region (Nuremberg)
-│   └── production-hel1/          # Standby region (Helsinki)
-└── flux/                          # GitOps configuration
+├── overlays/
+│   └── production/               # Example overlay on top of base (nothing applies it)
+└── flux/                          # GitOps configuration (vibecarbon configure cicd)
     └── clusters/
-        ├── primary/
+        ├── primary/              # One Flux Kustomization, vibecarbon-base, at ./k8s/base
         └── standby/
 ```
 
@@ -101,26 +100,21 @@ hands it to the cluster on every deploy (kube-system/hcloud on Hetzner) and
 restarts what reads it when it changes, so a rotated token takes effect on
 your next deploy.
 
-### Step 4: Deploy to Primary Cluster
+### Step 4: Apply the Manifests
+
+`vibecarbon deploy` (Step 1) already applied `k8s/base` to the cluster, and
+for HA to the standby cluster too. It fills in the deploy-time values first
+(the domain, images, storage class and more), so run it again after you change
+a manifest:
 
 ```bash
-export KUBECONFIG=kubeconfig-nbg1.yaml
-
-# Using kustomize
-kubectl apply -k overlays/production-nbg1
-
-# Or using kubectl
-kustomize build overlays/production-nbg1 | kubectl apply -f -
+vibecarbon deploy production
 ```
 
-### Step 5: Deploy to Standby Cluster
+A plain `kubectl apply -k` of `base/` or `overlays/production/` would apply
+those values unfilled.
 
-```bash
-export KUBECONFIG=kubeconfig-hel1.yaml
-kubectl apply -k overlays/production-hel1
-```
-
-### Step 6: Verify Deployment
+### Step 5: Verify Deployment
 
 ```bash
 # Check pods

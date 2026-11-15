@@ -528,16 +528,3 @@ export function findProjectRoot(startDir = process.cwd()) {
     dir = parent;
   }
 }
-
-/**
- * Check if K8s HA overlay directories exist
- *
- * @param {string} [cwd] - Working directory (defaults to process.cwd())
- * @returns {boolean}
- */
-export function isHAConfigured(cwd = process.cwd()) {
-  return (
-    existsSync(join(cwd, 'k8s/overlays/production-hel1')) ||
-    existsSync(join(cwd, 'k8s/overlays/production-nbg1'))
-  );
-}

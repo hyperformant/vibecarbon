@@ -83,8 +83,8 @@ A BI tool or script that needs the database runs next to it (an add-on such as M
 ├── docker-compose.observability.yml # Optional: Grafana, Prometheus, Loki (via `vibecarbon add observability`)
 ├── docker-compose.n8n.yml           # Optional: n8n workflow automation
 ├── docker-compose.metabase.yml      # Optional: Metabase analytics
-├── k8s/                             # Kubernetes manifests with Kustomize overlays
-└── k8s/overlays/                    # Optional: HA multi-region overlays
+├── k8s/                             # Kubernetes manifests (deploy applies k8s/base)
+└── k8s/overlays/                    # Example overlay on top of k8s/base (no deploy applies it)
 ```
 
 ### Composition Examples

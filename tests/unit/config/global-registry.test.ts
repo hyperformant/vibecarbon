@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   cleanStaleProjects,
   hasDockerCompose,
-  isHAConfigured,
   loadGlobalRegistry,
   registerProject,
 } from '../../../src/lib/config.js';
@@ -144,26 +143,6 @@ describe('Global Project Registry', () => {
       const dir = join(tempBase, 'empty');
       mkdirSync(dir, { recursive: true });
       expect(hasDockerCompose(dir)).toBe(false);
-    });
-  });
-
-  describe('isHAConfigured', () => {
-    it('returns true when K8s overlay dirs exist', () => {
-      const dir = join(tempBase, 'ha-project');
-      mkdirSync(join(dir, 'k8s/overlays/production-hel1'), { recursive: true });
-      expect(isHAConfigured(dir)).toBe(true);
-    });
-
-    it('returns true when nbg1 overlay exists', () => {
-      const dir = join(tempBase, 'ha-project2');
-      mkdirSync(join(dir, 'k8s/overlays/production-nbg1'), { recursive: true });
-      expect(isHAConfigured(dir)).toBe(true);
-    });
-
-    it('returns false when no overlay dirs exist', () => {
-      const dir = join(tempBase, 'no-ha');
-      mkdirSync(dir, { recursive: true });
-      expect(isHAConfigured(dir)).toBe(false);
     });
   });
 });
