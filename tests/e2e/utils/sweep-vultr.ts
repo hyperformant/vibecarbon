@@ -37,7 +37,7 @@
  * the k8s tier, kept now so the family stays uniform.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { isBucketAlreadyGone } from './bucket-already-gone.js';
+import { classifyBucketDeleteError } from './bucket-already-gone.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately EMPTY
@@ -86,6 +86,11 @@ interface VultrSweepObjectStorage {
    */
   listBuckets(): Promise<string[] | null>;
   emptyAndDeleteBucket(name: string): Promise<{ objectsRemoved: number }>;
+  /**
+   * The region holding the bucket (a HeadBucket in every region the keys
+   * reach), or null when none does; throws when a region cannot tell.
+   */
+  locateBucket(name: string): Promise<string | null>;
 }
 
 export interface VultrSweepDeps {
@@ -140,6 +145,10 @@ async function defaultObjectStorage(
     },
     async emptyAndDeleteBucket(name: string) {
       return provider.emptyAndDeleteBucket(name);
+    },
+    async locateBucket(name: string) {
+      // Vultr keys work on their own cluster only (keyRegions 'own').
+      return provider.locateBucket(name);
     },
   };
 }
@@ -458,15 +467,16 @@ export async function sweepOrphanedVultrResources(
           console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
           counts.s3Buckets++;
         } catch (err) {
-          if (isBucketAlreadyGone(err)) {
+          const verdict = await classifyBucketDeleteError(err, () =>
+            objectStorage.locateBucket(name),
+          );
+          if (verdict.gone) {
             // Stale listing: destroy already removed it. Goal state, not an
             // enumeration failure — see bucket-already-gone.ts.
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing) — already clean`);
+            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
           } else {
             enumFailed = true;
-            console.warn(
-              `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
-            );
+            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
           }
         }
       }

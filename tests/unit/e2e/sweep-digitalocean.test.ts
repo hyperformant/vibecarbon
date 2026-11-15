@@ -44,6 +44,7 @@ function fakeSpaces(overrides: Partial<NonNullable<SpacesLike>> = {}): NonNullab
     regions: () => ['nyc3', 'sfo3'],
     listBuckets: vi.fn().mockResolvedValue([]),
     emptyAndDeleteBucket: vi.fn().mockResolvedValue({ objectsRemoved: 0 }),
+    locateBucket: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
@@ -101,6 +102,13 @@ function doTagFetch(
 }
 
 const TAG = '[test]';
+
+/** What the sweep's delete threw in run 43757126064 (real SDK shape). */
+const STALE_LISTING_ERROR = Object.assign(new Error('UnknownError'), {
+  name: 'NoSuchBucket',
+  Code: 'NoSuchBucket',
+  $metadata: { httpStatusCode: 404 },
+});
 
 describe('sweepOrphanedDigitalOceanResources', () => {
   it('refuses to sweep with an empty project name (an empty prefix matches everything)', async () => {
@@ -221,8 +229,9 @@ describe('sweepOrphanedDigitalOceanResources', () => {
   it('sweeps prefix-matching Spaces buckets once across regions', async () => {
     const spaces = fakeSpaces({
       regions: () => ['nyc3', 'sfo3'],
-      // The same bucket shows up in both regions' listings (DO ListBuckets is
-      // account-wide) — it must be deleted exactly once.
+      // The dedupe guard: a name in two regions' listings is deleted once.
+      // (Live, each endpoint lists only its own region's buckets; probed
+      // 2026-11-15.)
       listBuckets: vi.fn().mockResolvedValue(['testapp-d3-backups', 'unrelated-bucket']),
       emptyAndDeleteBucket: vi.fn().mockResolvedValue({ objectsRemoved: 3 }),
     });
@@ -233,6 +242,42 @@ describe('sweepOrphanedDigitalOceanResources', () => {
     });
     expect(spaces.emptyAndDeleteBucket).toHaveBeenCalledTimes(1);
     expect(counts.s3Buckets).toBe(1);
+  });
+
+  it('a bucket destroy removed seconds earlier reads clean once no region holds it (run 43757126064)', async () => {
+    // For 1-3 s after a delete, Spaces still lists the bucket and answers
+    // ListObjectsV2 with a 404 NoSuchBucket whose message is empty, which the
+    // SDK words "UnknownError" (shape pinned in bucket-already-gone.test.ts).
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const spaces = fakeSpaces({
+      regions: () => ['nyc3'],
+      listBuckets: vi.fn().mockResolvedValue(['testapp-d3-backups']),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket,
+    });
+    const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider: fakeProvider(),
+      spaces,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(locateBucket).toHaveBeenCalledWith('nyc3', 'testapp-d3-backups');
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('a NoSuchBucket for a bucket some region still holds FAILS the sweep', async () => {
+    const spaces = fakeSpaces({
+      regions: () => ['nyc3'],
+      listBuckets: vi.fn().mockResolvedValue(['testapp-d3-backups']),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket: vi.fn().mockResolvedValue('sfo3'),
+    });
+    const { enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider: fakeProvider(),
+      spaces,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(enumFailed).toBe(true);
   });
 
   it('NEVER deletes the vc-local-e2e anchor Space, even when the prefix matches', async () => {

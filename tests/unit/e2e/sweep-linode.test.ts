@@ -48,6 +48,7 @@ function fakeStorage(overrides: Partial<NonNullable<StorageLike>> = {}): NonNull
   return {
     listAllBuckets: vi.fn().mockResolvedValue([]),
     emptyAndDeleteBucket: vi.fn().mockResolvedValue({ objectsRemoved: 0 }),
+    locateBucket: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
@@ -107,6 +108,13 @@ function linodeTagFetch(
 }
 
 const TAG = '[test]';
+
+/** What the sweep's delete threw in run 43757126064 (real SDK shape). */
+const STALE_LISTING_ERROR = Object.assign(new Error('UnknownError'), {
+  name: 'NoSuchBucket',
+  Code: 'NoSuchBucket',
+  $metadata: { httpStatusCode: 404 },
+});
 
 describe('sweepOrphanedLinodeResources', () => {
   it('refuses to sweep with an empty project name (an empty prefix matches everything)', async () => {
@@ -340,6 +348,41 @@ describe('sweepOrphanedLinodeResources', () => {
     expect(emptyAndDeleteBucket).toHaveBeenCalledTimes(1);
     expect(emptyAndDeleteBucket).toHaveBeenCalledWith('us-iad-10', 'testapp-l1-backups');
     expect(counts.s3Buckets).toBe(1);
+  });
+
+  it('a bucket destroy removed seconds earlier reads clean once its cluster has none', async () => {
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const storage = fakeStorage({
+      listAllBuckets: vi
+        .fn()
+        .mockResolvedValue([{ name: 'testapp-l1-backups', cluster: 'us-iad-10' }]),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket,
+    });
+    const { counts, enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
+      provider: fakeProvider(),
+      objectStorage: storage,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(locateBucket).toHaveBeenCalledWith('us-iad-10', 'testapp-l1-backups');
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('a NoSuchBucket for a bucket the cluster still holds FAILS the sweep', async () => {
+    const storage = fakeStorage({
+      listAllBuckets: vi
+        .fn()
+        .mockResolvedValue([{ name: 'testapp-l1-backups', cluster: 'us-iad-10' }]),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket: vi.fn().mockResolvedValue('us-iad-10'),
+    });
+    const { enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
+      provider: fakeProvider(),
+      objectStorage: storage,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(enumFailed).toBe(true);
   });
 
   it('marks enumeration incomplete (enumFailed) when a listing cannot be walked', async () => {

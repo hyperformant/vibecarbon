@@ -23,7 +23,7 @@
  * never deleted — better a loud leak than a cross-run data loss.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { isBucketAlreadyGone } from './bucket-already-gone.js';
+import { classifyBucketDeleteError } from './bucket-already-gone.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
@@ -59,6 +59,11 @@ interface DoSweepSpaces {
   /** Bucket names visible from this region's endpoint; null = unreadable. */
   listBuckets(region: string): Promise<string[] | null>;
   emptyAndDeleteBucket(region: string, name: string): Promise<{ objectsRemoved: number }>;
+  /**
+   * The region holding the bucket (a HeadBucket in every region the keys
+   * reach), or null when none does; throws when a region cannot tell.
+   */
+  locateBucket(region: string, name: string): Promise<string | null>;
 }
 
 export interface DoSweepDeps {
@@ -106,6 +111,9 @@ async function defaultSpaces(key: string, secret: string): Promise<DoSweepSpaces
     async emptyAndDeleteBucket(region: string, name: string) {
       const provider = new DigitalOceanSpacesProvider(key, secret, region);
       return provider.emptyAndDeleteBucket(name);
+    },
+    async locateBucket(region: string, name: string) {
+      return new DigitalOceanSpacesProvider(key, secret, region).locateBucket(name);
     },
   };
 }
@@ -443,9 +451,10 @@ export async function sweepOrphanedDigitalOceanResources(
     console.warn(`${tag} [sweep] Reserved IP check failed: ${e instanceof Error ? e.message : e}`);
   }
 
-  // 4. Spaces buckets. DO's ListBuckets is account-wide from any regional
-  // endpoint, so the same bucket can appear in several regions' listings —
-  // dedupe by name and let emptyAndDeleteBucket resolve the right region.
+  // 4. Spaces buckets. Each regional endpoint lists only its own region's
+  // buckets (probed 2026-11-15: nyc3 and sfo3 list disjoint sets) and
+  // answers NoSuchBucket for another region's, so a bucket is deleted
+  // through the region that listed it. The dedupe by name stays as a guard.
   let spaces = deps.spaces;
   if (!spaces) {
     const key = deps.spacesKey ?? process.env.DIGITALOCEAN_ACCESS_KEY;
@@ -486,15 +495,16 @@ export async function sweepOrphanedDigitalOceanResources(
           console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
           counts.s3Buckets++;
         } catch (err) {
-          if (isBucketAlreadyGone(err)) {
+          const verdict = await classifyBucketDeleteError(err, () =>
+            spaces.locateBucket(region, name),
+          );
+          if (verdict.gone) {
             // Stale listing: destroy already removed it. Goal state, not an
             // enumeration failure — see bucket-already-gone.ts.
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing) — already clean`);
+            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
           } else {
             enumFailed = true;
-            console.warn(
-              `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
-            );
+            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
           }
         }
       }
