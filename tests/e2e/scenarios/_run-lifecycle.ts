@@ -126,6 +126,7 @@ import {
   isClusterScopedStep,
 } from '../utils/cluster-diagnostics.js';
 import { hcloudChildEnv } from '../utils/compute-token.js';
+import { capTail, DIAGNOSTIC_SECTION_MAX_CHARS } from '../utils/diagnostic-cap.js';
 import {
   failoverFlipsRecord,
   postFailoverResolutionPin,
@@ -541,27 +542,29 @@ async function captureFailureDiagnostics(
   // kubectl returns or it can't reach the API). 30s was the old default;
   // padding ~5 commands × 30s added 2.5min to every failure-diagnostic
   // capture. Curl gets its own 10s --max-time arg already; safe to lower.
+  // Each section's command bounds its own lines; maxChars is only a runaway
+  // guard, and a cut keeps the newest lines (see utils/diagnostic-cap.ts).
   const safeRun = (
     cmd: string,
     argv: readonly string[],
     timeoutMs = 10_000,
-    maxChars = 4000,
+    maxChars = DIAGNOSTIC_SECTION_MAX_CHARS,
   ): string => {
     try {
-      return execFileSync(cmd, argv, {
+      const out = execFileSync(cmd, argv, {
         encoding: 'utf8',
         timeout: timeoutMs,
         stdio: ['ignore', 'pipe', 'pipe'],
         maxBuffer: 4 * 1024 * 1024,
       })
         .toString()
-        .trim()
-        .slice(0, maxChars);
+        .trim();
+      return capTail(out, maxChars);
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stdout?: Buffer; stderr?: Buffer };
       const stdout = e?.stdout?.toString?.()?.trim() ?? '';
       const stderr = e?.stderr?.toString?.()?.trim() ?? '';
-      const tail = [stdout, stderr].filter(Boolean).join('\n').slice(0, maxChars);
+      const tail = capTail([stdout, stderr].filter(Boolean).join('\n'), maxChars);
       const reason = e?.message?.split('\n')[0] || 'unknown';
       // Best-effort but LOUD: a capture that silently degrades to "(cmd
       // failed)" inside a file nobody opens is how a bundle ends up looking
