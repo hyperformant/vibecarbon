@@ -291,10 +291,10 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | | `compose-ha` | 2m 31s | 48.4s | 4.8s | 3m 3s | 2m 33s | 21.1s | 56.1s |
 | | `k8s` | 3m 38s | 13.5s | 31.3s | 1m 35s | 2m 35s | 1m 56s | — |
 | | `k8s-ha` | 3m 57s | 29.0s | 24.7s | 2m 33s | 3m 41s | 2m 0s | 3m 6s |
-| DigitalOcean | `compose` | 2m 31s | 46.3s | 5.7s | 2m 49s | 2m 24s | 30.9s | — |
-| | `compose-ha` | 3m 38s | 56.5s | 4.5s | 5m 8s | 3m 2s | 29.3s | 34.8s |
-| | `k8s` | 3m 13s | 8.1s | 43.5s | 1m 28s | 2m 56s | 2m 7s | — |
-| | `k8s-ha` | 4m 10s | 25.9s | 1m 0s | 2m 9s | 6m 7s | 2m 52s | 3m 16s |
+| DigitalOcean | `compose` | 2m 19s | 44.7s | 5.1s | 2m 48s | 2m 49s | 31.0s | — |
+| | `compose-ha` | 2m 58s | 54.6s | 3.9s | 3m 24s | 2m 31s | 33.3s | 37.9s |
+| | `k8s` | 3m 45s | 9.6s | 28.3s | 1m 19s | 3m 2s | 2m 9s | — |
+| | `k8s-ha` | 3m 41s | 23.4s | 27.3s | 1m 38s | 4m 7s | 2m 28s | 2m 22s |
 | Linode | `compose` | 2m 57s | 12.7s | 5.7s | 3m 30s | 4m 20s | 20.4s | — |
 | | `compose-ha` | 3m 52s | 20.0s | 4.6s | 4m 27s | 3m 41s | 12.2s | 1m 27s |
 | | `k8s` | 4m 47s | 5.1s | 37.4s | 1m 25s | 9m 58s | 1m 47s | — |
@@ -304,7 +304,7 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | Scaleway | `compose` | 2m 23s | 16.7s | 5.0s | 2m 46s | 2m 28s | 29.0s | — |
 | | `compose-ha` | 3m 37s | 28.4s | 37.9s | 4m 27s | 4m 35s | 1m 22s | 55.6s |
 
-_Latest green CI runs: Hetzner Cloud `0fc23e9` (2026-11-15) · DigitalOcean `a2c67c1` (2026-11-07) · Linode `c8c7f88` (2026-11-15) · Vultr `a68f139` (2026-11-15) · Scaleway `8ec8337` (2026-11-15) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `0fc23e9` (2026-11-15) · DigitalOcean `d80e0b4` (2026-11-15) · Linode `c8c7f88` (2026-11-15) · Vultr `a68f139` (2026-11-15) · Scaleway `8ec8337` (2026-11-15) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
