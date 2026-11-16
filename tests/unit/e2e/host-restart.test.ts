@@ -40,6 +40,8 @@ const state = (host: string, due: boolean) => ({
   packages: due ? ['linux-image-e2e-test'] : [],
 });
 
+const MASTER_IP = '10.1.0.1';
+
 const annotation = (host: string, due: boolean) =>
   JSON.stringify({ v: 1, ...state(host, due), packages: due ? ['linux-image-e2e-test'] : [] });
 
@@ -129,8 +131,10 @@ function fakes(mode: 'compose-ha' | 'k8s', world: World, planName: string, hostN
       if (argv.join(' ').includes('/var/run/reboot-required')) world.due = true;
       return '';
     },
-    sshKubectl: async () => {
+    sshKubectl: async (ip) => {
       calls.push('kubectl');
+      // Only a k3s server has a kubeconfig: the node read must go via the master.
+      if (isK8s && ip !== MASTER_IP) throw new Error(`kubectl asked ${ip}, not the master`);
       return isK8s
         ? JSON.stringify({
             metadata: {
@@ -205,7 +209,7 @@ describe('runHostRestartStep', () => {
   });
 
   it('adds the annotation checks on k8s', async () => {
-    const target = { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1' };
+    const target = { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1', masterIp: MASTER_IP };
     const results = await run('k8s', world(), target).result;
     expect(results.map((r) => r.checkName)).toContain('restart_due_annotation');
     expect(results.every((r) => r.status === 'pass')).toBe(true);
@@ -297,7 +301,7 @@ describe('restart_cleared can fail', () => {
   });
 
   it('fails naming the annotation when it stays due on k8s', async () => {
-    const target = { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1' };
+    const target = { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1', masterIp: MASTER_IP };
     const r = cleared(await run('k8s', world({ annotationClears: false }), target).result);
     expect(r?.status).toBe('fail');
     expect(r?.errorMessage).toMatch(/annotation:/);
@@ -306,7 +310,9 @@ describe('restart_cleared can fail', () => {
   it('fails naming admin when admin says the target is not reporting after the update', async () => {
     for (const mode of ['compose-ha', 'k8s'] as const) {
       const target =
-        mode === 'k8s' ? { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1' } : undefined;
+        mode === 'k8s'
+          ? { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1', masterIp: MASTER_IP }
+          : undefined;
       const r = cleared(await run(mode, world({ adminReporting: false }), target).result);
       expect(r?.status).toBe('fail');
       expect(r?.errorMessage).toMatch(/admin:.*not reporting/);
@@ -349,7 +355,7 @@ describe('selectRestartTarget', () => {
         return JSON.stringify({ items: [node('w-1', '10.1.0.7'), node('w-2', '10.1.0.8')] });
       },
     });
-    expect(t).toEqual({ name: 'w-1', ip: '10.1.0.7', planName: 'w-1' });
+    expect(t).toEqual({ name: 'w-1', ip: '10.1.0.7', planName: 'w-1', masterIp: '10.1.0.1' });
     expect(seen[0].slice(0, 3)).toEqual(['10.1.0.1', 'get', 'nodes']);
     expect(seen[0]).toContain('-l');
     expect(seen[0]).toContain('!node-role.kubernetes.io/control-plane,dedicated!=db');

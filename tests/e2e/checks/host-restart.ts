@@ -38,6 +38,8 @@ export interface RestartTarget {
   /** The name `status` and the admin endpoint report: the k8s node name, or the compose server name. */
   name: string;
   ip: string;
+  /** The primary master: the only server with a kubeconfig, so every kubectl read goes through it. k8s only. */
+  masterIp?: string;
   /** The name `vibecarbon update` plans the server under (src/lib/update/inventory.js). */
   planName: string;
 }
@@ -119,7 +121,7 @@ export async function selectRestartTarget(o: {
   for (const n of items) {
     const ip = n.status?.addresses?.find((a) => a.type === 'ExternalIP')?.address;
     if (n.metadata?.name && ip) {
-      return { name: n.metadata.name, ip, planName: n.metadata.name };
+      return { name: n.metadata.name, ip, planName: n.metadata.name, masterIp: primary.ip };
     }
   }
   throw new Error(`update: no worker node with a public address on ${primary.ip}`);
@@ -259,9 +261,14 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
   const annotationProbe =
     (want: 'due' | 'cleared'): (() => Promise<string | null>) =>
     async () => {
-      const text = await deps.sshKubectl(t.ip, o.key, ['get', 'node', t.name, '-o', 'json'], {
-        timeout: 30_000,
-      });
+      const text = await deps.sshKubectl(
+        t.masterIp ?? t.ip,
+        o.key,
+        ['get', 'node', t.name, '-o', 'json'],
+        {
+          timeout: 30_000,
+        },
+      );
       const h = hostStateFromNode(JSON.parse(text));
       if (!h.reporting || !h.state)
         return `node ${t.name} carries no readable host-state annotation`;
