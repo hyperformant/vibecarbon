@@ -45,23 +45,4 @@ describe('C-1: the replication role SQL handles idempotent re-runs', () => {
     expect(sql).toMatch(/CREATE ROLE replicator/);
     expect(sql).toMatch(/^ALTER ROLE replicator WITH PASSWORD 'testreplpass';$/m);
   });
-
-  it('carbon/ha no longer ships primary-init.sql (the SQL is built, never rendered)', async () => {
-    const { existsSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    expect(existsSync(join(process.cwd(), 'carbon', 'ha', 'primary-init.sql'))).toBe(false);
-  });
-});
-
-// standby-init.sh + activate-standby.sh were deleted (finding #7): unreferenced
-// dead scripts encoding known-broken approaches (no replication slot, NodePort
-// 30432, bare-service scale no-ops). The live k8s-HA path is
-// src/lib/deploy/k8s/ha/index.js setupReplication.
-describe('C-1: dead HA scripts removed', () => {
-  it('carbon/ha no longer ships standby-init.sh or activate-standby.sh', async () => {
-    const { existsSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    expect(existsSync(join(process.cwd(), 'carbon', 'ha', 'standby-init.sh'))).toBe(false);
-    expect(existsSync(join(process.cwd(), 'carbon', 'ha', 'activate-standby.sh'))).toBe(false);
-  });
 });

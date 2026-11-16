@@ -982,6 +982,7 @@ what a created project tracks, on npm and pnpm.
 | Docker version pin | 2026-11-05 (#343) | Security fixes must arrive without a release |
 | A roadmap file in the repository | 2026-09-16 (#107) | Kept elsewhere |
 | n8n and Metabase add-ons | Parked 2026-11-15 (#482) | Hidden; code remains |
+| Retirement guards for the hcloud autoscaler wiring, the credentials profiles and an e2e Grafana probe line | 2026-11-16 (#NNN) | The code they named is gone, so they could fail only on a name |
 
 ## Problems that keep coming back
 

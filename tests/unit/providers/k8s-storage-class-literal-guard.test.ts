@@ -14,8 +14,7 @@
  * left `do-block-storage` (and every future provider's literal) unswept.
  *
  * Two static-source recall checks, same "read the whole file as one string"
- * approach as hcloud-ca-retirement-guard.test.ts /
- * no-hardcoded-provider-dispatch.test.ts:
+ * approach as no-hardcoded-provider-dispatch.test.ts:
  *
  *   1. k8s manifests (carbon/k8s/, services/) — the literal must not appear
  *      AT ALL (bare YAML scalar, no quotes). Walked directly (not via
@@ -28,10 +27,9 @@
  *      (`` `hcloud-volumes` ``) — those are legitimate documentation, not a
  *      hardcoded value a runtime path could read.
  *
- * carbon/node_modules is deliberately NOT walked (mirrors
- * hcloud-ca-retirement-guard.test.ts's carbon/k8s/-scoped root, not all of
- * carbon/) — it's a local dev install, not a shipped/checked-in tree, and
- * walking it would make this test both slow and meaningless.
+ * carbon/node_modules is deliberately NOT walked (the root is carbon/k8s/,
+ * not all of carbon/) — it's a local dev install, not a shipped/checked-in
+ * tree, and walking it would make this test both slow and meaningless.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, sep } from 'node:path';
