@@ -126,6 +126,15 @@ type Spec = {
   // same name: unbound, so off the node's list, until it is Ready this long
   // after the server is back (never without readyAfterMs).
   statefulSet?: { readyAfterMs?: number };
+  // The app's ReplicaSet changes while the server restarts, and its pod on
+  // this node is gone once the server is back: a rollout scaled the old
+  // ReplicaSet to 0 ('rollout') or removed it ('deleted'), an HPA scaled it
+  // down to the replica Ready elsewhere ('scaledDown'), or it still wants 2
+  // with 1 Ready ('short').
+  appReplicaSet?: 'rollout' | 'deleted' | 'scaledDown' | 'short';
+  // A StatefulSet pod on the node was already terminating before the reboot,
+  // and its StatefulSet was scaled down: no pod of it comes back anywhere.
+  terminatingBefore?: boolean;
   leaseNeverRenews?: boolean;
   cordonedBefore?: boolean; // cordoned before the run (by the operator, unless markedBefore)
   markedBefore?: boolean; // an earlier update run left its mark
@@ -321,15 +330,19 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean; publicAnswer?
         ready,
         controller('DaemonSet', 'hcloud-csi-node', 'ds-csi'),
       ),
-      pod(
-        'vibecarbon',
-        `app-${s.name}`,
-        s.name,
-        'Running',
-        'True',
-        ready,
-        controller('ReplicaSet', `app-${s.name}-5d8f`, `rs-app-${s.name}`),
-      ),
+      ...(s.appReplicaSet && isBack(s)
+        ? []
+        : [
+            pod(
+              'vibecarbon',
+              `app-${s.name}`,
+              s.name,
+              'Running',
+              'True',
+              ready,
+              controller('ReplicaSet', `app-${s.name}-5d8f`, `rs-app-${s.name}`),
+            ),
+          ]),
       pod(
         'vibecarbon',
         `backup-29001-${s.name}`,
@@ -357,6 +370,18 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean; publicAnswer?
           ? pod('vibecarbon', 'web-7f9c-abcde', s.name, 'Failed', 'False', iso(failedAt(s)), RS_WEB)
           : pod('vibecarbon', 'web-7f9c-abcde', s.name, 'Running', 'True', OLD_READY, RS_WEB),
       );
+    }
+    if (s.terminatingBefore && !isBack(s)) {
+      const p = pod(
+        'vibecarbon',
+        'cache-1',
+        s.name,
+        'Running',
+        'True',
+        OLD_READY,
+        controller('StatefulSet', 'cache', 'sts-cache'),
+      );
+      items.push({ ...p, metadata: { ...p.metadata, deletionTimestamp: OLD_READY } });
     }
     if (s.jobPodFailsAfterBoot) {
       const job = controller('Job', 'backup-29002', 'job-29002');
@@ -388,6 +413,19 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean; publicAnswer?
   /** Every pod in the cluster: each node's, the other web replica, and its replacement. */
   const allPods = () => {
     const items = servers.flatMap(serverPods);
+    for (const s of servers.filter((x) => x.appReplicaSet)) {
+      const rs = controller('ReplicaSet', `app-${s.name}-5d8f`, `rs-app-${s.name}`);
+      if (s.appReplicaSet === 'scaledDown' || s.appReplicaSet === 'short')
+        items.push(
+          pod('vibecarbon', `app-${s.name}-other`, 'worker-2', 'Running', 'True', OLD_READY, rs),
+        );
+      if (s.appReplicaSet === 'rollout' || s.appReplicaSet === 'deleted') {
+        const next = controller('ReplicaSet', `app-${s.name}-9b2c`, `rs-app-${s.name}-next`);
+        items.push(
+          pod('vibecarbon', `app-${s.name}-next`, 'worker-2', 'Running', 'True', OLD_READY, next),
+        );
+      }
+    }
     for (const s of servers.filter((x) => x.podFailsAfterBoot)) {
       // The other replica, Ready since long before: it is not a replacement.
       items.push(
@@ -399,6 +437,25 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean; publicAnswer?
           pod('vibecarbon', 'web-7f9c-fresh', node, 'Running', 'True', iso(replacedAt(s)), RS_WEB),
         );
       }
+    }
+    return items;
+  };
+
+  const replicaSet = (name: string, uid: string, replicas: number, ready?: number) => ({
+    metadata: { namespace: 'vibecarbon', name, uid },
+    spec: { replicas },
+    status: ready === undefined ? {} : { readyReplicas: ready },
+  });
+  /** Every ReplicaSet: the web one, and each server's app one as appReplicaSet leaves it. */
+  const replicaSets = () => {
+    const items = [replicaSet('web-7f9c', 'rs-web', 2, 1)];
+    for (const s of servers) {
+      const [name, uid] = [`app-${s.name}-5d8f`, `rs-app-${s.name}`];
+      if (s.appReplicaSet === 'rollout' || s.appReplicaSet === 'deleted')
+        items.push(replicaSet(`app-${s.name}-9b2c`, `${uid}-next`, 1, 1));
+      if (s.appReplicaSet === 'rollout') items.push(replicaSet(name, uid, 0));
+      else if (s.appReplicaSet === 'short') items.push(replicaSet(name, uid, 2, 1));
+      else if (s.appReplicaSet !== 'deleted') items.push(replicaSet(name, uid, 1, 1));
     }
     return items;
   };
@@ -454,6 +511,11 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean; publicAnswer?
       if (verb === 'get' && rest[0] === 'pods' && rest[1] === '-n') {
         return JSON.stringify({
           items: allPods().filter((p) => p.metadata.namespace === rest[2]),
+        });
+      }
+      if (verb === 'get' && rest[0] === 'replicasets' && rest[1] === '-n') {
+        return JSON.stringify({
+          items: replicaSets().filter((r) => r.metadata.namespace === rest[2]),
         });
       }
       throw new Error(`unexpected kubectl: ${cmd}`);
@@ -620,6 +682,7 @@ function label(c: Call): string {
     if (cmd.startsWith('get node ')) return 'node';
     if (cmd.startsWith('get leases')) return 'lease';
     if (cmd.startsWith('get pods -n')) return 'namespace-pods';
+    if (cmd.startsWith('get replicasets')) return 'replicasets';
     if (cmd.startsWith('get pods')) return 'pods';
     return c.argv[0];
   }
@@ -1276,6 +1339,86 @@ describe('executeUpdatePlan on k8s', () => {
       hint: CONSOLE_HINT,
     });
     expect(w.byName('db')).toMatchObject({ cordoned: false, marked: false });
+    // Only a ReplicaSet may be proven by its status.
+    expect(first(w.calls, 'replicasets')).toBe(-1);
+  });
+
+  // A rollout or an HPA scale-down while the node restarts removes its pod
+  // for good, so no pod of that ReplicaSet is Ready since the restart. Once
+  // the node's own pods are back, a ReplicaSet that is gone, or has every
+  // replica it wants Ready, is back.
+  describe('a ReplicaSet that changed while the node restarted', () => {
+    const runOn = (w: ReturnType<typeof world>, name: string, role: string, ip: string) =>
+      w.clock.run(executeUpdatePlan(planOf(step(k8s(name, role, ip))), makeCtx(), w.deps));
+
+    it.each(['rollout', 'deleted'] as const)(
+      'a rollout mid-step (%s): the old ReplicaSet does not hold the run',
+      async (appReplicaSet) => {
+        const w = world([
+          { name: 'db', ip: '10.1.0.3', rebootRequired: true, pkgs: [PKG], appReplicaSet },
+        ]);
+        const res = await runOn(w, 'db', 'db', '10.1.0.3');
+        expect(res.stoppedAt).toBeNull();
+        const s = w.byName('db');
+        expect(w.calls.find((c) => label(c) === 'replicasets')?.argv).toEqual([
+          'get',
+          'replicasets',
+          '-n',
+          'vibecarbon',
+          '-o',
+          'json',
+        ]);
+        // Done at the first pod poll that finds the node back, not after 5 minutes.
+        const pods = w.calls.filter((c) => label(c) === 'pods');
+        expect(pods.at(-1)?.t).toBeLessThan(w.podsFreshAt(s) + 10_000);
+      },
+    );
+
+    it('an HPA scale-down on the master, which is never drained, does not hold the run', async () => {
+      const w = world([
+        {
+          name: 'master',
+          ip: MASTER_IP,
+          rebootRequired: true,
+          pkgs: [PKG],
+          appReplicaSet: 'scaledDown',
+        },
+      ]);
+      const res = await runOn(w, 'master', 'master', MASTER_IP);
+      expect(res.stoppedAt).toBeNull();
+      expect(first(w.calls, 'drain')).toBe(-1);
+      const pods = w.calls.filter((c) => label(c) === 'pods');
+      expect(pods.at(-1)?.t).toBeLessThan(w.podsFreshAt(w.byName('master')) + 10_000);
+    });
+
+    it('a ReplicaSet still short of the replicas it wants stops the run, named', async () => {
+      const w = world([
+        { name: 'db', ip: '10.1.0.3', rebootRequired: true, pkgs: [PKG], appReplicaSet: 'short' },
+      ]);
+      const res = await runOn(w, 'db', 'db', '10.1.0.3');
+      expect(res.stoppedAt).toMatchObject({
+        restarted: true,
+        error:
+          'db did not become healthy within 5 minutes: no pod Ready since the restart for ReplicaSet vibecarbon/app-db-5d8f',
+        hint: CONSOLE_HINT,
+      });
+      // One list per namespace for the whole wait would be stale: each poll reads it again.
+      expect(w.calls.filter((c) => label(c) === 'replicasets').length).toBeGreaterThan(5);
+    });
+  });
+
+  // A pod already terminating before the reboot is on its way out: its
+  // controller may never run a pod again (a StatefulSet scaled down).
+  it('never waits on the controller of a pod that was terminating before the reboot', async () => {
+    const w = world([
+      { name: 'db', ip: '10.1.0.3', rebootRequired: true, pkgs: [PKG], terminatingBefore: true },
+    ]);
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('db', 'db', '10.1.0.3'))), makeCtx(), w.deps),
+    );
+    expect(res.stoppedAt).toBeNull();
+    const pods = w.calls.filter((c) => label(c) === 'pods');
+    expect(pods.at(-1)?.t).toBeLessThan(w.podsFreshAt(w.byName('db')) + 10_000);
   });
 
   it('stops before the reboot, still cordoned, when the node cannot be read for its pods', async () => {
@@ -1630,7 +1773,7 @@ describe('stopping at the first failure', () => {
       ].join('\n'),
     );
     expect(res.stoppedAt?.hint).toBe(
-      'run vibecarbon update prod again once web-standby is reachable and apt is free',
+      'run vibecarbon update prod again once web-standby is reachable and apt is not busy',
     );
     expect(w.calls.some((c) => c.ip === '10.0.0.1')).toBe(false);
     expect(first(w.calls, 'reboot')).toBe(-1);

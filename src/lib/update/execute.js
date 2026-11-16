@@ -241,8 +241,11 @@ const isReady = (obj) =>
 
 /**
  * Ready, and turned Ready at or after `sinceSeconds`. The kubelet stamps that
- * transition with the server's own clock, the same clock `sinceSeconds` was
- * read from.
+ * transition with its own server's clock, and `sinceSeconds` was read from the
+ * restarted server's. For a pod on that node it is one clock. For a pod on
+ * another node (a controller's pod Ready elsewhere) it compares two servers'
+ * clocks, which NTP keeps well under a second apart: negligible next to the
+ * minute a restart takes.
  */
 function readySince(pod, sinceSeconds) {
   const ready = pod?.status?.conditions?.find((c) => c.type === 'Ready');
@@ -302,7 +305,9 @@ const hasPodBack = (uid, pods, sinceSeconds, except = null) =>
  * The controllers of the pods running on a node, Jobs left out: each must
  * have a pod Ready again after the restart. A StatefulSet pod that failed is
  * deleted and recreated under the same name, and until it is bound it is on
- * no node's list, so the node's own pods alone cannot prove it came back.
+ * no node's list, so the node's own pods alone cannot prove it came back. A
+ * pod already terminating is left out too: it is on its way out, and its
+ * controller may never run a pod again (a StatefulSet scaled down).
  *
  * @param {object[]} pods the node's pods, read before the reboot
  * @returns {Array<{ uid: string, kind: string, name: string, namespace: string }>}
@@ -312,6 +317,7 @@ function workloadsOf(pods) {
   for (const pod of pods) {
     const phase = pod?.status?.phase;
     if (phase === 'Succeeded' || phase === 'Failed') continue;
+    if (pod?.metadata?.deletionTimestamp) continue;
     const ref = controllerOf(pod);
     if (!ref?.uid || isJob(ref)) continue;
     found.set(ref.uid, {
@@ -1062,8 +1068,16 @@ const nodePodsArgv = (node) => [
  * Three checks, cheapest first: every pod on the node is Ready since the
  * restart; every pod that turned Failed since has a Ready replacement; and
  * every controller that had a pod on the node before the reboot (`workloads`)
- * has a pod Ready since, on any node. The namespace lists the last two need
- * are read only when the node's own pods do not already prove it.
+ * has a pod Ready since, on any node. The replacement check reads its
+ * namespace's pod list whenever a pod turned Failed; the controller check
+ * reads it only for a controller with no pod Ready since on the node itself.
+ * Each list is read once per look, so every look sees the cluster as it is.
+ *
+ * A ReplicaSet can lose its pod for good while the node restarts: a rollout
+ * scales it to 0, or an HPA scales it down. So once the node's own pods are
+ * back, a ReplicaSet with no pod Ready since the restart is also back when it
+ * is gone, or has every replica it wants Ready. StatefulSets and DaemonSets
+ * keep the stricter proof: a pod Ready since the restart.
  *
  * A drained worker keeps only DaemonSet pods: the provider's CSI node plugin
  * where it has one (servicelb is disabled, so there are no svclb pods). Where
@@ -1079,10 +1093,19 @@ async function podsBack({ node, workloads, sinceSeconds, read }) {
   if (waiting.length) return { done: false, seen: SEEN.podsNotReady(waiting.map(podName)) };
 
   const lists = new Map();
-  const namespacePods = async (ns) => {
-    if (!lists.has(ns))
-      lists.set(ns, JSON.parse(await read(['get', 'pods', '-n', ns, '-o', 'json'])).items ?? []);
-    return lists.get(ns);
+  const namespaceList = async (resource, ns) => {
+    const key = `${resource}/${ns}`;
+    if (!lists.has(key))
+      lists.set(key, JSON.parse(await read(['get', resource, '-n', ns, '-o', 'json'])).items ?? []);
+    return lists.get(key);
+  };
+  const namespacePods = (ns) => namespaceList('pods', ns);
+  /** Gone, or every replica it wants is Ready. */
+  const replicaSetSettled = async (w) => {
+    const rs = (await namespaceList('replicasets', w.namespace)).find(
+      (r) => r?.metadata?.uid === w.uid,
+    );
+    return !rs || (rs.status?.readyReplicas ?? 0) >= (rs.spec?.replicas ?? 1);
   };
 
   const unreplaced = [];
@@ -1096,8 +1119,9 @@ async function podsBack({ node, workloads, sinceSeconds, read }) {
   const missing = [];
   for (const w of workloads) {
     if (hasPodBack(w.uid, items, sinceSeconds)) continue;
-    if (!hasPodBack(w.uid, await namespacePods(w.namespace), sinceSeconds))
-      missing.push(`${w.kind} ${w.namespace}/${w.name}`);
+    if (hasPodBack(w.uid, await namespacePods(w.namespace), sinceSeconds)) continue;
+    if (w.kind === 'ReplicaSet' && (await replicaSetSettled(w))) continue;
+    missing.push(`${w.kind} ${w.namespace}/${w.name}`);
   }
   return missing.length ? { done: false, seen: SEEN.workloadsNotReady(missing) } : { done: true };
 }

@@ -606,12 +606,14 @@ describe('update run', () => {
   it('the summary prints no null, NaN or 0s for an unmeasured outage', async () => {
     setup();
     m.executeUpdatePlan.mockResolvedValue({
-      outcomes: [outcome({ outageSeconds: null })],
+      outcomes: [outcome({ name: 'web-10s', outageSeconds: null })],
       becameDue: [],
       stoppedAt: null,
     });
     await go(['prod', '-y']);
-    expect(text()).not.toMatch(/null|NaN|0s/);
+    expect(text()).toContain('web-10s: installed 2 updates');
+    // Whole tokens: a server named web-10s is not an unmeasured outage.
+    expect(text()).not.toMatch(/\b(?:null|NaN|0s)\b/);
   });
 
   describe('text from a server never reaches the terminal raw', () => {

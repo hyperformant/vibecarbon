@@ -249,6 +249,28 @@ describe('checkHostStates', () => {
     expect(hostStateRows('production', hosts).map((r) => r.label)).toEqual(['Restart check']);
   });
 
+  // The primary cluster's row is named after its server, and its reason is
+  // the snapshot error with the prefix dropped, in the row's words.
+  it.each([
+    ['cluster snapshot failed: ssh timeout', 'ssh timed out'],
+    ['cluster snapshot failed: Permission denied (publickey).', 'permission denied (publickey).'],
+  ])('k8s: a primary snapshot that fails with %j reads %j', async (message, error) => {
+    const snapshots = {
+      get: vi.fn(async () => {
+        throw new Error(message);
+      }),
+    };
+    const hosts = await checkHostStates(
+      'production',
+      { deployMode: 'kubernetes', servers: [{ name: 'prod-master', ip: '1.1.1.1' }] },
+      { snapshots, sshKeyPathFor: () => KEY, existsSync: () => true },
+    );
+    expect(hosts).toEqual([{ name: 'prod-master', reporting: false, state: null, error }]);
+    expect(hostStateRows('production', hosts)).toEqual([
+      { label: 'Restart check', text: `prod-master could not be checked (${error})` },
+    ]);
+  });
+
   it('no servers: nothing to check', async () => {
     expect(await checkHostStates('production', { deployMode: 'compose' }, {})).toEqual([]);
   });

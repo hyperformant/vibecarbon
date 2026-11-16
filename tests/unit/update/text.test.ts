@@ -197,9 +197,63 @@ describe('lines for an unfinished or empty run', () => {
 });
 
 describe('formatTotal', () => {
-  it('names the servers that go offline', () => {
-    expect(formatTotal(plan as never)).toBe(
-      'expected downtime: about 2 to 6 minutes in total, while master, db restart',
+  const outage = (
+    name: string,
+    over: { docker?: boolean; restart?: string; seconds?: [number, number] } = {},
+  ) =>
+    step({
+      target: target(name, '1.1.1.1'),
+      docker: over.docker ? { packages: [{ name: 'docker-ce', from: '1', to: '2' }] } : null,
+      restart: over.restart ?? 'due',
+      restartReason: 'libc6',
+      effect: { kind: 'app-offline', seconds: over.seconds ?? [60, 180] },
+    });
+  const totalOf = (steps: unknown[], total: [number, number]) =>
+    formatTotal({ ...plan, steps, total } as never);
+
+  it('one server restarts, many restart', () => {
+    expect(totalOf([outage('web-1')], [60, 180])).toBe(
+      'expected downtime: about 1 to 3 minutes in total, while web-1 restarts',
+    );
+    expect(totalOf([outage('master'), outage('db')], [120, 360])).toBe(
+      'expected downtime: about 2 to 6 minutes in total, while master and db restart',
+    );
+    expect(totalOf([outage('a'), outage('b'), outage('c')], [180, 540])).toBe(
+      'expected downtime: about 3 to 9 minutes in total, while a, b and c restart',
+    );
+  });
+
+  it('a Docker update without a restart says so, and both together name both', () => {
+    expect(
+      totalOf([outage('web-1', { docker: true, restart: 'none', seconds: [30, 60] })], [30, 60]),
+    ).toBe('expected downtime: about 30 to 60 seconds in total, while web-1 updates Docker');
+    expect(totalOf([outage('web-1', { docker: true, seconds: [60, 240] })], [60, 240])).toBe(
+      'expected downtime: about 1 to 4 minutes in total, while web-1 updates Docker and restarts',
+    );
+    // A likely restart is in the estimate, so it is named like a due one.
+    expect(totalOf([outage('web-1', { restart: 'likely' })], [60, 180])).toBe(
+      'expected downtime: about 1 to 3 minutes in total, while web-1 restarts',
+    );
+  });
+
+  it('servers doing different things are named by what each does', () => {
+    expect(
+      totalOf(
+        [
+          outage('web-1', { docker: true, restart: 'none', seconds: [30, 60] }),
+          outage('master'),
+          outage('db'),
+        ],
+        [150, 420],
+      ),
+    ).toBe(
+      'expected downtime: about 3 to 7 minutes in total, while web-1 updates Docker, and master and db restart',
+    );
+  });
+
+  it('leaves out the servers that cause no outage', () => {
+    expect(formatTotal({ ...plan, total: [180, 600] } as never)).toBe(
+      'expected downtime: about 3 to 10 minutes in total, while web updates Docker and restarts, and master and db restart',
     );
   });
   it('says none when there is no outage', () => {
@@ -285,7 +339,7 @@ describe('fixed lines', () => {
   });
   it('rounds offline seconds before splitting minutes', () => {
     const r = { name: 'w', installed: 1, docker: null, restarted: true, offlineSeconds: 119.6 };
-    expect(summaryLine(r)).toBe('w: installed 1 updates, restarted, app offline 2m 0s');
+    expect(summaryLine(r)).toBe('w: installed 1 update, restarted, app offline 2m 0s');
   });
   it('builds the summary line', () => {
     expect(
@@ -369,7 +423,7 @@ describe('execution lines', () => {
       'w did not become healthy within 5 minutes: pods not Ready since the restart: a/1, a/2, b/3 and 2 more',
     );
     expect(installHint({ envName: 'prod', name: 'web-1' })).toBe(
-      'run vibecarbon update prod again once web-1 is reachable and apt is free',
+      'run vibecarbon update prod again once web-1 is reachable and apt is not busy',
     );
     expect(cordonedHint('prod')).toBe(
       'it is still cordoned, run vibecarbon update prod again once it is Ready, which uncordons it',

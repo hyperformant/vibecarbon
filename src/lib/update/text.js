@@ -97,11 +97,33 @@ export function formatPlan(plan) {
   return lines.map(printable);
 }
 
+/** `a`, `a and b`, `a, b and c`. */
+const andList = (names) =>
+  names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : (names[0] ?? '');
+
+/** What a server does during its outage, for one server and for several. */
+const OUTAGE_ACTIONS = {
+  restart: ['restarts', 'restart'],
+  docker: ['updates Docker', 'update Docker'],
+  both: ['updates Docker and restarts', 'update Docker and restart'],
+};
+
 /** @param {import('./plan.js').UpdatePlan} plan */
 export function formatTotal(plan) {
   if (!plan.total) return 'no downtime expected';
+  // The servers whose outage the total adds up, grouped by what they do.
+  const groups = new Map();
+  for (const step of plan.steps.filter((s) => s.effect.seconds)) {
+    const restarts = step.restart !== 'none';
+    const docker = (step.docker?.packages.length ?? 0) > 0;
+    const action = docker && restarts ? 'both' : docker ? 'docker' : 'restart';
+    groups.set(action, [...(groups.get(action) ?? []), step.target.name]);
+  }
+  const doing = [...groups].map(
+    ([action, names]) => `${andList(names)} ${OUTAGE_ACTIONS[action][names.length === 1 ? 0 : 1]}`,
+  );
   return printable(
-    `expected downtime: ${formatDuration(plan.total)} in total, while ${plan.outageServers.join(', ')} restart`,
+    `expected downtime: ${formatDuration(plan.total)} in total, while ${doing.join(', and ')}`,
   );
 }
 
@@ -152,7 +174,7 @@ export const stillDueLine = ({ envName, names }) =>
  *   offlineSeconds is null when downtime was not measured; the line then leaves it out.
  */
 export function summaryLine({ name, installed, docker, restarted, offlineSeconds }) {
-  let line = `${name}: installed ${installed} updates`;
+  let line = `${name}: installed ${installed} ${installed === 1 ? 'update' : 'updates'}`;
   if (docker) line += `, Docker ${docker.from} to ${docker.to}`;
   if (restarted) line += ', restarted';
   if (offlineSeconds != null)
@@ -283,7 +305,7 @@ export const SEEN = {
 };
 
 export const installHint = ({ envName, name }) =>
-  printable(`run vibecarbon update ${envName} again once ${name} is reachable and apt is free`);
+  printable(`run vibecarbon update ${envName} again once ${name} is reachable and apt is not busy`);
 export const cordonedHint = (envName) =>
   `it is still cordoned, run vibecarbon update ${envName} again once it is Ready, which uncordons it`;
 export const consoleHint = (envName) =>
