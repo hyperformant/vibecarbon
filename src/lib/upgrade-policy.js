@@ -31,6 +31,10 @@ const SAFE_PATTERNS = [
   'tsconfig.json',
   'tsconfig.server.json',
   'components.json',
+  // drizzle-kit's config, a file we own like the tsconfigs. Safe, not merge:
+  // projects created before create copied it have none, and a safe file that
+  // is missing is added without a prompt.
+  'drizzle.config.ts',
   'backup/**',
   'scripts/**',
   'volumes/grafana/**',

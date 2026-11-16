@@ -805,6 +805,10 @@ async function bootstrap(cliArgs) {
   copyTemplate('tsconfig.json', join(projectDir, 'tsconfig.json'), variables);
   copyTemplate('tsconfig.server.json', join(projectDir, 'tsconfig.server.json'), variables);
   copyTemplate('vite.config.ts', join(projectDir, 'vite.config.ts'), variables);
+  // drizzle-kit's config. AGENTS.md's schema workflow (`npx drizzle-kit
+  // generate --name <slug>`) reads it; without it the command has no dialect,
+  // schema or output directory and fails.
+  copyTemplate('drizzle.config.ts', join(projectDir, 'drizzle.config.ts'), variables);
   copyTemplate('biome.json', join(projectDir, 'biome.json'), variables);
   // Generated projects are standalone (no parent biome config), so the config
   // must declare itself root — see makeBiomeConfigRoot.

@@ -315,6 +315,27 @@ describe('create-vibecarbon E2E', () => {
       }
     });
 
+    it('ships drizzle.config.ts with every file and path it names', () => {
+      // AGENTS.md's schema workflow is `npx drizzle-kit generate --name <slug>`,
+      // which reads this file. It was missing from the copy list, so the
+      // documented command failed in every new project.
+      const configPath = join(projectDir(), 'drizzle.config.ts');
+      expect(existsSync(configPath)).toBe(true);
+      const config = readFileSync(configPath, 'utf-8');
+      const relativeImports = [...config.matchAll(/from '(\.[^']+)'/g)].map((m) => m[1]);
+      expect(relativeImports).toContain('./src/server/db/port');
+      for (const spec of relativeImports) {
+        expect(existsSync(join(projectDir(), `${spec}.ts`)), spec).toBe(true);
+      }
+      expect(config).toContain("schema: './src/server/db/schema.ts'");
+      expect(existsSync(join(projectDir(), 'src/server/db/schema.ts'))).toBe(true);
+      expect(config).toContain("out: './db/migrations'");
+      expect(existsSync(join(projectDir(), 'db/migrations'))).toBe(true);
+      // Recorded for upgrade, so a later template change reaches the project.
+      const manifest = JSON.parse(readFileSync(join(projectDir(), '.vibecarbon.json'), 'utf-8'));
+      expect(Object.keys(manifest.fileChecksums ?? {})).toContain('drizzle.config.ts');
+    });
+
     it('scaffolds the whole migration baseline (SQL + drizzle meta) and the seed file', () => {
       // All of carbon/db/migrations, meta/ included: the app's migrator reads
       // meta/_journal.json, and a scaffold missing a baseline file ships
