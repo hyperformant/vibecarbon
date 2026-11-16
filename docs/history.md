@@ -1012,6 +1012,27 @@ with `git init`. The file belongs to the project, not to the repository step.
 PATH that holds only node, then runs a real `git init` and `git add .` and
 checks that neither env file is staged.
 
+#### 2026-11-16: Deploy stages the lockfile it generated and nothing else
+
+When a project has no lockfile, `deploy` generates one and stages it. It now
+stages that one file, through `buildGitAddNamedArgv`. `buildGitAddArgv`, which
+stages the whole allowlist, is left for the first commit `configure` makes.
+
+**Why:** the call passed the lockfile to `buildGitAddArgv` as an extra path.
+That function stages every allowlisted path, so a deploy also staged whatever
+the operator had changed under `src/`, `k8s/`, `package.json` and the rest,
+and their next commit carried work they had not chosen to stage. It had been
+that way since the first public commit.
+
+**Do not undo:** do not reach for `buildGitAddArgv` to stage one file. Keep
+the `.env*` exclusion and the empty-list check in the new helper: an exclusion
+with no path before it tells git to stage everything else.
+
+**Guard:** `tests/unit/security/gitignore-invariants.test.ts` runs real git on
+a project with modified allowlisted files and a new lockfile.
+`tests/unit/security/git-add-census.test.ts` allows `buildGitAddArgv` only in
+`configure`.
+
 ## Added and later removed
 
 | What | Removed | Why |
