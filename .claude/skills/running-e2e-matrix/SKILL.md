@@ -73,7 +73,8 @@ Long runs (20+ min) need proactive check-ins, not silent waits.
 
 - For each running scenario, schedule **4 ScheduleWakeup checkpoints** evenly spaced across its expected duration (k8s-ha ~55 min, compose-ha ~50 min, k8s ~40 min, compose ~35 min). At each wake-up, tail every in-flight log and report stage + any failures.
 - Per-scenario runner logs: `<tempDir>/<provider>-<mode>-<dnsProvider>.log` where `<tempDir>` = `$TMPDIR/vibecarbon-e2e-<runId>`.
-- Per-deploy CLI logs (the deploy CLI's own tee): `~/.vibecarbon/logs/<env>-<ts>.log`. These survive the run and are the first thing to read when a deploy/restore/failover step fails.
+- Per-deploy CLI logs (the deploy CLI's own tee): `~/.vibecarbon-e2e/logs/<env>-<ts>.log`. These survive the run and are the first thing to read when a deploy/restore/failover step fails.
+- The e2e CLI home is `~/.vibecarbon-e2e`, never the developer's `~/.vibecarbon`: the runner, `iter-step.js` and `sweep-hetzner.js` set `VIBECARBON_HOME` to it (`tests/e2e/utils/e2e-home.js`), and a preset `VIBECARBON_HOME` wins. One fixed directory for all runs, so parallel runs share the uplink lock and a kept rig finds its state again. To run `vibecarbon` by hand in a kept rig's project dir, prefix it with `VIBECARBON_HOME=~/.vibecarbon-e2e`.
 - Per-step results land in `tests/results/e2e.db` (SQLite). `pnpm test:e2e:report` shows trends across runs.
 - ScheduleWakeup only queues one wake-up at a time — re-schedule the next one when each fires. Stop when all monitored scenarios reach a terminal status.
 
@@ -82,7 +83,7 @@ Long runs (20+ min) need proactive check-ins, not silent waits.
 This is the discipline that makes the matrix stabilize.
 
 1. **Iterate on the single failing scenario, not the full matrix.** Save the full matrix for end-of-cycle confidence checks.
-2. **Distinguish "more observability" from "real fix".** Adding diagnostics to a failing step does NOT fix the deploy. Read existing logs first (`<tempDir>/<provider>-<mode>-<dnsProvider>.log` and `~/.vibecarbon/logs/<env>-<ts>.log`) to see if the diagnostics already point at root cause before adding more.
+2. **Distinguish "more observability" from "real fix".** Adding diagnostics to a failing step does NOT fix the deploy. Read existing logs first (`<tempDir>/<provider>-<mode>-<dnsProvider>.log` and `~/.vibecarbon-e2e/logs/<env>-<ts>.log`) to see if the diagnostics already point at root cause before adding more.
 3. **Every "transient" / "flaky" / "Hetzner-side" error gets RCA.** Pull the actual deploy log, identify the precise failure (last successful op, last log line, hung subprocess), and ask: is anything in our code able to prevent or recover from this (timeout, retry, pre-init, idempotent cleanup)? If yes, ship the fix. Only after exhausting "is anything in our code wrong?" can you label it as truly external — and even then, document with citations (Hetzner status page, vendor docs).
 4. **Never propose e2e shortcuts customers can't reuse.** Snapshot baselines, pre-baked images, registry caches scoped to the test rig — all rejected. E2E must reproduce the customer cold-start path or it stops catching production regressions.
 5. **Own everything.** No "not ours / pre-existing" framing. Dirty files, lint errors, failing siblings — investigate and address or flag, don't wave them off.
