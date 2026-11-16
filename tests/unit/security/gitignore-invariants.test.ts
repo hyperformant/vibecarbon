@@ -69,8 +69,6 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
     expect(argv).not.toContain('.env.local');
   });
 
-  it('includes drizzle.config.ts, the config the schema workflow reads', () => {
-    expect(buildGitAddArgv(join(process.cwd(), 'carbon'))).toContain('drizzle.config.ts');
   it('stages no .env file and nothing under .vibecarbon/, even when they exist', async () => {
     // The checks above run in this checkout, where none of these exist, and
     // the allowlist only ever returns paths that do. Here they all exist.
@@ -149,6 +147,10 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
   it('starts with git add --', () => {
     const argv = buildGitAddArgv();
     expect(argv.slice(0, 3)).toEqual(['git', 'add', '--']);
+  });
+
+  it('includes drizzle.config.ts, the config the schema workflow reads', () => {
+    expect(buildGitAddArgv(join(process.cwd(), 'carbon'))).toContain('drizzle.config.ts');
   });
 
   it('extras are appended to the allowlist', () => {
