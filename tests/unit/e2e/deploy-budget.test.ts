@@ -199,12 +199,17 @@ describe('budgets are keyed on provider + mode + class', () => {
   });
 
   it('the calibrated table has no hand-edit shape errors', () => {
-    // The calibrated rows alone, which is all a seed may be computed from.
+    const tableSince = Date.parse(
+      JSON.parse(readFileSync('tests/e2e/checks/deploy-budgets.json', 'utf8')).since,
+    );
+    expect(tableSince).not.toBeNaN();
+    // The calibrated rows alone, which is all a seed may be computed from:
+    // neither a seed nor a row carried over from an older table.
     const calibrated: BudgetTable = {};
     for (const [provider, modes] of Object.entries(DEPLOY_BUDGET_TABLE)) {
       for (const [mode, classes] of Object.entries(modes)) {
         for (const [cpuClass, row] of Object.entries(classes)) {
-          if (row.samples === 0) continue;
+          if (row.samples === 0 || row.carriedOver) continue;
           calibrated[provider] = {
             ...calibrated[provider],
             [mode]: { ...calibrated[provider]?.[mode as DeployMode], [cpuClass]: row },
@@ -228,6 +233,15 @@ describe('budgets are keyed on provider + mode + class', () => {
             expect(row.samples, where).toBeGreaterThan(0);
             expect(row.seededFrom, where).toBeUndefined();
           }
+          if (row.carriedOver !== undefined) {
+            // Carried over from an older table: calibrated (never a seed) from
+            // runs before this table's own.
+            expect(row.carriedOver, where).toBe(true);
+            expect(row.samples, where).toBeGreaterThan(0);
+            expect(Date.parse(row.carriedFromSince ?? ''), where).toBeLessThan(tableSince);
+          } else {
+            expect(row.carriedFromSince, where).toBeUndefined();
+          }
           expect(
             budgetFor(DEPLOY_BUDGET_TABLE, mode as DeployMode, { provider, cpuClass })?.row,
             where,
@@ -235,6 +249,39 @@ describe('budgets are keyed on provider + mode + class', () => {
         }
       }
     }
+  });
+
+  it('a carried row is judged like any other, and the verdict says it was carried', () => {
+    const carried = {
+      ownedS: 200,
+      endToEndS: 260,
+      samples: 5,
+      carriedOver: true,
+      carriedFromSince: '2026-11-05T12:00:00.000Z',
+    };
+    const table: BudgetTable = {
+      hetzner: { compose: { cpx: { ownedS: 150, endToEndS: 210, samples: 1 }, cx: carried } },
+    };
+    const fast = fixture('compose', { total: 150_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const pass = judge(fast, 'compose', KEY, table);
+    expect(pass.ok).toBe(true);
+    expect(pass.message).toMatch(
+      /carried budget: hetzner\/compose\/cx has no stock samples yet, so it is the row calibrated from runs since 2026-11-05T12:00:00\.000Z/,
+    );
+    expect(pass.details).toMatchObject({
+      budgetRow: 'hetzner/compose/cx',
+      budgetCarriedFromSince: carried.carriedFromSince,
+    });
+    const slow = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const fail = judge(slow, 'compose', KEY, table);
+    expect(fail.ok).toBe(false);
+    expect(fail.message).toMatch(
+      /^deploy-owned 245s > 200s .*\(carried budget: hetzner\/compose\/cx /,
+    );
+    // A calibrated row says neither.
+    const cpx = judge(fast, 'compose', { provider: 'hetzner', cpuClass: 'cpx' }, table);
+    expect(cpx.message).not.toMatch(/carried|seeded/);
+    expect(cpx.details).toMatchObject({ budgetCarriedFromSince: null });
   });
 
   it('a seeded row is judged like any other, and the verdict says it is a seed', () => {

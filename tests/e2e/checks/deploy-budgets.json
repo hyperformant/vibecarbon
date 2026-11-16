@@ -1,6 +1,6 @@
 {
-  "rule": "owned = ceil5(1.5 x median + 60) over local and GitHub cold deploys pooled; endToEnd = owned + tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A provider + mode with no samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers. Regenerate with scripts/calibrate-deploy-budgets.js.",
-  "since": "2026-11-05T12:00:00.000Z",
+  "rule": "owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled; endToEnd = owned + tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A class with no stock sample keeps its row from the table this one replaced (carriedOver, with carriedFromSince, the since it was calibrated from) until a stock sample replaces it. A provider + mode with no row is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers, never a carried row. Regenerate with scripts/calibrate-deploy-budgets.js.",
+  "since": "2026-11-15T20:06:33.000Z",
   "budgets": {
     "digitalocean": {
       "compose-ha": {
@@ -8,25 +8,31 @@
           "ownedS": 465,
           "endToEndS": 525,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "any": {
           "ownedS": 390,
           "endToEndS": 450,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "intel": {
           "ownedS": 335,
           "endToEndS": 395,
           "tlsAllowanceS": 60,
-          "samples": 8
+          "samples": 8,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 400,
-          "endToEndS": 460,
+          "ownedS": 285,
+          "endToEndS": 345,
           "tlsAllowanceS": 60,
-          "samples": 7
+          "samples": 2
         }
       },
       "compose": {
@@ -34,13 +40,15 @@
           "ownedS": 315,
           "endToEndS": 375,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 280,
-          "endToEndS": 340,
+          "ownedS": 255,
+          "endToEndS": 315,
           "tlsAllowanceS": 60,
-          "samples": 19
+          "samples": 2
         }
       },
       "k8s-ha": {
@@ -48,25 +56,31 @@
           "ownedS": 530,
           "endToEndS": 590,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "any": {
           "ownedS": 400,
           "endToEndS": 460,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 2,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "intel": {
           "ownedS": 390,
           "endToEndS": 450,
           "tlsAllowanceS": 60,
-          "samples": 6
+          "samples": 6,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 450,
-          "endToEndS": 510,
+          "ownedS": 415,
+          "endToEndS": 475,
           "tlsAllowanceS": 60,
-          "samples": 6
+          "samples": 2
         }
       },
       "k8s": {
@@ -74,19 +88,23 @@
           "ownedS": 315,
           "endToEndS": 375,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 2,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "any": {
           "ownedS": 420,
           "endToEndS": 480,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 400,
-          "endToEndS": 525,
-          "tlsAllowanceS": 125,
-          "samples": 16
+          "ownedS": 405,
+          "endToEndS": 465,
+          "tlsAllowanceS": 60,
+          "samples": 2
         }
       }
     },
@@ -96,19 +114,23 @@
           "ownedS": 400,
           "endToEndS": 460,
           "tlsAllowanceS": 60,
-          "samples": 9
+          "samples": 9,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 290,
-          "endToEndS": 350,
+          "ownedS": 275,
+          "endToEndS": 335,
           "tlsAllowanceS": 60,
-          "samples": 10
+          "samples": 1
         },
         "cx": {
           "ownedS": 405,
           "endToEndS": 465,
           "tlsAllowanceS": 60,
-          "samples": 5
+          "samples": 5,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         }
       },
       "compose": {
@@ -116,19 +138,23 @@
           "ownedS": 375,
           "endToEndS": 435,
           "tlsAllowanceS": 60,
-          "samples": 3
+          "samples": 3,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 230,
-          "endToEndS": 290,
+          "ownedS": 200,
+          "endToEndS": 260,
           "tlsAllowanceS": 60,
-          "samples": 8
+          "samples": 1
         },
         "cx": {
           "ownedS": 245,
           "endToEndS": 305,
           "tlsAllowanceS": 60,
-          "samples": 5
+          "samples": 5,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         }
       },
       "k8s-ha": {
@@ -136,19 +162,23 @@
           "ownedS": 460,
           "endToEndS": 520,
           "tlsAllowanceS": 60,
-          "samples": 6
+          "samples": 6,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 420,
-          "endToEndS": 550,
-          "tlsAllowanceS": 130,
-          "samples": 10
+          "ownedS": 375,
+          "endToEndS": 435,
+          "tlsAllowanceS": 60,
+          "samples": 1
         },
         "cx": {
           "ownedS": 440,
           "endToEndS": 500,
           "tlsAllowanceS": 60,
-          "samples": 4
+          "samples": 4,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         }
       },
       "k8s": {
@@ -156,37 +186,41 @@
           "ownedS": 470,
           "endToEndS": 530,
           "tlsAllowanceS": 60,
-          "samples": 3
+          "samples": 3,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 360,
-          "endToEndS": 420,
+          "ownedS": 320,
+          "endToEndS": 380,
           "tlsAllowanceS": 60,
-          "samples": 10
+          "samples": 1
         },
         "cx": {
           "ownedS": 410,
           "endToEndS": 470,
           "tlsAllowanceS": 60,
-          "samples": 7
+          "samples": 7,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         }
       }
     },
     "linode": {
       "compose-ha": {
         "standard": {
-          "ownedS": 375,
-          "endToEndS": 435,
+          "ownedS": 325,
+          "endToEndS": 385,
           "tlsAllowanceS": 60,
-          "samples": 15
+          "samples": 2
         }
       },
       "compose": {
         "standard": {
-          "ownedS": 330,
-          "endToEndS": 415,
-          "tlsAllowanceS": 85,
-          "samples": 15
+          "ownedS": 325,
+          "endToEndS": 385,
+          "tlsAllowanceS": 60,
+          "samples": 2
         }
       },
       "k8s-ha": {
@@ -194,14 +228,14 @@
           "ownedS": 530,
           "endToEndS": 590,
           "tlsAllowanceS": 60,
-          "samples": 5
+          "samples": 2
         }
       },
       "k8s": {
         "standard": {
-          "ownedS": 490,
-          "endToEndS": 550,
-          "tlsAllowanceS": 60,
+          "ownedS": 505,
+          "endToEndS": 570,
+          "tlsAllowanceS": 65,
           "samples": 2
         }
       }
@@ -212,13 +246,15 @@
           "ownedS": 560,
           "endToEndS": 620,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "DEV1": {
-          "ownedS": 490,
-          "endToEndS": 550,
+          "ownedS": 375,
+          "endToEndS": 435,
           "tlsAllowanceS": 60,
-          "samples": 11
+          "samples": 1
         }
       },
       "compose": {
@@ -226,13 +262,15 @@
           "ownedS": 345,
           "endToEndS": 405,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "BASIC3": {
           "ownedS": 260,
           "endToEndS": 320,
           "tlsAllowanceS": 60,
-          "samples": 11
+          "samples": 1
         }
       }
     },
@@ -242,13 +280,15 @@
           "ownedS": 420,
           "endToEndS": 480,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "vc2": {
-          "ownedS": 390,
-          "endToEndS": 450,
+          "ownedS": 360,
+          "endToEndS": 420,
           "tlsAllowanceS": 60,
-          "samples": 13
+          "samples": 1
         }
       },
       "compose": {
@@ -256,13 +296,15 @@
           "ownedS": 355,
           "endToEndS": 415,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 1,
+          "carriedOver": true,
+          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "vc2": {
-          "ownedS": 285,
-          "endToEndS": 345,
+          "ownedS": 270,
+          "endToEndS": 330,
           "tlsAllowanceS": 60,
-          "samples": 12
+          "samples": 1
         }
       }
     }

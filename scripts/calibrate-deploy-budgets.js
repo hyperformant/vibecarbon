@@ -12,8 +12,9 @@
  * of the same run) counts once.
  *
  * Reads the results dbs READ-ONLY (never written) and writes
- * tests/e2e/checks/deploy-budgets.json, the table
- * tests/e2e/checks/deploy-budget.ts judges against. Keyed on provider, mode
+ * tests/e2e/checks/deploy-budgets.json (or --out), the table
+ * tests/e2e/checks/deploy-budget.ts judges against, after reading the table
+ * already there for the rows it carries over (below). Keyed on provider, mode
  * and CPU class: one provider's speed cannot hide behind another's.
  *
  * Samples: a deploy step that PASSED and is `cold` in the db (the same
@@ -48,16 +49,37 @@
  * laptop's fixed overhead: local medians ran 1.4-1.5x GitHub's on the short
  * Hetzner compose deploys and about 1.07x elsewhere.
  *
- * Seeds: a provider + mode with no samples at all (a mode a provider supports
- * but has never passed a cold deploy in) gets a seeded row, so its first run
- * is judged against a number instead of failing with `no budget yet`. The
- * seed is the mean of every calibrated row of that mode on the other
- * providers, ceil5'd, with `samples: 0` and `seededFrom` naming those rows. A
- * seed is never an input to another seed, and the first passing cold deploy
- * replaces it with a calibrated row. A mode with no calibrated row on any
- * provider gets no seed; the check then fails with `no budget yet`.
+ * Seeds: a provider + mode with no row at all (a mode a provider supports but
+ * has never passed a cold deploy in, and nothing carried, below) gets a seeded
+ * row, so its first run is judged against a number instead of failing with
+ * `no budget yet`. The seed is the mean of every calibrated row of that mode
+ * on the other providers, ceil5'd, with `samples: 0` and `seededFrom` naming
+ * those rows. A seed is never an input to another seed, and the first passing
+ * cold deploy replaces it with a calibrated row. A mode with no calibrated row
+ * on any provider gets no seed; the check then fails with `no budget yet`.
+ *
+ * Carried rows: the table this run overwrites (--out) keeps every calibrated
+ * row whose provider + mode + class the new samples do not cover, marked
+ * `carriedOver: true` with `carriedFromSince`, the --since of the calibration
+ * that measured it (a row carried twice keeps its first). Without them a class
+ * no stock run has landed on yet (the default type moves with capacity), and
+ * the `any` row a run with no exact row falls back to, would lose their
+ * numbers, and the check would fail a deploy there with `no budget yet`. A
+ * stock sample of the class replaces its carried row on a later calibration.
+ * A carried row is never an input to a seed, and a provider + mode with one is
+ * judged by its own older number rather than seeded from other providers. A
+ * seed is never carried (it is recomputed), nor a row of a provider, mode or
+ * class a deploy can no longer land on.
+ *
+ * The rows carried in 2026-11-15 came from deploys before e2e runs were stock
+ * (#457), which ran the observability add-on and did more work, so a carried
+ * row is meant to err loose, not tight. The first stock runs mostly bore that
+ * out: the stock row came in at or under the older row on 14 of 16 classes,
+ * and 5 s and 15 s over it on the other two (DigitalOcean regular k8s and
+ * Linode k8s, n = 2 each). Read a carried row as a ceiling to tighten, not a
+ * stock number.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
@@ -104,8 +126,9 @@ export function budgetFromSamples(samples) {
 }
 
 /**
- * The seed for `provider` + `mode` from the calibrated rows (samples > 0) of
- * that mode on every other provider, or undefined when there are none.
+ * The seed for `provider` + `mode` from the calibrated rows (samples > 0, not
+ * carried over) of that mode on every other provider, or undefined when there
+ * are none.
  * @returns {{ownedS: number, endToEndS: number, tlsAllowanceS: number, samples: 0, seededFrom: string[]} | undefined}
  */
 export function seededRow(budgets, provider, mode) {
@@ -113,7 +136,7 @@ export function seededRow(budgets, provider, mode) {
   for (const [p, modes] of Object.entries(budgets)) {
     if (p === provider) continue;
     for (const [cls, row] of Object.entries(modes[mode] ?? {})) {
-      if (row.samples > 0) from.push({ name: `${p}/${mode}/${cls}`, row });
+      if (row.samples > 0 && !row.carriedOver) from.push({ name: `${p}/${mode}/${cls}`, row });
     }
   }
   if (from.length === 0) return undefined;
@@ -135,9 +158,10 @@ export function seedClass(provider) {
 }
 
 /**
- * Seed every supported provider + mode that has no row. Seeds are computed
- * from the calibrated table alone, so none feeds another. Mutates and returns
- * `budgets`, plus the seeds it added.
+ * Seed every supported provider + mode that has no row (calibrated or carried).
+ * Seeds are computed from the calibrated rows alone, so none feeds another and
+ * no carried row feeds one. Mutates and returns `budgets`, plus the seeds it
+ * added.
  */
 export function addSeeds(budgets) {
   const seeds = [];
@@ -153,6 +177,68 @@ export function addSeeds(budgets) {
     budgets[provider][mode] = { [cls]: row };
   }
   return { budgets, seeds };
+}
+
+const rowKey = (x) => `${x.provider}/${x.mode}/${x.cls}`;
+const byRowKey = (a, b) => rowKey(a).localeCompare(rowKey(b));
+
+/**
+ * Carry over from `previous` (the table this calibration overwrites) every
+ * calibrated row whose provider + mode + class has no row in `budgets`,
+ * marked `carriedOver` with `carriedFromSince`, the since of the calibration
+ * that measured it. A seed is not carried (it is recomputed), nor a row of a
+ * provider, mode or class a deploy can no longer land on. Run it before
+ * addSeeds. Mutates and returns `budgets`, plus the rows it carried.
+ */
+export function carryOver(budgets, previous) {
+  const carried = [];
+  for (const [provider, modes] of Object.entries(previous?.budgets ?? {})) {
+    if (!Object.hasOwn(PROVIDERS, provider)) continue;
+    const classes = [...declaredClasses(provider), ANY_CLASS];
+    for (const mode of supportedModes(provider)) {
+      for (const [cls, row] of Object.entries(modes?.[mode] ?? {})) {
+        if (!classes.includes(cls) || !(row?.samples > 0)) continue;
+        if (budgets[provider]?.[mode]?.[cls]) continue; // a stock sample replaced it
+        const carriedFromSince = row.carriedFromSince ?? previous.since;
+        if (Number.isNaN(Date.parse(carriedFromSince ?? ''))) {
+          throw new Error(
+            `cannot carry over ${provider}/${mode}/${cls}: the table it is in has no since`,
+          );
+        }
+        const { ownedS, endToEndS, tlsAllowanceS, samples } = row;
+        const kept = {
+          ownedS,
+          endToEndS,
+          tlsAllowanceS,
+          samples,
+          carriedOver: true,
+          carriedFromSince,
+        };
+        budgets[provider] ??= {};
+        budgets[provider][mode] ??= {};
+        budgets[provider][mode][cls] = kept;
+        carried.push({ provider, mode, cls, ...kept });
+      }
+    }
+  }
+  return { budgets, carried: carried.sort(byRowKey) };
+}
+
+/** `budgets` with its provider, mode and class keys in one order, however each row got there. */
+function sortedTable(budgets) {
+  const entries = [];
+  for (const [provider, modes] of Object.entries(budgets)) {
+    for (const [mode, classes] of Object.entries(modes)) {
+      for (const [cls, row] of Object.entries(classes)) entries.push({ provider, mode, cls, row });
+    }
+  }
+  const sorted = {};
+  for (const { provider, mode, cls, row } of entries.sort(byRowKey)) {
+    sorted[provider] ??= {};
+    sorted[provider][mode] ??= {};
+    sorted[provider][mode][cls] = row;
+  }
+  return sorted;
 }
 
 /** The modes a provider can really run (its SUPPORTED_TIERS). */
@@ -239,19 +325,24 @@ function readOne(dbPath, since, groups, seen, counts) {
   }
 }
 
-/** The table and the report from the samples. */
-export function buildTable({ groups, nonStock = 0 }, since) {
+/**
+ * The table and the report from the samples, carrying over the rows of
+ * `previous` (the table being overwritten, if any) that the samples do not
+ * cover.
+ */
+export function buildTable({ groups, nonStock = 0 }, since, previous) {
   const budgets = {};
   const rows = [];
-  for (const g of groups.sort((a, b) =>
-    `${a.provider}/${a.mode}/${a.cls}`.localeCompare(`${b.provider}/${b.mode}/${b.cls}`),
-  )) {
+  for (const g of groups.sort(byRowKey)) {
     const row = budgetFromSamples(g.rows);
     budgets[g.provider] ??= {};
     budgets[g.provider][g.mode] ??= {};
     budgets[g.provider][g.mode][g.cls] = row;
     rows.push({ ...g, ...row });
   }
+  // Carry before seeding: a provider + mode with a carried row is judged by
+  // it, and seededRow skips carried rows, so none feeds a seed.
+  const { carried } = carryOver(budgets, previous);
   const { seeds } = addSeeds(budgets);
   // What is left has no number at all: the check fails with `no budget yet`.
   const noData = [];
@@ -263,19 +354,21 @@ export function buildTable({ groups, nonStock = 0 }, since) {
   const table = {
     rule: RULE,
     since,
-    budgets,
+    budgets: sortedTable(budgets),
   };
-  return { table, rows, seeds, noData, nonStock };
+  return { table, rows, seeds, carried, noData, nonStock };
 }
 
 export const RULE =
   'owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled; ' +
   'endToEnd = owned + ' +
-  'tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A provider + mode with no ' +
-  "samples is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the " +
-  'other providers. Regenerate with scripts/calibrate-deploy-budgets.js.';
+  'tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A class with no stock ' +
+  'sample keeps its row from the table this one replaced (carriedOver, with carriedFromSince, ' +
+  'the since it was calibrated from) until a stock sample replaces it. A provider + mode with ' +
+  "no row is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the " +
+  'other providers, never a carried row. Regenerate with scripts/calibrate-deploy-budgets.js.';
 
-export function renderReport({ rows, seeds = [], noData, nonStock = 0 }, since) {
+export function renderReport({ rows, seeds = [], carried = [], noData, nonStock = 0 }, since) {
   const out = [
     `# Deploy budgets (runs since ${since})`,
     '',
@@ -293,6 +386,13 @@ export function renderReport({ rows, seeds = [], noData, nonStock = 0 }, since) 
     ...seeds.map(
       (x) =>
         `- ${x.provider}/${x.mode}/${x.cls}: owned ${x.ownedS} s, end-to-end ${x.endToEndS} s, from ${x.seededFrom.join(', ')}`,
+    ),
+    '',
+    '## Carried over (no stock sample of the class yet; the row from the table this one replaced, from deploys before e2e runs were stock, until a stock cold deploy replaces it)',
+    '',
+    ...carried.map(
+      (x) =>
+        `- ${x.provider}/${x.mode}/${x.cls}: owned ${x.ownedS} s, end-to-end ${x.endToEndS} s, n ${x.samples}, calibrated since ${x.carriedFromSince}`,
     ),
     '',
     '## No data (no number; the check fails with `no budget yet`)',
@@ -333,7 +433,9 @@ function parseArgs(argv) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = parseArgs(process.argv.slice(2));
-    const built = buildTable(readSamples(args.db, args.since), args.since);
+    // The table about to be overwritten: its rows the samples do not cover are carried over.
+    const previous = existsSync(args.out) ? JSON.parse(readFileSync(args.out, 'utf8')) : undefined;
+    const built = buildTable(readSamples(args.db, args.since), args.since, previous);
     mkdirSync(path.dirname(args.out), { recursive: true });
     writeFileSync(args.out, `${JSON.stringify(built.table, null, 2)}\n`);
     const report = renderReport(built, args.since);

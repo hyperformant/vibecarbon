@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -283,9 +284,219 @@ describe('reading the results db', () => {
     );
   });
 
+  it('carries over from the table it overwrites (--out) the rows its samples do not cover', () => {
+    const out = path.join(dir, 'budgets.json');
+    const row = (ownedS: number, samples: number) => ({
+      ownedS,
+      endToEndS: ownedS + 60,
+      tlsAllowanceS: 60,
+      samples,
+    });
+    writeFileSync(
+      out,
+      JSON.stringify({
+        rule: 'old',
+        since: '2026-11-01T00:00:00.000Z',
+        budgets: { hetzner: { compose: { cpx: row(230, 8), cx: row(999, 5) } } },
+      }),
+    );
+    const report = execFileSync(
+      process.execPath,
+      [
+        path.resolve('scripts/calibrate-deploy-budgets.js'),
+        '--db',
+        dbPath,
+        '--since',
+        '2026-11-05T13:00:00Z',
+        '--out',
+        out,
+      ],
+      { encoding: 'utf8' },
+    );
+    const written = JSON.parse(readFileSync(out, 'utf8'));
+    expect(written.since).toBe('2026-11-05T13:00:00.000Z');
+    // A stock sample of cx replaced the old row; cpx had none, so it is carried.
+    expect(written.budgets.hetzner.compose.cx).toEqual({
+      ownedS: 330,
+      endToEndS: 390,
+      tlsAllowanceS: 60,
+      samples: 1,
+    });
+    expect(written.budgets.hetzner.compose.cpx).toEqual({
+      ...row(230, 8),
+      carriedOver: true,
+      carriedFromSince: '2026-11-01T00:00:00.000Z',
+    });
+    expect(report).toMatch(/- hetzner\/compose\/cpx: owned 230 s, end-to-end 290 s, n 8, /);
+  });
+
   it('never writes the db', () => {
     const ro = new Database(dbPath, { readonly: true });
     expect(() => ro.exec('DELETE FROM steps')).toThrow(/readonly/);
     ro.close();
+  });
+});
+
+describe('carrying over the rows the stock samples do not cover', () => {
+  const OLD_SINCE = '2026-11-05T12:00:00.000Z';
+  const NEW_SINCE = '2026-11-15T20:06:33.000Z';
+  const row = (ownedS: number, samples: number) => ({
+    ownedS,
+    endToEndS: ownedS + 60,
+    tlsAllowanceS: 60,
+    samples,
+  });
+  const carriedRow = (ownedS: number, samples: number, since = OLD_SINCE) => ({
+    ...row(ownedS, samples),
+    carriedOver: true,
+    carriedFromSince: since,
+  });
+  const group = (provider: string, mode: string, cls: string, owned: number[]) => ({
+    provider,
+    mode,
+    cls,
+    rows: owned.map((x) => s(x)),
+  });
+  /** The table being overwritten: calibrated before e2e deploys were stock. */
+  const previous = {
+    rule: 'old',
+    since: OLD_SINCE,
+    budgets: {
+      hetzner: { compose: { any: row(375, 3), cpx: row(230, 8), cx: row(245, 5) } },
+      digitalocean: { k8s: { intel: row(390, 6) } },
+    },
+  };
+  const build = (groups: ReturnType<typeof group>[], prev: object | undefined = previous) =>
+    buildTable({ groups, nonStock: 0 }, NEW_SINCE, prev);
+  const key = (x: { provider: string; mode: string; cls: string }) =>
+    `${x.provider}/${x.mode}/${x.cls}`;
+
+  it('carries a class with no stock sample, marked with the since of the table it came from', () => {
+    const { table, carried } = build([group('hetzner', 'compose', 'cpx', [100])]);
+    expect(table.budgets.hetzner.compose.cx).toEqual(carriedRow(245, 5));
+    expect(table.budgets.hetzner.compose.any).toEqual(carriedRow(375, 3));
+    expect(table.budgets.digitalocean.k8s.intel).toEqual(carriedRow(390, 6));
+    expect(carried.map(key)).toEqual([
+      'digitalocean/k8s/intel',
+      'hetzner/compose/any',
+      'hetzner/compose/cx',
+    ]);
+  });
+
+  it('a class with stock samples replaces the carried row', () => {
+    const { table, rows, carried } = build([group('hetzner', 'compose', 'cpx', [100])]);
+    expect(table.budgets.hetzner.compose.cpx).toEqual(budgetFromSamples([s(100)]));
+    expect(table.budgets.hetzner.compose.cpx.carriedOver).toBeUndefined();
+    expect(rows.map(key)).toEqual(['hetzner/compose/cpx']);
+    expect(carried.map(key)).not.toContain('hetzner/compose/cpx');
+  });
+
+  it('a carried row is carried again with its first since, until a stock sample replaces it', () => {
+    const prev = {
+      since: NEW_SINCE,
+      budgets: { hetzner: { compose: { cx: carriedRow(245, 5) } } },
+    };
+    const again = build([group('hetzner', 'compose', 'cpx', [100])], prev);
+    expect(again.table.budgets.hetzner.compose.cx).toEqual(carriedRow(245, 5, OLD_SINCE));
+    const replaced = build([group('hetzner', 'compose', 'cx', [120])], prev);
+    expect(replaced.table.budgets.hetzner.compose.cx).toEqual(budgetFromSamples([s(120)]));
+    expect(replaced.carried).toEqual([]);
+  });
+
+  it('carried rows never seed, and a provider + mode they cover is judged by them, not a seed', () => {
+    // DigitalOcean's only k8s row is carried, so no calibrated k8s row exists
+    // anywhere: nothing can seed linode/k8s.
+    const none = build([group('hetzner', 'compose', 'cpx', [100])]);
+    expect(none.table.budgets.linode?.k8s).toBeUndefined();
+    expect(none.noData.map((d) => `${d.provider}/${d.mode}`)).toContain('linode/k8s');
+    expect(seededRow(none.table.budgets, 'linode', 'k8s')).toBeUndefined();
+    // One calibrated k8s row: the seed is that row alone, never the carried one.
+    const one = build([
+      group('hetzner', 'compose', 'cpx', [100]),
+      group('hetzner', 'k8s', 'cpx', [200]),
+    ]);
+    expect(one.table.budgets.linode.k8s).toEqual({
+      standard: {
+        ownedS: 360, // 1.5 x 200 + 60
+        endToEndS: 420,
+        tlsAllowanceS: 60,
+        samples: 0,
+        seededFrom: ['hetzner/k8s/cpx'],
+      },
+    });
+    // DigitalOcean k8s keeps its own (carried) number: no seed beside it.
+    expect(one.table.budgets.digitalocean.k8s).toEqual({ intel: carriedRow(390, 6) });
+    for (const x of one.seeds) {
+      for (const name of x.seededFrom) {
+        const [p, m, c] = name.split('/');
+        expect(one.table.budgets[p][m][c].carriedOver, name).toBeUndefined();
+      }
+    }
+  });
+
+  it('a seed in the table being overwritten is recomputed, never carried', () => {
+    const prev = {
+      since: OLD_SINCE,
+      budgets: {
+        vultr: { compose: { any: { ...row(500, 0), seededFrom: ['linode/compose/standard'] } } },
+      },
+    };
+    const { table, carried } = build([group('hetzner', 'compose', 'cpx', [100])], prev);
+    expect(carried).toEqual([]);
+    expect(table.budgets.vultr.compose).toEqual({
+      any: { ...budgetFromSamples([s(100)]), samples: 0, seededFrom: ['hetzner/compose/cpx'] },
+    });
+  });
+
+  it('drops a row no deploy can be judged by: an unsupported mode, an undeclared class, an unknown provider', () => {
+    const prev = {
+      since: OLD_SINCE,
+      budgets: {
+        vultr: { k8s: { vc2: row(300, 4) } },
+        hetzner: { compose: { zz9: row(300, 4) } },
+        nope: { compose: { any: row(300, 4) } },
+      },
+    };
+    const { table, carried } = build([group('hetzner', 'compose', 'cpx', [100])], prev);
+    expect(carried).toEqual([]);
+    expect(table.budgets.vultr?.k8s).toBeUndefined();
+    expect(table.budgets.hetzner.compose.zz9).toBeUndefined();
+    expect(table.budgets.nope).toBeUndefined();
+  });
+
+  it('carries nothing when there is no table to overwrite', () => {
+    const { table, carried } = buildTable(
+      { groups: [group('hetzner', 'compose', 'cpx', [100])] },
+      NEW_SINCE,
+    );
+    expect(carried).toEqual([]);
+    expect(Object.keys(table.budgets.hetzner.compose)).toEqual(['cpx']);
+  });
+
+  it('writes carried rows in the same order as calibrated ones', () => {
+    const { table } = build([group('hetzner', 'compose', 'cpx', [100])]);
+    expect(Object.keys(table.budgets)).toEqual([
+      'digitalocean',
+      'hetzner',
+      'linode',
+      'scaleway',
+      'vultr',
+    ]);
+    expect(Object.keys(table.budgets.hetzner.compose)).toEqual(['any', 'cpx', 'cx']);
+  });
+
+  it('the report lists the carried rows in their own section, never in the calibrated table', () => {
+    const built = build([group('hetzner', 'compose', 'cpx', [100])]);
+    const report = renderReport(built, NEW_SINCE);
+    const [calibrated] = report.split('\n## ');
+    expect(calibrated).toMatch(/\| hetzner \| compose \| cpx \| 1 \|/);
+    expect(calibrated).not.toMatch(/\| cx \||\| any \||\| intel \|/);
+    const section = report.split('\n## Carried over')[1]?.split('\n## ')[0];
+    expect(section).toBeDefined();
+    expect(section).toMatch(
+      /- hetzner\/compose\/cx: owned 245 s, end-to-end 305 s, n 5, calibrated since 2026-11-05T12:00:00\.000Z/,
+    );
+    expect(section).toMatch(/- hetzner\/compose\/any: owned 375 s/);
+    expect(section).toMatch(/- digitalocean\/k8s\/intel: owned 390 s/);
   });
 });
