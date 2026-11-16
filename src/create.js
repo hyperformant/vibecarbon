@@ -380,7 +380,7 @@ function makeBiomeConfigRoot(biomeJsonPath) {
  */
 export const TEMPLATE_ONLY_TESTS = ['template-migrations-census.test.ts'];
 
-function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCopy = []) {
+function copyTemplateDir(templateSubdir, destDir, variables, exclude = []) {
   const fullTemplatePath = join(TEMPLATE_DIR, templateSubdir);
 
   if (!existsSync(fullTemplatePath)) {
@@ -396,10 +396,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
 
     if (entry.isDirectory()) {
       mkdirSync(destPath, { recursive: true });
-      copyTemplateDir(join(templateSubdir, entry.name), destPath, variables, exclude, rawCopy);
-    } else if (rawCopy.includes(entry.name)) {
-      mkdirSync(dirname(destPath), { recursive: true });
-      copyFileSync(join(fullTemplatePath, entry.name), destPath);
+      copyTemplateDir(join(templateSubdir, entry.name), destPath, variables, exclude);
     } else {
       copyTemplate(join(templateSubdir, entry.name), destPath, variables);
     }
@@ -940,15 +937,7 @@ async function bootstrap(cliArgs) {
   copyK8sTemplate(projectDir, variables);
 
   // Scripts (manifest-based docker/k8s commands)
-  // generate-dev-configs.sh contains {{PLACEHOLDER}} tokens as its own substitution keys,
-  // so it must be copied verbatim to avoid leaking real secrets into the script.
-  copyTemplateDir(
-    'scripts',
-    join(projectDir, 'scripts'),
-    variables,
-    [],
-    ['generate-dev-configs.sh'],
-  );
+  copyTemplateDir('scripts', join(projectDir, 'scripts'), variables);
 
   // Make shell scripts executable
   const shellScripts = [
@@ -969,7 +958,7 @@ async function bootstrap(cliArgs) {
 
   // Validate no unreplaced placeholders remain
   s.message('Validating generated files');
-  const placeholderIssues = validatePlaceholders(projectDir, ['generate-dev-configs.sh', 'agents']);
+  const placeholderIssues = validatePlaceholders(projectDir, ['agents']);
   if (placeholderIssues.length > 0) {
     s.stop('Validation warning');
     p.log.warn('Some files contain unreplaced placeholders:');

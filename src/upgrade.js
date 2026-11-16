@@ -104,10 +104,6 @@ const PLACEHOLDERS = {
 // from .env.local). Keep in sync with create.js.
 const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'ADMIN_PASSWORD']);
 
-// Files that contain {{PLACEHOLDER}} strings as their own substitution keys
-// (not vibecarbon template variables). Must be copied raw without replacement.
-const RAW_COPY_FILES = new Set(['scripts/generate-dev-configs.sh']);
-
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
 // ============================================================================
@@ -740,14 +736,10 @@ async function main(cliArgs) {
       continue;
     }
 
-    // Resolve template with variables (or raw-copy for files with their own {{PLACEHOLDER}} tokens)
+    // Resolve template with variables
     let newContent;
     try {
-      if (RAW_COPY_FILES.has(relPath)) {
-        newContent = readFileSync(templateFilePath, 'utf-8');
-      } else {
-        newContent = resolveTemplate(templateFilePath, variables);
-      }
+      newContent = resolveTemplate(templateFilePath, variables);
     } catch {
       // Template file can't be read — skip
       continue;
