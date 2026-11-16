@@ -253,9 +253,10 @@ const TIMEOUTS: Record<string, number> = {
   // sits at warm-deploy's worst-case budget rather than its typical one.
   'warm-redeploy-change': 1_800_000,
   'verify-deploy': 1_800_000, // 30 min — k8s tail (ACME + rollout) past 20 min
-  // 25 min: `vibecarbon update` on a one-server mark restarts that server and
-  // waits for it, plus the 90 s and 120 s observation windows around it.
-  update: 25 * 60_000,
+  // 45 min: bounds the `vibecarbon update` CLI call only; the 90 s and 120 s
+  // observation windows come on top. k8s-ha updates its servers one at a time,
+  // and installs on fresh servers plus one restart can pass 25 min.
+  update: 45 * 60_000,
   'verify-status': 300_000, // 5 min — status -json polls up to 3 min for rolling pods
   // 10 parallel /api/health requests with a 15s per-request timeout. Allows
   // generous 2 min budget so a transient network blip during a single burst

@@ -232,7 +232,7 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
       if (res.status !== 200) return `GET /api/v1/admin/host-maintenance returned ${res.status}`;
       const body = (await res.json()) as {
         rebootRequired?: boolean;
-        servers?: Array<{ name: string; rebootRequired: boolean }>;
+        servers?: Array<{ name: string; reporting?: boolean; rebootRequired: boolean }>;
       };
       const servers = body.servers ?? [];
       // k8s names the node; compose reports one server per host, and the one
@@ -243,7 +243,17 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
       const anyDue = servers.some((s) => s.rebootRequired);
       if (want === 'due')
         return due ? null : `the endpoint does not list ${t.name} as due a restart`;
-      return (k8s ? due : anyDue) ? `the endpoint still lists ${t.name} as due a restart` : null;
+      if (k8s ? due : anyDue) return `the endpoint still lists ${t.name} as due a restart`;
+      // Not due is not enough: a reboot wipes the compose state file, and the
+      // app then lists the server as not reporting and not due. Cleared means
+      // the reporter came back and says so.
+      const mine = k8s
+        ? servers.find((s) => s.name === t.name)
+        : servers.length === 1
+          ? servers[0]
+          : undefined;
+      if (!mine) return `the endpoint does not list ${t.name}`;
+      return mine.reporting === true ? null : `${t.name} is not reporting to the endpoint yet`;
     };
 
   const annotationProbe =
@@ -298,7 +308,7 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
   // 4. Run the update. It runs even when a surface missed the mark: it is what
   // takes the mark away again.
   const upStart = Date.now();
-  const up = await deps.runUpdate(o.env, { cwd, timeout: o.timeouts?.updateMs ?? 25 * 60_000 });
+  const up = await deps.runUpdate(o.env, { cwd, timeout: o.timeouts?.updateMs ?? 45 * 60_000 });
   let plan: {
     plan?: Array<{ name: string; restart: string }>;
     skipped?: unknown[];
@@ -340,9 +350,15 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
       : Promise.resolve(null),
     pollWindow(deps, RESTART_CLEARED_WINDOW_MS, readyProbe),
   ]);
-  const problems = cleared
-    .map((p, i) => (p === null ? null : `${['status', 'admin', 'annotation', 'ready'][i]}: ${p}`))
-    .filter((p): p is string => p !== null);
+  const labelled: Array<[string, string | null]> = [
+    ['status', cleared[0]],
+    ['admin', cleared[1]],
+    ['annotation', cleared[2]],
+    ['ready', cleared[3]],
+  ];
+  const problems = labelled
+    .filter((entry): entry is [string, string] => entry[1] !== null)
+    .map(([name, p]) => `${name}: ${p}`);
   out.push(verdict('restart_cleared', problems.length ? problems.join('; ') : null, clearStart));
 
   // 6. Downtime against the plan.

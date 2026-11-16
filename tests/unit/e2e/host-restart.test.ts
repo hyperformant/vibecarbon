@@ -51,6 +51,14 @@ type World = {
   updateExit: number;
   skipped: unknown[];
   planRestart: string;
+  /** false: the update leaves the target due everywhere. */
+  updateClears: boolean;
+  /** false: the annotation alone stays due after the update. */
+  annotationClears: boolean;
+  readyStatus: number;
+  /** What admin says about the target's reporting after the update. */
+  adminReporting: boolean;
+  updated: boolean;
 };
 
 function fakes(mode: 'compose-ha' | 'k8s', world: World, planName: string, hostName: string) {
@@ -82,7 +90,8 @@ function fakes(mode: 'compose-ha' | 'k8s', world: World, planName: string, hostN
     },
     runUpdate: async () => {
       calls.push('update');
-      world.due = false;
+      world.updated = true;
+      if (world.updateClears) world.due = false;
       return {
         exitCode: world.updateExit,
         stderr: '',
@@ -98,13 +107,18 @@ function fakes(mode: 'compose-ha' | 'k8s', world: World, planName: string, hostN
     signIn: async () => ({ ok: true, jar: new CookieJar() }),
     fetch: async (url) => {
       calls.push(url);
-      if (url.endsWith('/api/health/ready')) return new Response('ok', { status: 200 });
+      if (url.endsWith('/api/health/ready'))
+        return new Response('ok', { status: world.readyStatus });
       return new Response(
         JSON.stringify({
           rebootRequired: world.due,
           servers: [
-            { name: 'other', reporting: true, rebootRequired: false },
-            { name: hostName, reporting: true, rebootRequired: world.due },
+            ...(isK8s ? [{ name: 'other', reporting: true, rebootRequired: false }] : []),
+            {
+              name: hostName,
+              reporting: world.updated ? world.adminReporting : true,
+              rebootRequired: world.due,
+            },
           ],
         }),
         { status: 200 },
@@ -121,7 +135,12 @@ function fakes(mode: 'compose-ha' | 'k8s', world: World, planName: string, hostN
         ? JSON.stringify({
             metadata: {
               name: hostName,
-              annotations: { 'vibecarbon.dev/host-state': annotation(hostName, world.due) },
+              annotations: {
+                'vibecarbon.dev/host-state': annotation(
+                  hostName,
+                  world.due || (world.updated && !world.annotationClears),
+                ),
+              },
             },
           })
         : '';
@@ -138,6 +157,11 @@ const world = (over: Partial<World> = {}): World => ({
   updateExit: 0,
   skipped: [],
   planRestart: 'due',
+  updateClears: true,
+  annotationClears: true,
+  readyStatus: 200,
+  adminReporting: true,
+  updated: false,
   ...over,
 });
 
@@ -252,6 +276,41 @@ describe('runHostRestartStep', () => {
     const a = results.find((r) => r.checkName === 'restart_due_admin');
     expect(a?.status).toBe('fail');
     expect(a?.errorMessage).toContain('401');
+  });
+});
+
+describe('restart_cleared can fail', () => {
+  const cleared = (rs: Array<{ checkName: string; status: string; errorMessage?: string }>) =>
+    rs.find((r) => r.checkName === 'restart_cleared');
+
+  it('fails naming status and admin when the update leaves the target due', async () => {
+    const r = cleared(await run('compose-ha', world({ updateClears: false })).result);
+    expect(r?.status).toBe('fail');
+    expect(r?.errorMessage).toMatch(/status:/);
+    expect(r?.errorMessage).toMatch(/admin:/);
+  });
+
+  it('fails naming ready when the ready probe answers 503 after the update', async () => {
+    const r = cleared(await run('compose-ha', world({ readyStatus: 503 })).result);
+    expect(r?.status).toBe('fail');
+    expect(r?.errorMessage).toMatch(/ready:.*503/);
+  });
+
+  it('fails naming the annotation when it stays due on k8s', async () => {
+    const target = { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1' };
+    const r = cleared(await run('k8s', world({ annotationClears: false }), target).result);
+    expect(r?.status).toBe('fail');
+    expect(r?.errorMessage).toMatch(/annotation:/);
+  });
+
+  it('fails naming admin when admin says the target is not reporting after the update', async () => {
+    for (const mode of ['compose-ha', 'k8s'] as const) {
+      const target =
+        mode === 'k8s' ? { name: 'worker-1', ip: '10.1.0.9', planName: 'worker-1' } : undefined;
+      const r = cleared(await run(mode, world({ adminReporting: false }), target).result);
+      expect(r?.status).toBe('fail');
+      expect(r?.errorMessage).toMatch(/admin:.*not reporting/);
+    }
   });
 });
 
