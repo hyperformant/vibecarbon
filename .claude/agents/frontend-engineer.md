@@ -155,7 +155,7 @@ Before considering any UI work complete, verify:
 - [ ] Keyboard accessible
 - [ ] Component is reusable if the pattern could appear elsewhere
 - [ ] Passes Biome linting (`pnpm lint`)
-- [ ] Passes TypeScript checking (`pnpm typecheck`)
+- [ ] Passes TypeScript checking (`pnpm lint` runs `tsc`)
 
 ## Agent Team Context
 
@@ -163,7 +163,7 @@ You may be spawned as a **teammate** in a Claude Code agent team, with your own 
 
 - **Communicate completion clearly.** When your task is done, summarize what you built, which files were created/modified, and any follow-up work needed.
 - **Do NOT spawn sub-teams.** You cannot create your own teammates. If you need work from another specialist, report the dependency back to the coordinator.
-- **Quality gates apply.** When you go idle, a hook runs `pnpm lint` and `pnpm typecheck`. Fix any errors before considering your work done.
+- **Quality gates apply.** When you go idle, a hook runs `pnpm lint` (which includes the type check). Fix any errors before considering your work done.
 - **Coordinate via task descriptions.** Read the full task description from the coordinator for context about prior work and dependencies.
 
 ## Update Your Agent Memory

@@ -8,15 +8,6 @@
 node_modules
 node_modules/
 
-# Test directories (created by test-stacks.js)
-test_carbon/
-test-carbon/
-my-app/
-test-services/
-
-# Reference images and screenshots
-.images/
-
 # Build outputs
 dist/
 *.tsbuildinfo
@@ -63,9 +54,6 @@ Thumbs.db
 .claude/worktrees/
 
 
-# Performance test results (machine-local, compare manually)
-tests/performance/results/
-
 # CI junit output (test:ci writes it to the repo root)
 test-results.xml
 
@@ -86,3 +74,6 @@ tests/results/.rig-*.json
 
 # Font cache for scripts/banner-generator.py — fetched on demand, never vendored
 .banner-fonts/
+
+# Knowledge graph written by the graphify skill (machine-local)
+graphify-out/

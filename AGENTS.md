@@ -324,27 +324,25 @@ Compose servers run Docker's classic image store, not the containerd store Docke
 
 ## Agent Team Workflow
 
-This project uses Claude Code's experimental agent teams feature. A **lead-coordinator** orchestrates 5 specialist teammates:
+This project uses Claude Code's experimental agent teams feature. A **lead-coordinator** orchestrates 4 specialist teammates:
 
 | Agent | Role | Quality Gate |
 |-------|------|-------------|
 | `lead-coordinator` | Decomposes tasks, delegates, synthesizes results | — |
-| `backend-engineer` | Backend APIs, database, DevOps, backend/infra `.md` docs | `pnpm lint` + `pnpm typecheck` on idle |
-| `frontend-engineer` | Frontend UI, components, styling, `/docs` route, frontend `.md` docs | `pnpm lint` + `pnpm typecheck` on idle |
+| `backend-engineer` | Backend APIs, database, DevOps, backend/infra `.md` docs | `pnpm lint` (includes the type check) on idle |
+| `frontend-engineer` | Frontend UI, components, styling, `/docs` route, frontend `.md` docs | `pnpm lint` (includes the type check) on idle |
 | `security-reviewer` | Security auditing after backend/infra changes | — |
 | `test-maintainer` | Test writing after any code change | `pnpm test:unit` on task complete |
 
 **Invocation**: Use the lead-coordinator for complex multi-step tasks. For simple single-domain tasks, invoke the specialist directly.
 
 **Quality gates** are enforced via hooks in `.claude/hooks/`:
-- `teammate-idle-gate.sh`: lint + typecheck before backend/frontend engineers go idle
+- `teammate-idle-gate.sh`: lint (which runs `tsc`) before backend/frontend engineers go idle
 - `task-completed-gate.sh`: unit tests must pass before QA marks a task complete
 
 **Configuration**:
 - `.claude/settings.json`: hook registrations (committed, shared with generated projects)
 - `.claude/settings.local.json`: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var (local only)
-
-> **Known issue**: `permissionMode: delegate` has a [bug](https://github.com/anthropics/claude-code/issues/23447) that strips file system tools from teammates. The coordination-only constraint is enforced via the lead-coordinator's system prompt instead. Enable `permissionMode: delegate` once the bug is fixed.
 
 ## Claude Code hooks
 
