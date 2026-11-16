@@ -47,8 +47,18 @@ const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
  * @returns {string}
  */
 export function sshKeyPathFor(environment, cwd = process.cwd()) {
-  const baseEnv = environment.replace(/-(primary|standby)$/, '');
+  const baseEnv = baseEnvName(environment);
   return join(cwd, '.vibecarbon', `deploy_key_${baseEnv}`);
+}
+
+/**
+ * The operator's environment name for a stack name: k8s-ha and compose-ha
+ * stacks are `<env>-primary` and `<env>-standby`.
+ * @param {string} environment
+ * @returns {string}
+ */
+export function baseEnvName(environment) {
+  return environment.replace(/-(primary|standby)$/, '');
 }
 
 /**

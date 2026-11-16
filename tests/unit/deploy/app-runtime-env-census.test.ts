@@ -252,6 +252,17 @@ describe('k8s: the app Secret and the infra Secret', () => {
     expect(app).not.toHaveProperty('S3_CREDENTIALS_INI');
   });
 
+  it('buildAppSecretData carries the base environment name as VIBECARBON_ENV', () => {
+    expect(buildAppSecretData({ envLocal, environment: 'production' }).VIBECARBON_ENV).toBe(
+      'production',
+    );
+    // k8s-ha stacks are named <env>-primary and <env>-standby; the app prints the operator's name.
+    expect(buildAppSecretData({ envLocal, environment: 'production-standby' }).VIBECARBON_ENV).toBe(
+      'production',
+    );
+    expect(buildAppSecretData({ envLocal })).not.toHaveProperty('VIBECARBON_ENV');
+  });
+
   it('buildAppSecretData carries the app keys, its S3 pair and REDIS_URL', () => {
     const app = buildAppSecretData({ envLocal, s3Config });
     expect(app.BETTER_AUTH_SECRET).toBe('SENTINEL_BETTER_AUTH_SECRET');
@@ -351,6 +362,15 @@ describe('compose bundle: app.env', () => {
       expect(appEnv, k).not.toHaveProperty(k);
     }
     expect(appEnvText).not.toContain('SENTINEL_HETZNER_API_TOKEN');
+  });
+
+  it('holds the base environment name as VIBECARBON_ENV, and keeps it out of .env', () => {
+    stage = renderBundle('myproj', { environment: 'production' });
+    const appEnv = parseDotenv(readFileSync(join(stage, 'app.env'), 'utf-8'));
+    expect(appEnv.VIBECARBON_ENV).toBe('production');
+    expect(parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'))).not.toHaveProperty(
+      'VIBECARBON_ENV',
+    );
   });
 
   it('a scale replay carries the old app.env storage pair forward', () => {

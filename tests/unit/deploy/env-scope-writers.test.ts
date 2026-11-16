@@ -60,13 +60,15 @@ describe('k8s app and infra Secrets', () => {
     );
   });
 
-  it('applyK3sManifests hands the Secret no environment', () => {
+  it('applyK3sManifests hands the Secret the environment only as VIBECARBON_ENV, never VC_ENV', () => {
     const k3s = src('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(
       // `restore` is the deploy -restore marker (a backup name and recovery
       // settings), not an environment; nor is `walgRole` (the db's wal-g role
-      // intent, primary or standby).
-      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupTarget,\s*restore,\s*walgRole,?\s*\}\)/,
+      // intent, primary or standby). `environment` is the stack name the app's
+      // restart notice prints as `vibecarbon update <env>` (buildAppSecretData
+      // strips the role suffix); the Secret never gets a VC_ENV key.
+      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupTarget,\s*restore,\s*walgRole,\s*environment,?\s*\}\)/,
     );
     expect(k3s).not.toMatch(/VC_ENV\s*=/);
   });

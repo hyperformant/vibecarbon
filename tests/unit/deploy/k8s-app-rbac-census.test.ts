@@ -3,9 +3,12 @@
  * Task 3, R11). On compose the app's Docker access is a path-allowlisted
  * proxy (list and logs only); on k8s the same narrowness comes from RBAC, and
  * this census keeps it that way:
- *   - every binding to the app ServiceAccount is a namespaced RoleBinding, and
- *     the Roles it binds grant only `get/list` on `pods` and `get` on
- *     `pods/log`: never `secrets`, `configmaps`, a wildcard, or a write verb;
+ *   - every namespaced binding to the app ServiceAccount is a RoleBinding to
+ *     a Role that grants only `get/list` on `pods` and `get` on `pods/log`:
+ *     never `secrets`, `configmaps`, a wildcard, or a write verb;
+ *   - the one cluster-wide grant is ClusterRole `vibecarbon-app-nodes`, bound
+ *     to the app by a ClusterRoleBinding, granting `get/list` on `nodes` and
+ *     nothing else (the app reads each node's host restart state from it);
  *   - pod specs reach credentials by `valueFrom` (a Secret key's name), so a
  *     pod read never carries a password: no workload under carbon/k8s/base sets
  *     a credential-looking env name as a literal `value:`.
@@ -63,16 +66,19 @@ describe('k8s: the app ServiceAccount reads pods and their logs, nothing else', 
     expect(bindings.length).toBeGreaterThan(0);
   });
 
-  it('binds only namespaced Roles, never a ClusterRole', () => {
-    for (const b of bindings) {
-      expect(b.kind, b.metadata?.name).toBe('RoleBinding');
+  const roleBindings = bindings.filter((b) => b.kind === 'RoleBinding');
+  const clusterBindings = bindings.filter((b) => b.kind === 'ClusterRoleBinding');
+
+  it('every namespaced binding is a RoleBinding to a Role', () => {
+    expect(roleBindings.length).toBeGreaterThan(0);
+    for (const b of roleBindings) {
       expect(b.roleRef?.kind, b.metadata?.name).toBe('Role');
     }
   });
 
   it('the bound Roles grant get/list on pods and get on pods/log only', () => {
     const allowed: Record<string, string[]> = { pods: ['get', 'list'], 'pods/log': ['get'] };
-    for (const b of bindings) {
+    for (const b of roleBindings) {
       const role = all.find((d) => d.kind === 'Role' && d.metadata?.name === b.roleRef.name);
       expect(role, `Role ${b.roleRef.name} not found`).toBeDefined();
       for (const rule of role.rules ?? []) {
@@ -91,6 +97,32 @@ describe('k8s: the app ServiceAccount reads pods and their logs, nothing else', 
           }
         }
       }
+    }
+  });
+
+  it('is bound to exactly one ClusterRole, which grants get/list on nodes and nothing else', () => {
+    expect(clusterBindings.map((b) => b.metadata?.name)).toEqual(['vibecarbon-app-nodes']);
+    const [binding] = clusterBindings;
+    expect(binding.roleRef).toEqual({
+      apiGroup: 'rbac.authorization.k8s.io',
+      kind: 'ClusterRole',
+      name: 'vibecarbon-app-nodes',
+    });
+    const roles = all.filter(
+      (d) => d.kind === 'ClusterRole' && d.metadata?.name === binding.roleRef.name,
+    );
+    expect(roles).toHaveLength(1);
+    expect(roles[0].aggregationRule).toBeUndefined();
+    expect(roles[0].rules).toEqual([
+      { apiGroups: [''], resources: ['nodes'], verbs: ['get', 'list'] },
+    ]);
+  });
+
+  it('no other subject-kind binding reaches the app through a group or the namespace', () => {
+    // A ClusterRoleBinding to a broad group would also give the app power.
+    for (const d of all.filter((x) => x.kind === 'ClusterRoleBinding')) {
+      if (d.metadata?.name === 'vibecarbon-app-nodes') continue;
+      expect(bindsAppSa(d), d.metadata?.name).toBe(false);
     }
   });
 });

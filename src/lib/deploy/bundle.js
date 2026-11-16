@@ -22,6 +22,7 @@ import {
   renderAddonServicesScript,
 } from '../services/addon-start.js';
 import { composeStandbyScaledServices, enabledAddonNames } from '../services/standby-policy.js';
+import { baseEnvName } from '../ssh.js';
 import { makeTempDir, removeTempDir } from '../temp-dir.js';
 import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
 import { renderComposeCommand, VC_COMPOSE, VC_COMPOSE_SCRIPT } from './compose/command.js';
@@ -496,8 +497,13 @@ function writeBundle(stageDir, projectName, options) {
   // server's app.env as `appEnvReplay`; a server deployed before app.env
   // existed gave its app the whole .env, so its S3_* there are what it used.
   const serverEnv = parseDotenv(serverEnvText);
+  // VIBECARBON_ENV is the operator's environment name, for the restart notice's
+  // `vibecarbon update <env>` hint. It joins the app's env here, not .env, so
+  // the server .env (which the db reads) is unchanged.
   const appEnv = buildAppRuntimeEnv(
-    serverEnv,
+    options.environment
+      ? { ...serverEnv, VIBECARBON_ENV: baseEnvName(options.environment) }
+      : serverEnv,
     appStorageCredential({
       s3Config: options.s3,
       previousAppEnv: options.appEnvReplay ?? serverEnv,
