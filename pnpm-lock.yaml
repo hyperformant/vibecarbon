@@ -47,7 +47,7 @@ importers:
         version: 3.274.1(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.61.1
-        version: 1.61.1(typescript@7.0.2)
+        version: 1.62.1(typescript@7.0.2)
       opentype.js:
         specifier: ^2.0.0
         version: 2.0.0
@@ -746,8 +746,8 @@ packages:
       typescript:
         optional: true
 
-  '@pulumiverse/scaleway@1.61.1':
-    resolution: {integrity: sha512-7IQzv0BSI3ZFIavjrznBNiBjsGUyHxLSGHGfoSPDhOpSK1JkVkvrNNEyTNqVtYchSnUW6Cmj38LWuKKXK+dAqA==}
+  '@pulumiverse/scaleway@1.62.1':
+    resolution: {integrity: sha512-iGhHLg9QyQXxPoYiXrwRt1nwDNajLjRydUaPJSiEUmInPFRdJtiu7tgh2HjtY4nfl9FRewkgqBpvwbc9S9JaOQ==}
 
   '@rolldown/binding-android-arm-eabi@1.2.18':
     resolution: {integrity: sha512-ubTG+4KlidvioxjOFdsdEa2F6JVGZb8m2ByJUqQ7fYzUeT1cEn194POcsQ10PKH4p//q0YQn4SB3YpSuzcA1Yg==}
@@ -3396,7 +3396,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@pulumiverse/scaleway@1.61.1(typescript@7.0.2)':
+  '@pulumiverse/scaleway@1.62.1(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.274.1(typescript@7.0.2)
     transitivePeerDependencies:
