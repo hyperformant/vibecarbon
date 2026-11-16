@@ -422,6 +422,16 @@ function ensureConfigDir(configDir = vibecarbonHome()) {
   }
 }
 
+/** @param {unknown} entry */
+function isProjectRecord(entry) {
+  return (
+    entry !== null &&
+    typeof entry === 'object' &&
+    !Array.isArray(entry) &&
+    typeof (/** @type {{path?: unknown}} */ (entry).path) === 'string'
+  );
+}
+
 /**
  * Load the global project registry
  *
@@ -440,7 +450,10 @@ export function loadGlobalRegistry(configDir = vibecarbonHome()) {
     if (!Array.isArray(data.projects)) {
       return { projects: [] };
     }
-    return data;
+    // The file is on the operator's disk, so an entry may be anything. Keep
+    // only project records: a registry once held 610 `null` entries, and
+    // every caller reads `.path`. The next write saves the healed list.
+    return { ...data, projects: data.projects.filter(isProjectRecord) };
   } catch {
     return { projects: [] };
   }

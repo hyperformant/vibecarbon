@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -37,6 +37,36 @@ describe('Global Project Registry', () => {
       writeFileSync(join(configDir, 'projects.json'), 'not json');
       const result = loadGlobalRegistry(configDir);
       expect(result).toEqual({ projects: [] });
+    });
+
+    // A registry on a real machine held 610 null entries among 616 (cause not
+    // found). `create` then built the whole project and died in
+    // registerProject on `p.path` of null.
+    it('drops entries that are not a project record', () => {
+      mkdirSync(configDir, { recursive: true });
+      const good = { name: 'app', path: '/srv/app', createdAt: 'a', updatedAt: 'b' };
+      writeFileSync(
+        join(configDir, 'projects.json'),
+        JSON.stringify({ projects: [null, good, 'x', 7, [], { name: 'no-path' }, { path: 42 }] }),
+      );
+      expect(loadGlobalRegistry(configDir)).toEqual({ projects: [good] });
+    });
+
+    it('registers a project into a registry that holds null entries, and heals it', () => {
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(join(configDir, 'projects.json'), JSON.stringify({ projects: [null, null] }));
+      const dir = join(tempBase, 'proj');
+      mkdirSync(dir);
+      expect(() => registerProject('proj', dir, configDir)).not.toThrow();
+      const { projects } = JSON.parse(readFileSync(join(configDir, 'projects.json'), 'utf-8'));
+      expect(projects).toHaveLength(1);
+      expect(projects[0]).toMatchObject({ name: 'proj', path: dir });
+    });
+
+    it('cleans stale projects in a registry that holds null entries', () => {
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(join(configDir, 'projects.json'), JSON.stringify({ projects: [null] }));
+      expect(() => cleanStaleProjects(configDir)).not.toThrow();
     });
 
     it('returns empty projects array when projects field is not an array', () => {
