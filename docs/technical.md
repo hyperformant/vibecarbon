@@ -83,7 +83,7 @@ Every server runs a small reporter that says whether it needs a restart to finis
   - k8s: `prePullImages` (`src/lib/deploy/k8s/k3s.js`) installs it over the SSH session that already reaches the master, the database node and the workers on every deploy. The three worker cloud-init scripts (`worker-init.sh`, `do-worker-init.sh`, `linode-worker-init.sh`) carry it too, because that is the only path for nodes the autoscaler creates.
   - compose and compose-ha: `setupComposeBackupCron` (`src/lib/deploy/compose/index.js`) installs it on every compose deploy and scale.
   - Any server: `vibecarbon update` installs it on each server it reaches.
-- **Why the master's cloud-init does not carry it:** Hetzner rejects user data over 32 KiB, and a unit test (`tests/unit/deploy/private-net-guard.test.ts`) trips every Hetzner render at 28 KiB so nobody hits that cap in the middle of a deploy. The master's user data is already about 28,230 bytes, so adding the reporter there would fail the test. The SSH sessions above reach the master anyway.
+- **Why the master's cloud-init does not carry it:** Hetzner rejects user data over 32 KiB, and a unit test (`tests/unit/deploy/private-net-guard.test.ts`) trips every Hetzner render at 28 KiB so nobody hits that cap in the middle of a deploy. The master's user data is already close to that 28 KiB tripwire, so the master leaves the reporter out, and `tests/unit/deploy/host-reporter-census.test.ts` asserts the master carries none. The SSH sessions above reach the master anyway.
 - **Existing clusters** show "not reporting yet" until the next `deploy` or `update` installs the reporter.
 
 ---

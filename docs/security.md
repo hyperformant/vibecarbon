@@ -294,7 +294,7 @@ The notice and the email go away once the servers have restarted.
 - Docker Compose: one directory, `/run/vibecarbon-host`, mounted into the app read-only at `/host-status`. The app reads one small file there (at most 16 KiB). It gets no Docker socket access beyond what it already had, and no other host path.
 - Kubernetes: a node annotation (`vibecarbon.dev/host-state`) and a read-only ClusterRole that lets the app `get` and `list` nodes, and nothing else. The reporter writes the annotation with the node's own kubelet credential, which Kubernetes lets annotate only that one Node. The app's service account cannot change a node.
 
-The reader treats what it finds as untrusted. A node's credential can rewrite its own annotation, so both the CLI and the app accept only a strict format: package names and host names limited to safe characters, at most 20 packages, and a size cap. Anything else counts as "not reporting". The agent token that k3s keeps on a node is masked in the node's annotations, and a test checks that.
+The reader treats what it finds as untrusted. A node's credential can rewrite its own annotation, so both the CLI and the app accept only a strict format: package names and host names limited to safe characters, at most 20 packages, and a size cap. Anything else counts as "not reporting".
 
 ### Database connections
 
