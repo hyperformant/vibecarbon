@@ -104,6 +104,7 @@ export const allClearLine = () => 'no reboot due on any server';
 
 /**
  * @param {{ name: string, installed: number, docker: { from: string, to: string } | null, restarted: boolean, offlineSeconds: number | null }} r
+ *   offlineSeconds is null when downtime was not measured; the line then leaves it out.
  */
 export function summaryLine({ name, installed, docker, restarted, offlineSeconds }) {
   let line = `${name}: installed ${installed} updates`;
@@ -148,6 +149,12 @@ export const reporterFailedLine = (name, why) =>
   `could not install the restart reporter on ${name} (${why}), so vibecarbon status may not show when it needs a restart`;
 export const unmarkFailedLine = (name, why) =>
   `${name} is uncordoned but kept its update mark (${why}), the next update removes it`;
+export const notMeasuredLine = (domain) =>
+  `could not reach ${domain} from this machine, so downtime is not measured`;
+export const rebootCallFailedLine = (name, why) =>
+  `${name}: the restart command failed (${why}), checking whether it restarts anyway`;
+export const alreadyCordonedLine = (name) =>
+  `${name}: already cordoned, it stays cordoned after the restart`;
 
 const ACTIONS = {
   install: (name) => `install the security updates on ${name}`,
@@ -206,6 +213,11 @@ export const SEEN = {
     return `pods not Ready since the restart: ${shown}${more}`;
   },
   appUnhealthy: (status) => `its health check never passed (last result: ${status})`,
+  /** @param {{ domain: string, status: number | null, detail: string | null }} last */
+  domainDown: ({ domain, status, detail }) =>
+    status != null
+      ? `${domain} answered ${status}`
+      : `${domain} did not answer${detail ? ` (${detail})` : ''}`,
 };
 
 export const installHint = ({ envName, name }) =>
@@ -215,5 +227,3 @@ export const cordonedHint = (envName) =>
 export const consoleHint = (envName) =>
   `check it in your provider console, then run vibecarbon status ${envName}`;
 export const retryHint = (envName) => `run vibecarbon update ${envName} again`;
-export const unmarkedCordonHint = (node) =>
-  `it is still cordoned without the update mark, so the next update will not release it: run kubectl uncordon ${node} on the cluster once it is Ready`;

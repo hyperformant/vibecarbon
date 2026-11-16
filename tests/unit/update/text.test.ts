@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   allClearLine,
+  alreadyCordonedLine,
   backLine,
   confirmQuestion,
   consoleHint,
@@ -18,6 +19,8 @@ import {
   installingLine,
   noRestartAfterAllLine,
   nothingToDoLine,
+  notMeasuredLine,
+  rebootCallFailedLine,
   reporterFailedLine,
   restartingLine,
   retryHint,
@@ -28,7 +31,6 @@ import {
   summaryLine,
   unexpectedRestartPrompt,
   unexpectedRestartYesLine,
-  unmarkedCordonHint,
   unmarkFailedLine,
 } from '../../../src/lib/update/text.js';
 
@@ -295,6 +297,15 @@ describe('execution lines', () => {
     expect(unmarkFailedLine('w', 'it exited 1')).toBe(
       'w is uncordoned but kept its update mark (it exited 1), the next update removes it',
     );
+    expect(notMeasuredLine('app.example.test')).toBe(
+      'could not reach app.example.test from this machine, so downtime is not measured',
+    );
+    expect(rebootCallFailedLine('web-1', 'ssh timeout')).toBe(
+      'web-1: the restart command failed (ssh timeout), checking whether it restarts anyway',
+    );
+    expect(alreadyCordonedLine('w')).toBe(
+      'w: already cordoned, it stays cordoned after the restart',
+    );
   });
 
   it('prints the errors and hints of the brief exactly', () => {
@@ -323,8 +334,14 @@ describe('execution lines', () => {
       'check it in your provider console, then run vibecarbon status prod',
     );
     expect(retryHint('prod')).toBe('run vibecarbon update prod again');
-    expect(unmarkedCordonHint('w')).toBe(
-      'it is still cordoned without the update mark, so the next update will not release it: run kubectl uncordon w on the cluster once it is Ready',
+    expect(SEEN.domainDown({ domain: 'app.example.test', status: 503, detail: null })).toBe(
+      'app.example.test answered 503',
+    );
+    expect(SEEN.domainDown({ domain: 'app.example.test', status: null, detail: 'ENOTFOUND' })).toBe(
+      'app.example.test did not answer (ENOTFOUND)',
+    );
+    expect(SEEN.domainDown({ domain: 'app.example.test', status: null, detail: null })).toBe(
+      'app.example.test did not answer',
     );
   });
 
@@ -371,7 +388,11 @@ describe('execution lines', () => {
       installHint({ envName: 'p', name: 'a' }),
       cordonedHint('p'),
       consoleHint('p'),
-      unmarkedCordonHint('a'),
+      notMeasuredLine('a'),
+      rebootCallFailedLine('a', 'b'),
+      alreadyCordonedLine('a'),
+      SEEN.domainDown({ domain: 'a', status: 503, detail: null }),
+      SEEN.domainDown({ domain: 'a', status: null, detail: 'b' }),
       ...(
         ['install', 'docker', 'check', 'cordon', 'mark', 'drain', 'restart', 'uncordon'] as const
       ).map((action) => stepFailedError({ action, name: 'a', why: 'b' })),

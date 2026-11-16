@@ -141,6 +141,9 @@ export function aptQuietUpdate(opts = '', confPath = APT_QUIET_CONF) {
   return `printf "%s\\n" ${clears} > ${confPath}; apt-get -c ${confPath} ${APT_LOCK_OPT} ${APT_NO_SRV_OPT} update -qq${opts ? ` ${opts}` : ''}`;
 }
 
+/** aptWaitForDailyUnits' own bound, for an ssh timeout that has to outlast it. */
+export const APT_DAILY_UNITS_WAIT_SECONDS = 300;
+
 /**
  * Block until apt-daily.service and apt-daily-upgrade.service are not running,
  * for an apt refresh that runs after boot over ssh. `apt-get update` takes
@@ -154,7 +157,7 @@ export function aptQuietUpdate(opts = '', confPath = APT_QUIET_CONF) {
  * @returns {string} one line of POSIX sh, safe under `set -e`
  */
 export function aptWaitForDailyUnits() {
-  return '{ command -v systemd-run >/dev/null 2>&1 && timeout 300 systemd-run --quiet --wait --property=After=apt-daily.service --property=After=apt-daily-upgrade.service true || true; }';
+  return `{ command -v systemd-run >/dev/null 2>&1 && timeout ${APT_DAILY_UNITS_WAIT_SECONDS} systemd-run --quiet --wait --property=After=apt-daily.service --property=After=apt-daily-upgrade.service true || true; }`;
 }
 
 /**

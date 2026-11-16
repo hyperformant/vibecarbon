@@ -12,12 +12,25 @@
  * as back only when it reports the boot id the server itself gave over ssh,
  * and a pod only when its Ready condition turned True after the restart.
  *
+ * Downtime is measured from this machine through the app's public readiness,
+ * and only when one probe before the first step reaches it. Then a compose
+ * server is healthy only once the domain answers again too.
+ *
+ * The run never rejects: a prompt or a log line that throws ends it like a
+ * failed step, with the outcomes so far.
+ *
  * Every remote command has a timeout and a stdin that ends, so nothing can
  * wait on a prompt. Every wait runs on the injected `now` and `sleep`.
  * Copy lives in ./text.js.
  */
 import { setTimeout as timerSleep } from 'node:timers/promises';
-import { APT_LOCK_TIMEOUT_SECONDS, aptGet, aptQuietUpdate } from '../deploy/apt.js';
+import {
+  APT_DAILY_UNITS_WAIT_SECONDS,
+  APT_LOCK_TIMEOUT_SECONDS,
+  aptGet,
+  aptQuietUpdate,
+  aptWaitForDailyUnits,
+} from '../deploy/apt.js';
 import { waitForKubeletsRenewing } from '../deploy/k8s/kubelet-liveness.js';
 import { fetchPublicDomain } from '../deploy/public-domain-probe.js';
 import { hostReporterInstaller, hostReporterScript } from '../host-reporter.js';
@@ -27,6 +40,7 @@ import { pollUntil } from '../retry.js';
 import { sshKubectl, sshRun, sshRunScript } from '../ssh.js';
 import { describeSshError } from '../status/cluster-snapshot.js';
 import {
+  alreadyCordonedLine,
   backLine,
   consoleHint,
   cordonedHint,
@@ -38,6 +52,8 @@ import {
   installHint,
   installingLine,
   noRestartAfterAllLine,
+  notMeasuredLine,
+  rebootCallFailedLine,
   reporterFailedLine,
   restartingLine,
   retryHint,
@@ -46,7 +62,6 @@ import {
   stepFailedError,
   stepLine,
   unexpectedRestartPrompt,
-  unmarkedCordonHint,
   unmarkFailedLine,
 } from './text.js';
 
@@ -54,9 +69,13 @@ import {
 export const CORDON_MARK = 'vibecarbon.dev/cordoned-by-update';
 
 const REPORTER_TIMEOUT_MS = 60_000;
-const INSTALL_TIMEOUT_MS = 1_200_000;
-/** 600 s: apt's own 300 s wait for the dpkg lock, then 300 s to refresh and install. */
-const DOCKER_TIMEOUT_MS = (APT_LOCK_TIMEOUT_SECONDS + 300) * 1000;
+/** 1200 s: up to 300 s for the daily apt units to finish, then 900 s to install. */
+const INSTALL_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + 900) * 1000;
+/**
+ * 900 s: up to 300 s for the daily apt units, apt's own 300 s wait for the
+ * dpkg lock, then 300 s to refresh and install.
+ */
+const DOCKER_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + APT_LOCK_TIMEOUT_SECONDS + 300) * 1000;
 /** From the reboot command to a new boot id over ssh. */
 const COME_BACK_BUDGET_MS = 600_000;
 /** Each wait after the server is back: the app, the API, the node, its lease, its pods. */
@@ -69,22 +88,36 @@ const QUICK_TIMEOUT_MS = 30_000;
 const DRAIN_TIMEOUT_MS = 360_000;
 const LIST_NODES_TIMEOUT_MS = 20_000;
 const PROBE_TIMEOUT_MS = 5000;
+/** How often the compose health wait looks at the monitor's latest probe. */
+const DOMAIN_CHECK_MS = 1000;
 const LAST_LINES = 5;
 /** stdin for every remote command: empty, closed at once, so nothing waits on it. */
 const NO_STDIN = '';
 const APP_READY_PATH = '/api/health/ready';
 
-/** Installs the security updates the daily job would, the same way it does. */
+/**
+ * Installs the security updates the daily job would, the same way it does,
+ * once the daily apt units are done, so the two never run apt at once.
+ */
 export const UPGRADE_ARGV = [
   'env',
   'DEBIAN_FRONTEND=noninteractive',
-  'unattended-upgrade',
-  '--verbose',
+  'sh',
+  '-c',
+  `${aptWaitForDailyUnits()}; unattended-upgrade --verbose`,
 ];
-/** The reboot starts 2 s after ssh returns, so the command itself never hangs. */
+/**
+ * The reboot starts 2 s after ssh returns, so the command itself never hangs.
+ * --collect and RemainAfterElapse=no unload both transient units even when the
+ * reboot never happened, so a later run can schedule it again under the same
+ * name. RemainAfterElapse is a timer setting (systemd.timer(5)): set with -p it
+ * would go to the service, which refuses it, so it goes to the timer.
+ */
 export const REBOOT_ARGV = [
   'systemd-run',
   '--on-active=2',
+  '--collect',
+  '--timer-property=RemainAfterElapse=no',
   '--unit=vibecarbon-update-reboot',
   'systemctl',
   'reboot',
@@ -101,7 +134,8 @@ const BOOT_ARGV = [
 /**
  * Docker's own packages, upgraded from Docker's own source only (the refresh
  * reads docker.list alone), keeping any config file the operator changed.
- * Both apt commands run noninteractive.
+ * Both apt commands run noninteractive, after the daily apt units are done:
+ * apt-get update takes the lists lock without waiting for it.
  *
  * @returns {string[]}
  */
@@ -114,7 +148,7 @@ export function dockerUpdateArgv() {
     'DEBIAN_FRONTEND=noninteractive',
     'sh',
     '-c',
-    `${aptQuietUpdate(DOCKER_SOURCE_ONLY)} && ${install}`,
+    `${aptWaitForDailyUnits()}; ${aptQuietUpdate(DOCKER_SOURCE_ONLY)} && ${install}`,
   ];
 }
 
@@ -131,7 +165,7 @@ export const uncordonArgv = (node) => ['uncordon', node];
 export const unmarkArgv = (node) => ['annotate', 'node', node, `${CORDON_MARK}-`];
 
 /**
- * @typedef {{ name: string, installed: number, docker: Array<{ name: string, from: string, to: string }> | null, restarted: boolean, outageSeconds: number, error: string | null, hint: string | null }} StepOutcome
+ * @typedef {{ name: string, installed: number, docker: Array<{ name: string, from: string, to: string }> | null, restarted: boolean, outageSeconds: number | null, error: string | null, hint: string | null }} StepOutcome
  * @typedef {{ envName: string, sshKeyPath: string, domain: string | null, projectName: string, yes: boolean, confirm: (message: string) => Promise<boolean>, log: { step: (m: string) => void, info: (m: string) => void, warn: (m: string) => void } }} ExecuteContext
  * @typedef {{ sshRun: Function, sshRunScript: Function, sshKubectl: Function, verifyAppHealth: Function, fetchPublicDomain: Function, now: () => number, sleep: (ms: number, signal?: AbortSignal) => Promise<unknown> }} ExecuteDeps
  */
@@ -200,20 +234,79 @@ function parseBoot(out) {
 const isReady = (obj) =>
   obj?.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') ?? false;
 
-/** Pods that finished never come back Ready; their controllers replace them. */
-const FINISHED_PHASES = new Set(['Succeeded', 'Failed']);
-
 /**
- * A pod is back when it is Ready and turned Ready at or after `sinceSeconds`.
- * The kubelet stamps that transition with the server's own clock, the same
- * clock `sinceSeconds` was read from.
+ * Ready, and turned Ready at or after `sinceSeconds`. The kubelet stamps that
+ * transition with the server's own clock, the same clock `sinceSeconds` was
+ * read from.
  */
-function podIsBack(pod, sinceSeconds) {
-  if (FINISHED_PHASES.has(pod?.status?.phase)) return true;
+function readySince(pod, sinceSeconds) {
   const ready = pod?.status?.conditions?.find((c) => c.type === 'Ready');
   if (ready?.status !== 'True') return false;
   const at = Date.parse(ready.lastTransitionTime ?? '');
   return Number.isFinite(at) && at / 1000 >= sinceSeconds;
+}
+
+/**
+ * When a pod's status last changed, in seconds: for a Failed pod, when it
+ * failed. A pod that says nothing reads as changed long ago.
+ */
+function lastChangeSeconds(pod) {
+  const stamps = [
+    ...(pod?.status?.conditions ?? []).map((c) => c?.lastTransitionTime),
+    ...(pod?.status?.containerStatuses ?? []).map((c) => c?.state?.terminated?.finishedAt),
+  ]
+    .map((t) => Date.parse(t ?? ''))
+    .filter(Number.isFinite);
+  return stamps.length ? Math.max(...stamps) / 1000 : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Where a pod on the restarted node stands: 'back', 'waiting' for Ready, or
+ * 'replace' when it turned Failed after the restart, which only a replacement
+ * that is Ready can answer. A pod that Succeeded, or failed before the
+ * restart, is not this restart's doing.
+ *
+ * @returns {'back' | 'waiting' | 'replace'}
+ */
+function podState(pod, sinceSeconds) {
+  const phase = pod?.status?.phase;
+  if (phase === 'Succeeded') return 'back';
+  if (phase === 'Failed') return lastChangeSeconds(pod) >= sinceSeconds ? 'replace' : 'back';
+  return readySince(pod, sinceSeconds) ? 'back' : 'waiting';
+}
+
+const controllerUid = (pod) => pod?.metadata?.ownerReferences?.find((o) => o?.controller)?.uid;
+
+/**
+ * The Failed pods a controller replaced: another pod of the same controller,
+ * Running and Ready since the restart. A pod with no controller is never
+ * replaced.
+ *
+ * @param {object[]} failed
+ * @param {number} sinceSeconds
+ * @param {(namespace: string) => Promise<string>} listNamespace `get pods -n` JSON
+ * @returns {Promise<Set<object>>}
+ */
+async function replacedPods(failed, sinceSeconds, listNamespace) {
+  const replaced = new Set();
+  const lists = new Map();
+  for (const pod of failed) {
+    const owner = controllerUid(pod);
+    if (!owner) continue;
+    const ns = pod.metadata?.namespace;
+    if (!lists.has(ns)) lists.set(ns, JSON.parse(await listNamespace(ns)).items ?? []);
+    const found = lists
+      .get(ns)
+      .some(
+        (other) =>
+          other?.metadata?.uid !== pod.metadata?.uid &&
+          controllerUid(other) === owner &&
+          other?.status?.phase === 'Running' &&
+          readySince(other, sinceSeconds),
+      );
+    if (found) replaced.add(pod);
+  }
+  return replaced;
 }
 
 /**
@@ -258,31 +351,54 @@ async function waitFor(probe, budgetMs, onError, deps) {
   }
 }
 
+/** What a failed probe ran into: the socket error's code, else the error's name. */
+const probeFailure = (err) => err?.cause?.code ?? err?.code ?? err?.name ?? null;
+
 /**
  * Probe the app's public health every `intervalMs` until stopped. A failed
  * probe or a non-2xx answer opens an outage window at the time that probe
  * started; the next 2xx closes it.
  *
  * @param {{ url: string, probe: (url: string, signal: AbortSignal) => Promise<{ status: number }>, intervalMs?: number, now: () => number, sleep: (ms: number, signal?: AbortSignal) => Promise<unknown> }} options
- * @returns {{ stop(): { windows: Array<{ start: number, end: number }>, totalSeconds: number } }}
+ * @returns {{
+ *   ready: Promise<boolean>,
+ *   upSince(at: number): boolean,
+ *   last(): { at: number, up: boolean, status: number | null, detail: string | null } | null,
+ *   stop(): { windows: Array<{ start: number, end: number }>, totalSeconds: number },
+ * }}
+ *   `ready` is whether the first probe answered 2xx; `upSince` whether a
+ *   probe started at or after `at` did; `last` is the latest probe.
  */
 export function startOutageMonitor({ url, probe, intervalMs = POLL_INTERVAL_MS, now, sleep }) {
   const controller = new AbortController();
   /** @type {Array<{ start: number, end: number }>} */
   const windows = [];
   let openedAt = null;
+  let lastUpAt = null;
+  /** @type {{ at: number, up: boolean, status: number | null, detail: string | null } | null} */
+  let latest = null;
   let stopped = false;
+  /** @type {(up: boolean) => void} */
+  let settleReady = () => {};
+  const ready = new Promise((resolve) => {
+    settleReady = resolve;
+  });
   const loop = async () => {
     while (!stopped) {
       const at = now();
-      let up = false;
+      let status = null;
+      let detail = null;
       try {
         const res = await probe(url, controller.signal);
-        up = typeof res?.status === 'number' && res.status >= 200 && res.status < 300;
-      } catch {
-        up = false;
+        status = typeof res?.status === 'number' ? res.status : null;
+      } catch (err) {
+        detail = probeFailure(err);
       }
       if (stopped) return;
+      const up = status !== null && status >= 200 && status < 300;
+      latest = { at, up, status, detail };
+      settleReady(up);
+      if (up) lastUpAt = at;
       if (!up && openedAt === null) openedAt = at;
       else if (up && openedAt !== null) {
         windows.push({ start: openedAt, end: at });
@@ -297,10 +413,14 @@ export function startOutageMonitor({ url, probe, intervalMs = POLL_INTERVAL_MS, 
   };
   loop().catch(() => {});
   return {
+    ready,
+    upSince: (at) => lastUpAt !== null && lastUpAt >= at,
+    last: () => (latest ? { ...latest } : null),
     stop() {
       if (!stopped) {
         stopped = true;
         controller.abort();
+        settleReady(false);
         if (openedAt !== null) {
           windows.push({ start: openedAt, end: now() });
           openedAt = null;
@@ -368,11 +488,26 @@ function fail(outcome, error, hint) {
   return outcome;
 }
 
+/** @returns {StepOutcome} */
+const newOutcome = (name) => ({
+  name,
+  installed: 0,
+  docker: null,
+  restarted: false,
+  outageSeconds: null,
+  error: null,
+  hint: null,
+});
+
+const thrownMessage = (err) => (err instanceof Error ? err.message : String(err));
+
 /**
  * @param {import('./plan.js').UpdatePlan} plan
  * @param {ExecuteContext} ctx
  * @param {Partial<ExecuteDeps>} [deps]
  * @returns {Promise<{ outcomes: StepOutcome[], becameDue: Array<{ name: string, package: string }>, stoppedAt: StepOutcome | null }>}
+ *   Never rejects: a prompt or a log line that throws stops the run at that
+ *   step, with the thrown message as its error.
  */
 export async function executeUpdatePlan(plan, ctx, deps = {}) {
   /** @type {ExecuteDeps} */
@@ -382,6 +517,7 @@ export async function executeUpdatePlan(plan, ctx, deps = {}) {
   const becameDue = [];
   const spans = [];
   let stoppedAt = null;
+  let measured = false;
   // The app's public readiness, as its users reach it.
   const readyUrl = ctx.domain ? `https://${ctx.domain}/api/health/ready` : null;
   const monitor = readyUrl
@@ -396,23 +532,31 @@ export async function executeUpdatePlan(plan, ctx, deps = {}) {
       })
     : null;
   try {
+    // The monitor's first probe is the baseline: when this machine cannot
+    // reach the app before anything changed, a window would measure this
+    // machine, not the update.
+    if (monitor) {
+      measured = await monitor.ready;
+      if (!measured) {
+        monitor.stop();
+        ctx.log.warn(notMeasuredLine(ctx.domain));
+      }
+    }
+    const watch = measured ? monitor : null;
     for (const [i, step] of plan.steps.entries()) {
       const { name } = step.target;
-      ctx.log.step(stepLine({ name, index: i + 1, total: plan.steps.length }));
-      /** @type {StepOutcome} */
-      const outcome = {
-        name,
-        installed: 0,
-        docker: null,
-        restarted: false,
-        outageSeconds: 0,
-        error: null,
-        hint: null,
-      };
+      const outcome = newOutcome(name);
       outcomes.push(outcome);
+      // Whether this run holds a cordon on the node right now.
+      const live = { cordoned: false };
       const start = d.now();
       try {
-        await runStep(step, outcome, { ctx, deps: d, becameDue });
+        ctx.log.step(stepLine({ name, index: i + 1, total: plan.steps.length }));
+        await runStep(step, outcome, { ctx, deps: d, becameDue, monitor: watch, live });
+      } catch (err) {
+        // A prompt or a log line threw (a cancelled prompt, a closed stdout).
+        const hint = live.cordoned ? cordonedHint(ctx.envName) : retryHint(ctx.envName);
+        fail(outcome, thrownMessage(err), hint);
       } finally {
         spans.push({ outcome, start, end: d.now() });
       }
@@ -421,10 +565,17 @@ export async function executeUpdatePlan(plan, ctx, deps = {}) {
         break;
       }
     }
+  } catch (err) {
+    // Only the baseline's warning runs outside a step: it stops the first one.
+    const next = plan.steps[outcomes.length];
+    if (next) {
+      stoppedAt = fail(newOutcome(next.target.name), thrownMessage(err), retryHint(ctx.envName));
+      outcomes.push(stoppedAt);
+    }
   } finally {
     const windows = monitor ? monitor.stop().windows : [];
     for (const { outcome, start, end } of spans) {
-      outcome.outageSeconds = overlapSeconds(windows, start, end);
+      outcome.outageSeconds = measured ? overlapSeconds(windows, start, end) : null;
     }
   }
   return { outcomes, becameDue, stoppedAt };
@@ -483,40 +634,29 @@ async function runStep(step, outcome, run) {
     }
   }
 
-  let host;
+  let host = null;
+  let checkError = null;
   try {
     host = parseHostState(
       await ssh(HOST_STATE_ARGV, { input: hostReporterScript(), timeout: QUICK_TIMEOUT_MS }),
     );
+    if (!host) checkError = stepFailedError({ action: 'check', name, why: SEEN.unreadable });
   } catch (err) {
-    const error = stepFailedError({
+    checkError = stepFailedError({
       action: 'check',
       name,
       why: whyFailed(err, QUICK_TIMEOUT_MS),
       lines: lastLines(err),
     });
-    return fail(outcome, error, retryHint(ctx.envName));
   }
-  if (!host) {
-    const error = stepFailedError({ action: 'check', name, why: SEEN.unreadable });
-    return fail(outcome, error, retryHint(ctx.envName));
+  if (checkError) {
+    // Docker restarted every container: the app is waited on all the same.
+    if (outcome.docker && !(await appIsBack(target, outcome, run))) return outcome;
+    return fail(outcome, checkError, retryHint(ctx.envName));
   }
 
   if (await restartNow(step, host, run)) return restartServer(step, outcome, run);
-
-  if (outcome.docker) {
-    const app = await waitForApp(target, run);
-    if (!app.ok) {
-      const error = didNotError({
-        name,
-        what: 'become healthy',
-        budgetMs: HEALTHY_BUDGET_MS,
-        seen: app.seen,
-      });
-      return fail(outcome, error, consoleHint(ctx.envName));
-    }
-    ctx.log.step(healthyLine(name, false));
-  }
+  if (outcome.docker) await appIsBack(target, outcome, run);
   return outcome;
 }
 
@@ -539,9 +679,14 @@ async function restartNow(step, host, run) {
   return false;
 }
 
-/** compose: the app on the server answers its readiness check. */
+/**
+ * compose: the app on the server answers its readiness check, then, when
+ * downtime is measured, the domain answers 2xx again, all in one budget. The
+ * server's own check never passes through the proxy users reach the app by.
+ */
 async function waitForApp(target, run) {
-  const { ctx, deps } = run;
+  const { ctx, deps, monitor } = run;
+  const start = deps.now();
   let res;
   try {
     res = await deps.verifyAppHealth(target.ip, ctx.sshKeyPath, ctx.projectName, {
@@ -552,18 +697,53 @@ async function waitForApp(target, run) {
   } catch (err) {
     return { ok: false, seen: SEEN.sshFailed(oneLine(err)) };
   }
-  if (res?.healthy) return { ok: true };
-  return { ok: false, seen: SEEN.appUnhealthy(res?.status ?? 'none') };
+  if (!res?.healthy) return { ok: false, seen: SEEN.appUnhealthy(res?.status ?? 'none') };
+  if (!monitor) return { ok: true };
+  // Only a probe that started once the app was healthy counts.
+  const healthyAt = deps.now();
+  const deadline = start + HEALTHY_BUDGET_MS;
+  while (!monitor.upSince(healthyAt)) {
+    const left = deadline - deps.now();
+    if (left <= 0) {
+      const last = monitor.last();
+      const down = last && !last.up ? last : { status: null, detail: null };
+      return {
+        ok: false,
+        seen: SEEN.domainDown({ domain: ctx.domain, status: down.status, detail: down.detail }),
+      };
+    }
+    await deps.sleep(Math.min(DOMAIN_CHECK_MS, left));
+  }
+  return { ok: true };
+}
+
+/** compose: wait for the app; false when it failed the step. */
+async function appIsBack(target, outcome, run) {
+  const { ctx } = run;
+  const app = await waitForApp(target, run);
+  if (!app.ok) {
+    const error = didNotError({
+      name: target.name,
+      what: 'become healthy',
+      budgetMs: HEALTHY_BUDGET_MS,
+      seen: app.seen,
+    });
+    fail(outcome, error, consoleHint(ctx.envName));
+    return false;
+  }
+  ctx.log.step(healthyLine(target.name, false));
+  return true;
 }
 
 /**
  * Cordon (k8s), reboot, wait for a new boot id, then wait for the server to be
  * healthy: the app on compose; on k8s the API (master), the node with its new
  * boot id, its kubelet's lease and its pods, then uncordon. A failure after the
- * cordon leaves the node cordoned and marked, so the next run releases it.
+ * cordon leaves the node cordoned and marked, so the next run releases it. A
+ * node the operator cordoned is left to them: no mark, no uncordon.
  */
 async function restartServer(step, outcome, run) {
-  const { ctx, deps } = run;
+  const { ctx, deps, live } = run;
   const { target } = step;
   const { name, ip } = target;
   const key = ctx.sshKeyPath;
@@ -576,36 +756,45 @@ async function restartServer(step, outcome, run) {
       timeout: QUICK_TIMEOUT_MS,
       ...opts,
     });
-  const stillCordoned = cordonedHint(ctx.envName);
   const failed = (action, err, budgetMs, hint) =>
     fail(
       outcome,
       stepFailedError({ action, name, why: whyFailed(err, budgetMs), lines: lastLines(err) }),
       hint,
     );
+  // While this run holds the cordon, every failure says so: the next run releases it.
+  const held = () => (live.cordoned ? cordonedHint(ctx.envName) : null);
+  const beforeHint = () => held() ?? retryHint(ctx.envName);
+  const afterHint = () => held() ?? consoleHint(ctx.envName);
 
   if (k8s) {
+    let current;
     try {
-      await kubectl(cordonArgv(node));
+      current = JSON.parse(await kubectl(['get', 'node', node, '-o', 'json']));
     } catch (err) {
       return failed('cordon', err, QUICK_TIMEOUT_MS, retryHint(ctx.envName));
     }
-    try {
-      await kubectl(markArgv(node));
-    } catch (err) {
-      // Unmarked, the next run would not release it, so release it now.
-      let released = true;
+    // Cordoned without the mark is the operator's cordon. With the mark, an
+    // earlier run left it, and this run takes it over and releases it.
+    if (
+      current?.spec?.unschedulable === true &&
+      !(CORDON_MARK in (current.metadata?.annotations ?? {}))
+    ) {
+      ctx.log.info(alreadyCordonedLine(name));
+    } else {
+      // The mark goes first: a mark on a node that is not cordoned is released
+      // as a no-op, a cordon without the mark would never be released.
       try {
-        await kubectl(uncordonArgv(node));
-      } catch {
-        released = false;
+        await kubectl(markArgv(node));
+      } catch (err) {
+        return failed('mark', err, QUICK_TIMEOUT_MS, retryHint(ctx.envName));
       }
-      return failed(
-        'mark',
-        err,
-        QUICK_TIMEOUT_MS,
-        released ? retryHint(ctx.envName) : unmarkedCordonHint(node),
-      );
+      try {
+        await kubectl(cordonArgv(node));
+      } catch (err) {
+        return failed('cordon', err, QUICK_TIMEOUT_MS, retryHint(ctx.envName));
+      }
+      live.cordoned = true;
     }
     const draining = target.role === 'worker';
     ctx.log.step(cordonedLine(name, draining));
@@ -613,7 +802,7 @@ async function restartServer(step, outcome, run) {
       try {
         await kubectl(drainArgv(node), { timeout: DRAIN_TIMEOUT_MS });
       } catch (err) {
-        return failed('drain', err, DRAIN_TIMEOUT_MS, stillCordoned);
+        return failed('drain', err, DRAIN_TIMEOUT_MS, beforeHint());
       }
     }
   }
@@ -623,18 +812,19 @@ async function restartServer(step, outcome, run) {
   try {
     before = parseBoot(await ssh(BOOT_ARGV, { timeout: QUICK_TIMEOUT_MS }));
   } catch (err) {
-    return failed('restart', err, QUICK_TIMEOUT_MS, k8s ? stillCordoned : retryHint(ctx.envName));
+    return failed('restart', err, QUICK_TIMEOUT_MS, beforeHint());
   }
   if (!before) {
     const error = stepFailedError({ action: 'restart', name, why: SEEN.unreadable });
-    return fail(outcome, error, k8s ? stillCordoned : retryHint(ctx.envName));
+    return fail(outcome, error, beforeHint());
   }
   ctx.log.step(restartingLine(name));
   try {
-    await ssh(REBOOT_ARGV, { timeout: QUICK_TIMEOUT_MS });
+    await ssh(REBOOT_ARGV, { timeout: QUICK_TIMEOUT_MS, transportRetry: false });
   } catch (err) {
-    // ssh may have failed after the reboot was scheduled, so its state is unknown.
-    return failed('restart', err, QUICK_TIMEOUT_MS, k8s ? stillCordoned : consoleHint(ctx.envName));
+    // ssh can fail after the reboot was scheduled, or the reboot can cut the
+    // session: only the boot id says whether the server restarted.
+    ctx.log.warn(rebootCallFailedLine(name, oneLine(err)));
   }
 
   const back = await waitFor(
@@ -657,26 +847,23 @@ async function restartServer(step, outcome, run) {
       budgetMs: COME_BACK_BUDGET_MS,
       seen: back.seen,
     });
-    return fail(outcome, error, k8s ? stillCordoned : consoleHint(ctx.envName));
+    return fail(outcome, error, afterHint());
   }
   outcome.restarted = true;
   ctx.log.step(backLine(name));
   const after = /** @type {{ bootId: string, clock: number, btime: number | null }} */ (back.value);
 
-  const notHealthy = (seen, hint) =>
-    fail(
-      outcome,
-      didNotError({ name, what: 'become healthy', budgetMs: HEALTHY_BUDGET_MS, seen }),
-      hint,
-    );
-
   if (!k8s) {
-    const app = await waitForApp(target, run);
-    if (!app.ok) return notHealthy(app.seen, consoleHint(ctx.envName));
-    ctx.log.step(healthyLine(name, false));
+    await appIsBack(target, outcome, run);
     return outcome;
   }
 
+  const notHealthy = (seen) =>
+    fail(
+      outcome,
+      didNotError({ name, what: 'become healthy', budgetMs: HEALTHY_BUDGET_MS, seen }),
+      afterHint(),
+    );
   const poll = { timeout: POLL_TIMEOUT_MS, transportRetry: false };
   const kubectlSeen = (err) =>
     err instanceof SyntaxError ? SEEN.unreadable : SEEN.kubectlFailed(oneLine(err));
@@ -693,7 +880,7 @@ async function restartServer(step, outcome, run) {
       kubectlSeen,
       deps,
     );
-    if (!api.ok) return notHealthy(api.seen, stillCordoned);
+    if (!api.ok) return notHealthy(api.seen);
   }
 
   // Ready means nothing until the node reports the boot id the server gave.
@@ -711,7 +898,7 @@ async function restartServer(step, outcome, run) {
     kubectlSeen,
     deps,
   );
-  if (!nodeBack.ok) return notHealthy(nodeBack.seen, stillCordoned);
+  if (!nodeBack.ok) return notHealthy(nodeBack.seen);
 
   const leases = await waitForKubeletsRenewing({
     readLeases: () =>
@@ -732,11 +919,17 @@ async function restartServer(step, outcome, run) {
     now: deps.now,
     sleep: deps.sleep,
   });
-  if (!leases.settled) return notHealthy(SEEN.leaseNotRenewing, stillCordoned);
+  if (!leases.settled) return notHealthy(SEEN.leaseNotRenewing);
 
   // A pod Ready from before the restart is the API's memory, not the pod. The
   // boot's own start time is later than the clock read before the reboot, so
   // it also rules out a pod that turned Ready in the 2 s before the reboot.
+  //
+  // A drained worker keeps only DaemonSet pods: the provider's CSI node plugin
+  // where it has one (servicelb is disabled, so there are no svclb pods).
+  // Where it has none the list is empty, and the proof is the boot id, Ready
+  // and the lease above. On the master and the db node the pods restart in
+  // place, and each must turn Ready again.
   const since = Math.max(before.clock, after.btime ?? 0);
   const pods = await waitFor(
     async () => {
@@ -744,22 +937,34 @@ async function restartServer(step, outcome, run) {
         ['get', 'pods', '-A', '--field-selector', `spec.nodeName=${node}`, '-o', 'json'],
         poll,
       );
-      const waiting = (JSON.parse(out).items ?? [])
-        .filter((p) => !podIsBack(p, since))
-        .map((p) => `${p.metadata?.namespace}/${p.metadata?.name}`);
-      return waiting.length ? { done: false, seen: SEEN.podsNotReady(waiting) } : { done: true };
+      const items = JSON.parse(out).items ?? [];
+      const waiting = items.filter((p) => podState(p, since) === 'waiting');
+      const broken = items.filter((p) => podState(p, since) === 'replace');
+      if (broken.length) {
+        const replaced = await replacedPods(broken, since, (ns) =>
+          kubectl(['get', 'pods', '-n', ns, '-o', 'json'], poll),
+        );
+        waiting.push(...broken.filter((p) => !replaced.has(p)));
+      }
+      const names = waiting.map((p) => `${p.metadata?.namespace}/${p.metadata?.name}`);
+      return names.length ? { done: false, seen: SEEN.podsNotReady(names) } : { done: true };
     },
     HEALTHY_BUDGET_MS,
     kubectlSeen,
     deps,
   );
-  if (!pods.ok) return notHealthy(pods.seen, stillCordoned);
+  if (!pods.ok) return notHealthy(pods.seen);
 
+  if (!live.cordoned) {
+    ctx.log.step(healthyLine(name, false));
+    return outcome;
+  }
   try {
     await kubectl(uncordonArgv(node));
   } catch (err) {
-    return failed('uncordon', err, QUICK_TIMEOUT_MS, stillCordoned);
+    return failed('uncordon', err, QUICK_TIMEOUT_MS, afterHint());
   }
+  live.cordoned = false;
   try {
     await kubectl(unmarkArgv(node));
   } catch (err) {
