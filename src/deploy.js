@@ -6,41 +6,19 @@
 import * as p from '@clack/prompts';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
-import { checkDependency, runCommand } from './lib/command.js';
+import { runCommand } from './lib/command.js';
 import { loadProjectConfig } from './lib/config.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
 import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
-import {
-  gatherDeploymentConfig,
-  promptEnvironmentName,
-  resolveDeployMode,
-} from './lib/deploy/prompts.js';
-// New modular imports
-import {
-  DEFAULT_WORKER_MAX,
-  DEFAULT_WORKER_MIN,
-  generateSSHKeyPair,
-  getBranchName,
-  normalizeEnvName,
-  waitForSSH,
-} from './lib/deploy/utils.js';
+import { gatherDeploymentConfig, promptEnvironmentName } from './lib/deploy/prompts.js';
+import { normalizeEnvName } from './lib/deploy/utils.js';
 import { withDeployLog } from './lib/deploy-logger.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { resolveEnvSeed } from './lib/env-identity.js';
 import { ensureLockfile } from './lib/package-manager.js';
 import { buildGitAddArgv, detectPackageManager, repairLegacyEnvQuoting } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { HetznerS3Provider, sanitizeBucketName } from './lib/providers/hetzner-s3.js';
-import { getProvider, getProviderClass, listProviders } from './lib/providers/index.js';
-import {
-  buildComposeTypeOptions,
-  buildK8sProfileOptions,
-  COMPOSE_MIN_RAM_GB,
-  detectCurrentProfile,
-  K8S_PROFILES,
-} from './lib/server-types.js';
-import { VERSION } from './lib/version.js';
 import { vibecarbonHome } from './lib/vibecarbon-home.js';
 
 // ============================================================================
@@ -435,31 +413,6 @@ export async function run(args) {
   }
 }
 
-// Re-exports for testing and backward compatibility
-export {
-  buildComposeTypeOptions,
-  buildK8sProfileOptions,
-  buildLegacyArgs,
-  COMPOSE_MIN_RAM_GB,
-  checkDependency,
-  DEFAULT_WORKER_MAX,
-  DEFAULT_WORKER_MIN,
-  detectCurrentProfile,
-  detectPackageManager,
-  generateSSHKeyPair,
-  getBranchName,
-  getProvider,
-  getProviderClass,
-  HetznerS3Provider,
-  K8S_PROFILES,
-  listProviders,
-  loadProjectConfig,
-  main,
-  normalizeEnvName,
-  resolveDeployMode,
-  runCommand,
-  SPEC,
-  sanitizeBucketName,
-  VERSION,
-  waitForSSH,
-};
+// The command registry and the docs generator read SPEC; the arg tests read
+// buildLegacyArgs.
+export { buildLegacyArgs, SPEC };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getBranchName, normalizeEnvName } from '../../../src/deploy.js';
+import { getBranchName, normalizeEnvName } from '../../../src/lib/deploy/utils.js';
 
 describe('normalizeEnvName', () => {
   it('converts to lowercase', () => {

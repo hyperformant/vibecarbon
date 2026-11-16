@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from '../../../src/lib/deploy/utils.js';
 import {
   buildComposeTypeOptions,
   buildK8sProfileOptions,
   COMPOSE_MIN_RAM_GB,
-  DEFAULT_WORKER_MAX,
-  DEFAULT_WORKER_MIN,
   detectCurrentProfile,
   K8S_PROFILES,
-} from '../../../src/deploy.js';
+} from '../../../src/lib/server-types.js';
 
 // NOTE: parseArgs-driven tests for deploy were retired in PR 4 of the CLI
 // rewrite; deploy's flag matrix now lives in
