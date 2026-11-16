@@ -22,7 +22,7 @@ ARG NODE_IMAGE=node:24-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fb
 # supported for --from"); a stage built FROM the global ARG is the workaround.
 FROM ${NODE_IMAGE} AS node
 
-FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 RUN apk add --no-cache libstdc++ && \
     addgroup -g 1001 -S hono && \
