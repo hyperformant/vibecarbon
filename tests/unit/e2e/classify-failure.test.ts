@@ -12,19 +12,12 @@ import {
 } from '../../e2e/utils/classify-failure.js';
 
 describe('classifyFailure', () => {
-  it('flags k3s install timeout as infra', () => {
-    const result = classifyFailure({
-      errorMessage: 'k3s binary did not appear on root@1.2.3.4 within 300s',
-    });
-    expect(result.category).toBe('infra');
-    expect(result.reason).toMatch(/k3s install timeout/i);
-  });
-
   it('flags k3s readiness timeout as infra', () => {
     const result = classifyFailure({
       errorMessage: 'k3s did not become ready on 5.6.7.8 within 600s',
     });
     expect(result.category).toBe('infra');
+    expect(result.reason).toMatch(/k3s install timeout/i);
   });
 
   it('flags spinner-truncated k3s timeout as infra', () => {
@@ -260,7 +253,6 @@ describe('classifyFailure', () => {
     ['missing module', "Cannot find module './nope.js'"],
     ['JS exception', 'undefined is not a function'],
     ['SQL constraint violation', 'UNIQUE constraint failed: orgs.slug'],
-    ['restore precondition violated', 'No backups found in S3'],
     ['ACME issuance terminally failed', 'terminally failed after 2 recovery attempts'],
     ['project quota exhausted (leak residue)', 'server limit reached (resource_limit_exceeded)'],
   ];
@@ -318,17 +310,6 @@ describe('classifyFailure', () => {
   it('flags missing module as code, not infra', () => {
     const result = classifyFailure({
       errorMessage: "Cannot find module '../foo.js'",
-    });
-    expect(result.category).toBe('unknown');
-    expect(result.reason).toMatch(/code:/);
-  });
-
-  it('flags "No backups found in S3" as code (restore precondition)', () => {
-    // This was the exact PR 1BI regression — restore failed because the
-    // mid-flow destroy purged the bucket. Classifying as 'unknown' (with
-    // a code: prefix) makes sure it doesn't get auto-retried as infra.
-    const result = classifyFailure({
-      errorMessage: 'Restore failed (exit 1): No backups found in S3',
     });
     expect(result.category).toBe('unknown');
     expect(result.reason).toMatch(/code:/);

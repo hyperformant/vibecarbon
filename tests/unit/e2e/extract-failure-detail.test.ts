@@ -30,18 +30,18 @@ describe('extractDeployFailureDetail', () => {
       '[perf] deploy.k3s.sideload.app 614476ms (failed)',
       '[perf] deploy.k3s.full 868122ms (failed)',
       'Deploy log saved under /home/x/.vibecarbon/logs/',
-      'Error: [step:deploy-cluster] k3s binary did not appear on root@188.245.40.255 within 600s. Last SSH error: Command failed: ssh -i /k root@188.245.40.255 command -v k3s',
+      'Error: [step:deploy-cluster] k3s did not become ready on 188.245.40.255 within 600s. Last SSH error: Command failed: ssh -i /k root@188.245.40.255 command -v k3s',
       'ssh: connect to host 188.245.40.255 port 22: Connection timed out',
     ].join('\n');
     const detail = extractDeployFailureDetail(stdout, '');
-    expect(detail).toContain('k3s binary did not appear');
+    expect(detail).toContain('k3s did not become ready');
     expect(detail).toContain('[perf] deploy.k3s.full 868122ms (failed)');
   });
 
   it('regression 2026-07-08: the extracted detail classifies as infra, not unknown', () => {
     const stdout = [
       '[perf] deploy.k3s.full 868122ms (failed)',
-      'Error: [step:deploy-cluster] k3s binary did not appear on root@188.245.40.255 within 600s. Last SSH error: Command failed: ssh',
+      'Error: [step:deploy-cluster] k3s did not become ready on 188.245.40.255 within 600s. Last SSH error: Command failed: ssh',
       'ssh: connect to host 188.245.40.255 port 22: Connection timed out',
     ].join('\n');
     const detail = extractDeployFailureDetail(stdout, '');

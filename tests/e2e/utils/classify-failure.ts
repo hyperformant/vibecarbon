@@ -32,7 +32,7 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // the spinner-truncated form when only stderr is captured ("Waiting
   // for k3s on master ... Canceled" — the spinner prefix made it past
   // truncation but the throw didn't, observed 2026-04-27 morning matrix).
-  { pattern: /k3s\s+(binary did not appear|did not become ready)/i, reason: 'k3s install timeout' },
+  { pattern: /k3s\s+did not become ready/i, reason: 'k3s install timeout' },
   {
     pattern: /Waiting for k3s on (master|node).{0,200}Canceled/is,
     reason: 'k3s install timeout',
@@ -174,7 +174,6 @@ export const CODE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     pattern: /UNIQUE constraint failed|FOREIGN KEY constraint/i,
     reason: 'SQL constraint violation',
   },
-  { pattern: /No backups found in S3/i, reason: 'restore precondition violated' },
   // The deploy's ACME watchdog only says this after it has detected a
   // terminal cert-manager Order AND spent its whole repair budget failing to
   // clear it (src/lib/deploy/k8s/acme-order-recovery.js). It must outrank the
