@@ -340,6 +340,8 @@ A worktree stays, and the hook tells you why, when this session is working in it
 
 Both hooks do nothing without an `origin` remote. They are registered in `.claude/settings.json`.
 
+They run at session start only for a new or resumed session (matcher `startup|resume`), not on `/clear`, compaction or a fork, because each run fetches from `origin`. They never ask you for anything: ssh runs in batch mode and git's own prompts are off, so a fetch that cannot log in does nothing. Your `GIT_SSH_COMMAND` or `core.sshCommand` keeps its options.
+
 ## File Uploads (signed URLs)
 
 Files go from the browser straight to the S3 bucket. They never touch the server's disk and never pass through Hono, so uploads stay fast and the VPS stays small. The server only signs short-lived URLs (`src/server/lib/storage.ts`).
