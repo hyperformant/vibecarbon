@@ -964,7 +964,7 @@ what a created project tracks, on npm and pnpm.
 `tests/unit/security/git-add-census.test.ts` allows `git add -A` only in
 `create`'s initial commit.
 
-#### 2026-11-16: The e2e harness has its own CLI home (#NNN)
+#### 2026-11-16: The e2e harness has its own CLI home (#503)
 
 Real-infrastructure e2e runs now keep their CLI state in `~/.vibecarbon-e2e`
 instead of the developer's `~/.vibecarbon`. `tests/e2e/utils/e2e-home.js` sets
@@ -975,8 +975,8 @@ and `scripts/sweep-hetzner.js` import it before anything else. A
 
 **Why:** the unit and integration tiers got their own home earlier, but the
 e2e runner did not. Every e2e `create` and `deploy` wrote the developer's real
-project registry and log folder. One registry held 610 test entries out of
-616, and the log folder held hundreds of test deploy logs.
+project registry and log folder, and the log folder held hundreds of test
+deploy logs.
 
 **Do not undo:** it is one fixed directory for all runs, not one per run or
 per scenario. Runs in parallel must share the uplink lock in it, or their

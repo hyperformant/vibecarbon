@@ -4,8 +4,7 @@
  *
  * Real-infra e2e runs `create`, `deploy` and `destroy` for throwaway projects.
  * Under the developer's real ~/.vibecarbon that filled the project registry
- * and the log folder with test entries (one registry held 610 test entries
- * out of 616).
+ * and the log folder with test entries.
  *
  * ONE fixed directory for every run, not one per run or per scenario:
  *   - runs in parallel must share locks/uplink-push.lock, which keeps their
