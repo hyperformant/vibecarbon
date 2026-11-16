@@ -38,38 +38,46 @@ so the probe then checks whether anything listens there
 ## Writing a CLI test (the harness)
 
 ```ts
-import { afterEach, describe, it } from 'vitest';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertSuccess,
-  assertFileWritten,
-  buildFixture,
-  destroyFixture,
-  installStubs,
+  destroyRealProject,
+  installExecStubs,
+  realProject,
   runCli,
-  type TeardownFn,
 } from '../../_harness/index.js';
 
 describe('vibecarbon add observability', () => {
-  let fix: string;
-  let teardown: TeardownFn | undefined;
-  afterEach(() => { teardown?.(); destroyFixture(fix); });
+  let project: string;
+  beforeEach(() => { project = realProject(); });
+  afterEach(() => { destroyRealProject(project); });
 
-  it('writes manifest in a -no-git project', () => {
-    fix = buildFixture({ mode: 'k8s', git: false });
-    teardown = installStubs({ hetzner: 'success' });
-    const r = runCli('add', ['observability'], { cwd: fix });
+  it('installs the compose overlay', () => {
+    const r = runCli('add', ['observability', '-y'], { cwd: project });
     assertSuccess(r);
-    assertFileWritten(fix, 'k8s/overlays/observability/kustomization.yaml');
+    expect(existsSync(join(project, 'docker-compose.observability.yml'))).toBe(true);
+  });
+
+  it('records the commands the CLI runs', () => {
+    const stubs = installExecStubs([{ command: 'docker', respond: { stdout: 'ok\n' } }]);
+    try {
+      runCli('up', [], { cwd: project, execStubs: stubs });
+      expect(stubs.callsTo('docker').length).toBeGreaterThan(0);
+    } finally {
+      stubs.teardown();
+    }
   });
 });
 ```
 
 ### Harness primitives
 
-- **`buildFixture({ mode, git, envs, withDeployedState, files })`**: synthesizes a vibecarbon project in a temp dir. Mode-specific scaffolding (compose vs k8s), `.gitignore` mirrors `carbon/_gitignore`, optional pre-populated `.vibecarbon/<env>.json` for post-deploy commands.
-- **`installStubs({ hetzner, cloudflare })`**: overrides `globalThis.fetch` with HTTP fakes. Hetzner modes: `success` / `capacity-exhausted` / `rate-limited` / `not-found`. Cloudflare: `success` / `rate-limited`. Unmatched URLs throw: no silent prod hits. (In-process only; child-process exec stubbing is deferred.)
-- **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp and points `VIBECARBON_API_BASE` at a closed port by default, so a test never makes a silent production request. Returns `{ exitCode, stdout, stderr }`.
-- **`assertSuccess` / `assertExitWith` / `assertFileWritten` / `assertFileMissing`**: throw plain `Error` with the relevant slice of `RunResult` so failures are legible without digging through raw stdio.
+- **`realProject({ deployMode, git, envs, withDeployedState })`**: runs the real `vibecarbon create` once per test file, then hands each call a fresh copy in a temp dir. Options set `deployMode` and `envs` in `.vibecarbon.json`, remove `.git` (`git: false`), or write `.vibecarbon/<env>.json` as if a deploy already succeeded (`withDeployedState`, for post-deploy commands). Pass the path to **`destroyRealProject(path)`** in `afterEach`.
+- **`installExecStubs([{ command, matches, respond, recordEnv }])`**: writes a fake executable per command (`ssh`, `docker`, `kubectl`, ...) into a temp `bin` directory and records every call. The first spec whose `matches` regex fits the joined argv answers with `respond` (`stdout`, `stderr`, `exitCode`). Pass the result as `runCli`'s `execStubs` option to put it first on `PATH`, read the calls with `calls()` or `callsTo(command)`, and call `teardown()` when done.
+- **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp and points `VIBECARBON_API_BASE` at a closed port by default, so a test never makes a silent production request. Returns `{ exitCode, stdout, stderr }`. **`runCliAsync`** is the same without blocking the event loop: use it whenever the test passes its own `apiBase`, because a server in the test process cannot answer while `spawnSync` runs.
+- **`assertSuccess` / `assertExitWith` / `assertFileWritten` / `assertFileUnchanged` / `assertFileMissing`**: throw plain `Error` with the relevant slice of `RunResult` so failures are legible without digging through raw stdio.
 
 ## Cross-tier shared helpers
 
@@ -274,7 +282,7 @@ bucket. Health checks assert liveness; nobody asserted *effect*.
 *Countermeasure (rule):* **success must cite evidence.** A step that can degrade must
 (a) mark the run summary degraded (never `warn`-and-continue on a deploy-critical
 path) and (b) carry a unit test asserting the loud path (pattern:
-`compose-admin-user-retry.test.ts`, `destroy-stack-partial-detection.test.ts`).
+`destroy-stack-partial-detection.test.ts`).
 Binaries installed into images are *executed* in the same build layer
 (`walg-dockerfile-arch.test.ts`). The last gap in this class (asserting a backup
 object actually *lands* in S3) is now closed by the backup-evidence e2e check

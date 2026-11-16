@@ -12,7 +12,7 @@ Vibecarbon has four test tiers; only the first three are addressed here. Pick th
 | **unit** | Pure, in-process. No child processes, no I/O outside tmp dirs. | ~10s | `pnpm test:unit` |
 | **integration** | Spawns the CLI against fixture projects; cloud / SSH / exec stubbed; real Pulumi against `file://` backend. | ~1 min | `pnpm test:integration` |
 | **loadtest** | Performance benchmarks against a deployed target. | varies | `pnpm test:loadtest` |
-| **e2e** | REAL_INFRA Hetzner — see [[running-e2e-matrix]]. | 30 min – 3 hr | `pnpm test:e2e:batch` |
+| **e2e** | REAL_INFRA on a real provider (Hetzner, DigitalOcean, Linode, Vultr or Scaleway) — see [[running-e2e-matrix]]. | 30 min – 3 hr | `pnpm test:e2e:batch` |
 
 `pnpm test` runs unit + integration + loadtest (everything except e2e, which is gated by `REAL_INFRA=true`). `pnpm test:prepush` runs `lint + unit + integration` and is what the git pre-push hook enforces — match this locally before pushing.
 
@@ -27,7 +27,7 @@ Use this decision table when you've changed code and need to know what to run:
 | Anything in `carbon/` that lint or build would catch | `pnpm test:template` |
 | A docker-compose service or compose-mode deploy path | `DOCKER_INTEGRATION=true pnpm test:docker` |
 | Multi-CLI orchestration that doesn't fit one verb | `pnpm test:modules` |
-| Anything that touches deploy / destroy / scale / restore against real Hetzner | e2e — see [[running-e2e-matrix]] |
+| Anything that touches deploy / destroy / scale / restore against a real provider | e2e — see [[running-e2e-matrix]] |
 | About to push and want the pre-push gate locally | `pnpm test:prepush` |
 | You changed a lot and aren't sure | `pnpm test` (unit + integration + loadtest) |
 
@@ -40,10 +40,10 @@ Vitest supports path filters and `-t` for test-name filters. Path filters are re
 ```bash
 # Single file
 pnpm test:unit tests/unit/lib/foo.test.ts
-pnpm test:integration tests/integration/cli/deploy/matrix.test.ts
+pnpm test:integration tests/integration/cli/deploy/deploy.test.ts
 
 # Single test in that file (matches the `it(...)` name as substring)
-pnpm test:integration tests/integration/cli/deploy/matrix.test.ts -t "compose mode"
+pnpm test:integration tests/integration/cli/deploy/deploy.test.ts -t "prints help"
 ```
 
 `pnpm test:watch` runs unit + integration in watch mode — good for the inner loop on a stubborn test.
@@ -54,12 +54,11 @@ Integration tests use a shared CLI harness at `tests/integration/_harness/`. Rea
 
 - `tests/integration/_harness/index.ts` — public exports.
 - `tests/integration/_harness/real-project.ts` — `realProject()` materializes a real `vibecarbon create` output (cloned from a per-process cache on the second call onward).
-- `tests/integration/_harness/build-fixture.ts` — `buildFixture()` synthesizes a minimal project (faster, used when you don't need a full create).
-- `tests/integration/_harness/install-stubs.ts` — `installStubs({ hetzner, cloudflare })` overrides `globalThis.fetch`. Modes: `success` / `capacity-exhausted` / `rate-limited` / `not-found` (hetzner); `success` / `rate-limited` (cloudflare). Unmatched URLs throw — no silent prod hits.
-- `tests/integration/_harness/run-cli.ts` — `runCli(verb, flags, opts)` spawns `node src/cli.js`, strips ANSI, returns `{ exitCode, stdout, stderr }`. Sets `HOME` to a per-process tmp dir so the CLI never reads or writes the developer's real `~/.vibecarbon`, and points telemetry and the update check at a closed port unless `apiBase` is given.
-- `tests/integration/_harness/assertions.ts` — `assertSuccess`, `assertExitWith`, `assertFileWritten`, `assertFileMissing`. Throw plain `Error` with a relevant slice of the run result.
+- `tests/integration/_harness/exec-stubs.ts` — `installExecStubs([{ command, matches, respond }])` writes fake executables (`ssh`, `docker`, `kubectl`, ...) into a temp `bin` directory and records every call. Pass the result as `runCli`'s `execStubs` option; read `calls()` / `callsTo(command)`; call `teardown()` when done.
+- `tests/integration/_harness/run-cli.ts` — `runCli(verb, flags, opts)` spawns `node src/cli.js`, strips ANSI, returns `{ exitCode, stdout, stderr }` (`runCliAsync` is the non-blocking form, required when the test passes its own `apiBase`). Sets `HOME` to a per-process tmp dir so the CLI never reads or writes the developer's real `~/.vibecarbon`, and points telemetry and the update check at a closed port unless `apiBase` is given.
+- `tests/integration/_harness/assertions.ts` — `assertSuccess`, `assertExitWith`, `assertFileWritten`, `assertFileUnchanged`, `assertFileMissing`. Throw plain `Error` with a relevant slice of the run result.
 
-The harness is in-process — it stubs `fetch`, not subprocess execs. If your CLI path shells out to something real (e.g. `pulumi`, `docker`, `kubectl`), the integration test will hit the real binary. For pure cloud HTTP, the stubs are sufficient.
+The CLI runs as a child process, so nothing in the test process can stub its `fetch`. Stub the commands it shells out to with `installExecStubs`; a command you leave unstubbed (e.g. `pulumi`, `docker`, `kubectl`) is the real binary.
 
 ## Common failure modes
 
@@ -67,7 +66,7 @@ The harness is in-process — it stubs `fetch`, not subprocess execs. If your CL
 
 **Test hangs and doesn't exit.** Usually a child process the test spawned didn't get its stdio closed. The fix is to replace `process.exit()` in CLI subprocesses with `'exit'` event + kill process group, otherwise orphan stdio holds the runner open. If a CLI verb you're testing hangs in `runCli`, check that its exit path closes stdio.
 
-**Stub said the URL wasn't matched.** `installStubs` throws on unmatched URLs by design. Either the CLI hit a URL that the chosen mode doesn't cover, or you forgot to call `installStubs` at all. Check which mode you passed (`success` vs the failure-flavored ones) and look at `tests/integration/_harness/install-stubs.ts` to see what each mode answers.
+**A stubbed command did not answer as expected.** For one command name, the first spec whose `matches` regex fits the joined argv wins, so order specs from most to least specific. Print `stubs.calls()` to see the argv the CLI really sent, and check that you passed `execStubs: stubs` to `runCli`; without it the real binary runs.
 
 **`pnpm test` fails on a single file but `pnpm test:unit <file>` passes.** Cross-file state leak. Setup files run once per worker via `tests/setup/global-setup.ts`; suspect test that doesn't restore a global (`globalThis.fetch`, `process.env.HOME`, cwd). Run the file *before* the failing one to confirm: `pnpm test:integration tests/integration/<earlier>.test.ts tests/integration/<failing>.test.ts`.
 
@@ -78,12 +77,12 @@ Where to put it follows the same decision as where to run:
 | Symptom you're guarding against | Tier and file |
 |---|---|
 | Pure function returns wrong value | `tests/unit/<module>/<x>.test.ts` |
-| CLI verb fails to dispatch / parse a flag | `tests/integration/cli/<cmd>/matrix.test.ts` |
+| CLI verb fails to dispatch / parse a flag | `tests/integration/cli/<cmd>/<cmd>.test.ts` |
 | Generated project doesn't lint / build | `tests/integration/template/lint-build.test.ts` |
 | Docker compose service won't come up | `tests/integration/docker/<x>.test.ts` |
-| Real Hetzner deploy regresses | `tests/e2e/scenarios/<x>.ts` — see [[running-e2e-matrix]] |
+| Real-provider deploy regresses | `tests/e2e/scenarios/<x>.ts` — see [[running-e2e-matrix]] |
 
-For unit tests, mirror the source path: a function in `src/lib/deploy/k8s/k3s.js` gets a test at `tests/unit/lib/deploy/k8s/k3s.test.ts`. For CLI flag tests, prefer extending the existing `matrix.test.ts` for that verb over creating a new file — the harness setup amortizes better.
+For unit tests, mirror the source path: a function in `src/lib/deploy/k8s/k3s.js` gets a test at `tests/unit/lib/deploy/k8s/k3s.test.ts`. For CLI flag tests, prefer extending the existing `<cmd>.test.ts` for that verb over creating a new file — the harness setup amortizes better.
 
 ### Adding a guard with a bugfix — the parity rule
 

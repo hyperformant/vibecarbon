@@ -10,9 +10,9 @@ licensed.
   cloud deploys, the [Pulumi CLI](https://www.pulumi.com/docs/install/). Linux,
   macOS, or Windows via WSL2.
 - Install: `pnpm install` (this also wires the repo's git hooks).
-- The repo has two pnpm projects: the CLI at the root (`src/`) and the shipped
-  application template in `carbon/`. They are versioned together but have
-  separate dependencies, so align tooling by hand.
+- The repo has two projects: the CLI at the root (`src/`), which uses pnpm,
+  and the shipped application template in `carbon/`, which uses npm. They are
+  versioned together but have separate dependencies, so align tooling by hand.
 
 ## Before you open a pull request
 

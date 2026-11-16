@@ -89,13 +89,13 @@ job that patches README from every leg's uploaded `e2e.db`
 - Add the provider's token/storage secrets to the `e2e-infra` GitHub
   Environment (secrets via GitHub Environments, never committed
   ciphertext) and map them in the `matrix` job's "Run e2e (provider leg)"
-  step env (both providers' secrets are present on every leg: the
+  step env (every provider's secrets are present on every leg: the
   runner's registry-driven credential preflight only requires the
   SELECTED provider's vars) and in the "Scrub secret values from
   artifacts" step's redaction list.
 - Add the provider to the `matrix` job's two hand-maintained lists (the
   `provider:` workflow_dispatch input's `options:` and the
-  `fromJSON('["hetzner","digitalocean"]')` literal in the matrix `strategy`
+  `fromJSON('["hetzner","digitalocean","linode","vultr","scaleway"]')` literal in the matrix `strategy`
   expression) and to a namespace-scoped safety-net sweep step (model:
   `tests/e2e/sweep-digitalocean-ci.ts`, which self-skips without a token and
   exits nonzero on incomplete enumeration), gated `if: always() && matrix.provider
@@ -110,8 +110,9 @@ job that patches README from every leg's uploaded `e2e.db`
 - `docs/deploy-<id>.md`: operator setup guide (see the Hetzner/DO ones).
 - Pricing watchlist entry if the provider's catalog is pinned anywhere
   (watchlists need spec, source URL, refresh cadence).
-- No `sha256` digest-pinned image refs in templates; floating/version tags
-  only.
+- Pin every image ref you add by digest (`name:tag@sha256:<multi-arch index
+  digest>`); `tests/unit/deploy/image-digest-census.test.ts` fails on anything
+  else. See "Every image ref is pinned by digest" in `AGENTS.md`.
 
 ## 7. Prove it on real infra
 

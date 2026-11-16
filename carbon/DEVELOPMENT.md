@@ -107,8 +107,8 @@ npm run dev:start:all
 
 # Test CLI generation
 cd .. && node src/cli.js create test-app -y \
-  --admin-email=test@example.com \
-  --admin-password=testpass123
+  -admin-email test@example.com \
+  -admin-password testpass123
 cd test-app && npm run dev:start
 ```
 

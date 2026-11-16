@@ -8,7 +8,7 @@ Guidance for AI coding agents working on this repository.
 
 Vibecarbon is a CLI tool, MIT licensed, that generates production-ready software applications with Hono + Vite + React 19 on its own Postgres 17 (Better Auth for sign-in, Drizzle for data, Traefik at the edge; extras such as observability and Redis arrive through `vibecarbon add`). The repository contains:
 
-1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`)
+1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `up.js`, `down.js`, `status.js`, `reset.js`, `add.js`, `remove.js`, `configure.js`, `upgrade.js`, `telemetry.js`, `deploy.js`, `destroy.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `update.js`, `shell.js`, `diagnose.js`, `console.js`, `access.js`)
 2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
@@ -135,7 +135,6 @@ pnpm test:template           # Subset: generated-project lint/build
 pnpm test:docker             # Subset: docker compose smoke (requires DOCKER_INTEGRATION=true)
 pnpm test:e2e:batch -- --provider hetzner   # Real-infra matrix (~3hr, REAL_INFRA=true). --provider is REQUIRED: no provider is a default
 pnpm test:e2e:expanded # E2E + VPS autoscaling end-to-end (adds ~25min)
-pnpm test:e2e:single  # Real-infra single-resource tests (former tests/infrastructure/)
 pnpm test:coverage           # Run tests with coverage report
 ```
 

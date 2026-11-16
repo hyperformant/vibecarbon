@@ -485,9 +485,9 @@ The caps are the `deploy.resources.limits` in `docker-compose.prod.yml`. The dat
 
 | Scenario | Hetzner Server | Specs |
 |----------|----------------|-------|
-| Dev, QA | CX23, CX22, CPX21 | 2 vCPU, 4 GB RAM |
-| Prod (Single VPS) | CX33, CPX31 | 4 vCPU, 8 GB RAM |
-| Prod HA (2x Standby) | CX33, CPX31 (x2) | 8 vCPU, 16 GB RAM |
+| Dev, QA | CPX22, CX23, CPX21 | 2 vCPU, 4 GB RAM |
+| Prod (Single VPS) | CX33, CPX32 | 4 vCPU, 8 GB RAM |
+| Prod HA (2x Standby) | CX33, CPX32 (x2) | 8 vCPU, 16 GB RAM |
 
 *For current monthly costs, see [Hetzner Cloud pricing](https://www.hetzner.com/cloud/). Exact server types are picked per region at deploy time based on availability.*
 
@@ -520,8 +520,8 @@ Mode support by provider (same facts as the README architecture diagram):
 | Deploy mode | Hetzner | DigitalOcean | Linode | Vultr | Scaleway |
 |---|:---:|:---:|:---:|:---:|:---:|
 | `compose` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `k8s` | ✅ | ✅ | — | — | — |
-| `k8s-ha` | ✅ | ✅ | — | — | — |
+| `k8s` | ✅ | ✅ | ✅ | — | — |
+| `k8s-ha` | ✅ | ✅ | ✅ | — | — |
 
 Every cell that ships runs the same CLI, the same lifecycle commands, and the same e2e gate. A dash is a mode not yet built for that provider: requesting it fails at deploy-mode selection with an explicit capability-gate error (`assertTierSupported()` in `src/lib/providers/index.js`).
 

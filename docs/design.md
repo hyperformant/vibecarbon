@@ -57,7 +57,7 @@ Business vision and brand design guidelines.
 
 ```bash
 # Create a new project
-npx create-vibecarbon@latest [app-name]
+npx vibecarbon@latest create [app-name]
 
 # Run locally
 npm run dev:start
