@@ -502,7 +502,7 @@ export const PERF_TABLE_ROWS: PerfRow[] = [
  * so the published grid and the scenario totals describe only what a
  * customer would wait on. verify-status polls `vibecarbon status`.
  */
-export const NON_PERF_STEPS: ReadonlySet<string> = new Set(['verify-status']);
+export const NON_PERF_STEPS: ReadonlySet<string> = new Set(['verify-status', 'update']);
 
 export function perfDurationSum(
   steps: Array<{ name: string; duration_ms: number | null }>,

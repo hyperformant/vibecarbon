@@ -79,6 +79,10 @@ export const STEP_NAMES = [
   // agree with what verify-deploy just proved from the outside. See
   // tests/e2e/checks/status-health.ts.
   'verify-status',
+  // Marks a restart due on one server, checks every surface reports it, runs
+  // `vibecarbon update`, and checks it clears with downtime within the plan.
+  // See tests/e2e/checks/host-restart.ts.
+  'update',
   // Re-invokes `vibecarbon deploy` against the already-provisioned env to
   // time the no-op convergence path — the push-to-deploy iteration loop
   // customers actually live in after the initial cold deploy.

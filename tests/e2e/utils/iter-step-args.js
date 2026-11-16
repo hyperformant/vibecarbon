@@ -17,6 +17,7 @@ export const ITER_STEPS = [
   'restore',
   'destroy',
   'status',
+  'update',
   'diagnose',
 ];
 

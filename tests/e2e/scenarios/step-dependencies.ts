@@ -10,6 +10,7 @@ import type { StepName } from './types.js';
 export const STEP_DEPENDENTS: Readonly<Partial<Record<StepName, readonly StepName[]>>> = {
   // The backup writes the marker row restore-deploy looks for; the destroy
   // leaves the empty environment it deploys into.
+  deploy: ['update'],
   backup: ['restore-deploy'],
   destroy: ['restore-deploy'],
   failover: ['second-failover', 'reconverge-deploy'],
