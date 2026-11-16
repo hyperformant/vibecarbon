@@ -176,12 +176,26 @@ Compose servers install Docker (docker-ce, containerd.io, runc and their compani
 - **The daily automatic job still never touches Docker.** A dockerd restart is downtime, so it only happens when the operator runs `update`.
 - **k8s nodes are unaffected.** They run k3s's own containerd, which `deploy` and the version channel manage.
 
-## Docs
+## Docs *(Brandon: document it in the help, the markdown files and the user docs)*
 
-- `carbon/content/docs/cli.mdx` gets a `## update` section, with prose on the downtime per mode.
-- `docs/security.md` gets a section, "Security updates and restarts".
-- `carbon/PRODUCTION.md` gets a short paragraph.
-- The email and the notice link to the docs section.
+`update` is a deploy command. It belongs in the **DEPLOY COMMANDS** section of `vibecarbon -h` (`src/lib/cli/help.js:219` renders that heading from the registry's `deploy` category), listed after `scale`. Each place it must appear:
+
+- **CLI help:**
+  - the `deploy`-category entry in `src/lib/cli/command-registry.js` (usage `[env]`) and the command's own `SPEC`;
+  - `vibecarbon update -h`, which renders from that `SPEC`;
+  - `vibecarbon upgrade -h`, which gets a line pointing to `update` for server updates. `update -h` gets the reverse.
+- **Generated markdown**, all by `pnpm docs:cli`, with `tests/unit/docs/cli-docs-generated.test.ts` failing on drift:
+  - the README's "Deploy: take an environment to the cloud (and back)" table (`README.md:144`);
+  - AGENTS.md's command block;
+  - the flag table in `cli.mdx`.
+- **User docs:**
+  - `carbon/content/docs/cli.mdx` gets a `## update` section with the `flags update` marker pair, plus hand-written prose: what it updates (Ubuntu security updates, and Docker on compose), the plan and the downtime per mode and role, the `-y` rule, and what to do when a server doesn't come back.
+  - Any CLI overview page under `carbon/content/docs/` that lists the deploy commands gets the new row.
+- **Repo docs:**
+  - `docs/security.md` gets a section, "Security updates and restarts". It covers what updates by itself daily, what waits for `update`, why nothing restarts on its own, and the three places a due restart shows up.
+  - `carbon/PRODUCTION.md` gets a short paragraph pointing to it.
+  - `docs/technical.md` describes the host reporter in its architecture section.
+- **The email and the Super Admin notice** link to the `update` section of the user docs.
 
 ## Testing (decided: Claude)
 
