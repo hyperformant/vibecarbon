@@ -81,7 +81,8 @@ One escaper per sink: `src/lib/shell.js` for shell, SQL and YAML; `src/lib/doten
 Enforcement:
 - `src/create.js` asserts at startup that the bundled `.gitignore` contains these patterns; a missing pattern fails the CLI before it touches the filesystem.
 - `tests/unit/security/gitignore-invariants.test.ts` asserts the same list against the generated project.
-- Every `git add` call in `src/` uses an explicit allowlist rather than `git add .` (see `buildGitAddArgv` in `src/lib/project.js`, used by `src/deploy.js` and `src/configure.js`).
+- Every `git add` call in `src/` names the paths it stages rather than running `git add .`, with one exception. `buildGitAddArgv` in `src/lib/project.js` (used by `src/deploy.js` and `src/configure.js`) stages an explicit allowlist, the GitOps deploy stages only `k8s/`, and the CI setup stages only the build workflow and `.nvmrc`.
+- The exception is the initial commit in `src/create.js`, which runs `git add -A`. That is safe by construction: `create` refuses a directory that already exists, so the project holds only what `create` just wrote, and it has already checked the `.gitignore` it wrote against the patterns above. `tests/unit/security/git-add-census.test.ts` fails on any other broad `git add` in `src/`.
 
 ### 6. Operator-safety prompts
 

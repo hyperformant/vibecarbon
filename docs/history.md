@@ -940,6 +940,30 @@ ask for a password.
 **Guard:** `tests/integration/hooks/never-prompt.test.ts` and the matcher test
 in `tests/unit/template/claude-hooks-lockstep.test.ts`.
 
+#### 2026-11-16: The staging allowlist covers every file create ships (#501)
+
+`.nvmrc`, `tests/`, `vitest.config.ts`, `tsconfig.test.json`, `TESTING.md`,
+`pnpm-workspace.yaml`, `.cursor/rules/` and `.windsurfrules` joined the list of
+paths the CLI stages in a project. Because the list names whole directories,
+staging now also leaves out any `.env*` file inside them, at any depth.
+
+**Why:** when a project has no commit, `configure` makes the first one from
+this list and pushes it to a new GitHub repository. The files had been added
+to the template without being added to the list, so that push left them out.
+The project's build workflow runs the tests, so it would fail on its first run
+with no tests to find. On pnpm the push also left out the file that holds the
+dependency security floors.
+
+**Do not undo:** the list stays explicit. No `.env` name goes on it, the two
+example files included, and `.vibecarbon.json` stays the operator's to commit.
+Keep the `.env*` exclusion: the project's `.gitignore` does not cover every
+env file name, and a project created without git has no `.gitignore`.
+
+**Guard:** `tests/integration/template/create.test.ts` compares the list with
+what a created project tracks, on npm and pnpm.
+`tests/unit/security/git-add-census.test.ts` allows `git add -A` only in
+`create`'s initial commit.
+
 ## Added and later removed
 
 | What | Removed | Why |

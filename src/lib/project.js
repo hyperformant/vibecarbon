@@ -483,25 +483,42 @@ export function describeCredentialSource(keys) {
 
 /**
  * Allowlist of paths that vibecarbon knows are safe to commit.
- * Used by add/deploy/push in place of `git add .` to prevent leaking
+ * Used by deploy and configure in place of `git add .` to prevent leaking
  * `.vibecarbon/`, `.env.local`, or other untracked secrets.
+ *
+ * It covers every file `vibecarbon create` commits, because configure makes a
+ * project's first commit from it and pushes that to GitHub: a file missing
+ * here is missing from the repository the build workflow runs in
+ * (tests/integration/template/create.test.ts derives the check from a created
+ * project). Three tracked files stay out on purpose: `.env.example` and
+ * `.env.local.example`, so that no entry starts with `.env`, and
+ * `.vibecarbon.json`, whose commit decides which state passphrase the project
+ * trusts and is the operator's to make.
  */
 const PROJECT_GIT_ADD_ALLOWLIST = [
   // Top-level config
   '.gitignore',
   '.dockerignore',
+  '.nvmrc',
   '.github/',
   '.claude/',
+  // The rules file the template ships, not all of .cursor/: an editor's local
+  // config there (an MCP server list, say) can hold tokens.
+  '.cursor/rules/',
+  '.windsurfrules',
   'package.json',
   'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
   'package-lock.json',
   'bun.lock',
   'bun.lockb',
   'biome.json',
   'tsconfig.json',
   'tsconfig.server.json',
+  'tsconfig.test.json',
   'vite.config.ts',
   'drizzle.config.ts',
+  'vitest.config.ts',
   'components.json',
   // Docker
   'Dockerfile',
@@ -520,6 +537,7 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'docker-compose.observability.override.yml',
   // Source
   'src/',
+  'tests/',
   'scripts/',
   'content/',
   'backup/',
@@ -535,8 +553,18 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'CLAUDE.md',
   'DEVELOPMENT.md',
   'PRODUCTION.md',
+  'TESTING.md',
   'CHANGELOG.md',
 ];
+
+/**
+ * Taken back out of whatever the allowlist names. The list holds whole
+ * directories (src/, tests/, volumes/), and the project's .gitignore is not
+ * enough to keep an env file inside one unstaged: it does not cover every
+ * name (.env.e2e, .env.production), and a project created without git has no
+ * .gitignore at all. Matches at any depth.
+ */
+const PROJECT_GIT_ADD_EXCLUDES = [':(exclude,glob)**/.env*'];
 
 /**
  * Build a `git add` argv limited to template-known paths that exist.
@@ -553,7 +581,10 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
  */
 export function buildGitAddArgv(cwd = process.cwd(), extras = []) {
   const paths = [...PROJECT_GIT_ADD_ALLOWLIST, ...extras].filter((p) => existsSync(join(cwd, p)));
-  return ['git', 'add', '--', ...paths];
+  // Never with no path before it: git reads an exclusion on its own as
+  // "everything but this", which would stage the whole project.
+  if (paths.length === 0) return ['git', 'add', '--'];
+  return ['git', 'add', '--', ...paths, ...PROJECT_GIT_ADD_EXCLUDES];
 }
 
 // ============================================================================
