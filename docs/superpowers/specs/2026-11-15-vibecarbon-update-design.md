@@ -1,6 +1,6 @@
 # `vibecarbon update`: system updates, reboots and the notice that one is due
 
-Status: draft for Brandon's approval, 2026-11-15.
+Status: approved by Brandon, 2026-11-15.
 
 ## Why
 
