@@ -62,6 +62,9 @@
  * net.core.txrehash=0 before the k3s install
  * (tests/unit/deploy/stable-flowlabel-census.test.ts). The diff is the
  * snippet's lines.
+ * RE-CAPTURED 2026-11-15 (host reporter): the worker gained the
+ * `_host-reporter.sh` snippet after the k3s install; the master and db render
+ * are unchanged (tests/unit/deploy/host-reporter-census.test.ts).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

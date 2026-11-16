@@ -55,6 +55,10 @@
  * RE-CAPTURED 2026-11-15 (stable IPv6 flow label): the embedded worker script
  * gained the `_stable-flowlabel.sh` snippet; `cloudInit` is the only field
  * that changed.
+ * RE-CAPTURED 2026-11-15 (host reporter): the embedded worker script gained
+ * the `_host-reporter.sh` snippet after the k3s install
+ * (tests/unit/deploy/host-reporter-census.test.ts); `cloudInit` is the only
+ * field that changed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

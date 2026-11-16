@@ -148,7 +148,11 @@ describe('setupComposeBackupCron', () => {
         `#!/bin/sh\nif [ "$1" = "-l" ]; then cat "${state}" 2>/dev/null; exit 0; fi\ncat "$1" > "${state}"\n`,
       );
       chmodSync(join(bin, 'crontab'), 0o755);
-      const r = spawnSync('bash', ['-c', script().replaceAll('/opt/myapp', remote)], {
+      // The host reporter's installer leads the script (it writes /usr/local and
+      // /etc/systemd and starts units, host-reporter-census.test.ts holds it
+      // there); this runs the cron install that follows it, never on this host.
+      const afterInstaller = script().split(') >/dev/null 2>&1 || true\n').pop() as string;
+      const r = spawnSync('bash', ['-c', afterInstaller.replaceAll('/opt/myapp', remote)], {
         encoding: 'utf-8',
         env: { PATH: `${bin}:${process.env.PATH}` },
       });

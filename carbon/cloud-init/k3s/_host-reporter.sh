@@ -7,6 +7,7 @@
 mkdir -p /usr/local/lib/vibecarbon
 cat > /usr/local/lib/vibecarbon/host-reporter.sh <<'VC_HOST_REPORTER_EOF'
 #!/bin/sh
+PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
 # Prints or publishes this host's restart state. See carbon/cloud-init/k3s/_host-reporter.sh.
 FLAG=/var/run/reboot-required
 PKGS=/var/run/reboot-required.pkgs

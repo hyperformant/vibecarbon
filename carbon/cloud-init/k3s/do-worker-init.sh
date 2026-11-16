@@ -140,5 +140,7 @@ if [ "$K3S_INSTALL_OK" != "true" ]; then
   exit 1
 fi
 
+# @include _host-reporter.sh
+
 echo "k3s worker installation complete!"
 _m e

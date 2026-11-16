@@ -61,6 +61,7 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
+import { withHostReporter } from '../../host-reporter.js';
 import { CLOUD_INIT_DIR } from '../../iac/cloud-init.js';
 import { infraStepSkips } from '../../iac/state-seal.js';
 import {
@@ -1505,9 +1506,15 @@ export async function prePullImages({ nodeIps, sshKeyPath, khPath, extraImages =
   // This session reaches every node the deploy knows, on every deploy, as
   // soon as k3s answers and minutes before the apply has kubelet pull
   // anything, so it also sets the stable flow label on nodes created before
-  // v0.54.1 (../stable-flowlabel.js). Failover's standby pre-pull rides it too.
+  // v0.54.1 (../stable-flowlabel.js), and installs the host reporter on nodes
+  // created before it existed (../../host-reporter.js). Failover's standby
+  // pre-pull rides it too.
   const script = withStableFlowLabel(
-    images.map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`).join('\n'),
+    withHostReporter(
+      images
+        .map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`)
+        .join('\n'),
+    ),
   );
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
   await Promise.all(

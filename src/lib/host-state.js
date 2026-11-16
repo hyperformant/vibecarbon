@@ -10,10 +10,11 @@ const MAX_PACKAGES = 20;
 
 /**
  * Packages whose maintainer scripts call
- * /usr/share/update-notifier/notify-reboot-required on Ubuntu 24.04 and
- * 26.04 (checked with `grep -l notify-reboot-required /var/lib/dpkg/info/*.postinst`
- * in ubuntu:26.04 with unattended-upgrades installed): the kernel family,
- * firmware, libc, systemd, dbus and libpam0g (libpam0g found on 26.04).
+ * /usr/share/update-notifier/notify-reboot-required. Checked on Ubuntu 26.04
+ * (tests/integration/docker/host-reporter-ubuntu.test.ts): dbus, libc6 and
+ * libpam0g. The kernel and firmware patterns come from Ubuntu's kernel
+ * packaging (linux-image, linux-modules, linux-base, linux-firmware), and
+ * systemd is listed on the same grounds without a 26.04 check.
  */
 export const REBOOT_TRIGGER_PATTERNS = [
   /^linux-(image|modules|base|firmware)/,
