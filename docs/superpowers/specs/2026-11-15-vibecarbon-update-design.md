@@ -99,13 +99,17 @@ The line names the servers and the main package (e.g. `linux-image-…`) and end
 
 ### 4. Email (decided: Claude)
 
-An in-process check runs in the app server every hour.
+An in-process check runs in the app server once a day *(Brandon: daily, not hourly)*.
+- **When:** a fixed time of day (09:00 UTC), after Ubuntu's daily automatic-update run (apt-daily-upgrade, 06:00 plus up to an hour of random delay).
+- **Why a fixed time:** an app restart (every deploy) doesn't push the check back the way a 24-hour interval timer would.
+- **No check at startup.**
+- The table below records `last_checked_at`, so a replica that restarts after 09:00 doesn't run the check twice that day.
 - It takes `pg_try_advisory_lock`, so one replica does the work.
 - It skips when the database is in recovery (the compose-ha standby) or when email isn't configured.
 - When a reboot is due, it emails every super admin with a verified email address:
   - when the condition is first seen (keyed on the earliest "since");
   - then a reminder every 7 days while it stays due.
-- It records sends in a new small table, e.g. `host_maintenance_notices(key, first_seen_at, last_emailed_at)`, with a migration and RLS for super-admin read only. The record stops repeats across restarts and replicas.
+- It records checks and sends in a new small table, e.g. `host_maintenance_notices(key, first_seen_at, last_emailed_at, last_checked_at)`, with a migration and RLS for super-admin read only. The record stops repeats across restarts and replicas.
 - The email names the servers and the command, and says nothing will reboot on its own.
 
 ### 5. `vibecarbon update <env>`
@@ -186,7 +190,7 @@ Compose servers install Docker (docker-ce, containerd.io, runc and their compani
   - the Docker line and the one-outage rule when a server needs both;
   - a census that `update`'s Docker package list matches `docker-install.js`;
   - parsing of the reporter's output and annotations;
-  - the email check (first send, weekly reminder, no send on a standby or without SMTP, one replica via the lock);
+  - the email check (first send, weekly reminder, no send on a standby or without SMTP, one replica via the lock, once per day even across a restart after 09:00 UTC);
   - the status line;
   - a census that every host-provisioning path (compose cloud-init, every k3s `*-init.sh` role, the deploy-time SSH install) installs the reporter.
 - **Template tests:** the admin endpoint and RLS on the new table.
