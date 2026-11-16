@@ -916,6 +916,8 @@ over.
 
 #### 2026-11-16: Session hooks never prompt, and fetch only at a real session start (#TBD)
 
+#### 2026-11-16: Session hooks never prompt, and fetch only at a real session start (#500)
+
 `ff-main.sh` and `clean-merged.sh` now run every git network call with ssh in
 batch mode and git's terminal and askpass prompts off, so a fetch that cannot
 log in fails quietly. At session start they run only for a new or resumed
