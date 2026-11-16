@@ -72,6 +72,20 @@ my-app/
 6. Writes `ADMIN_EMAIL`/`ADMIN_PASSWORD` to `.env.local`; the app creates the super admin from them at startup
 7. Installs dependencies and initializes git
 
+### Host reporter
+
+Every server runs a small reporter that says whether it needs a restart to finish its security updates. It is what `vibecarbon status`, the Super Admin notice and the daily email read. Nothing restarts because of it; `vibecarbon update` does the restarting.
+
+- **Source:** one POSIX `sh` snippet, `carbon/cloud-init/k3s/_host-reporter.sh`. It installs `/usr/local/lib/vibecarbon/host-reporter.sh` and two systemd units: `vibecarbon-host-reporter.path`, which fires when `/var/run/reboot-required` or `/var/run/reboot-required.pkgs` changes, and `vibecarbon-host-reporter.service`, a oneshot that also runs at boot and retries on failure. The installer only runs as root, and installing it again is harmless. The CLI loads the snippet through `src/lib/host-reporter.js`.
+- **State:** one JSON line, `{"v":1,"host":...,"rebootRequired":...,"since":...,"packages":[...]}`, with at most 20 packages. `src/lib/host-state.js` (CLI) and `carbon/src/server/lib/host-maintenance.ts` (app) parse it with the same strict rules and must stay in step.
+- **Where it goes:** on k8s, the node's own annotation `vibecarbon.dev/host-state`, written with the kubelet's credential, which can annotate only its own Node. On compose, `/run/vibecarbon-host/state.json`, replaced atomically, in a directory the app container mounts read-only at `/host-status` (`carbon/docker-compose.prod.yml`). The app reads k8s nodes through the read-only `nodes` ClusterRole in `carbon/k8s/base/app/rbac.yaml`.
+- **How it reaches a server:**
+  - k8s: `prePullImages` (`src/lib/deploy/k8s/k3s.js`) installs it over the SSH session that already reaches the master, the database node and the workers on every deploy. The three worker cloud-init scripts (`worker-init.sh`, `do-worker-init.sh`, `linode-worker-init.sh`) carry it too, because that is the only path for nodes the autoscaler creates.
+  - compose and compose-ha: `setupComposeBackupCron` (`src/lib/deploy/compose/index.js`) installs it on every compose deploy and scale.
+  - Any server: `vibecarbon update` installs it on each server it reaches.
+- **Why the master's cloud-init does not carry it:** Hetzner rejects user data over 32 KiB, and a unit test (`tests/unit/deploy/private-net-guard.test.ts`) trips every Hetzner render at 28 KiB so nobody hits that cap in the middle of a deploy. The master's user data is already about 28,230 bytes, so adding the reporter there would fail the test. The SSH sessions above reach the master anyway.
+- **Existing clusters** show "not reporting yet" until the next `deploy` or `update` installs the reporter.
+
 ---
 
 ## Getting Started

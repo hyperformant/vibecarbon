@@ -12,6 +12,10 @@ is the supported path to production. It provisions servers on your chosen cloud 
 
 See the in-app deployment guide (`content/docs/deployment.mdx`, rendered at `/docs/deployment`) for the full flow, provider options, and Kubernetes/HA modes. The rest of this document describes the production **stack** — the services and settings that differ between local and production regardless of how you deploy — plus an appendix on what `vibecarbon deploy` does under the hood.
 
+## Keeping servers up to date
+
+Every server installs Ubuntu's security updates by itself each day, but it never restarts by itself, and Docker Engine on Docker Compose servers is not updated by the daily job. Run `vibecarbon update <env>` from your project to install what is waiting and restart what needs it, one server at a time, after it shows you the plan and the downtime to expect. The app tells super admins when a restart is due. See "Security updates and restarts" in `docs/security.md` and the `update` section of the CLI docs.
+
 ## Architecture Differences
 
 The same four services run in both places: your Postgres 17 (`db`, with pg_cron and WAL-G), your app (`app`, the Hono API with Better Auth, serving the SPA), Traefik, and in production the Docker socket proxy Traefik reads through. What changes is how they are tuned and exposed.
