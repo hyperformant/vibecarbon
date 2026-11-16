@@ -8,6 +8,7 @@ import {
   DEFAULT_BACKUP_SCHEDULE,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
+import { withHostReporter } from '../../../src/lib/host-reporter.js';
 
 // ---------------------------------------------------------------------------
 // setupComposeBackupCron() — builds + installs the scheduled wal-g backup cron.
@@ -148,10 +149,14 @@ describe('setupComposeBackupCron', () => {
         `#!/bin/sh\nif [ "$1" = "-l" ]; then cat "${state}" 2>/dev/null; exit 0; fi\ncat "$1" > "${state}"\n`,
       );
       chmodSync(join(bin, 'crontab'), 0o755);
-      // The host reporter's installer leads the script (it writes /usr/local and
-      // /etc/systemd and starts units, host-reporter-census.test.ts holds it
-      // there); this runs the cron install that follows it, never on this host.
-      const afterInstaller = script().split(') >/dev/null 2>&1 || true\n').pop() as string;
+      // The host reporter's installer leads the script (it is inert off a
+      // server, but this never runs it); strip exactly what withHostReporter
+      // adds, and fail loudly if what remains is not the cron install alone.
+      const whole = script();
+      const lead = withHostReporter('');
+      expect(whole.startsWith(lead)).toBe(true);
+      const afterInstaller = whole.slice(lead.length);
+      expect(afterInstaller).not.toMatch(/host-reporter|systemctl/);
       const r = spawnSync('bash', ['-c', afterInstaller.replaceAll('/opt/myapp', remote)], {
         encoding: 'utf-8',
         env: { PATH: `${bin}:${process.env.PATH}` },

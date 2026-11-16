@@ -4,6 +4,9 @@
 # the node annotation vibecarbon.dev/host-state; compose servers write
 # /run/vibecarbon-host/state.json for the app's bind mount. POSIX sh, busybox
 # safe, no brace-style placeholders (renderScript substitutes those).
+# Only root installs: the guard is an if-block, not an exit, so it is safe both
+# inside withHostReporter's subshell and spliced into a cloud-init script.
+if [ "$(id -u)" = 0 ]; then
 mkdir -p /usr/local/lib/vibecarbon
 cat > /usr/local/lib/vibecarbon/host-reporter.sh <<'VC_HOST_REPORTER_EOF'
 #!/bin/sh
@@ -32,7 +35,11 @@ if [ "$1" = "--print" ]; then
   exit 0
 fi
 
-if [ -e "$KUBELET_KUBECONFIG" ]; then
+if command -v k3s >/dev/null 2>&1; then
+  # A k3s node: a missing kubeconfig means the agent has not written it yet, so
+  # fail and let the unit's Restart=on-failure retry instead of writing a
+  # compose-style file.
+  [ -e "$KUBELET_KUBECONFIG" ] || exit 1
   name=$(kubectl --kubeconfig "$KUBELET_KUBECONFIG" auth whoami -o jsonpath='{.status.userInfo.username}') || exit 1
   name=${name#system:node:}
   [ -n "$name" ] || exit 1
@@ -75,3 +82,4 @@ systemctl daemon-reload
 systemctl enable vibecarbon-host-reporter.service vibecarbon-host-reporter.path
 systemctl restart vibecarbon-host-reporter.path
 systemctl start --no-block vibecarbon-host-reporter.service
+fi

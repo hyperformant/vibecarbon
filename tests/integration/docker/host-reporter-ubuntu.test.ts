@@ -77,6 +77,18 @@ describe.skipIf(SKIPPED)('the host reporter on Ubuntu 26.04 (compose mode)', () 
     expect(sh(`stat -c %Y.%y ${STATE}`).stdout).toBe(before);
   });
 
+  it('on a k3s node without its kubeconfig it fails and writes no compose state (systemd retries)', () => {
+    sh(`rm -rf /run/vibecarbon-host /var/lib/rancher/k3s/agent/kubelet.kubeconfig`);
+    sh('printf "#!/bin/sh\\nexit 0\\n" > /usr/local/bin/k3s && chmod 755 /usr/local/bin/k3s');
+    try {
+      const r = sh('sh /tmp/host-reporter.sh');
+      expect(r.status).not.toBe(0);
+      expect(sh(`test -e ${STATE}`).status).not.toBe(0);
+    } finally {
+      sh('rm -f /usr/local/bin/k3s');
+    }
+  });
+
   it('every package Ubuntu flags with notify-reboot-required matches the trigger patterns', () => {
     const r = sh('grep -l notify-reboot-required /var/lib/dpkg/info/*.postinst');
     const pkgs = r.stdout
