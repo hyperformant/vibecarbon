@@ -544,6 +544,28 @@ describe('create-vibecarbon E2E', () => {
       expect(statSync(hookPath).mode & 0o111).not.toBe(0);
     });
 
+    it('ships the scanner with its rule module, and it refuses a provider token', () => {
+      // The scanner imports scripts/lib/secret-scan-rules.js: shipped without
+      // it, every commit in the project would fail on a missing module.
+      expect(existsSync(join(projectDir(), 'scripts/secret-scan.mjs'))).toBe(true);
+      expect(existsSync(join(projectDir(), 'scripts/lib/secret-scan-rules.js'))).toBe(true);
+      // An obviously fake token, assembled here; never issued by a provider.
+      writeFileSync(
+        join(projectDir(), 'leak-fixture.txt'),
+        `DIGITALOCEAN_TOKEN=dop_v1_${'ab'.repeat(32)}\n`,
+      );
+      try {
+        const r = spawnSync(process.execPath, ['scripts/secret-scan.mjs', 'leak-fixture.txt'], {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+        });
+        expect(r.stderr).toContain('[digitalocean-token]');
+        expect(r.status).toBe(1);
+      } finally {
+        rmSync(join(projectDir(), 'leak-fixture.txt'), { force: true });
+      }
+    });
+
     it('installs an executable pre-push hook that runs test:prepush', () => {
       const hookPath = join(projectDir(), '.git/hooks/pre-push');
       expect(existsSync(hookPath)).toBe(true);

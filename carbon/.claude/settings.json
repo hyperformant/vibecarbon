@@ -27,7 +27,7 @@
     ],
     "SessionStart": [
       {
-        "matcher": "",
+        "matcher": "startup|resume",
         "hooks": [
           {
             "type": "command",

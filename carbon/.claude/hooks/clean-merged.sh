@@ -38,6 +38,19 @@ EVENT=$(printf '%s' "$INPUT" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:spac
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 git remote 2>/dev/null | grep -qx origin || exit 0
 
+# A background hook must never ask a person for anything, so a fetch that
+# cannot log in fails quietly instead. BatchMode stops ssh asking for a
+# password or passphrase; GIT_TERMINAL_PROMPT and GIT_ASKPASS stop git asking
+# over HTTPS (stored credentials still work). An ssh command already chosen in
+# GIT_SSH_COMMAND or core.sshCommand keeps its options, with ours added after
+# them. GIT_SSH names a program that may not be OpenSSH, so it is left alone.
+# This cannot stop a key agent that asks to unlock a key on its own.
+export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true
+NO_PROMPT_SSH=${GIT_SSH_COMMAND:-$(git config --get core.sshCommand 2>/dev/null || true)}
+if [ -n "$NO_PROMPT_SSH" ] || [ -z "${GIT_SSH:-}" ]; then
+  export GIT_SSH_COMMAND="${NO_PROMPT_SSH:-ssh} -o BatchMode=yes -o ConnectTimeout=10"
+fi
+
 # A failed fetch (offline, or a lock held by ff-main.sh) is fine: both proofs
 # stay valid on stale refs and can only miss newly merged work.
 git fetch --quiet --prune origin 2>/dev/null || true
