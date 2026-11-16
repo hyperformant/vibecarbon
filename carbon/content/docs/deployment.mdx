@@ -117,6 +117,8 @@ Worker nodes are bounds-controlled at deploy time. The default is `min=1, max=3`
 
 To re-tune bounds or worker server types on an existing cluster, run `vibecarbon scale`, and the wizard walks you through what's changeable for your topology. Power users can seed a server-type change with `-type`, using a type id from their own provider's catalog (e.g. `vibecarbon scale prod -type cx33 -y` on Hetzner). Pod-level autoscaling (HPA) is configured for the app and rest services and scales pods within the existing worker pool based on CPU.
 
+To install the security updates waiting on your environment's servers and restart the ones that need it, run `vibecarbon update <env>`; see the [CLI reference](/docs/cli#update).
+
 > **Note**: k3s masters have no `NoSchedule` taint by default, so all application pods run on the master node when no workers are present.
 
 ### High Availability

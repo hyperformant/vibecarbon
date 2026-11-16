@@ -772,6 +772,52 @@ vibecarbon scale prod
 
 ---
 
+## update
+
+Install the system updates waiting on an environment's servers, and restart the ones that need it.
+
+```bash
+# Show the plan, then ask
+vibecarbon update prod
+
+# Apply the plan without asking
+vibecarbon update prod -y
+```
+
+It installs the Ubuntu security updates on every server of the environment, and Docker updates on compose servers. Servers already install security updates every day on their own, but some updates only take effect after a restart, and nothing restarts on its own. This is the command that restarts them, when you choose.
+
+Before it changes anything it prints the plan: what each server installs, which ones restart and why, and what your users notice. It then asks you to confirm. It works through the servers one at a time, a standby side first, and stops at the first server that fails, so a problem never spreads to the next one.
+
+What your users notice depends on the server:
+
+| What restarts | What your users notice |
+|---------------|------------------------|
+| A compose server | The app is offline for about 1 to 3 minutes |
+| Docker on a compose server | The app is offline for about 30 to 60 seconds |
+| Docker, then a restart, on a compose server | The app is offline for about 1 to 4 minutes |
+| A Kubernetes master | The app is offline for about 1 to 3 minutes, since Traefik runs only on the master |
+| A Kubernetes database node | Requests that need the database fail for about 1 to 3 minutes |
+| A Kubernetes worker | Nothing, the node is drained first and the app keeps running elsewhere |
+| A standby side | Nothing, it takes no traffic |
+
+With `-y` it skips the confirmation. A restart that becomes due during a `-y` run waits for the next run: the command tells you which server and why, and `vibecarbon update <env>` again restarts it. Without `-y` it asks about that restart as it comes up.
+
+If a server doesn't come back, the command stops and says what it was waiting for. Check the server in your provider console, then run `vibecarbon status <env>`, and run `vibecarbon update <env>` again once it is reachable. A Kubernetes node it had cordoned is released on that next run.
+
+`-json` prints the plan and the result as JSON, for scripts. Without `-y` it only prints the plan and changes nothing.
+
+This is not `vibecarbon upgrade`. That one updates your project's infrastructure files from the template. `update` installs system updates and restarts servers.
+
+{/* BEGIN GENERATED: flags update */}
+| Flag | Description |
+|------|-------------|
+| `-y` | Skip the confirmation prompt |
+| `-json` | Print the plan and the result as JSON |
+| `-env <name>` | Environment seed (alternative to positional) |
+{/* END GENERATED: flags update */}
+
+---
+
 # Debug & Access
 
 Operator tools for cluster introspection and access management.

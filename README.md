@@ -152,6 +152,7 @@ vibecarbon <command> [options]
 | **`restore [env]`** | Restore the database from a backup |
 | **`failover [env]`** | Initiate failover to the standby region |
 | **`scale [env]`** | Scale worker nodes and instance sizes |
+| **`update [env]`** | Install system updates and restart servers when needed |
 <!-- END GENERATED: commands deploy -->
 
 ### Debug: look under the hood

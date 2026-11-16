@@ -145,6 +145,7 @@ export const KNOWN_COMMANDS = [
   'restore',
   'failover',
   'scale',
+  'update',
   'upgrade',
   'configure',
   'shell',
@@ -353,6 +354,12 @@ async function main() {
       case 'scale': {
         const scaleModule = await import('./scale.js');
         await scaleModule.run(subcommandArgs);
+        break;
+      }
+
+      case 'update': {
+        const updateModule = await import('./update.js');
+        await updateModule.run(subcommandArgs);
         break;
       }
 

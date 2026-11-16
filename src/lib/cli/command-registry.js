@@ -126,6 +126,12 @@ export const COMMANDS = [
     usage: '[env]',
     loadSpec: async () => (await import('../../scale.js')).SPEC,
   },
+  {
+    name: 'update',
+    category: 'deploy',
+    usage: '[env]',
+    loadSpec: async () => (await import('../../update.js')).SPEC,
+  },
   // Debug
   {
     name: 'shell',
