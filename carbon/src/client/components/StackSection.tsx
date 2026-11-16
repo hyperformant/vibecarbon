@@ -29,7 +29,6 @@ import postgresqlLogo from '../assets/logos/tech-postgresql.svg';
 import prometheusLogo from '../assets/logos/tech-prometheus.svg';
 import pulumiLogo from '../assets/logos/tech-pulumi.svg';
 import reactLogo from '../assets/logos/tech-react.svg';
-import reactHookFormLogo from '../assets/logos/tech-reacthookform.svg';
 import reactQueryLogo from '../assets/logos/tech-reactquery.svg';
 import reactRouterLogo from '../assets/logos/tech-reactrouter.svg';
 import redisLogo from '../assets/logos/tech-redis.svg';
@@ -82,7 +81,7 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
       { name: 'Tailwind CSS', imgs: [tailwindLogo] },
       { name: 'Shadcn UI', imgs: [shadcnLogo] },
       { name: 'TanStack Query', imgs: [reactQueryLogo] },
-      { name: 'Zod + React Hook Form', imgs: [zodLogo, reactHookFormLogo] },
+      { name: 'Zod', imgs: [zodLogo] },
       { name: 'Framer Motion', imgs: [framerLogo] },
       { name: 'MDX', imgs: [mdxLogo] },
       { name: 'i18next', imgs: [i18nextLogo] },
