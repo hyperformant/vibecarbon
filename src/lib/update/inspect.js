@@ -1,0 +1,145 @@
+/**
+ * Reads one server's pending updates and restart state over a single ssh
+ * session. The script it sends changes apt state (apt-get update), so it only
+ * ever runs on a server or inside a container.
+ */
+import { aptGet, aptQuietUpdate } from '../deploy/apt.js';
+import { hostReporterScript } from '../host-reporter.js';
+import { parseHostState } from '../host-state.js';
+import { DOCKER_PACKAGES, DOCKER_SOURCE_ONLY } from '../iac/docker-install.js';
+import { sshKeyPathFor, sshRun } from '../ssh.js';
+import { describeSshError } from '../status/cluster-snapshot.js';
+
+const REPORTER_EOF = 'VC_INSPECT_REPORTER_EOF';
+
+/**
+ * @typedef {{ host: import('../host-state.js').HostState, bootId: string, ubuntu: string[], docker: { packages: Array<{ name: string, from: string, to: string }> } | null }} TargetState
+ */
+
+/**
+ * @param {'compose' | 'k8s'} kind
+ * @returns {string} POSIX sh
+ */
+export function INSPECT_SCRIPT(kind) {
+  const lines = [
+    'PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH',
+    'echo @@host',
+    `sh -s -- --print <<'${REPORTER_EOF}'`,
+    hostReporterScript().trimEnd(),
+    REPORTER_EOF,
+    'echo @@boot-id',
+    'cat /proc/sys/kernel/random/boot_id',
+    'echo @@ubuntu',
+    `${aptGet('update -qq')} >/dev/null 2>&1`,
+    "unattended-upgrade --dry-run --verbose 2>&1 | sed -n 's/^Packages that will be upgraded: *//p'",
+  ];
+  if (kind === 'compose') {
+    lines.push(
+      'echo @@docker',
+      `if [ -f /etc/apt/sources.list.d/docker.list ]; then ${aptQuietUpdate(DOCKER_SOURCE_ONLY)} >/dev/null 2>&1; fi`,
+      `apt-cache policy ${DOCKER_PACKAGES.join(' ')} 2>/dev/null`,
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/** @returns {Map<string, string>} section name to its text */
+function sections(stdout) {
+  const out = new Map();
+  let name = null;
+  for (const line of String(stdout).split('\n')) {
+    const m = line.match(/^@@([a-z-]+)\s*$/);
+    if (m) {
+      name = m[1];
+      out.set(name, '');
+    } else if (name) {
+      out.set(name, `${out.get(name)}${line}\n`);
+    }
+  }
+  return out;
+}
+
+function parseDocker(text) {
+  const packages = [];
+  let seen = false;
+  let name = null;
+  let installed = null;
+  for (const raw of text.split('\n')) {
+    const head = raw.match(/^(\S+):\s*$/);
+    if (head) {
+      name = head[1];
+      installed = null;
+      continue;
+    }
+    const inst = raw.match(/^\s+Installed:\s*(\S+)/);
+    if (inst) installed = inst[1];
+    const cand = raw.match(/^\s+Candidate:\s*(\S+)/);
+    if (cand && name) {
+      if (cand[1] === '(none)') continue;
+      seen = true;
+      if (installed && installed !== '(none)' && installed !== cand[1]) {
+        packages.push({ name, from: installed, to: cand[1] });
+      }
+    }
+  }
+  return seen ? { packages } : null;
+}
+
+/**
+ * @param {string} stdout
+ * @param {'compose' | 'k8s'} kind
+ * @returns {TargetState}
+ * @throws {Error} inspect output missing @@<section>
+ */
+export function parseInspectOutput(stdout, kind) {
+  const s = sections(stdout);
+  const need = (n) => {
+    if (!s.has(n)) throw new Error(`inspect output missing @@${n}`);
+    return s.get(n);
+  };
+  const host = parseHostState(need('host').trim());
+  if (!host) throw new Error('inspect output has an unreadable @@host');
+  const bootId = need('boot-id').trim();
+  const ubuntu = need('ubuntu').split(/\s+/).filter(Boolean);
+  const docker = kind === 'compose' ? parseDocker(need('docker')) : null;
+  return { host, bootId, ubuntu, docker };
+}
+
+/**
+ * @param {import('./inventory.js').UpdateTarget} target
+ * @param {{ sshRun?: Function, envName?: string }} [deps]
+ * @returns {Promise<TargetState>}
+ */
+export async function inspectTarget(target, deps = { sshRun }) {
+  const run = deps.sshRun ?? sshRun;
+  const key = sshKeyPathFor(deps.envName ?? '');
+  const out = await run(target.ip, key, ['sh', '-s'], {
+    input: INSPECT_SCRIPT(target.kind),
+    timeout: 180_000,
+    transportRetry: false,
+  });
+  return parseInspectOutput(out, target.kind);
+}
+
+/**
+ * @param {import('./inventory.js').UpdateTarget[]} targets
+ * @param {{ sshRun?: Function, envName?: string }} [deps]
+ */
+export async function inspectAll(targets, deps = { sshRun }) {
+  const results = await Promise.all(
+    targets.map((target) =>
+      inspectTarget(target, deps).then(
+        (state) => ({ target, state }),
+        (err) => ({ target, err }),
+      ),
+    ),
+  );
+  const inspected = [];
+  const skipped = [];
+  for (const r of results) {
+    if (r.err)
+      skipped.push({ name: r.target.name, ip: r.target.ip, reason: describeSshError(r.err) });
+    else inspected.push(r);
+  }
+  return { inspected, skipped };
+}

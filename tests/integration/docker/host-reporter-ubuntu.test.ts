@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hostReporterScript } from '../../../src/lib/host-reporter.js';
 import { parseHostState, REBOOT_TRIGGER_PATTERNS } from '../../../src/lib/host-state.js';
+import { INSPECT_SCRIPT, parseInspectOutput } from '../../../src/lib/update/inspect.js';
 
 const SKIPPED =
   process.env.DOCKER_INTEGRATION === 'true'
@@ -35,9 +36,14 @@ describe.skipIf(SKIPPED)('the host reporter on Ubuntu 26.04 (compose mode)', () 
     const up = run('docker', ['run', '-d', '--name', NAME, 'ubuntu:26.04', 'sleep', '3600']);
     if (up.status !== 0) throw new Error(`docker run failed: ${up.stderr.trim()}`);
     const apt = sh(
-      'export DEBIAN_FRONTEND=noninteractive; apt-get -o DPkg::Lock::Timeout=60 update -qq && apt-get -o DPkg::Lock::Timeout=60 install -y -qq unattended-upgrades >/dev/null',
+      'export DEBIAN_FRONTEND=noninteractive; apt-get -o DPkg::Lock::Timeout=60 update -qq && apt-get -o DPkg::Lock::Timeout=60 install -y -qq unattended-upgrades curl ca-certificates >/dev/null',
     );
     if (apt.status !== 0) throw new Error(`apt failed: ${apt.stderr.trim()}`);
+    // Docker's apt source, set up the way src/lib/iac/docker-install.js does on servers.
+    const docker = sh(
+      'install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list',
+    );
+    if (docker.status !== 0) throw new Error(`docker source failed: ${docker.stderr.trim()}`);
     tmp = mkdtempSync(join(tmpdir(), 'vctest-hostrep-'));
     const file = join(tmp, 'host-reporter.sh');
     writeFileSync(file, hostReporterScript());
@@ -104,5 +110,20 @@ describe.skipIf(SKIPPED)('the host reporter on Ubuntu 26.04 (compose mode)', () 
     expect(pkgs.length).toBeGreaterThan(0);
     const unmatched = pkgs.filter((p) => !REBOOT_TRIGGER_PATTERNS.some((re) => re.test(p)));
     expect(unmatched).toEqual([]);
+  });
+
+  it('the update inspect script runs and parses (compose)', () => {
+    const r = spawnSync('docker', ['exec', '-i', NAME, 'sh', '-s'], {
+      encoding: 'utf-8',
+      timeout: LONG,
+      input: INSPECT_SCRIPT('compose'),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const state = parseInspectOutput(r.stdout, 'compose');
+    expect(state.host.rebootRequired).toBeTypeOf('boolean');
+    expect(state.bootId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Array.isArray(state.ubuntu)).toBe(true);
+    // Docker's source is configured above, so the repository has a candidate.
+    expect(state.docker).not.toBeNull();
   });
 });

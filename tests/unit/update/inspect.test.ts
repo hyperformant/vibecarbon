@@ -1,0 +1,113 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  INSPECT_SCRIPT,
+  inspectAll,
+  inspectTarget,
+  parseInspectOutput,
+} from '../../../src/lib/update/inspect.js';
+
+const FIXTURE = readFileSync(
+  join(import.meta.dirname, '../../fixtures/update/inspect-compose.txt'),
+  'utf-8',
+);
+
+const target = (name: string) => ({
+  name,
+  ip: `10.0.0.${name.length}`,
+  side: 'primary' as const,
+  role: 'server' as const,
+  kind: 'compose' as const,
+});
+
+describe('parseInspectOutput', () => {
+  it('reads a real compose run: ubuntu names, boot id, changed docker packages only', () => {
+    const s = parseInspectOutput(FIXTURE, 'compose');
+    expect(s.host.rebootRequired).toBe(false);
+    expect(s.bootId).toBe('2189d752-96e6-4e90-97fd-6ccf5f576e00');
+    expect(s.ubuntu).toEqual([
+      'apt',
+      'libapt-pkg7.0',
+      'libc-bin',
+      'libc-gconv-modules-extra',
+      'libc6',
+      'libpcre2-8-0',
+      'perl-base',
+    ]);
+    expect(s.docker?.packages).toEqual([
+      {
+        name: 'docker-ce-cli',
+        from: '5:29.9.0-1~ubuntu.26.04~resolute',
+        to: '5:29.9.3-1~ubuntu.26.04~resolute',
+      },
+    ]);
+  });
+
+  it('gives docker null when the section shows no candidate', () => {
+    const bare = FIXTURE.slice(0, FIXTURE.indexOf('@@docker'));
+    expect(parseInspectOutput(`${bare}@@docker\n`, 'compose').docker).toBeNull();
+    expect(
+      parseInspectOutput(
+        `${bare}@@docker\ndocker-ce:\n  Installed: (none)\n  Candidate: (none)\n`,
+        'compose',
+      ).docker,
+    ).toBeNull();
+  });
+
+  it('k8s output has no docker section', () => {
+    const k8s = FIXTURE.slice(0, FIXTURE.indexOf('@@docker'));
+    expect(parseInspectOutput(k8s, 'k8s').docker).toBeNull();
+  });
+
+  it('throws on a missing section', () => {
+    const noBoot = FIXTURE.replace('@@boot-id', '@@x');
+    expect(() => parseInspectOutput(noBoot, 'compose')).toThrow('inspect output missing @@boot-id');
+  });
+});
+
+describe('INSPECT_SCRIPT', () => {
+  it('is valid sh, and only compose asks about docker', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-inspect-'));
+    try {
+      for (const kind of ['compose', 'k8s'] as const) {
+        const f = join(dir, `${kind}.sh`);
+        writeFileSync(f, INSPECT_SCRIPT(kind));
+        // -n parses only; nothing runs.
+        expect(spawnSync('sh', ['-n', f]).status).toBe(0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(INSPECT_SCRIPT('compose')).toContain('@@docker');
+    expect(INSPECT_SCRIPT('k8s')).not.toContain('@@docker');
+    expect(INSPECT_SCRIPT('k8s')).toContain('--print');
+  });
+});
+
+describe('inspectTarget and inspectAll', () => {
+  it('sends the script on stdin with a bound and no transport retry', async () => {
+    const sshRun = vi.fn().mockResolvedValue(FIXTURE);
+    await inspectTarget(target('master'), { sshRun, envName: 'prod' });
+    expect(sshRun).toHaveBeenCalledWith('10.0.0.6', expect.any(String), ['sh', '-s'], {
+      input: INSPECT_SCRIPT('compose'),
+      timeout: 180_000,
+      transportRetry: false,
+    });
+  });
+
+  it('a target that throws is skipped; the others are inspected', async () => {
+    const sshRun = vi.fn(async (ip: string) => {
+      if (ip === '10.0.0.3') throw Object.assign(new Error('boom'), { timedOut: true });
+      return FIXTURE;
+    });
+    const r = await inspectAll([target('a'), target('bad'), target('three')], {
+      sshRun,
+      envName: 'prod',
+    });
+    expect(r.inspected.map((i) => i.target.name)).toEqual(['a', 'three']);
+    expect(r.skipped).toEqual([{ name: 'bad', ip: '10.0.0.3', reason: 'ssh timeout' }]);
+  });
+});
