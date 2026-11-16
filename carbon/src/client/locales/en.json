@@ -359,6 +359,13 @@
     }
   },
   "admin": {
+    "hostMaintenance": {
+      "title": "A restart is needed to finish security updates",
+      "body": "Security updates are installed on {{servers}} and take effect after a restart. Nothing restarts on its own. To restart safely, run {{command}} from your project.",
+      "docsLink": "How updates work",
+      "showPackages": "Show packages",
+      "notReporting": "{{servers}} not reporting yet. Run {{command}} once to set it up."
+    },
     "impersonating": "Viewing as {{email}}",
     "stopImpersonating": "Stop",
     "loginAsUser": "Sign in as user",

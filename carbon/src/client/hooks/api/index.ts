@@ -17,4 +17,5 @@ export {
   useMfaRequired,
 } from './useAuthSettings';
 export { getGitHubRepoUrl, gitHubStarsQueryKey, useGitHubStars } from './useGitHubStars';
+export { hostMaintenanceQueryKey, useHostMaintenance } from './useHostMaintenance';
 export { subscriptionQueryKey, useSubscription } from './useSubscription';
