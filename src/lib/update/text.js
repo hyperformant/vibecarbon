@@ -113,3 +113,107 @@ export function summaryLine({ name, installed, docker, restarted, offlineSeconds
     line += `, app offline ${Math.floor(Math.round(offlineSeconds) / 60)}m ${Math.round(offlineSeconds) % 60}s`;
   return line;
 }
+
+// Execution: progress lines, errors and hints for src/lib/update/execute.js.
+
+/** The reason a restart names when the server listed no packages. */
+export const SYSTEM_UPDATES = 'system updates';
+
+/**
+ * A wait's budget in words: whole minutes when it is one, else seconds.
+ *
+ * @param {number} ms
+ * @returns {string}
+ */
+export function formatBudget(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60 || s % 60 !== 0) return `${s} seconds`;
+  return s === 60 ? '1 minute' : `${s / 60} minutes`;
+}
+
+export const stepLine = ({ name, index, total }) => `${name} (${index} of ${total})`;
+export const installingLine = (name, count) =>
+  `${name}: installing ${count} security ${count === 1 ? 'update' : 'updates'}`;
+export const dockerUpdatingLine = (name) => `${name}: updating Docker, every container restarts`;
+export const cordonedLine = (name, draining) =>
+  draining
+    ? `${name}: cordoned, moving its pods to other nodes`
+    : `${name}: cordoned, so no new pods start on it`;
+export const restartingLine = (name) => `${name}: restarting`;
+export const backLine = (name) => `${name}: back up, waiting until it is healthy`;
+export const healthyLine = (name, uncordoned) =>
+  uncordoned ? `${name}: healthy and uncordoned` : `${name}: healthy`;
+export const noRestartAfterAllLine = (name) => `${name}: no restart needed after all`;
+export const reporterFailedLine = (name, why) =>
+  `could not install the restart reporter on ${name} (${why}), so vibecarbon status may not show when it needs a restart`;
+export const unmarkFailedLine = (name, why) =>
+  `${name} is uncordoned but kept its update mark (${why}), the next update removes it`;
+
+const ACTIONS = {
+  install: (name) => `install the security updates on ${name}`,
+  docker: (name) => `update Docker on ${name}`,
+  check: (name) => `check whether ${name} needs a restart`,
+  cordon: (name) => `cordon ${name}`,
+  mark: (name) => `mark ${name} as cordoned by vibecarbon update`,
+  drain: (name) => `drain ${name}`,
+  restart: (name) => `restart ${name}`,
+  uncordon: (name) => `uncordon ${name}`,
+};
+
+/**
+ * Why a remote command failed, in words.
+ *
+ * @param {{ timedOut?: boolean, status?: number | null, budgetMs?: number, detail?: string }} f
+ */
+export function failureWhy({ timedOut, status, budgetMs, detail }) {
+  if (timedOut && budgetMs) return `it did not finish within ${formatBudget(budgetMs)}`;
+  if (typeof status === 'number') return `it exited ${status}`;
+  return detail || 'it failed';
+}
+
+/**
+ * A step that failed outright: what it tried, why, and the last output lines.
+ *
+ * @param {{ action: keyof typeof ACTIONS, name: string, why: string, lines?: string[] }} f
+ */
+export function stepFailedError({ action, name, why, lines = [] }) {
+  const head = `could not ${ACTIONS[action](name)}: ${why}`;
+  return lines.length ? [head, ...lines.map((l) => `  ${l}`)].join('\n') : head;
+}
+
+/**
+ * A wait that ran out.
+ *
+ * @param {{ name: string, what: 'come back' | 'become healthy', budgetMs: number, seen: string }} f
+ */
+export const didNotError = ({ name, what, budgetMs, seen }) =>
+  `${name} did not ${what} within ${formatBudget(budgetMs)}: ${seen}`;
+
+/** The last thing each wait saw, for didNotError. */
+export const SEEN = {
+  oldBootId: 'it still had the boot id from before the restart',
+  noAnswer: 'it never answered',
+  unreadable: 'its answer could not be read',
+  sshFailed: (detail) => `ssh said: ${detail}`,
+  kubectlFailed: (detail) => `kubectl said: ${detail}`,
+  apiNotReady: (answer) => `the cluster API answered ${answer}`,
+  nodeFromBefore: 'the cluster still showed the node as it was before the restart',
+  nodeNotReady: (reason) => `the node was not Ready (${reason})`,
+  leaseNotRenewing: 'its kubelet did not renew its node lease',
+  podsNotReady: (names) => {
+    const shown = names.slice(0, 3).join(', ');
+    const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
+    return `pods not Ready since the restart: ${shown}${more}`;
+  },
+  appUnhealthy: (status) => `its health check never passed (last result: ${status})`,
+};
+
+export const installHint = ({ envName, name }) =>
+  `run vibecarbon update ${envName} again once ${name} is reachable and apt is free`;
+export const cordonedHint = (envName) =>
+  `it is still cordoned, run vibecarbon update ${envName} again once it is Ready, which uncordons it`;
+export const consoleHint = (envName) =>
+  `check it in your provider console, then run vibecarbon status ${envName}`;
+export const retryHint = (envName) => `run vibecarbon update ${envName} again`;
+export const unmarkedCordonHint = (node) =>
+  `it is still cordoned without the update mark, so the next update will not release it: run kubectl uncordon ${node} on the cluster once it is Ready`;

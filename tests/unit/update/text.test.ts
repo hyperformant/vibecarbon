@@ -1,14 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import {
   allClearLine,
+  backLine,
   confirmQuestion,
+  consoleHint,
+  cordonedHint,
+  cordonedLine,
+  didNotError,
+  dockerUpdatingLine,
+  failureWhy,
+  formatBudget,
   formatDuration,
   formatPlan,
   formatTotal,
+  healthyLine,
+  installHint,
+  installingLine,
+  noRestartAfterAllLine,
   nothingToDoLine,
+  reporterFailedLine,
+  restartingLine,
+  retryHint,
+  SEEN,
+  SYSTEM_UPDATES,
+  stepFailedError,
+  stepLine,
   summaryLine,
   unexpectedRestartPrompt,
   unexpectedRestartYesLine,
+  unmarkedCordonHint,
+  unmarkFailedLine,
 } from '../../../src/lib/update/text.js';
 
 const target = (name: string, ip: string, over = {}) => ({
@@ -242,5 +263,119 @@ describe('fixed lines', () => {
         offlineSeconds: null,
       }),
     ).toBe('w: installed 0 updates');
+  });
+});
+
+describe('execution lines', () => {
+  it('says each budget in whole minutes when it is one', () => {
+    expect(formatBudget(600_000)).toBe('10 minutes');
+    expect(formatBudget(300_000)).toBe('5 minutes');
+    expect(formatBudget(1_200_000)).toBe('20 minutes');
+    expect(formatBudget(60_000)).toBe('1 minute');
+    expect(formatBudget(90_000)).toBe('90 seconds');
+    expect(formatBudget(5000)).toBe('5 seconds');
+  });
+
+  it('prints the progress lines exactly', () => {
+    expect(SYSTEM_UPDATES).toBe('system updates');
+    expect(stepLine({ name: 'web-1', index: 2, total: 3 })).toBe('web-1 (2 of 3)');
+    expect(installingLine('web-1', 3)).toBe('web-1: installing 3 security updates');
+    expect(installingLine('web-1', 1)).toBe('web-1: installing 1 security update');
+    expect(dockerUpdatingLine('web-1')).toBe('web-1: updating Docker, every container restarts');
+    expect(cordonedLine('w', true)).toBe('w: cordoned, moving its pods to other nodes');
+    expect(cordonedLine('m', false)).toBe('m: cordoned, so no new pods start on it');
+    expect(restartingLine('web-1')).toBe('web-1: restarting');
+    expect(backLine('web-1')).toBe('web-1: back up, waiting until it is healthy');
+    expect(healthyLine('web-1', false)).toBe('web-1: healthy');
+    expect(healthyLine('w', true)).toBe('w: healthy and uncordoned');
+    expect(noRestartAfterAllLine('web-1')).toBe('web-1: no restart needed after all');
+    expect(reporterFailedLine('web-1', 'it exited 1')).toBe(
+      'could not install the restart reporter on web-1 (it exited 1), so vibecarbon status may not show when it needs a restart',
+    );
+    expect(unmarkFailedLine('w', 'it exited 1')).toBe(
+      'w is uncordoned but kept its update mark (it exited 1), the next update removes it',
+    );
+  });
+
+  it('prints the errors and hints of the brief exactly', () => {
+    expect(
+      didNotError({ name: 'web-1', what: 'come back', budgetMs: 600_000, seen: SEEN.oldBootId }),
+    ).toBe(
+      'web-1 did not come back within 10 minutes: it still had the boot id from before the restart',
+    );
+    expect(
+      didNotError({
+        name: 'w',
+        what: 'become healthy',
+        budgetMs: 300_000,
+        seen: SEEN.podsNotReady(['a/1', 'a/2', 'b/3', 'b/4', 'c/5']),
+      }),
+    ).toBe(
+      'w did not become healthy within 5 minutes: pods not Ready since the restart: a/1, a/2, b/3 and 2 more',
+    );
+    expect(installHint({ envName: 'prod', name: 'web-1' })).toBe(
+      'run vibecarbon update prod again once web-1 is reachable and apt is free',
+    );
+    expect(cordonedHint('prod')).toBe(
+      'it is still cordoned, run vibecarbon update prod again once it is Ready, which uncordons it',
+    );
+    expect(consoleHint('prod')).toBe(
+      'check it in your provider console, then run vibecarbon status prod',
+    );
+    expect(retryHint('prod')).toBe('run vibecarbon update prod again');
+    expect(unmarkedCordonHint('w')).toBe(
+      'it is still cordoned without the update mark, so the next update will not release it: run kubectl uncordon w on the cluster once it is Ready',
+    );
+  });
+
+  it('says why a step failed and keeps its last output lines', () => {
+    expect(failureWhy({ status: 100 })).toBe('it exited 100');
+    expect(failureWhy({ timedOut: true, status: null, budgetMs: 1_200_000 })).toBe(
+      'it did not finish within 20 minutes',
+    );
+    expect(failureWhy({ detail: 'ssh timeout' })).toBe('ssh timeout');
+    expect(failureWhy({})).toBe('it failed');
+    expect(
+      stepFailedError({
+        action: 'install',
+        name: 'web-1',
+        why: 'it exited 100',
+        lines: ['Reading package lists...', 'E: Could not get lock /var/lib/dpkg/lock-frontend'],
+      }),
+    ).toBe(
+      'could not install the security updates on web-1: it exited 100\n  Reading package lists...\n  E: Could not get lock /var/lib/dpkg/lock-frontend',
+    );
+    expect(stepFailedError({ action: 'drain', name: 'w', why: 'it exited 1' })).toBe(
+      'could not drain w: it exited 1',
+    );
+    expect(stepFailedError({ action: 'docker', name: 'web-1', why: 'x' })).toBe(
+      'could not update Docker on web-1: x',
+    );
+  });
+
+  it('never prints an em or en dash', () => {
+    const all = [
+      formatBudget(90_000),
+      installingLine('a', 2),
+      dockerUpdatingLine('a'),
+      cordonedLine('a', true),
+      cordonedLine('a', false),
+      backLine('a'),
+      reporterFailedLine('a', 'b'),
+      unmarkFailedLine('a', 'b'),
+      didNotError({ name: 'a', what: 'come back', budgetMs: 600_000, seen: SEEN.nodeFromBefore }),
+      SEEN.leaseNotRenewing,
+      SEEN.appUnhealthy('fail'),
+      SEEN.nodeNotReady('KubeletNotReady'),
+      SEEN.apiNotReady('[-]etcd failed'),
+      installHint({ envName: 'p', name: 'a' }),
+      cordonedHint('p'),
+      consoleHint('p'),
+      unmarkedCordonHint('a'),
+      ...(
+        ['install', 'docker', 'check', 'cordon', 'mark', 'drain', 'restart', 'uncordon'] as const
+      ).map((action) => stepFailedError({ action, name: 'a', why: 'b' })),
+    ].join('\n');
+    expect(all).not.toMatch(/[—–]/);
   });
 });

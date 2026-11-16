@@ -127,4 +127,27 @@ describe('waitForKubeletsRenewing', () => {
       pending: [],
     });
   });
+
+  it('waits on an injected clock when given one', async () => {
+    let t = 0;
+    const sleeps: number[] = [];
+    const { read } = reader([
+      leases({ worker: 't0' }),
+      leases({ worker: 't0' }),
+      leases({ worker: 't1' }),
+      leases({ worker: 't2' }),
+    ]);
+    await expect(
+      waitForKubeletsRenewing({
+        readLeases: read,
+        budgetMs: 300_000,
+        now: () => t,
+        sleep: async (ms: number) => {
+          sleeps.push(ms);
+          t += ms;
+        },
+      }),
+    ).resolves.toEqual({ settled: true, pending: [] });
+    expect(sleeps).toEqual([3000, 3000, 3000]);
+  });
 });

@@ -27,6 +27,19 @@ export async function runWithRetry(
   }
 }
 
+/**
+ * @param {() => unknown} probe truthy ends the wait; a throw counts as falsy
+ * @param {object} options
+ * @param {number} options.budgetMs
+ * @param {number} [options.initialDelayMs]
+ * @param {number} [options.maxDelayMs]
+ * @param {number} [options.backoffFactor]
+ * @param {string} [options.description]
+ * @param {() => number} [options.now] clock seam, Date.now by default
+ * @param {(ms: number) => Promise<unknown>} [options.sleep] sleep seam, a
+ *   real timer by default; tests pass a fake clock's pair so a wait of minutes
+ *   runs in no time
+ */
 export async function pollUntil(
   probe,
   {
@@ -35,9 +48,11 @@ export async function pollUntil(
     maxDelayMs = 15_000,
     backoffFactor = 2,
     description = 'condition',
+    now = Date.now,
+    sleep: wait = sleep,
   } = {},
 ) {
-  const deadline = Date.now() + budgetMs;
+  const deadline = now() + budgetMs;
   let delay = initialDelayMs;
   let lastErr;
   for (;;) {
@@ -48,8 +63,8 @@ export async function pollUntil(
     } catch (err) {
       lastErr = err;
     }
-    if (Date.now() + delay > deadline) break;
-    await sleep(delay);
+    if (now() + delay > deadline) break;
+    await wait(delay);
     delay = Math.min(delay * backoffFactor, maxDelayMs);
   }
   const cause = lastErr ? `: ${lastErr.message}` : '';
