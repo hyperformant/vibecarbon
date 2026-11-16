@@ -873,7 +873,7 @@ at a time. `status` and the admin dashboard say when a restart is due.
 **Do not undo:** no server reboots on its own. When the app cannot tell
 whether a restart is due, it says so; it never reports "none due".
 
-#### 2026-11-16: `create` ships `drizzle.config.ts` (#TBD)
+#### 2026-11-16: `create` ships `drizzle.config.ts` (#495)
 
 `create` now copies `drizzle.config.ts` into the project, and `upgrade` adds it
 to a project that has none.
