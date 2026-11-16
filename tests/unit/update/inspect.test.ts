@@ -68,6 +68,67 @@ describe('parseInspectOutput', () => {
   });
 });
 
+describe('a failed apt check is never read as nothing pending', () => {
+  const ubuntuHead = FIXTURE.slice(0, FIXTURE.indexOf('@@ubuntu'));
+  const withUbuntu = (body: string) => `${ubuntuHead}@@ubuntu\n${body}`;
+
+  it.each([
+    ['@@error apt-get update exited 100', 'could not check for updates: apt-get update exited 100'],
+    [
+      '@@error unattended-upgrade not installed',
+      'could not check for updates: unattended-upgrade not installed',
+    ],
+    [
+      '@@error unattended-upgrade exited 1',
+      'could not check for updates: unattended-upgrade exited 1',
+    ],
+  ])('throws on %s', (marker, message) => {
+    expect(() => parseInspectOutput(withUbuntu(`${marker}\n`), 'compose')).toThrow(message);
+  });
+
+  it('throws on a docker apt-get update failure in the docker section', () => {
+    const text = FIXTURE.replace(
+      '@@docker\n',
+      '@@docker\n@@error docker apt-get update exited 100\n',
+    );
+    expect(() => parseInspectOutput(text, 'compose')).toThrow(
+      'could not check for updates: docker apt-get update exited 100',
+    );
+  });
+
+  it('inspectAll lists such a server as skipped with that reason', async () => {
+    const sshRun = vi.fn(async (ip: string) =>
+      ip === '10.0.0.3' ? withUbuntu('@@error apt-get update exited 100\n@@boot-id\nx\n') : FIXTURE,
+    );
+    const r = await inspectAll([target('a'), target('bad')], { sshRun, envName: 'prod' });
+    expect(r.inspected.map((i) => i.target.name)).toEqual(['a']);
+    expect(r.skipped).toEqual([
+      {
+        name: 'bad',
+        ip: '10.0.0.3',
+        reason: 'could not check for updates: apt-get update exited 100',
+      },
+    ]);
+  });
+
+  it('the script prints the markers and reads no stdin outside the reporter heredoc', () => {
+    const script = INSPECT_SCRIPT('compose');
+    expect(script).toContain('@@error apt-get update exited');
+    expect(script).toContain('@@error unattended-upgrade not installed');
+    expect(script).toContain('@@error unattended-upgrade exited');
+    expect(script).toContain('@@error docker apt-get update exited');
+    const outside = script.replace(
+      /<<'VC_INSPECT_REPORTER_EOF'[\s\S]*?\nVC_INSPECT_REPORTER_EOF\n/,
+      '',
+    );
+    const offenders = outside
+      .split('\n')
+      .filter((l) => /apt-get|apt-cache|unattended-upgrade/.test(l) && !/^\s*echo /.test(l))
+      .filter((l) => !l.includes('</dev/null'));
+    expect(offenders).toEqual([]);
+  });
+});
+
 describe('INSPECT_SCRIPT', () => {
   it('is valid sh, and only compose asks about docker', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vc-inspect-'));

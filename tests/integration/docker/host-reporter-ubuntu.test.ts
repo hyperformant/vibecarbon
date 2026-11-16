@@ -112,18 +112,43 @@ describe.skipIf(SKIPPED)('the host reporter on Ubuntu 26.04 (compose mode)', () 
     expect(unmatched).toEqual([]);
   });
 
-  it('the update inspect script runs and parses (compose)', () => {
-    const r = spawnSync('docker', ['exec', '-i', NAME, 'sh', '-s'], {
+  const inspect = (pathPrefix = '') =>
+    spawnSync('docker', ['exec', '-i', NAME, 'sh', '-s'], {
       encoding: 'utf-8',
       timeout: LONG,
-      input: INSPECT_SCRIPT('compose'),
+      input: `${pathPrefix}${INSPECT_SCRIPT('compose')}`,
     });
+
+  it('the update inspect script runs and parses (compose)', () => {
+    // An older docker-ce-cli, so Docker's repository has something newer.
+    const old = sh(
+      'apt-get -o DPkg::Lock::Timeout=60 update -qq >/dev/null && v=$(apt-cache madison docker-ce-cli | sed -n 3p | cut -d"|" -f2 | tr -d " ") && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq docker-ce-cli=$v --allow-downgrades >/dev/null',
+    );
+    expect(old.status, old.stderr).toBe(0);
+    const r = inspect();
     expect(r.status, r.stderr).toBe(0);
     const state = parseInspectOutput(r.stdout, 'compose');
     expect(state.host.rebootRequired).toBeTypeOf('boolean');
     expect(state.bootId).toMatch(/^[0-9a-f-]{36}$/);
     expect(Array.isArray(state.ubuntu)).toBe(true);
-    // Docker's source is configured above, so the repository has a candidate.
-    expect(state.docker).not.toBeNull();
+    expect(Array.isArray(state.docker?.packages)).toBe(true);
+    const cli = state.docker?.packages.find((p) => p.name === 'docker-ce-cli');
+    expect(cli).toBeDefined();
+    expect(cli?.from).not.toBe(cli?.to);
+  });
+
+  it('a failing unattended-upgrade is an error, never an empty list', () => {
+    // A stub first on PATH for this one run; the script's own PATH line keeps
+    // /usr/local/bin ahead of /usr/bin.
+    sh(
+      'printf "#!/bin/sh\nexit 7\n" > /usr/local/bin/unattended-upgrade && chmod 755 /usr/local/bin/unattended-upgrade',
+    );
+    try {
+      const r = inspect();
+      expect(r.status, r.stderr).toBe(0);
+      expect(() => parseInspectOutput(r.stdout, 'compose')).toThrow('could not check for updates');
+    } finally {
+      sh('rm -f /usr/local/bin/unattended-upgrade');
+    }
   });
 });

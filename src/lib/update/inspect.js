@@ -30,14 +30,23 @@ export function INSPECT_SCRIPT(kind) {
     'echo @@boot-id',
     'cat /proc/sys/kernel/random/boot_id',
     'echo @@ubuntu',
-    `${aptGet('update -qq')} >/dev/null 2>&1`,
-    "unattended-upgrade --dry-run --verbose 2>&1 | sed -n 's/^Packages that will be upgraded: *//p'",
+    `${aptGet('update -qq')} >/dev/null 2>&1 </dev/null || echo "@@error apt-get update exited $?"`,
+    'if command -v unattended-upgrade >/dev/null 2>&1 </dev/null; then',
+    '  out=$(unattended-upgrade --dry-run --verbose 2>&1 </dev/null); rc=$?',
+    '  if [ "$rc" -ne 0 ]; then',
+    '    echo "@@error unattended-upgrade exited $rc"',
+    '  else',
+    `    printf '%s\\n' "$out" | sed -n 's/^Packages that will be upgraded: *//p'`,
+    '  fi',
+    'else',
+    '  echo "@@error unattended-upgrade not installed"',
+    'fi',
   ];
   if (kind === 'compose') {
     lines.push(
       'echo @@docker',
-      `if [ -f /etc/apt/sources.list.d/docker.list ]; then ${aptQuietUpdate(DOCKER_SOURCE_ONLY)} >/dev/null 2>&1; fi`,
-      `apt-cache policy ${DOCKER_PACKAGES.join(' ')} 2>/dev/null`,
+      `if [ -f /etc/apt/sources.list.d/docker.list ]; then { ${aptQuietUpdate(DOCKER_SOURCE_ONLY)}; } >/dev/null 2>&1 </dev/null || echo "@@error docker apt-get update exited $?"; fi`,
+      `apt-cache policy ${DOCKER_PACKAGES.join(' ')} 2>/dev/null </dev/null`,
     );
   }
   return `${lines.join('\n')}\n`;
@@ -93,6 +102,8 @@ function parseDocker(text) {
  */
 export function parseInspectOutput(stdout, kind) {
   const s = sections(stdout);
+  const failed = String(stdout).match(/^@@error (.+)$/m);
+  if (failed) throw new Error(`could not check for updates: ${failed[1].trim()}`);
   const need = (n) => {
     if (!s.has(n)) throw new Error(`inspect output missing @@${n}`);
     return s.get(n);

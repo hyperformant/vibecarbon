@@ -103,4 +103,27 @@ describe('listUpdateTargets', () => {
     expect(r.skipped).toHaveLength(1);
     expect(r.skipped[0].reason).toBe('could not list nodes through 1.1.1.1: ssh timeout');
   });
+
+  it('a compose or compose-ha entry with no ip is skipped, not omitted', async () => {
+    const compose = await listUpdateTargets(
+      'prod',
+      { deployMode: 'compose', servers: [{ name: 'master' }] },
+      { sshKubectl: vi.fn() },
+    );
+    expect(compose.targets).toEqual([]);
+    expect(compose.skipped).toEqual([{ name: 'master', ip: null, reason: 'no public address' }]);
+    const ha = await listUpdateTargets(
+      'prod',
+      {
+        deployMode: 'compose-ha',
+        servers: [
+          { name: 'p', ip: '1.1.1.1', role: 'primary' },
+          { name: 's', role: 'standby' },
+        ],
+      },
+      { sshKubectl: vi.fn() },
+    );
+    expect(ha.targets.map((t) => t.name)).toEqual(['p']);
+    expect(ha.skipped).toEqual([{ name: 's', ip: null, reason: 'no public address' }]);
+  });
 });

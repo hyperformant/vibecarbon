@@ -60,6 +60,9 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
  * @param {string} envName
  * @param {object} envConfig
  * @param {{ sshKubectl?: Function }} [deps]
+ * An `AmbiguousPrimaryError` from `resolvePrimary` propagates on purpose: with
+ * unclear roles, guessing which server is primary could update the wrong one.
+ *
  * @returns {Promise<{ tier: string, targets: UpdateTarget[], skipped: Skipped[] }>}
  */
 export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl }) {
@@ -73,7 +76,9 @@ export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl 
 
   if (tier === 'compose') {
     const sv = resolvePrimary(envConfig, { env: envName })?.entry;
-    if (sv?.ip) {
+    if (sv && !sv.ip) {
+      skipped.push({ name: sv.name ?? 'master', ip: null, reason: 'no public address' });
+    } else if (sv) {
       targets.push({
         name: sv.name ?? 'master',
         ip: sv.ip,
@@ -84,7 +89,10 @@ export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl 
     }
   } else if (tier === 'compose-ha') {
     for (const sv of servers) {
-      if (!sv.ip) continue;
+      if (!sv.ip) {
+        skipped.push({ name: sv.name, ip: null, reason: 'no public address' });
+        continue;
+      }
       targets.push({
         name: sv.name,
         ip: sv.ip,
