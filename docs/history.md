@@ -914,8 +914,6 @@ over.
 
 **Guard:** `tests/unit/security/secret-scan-rules-census.test.ts`.
 
-#### 2026-11-16: Session hooks never prompt, and fetch only at a real session start (#TBD)
-
 #### 2026-11-16: Session hooks never prompt, and fetch only at a real session start (#500)
 
 `ff-main.sh` and `clean-merged.sh` now run every git network call with ssh in
