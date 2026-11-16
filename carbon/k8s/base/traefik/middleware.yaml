@@ -98,26 +98,6 @@ spec:
     prefixes:
       - /admin/traefik
 ---
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: rate-limit
-  labels:
-    app: vibecarbon
-spec:
-  rateLimit:
-    average: 100
-    burst: 200
----
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: compress
-  labels:
-    app: vibecarbon
-spec:
-  compress: {}
----
 # ForwardAuth middleware for admin routes
 # Verifies user is authenticated and has admin role via app's verify-role endpoint
 apiVersion: traefik.io/v1alpha1

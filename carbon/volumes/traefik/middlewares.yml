@@ -83,27 +83,6 @@ http:
           - strip-proxy-headers
           - super-admin-forward-auth
 
-    # Strip prefix middlewares for path-based admin routing
-    strip-admin-traefik:
-      stripPrefix:
-        prefixes:
-          - "/admin/traefik"
-
-    strip-admin-grafana:
-      stripPrefix:
-        prefixes:
-          - "/admin/grafana"
-
-    strip-admin-n8n:
-      stripPrefix:
-        prefixes:
-          - "/admin/n8n"
-
-    strip-admin-metabase:
-      stripPrefix:
-        prefixes:
-          - "/admin/metabase"
-
     # Security headers — applied to admin services (Grafana, n8n, etc.)
     security-headers:
       headers:
