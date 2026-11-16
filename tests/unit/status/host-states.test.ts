@@ -44,17 +44,62 @@ describe('hostStateRows', () => {
     ]);
   });
 
-  it('a server that is not reporting gets the Restart check row', () => {
+  it('a server with no reporter yet is told to run update once', () => {
     expect(
       hostStateRows('production', [
         { name: 'worker-1', reporting: false, state: null },
-        { name: 'worker-2', reporting: false, state: null, error: 'ssh timeout' },
+        { name: 'worker-2', reporting: false, state: null },
       ]),
     ).toEqual([
       {
         label: 'Restart check',
         text: 'worker-1, worker-2 not reporting yet, run vibecarbon update production once to set it up',
       },
+    ]);
+  });
+
+  it.each([
+    ['ssh failure', 'ssh timed out'],
+    ['unreadable host state', 'unreadable host state'],
+    ['no ssh key', 'no ssh key for this environment'],
+    ['unreadable standby cluster', 'could not read nodes'],
+  ])('%s says why, with no update hint', (_c, error) => {
+    const name = error === 'could not read nodes' ? 'standby cluster' : 'worker-1';
+    expect(hostStateRows('production', [{ name, reporting: false, state: null, error }])).toEqual([
+      { label: 'Restart check', text: `${name} could not be checked (${error})` },
+    ]);
+  });
+
+  it('one row per distinct reason, names joined', () => {
+    expect(
+      hostStateRows('production', [
+        { name: 'a', reporting: false, state: null, error: 'ssh timed out' },
+        { name: 'b', reporting: false, state: null, error: 'unreadable host state' },
+        { name: 'c', reporting: false, state: null, error: 'ssh timed out' },
+      ]),
+    ).toEqual([
+      { label: 'Restart check', text: 'a, c could not be checked (ssh timed out)' },
+      { label: 'Restart check', text: 'b could not be checked (unreadable host state)' },
+    ]);
+  });
+
+  it('mixed: due, not installed and unreachable each get their own row', () => {
+    expect(
+      hostStateRows('production', [
+        { name: 'master', reporting: true, state: due('master') },
+        { name: 'worker-1', reporting: false, state: null },
+        { name: 'worker-2', reporting: false, state: null, error: 'ssh timed out' },
+      ]),
+    ).toEqual([
+      {
+        label: 'Restart due',
+        text: 'master needs a restart for linux-image-6.8.0-90-generic (since Nov 15), run vibecarbon update production to install it',
+      },
+      {
+        label: 'Restart check',
+        text: 'worker-1 not reporting yet, run vibecarbon update production once to set it up',
+      },
+      { label: 'Restart check', text: 'worker-2 could not be checked (ssh timed out)' },
     ]);
   });
 
@@ -130,7 +175,7 @@ describe('checkHostStates', () => {
       ['a', false, null],
       ['b', false, null],
     ]);
-    expect(hosts[0].error).toBe('ssh timeout');
+    expect(hosts[0].error).toBe('ssh timed out');
     expect(hosts[1].error).toBeTruthy();
   });
 
@@ -183,7 +228,7 @@ describe('checkHostStates', () => {
         name: 'standby cluster',
         reporting: false,
         state: null,
-        error: 'standby cluster: could not read nodes',
+        error: 'could not read nodes',
       },
     ]);
     expect(hostStateRows('production', hosts).map((r) => r.label)).toEqual(['Restart check']);

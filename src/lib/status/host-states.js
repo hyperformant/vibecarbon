@@ -24,6 +24,14 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
  * @typedef {{ name: string, reporting: boolean, state: HostState | null, error?: string }} HostCheck
  */
 
+// A short lowercase reason: the ssh helpers say "ssh timeout", the row says
+// what happened.
+const reasonOf = (message) =>
+  message
+    .replace(/^cluster snapshot failed: /, '')
+    .replace(/^ssh timeout$/, 'ssh timed out')
+    .toLowerCase();
+
 const silent = (name, error) => ({ name, reporting: false, state: null, error });
 
 async function readCompose(target, keyPath, deps) {
@@ -41,7 +49,7 @@ async function readCompose(target, keyPath, deps) {
     if (!state) return silent(target.serverName, 'unreadable host state');
     return { name: target.serverName, reporting: true, state };
   } catch (err) {
-    return silent(target.serverName, describeSshError(err));
+    return silent(target.serverName, reasonOf(describeSshError(err)));
   }
 }
 
@@ -50,7 +58,7 @@ async function readCluster(target, label, deps) {
     const snapshot = await deps.snapshots.get(target.ip);
     return snapshot.nodes.map(hostStateFromNode);
   } catch (err) {
-    const reason = label ? `${label}: could not read nodes` : describeSshError(err);
+    const reason = label ? 'could not read nodes' : reasonOf(err.message);
     return [silent(label ?? target.serverName, reason)];
   }
 }
@@ -73,9 +81,17 @@ export async function checkHostStates(envName, envConfig, deps = {}) {
 
   const keyPath = d.sshKeyPathFor(envName);
   const haveKey = !!keyPath && d.existsSync(keyPath);
+  const standbyIp =
+    envConfig.ha?.standby?.masterIp ??
+    (envConfig.servers ?? []).find((s) => s.role === 'standby')?.ip;
   const groups = await Promise.all(
-    targets.map((target, i) => {
-      if (target.kind === 'k8s') return readCluster(target, i > 0 ? 'standby cluster' : null, d);
+    targets.map((target) => {
+      if (target.kind === 'k8s')
+        return readCluster(
+          target,
+          standbyIp && target.ip === standbyIp ? 'standby cluster' : null,
+          d,
+        );
       if (!haveKey) return [silent(target.serverName, 'no ssh key for this environment')];
       return readCompose(target, keyPath, d).then((h) => [h]);
     }),
@@ -110,11 +126,22 @@ export function hostStateRows(envName, hosts) {
       text: `${due.map((h) => h.name).join(', ')} ${due.length === 1 ? 'needs' : 'need'} a restart for ${pkg}${since ? ` (since ${utcDay(since)})` : ''}, run vibecarbon update ${envName} to install it`,
     });
   }
-  const silentHosts = hosts.filter((h) => !h.reporting);
-  if (silentHosts.length > 0) {
+  const notInstalled = hosts.filter((h) => !h.reporting && !h.error);
+  if (notInstalled.length > 0) {
     rows.push({
       label: 'Restart check',
-      text: `${silentHosts.map((h) => h.name).join(', ')} not reporting yet, run vibecarbon update ${envName} once to set it up`,
+      text: `${notInstalled.map((h) => h.name).join(', ')} not reporting yet, run vibecarbon update ${envName} once to set it up`,
+    });
+  }
+  // A server that could not be read is not one update fixes: say why instead.
+  const byReason = new Map();
+  for (const h of hosts.filter((x) => !x.reporting && x.error)) {
+    byReason.set(h.error, [...(byReason.get(h.error) ?? []), h.name]);
+  }
+  for (const [reason, names] of byReason) {
+    rows.push({
+      label: 'Restart check',
+      text: `${names.join(', ')} could not be checked (${reason})`,
     });
   }
   return rows;
