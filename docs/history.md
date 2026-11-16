@@ -896,8 +896,9 @@ drizzle.config.ts with every file and path it names").
 #### 2026-11-16: The staging allowlist covers every file create ships (#TBD)
 
 `.nvmrc`, `tests/`, `vitest.config.ts`, `tsconfig.test.json`, `TESTING.md`,
-`pnpm-workspace.yaml`, `.cursor/` and `.windsurfrules` joined the list of paths
-the CLI stages in a project.
+`pnpm-workspace.yaml`, `.cursor/rules/` and `.windsurfrules` joined the list of
+paths the CLI stages in a project. Because the list names whole directories,
+staging now also leaves out any `.env*` file inside them, at any depth.
 
 **Why:** when a project has no commit, `configure` makes the first one from
 this list and pushes it to a new GitHub repository. The files had been added
@@ -908,6 +909,8 @@ dependency security floors.
 
 **Do not undo:** the list stays explicit. No `.env` name goes on it, the two
 example files included, and `.vibecarbon.json` stays the operator's to commit.
+Keep the `.env*` exclusion: the project's `.gitignore` does not cover every
+env file name, and a project created without git has no `.gitignore`.
 
 **Guard:** `tests/integration/template/create.test.ts` compares the list with
 what a created project tracks, on npm and pnpm.

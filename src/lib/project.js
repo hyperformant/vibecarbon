@@ -502,7 +502,9 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   '.nvmrc',
   '.github/',
   '.claude/',
-  '.cursor/',
+  // The rules file the template ships, not all of .cursor/: an editor's local
+  // config there (an MCP server list, say) can hold tokens.
+  '.cursor/rules/',
   '.windsurfrules',
   'package.json',
   'pnpm-lock.yaml',
@@ -556,6 +558,15 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
 ];
 
 /**
+ * Taken back out of whatever the allowlist names. The list holds whole
+ * directories (src/, tests/, volumes/), and the project's .gitignore is not
+ * enough to keep an env file inside one unstaged: it does not cover every
+ * name (.env.e2e, .env.production), and a project created without git has no
+ * .gitignore at all. Matches at any depth.
+ */
+const PROJECT_GIT_ADD_EXCLUDES = [':(exclude,glob)**/.env*'];
+
+/**
  * Build a `git add` argv limited to template-known paths that exist.
  * The first 3 tokens ('git', 'add', '--') are always included; the rest
  * are filtered by existsSync so missing optional paths don't error.
@@ -570,7 +581,10 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
  */
 export function buildGitAddArgv(cwd = process.cwd(), extras = []) {
   const paths = [...PROJECT_GIT_ADD_ALLOWLIST, ...extras].filter((p) => existsSync(join(cwd, p)));
-  return ['git', 'add', '--', ...paths];
+  // Never with no path before it: git reads an exclusion on its own as
+  // "everything but this", which would stage the whole project.
+  if (paths.length === 0) return ['git', 'add', '--'];
+  return ['git', 'add', '--', ...paths, ...PROJECT_GIT_ADD_EXCLUDES];
 }
 
 // ============================================================================

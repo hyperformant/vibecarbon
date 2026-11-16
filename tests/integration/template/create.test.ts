@@ -50,7 +50,9 @@ describe('create-vibecarbon E2E', () => {
     })
       .split('\n')
       .filter(Boolean);
-    const staged = buildGitAddArgv(dir).slice(3);
+    const staged = buildGitAddArgv(dir)
+      .slice(3)
+      .filter((path) => !path.startsWith(':('));
     const covered = (file: string) =>
       staged.some((path) => (path.endsWith('/') ? file.startsWith(path) : file === path));
 
