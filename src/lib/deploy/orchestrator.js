@@ -547,7 +547,7 @@ export function assertDeployRegion(ProviderClass, tier, config) {
 }
 
 /** The node the persisted roles call primary, as the write-fence marker names it. */
-function rolePrimaryOf(_tier, envConfig, environment) {
+function rolePrimaryOf(envConfig, environment) {
   return resolvePrimary(envConfig, { env: environment });
 }
 
@@ -608,7 +608,7 @@ export async function liftStrandedFenceAtEntry({
     // Inside the try: `vibecarbon deploy` is the remedy an ambiguous-roles
     // error recommends, so that error can never be what stops this deploy.
     try {
-      const rolePrimary = rolePrimaryOf(tier, envConfig, environment);
+      const rolePrimary = rolePrimaryOf(envConfig, environment);
       if (rolePrimary?.ip) {
         await lift({
           environment,
@@ -2340,7 +2340,7 @@ export async function executeDeployment(args, gatheredConfig) {
         // which also loads dockerHub creds in the orchestrator).
         dockerHubCreds: resolveDockerHubCreds(),
       };
-      await runPlan(planDeploy('compose', config), composeCtx, EFFECTS);
+      await runPlan(planDeploy('compose'), composeCtx, EFFECTS);
       deployResult = {
         masterIp: composeCtx.serverIp,
         serverId: composeCtx.providerServerId || 'manual',
@@ -2395,7 +2395,7 @@ export async function executeDeployment(args, gatheredConfig) {
       // fan uploads it to both nodes and settles only after both uploads have
       // (haSetupServerFiles), so no upload still reads it then.
       await perfAsync('deploy.ha.compose.full', () =>
-        runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
+        runPlan(planDeploy('compose-ha'), composeHaCtx, EFFECTS),
       );
       s.stop('Compose HA deployment complete');
       // A reconverge that did not verify streaming and record the identifier
@@ -2427,7 +2427,7 @@ export async function executeDeployment(args, gatheredConfig) {
       // the cluster's addresses exist (k8s/dns-record.js), so it overlaps the
       // image delivery and manifest apply. k8s-ha's fan-out owns its own hook.
       const k8sCtx = { options: { ...deploymentConfig, onInfraReady: k8sDns.onInfraReady } };
-      await runPlan(planDeploy('k8s', config), k8sCtx, EFFECTS);
+      await runPlan(planDeploy('k8s'), k8sCtx, EFFECTS);
       deployResult = k8sCtx.clusterResult;
     } else {
       // k8s-ha: two clusters (primary + standby) deployed in parallel + the
@@ -2441,9 +2441,7 @@ export async function executeDeployment(args, gatheredConfig) {
       // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
       // not race the 0.0.0.0 warm-up write of the same apex record.
       const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, stateBackend };
-      await perfAsync('deploy.ha.k8s.full', () =>
-        runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
-      );
+      await perfAsync('deploy.ha.k8s.full', () => runPlan(planDeploy('k8s-ha'), k8sHaCtx, EFFECTS));
       dnsWrite = k8sHaCtx.dnsWrite ?? null;
       // The retired cluster is the standby this deploy just rebuilt and gated on
       // streaming (or finalized degraded under -allow-degraded): this deploy

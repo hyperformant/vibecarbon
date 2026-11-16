@@ -35,7 +35,7 @@ const STACK_CLEANUP_EFFECTS = new Set([
 
 describe('stack-state cleanup census (every tier reconciles Pulumi state at destroy)', () => {
   it.each(TIERS)('tier %s plans a stack-cleanup step', (tier) => {
-    const effects = planDestroy(tier, {}).map((step) => step.effect);
+    const effects = planDestroy(tier).map((step) => step.effect);
     const cleanup = effects.filter((e) => STACK_CLEANUP_EFFECTS.has(e));
     expect(
       cleanup,

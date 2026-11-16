@@ -68,7 +68,7 @@ beforeEach(() => {
 
 describe.each(TIERS)('%s', (tier) => {
   it('opens the backend once, before the fan-out', async () => {
-    await runPlan(planDeploy(tier, {}), { stateBackend: backend() }, effects());
+    await runPlan(planDeploy(tier), { stateBackend: backend() }, effects());
     expect(pulumi.order.filter((name) => name === 'whoAmI')).toHaveLength(1);
     expect(pulumi.order.indexOf('whoAmI')).toBeLessThan(pulumi.order.indexOf(FAN_OUT[tier]));
     expect(pulumi.order.filter((name) => name === FAN_OUT[tier])).toHaveLength(1);
@@ -77,7 +77,7 @@ describe.each(TIERS)('%s', (tier) => {
   // The open is never skipped: a ctx that names no backend is a wiring bug,
   // and the pair must not start on a backend nobody opened.
   it('no backend to open stops the deploy before anything is provisioned', async () => {
-    await expect(runPlan(planDeploy(tier, {}), {}, effects())).rejects.toThrow(
+    await expect(runPlan(planDeploy(tier), {}, effects())).rejects.toThrow(
       /\[step:open-state-backend\]/,
     );
     expect(pulumi.whoAmI).not.toHaveBeenCalled();
@@ -86,9 +86,9 @@ describe.each(TIERS)('%s', (tier) => {
 
   it('a backend that will not open stops the deploy before anything is provisioned', async () => {
     pulumi.whoAmI.mockRejectedValue(new Error('error: could not list bucket'));
-    await expect(
-      runPlan(planDeploy(tier, {}), { stateBackend: backend() }, effects()),
-    ).rejects.toThrow(/\[step:open-state-backend\].*could not list bucket/);
+    await expect(runPlan(planDeploy(tier), { stateBackend: backend() }, effects())).rejects.toThrow(
+      /\[step:open-state-backend\].*could not list bucket/,
+    );
     expect(pulumi.whoAmI).toHaveBeenCalledOnce();
     expect(pulumi.order).not.toContain(FAN_OUT[tier]);
   });

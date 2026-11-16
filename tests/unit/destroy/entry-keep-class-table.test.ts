@@ -459,7 +459,7 @@ describe('ENTRY_KEEP_BY_CLASS census', () => {
 
   it('every step of every tier plan has a destroy-step verdict', () => {
     const steps = ENTRY_KEEP_BY_CLASS['destroy-step'].keeps as Record<string, unknown>;
-    const missing = TIERS.flatMap((tier: string) => planDestroy(tier, {}))
+    const missing = TIERS.flatMap((tier: string) => planDestroy(tier))
       .map((step: { name: string }) => step.name)
       .filter((name: string) => !Object.hasOwn(steps, name));
     expect(missing).toEqual([]);
@@ -526,7 +526,7 @@ describe('a destroy step that throws', () => {
   }
 
   const wrapped = TIERS.flatMap((tier: string) =>
-    planDestroy(tier, {}).map((step: { name: string; effect: string }) => [tier, step] as const),
+    planDestroy(tier).map((step: { name: string; effect: string }) => [tier, step] as const),
   ).filter(([, step]) => step.effect !== 'finishOutro');
 
   it.each(wrapped)(
@@ -564,7 +564,7 @@ describe('a destroy step that throws', () => {
 
   it('in the compose plans, no step after the stack-state step keeps the entry', async () => {
     for (const tier of ['compose', 'compose-ha']) {
-      const steps = planDestroy(tier, {});
+      const steps = planDestroy(tier);
       const at = steps.findIndex((s: { name: string }) => s.name === 'remove-stack-state');
       expect(at, tier).toBeGreaterThan(0);
       for (const step of steps.slice(at + 1)) {
@@ -650,7 +650,7 @@ async function destroyOnce(tier: 'compose' | 'compose-ha') {
     tracker: { spinner: () => spinner, finish: () => ({ formatted: '1s' }) },
     isK8s: false,
   };
-  await runPlan(planDestroy(tier, {}), ctx, DESTROY_EFFECTS);
+  await runPlan(planDestroy(tier), ctx, DESTROY_EFFECTS);
   return {
     entries: results.leaks.entries as Entry[],
     entryKept: Boolean((store.state.disk as Config).environments?.prod),

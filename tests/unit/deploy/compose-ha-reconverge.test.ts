@@ -853,7 +853,7 @@ describe('the deploy wires the managed-DNS repoint into the reconverge check (I3
 describe('the standby role is on the node before its stack starts (add-ons held at zero)', () => {
   it('write-node-roles precedes start-compose-stack and configure-replication in the compose-ha plan', async () => {
     const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js');
-    const names = (planDeploy('compose-ha', {}) as Array<{ name: string }>).map((s) => s.name);
+    const names = (planDeploy('compose-ha') as Array<{ name: string }>).map((s) => s.name);
     const write = names.indexOf('write-node-roles');
     expect(write).toBeGreaterThanOrEqual(0);
     expect(write).toBeLessThan(names.indexOf('start-compose-stack'));

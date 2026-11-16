@@ -34,7 +34,7 @@ const EXPECTED_COMPOSE_SEQUENCE = [
 
 describe('planDeploy(compose)', () => {
   it('produces the compose deploy step sequence (pure — no config needed)', () => {
-    const steps = planDeploy('compose', {});
+    const steps = planDeploy('compose');
     expect(planStepNames(steps)).toEqual(EXPECTED_COMPOSE_SEQUENCE);
   });
 
@@ -45,7 +45,7 @@ describe('planDeploy(compose)', () => {
     // migrations), and no scheduled backups (no setupComposeBackupCron). The
     // RLS + wal-g audits (audit-database) rode along with the old migration
     // step and must survive it. These MUST remain in the compose plan.
-    const steps = planDeploy('compose', {});
+    const steps = planDeploy('compose');
     for (const guard of ['wait-admin-ready', 'audit-database', 'setup-backup-cron']) {
       expect(steps.find((s) => s.name === guard)).toBeTruthy();
     }
@@ -55,7 +55,7 @@ describe('planDeploy(compose)', () => {
     // Steps carry `when` closures (fresh per call, so reference-inequal); compare
     // the serializable shape — name, effect, and whether the step is gated.
     const shape = () =>
-      planDeploy('compose', {}).map((s) => ({
+      planDeploy('compose').map((s) => ({
         name: s.name,
         effect: s.effect,
         gated: typeof s.when === 'function',
@@ -65,13 +65,13 @@ describe('planDeploy(compose)', () => {
 
   it('references only effects that exist in the registry', async () => {
     const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('compose', {})) {
+    for (const step of planDeploy('compose')) {
       expect(typeof EFFECTS[step.effect]).toBe('function');
     }
   });
 
   it('gates conditional steps with when-predicates and leaves unconditional steps ungated', () => {
-    const byName = Object.fromEntries(planDeploy('compose', {}).map((s) => [s.name, s]));
+    const byName = Object.fromEntries(planDeploy('compose').map((s) => [s.name, s]));
 
     // provision-server only when the server has not been provisioned yet: a
     // recorded server never gets an up, sealed or not (its user data holds
@@ -115,7 +115,7 @@ describe('planDeploy(compose)', () => {
   });
 
   it('throws for an unknown tier', () => {
-    expect(() => planDeploy('nope', {})).toThrow('planDeploy: unknown/unsupported tier nope');
+    expect(() => planDeploy('nope')).toThrow('planDeploy: unknown/unsupported tier nope');
   });
 });
 
@@ -132,11 +132,11 @@ const EXPECTED_K8S_SEQUENCE = ['deploy-cluster'];
 
 describe('planDeploy(k8s)', () => {
   it('produces the k8s deploy step sequence (pure — no config needed)', () => {
-    expect(planStepNames(planDeploy('k8s', {}))).toEqual(EXPECTED_K8S_SEQUENCE);
+    expect(planStepNames(planDeploy('k8s'))).toEqual(EXPECTED_K8S_SEQUENCE);
   });
 
   it('is a single unconditional step wrapping the deployK3s pipeline', () => {
-    const [step] = planDeploy('k8s', {});
+    const [step] = planDeploy('k8s');
     expect(step.name).toBe('deploy-cluster');
     expect(step.effect).toBe('k8sDeployCluster');
     expect(step.when).toBeUndefined();
@@ -144,14 +144,14 @@ describe('planDeploy(k8s)', () => {
 
   it('references only effects that exist in the registry', async () => {
     const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('k8s', {})) {
+    for (const step of planDeploy('k8s')) {
       expect(typeof EFFECTS[step.effect]).toBe('function');
     }
   });
 
   it('is pure: repeated calls produce structurally identical plans', () => {
     const shape = () =>
-      planDeploy('k8s', {}).map((s) => ({
+      planDeploy('k8s').map((s) => ({
         name: s.name,
         effect: s.effect,
         gated: typeof s.when === 'function',
@@ -186,11 +186,11 @@ const EXPECTED_K8S_HA_SEQUENCE = [
 
 describe('planDeploy(k8s-ha)', () => {
   it('produces the k8s-ha deploy step sequence (pure — no config needed)', () => {
-    expect(planStepNames(planDeploy('k8s-ha', {}))).toEqual(EXPECTED_K8S_HA_SEQUENCE);
+    expect(planStepNames(planDeploy('k8s-ha'))).toEqual(EXPECTED_K8S_HA_SEQUENCE);
   });
 
   it('places replication configuration + verification after both clusters provision, in order', () => {
-    const names = planStepNames(planDeploy('k8s-ha', {}));
+    const names = planStepNames(planDeploy('k8s-ha'));
     const idx = (n: string) => names.indexOf(n);
     // Both clusters must exist before the WG firewall + replication run.
     expect(idx('open-replication-firewall')).toBeGreaterThan(idx('provision-clusters'));
@@ -209,7 +209,7 @@ describe('planDeploy(k8s-ha)', () => {
   it('reuses the shared per-cluster block ×2 and adds the replication steps', () => {
     // deployK8sHA provisions primary + standby in ONE parallel step (deployK3s
     // ×2), then layers the replication/tunnel/verify steps on top.
-    const names = planStepNames(planDeploy('k8s-ha', {}));
+    const names = planStepNames(planDeploy('k8s-ha'));
     expect(names).toContain('provision-clusters');
     for (const repl of ['open-replication-firewall', 'configure-replication', 'verify-streaming']) {
       expect(names).toContain(repl);
@@ -219,8 +219,8 @@ describe('planDeploy(k8s-ha)', () => {
   it('mirrors compose-ha replication step names (cross-tier symmetry)', () => {
     // The Task 5 symmetry check: both HA tiers name the replication phases
     // identically so a reader recognises them across tiers.
-    const k8sHaNames = new Set(planStepNames(planDeploy('k8s-ha', {})));
-    const composeHaNames = new Set(planStepNames(planDeploy('compose-ha', {})));
+    const k8sHaNames = new Set(planStepNames(planDeploy('k8s-ha')));
+    const composeHaNames = new Set(planStepNames(planDeploy('compose-ha')));
     for (const shared of ['configure-replication', 'verify-streaming']) {
       expect(composeHaNames.has(shared)).toBe(true);
       expect(k8sHaNames.has(shared)).toBe(true);
@@ -232,7 +232,7 @@ describe('planDeploy(k8s-ha)', () => {
     // degraded handling INSIDE the function body, not at the phase boundary —
     // so no phase carries a when-predicate, mirroring compose-ha's provisioning.
     // open-state-backend included: it runs on every HA deploy (F5).
-    const gated = planDeploy('k8s-ha', {}).filter((step) => step.when);
+    const gated = planDeploy('k8s-ha').filter((step) => step.when);
     expect(planStepNames(gated)).toEqual([]);
   });
 
@@ -242,7 +242,7 @@ describe('planDeploy(k8s-ha)', () => {
     // has no runtime effect NOW — it is a forward guard: if anyone ever adds a
     // when-predicate that evaluates falsy under the real ctx, runPlan aborts
     // loudly instead of shipping a deploy with no verified replica.
-    const byName = Object.fromEntries(planDeploy('k8s-ha', {}).map((s) => [s.name, s]));
+    const byName = Object.fromEntries(planDeploy('k8s-ha').map((s) => [s.name, s]));
     for (const gate of [
       'configure-replication',
       'verify-streaming',
@@ -291,20 +291,20 @@ describe('planDeploy(k8s-ha)', () => {
         allowDegraded: false,
       },
     };
-    await runPlan(planDeploy('k8s-ha', {}), coldCtx, stubEffects);
+    await runPlan(planDeploy('k8s-ha'), coldCtx, stubEffects);
     expect(ran).toEqual(EXPECTED_K8S_HA_SEQUENCE);
   });
 
   it('references only effects that exist in the registry', async () => {
     const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('k8s-ha', {})) {
+    for (const step of planDeploy('k8s-ha')) {
       expect(typeof EFFECTS[step.effect]).toBe('function');
     }
   });
 
   it('is pure: repeated calls produce structurally identical plans', () => {
     const shape = () =>
-      planDeploy('k8s-ha', {}).map((s) => ({
+      planDeploy('k8s-ha').map((s) => ({
         name: s.name,
         effect: s.effect,
         gated: typeof s.when === 'function',
@@ -358,7 +358,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
 describe('the wal-g role file is written before any compose stack starts', () => {
   it('every compose tier writes the node roles before the stack starts', () => {
     for (const tier of ['compose', 'compose-ha'] as const) {
-      const names = planStepNames(planDeploy(tier, {}));
+      const names = planStepNames(planDeploy(tier));
       const write = names.indexOf('write-node-roles');
       expect(write, tier).toBeGreaterThanOrEqual(0);
       expect(write, tier).toBeLessThan(names.indexOf('start-compose-stack'));
@@ -367,13 +367,13 @@ describe('the wal-g role file is written before any compose stack starts', () =>
   });
 
   it('single compose writes after the bundle lands (the project dir exists)', () => {
-    const names = planStepNames(planDeploy('compose', {}));
+    const names = planStepNames(planDeploy('compose'));
     expect(names.indexOf('write-node-roles')).toBeGreaterThan(names.indexOf('setup-server-files'));
   });
 
   it('each tier runs its own effect', () => {
     const effectOf = (tier: 'compose' | 'compose-ha') =>
-      planDeploy(tier, {}).find((s) => s.name === 'write-node-roles')?.effect;
+      planDeploy(tier).find((s) => s.name === 'write-node-roles')?.effect;
     expect(effectOf('compose')).toBe('writeNodeRoles');
     expect(effectOf('compose-ha')).toBe('haWriteNodeRoles');
   });
@@ -381,12 +381,12 @@ describe('the wal-g role file is written before any compose stack starts', () =>
 
 describe('planDeploy(compose-ha)', () => {
   it('produces the compose-ha deploy step sequence (pure — no config needed)', () => {
-    const steps = planDeploy('compose-ha', {});
+    const steps = planDeploy('compose-ha');
     expect(planStepNames(steps)).toEqual(EXPECTED_COMPOSE_HA_SEQUENCE);
   });
 
   it('places the replication additions after the primary app is up, in order', () => {
-    const names = planStepNames(planDeploy('compose-ha', {}));
+    const names = planStepNames(planDeploy('compose-ha'));
     const idx = (n: string) => names.indexOf(n);
     // The app must be serving (migrations + admin + primary PG ready) before
     // the standby is seeded; the audits read the migrated catalog.
@@ -404,7 +404,7 @@ describe('planDeploy(compose-ha)', () => {
   });
 
   it('includes the shipped-bug guard steps shared with single compose', () => {
-    const steps = planDeploy('compose-ha', {});
+    const steps = planDeploy('compose-ha');
     for (const guard of ['wait-admin-ready', 'audit-database', 'setup-backup-cron']) {
       expect(steps.find((s) => s.name === guard)).toBeTruthy();
     }
@@ -415,7 +415,7 @@ describe('planDeploy(compose-ha)', () => {
     // (persist-pending-config so destroy can recover, finalize-config that
     // promotes deployed) and the replication gate must never be silently
     // gated out of a compose-ha deploy.
-    const byName = Object.fromEntries(planDeploy('compose-ha', {}).map((s) => [s.name, s]));
+    const byName = Object.fromEntries(planDeploy('compose-ha').map((s) => [s.name, s]));
     for (const gate of [
       'persist-pending-config',
       'configure-replication',
@@ -427,7 +427,7 @@ describe('planDeploy(compose-ha)', () => {
   });
 
   it('gates transfer-image on a local or direct build; provisioning is unconditional', () => {
-    const byName = Object.fromEntries(planDeploy('compose-ha', {}).map((s) => [s.name, s]));
+    const byName = Object.fromEntries(planDeploy('compose-ha').map((s) => [s.name, s]));
     // deployComposeHA always reconciled both Pulumi stacks (idempotent) — no
     // warm-skip gate, unlike single compose's provision-server.
     expect(byName['provision-servers'].when).toBeUndefined();
@@ -441,14 +441,14 @@ describe('planDeploy(compose-ha)', () => {
 
   it('references only effects that exist in the registry', async () => {
     const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('compose-ha', {})) {
+    for (const step of planDeploy('compose-ha')) {
       expect(typeof EFFECTS[step.effect]).toBe('function');
     }
   });
 
   it('is pure: repeated calls produce structurally identical plans', () => {
     const shape = () =>
-      planDeploy('compose-ha', {}).map((s) => ({
+      planDeploy('compose-ha').map((s) => ({
         name: s.name,
         effect: s.effect,
         gated: typeof s.when === 'function',

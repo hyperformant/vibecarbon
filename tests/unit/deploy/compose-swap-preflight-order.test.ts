@@ -25,7 +25,7 @@ beforeEach(() => {
   H.refuse = false;
 });
 
-const names = (tier: 'compose' | 'compose-ha') => planDeploy(tier, {}).map((s) => s.name);
+const names = (tier: 'compose' | 'compose-ha') => planDeploy(tier).map((s) => s.name);
 const runsBefore = (list: string[], a: string, b: string) => {
   expect(list.indexOf(a), `${a} is in the plan`).toBeGreaterThanOrEqual(0);
   expect(list.indexOf(b), `${b} is in the plan`).toBeGreaterThanOrEqual(0);
@@ -43,7 +43,7 @@ describe('compose: check-db-ledger runs before the server is touched', () => {
   });
 
   it('has no when-gate: every deploy reads (a first deploy passes on no container)', () => {
-    expect(planDeploy('compose', {}).find((s) => s.name === 'check-db-ledger')?.when).toBeFalsy();
+    expect(planDeploy('compose').find((s) => s.name === 'check-db-ledger')?.when).toBeFalsy();
   });
 
   it('reads the one server, and a refusal propagates', async () => {

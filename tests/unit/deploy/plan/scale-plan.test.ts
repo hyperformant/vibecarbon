@@ -38,11 +38,11 @@ const EXPECTED_K8S_SEQUENCE = [
 
 describe('planScale(compose)', () => {
   it('produces the compose scale step sequence', () => {
-    expect(planStepNames(planScale('compose', {}))).toEqual(EXPECTED_COMPOSE_SEQUENCE);
+    expect(planStepNames(planScale('compose'))).toEqual(EXPECTED_COMPOSE_SEQUENCE);
   });
 
   it('starts with the ssh-key registration, then the server-replacement fan-out', () => {
-    const [first, second] = planScale('compose', {});
+    const [first, second] = planScale('compose');
     expect(first).toEqual({ name: 'register-ssh-key', effect: 'scaleRegisterSshKey' });
     expect(second).toEqual({ name: 'scale-servers', effect: 'scaleServers' });
   });
@@ -50,15 +50,13 @@ describe('planScale(compose)', () => {
 
 describe('planScale(compose-ha)', () => {
   it('shares the compose step sequence — the primary/standby fan-out is ctx-driven', () => {
-    expect(planStepNames(planScale('compose-ha', {}))).toEqual(EXPECTED_COMPOSE_SEQUENCE);
-    expect(planStepNames(planScale('compose-ha', {}))).toEqual(
-      planStepNames(planScale('compose', {})),
-    );
+    expect(planStepNames(planScale('compose-ha'))).toEqual(EXPECTED_COMPOSE_SEQUENCE);
+    expect(planStepNames(planScale('compose-ha'))).toEqual(planStepNames(planScale('compose')));
   });
 
   it('uses the SAME scale-servers effect as compose (fan-out lives inside the effect)', () => {
-    const composeHa = planScale('compose-ha', {});
-    const compose = planScale('compose', {});
+    const composeHa = planScale('compose-ha');
+    const compose = planScale('compose');
     expect(composeHa.find((s) => s.name === 'scale-servers').effect).toBe(
       compose.find((s) => s.name === 'scale-servers').effect,
     );
@@ -67,23 +65,23 @@ describe('planScale(compose-ha)', () => {
 
 describe('planScale(k8s)', () => {
   it('produces the k8s scale step sequence', () => {
-    expect(planStepNames(planScale('k8s', {}))).toEqual(EXPECTED_K8S_SEQUENCE);
+    expect(planStepNames(planScale('k8s'))).toEqual(EXPECTED_K8S_SEQUENCE);
   });
 
   it('wraps Pulumi apply + cluster-autoscaler re-patch as one black-box step', () => {
-    const [first] = planScale('k8s', {});
+    const [first] = planScale('k8s');
     expect(first).toEqual({ name: 'apply-scale-changes', effect: 'scaleApplyK8sChanges' });
   });
 });
 
 describe('planScale(k8s-ha)', () => {
   it('shares the k8s teardown sequence — the standby cluster fan-out is ctx-driven', () => {
-    expect(planStepNames(planScale('k8s-ha', {}))).toEqual(planStepNames(planScale('k8s', {})));
+    expect(planStepNames(planScale('k8s-ha'))).toEqual(planStepNames(planScale('k8s')));
   });
 
   it('shares the k8s apply-scale-changes effect (isHA gates the standby fan-out internally)', () => {
-    const k8sHa = planScale('k8s-ha', {});
-    const k8s = planScale('k8s', {});
+    const k8sHa = planScale('k8s-ha');
+    const k8s = planScale('k8s');
     expect(k8sHa.find((s) => s.name === 'apply-scale-changes').effect).toBe(
       k8s.find((s) => s.name === 'apply-scale-changes').effect,
     );
@@ -94,7 +92,7 @@ describe('planScale — purity + validity', () => {
   it('is pure: repeated calls produce structurally identical plans', () => {
     for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
       const shape = () =>
-        planScale(tier, {}).map((s) => ({
+        planScale(tier).map((s) => ({
           name: s.name,
           effect: s.effect,
           gated: typeof s.when === 'function',
@@ -106,13 +104,13 @@ describe('planScale — purity + validity', () => {
   it('every step references an effect that exists in the scale registry', async () => {
     const { SCALE_EFFECTS } = await import('../../../../src/scale.js');
     for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
-      for (const step of planScale(tier, {})) {
+      for (const step of planScale(tier)) {
         expect(typeof SCALE_EFFECTS[step.effect]).toBe('function');
       }
     }
   });
 
   it('throws for an unknown tier', () => {
-    expect(() => planScale('nope', {})).toThrow('planScale: unknown/unsupported tier nope');
+    expect(() => planScale('nope')).toThrow('planScale: unknown/unsupported tier nope');
   });
 });

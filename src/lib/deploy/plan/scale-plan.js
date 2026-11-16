@@ -1,12 +1,11 @@
 /**
- * Pure scale planner. `planScale(tier, config) → Step[]` returns the ordered
+ * Pure scale planner. `planScale(tier) → Step[]` returns the ordered
  * list of step descriptors for a tier's post-deploy scale. It is PURE: no
  * SSH/Pulumi/kubectl calls, no Date.now, no I/O of any kind — every runtime
  * decision (which servers to touch, HA fan-out parallel-vs-sequential,
  * whether infra actually changed) is deferred to the effects (the
  * `SCALE_EFFECTS` registry in src/scale.js), which runPlan executes against
- * the live ctx. The `config` argument is accepted for signature symmetry
- * with the other planners; scale's plan shape is fixed per tier-family.
+ * the live ctx. Scale's plan shape is fixed per tier-family.
  *
  * This is the scale analogue of deploy-plan.js / destroy-plan.js. The
  * interactive prep that used to open `scaleCompose` / `scaleK8s` (env/target/
@@ -14,7 +13,7 @@
  * NOT part of the plan — exactly as planDeploy defers the config-gathering
  * step to the caller (deploy.js) and only expresses the ordered EXECUTION
  * sequence. scale.js's run() still gathers the operator's choices and builds
- * ctx before calling `runPlan(planScale(tier, config), ctx, SCALE_EFFECTS)`.
+ * ctx before calling `runPlan(planScale(tier), ctx, SCALE_EFFECTS)`.
  *
  * ── compose / compose-ha share ONE step list ──
  * scaleCompose already ran ONE code path for both tiers, branching on
@@ -77,10 +76,9 @@ const k8sScaleSteps = () => [
 
 /**
  * @param {'compose'|'compose-ha'|'k8s'|'k8s-ha'} tier
- * @param {object} _config
  * @returns {import('./step.js').Step[]}
  */
-export function planScale(tier, _config) {
+export function planScale(tier) {
   if (tier === 'compose' || tier === 'compose-ha') {
     return composeScaleSteps();
   }

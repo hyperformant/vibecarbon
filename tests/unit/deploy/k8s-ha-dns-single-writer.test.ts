@@ -380,7 +380,7 @@ afterEach(() => {
 
 describe('every step of the k8s plans is classified for this harness', () => {
   it.each(['k8s-ha', 'k8s'])('%s', (tier) => {
-    const effects = planDeploy(tier as never, {}).map((s) => s.effect);
+    const effects = planDeploy(tier as never).map((s) => s.effect);
     const known = new Set([...classified.real[tier], ...Object.keys(classified.stubs)]);
     expect(effects.filter((e) => !known.has(e))).toEqual([]);
     for (const e of classified.real[tier]) expect(effects).toContain(e);
@@ -390,7 +390,7 @@ describe('every step of the k8s plans is classified for this harness', () => {
 describe('a k8s-ha deploy writes its DNS records once, through setupHA', () => {
   it('first deploy: the warm-up, then setupHA at the primary, nothing after', async () => {
     const writes = await deploy(true);
-    expect(run.plans.at(-1)).toEqual(planDeploy('k8s-ha', {}).map((s) => s.effect));
+    expect(run.plans.at(-1)).toEqual(planDeploy('k8s-ha').map((s) => s.effect));
     expect(writes).toEqual([WARMUP, `setupHA ${P.floatingIp} ${S.floatingIp}`]);
     expect(dnsMock.setupHA).toHaveBeenCalledWith(
       'dns-token',
@@ -447,7 +447,7 @@ describe('a k8s-ha deploy writes its DNS records once, through setupHA', () => {
 describe('single k8s keeps its one early write', () => {
   it('first deploy: the warm-up, then setupSimple at the floating IP, never setupHA', async () => {
     const writes = await deploy(false);
-    expect(run.plans.at(-1)).toEqual(planDeploy('k8s', {}).map((s) => s.effect));
+    expect(run.plans.at(-1)).toEqual(planDeploy('k8s').map((s) => s.effect));
     expect(writes).toEqual([WARMUP, `setupSimple ${SINGLE.floatingIp}`]);
     expect(dnsMock.setupHA).not.toHaveBeenCalled();
   });

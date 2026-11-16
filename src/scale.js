@@ -507,7 +507,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     // under a FRESH id and saves that one once the relaunch ran.
     attemptId: mintAttemptId(),
   };
-  await runPlan(planScale(tier, envConfig), ctx, SCALE_EFFECTS);
+  await runPlan(planScale(tier), ctx, SCALE_EFFECTS);
 }
 
 /** compose/compose-ha `register-ssh-key` effect: register (or reuse — Hetzner
@@ -2508,7 +2508,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
     infraChanges,
     Provider,
   };
-  await runPlan(planScale(parsed.tier, envConfig), ctx, SCALE_EFFECTS);
+  await runPlan(planScale(parsed.tier), ctx, SCALE_EFFECTS);
 }
 
 /**

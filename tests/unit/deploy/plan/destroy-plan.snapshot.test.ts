@@ -9,7 +9,7 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // real infrastructure. Update ONLY with an intentional, reviewed plan change.
 describe('destroy plan snapshot', () => {
   it('locks the compose teardown step-name sequence', () => {
-    expect(planStepNames(planDestroy('compose', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDestroy('compose'))).toMatchInlineSnapshot(`
       [
         "destroy-compose-services",
         "revoke-app-storage-key",
@@ -25,7 +25,7 @@ describe('destroy plan snapshot', () => {
   });
 
   it('locks the compose-ha teardown step-name sequence', () => {
-    expect(planStepNames(planDestroy('compose-ha', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDestroy('compose-ha'))).toMatchInlineSnapshot(`
       [
         "destroy-compose-ha",
         "revoke-app-storage-key",
@@ -41,7 +41,7 @@ describe('destroy plan snapshot', () => {
   });
 
   it('locks the k8s teardown step-name sequence', () => {
-    expect(planStepNames(planDestroy('k8s', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDestroy('k8s'))).toMatchInlineSnapshot(`
       [
         "destroy-k8s-infra",
         "revoke-app-storage-key",
@@ -58,7 +58,7 @@ describe('destroy plan snapshot', () => {
   });
 
   it('locks the k8s-ha teardown step-name sequence', () => {
-    expect(planStepNames(planDestroy('k8s-ha', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDestroy('k8s-ha'))).toMatchInlineSnapshot(`
       [
         "destroy-k8s-infra",
         "revoke-app-storage-key",
