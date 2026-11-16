@@ -17,7 +17,7 @@ import { compileFunction } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
 const REPO = join(__dirname, '../../..');
-const HOOK_FILES = ['services/n8n/hooks/hooks.js', 'carbon/volumes/n8n/hooks.js'];
+const HOOK_FILES = ['services/n8n/hooks/hooks.js'];
 
 type Handler = (req: unknown, res: unknown, next: () => void) => Promise<void>;
 

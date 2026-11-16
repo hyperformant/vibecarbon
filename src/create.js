@@ -407,7 +407,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
 }
 
 /**
- * Lay down the project's k8s/ tree. Optional add-ons like n8n are left out:
+ * Lay down the project's k8s/ tree. Add-ons are not in the template:
  * `vibecarbon add` installs them. The one copy rule for k8s/, so a test can
  * resolve what the Flux cluster files point at in the tree a new project
  * really gets (tests/unit/create/flux-kustomization-paths.test.ts).
@@ -416,7 +416,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
  * @param {Record<string, string>} variables
  */
 export function copyK8sTemplate(projectDir, variables) {
-  copyTemplateDir('k8s', join(projectDir, 'k8s'), variables, ['n8n']);
+  copyTemplateDir('k8s', join(projectDir, 'k8s'), variables);
 }
 
 /**

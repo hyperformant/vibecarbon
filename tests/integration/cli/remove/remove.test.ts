@@ -2,7 +2,7 @@
  * vibecarbon remove — comprehensive matrix against a real project.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
@@ -96,7 +96,7 @@ describe('vibecarbon remove', () => {
     });
   });
 
-  describe('remove never deletes through a symlink, nor a file the template ships', () => {
+  describe('remove never deletes through a symlink', () => {
     it('skips a file whose path runs through a symlinked directory', () => {
       assertSuccess(runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
       // volumes/prometheus becomes a link to a directory outside the project
@@ -121,22 +121,33 @@ describe('vibecarbon remove', () => {
       assertSuccess(r);
       expect(readFileSync(join(outside, 'kustomization.yaml'), 'utf-8')).toBe('outside\n');
     });
+  });
 
-    it('leaves a mapped file the template also ships (volumes/db/n8n-init.sh)', () => {
-      const rel = 'volumes/db/n8n-init.sh';
-      expect(existsSync(join(process.cwd(), 'carbon', rel))).toBe(true);
-      if (!existsSync(join(project, rel))) {
-        mkdirSync(join(project, 'volumes', 'db'), { recursive: true });
-        writeFileSync(join(project, rel), readFileSync(join(process.cwd(), 'carbon', rel)));
+  describe('a parked add-on installed earlier loses its own files', () => {
+    it('removes the files n8n mapped into shared directories, and leaves the template ones', () => {
+      // The template ships none of n8n's files, so every one `add` wrote goes,
+      // including those under volumes/db/, which the template's db scripts share.
+      const mapped: Record<string, string> = {
+        'volumes/db/n8n-init.sh': 'db/init.sh',
+        'volumes/n8n/hooks.js': 'hooks/hooks.js',
+        'docker-compose.n8n.prod.yml': 'compose/docker-compose.prod.yml',
+      };
+      for (const [rel, src] of Object.entries(mapped)) {
+        expect(existsSync(join(process.cwd(), 'carbon', rel)), rel).toBe(false);
+        mkdirSync(dirname(join(project, rel)), { recursive: true });
+        writeFileSync(
+          join(project, rel),
+          readFileSync(join(process.cwd(), 'services', 'n8n', src)),
+        );
       }
       const manifestPath = join(project, '.vibecarbon.json');
       const seeded = JSON.parse(readFileSync(manifestPath, 'utf-8'));
       seeded.services = { ...(seeded.services ?? {}), n8n: { version: '1.0.0' } };
       writeFileSync(manifestPath, JSON.stringify(seeded, null, 2));
       assertSuccess(runCli('remove', ['n8n', '-y'], { cwd: project, timeoutMs: 30_000 }));
-      expect(existsSync(join(project, rel))).toBe(true);
-      // n8n's own files still go.
-      expect(existsSync(join(project, 'docker-compose.n8n.prod.yml'))).toBe(false);
+      for (const rel of Object.keys(mapped))
+        expect(existsSync(join(project, rel)), rel).toBe(false);
+      expect(existsSync(join(project, 'volumes/db/db-guard.sh'))).toBe(true);
     });
   });
 

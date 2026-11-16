@@ -20,8 +20,6 @@ const load = (rel: string) =>
 
 const PAIRS: Array<[string, string]> = [
   ['carbon/docker-compose.yml', 'carbon/docker-compose.override.yml'],
-  ['carbon/docker-compose.n8n.yml', 'carbon/docker-compose.n8n.override.yml'],
-  ['carbon/docker-compose.metabase.yml', 'carbon/docker-compose.metabase.override.yml'],
 ];
 
 // Add-ons ship from services/<svc>/compose/, not carbon/. Discover them so a

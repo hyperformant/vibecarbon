@@ -35,7 +35,6 @@ const FILES = execFileSync(
     'services/*/db/*.sh',
     'services/*/compose/*.yml',
     'services/*/scripts/*.sh',
-    'carbon/volumes/n8n/scripts/setup.sh',
     'tests/e2e/*.ts',
   ],
   { cwd: ROOT, encoding: 'utf8' },
@@ -52,7 +51,7 @@ const INVOCATION = new RegExp(
 const ROLE = /(?:-U|--username)[\s'",=]+([$\w{}:-]+)/;
 /** Shell separators that end one command and start the next. */
 const SEPARATOR = /&&|\|\||;|\|/;
-// n8n is the role carbon/volumes/db/n8n-init.sh creates for n8n's own database.
+// n8n is the role services/n8n/db/init.sh creates for n8n's own database.
 const ALLOWED = new Set(['postgres', 'replicator', 'n8n']);
 
 /**
@@ -120,9 +119,9 @@ describe('db client role census', () => {
   it('sees the argv-array shape (flags on the following lines)', () => {
     expect(found.some(({ where }) => where.startsWith('src/failover.js:'))).toBe(true);
     // ...and the service scripts that connect as their own role.
-    expect(
-      found.filter(({ where }) => where.startsWith('carbon/volumes/n8n/scripts/setup.sh:')),
-    ).toEqual([expect.objectContaining({ role: 'n8n' }), expect.objectContaining({ role: 'n8n' })]);
+    expect(found.filter(({ where }) => where.startsWith('services/n8n/scripts/setup.sh:'))).toEqual(
+      [expect.objectContaining({ role: 'n8n' }), expect.objectContaining({ role: 'n8n' })],
+    );
   });
 
   it('every db client names an existing role', () => {

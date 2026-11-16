@@ -192,9 +192,9 @@ async function removeService(serviceName, options) {
   const droppedChecksums = [];
   const skipped = [];
   // A path through a symlink is never deleted (the delete would land where
-  // the link points), and a file the template itself ships stays (the
-  // template's copy of volumes/db/n8n-init.sh, say): both are left, the
-  // symlinked ones with a warning.
+  // the link points), and a file the template itself ships stays (none does
+  // today, but an add-on that maps a whole directory may come to share a
+  // path with it): both are left, the symlinked ones with a warning.
   const throughLink = (rel) => {
     const link = symlinkedComponent(cwd, rel.replace(/\/$/, ''));
     if (link) skipped.push(`${rel}: ${link} is a symlink, and remove never deletes through one`);

@@ -672,8 +672,8 @@ async function main(cliArgs) {
   // What upgrade ships: the template's files, plus the files of every add-on
   // the project installed, read from the bundled services/<name>/ through
   // the add-on's manifest (the map `vibecarbon add` copied by). A path an
-  // add-on maps is the add-on's: the template's copy of it (the dev stack's
-  // carbon/docker-compose.n8n.yml and the like) is never its source.
+  // add-on maps is the add-on's: a template file at the same path is never
+  // its source.
   const ownedByAddons = addonOwnedPaths(SERVICES_DIR);
   const shippedEntries = [
     ...getUpgradeableFiles(TEMPLATE_DIR)
