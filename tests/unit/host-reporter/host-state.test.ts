@@ -70,12 +70,16 @@ describe('mainPackage', () => {
 
 describe('REBOOT_TRIGGER_PATTERNS', () => {
   const hit = (n: string) => REBOOT_TRIGGER_PATTERNS.some((re) => re.test(n));
-  it.each(['linux-image-6.8.0-90-generic', 'linux-firmware', 'libc6', 'systemd', 'dbus'])(
-    'matches %s',
-    (n) => {
-      expect(hit(n)).toBe(true);
-    },
-  );
+  it.each([
+    'linux-image-6.8.0-90-generic',
+    'linux-firmware',
+    'libc6',
+    'systemd',
+    'dbus',
+    'libpam0g',
+  ])('matches %s', (n) => {
+    expect(hit(n)).toBe(true);
+  });
   it.each(['curl', 'openssl'])('does not match %s', (n) => {
     expect(hit(n)).toBe(false);
   });

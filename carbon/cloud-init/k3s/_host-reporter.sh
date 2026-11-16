@@ -32,10 +32,10 @@ if [ "$1" = "--print" ]; then
 fi
 
 if [ -e "$KUBELET_KUBECONFIG" ]; then
-  name=$(k3s kubectl --kubeconfig "$KUBELET_KUBECONFIG" auth whoami -o jsonpath='{.status.userInfo.username}') || exit 1
+  name=$(kubectl --kubeconfig "$KUBELET_KUBECONFIG" auth whoami -o jsonpath='{.status.userInfo.username}') || exit 1
   name=${name#system:node:}
   [ -n "$name" ] || exit 1
-  k3s kubectl --kubeconfig "$KUBELET_KUBECONFIG" annotate --overwrite node "$name" "vibecarbon.dev/host-state=$json" || exit 1
+  kubectl --kubeconfig "$KUBELET_KUBECONFIG" annotate --overwrite node "$name" "vibecarbon.dev/host-state=$json" || exit 1
   exit 0
 fi
 
