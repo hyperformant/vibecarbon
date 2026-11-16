@@ -314,26 +314,6 @@ const TIMEOUTS: Record<string, number> = {
   'final-destroy': 1_200_000, // same S3 teardown ladders as destroy
 };
 
-/**
- * Verification checks that are KNOWN to fail for a given (mode, step) combo
- * because of an underlying architectural limitation that hasn't been fixed
- * yet. The lifecycle treats these as "expected fail" — they're still recorded
- * in the verifications table, but they don't fail the step. ANY OTHER check
- * failing in the same step still fails the step (so we don't lose signal on
- * unrelated regressions).
- *
- * Each entry MUST cite the underlying issue so we know when to remove it.
- * If you find yourself adding a new entry here, prefer fixing the root cause.
- *
- * Currently empty. It once held k8s-ha verify-failover entries whose failing
- * set varied run-to-run because cross-cluster replication never streamed
- * (project_replication_broken.md), and for a while verify-failover was
- * skipped for k8s-ha outright. Both are history: the WireGuard transport +
- * pg_basebackup reseed landed 2026-07-06 and verify-failover now runs for
- * BOTH HA modes (see step 12 in the step list below).
- */
-const EXPECTED_VERIFY_FAILURES: Record<string, Partial<Record<StepName, string[]>>> = {};
-
 // ---------------------------------------------------------------------------
 // .env.local admin credentials
 // ---------------------------------------------------------------------------
@@ -2063,16 +2043,9 @@ export async function runLifecycle(
           }
         }
 
-        // Check for any failed verifications. Known-broken checks for this
-        // (mode, step) combo are downgraded to warnings — the verifications
-        // table still records them, but they don't fail the step. See
-        // EXPECTED_VERIFY_FAILURES at the top of this file for entries.
-        const expectedFailNames = EXPECTED_VERIFY_FAILURES[config.mode]?.[stepName] ?? [];
-        const allFailures = allResults.filter((r) => r.status === 'fail');
-        const expectedFailures = allFailures.filter((r) => expectedFailNames.includes(r.checkName));
-        const unexpectedFailures = allFailures.filter(
-          (r) => !expectedFailNames.includes(r.checkName),
-        );
+        // Any failed verification fails the step. There is no table of
+        // expected failures: a check that cannot pass yet is fixed or removed.
+        const failures = allResults.filter((r) => r.status === 'fail');
 
         // Skips are counted on their OWN axis — a check whose precondition was
         // missing (no SSH handle, feature off, unresolved standby IP) is neither
@@ -2090,19 +2063,10 @@ export async function runLifecycle(
           );
         }
 
-        // Log expected failures distinctly so they don't look like passes.
-        for (const f of expectedFailures) {
-          const detail = f.errorMessage || JSON.stringify(f.details || {});
-          console.warn(
-            `${tag} [expected-fail] ${f.checkName}: ${detail} ` +
-              `(known limitation for ${config.mode}/${stepName} — see EXPECTED_VERIFY_FAILURES)`,
-          );
-        }
-
-        if (unexpectedFailures.length > 0) {
-          const failNames = unexpectedFailures.map((f) => f.checkName).join(', ');
+        if (failures.length > 0) {
+          const failNames = failures.map((f) => f.checkName).join(', ');
           // Log error details for each failed check to help diagnose issues
-          for (const f of unexpectedFailures) {
+          for (const f of failures) {
             const detail = f.errorMessage || JSON.stringify(f.details || {});
             console.error(`${tag} [fail] ${f.checkName}: ${detail}`);
           }
@@ -2114,14 +2078,14 @@ export async function runLifecycle(
           // pattern — read as [unknown] and hard-failed the leg). Same bug
           // shape de488eb fixed for verify-tls aborts, at the verification
           // surface.
-          const detailLines = unexpectedFailures
+          const detailLines = failures
             .map(
               (f) =>
                 `[fail] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
             )
             .join('\n');
           throw new Error(
-            `${unexpectedFailures.length} verification(s) failed: ${failNames}\n${detailLines}`,
+            `${failures.length} verification(s) failed: ${failNames}\n${detailLines}`,
           );
         }
 
