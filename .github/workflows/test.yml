@@ -196,6 +196,14 @@ jobs:
       - name: Run unit tests
         run: pnpm test:unit
 
+      # Same step as the integration job. This job ran without it while the
+      # runner image shipped a pulumi CLI; ubuntu-26.04 does not.
+      - name: Install Pulumi CLI
+        run: |
+          version="$(node -p "require('@pulumi/pulumi/package.json').version")"
+          curl -fsSL https://get.pulumi.com | sh -s -- --version "$version" --no-edit-path
+          echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"
+
       - name: Run integration tests
         run: pnpm test:integration
         timeout-minutes: 10
