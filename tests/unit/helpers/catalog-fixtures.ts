@@ -11,8 +11,9 @@ import { getProviderClass } from '../../../src/lib/providers/index.js';
  * payloads `fetchServerTypes` reads, captured on 2026-10-22 and trimmed to the
  * fields it uses (specs, architecture, per-location availability and the
  * monthly price). They are public catalog data with no account identifiers.
- * `flux-hetzner-cx23-hel1` is synthetic: the 2026-10-22 Hetzner catalog with
- * `cx23` set orderable in hel1 only, the shape Hetzner showed on 2026-10-20.
+ * `flux-hetzner-cx23-hel1` is synthetic and has no file: it is the 2026-10-22
+ * Hetzner catalog with `cx23` set orderable in hel1 only, the shape Hetzner
+ * showed on 2026-10-20, derived in `DERIVED_FIXTURES` below.
  *
  * The loader hands the fixture's payload to the provider's own
  * `parseCatalog`, the pure step `fetchServerTypes` runs on what it walked, so
@@ -25,8 +26,34 @@ const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), '../fixtures/c
 // biome-ignore lint/suspicious/noExplicitAny: fixtures are untyped API JSON
 type Json = any;
 
+/**
+ * Fixtures with no file of their own: each is a stored capture with a few
+ * fields changed, so the capture stays the one copy of the catalog.
+ */
+const DERIVED_FIXTURES: Record<string, () => Json> = {
+  'flux-hetzner-cx23-hel1': () => {
+    const fixture = readCatalogFixture('2026-10-22/hetzner');
+    fixture.captured = '2026-10-22 (edited)';
+    fixture.source =
+      'Synthetic: the 2026-10-22 Hetzner capture with cx23 available in hel1 only (the 2026-10-20 shape)';
+    const cx23 = fixture.server_types.find((t: Json) => t.name === 'cx23');
+    const hel1 = cx23?.locations.find((l: Json) => l.name === 'hel1');
+    // The capture has cx23 orderable nowhere. A re-capture that changes that
+    // makes this fixture something other than "hel1 only", so refuse it.
+    if (!hel1 || cx23.locations.some((l: Json) => l.available)) {
+      throw new Error(
+        'flux-hetzner-cx23-hel1: the capture no longer has cx23 unavailable in every location',
+      );
+    }
+    hel1.available = true;
+    return fixture;
+  },
+};
+
 /** Read a fixture by name, e.g. `2026-10-22/hetzner` or `flux-hetzner-cx23-hel1`. */
 export function readCatalogFixture(name: string): Json {
+  const derive = DERIVED_FIXTURES[name];
+  if (derive) return derive();
   return JSON.parse(readFileSync(join(FIXTURE_DIR, `${name}.json`), 'utf8'));
 }
 
