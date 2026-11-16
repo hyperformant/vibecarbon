@@ -16,7 +16,7 @@ export type DeployMode = 'compose' | 'compose-ha' | 'k8s' | 'k8s-ha';
  * scenario on DO DNS needs no credential beyond DIGITALOCEAN_API_TOKEN.
  */
 export type DnsProvider = 'hetzner' | 'cloudflare' | 'digitalocean' | 'linode' | 'vultr' | 'manual';
-/** Cloud provider a scenario provisions against. Absent/undefined means 'hetzner'. */
+/** Cloud provider a scenario provisions against. Always explicit (see `ScenarioConfig.provider`). */
 export type Provider = 'hetzner' | 'digitalocean' | 'linode' | 'vultr' | 'scaleway';
 
 export interface ScenarioConfig {
