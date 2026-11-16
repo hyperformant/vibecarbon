@@ -68,6 +68,10 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
     expect(argv).not.toContain('.env.local');
   });
 
+  it('includes drizzle.config.ts, the config the schema workflow reads', () => {
+    expect(buildGitAddArgv(join(process.cwd(), 'carbon'))).toContain('drizzle.config.ts');
+  });
+
   it('starts with git add --', () => {
     const argv = buildGitAddArgv();
     expect(argv.slice(0, 3)).toEqual(['git', 'add', '--']);

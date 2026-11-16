@@ -33,7 +33,7 @@ When invoked, follow this systematic process:
   - `tests/component/` — React components and custom hooks via React Testing Library (jsdom env)
   - `tests/integration/` — Hono route handlers end-to-end via `app.request()`, with the database, the auth API, Stripe and SMTP mocked at the module boundary (node env)
   - `tests/db/` — RLS policies and SQL against a real Postgres; skipped unless `TEST_DB_HOST` is set (see `TESTING.md`)
-- Shared helpers live in `tests/_helpers/`: `app.ts` (`mountRoute`, `jsonPost`), `factories.ts` (`makeUser`, `makeOrg`), `jwt.ts` (`mockJwt`), `env.ts` (`mockEnv`)
+- Shared helpers live in `tests/_helpers/`: `app.ts` (`mountRoute`, `jsonPost`), `factories.ts` (`makeUser`, `makeOrg`), `env.ts` (`mockEnv`)
 - Use Vitest (`describe`, `it`, `expect`, `vi` for mocking)
 - Put a new test in the tier that matches what it exercises; do not co-locate tests next to `src/`
 

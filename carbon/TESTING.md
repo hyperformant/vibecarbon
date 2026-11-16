@@ -91,7 +91,6 @@ All under `tests/_helpers/`:
 | `app.ts` → `jsonPost(body)` | POSTing JSON to `app.request()` without re-typing headers. |
 | `factories.ts` → `makeUser`, `makeOrg`, `makeContactSubmission` | Plausible domain objects to hand back from a mocked query. |
 | `drizzle-mock.ts` → `queryChain(run)` | Standing in for a Drizzle query: every builder method returns the chain, and awaiting it calls `run` for the rows (or throws, to simulate a failed query). |
-| `jwt.ts` → `mockJwt(payload, secret?)` | HS256-signed bearer token for auth-protected routes. |
 | `env.ts` → `mockEnv({...})` | Temporarily swap process.env vars for one test; returns a restore closure. |
 | `setup-rtl.ts` | Wired into the `component` project — loads jest-dom matchers and runs RTL's cleanup between tests. |
 | `setup-integration.ts` | Wired into the `integration` project. Seeds plausible env values (auth secret, site URL, db host) so server modules pass zod validation when imported. |

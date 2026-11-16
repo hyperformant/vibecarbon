@@ -183,8 +183,7 @@ export function addonUpgradeEntries({ installed, servicesDir, projectRoot, onRej
 /**
  * Every project path any bundled add-on maps, installed or not. The add-on is
  * the source of these files: upgrade never takes them from the template,
- * whose copies (carbon/docker-compose.n8n.yml and the like) serve the
- * template's own development stack. Uncontained paths are left out, as in
+ * even if the template ships a file at the same path. Uncontained paths are left out, as in
  * addonUpgradeEntries; containment is judged against a stand-in root, since
  * only the path set matters here.
  *

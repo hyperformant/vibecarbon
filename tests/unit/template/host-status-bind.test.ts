@@ -19,8 +19,13 @@ import { describe, expect, it } from 'vitest';
 const ROOT = process.cwd();
 
 // Compose's merge tags (`!reset`, `!override`) are not YAML core; drop them.
+// Add-on files carry {{PLACEHOLDER}} tokens that are not valid YAML.
 const load = (rel: string) =>
-  loadYaml(readFileSync(join(ROOT, rel), 'utf-8').replace(/!(reset|override)\b/g, '')) as {
+  loadYaml(
+    readFileSync(join(ROOT, rel), 'utf-8')
+      .replace(/!(reset|override)\b/g, '')
+      .replace(/\{\{[A-Z_]+\}\}/g, 'x'),
+  ) as {
     services: Record<string, { volumes?: unknown[] }>;
   };
 
@@ -28,10 +33,10 @@ const COMPOSE_FILES = [
   'carbon/docker-compose.yml',
   'carbon/docker-compose.prod.yml',
   'carbon/docker-compose.override.yml',
-  'carbon/docker-compose.n8n.yml',
-  'carbon/docker-compose.n8n.prod.yml',
-  'carbon/docker-compose.metabase.yml',
-  'carbon/docker-compose.metabase.prod.yml',
+  'services/n8n/compose/docker-compose.yml',
+  'services/n8n/compose/docker-compose.prod.yml',
+  'services/metabase/compose/docker-compose.yml',
+  'services/metabase/compose/docker-compose.prod.yml',
 ];
 
 describe('compose prod overlay: the host status bind', () => {

@@ -265,7 +265,6 @@ describe('core-path images come from our ghcr mirror', () => {
       expect.arrayContaining(['carbon/docker-compose.yml', 'carbon/docker-compose.prod.yml']),
     );
     expect(COMPOSE_FILES.some(isAddonCompose)).toBe(false);
-    expect(gitFiles('carbon/docker-compose*.yml').some(isAddonCompose)).toBe(true);
     expect(K8S_FILES).toEqual(
       expect.arrayContaining([
         'carbon/k8s/base/traefik/deployment.yaml',

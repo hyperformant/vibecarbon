@@ -501,6 +501,7 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'tsconfig.json',
   'tsconfig.server.json',
   'vite.config.ts',
+  'drizzle.config.ts',
   'components.json',
   // Docker
   'Dockerfile',

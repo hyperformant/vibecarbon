@@ -31,14 +31,12 @@ const ADDONS = [
   { name: 'n8n', key: 'N8N_DB_PASSWORD' },
 ] as const;
 
-/** What an add-on ships: compose (add-on and template copies), k8s, scripts. */
+/** What an add-on ships: compose, k8s, scripts. */
 function shippedFiles(name: string): string[] {
   return [
     `services/${name}/compose/docker-compose.yml`,
     `services/${name}/compose/docker-compose.prod.yml`,
     `services/${name}/compose/docker-compose.override.yml`,
-    `carbon/docker-compose.${name}.yml`,
-    `carbon/docker-compose.${name}.prod.yml`,
     `services/${name}/k8s/deployment.yaml`,
     ...(name === 'metabase' ? ['services/metabase/scripts/setup.sh'] : []),
     `services/${name}/db/init.sh`,
@@ -62,10 +60,7 @@ describe('add-on database passwords', () => {
       });
 
       it(`compose hands ${key} to the add-on and to the db's init script`, () => {
-        for (const file of [
-          `services/${name}/compose/docker-compose.yml`,
-          `carbon/docker-compose.${name}.yml`,
-        ]) {
+        for (const file of [`services/${name}/compose/docker-compose.yml`]) {
           const text = read(file);
           // The db service extension (the init script reads it in the db container).
           expect(text, file).toMatch(
@@ -85,7 +80,7 @@ describe('add-on database passwords', () => {
       });
 
       it('the init script refuses an empty password and sets it with :pw quoting, off the error and slow-statement logs, never on argv', () => {
-        for (const file of [`services/${name}/db/init.sh`, `carbon/volumes/db/${name}-init.sh`]) {
+        for (const file of [`services/${name}/db/init.sh`]) {
           const script = read(file);
           expect(script, file).toContain(`: "\${${key}:?`);
           // The password is read inside the SQL, never passed on psql's argv.
@@ -154,10 +149,7 @@ describe('add-on database passwords', () => {
       ]);
       expect(env(dir, '.env.local').N8N_ENCRYPTION_KEY).toHaveLength(48);
       expect(env(dir, '.env').N8N_ENCRYPTION_KEY).toBe(env(dir, '.env.local').N8N_ENCRYPTION_KEY);
-      for (const f of [
-        'services/n8n/compose/docker-compose.yml',
-        'carbon/docker-compose.n8n.yml',
-      ]) {
+      for (const f of ['services/n8n/compose/docker-compose.yml']) {
         expect(read(f), f).toContain('N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?');
         expect(read(f), f).not.toContain('n8n_dev_encryption_key');
       }

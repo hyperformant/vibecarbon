@@ -376,11 +376,16 @@ function makeBiomeConfigRoot(biomeJsonPath) {
  * Template tests that must not reach a generated project. The migrations
  * census pins carbon/db/migrations to its one baseline set; a project's
  * history grows normally, so the census would fail on its first
- * `drizzle-kit generate`. Pinned by tests/unit/create/template-only-tests.test.ts.
+ * `drizzle-kit generate`. The add-on init-grants test reads the add-on
+ * bundles in this repo's services/, which a project does not have.
+ * Pinned by tests/unit/create/template-only-tests.test.ts.
  */
-export const TEMPLATE_ONLY_TESTS = ['template-migrations-census.test.ts'];
+export const TEMPLATE_ONLY_TESTS = [
+  'template-migrations-census.test.ts',
+  'addon-init-grants.test.ts',
+];
 
-function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCopy = []) {
+function copyTemplateDir(templateSubdir, destDir, variables, exclude = []) {
   const fullTemplatePath = join(TEMPLATE_DIR, templateSubdir);
 
   if (!existsSync(fullTemplatePath)) {
@@ -396,10 +401,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
 
     if (entry.isDirectory()) {
       mkdirSync(destPath, { recursive: true });
-      copyTemplateDir(join(templateSubdir, entry.name), destPath, variables, exclude, rawCopy);
-    } else if (rawCopy.includes(entry.name)) {
-      mkdirSync(dirname(destPath), { recursive: true });
-      copyFileSync(join(fullTemplatePath, entry.name), destPath);
+      copyTemplateDir(join(templateSubdir, entry.name), destPath, variables, exclude);
     } else {
       copyTemplate(join(templateSubdir, entry.name), destPath, variables);
     }
@@ -407,7 +409,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
 }
 
 /**
- * Lay down the project's k8s/ tree. Optional add-ons like n8n are left out:
+ * Lay down the project's k8s/ tree. Add-ons are not in the template:
  * `vibecarbon add` installs them. The one copy rule for k8s/, so a test can
  * resolve what the Flux cluster files point at in the tree a new project
  * really gets (tests/unit/create/flux-kustomization-paths.test.ts).
@@ -416,7 +418,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
  * @param {Record<string, string>} variables
  */
 export function copyK8sTemplate(projectDir, variables) {
-  copyTemplateDir('k8s', join(projectDir, 'k8s'), variables, ['n8n']);
+  copyTemplateDir('k8s', join(projectDir, 'k8s'), variables);
 }
 
 /**
@@ -808,6 +810,10 @@ async function bootstrap(cliArgs) {
   copyTemplate('tsconfig.json', join(projectDir, 'tsconfig.json'), variables);
   copyTemplate('tsconfig.server.json', join(projectDir, 'tsconfig.server.json'), variables);
   copyTemplate('vite.config.ts', join(projectDir, 'vite.config.ts'), variables);
+  // drizzle-kit's config. AGENTS.md's schema workflow (`npx drizzle-kit
+  // generate --name <slug>`) reads it; without it the command has no dialect,
+  // schema or output directory and fails.
+  copyTemplate('drizzle.config.ts', join(projectDir, 'drizzle.config.ts'), variables);
   copyTemplate('biome.json', join(projectDir, 'biome.json'), variables);
   // Generated projects are standalone (no parent biome config), so the config
   // must declare itself root — see makeBiomeConfigRoot.
@@ -940,15 +946,7 @@ async function bootstrap(cliArgs) {
   copyK8sTemplate(projectDir, variables);
 
   // Scripts (manifest-based docker/k8s commands)
-  // generate-dev-configs.sh contains {{PLACEHOLDER}} tokens as its own substitution keys,
-  // so it must be copied verbatim to avoid leaking real secrets into the script.
-  copyTemplateDir(
-    'scripts',
-    join(projectDir, 'scripts'),
-    variables,
-    [],
-    ['generate-dev-configs.sh'],
-  );
+  copyTemplateDir('scripts', join(projectDir, 'scripts'), variables);
 
   // Make shell scripts executable
   const shellScripts = [
@@ -969,7 +967,7 @@ async function bootstrap(cliArgs) {
 
   // Validate no unreplaced placeholders remain
   s.message('Validating generated files');
-  const placeholderIssues = validatePlaceholders(projectDir, ['generate-dev-configs.sh', 'agents']);
+  const placeholderIssues = validatePlaceholders(projectDir, ['agents']);
   if (placeholderIssues.length > 0) {
     s.stop('Validation warning');
     p.log.warn('Some files contain unreplaced placeholders:');

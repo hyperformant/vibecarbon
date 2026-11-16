@@ -292,7 +292,6 @@ Helpers live in `tests/_helpers/`:
 
 - `app.ts` — `mountRoute(prefix, routes)` to build a tiny Hono app for one route; `jsonPost(body)` for request boilerplate.
 - `factories.ts` — `makeUser`, `makeOrg`, `makeContactSubmission` for plausible domain fixtures.
-- `jwt.ts` — `mockJwt(payload)` for HS256-signed test tokens.
 - `env.ts` — `mockEnv({...})` returning a restore closure (no globals).
 - `setup-rtl.ts` — vitest setup for the component project (jest-dom matchers + RTL cleanup).
 - `setup-integration.ts` — seeds plausible env values so server modules load without zod-validation errors.

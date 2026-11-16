@@ -150,10 +150,10 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   // S3_ENDPOINT/S3_BUCKET/S3_REGION/S3_ACCESS_KEY/S3_SECRET_KEY were REMOVED (2026-10-13): the
   // app storage module (carbon/src/server/lib/storage.ts + env.ts) now reads them directly, so
   // the census counts them as real carbon/src reads and they no longer need an exemption.
-  // N8N_DB_PASSWORD was REMOVED (2026-09-19 code review): carbon/docker-compose.n8n.yml:87 sets
+  // N8N_DB_PASSWORD was REMOVED (2026-09-19 code review): the n8n compose file set
   // the container's N8N_DB_PASSWORD FROM POSTGRES_PASSWORD — it assigns a container var NAMED
   // N8N_DB_PASSWORD from a DIFFERENT source and never reads the operator's N8N_DB_PASSWORD at
-  // all. The n8n role password really is POSTGRES_PASSWORD (carbon/volumes/db/n8n-init.sh), same
+  // all. The n8n role password really is POSTGRES_PASSWORD (the n8n init script), same
   // as METABASE_DB_PASSWORD before it. The .env.example line was dropped, not exempted — see the
   // mechanical check below.
 };

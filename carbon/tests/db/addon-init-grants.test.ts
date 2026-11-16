@@ -12,8 +12,9 @@ import { connectTestDb, dbTestsEnabled } from './_helpers';
  * bucket's keys) and read the auth tables (password hashes, plain-text
  * session tokens, TOTP secrets).
  *
- * volumes/db/<addon>-init.sh runs at first boot and on every dev start
- * (scripts/docker-up.js). It makes its role NOSUPERUSER BYPASSRLS (so it sees
+ * Each add-on's db/init.sh (services/<addon>/db/init.sh in the vibecarbon
+ * repo; `vibecarbon add` installs it as volumes/db/<addon>-init.sh) runs at
+ * first boot and on every dev start (scripts/docker-up.js). It makes its role NOSUPERUSER BYPASSRLS (so it sees
  * every business row), grants it the business tables, and in the same
  * transaction takes back every server-only table (RLS on, no policies)
  * through app.revoke_server_only_tables(), which the migration runner also
@@ -35,7 +36,9 @@ const ADDONS = [
  * only psql can run or what needs the add-on's own database.
  */
 function initSqlBlocks(role: string): string[] {
-  const script = readFileSync(join(process.cwd(), 'volumes', 'db', `${role}-init.sh`), 'utf8');
+  // The bundles live beside the template in the vibecarbon repo, which is why
+  // this test does not ship into a generated project (TEMPLATE_ONLY_TESTS).
+  const script = readFileSync(join(process.cwd(), '..', 'services', role, 'db', 'init.sh'), 'utf8');
   const blocks = [...script.matchAll(/<<'?EOSQL'?\n([\s\S]*?)\nEOSQL/g)].map((m) => m[1]);
   return blocks.map((sql) =>
     sql

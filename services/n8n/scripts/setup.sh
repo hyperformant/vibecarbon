@@ -9,9 +9,6 @@
 # random value nobody knows: production signs in through ForwardAuth + hooks.js
 # and never needs a password, so no shared password exists.
 # Added via: vibecarbon add n8n
-#
-# This file ships from two places (services/n8n/scripts and
-# carbon/volumes/n8n/scripts) and the two must stay byte for byte the same.
 
 set -e
 

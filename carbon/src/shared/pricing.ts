@@ -203,14 +203,3 @@ export function planIdFromPriceId(
   if (priceId === priceIds.pro) return 'pro';
   return 'free';
 }
-
-/**
- * Map Stripe price ID back to a plan ID.
- * @deprecated Use planIdFromPriceId instead. Kept for backward compatibility.
- */
-export function planIdFromStripePriceId(
-  stripePriceId: string,
-  envPriceIds: { starter?: string; pro?: string }
-): PlanId {
-  return planIdFromPriceId(stripePriceId, envPriceIds);
-}

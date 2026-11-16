@@ -67,7 +67,6 @@ describe('add-on app-database roles', () => {
         'services/metabase/compose/docker-compose.yml',
         'services/metabase/scripts/setup.sh',
         'services/n8n/compose/docker-compose.yml',
-        'carbon/docker-compose.metabase.yml',
       ]),
     );
   });
@@ -77,14 +76,12 @@ describe('add-on app-database roles', () => {
       /^APP_DB_USER="\$\{APP_DB_USER:-metabase\}"$/m,
     );
     expect(read('services/metabase/compose/docker-compose.yml')).toMatch(/APP_DB_USER: metabase$/m);
-    expect(read('carbon/docker-compose.metabase.yml')).toMatch(/- APP_DB_USER=metabase$/m);
     expect(read('services/n8n/compose/docker-compose.yml')).toMatch(/- APP_DB_USER=n8n$/m);
   });
 
   for (const role of ADDON_ROLES) {
-    it(`${role}-init.sh demotes its role, and the template copy matches the add-on's`, () => {
+    it(`${role}'s init.sh demotes its role`, () => {
       const script = read(`services/${role}/db/init.sh`);
-      expect(read(`carbon/volumes/db/${role}-init.sh`)).toBe(script);
       expect(script).toMatch(new RegExp(`^ALTER ROLE ${role} NOSUPERUSER BYPASSRLS;$`, 'm'));
       expect(script).not.toMatch(/\bSUPERUSER\b/);
       // The grant and the server-only revoke share one transaction (-1), and

@@ -188,7 +188,7 @@ function project(): string {
     if (/^docker-compose\..*ya?ml$/.test(f)) cpSync(join(REPO, 'carbon', f), join(dir, f));
   }
   cpSync(join(REPO, 'carbon', 'backup'), join(dir, 'backup'), { recursive: true });
-  for (const addon of ['observability', 'redis']) {
+  for (const addon of ['observability', 'redis', 'n8n', 'metabase']) {
     cpSync(
       join(REPO, 'services', addon, 'compose', 'docker-compose.yml'),
       join(dir, `docker-compose.${addon}.yml`),

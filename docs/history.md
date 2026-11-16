@@ -873,6 +873,26 @@ at a time. `status` and the admin dashboard say when a restart is due.
 **Do not undo:** no server reboots on its own. When the app cannot tell
 whether a restart is due, it says so; it never reports "none due".
 
+#### 2026-11-16: `create` ships `drizzle.config.ts` (#495)
+
+`create` now copies `drizzle.config.ts` into the project, and `upgrade` adds it
+to a project that has none.
+
+**Why:** the template gained the file with the lean stack (#194, 2026-10-16),
+but `create` copies root files from an explicit list and the file was never
+added to it. Every project made since then lacked it, so the documented schema
+workflow, `npx drizzle-kit generate --name <slug>`, failed for want of a
+config. No test saw it: the template's own drift test passes the dialect,
+schema and output directory as flags.
+
+**Do not undo:** a new root file in `carbon/` reaches no project until it is
+in the copy list in `src/create.js`, classified in
+`src/lib/upgrade-policy.js`, and in the git-add allowlist in
+`src/lib/project.js`.
+
+**Guard:** `tests/integration/template/create.test.ts` ("ships
+drizzle.config.ts with every file and path it names").
+
 ## Added and later removed
 
 | What | Removed | Why |

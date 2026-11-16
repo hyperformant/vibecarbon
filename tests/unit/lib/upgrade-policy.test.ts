@@ -31,6 +31,10 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('volumes/db/wal-archive.sh')).toBe('safe');
   });
 
+  it('classifies drizzle.config.ts as safe, so a project created without it gets it', () => {
+    expect(getFilePolicy('drizzle.config.ts')).toBe('safe');
+  });
+
   it('classifies Claude hook scripts as safe so projects get fixes', () => {
     expect(getFilePolicy('.claude/hooks/clean-merged.sh')).toBe('safe');
     expect(getFilePolicy('.claude/hooks/ff-main.sh')).toBe('safe');

@@ -99,14 +99,3 @@ export function useEnabledServices() {
     runningContainers: runningContainers || new Set(),
   };
 }
-
-/**
- * Check if a specific service is running
- */
-export function useIsServiceRunning(serviceId: string) {
-  const { services, isLoading } = useEnabledServices();
-  return {
-    isRunning: services.some((s) => s.id === serviceId),
-    isLoading,
-  };
-}

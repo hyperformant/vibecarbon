@@ -359,7 +359,7 @@ const offenders = (sites: Site[]) =>
 
 describe('every shipped image ref is pinned by digest', () => {
   it('found the files it sweeps (a moved directory must not empty the census)', () => {
-    expect(COMPOSE_FILES.length).toBeGreaterThanOrEqual(20);
+    expect(COMPOSE_FILES.length).toBeGreaterThanOrEqual(15);
     expect(K8S_FILES.length).toBeGreaterThanOrEqual(10);
     expect(CLOUD_INIT_FILES.length).toBeGreaterThan(0);
     expect(DOCKERFILES).toEqual(
