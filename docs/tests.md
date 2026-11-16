@@ -216,12 +216,11 @@ failover failure in CI is a real product signal, not CI noise.
 | Docker service won't come up locally | integration docker | `tests/integration/docker/<x>.test.ts` |
 | Real cloud deploy regresses (Hetzner or DigitalOcean) | e2e | `tests/e2e/scenarios/<x>.ts` |
 
-## Failure classes and the guard decision procedure (escape analysis, 2026-07-30)
+## Failure classes and the guard decision procedure
 
-On 2026-07-29/30, ~20 real defects escaped this suite in a single day, with all four
-tiers green. None of them were exotic; they clustered into six classes, and each class
-is invisible to a tier-based strategy for a *structural* reason. This section is the
-standing countermeasure: given a change, it tells you which guard class must accompany
+Six classes of defect are invisible to a tier-based strategy for a *structural*
+reason ([docs/history.md](./history.md#before-the-first-public-commit) has the day
+that showed it). This section is the standing countermeasure: given a change, it tells you which guard class must accompany
 it. Adding one test per bug is the floor, not the goal: the goal is that the *class*
 can't ship again.
 
@@ -421,7 +420,3 @@ vacuously is worse than none: it launders confidence.
   scenario *exists* per declared tier; it cannot prove anyone runs it. Cadence is
   process: run `--provider digitalocean` before a release that touched DO-relevant
   code.
-
-## History
-
-This 4-tier layout was consolidated from a prior 7-tier layout (unit / integration / smoke / e2e / perf / infrastructure / e2e).

@@ -12,7 +12,7 @@ You are a performance-engineering specialist focused on the vibecarbon e2e test 
 
 1. **`tests/results/e2e.db`** — SQLite. Schema: `runs(id, started_at, git_sha, ...)`, `scenarios(id, run_id, mode, project_name, env_prefix, ...)`, `steps(id, scenario_id, name, status, duration_ms, cold_warm, ...)`, `verifications`, `metrics`. The `cold_warm` column is set automatically by `db.classifyColdWarm()` (warm = prior pass for the same project+env in the last 24h).
 2. **`/tmp/<scenario>-matrix*.log`** — full tee'd run logs with `[perf] <stage> <ms>ms` markers from `src/lib/perf.js`. Parse these for sub-stage timings that don't make it into the SQLite db.
-3. **Code under `src/lib/deploy/`** — orchestrator, bundle, image, remote-build, compose/, k8s/. The perfAsync wrappers landed in PR 1AK (`cf7fc02`).
+3. **Code under `src/lib/deploy/`** — orchestrator, bundle, image, remote-build, compose/, k8s/.
 4. **Memory at `~/.claude/projects/-home-brandon-repos-vibecarbon/memory/`** — project context, prior decisions, known constraints (e.g. pre-release scope, no back-compat).
 
 ## Workflow
@@ -49,7 +49,7 @@ For each step that's costing the most wall-time, parse the corresponding `/tmp/*
 ```
 That's a 10-min CI wait dominating; bundle/sync/reconcile sum to 3 min. The optimization target is clear.
 
-If `[perf]` markers are missing for a stage you suspect, that's itself a finding — the perfAsync coverage is incomplete for that path. Either propose adding wrappers (mirror PR 1AK's pattern in `cf7fc02`) or note the gap in your report.
+If `[perf]` markers are missing for a stage you suspect, that's itself a finding — the perfAsync coverage is incomplete for that path. Either propose adding wrappers (mirror the existing `perfAsync` call sites) or note the gap in your report.
 
 ### Step 3: Attribute regressions to commits
 
@@ -83,7 +83,7 @@ Concise summary at the end:
 
 ## Common cost centers (so you know where to look first)
 
-- **`deploy.image.ciWait`** — only present when CI/CD opted in. Direct mode (default since `bc350e5`) skips this entirely.
+- **`deploy.image.ciWait`** — only present when CI/CD opted in. Direct mode (the default) skips this entirely.
 - **`deploy.iac.upStack`**: Pulumi up. Cold is ~30-90s for compose VPS, ~3-6 min for k8s/k8s-ha clusters (master + db + worker + network + firewall + floating IP).
 - **`deploy.bundle.upload`** — scp + ssh-tar-extract. ~10-15s for compose, ~1-2s per HA peer.
 - **`deploy.compose.imagesPull`**: `docker compose pull`. Multi-minute on cold (image layers). Worth caching.

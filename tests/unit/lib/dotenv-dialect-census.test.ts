@@ -1,7 +1,6 @@
 /**
- * Reader/writer census for the single dotenv dialect (spec
- * docs/superpowers/specs/2026-09-20-dotenv-dialect-design.md, "Enumerable
- * invariants" 3; replaces the old dotenv-parsers-parity test).
+ * Reader/writer census for the single dotenv dialect (docs/history.md,
+ * 2026-09-21; replaces the old dotenv-parsers-parity test).
  *
  * Invariant: no file parses `.env*` text except through `src/lib/dotenv.js`
  * (or its byte-identical template copy), and no production writer emits an

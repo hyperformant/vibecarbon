@@ -5,8 +5,8 @@
  * fails on any mention of a parked name:
  *
  * - the repo's own docs: every root *.md but CHANGELOG.md (the release
- *   record), and docs/**\/*.md but docs/superpowers (historical plans and
- *   specs);
+ *   record), and docs/**\/*.md but docs/history.md (the project
+ *   history, which says when each one was parked);
  * - every doc file under carbon/ (.md, .mdx, .mdc, the .env examples, the
  *   locale strings). `create` copies the template's docs from carbon/ into
  *   each new project, so walking all of carbon/ covers every doc it copies,
@@ -55,7 +55,7 @@ const isTemplateDoc = (rel: string) =>
 function userDocs(): string[] {
   const rootDocs = readdirSync(ROOT).filter((f) => f.endsWith('.md') && f !== 'CHANGELOG.md');
   const repoDocs = walk(join(ROOT, 'docs'), (rel) => rel.endsWith('.md')).filter(
-    (rel) => !rel.startsWith('docs/superpowers/'),
+    (rel) => rel !== 'docs/history.md',
   );
   const templateDocs = walk(join(ROOT, 'carbon'), isTemplateDoc);
   return [...rootDocs, ...repoDocs, ...templateDocs];
@@ -103,7 +103,7 @@ describe('parked add-on surface census', () => {
     ]) {
       expect(docs, expected).toContain(expected);
     }
-    expect(docs.some((d) => d.startsWith('docs/superpowers/'))).toBe(false);
+    expect(docs).not.toContain('docs/history.md');
   });
 
   it('no repo or template doc names a parked add-on', () => {

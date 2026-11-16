@@ -46,7 +46,8 @@ export const PROVIDER_ORDER = ['hetzner', 'digitalocean', 'vultr', 'linode', 'sc
  * state, ipv4MonthlyAt), declared once here with where each price was read.
  * Hetzner's floating IP and volume prices are read live from /v1/pricing when
  * the token is present (parseHetznerExtras); these values are the fallback.
- * What each environment bills: docs/superpowers/plans/2026-10-20-cost-grid-sources.md.
+ * What each environment bills: the README's "What it costs to run" section,
+ * which this script writes.
  */
 export const BILLING_EXTRAS = {
   hetzner: {

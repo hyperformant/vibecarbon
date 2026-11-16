@@ -1,6 +1,6 @@
 # Object storage key scoping (real accounts, 2026-10-20)
 
-The evidence behind ruling R2 of the security-hardening plan (docs/superpowers/plans/2026-10-20-security-hardening.md): which providers can give each environment's app its own object-storage key, and how. Copied from the spike notes with every access-key fragment removed. Every key, bucket and policy the spike created was deleted (see the cleanup lines).
+The evidence behind the least-privilege credentials decision ([docs/history.md](../history.md), 2026-10-25): which providers can give each environment's app its own object-storage key, and how. Copied from the spike notes with every access-key fragment removed. Every key, bucket and policy the spike created was deleted (see the cleanup lines).
 
 Scripts and raw logs stayed in the session scratchpad (`lib.mjs`, `linode.mjs`, `do.mjs`, `scaleway.mjs`, `scw-perm.mjs`, `scw-org.mjs`, `hetzner.mjs`, `vultr.mjs`, `*.log`). Credentials loaded in-process via `util.parseEnv(tests/.env.e2e)`; secrets redacted in all output. Each probe: two buckets A/B (each with `seed.txt`), then Put/Get/List/Delete on A and B, plus ListBuckets.
 

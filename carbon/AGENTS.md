@@ -239,12 +239,10 @@ Never hardcode a user-facing string, in either mode. Even monolingual projects
 route through `t()`, so enabling a language later is a CLI command rather than
 a rewrite. `tests/structural/i18n-key-resolution.test.ts` enforces that every
 `t()` key resolves against `en.json` — a typo'd key path renders as the raw
-path to the user, in every language at once, which is exactly the bug that test
-was written after finding.
+path to the user, in every language at once.
 
 **French register:** app UI uses *tu*; *vous* is reserved for `landing.*`
-marketing copy. Recorded here because the fr locale file no longer exists to
-read the convention off it.
+marketing copy.
 
 **Changing the language set is `vibecarbon configure globalization`**, never a
 hand-edited file. Adding a language seeds every key with its English value, so
@@ -399,7 +397,7 @@ Rules:
 
 ## Session Cookies & ForwardAuth (split-cookie contract)
 
-Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-split`, invariants pinned in `tests/structural/security-invariants.test.ts`):
+Two cookies, two jobs — never merge them (invariants pinned in `tests/structural/security-invariants.test.ts`):
 
 - **The session cookie** is set by the auth API (`/api/auth/*`): **HttpOnly** and **host-only** (apex). Page JS never sees it or any session token, and the SPA keeps no session store of its own. It **MUST NOT** get a `domain=` attribute: a parent-domain scope would send every user's session to every admin subdomain, where XSS in any bundled tool (Grafana or another admin add-on) could ride it. It is **NOT** a ForwardAuth credential.
 - **`vc-admin-token`** is the only credential `/api/_internal/verify-role` accepts (no session cookie, no `Authorization` / `X-Forwarded-Access-Token` header): **HttpOnly**, 1h, parent-domain scoped, minted by `POST /api/v1/admin/forwardauth-cookie` for super admins only (aal2 while MFA is globally on, never from an impersonation session). It carries a dedicated ForwardAuth token, **never the session token** (the parent-domain cookie reaches Grafana and every other admin subdomain): 32 random bytes, stored only as a SHA-256 hash in the `verification` table (`forwardauth:<hash>`, bound to the minting session, expires in 1 h; minting again keeps the session's two newest tokens, DELETE forgets all of them). verify-role looks the hash up, then the bound session, from the database every time, so an expired or forgotten token, signing out, a revoked or banned session, a role change, or MFA turned on with an aal1 session ends it at once. The token is useless against the app's own API. Never log it. Regular users carry no domain-wide cookie at all. **NEVER** let verify-role read the app's session cookie.

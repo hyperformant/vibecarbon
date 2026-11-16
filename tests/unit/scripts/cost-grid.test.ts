@@ -3,9 +3,8 @@
  *
  * renderCostGrid and replaceSection are pure. computeEnvMonthly and
  * providerEntry run on the 2026-10-22 catalog fixtures (seedCatalog), never
- * the network, and must give the grid the cost-grid sources quote
- * (docs/superpowers/plans/2026-10-20-cost-grid-sources.md), with each
- * location picked as the deploy wizard picks it for a new project.
+ * the network, and must give the grid the README published from that
+ * snapshot, with each location picked as the deploy wizard picks it for a new project.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
