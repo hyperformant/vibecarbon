@@ -70,6 +70,22 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
 
   it('includes drizzle.config.ts, the config the schema workflow reads', () => {
     expect(buildGitAddArgv(join(process.cwd(), 'carbon'))).toContain('drizzle.config.ts');
+  it('stages no .env file and nothing under .vibecarbon/, even when they exist', async () => {
+    // The checks above run in this checkout, where none of these exist, and
+    // the allowlist only ever returns paths that do. Here they all exist.
+    const { writeFileSync, mkdirSync, mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const tmp = mkdtempSync(join(tmpdir(), 'vb-allowlist-test-'));
+    try {
+      const present = ['.env', '.env.local', '.env.example', '.env.local.example', 'package.json'];
+      for (const name of present) writeFileSync(join(tmp, name), '');
+      mkdirSync(join(tmp, '.vibecarbon'));
+      writeFileSync(join(tmp, '.vibecarbon', 'deploy_key'), '');
+      const paths = buildGitAddArgv(tmp).slice(3);
+      expect(paths).toEqual(['package.json']);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('starts with git add --', () => {

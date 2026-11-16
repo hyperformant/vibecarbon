@@ -893,6 +893,27 @@ in the copy list in `src/create.js`, classified in
 **Guard:** `tests/integration/template/create.test.ts` ("ships
 drizzle.config.ts with every file and path it names").
 
+#### 2026-11-16: The staging allowlist covers every file create ships (#TBD)
+
+`.nvmrc`, `tests/`, `vitest.config.ts`, `tsconfig.test.json`, `TESTING.md`,
+`pnpm-workspace.yaml`, `.cursor/` and `.windsurfrules` joined the list of paths
+the CLI stages in a project.
+
+**Why:** when a project has no commit, `configure` makes the first one from
+this list and pushes it to a new GitHub repository. The files had been added
+to the template without being added to the list, so that push left them out.
+The project's build workflow runs the tests, so it would fail on its first run
+with no tests to find. On pnpm the push also left out the file that holds the
+dependency security floors.
+
+**Do not undo:** the list stays explicit. No `.env` name goes on it, the two
+example files included, and `.vibecarbon.json` stays the operator's to commit.
+
+**Guard:** `tests/integration/template/create.test.ts` compares the list with
+what a created project tracks, on npm and pnpm.
+`tests/unit/security/git-add-census.test.ts` allows `git add -A` only in
+`create`'s initial commit.
+
 ## Added and later removed
 
 | What | Removed | Why |

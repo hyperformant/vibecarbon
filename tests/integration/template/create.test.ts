@@ -11,6 +11,7 @@ import {
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { buildGitAddArgv } from '../../../src/lib/project.js';
 import { statePassphraseFingerprint } from '../../../src/lib/state-passphrase.js';
 // Shared scrub for test-spawned git (GIT_DIR hook-leak class — see the
 // module doc in _shared/git-env.ts; this file's local copy converged there
@@ -33,6 +34,47 @@ describe('create-vibecarbon E2E', () => {
   afterAll(() => {
     cleanupTempDir(tempDir);
   });
+
+  function expectAllowlistCoversTrackedFiles(dir: string) {
+    // `vibecarbon configure` makes the first commit from the allowlist when
+    // a project has none (create ran without git), then pushes it to a new
+    // GitHub repository. A shipped file the allowlist does not name is left
+    // out of that push: without tests/ or vitest.config.ts the project's
+    // own build workflow, which runs the tests, fails. Derived from what
+    // create really commits, so a file added to the template cannot be
+    // forgotten here.
+    const tracked = execSync('git ls-files', {
+      cwd: dir,
+      encoding: 'utf-8',
+      env: gitScrubbedEnv(),
+    })
+      .split('\n')
+      .filter(Boolean);
+    const staged = buildGitAddArgv(dir).slice(3);
+    const covered = (file: string) =>
+      staged.some((path) => (path.endsWith('/') ? file.startsWith(path) : file === path));
+
+    // Tracked by create, deliberately not staged by the allowlist.
+    const NOT_STAGED: Record<string, string> = {
+      // The allowlist names nothing that starts with .env, so no entry can
+      // ever sit one typo away from .env or .env.local. Both examples hold
+      // no values, and nothing the CLI or the build workflow does reads them.
+      '.env.example': 'no .env name in the allowlist',
+      '.env.local.example': 'no .env name in the allowlist',
+      // Whether its state passphrase fingerprint is committed decides whose
+      // passphrase the project trusts (docs/security.md, "What
+      // .vibecarbon.json records"). Committing it stays the operator's act.
+      '.vibecarbon.json': "committing the passphrase fingerprint is the operator's decision",
+    };
+
+    expect(tracked.filter((file) => !covered(file) && !(file in NOT_STAGED))).toEqual([]);
+    // An exemption that create stopped shipping, or that the allowlist now
+    // covers, is stale: remove it.
+    for (const file of Object.keys(NOT_STAGED)) {
+      expect(tracked, `${file} is no longer tracked`).toContain(file);
+      expect(covered(file), `${file} is staged now`).toBe(false);
+    }
+  }
 
   describe('a state passphrase exported in the shell', () => {
     it('belongs to another project: create makes its own and records that one', () => {
@@ -94,6 +136,10 @@ describe('create-vibecarbon E2E', () => {
 
     it('creates project directory', () => {
       expect(existsSync(projectDir())).toBe(true);
+    });
+
+    it('the staging allowlist covers every file the initial commit tracks (npm)', () => {
+      expectAllowlistCoversTrackedFiles(projectDir());
     });
 
     it('generates package.json', () => {
@@ -546,6 +592,10 @@ describe('create-vibecarbon E2E', () => {
       expect(tracked).toContain('package.json');
       expect(tracked).toContain('.env.example');
       expect(trackedLines).toContain('.env.local.example');
+    });
+
+    it('the staging allowlist covers every file the initial commit tracks (launching package manager)', () => {
+      expectAllowlistCoversTrackedFiles(projectDir());
     });
 
     it('gitignores `vibecarbon upgrade` backup/new files at root and nested paths', () => {

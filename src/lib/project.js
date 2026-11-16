@@ -483,25 +483,40 @@ export function describeCredentialSource(keys) {
 
 /**
  * Allowlist of paths that vibecarbon knows are safe to commit.
- * Used by add/deploy/push in place of `git add .` to prevent leaking
+ * Used by deploy and configure in place of `git add .` to prevent leaking
  * `.vibecarbon/`, `.env.local`, or other untracked secrets.
+ *
+ * It covers every file `vibecarbon create` commits, because configure makes a
+ * project's first commit from it and pushes that to GitHub: a file missing
+ * here is missing from the repository the build workflow runs in
+ * (tests/integration/template/create.test.ts derives the check from a created
+ * project). Three tracked files stay out on purpose: `.env.example` and
+ * `.env.local.example`, so that no entry starts with `.env`, and
+ * `.vibecarbon.json`, whose commit decides which state passphrase the project
+ * trusts and is the operator's to make.
  */
 const PROJECT_GIT_ADD_ALLOWLIST = [
   // Top-level config
   '.gitignore',
   '.dockerignore',
+  '.nvmrc',
   '.github/',
   '.claude/',
+  '.cursor/',
+  '.windsurfrules',
   'package.json',
   'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
   'package-lock.json',
   'bun.lock',
   'bun.lockb',
   'biome.json',
   'tsconfig.json',
   'tsconfig.server.json',
+  'tsconfig.test.json',
   'vite.config.ts',
   'drizzle.config.ts',
+  'vitest.config.ts',
   'components.json',
   // Docker
   'Dockerfile',
@@ -520,6 +535,7 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'docker-compose.observability.override.yml',
   // Source
   'src/',
+  'tests/',
   'scripts/',
   'content/',
   'backup/',
@@ -535,6 +551,7 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'CLAUDE.md',
   'DEVELOPMENT.md',
   'PRODUCTION.md',
+  'TESTING.md',
   'CHANGELOG.md',
 ];
 
