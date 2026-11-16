@@ -110,7 +110,15 @@ async function sendBounded(
     ]);
     return true;
   } catch (err) {
-    logger.warn({ err }, 'host-maintenance-email: one recipient could not be emailed');
+    // The SMTP error text can quote the rejected address, so only its codes are logged.
+    const { code, responseCode } = err as { code?: unknown; responseCode?: unknown };
+    logger.warn(
+      {
+        code: typeof code === 'string' ? code : undefined,
+        responseCode: typeof responseCode === 'number' ? responseCode : undefined,
+      },
+      'host-maintenance-email: one recipient could not be emailed'
+    );
     return false;
   } finally {
     clearTimeout(timer);

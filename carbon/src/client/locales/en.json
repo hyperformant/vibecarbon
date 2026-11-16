@@ -364,7 +364,8 @@
       "body": "Security updates are installed on {{servers}} and take effect after a restart. Nothing restarts on its own. To restart safely, run {{command}} from your project.",
       "docsLink": "How updates work",
       "showPackages": "Show packages",
-      "notReporting": "{{servers}} not reporting yet. Run {{command}} once to set it up."
+      "notReporting": "Not reporting yet: {{servers}}. Run {{command}} once to set it up.",
+      "unavailable": "The servers could not be checked for a pending restart."
     },
     "impersonating": "Viewing as {{email}}",
     "stopImpersonating": "Stop",

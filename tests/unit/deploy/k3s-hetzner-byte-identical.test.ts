@@ -59,6 +59,9 @@
  * the `_host-reporter.sh` snippet after the k3s install
  * (tests/unit/deploy/host-reporter-census.test.ts); `cloudInit` is the only
  * field that changed.
+ * RE-CAPTURED 2026-11-15 (reporter bounds): the embedded reporter gained
+ * --request-timeout=30s on both kubectl calls and TimeoutStartSec=120;
+ * `cloudInit` is the only field that changed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

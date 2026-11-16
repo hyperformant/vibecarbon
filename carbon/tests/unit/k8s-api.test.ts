@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A fake API server: the TCP probe connects at once and https.request answers
 // with the status and body the test sets.
-const server = vi.hoisted(() => ({ status: 200, body: '{}' }));
+const server = vi.hoisted(() => ({ status: 200, body: '{}', networkError: false }));
 const probe = vi.hoisted(() => ({ fail: false }));
 
 vi.mock('node:fs', () => {
@@ -29,6 +29,10 @@ vi.mock('node:https', async () => {
       setTimeout() {},
       destroy() {},
       end() {
+        if (server.networkError) {
+          queueMicrotask(() => req.emit('error', new Error('connection reset')));
+          return;
+        }
         const res = Object.assign(new EventEmitter(), { statusCode: server.status });
         cb(res);
         res.emit('data', Buffer.from(server.body));
@@ -64,6 +68,27 @@ describe('k8sGetJson', () => {
     const err = await k8sGetJson('/api/v1/nodes').catch((e) => e);
     expect(err).toBeInstanceOf(K8sApiError);
     expect(err.status).toBe(403);
+  });
+
+  it('rejects a 200 whose body is not JSON, with a K8sApiError', async () => {
+    server.status = 200;
+    server.body = '<html>proxy error</html>';
+    const { k8sGetJson, K8sApiError } = await import('@server/lib/k8s-api');
+    const err = await k8sGetJson('/api/v1/nodes').catch((e) => e);
+    expect(err).toBeInstanceOf(K8sApiError);
+    expect(err.message).toBe('K8s API returned a body that is not JSON');
+  });
+
+  it('rejects when the request itself fails', async () => {
+    server.status = 200;
+    server.body = '{}';
+    server.networkError = true;
+    try {
+      const { k8sGetJson } = await import('@server/lib/k8s-api');
+      await expect(k8sGetJson('/api/v1/nodes')).rejects.toThrow('connection reset');
+    } finally {
+      server.networkError = false;
+    }
   });
 
   it('retries the endpoint probe after a failed one', async () => {

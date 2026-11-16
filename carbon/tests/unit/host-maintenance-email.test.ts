@@ -304,6 +304,28 @@ describe('runHostMaintenanceCheck', () => {
     expect(h.record.current?.lastEmailedAt).toBe('2026-11-16T09:00:00.000Z');
   });
 
+  it('logs why a send failed without the address the SMTP server rejected', async () => {
+    const { logger } = await import('@server/lib/logger');
+    vi.mocked(logger.warn).mockClear();
+    const h = harness({
+      send: async () => {
+        throw Object.assign(new Error('550 5.1.1 <secret.person@x.test>: user unknown'), {
+          code: 'EENVELOPE',
+          responseCode: 550,
+        });
+      },
+    });
+    await runHostMaintenanceCheck(at('2026-11-16T09:00:00Z'), h.deps);
+    const calls = vi.mocked(logger.warn).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    expect(JSON.stringify(calls)).not.toContain('secret.person');
+    expect(JSON.stringify(calls)).not.toContain('a@x.test');
+    expect(calls[0]).toEqual([
+      { code: 'EENVELOPE', responseCode: 550 },
+      'host-maintenance-email: one recipient could not be emailed',
+    ]);
+  });
+
   it('a send that never resolves times out at 60 s, releases the lock, and counts as failed', async () => {
     vi.useFakeTimers();
     try {

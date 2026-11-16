@@ -65,6 +65,8 @@
  * RE-CAPTURED 2026-11-15 (host reporter): the worker gained the
  * `_host-reporter.sh` snippet after the k3s install; the master and db render
  * are unchanged (tests/unit/deploy/host-reporter-census.test.ts).
+ * RE-CAPTURED 2026-11-15 (reporter bounds): the worker snippet gained --request-timeout=30s
+ * on both kubectl calls and TimeoutStartSec=120 in the service unit.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

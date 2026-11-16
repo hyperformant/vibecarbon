@@ -157,14 +157,24 @@ describe.skipIf(SKIPPED)(`the host reporter on real k3s (k3s ${VERSION})`, () =>
     const r = inAgent('sh', '/tmp/host-reporter.sh');
     expect(r.status, r.stderr).toBe(0);
     const state = parseHostState(annotation());
-    expect(state).toMatchObject({ rebootRequired: true, packages: ['linux-image-e2e-test'] });
+    expect(state).toEqual({
+      host: expect.any(String),
+      rebootRequired: true,
+      since: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/),
+      packages: ['linux-image-e2e-test'],
+    });
   });
 
   it('reports no restart once the files are gone', () => {
     inAgent('rm', '-f', '/var/run/reboot-required', '/var/run/reboot-required.pkgs');
     const r = inAgent('sh', '/tmp/host-reporter.sh');
     expect(r.status, r.stderr).toBe(0);
-    expect(parseHostState(annotation())).toMatchObject({ rebootRequired: false, packages: [] });
+    expect(parseHostState(annotation())).toEqual({
+      host: expect.any(String),
+      rebootRequired: false,
+      since: null,
+      packages: [],
+    });
   });
 
   it('is refused annotating another Node (NodeRestriction)', () => {

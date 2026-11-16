@@ -7,7 +7,7 @@
  *     a Role that grants only `get/list` on `pods` and `get` on `pods/log`:
  *     never `secrets`, `configmaps`, a wildcard, or a write verb;
  *   - the one cluster-wide grant is ClusterRole `vibecarbon-app-nodes`, bound
- *     to the app by a ClusterRoleBinding, granting `get/list` on `nodes` and
+ *     to the app by a ClusterRoleBinding, granting `list` on `nodes` and
  *     nothing else (the app reads each node's host restart state from it);
  *   - pod specs reach credentials by `valueFrom` (a Secret key's name), so a
  *     pod read never carries a password: no workload under carbon/k8s/base sets
@@ -100,7 +100,7 @@ describe('k8s: the app ServiceAccount reads pods and their logs, nothing else', 
     }
   });
 
-  it('is bound to exactly one ClusterRole, which grants get/list on nodes and nothing else', () => {
+  it('is bound to exactly one ClusterRole, which grants list on nodes and nothing else', () => {
     expect(clusterBindings.map((b) => b.metadata?.name)).toEqual(['vibecarbon-app-nodes']);
     const [binding] = clusterBindings;
     expect(binding.roleRef).toEqual({
@@ -113,9 +113,7 @@ describe('k8s: the app ServiceAccount reads pods and their logs, nothing else', 
     );
     expect(roles).toHaveLength(1);
     expect(roles[0].aggregationRule).toBeUndefined();
-    expect(roles[0].rules).toEqual([
-      { apiGroups: [''], resources: ['nodes'], verbs: ['get', 'list'] },
-    ]);
+    expect(roles[0].rules).toEqual([{ apiGroups: [''], resources: ['nodes'], verbs: ['list'] }]);
   });
 
   it('no other ClusterRoleBinding binds the app', () => {

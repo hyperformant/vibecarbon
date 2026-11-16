@@ -1,6 +1,6 @@
 import type { HostMaintenance, HostServer } from '@shared/host-maintenance';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -88,17 +88,34 @@ describe('HostMaintenanceNotice', () => {
     renderNotice();
     expect(
       await screen.findByText(
-        'web-2 not reporting yet. Run vibecarbon update production once to set it up.'
+        'Not reporting yet: web-2. Run vibecarbon update production once to set it up.'
       )
     ).toBeTruthy();
     expect(screen.queryByText('A restart is needed to finish security updates')).toBeNull();
   });
 
-  it('renders nothing when the query fails', async () => {
-    vi.mocked(apiJson).mockRejectedValue(new Error('403'));
-    const { container } = renderNotice();
-    await waitFor(() => expect(apiJson).toHaveBeenCalled());
-    expect(container.innerHTML).toBe('');
+  it('says the servers could not be checked when the query fails', async () => {
+    vi.mocked(apiJson).mockRejectedValue(new Error('503'));
+    renderNotice();
+    expect(
+      await screen.findByText('The servers could not be checked for a pending restart.')
+    ).toBeTruthy();
+  });
+
+  it('lists each due server with its packages once the Collapsible is opened', async () => {
+    vi.mocked(apiJson).mockResolvedValue(
+      state({
+        rebootRequired: true,
+        servers: [
+          server({ rebootRequired: true, packages: ['libc6', 'openssl'] }),
+          server({ name: 'web-2', rebootRequired: true, packages: ['linux-image-6.8'] }),
+        ],
+      })
+    );
+    renderNotice();
+    fireEvent.click(await screen.findByText('Show packages'));
+    expect(await screen.findByText('web-1: libc6, openssl')).toBeTruthy();
+    expect(screen.getByText('web-2: linux-image-6.8')).toBeTruthy();
   });
 
   it('renders nothing for runtime none', async () => {

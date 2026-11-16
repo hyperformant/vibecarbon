@@ -37,7 +37,7 @@ subjects:
 ---
 # Read-only view of the nodes, so the app can say which need a restart (each
 # node's vibecarbon.dev/host-state annotation). Nodes are cluster-scoped, so
-# this is a ClusterRole; it grants nothing but get and list on nodes.
+# this is a ClusterRole; it grants nothing but list on nodes.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -45,7 +45,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

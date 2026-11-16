@@ -34,8 +34,12 @@ export function hostReporterInstaller() {
 export function hostReporterScript() {
   if (script === undefined) {
     const text = hostReporterInstaller();
-    const start = text.indexOf(REPORTER_START) + REPORTER_START.length;
-    script = `${text.slice(start, text.indexOf(REPORTER_END, start))}\n`;
+    const open = text.indexOf(REPORTER_START);
+    const close = open === -1 ? -1 : text.indexOf(REPORTER_END, open + REPORTER_START.length);
+    if (open === -1 || close === -1) {
+      throw new Error(`${HOST_REPORTER_SNIPPET}: the reporter heredoc markers are missing`);
+    }
+    script = `${text.slice(open + REPORTER_START.length, close)}\n`;
   }
   return script;
 }

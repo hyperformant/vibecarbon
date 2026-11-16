@@ -274,12 +274,12 @@ Your environment's servers keep themselves patched, but only up to a point. Some
 **What waits for `vibecarbon update <env>`.**
 
 - Restarts. When an update needs one, Ubuntu leaves a marker (`/var/run/reboot-required`, with the package names in `/var/run/reboot-required.pkgs`) and nothing more happens until you act.
-- Docker Engine on Docker Compose servers. Docker comes from Docker's own package repository, which the daily job does not read, and updating it restarts every container. `update` upgrades it, with the same packages `create` installs, only when you run it.
+- Docker Engine on Docker Compose servers. Docker comes from Docker's own package repository, which the daily job does not read, and updating it restarts every container. The deploy's server cloud-init installs it, and `update` upgrades those same packages, only when you run it.
 - Kubernetes nodes run k3s's own container runtime, which `deploy` manages, so `update` leaves it alone.
 
 `update` shows its plan first: each server in the order it will go, whether it restarts, and how long people using your app should expect it to be offline. It changes nothing until you confirm (`-y` confirms for you). It then goes one server at a time, standby side first, and stops at the first failure. See the `update` section of the CLI docs for the plan and the downtime for each mode.
 
-**Why nothing restarts on its own.** A restart takes the app offline for 60 to 180 seconds on a server that carries traffic, and a Docker-only update for 30 to 60. You should pick that moment, not a timer. If a package you did not expect asks for a restart during a run, `update` asks first. With `-y` it does not restart that server, and tells you to run `update` again.
+**Why nothing restarts on its own.** A restart takes the app offline for 60 to 180 seconds when it is the single server on Docker Compose or the master on Kubernetes, and the app's database requests wait while the database node restarts. A Kubernetes worker is drained first, so restarting one causes no outage. A Docker-only update takes 30 to 60 seconds. You should pick that moment, not a timer. If a package you did not expect asks for a restart during a run, `update` asks first. With `-y` it does not restart that server, and tells you to run `update` again.
 
 **Where a due restart shows up.**
 
@@ -292,7 +292,7 @@ The notice and the email go away once the servers have restarted.
 **How the app learns this, with no new access.** A small reporter on each server (see [Host reporter](technical.md#host-reporter) in the technical guide) publishes whether a restart is due. The app reads it through one narrow door per mode:
 
 - Docker Compose: one directory, `/run/vibecarbon-host`, mounted into the app read-only at `/host-status`. The app reads one small file there (at most 16 KiB). It gets no Docker socket access beyond what it already had, and no other host path.
-- Kubernetes: a node annotation (`vibecarbon.dev/host-state`) and a read-only ClusterRole that lets the app `get` and `list` nodes, and nothing else. The reporter writes the annotation with the node's own kubelet credential, which Kubernetes lets annotate only that one Node. The app's service account cannot change a node.
+- Kubernetes: a node annotation (`vibecarbon.dev/host-state`) and a read-only ClusterRole that lets the app `list` nodes, and nothing else. The reporter writes the annotation with the node's own kubelet credential, which Kubernetes lets annotate only that one Node. The app's service account cannot change a node.
 
 The reader treats what it finds as untrusted. A node's credential can rewrite its own annotation, so both the CLI and the app accept only a strict format: package names and host names limited to safe characters, at most 20 packages, and a size cap. Anything else counts as "not reporting".
 

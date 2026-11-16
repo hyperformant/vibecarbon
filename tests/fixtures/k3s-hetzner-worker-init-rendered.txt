@@ -535,10 +535,10 @@ if command -v k3s >/dev/null 2>&1; then
   # fail and let the unit's Restart=on-failure retry instead of writing a
   # compose-style file.
   [ -e "$KUBELET_KUBECONFIG" ] || exit 1
-  name=$(kubectl --kubeconfig "$KUBELET_KUBECONFIG" auth whoami -o jsonpath='{.status.userInfo.username}') || exit 1
+  name=$(kubectl --kubeconfig "$KUBELET_KUBECONFIG" --request-timeout=30s auth whoami -o jsonpath='{.status.userInfo.username}') || exit 1
   name=${name#system:node:}
   [ -n "$name" ] || exit 1
-  kubectl --kubeconfig "$KUBELET_KUBECONFIG" annotate --overwrite node "$name" "vibecarbon.dev/host-state=$json" || exit 1
+  kubectl --kubeconfig "$KUBELET_KUBECONFIG" --request-timeout=30s annotate --overwrite node "$name" "vibecarbon.dev/host-state=$json" || exit 1
   exit 0
 fi
 
@@ -556,6 +556,7 @@ Description=Report whether this host needs a restart
 [Service]
 Type=oneshot
 ExecStart=/usr/local/lib/vibecarbon/host-reporter.sh
+TimeoutStartSec=120
 Restart=on-failure
 RestartSec=30
 

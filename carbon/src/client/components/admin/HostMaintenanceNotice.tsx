@@ -7,12 +7,22 @@ import { useHostMaintenance } from '@/hooks/api';
 
 /**
  * Super-admin banner: security updates are installed but a server needs a
- * restart, and/or a server has not started reporting. Renders nothing while
- * loading, on error, with no runtime, or when everything is current.
+ * restart, and/or a server has not started reporting. A read error says the
+ * servers could not be checked. Renders nothing while loading, with no
+ * runtime, or when everything is current.
  */
 export function HostMaintenanceNotice() {
   const { t } = useTranslation();
-  const { data } = useHostMaintenance();
+  const { data, isError } = useHostMaintenance();
+
+  // A failed read must not look like "nothing due".
+  if (isError) {
+    return (
+      <p className="p-4 pb-0 text-sm text-muted-foreground">
+        {t('admin.hostMaintenance.unavailable')}
+      </p>
+    );
+  }
 
   if (!data || data.runtime === 'none') return null;
 

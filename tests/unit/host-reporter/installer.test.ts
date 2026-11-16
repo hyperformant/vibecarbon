@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   hostReporterInstaller,
   hostReporterScript,
@@ -23,6 +23,37 @@ describe('host reporter installer', () => {
   });
   it('parses as sh', () => {
     expect(shOk(installer)).toBe(0);
+  });
+});
+
+describe('host reporter bounds', () => {
+  it('gives the service unit a start timeout, so a hung run fails and retries', () => {
+    expect(hostReporterInstaller()).toMatch(/^TimeoutStartSec=120$/m);
+    expect(hostReporterInstaller()).toMatch(/^Restart=on-failure$/m);
+  });
+  it('bounds both kubectl calls with --request-timeout=30s', () => {
+    const calls = hostReporterScript()
+      .split('\n')
+      .filter((l) => /\bkubectl\b/.test(l) && !l.trimStart().startsWith('#'));
+    expect(calls).toHaveLength(2);
+    for (const l of calls) expect(l).toContain('--request-timeout=30s');
+  });
+});
+
+describe('hostReporterScript without its heredoc markers', () => {
+  it('throws instead of returning garbage', async () => {
+    vi.resetModules();
+    vi.doMock('node:fs', async (orig) => ({
+      ...(await orig<typeof import('node:fs')>()),
+      readFileSync: () => 'if true; then\n  echo no heredoc here\nfi\n',
+    }));
+    try {
+      const mod = await import('../../../src/lib/host-reporter.js');
+      expect(() => mod.hostReporterScript()).toThrow(/heredoc/);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
   });
 });
 
