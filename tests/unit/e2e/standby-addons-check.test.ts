@@ -13,7 +13,6 @@ import {
   checkPromotedPrimaryOnlyRunning,
   checkStandbyPrimaryOnlyAbsent,
   enabledAddons,
-  parseContainerNames,
   parseContainerStates,
   parseN8nKeyFingerprint,
   parseReadyDeployments,
@@ -36,17 +35,21 @@ function runner(output: string, ok = true): RemoteRun & { calls: string[] } {
 const ps = (...names: string[]) => `${names.join('\n')}\nPROBE_DONE`;
 const base = { mode: 'compose-ha' as const, projectName: P, sshKeyPath: KEY, features: FEATURES };
 
-describe('parseContainerNames', () => {
+describe('parseContainerStates', () => {
+  const names = (output: string | null | undefined) => {
+    const states = parseContainerStates(output);
+    return states ? [...states.keys()] : null;
+  };
   it('returns the names without the sentinel', () => {
-    expect(parseContainerNames(ps('quorum-db', 'quorum-app'))).toEqual(['quorum-db', 'quorum-app']);
+    expect(names(ps('quorum-db', 'quorum-app'))).toEqual(['quorum-db', 'quorum-app']);
   });
   it('is null without the sentinel (a truncated or empty read proves nothing)', () => {
-    expect(parseContainerNames('quorum-db\n')).toBeNull();
-    expect(parseContainerNames('')).toBeNull();
-    expect(parseContainerNames(undefined)).toBeNull();
+    expect(names('quorum-db\n')).toBeNull();
+    expect(names('')).toBeNull();
+    expect(names(undefined)).toBeNull();
   });
   it('an empty list with the sentinel is an empty list', () => {
-    expect(parseContainerNames('PROBE_DONE')).toEqual([]);
+    expect(names('PROBE_DONE')).toEqual([]);
   });
 });
 
@@ -116,13 +119,12 @@ describe('standby_primary_only_absent', () => {
 
 describe('promoted_primary_only_running', () => {
   const up = (name: string, state = 'running') => `${name}\t${state}`;
-  it('parses name and state per line; the names parser ignores the state', () => {
+  it('parses name and state per line', () => {
     const out = ps(up('quorum-n8n'), up('quorum-metabase', 'restarting'));
     expect([...(parseContainerStates(out) as Map<string, string>)]).toEqual([
       ['quorum-n8n', 'running'],
       ['quorum-metabase', 'restarting'],
     ]);
-    expect(parseContainerNames(out)).toEqual(['quorum-n8n', 'quorum-metabase']);
     expect(parseContainerStates('quorum-n8n\trunning')).toBeNull();
   });
   it('passes when n8n and metabase run (setups are not required)', async () => {

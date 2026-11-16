@@ -412,21 +412,11 @@ export async function checkAppApiMeAuthenticated(
  * signs up a throwaway user rather than logging in as ADMIN_EMAIL. This check
  * closes that blind spot: it FAILS (not skips) when the admin can't sign in, or
  * signs in without the super_admin role.
- */
-export async function checkAdminLogin(
-  domain: string,
-  adminEmail: string,
-  adminPassword: string,
-  fetcher: typeof safeFetch = safeFetch,
-): Promise<VerificationResult> {
-  return (await adminSignIn(domain, adminEmail, adminPassword, fetcher)).result;
-}
-
-/**
- * The auth_admin_login check, plus the signed-in super-admin session when it
- * passed. The observability checks reuse that session to mint the ForwardAuth
- * cookie instead of signing in again (password sign-in is capped at 10 per
- * 15 min per IP).
+ *
+ * Returns the auth_admin_login result, plus the signed-in super-admin session
+ * when it passed. The observability checks reuse that session to mint the
+ * ForwardAuth cookie instead of signing in again (password sign-in is capped
+ * at 10 per 15 min per IP).
  */
 export async function adminSignIn(
   domain: string,
