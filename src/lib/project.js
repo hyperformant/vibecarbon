@@ -561,8 +561,9 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
  * Taken back out of whatever the allowlist names. The list holds whole
  * directories (src/, tests/, volumes/), and the project's .gitignore is not
  * enough to keep an env file inside one unstaged: it does not cover every
- * name (.env.e2e, .env.production), and a project created without git has no
- * .gitignore at all. Matches at any depth.
+ * name (.env.e2e, .env.production), and it can be missing (deleted, or a
+ * project created without git before create wrote it in that case too).
+ * Matches at any depth.
  */
 const PROJECT_GIT_ADD_EXCLUDES = [':(exclude,glob)**/.env*'];
 

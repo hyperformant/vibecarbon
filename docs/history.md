@@ -958,6 +958,8 @@ dependency security floors.
 example files included, and `.vibecarbon.json` stays the operator's to commit.
 Keep the `.env*` exclusion: the project's `.gitignore` does not cover every
 env file name, and a project created without git has no `.gitignore`.
+(Since the entry "A project created without git still gets its `.gitignore`"
+below it has one. The exclusion stays for the names it does not cover.)
 
 **Guard:** `tests/integration/template/create.test.ts` compares the list with
 what a created project tracks, on npm and pnpm.
@@ -990,6 +992,25 @@ The module imports Node builtins only, for the same reason.
 **Guard:** `tests/unit/e2e/e2e-home.test.ts` checks the import comes first in
 all three entry points, and runs a real Node process to prove load-time paths
 land in the e2e home and a preset home is respected.
+
+#### 2026-11-16: A project created without git still gets its `.gitignore`
+
+`create` now writes `.gitignore` and checks it for the required patterns on
+every run. Only `git init`, the hooks and the first commit depend on git being
+installed.
+
+**Why:** the file was written inside the branch that runs when git is on the
+PATH. On a machine without git the project had its generated secrets in `.env`
+and `.env.local` and no `.gitignore`. The message `create` prints there tells
+the operator to install git and run `git init`, and the first `git add .`
+after that would have staged both files.
+
+**Do not undo:** do not move the write back under the git check to group it
+with `git init`. The file belongs to the project, not to the repository step.
+
+**Guard:** `tests/integration/template/create.test.ts` runs `create` with a
+PATH that holds only node, then runs a real `git init` and `git add .` and
+checks that neither env file is staged.
 
 ## Added and later removed
 

@@ -6,12 +6,13 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
-import { buildGitAddArgv } from '../../../src/lib/project.js';
+import { buildGitAddArgv, validateGitignore } from '../../../src/lib/project.js';
 import { statePassphraseFingerprint } from '../../../src/lib/state-passphrase.js';
 // Shared scrub for test-spawned git (GIT_DIR hook-leak class — see the
 // module doc in _shared/git-env.ts; this file's local copy converged there
@@ -754,6 +755,77 @@ describe('create-vibecarbon E2E', () => {
         env: noIdEnv,
       }).trim();
       expect(author).toBe('vibecarbon <vibecarbon@users.noreply.github.com>');
+    });
+  });
+
+  describe('create on a machine without git', () => {
+    const noGitProject = 'test-e2e-no-git';
+    const projectDir = () => join(tempDir, noGitProject);
+    let output = '';
+
+    beforeAll(() => {
+      // A PATH that holds node and nothing else, so `git --version` fails
+      // inside create exactly as it does where git is not installed.
+      const binDir = join(tempDir, 'node-only-bin');
+      mkdirSync(binDir, { recursive: true });
+      symlinkSync(process.execPath, join(binDir, 'node'));
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(process.cwd(), 'src/cli.js'),
+          'create',
+          noGitProject,
+          '-y',
+          '-admin-email',
+          'test@e2e.local',
+          '-admin-password',
+          'testpass123',
+          '-skip-lockfile',
+        ],
+        {
+          cwd: tempDir,
+          encoding: 'utf-8',
+          timeout: 60000,
+          env: { ...pmScrubbedEnv(), PATH: binDir },
+        },
+      );
+      if (result.status !== 0) {
+        throw new Error(`create failed: ${result.stderr || result.stdout}`);
+      }
+      output = `${result.stdout}${result.stderr}`;
+    }, 60000);
+
+    it('really ran without git: no repository, and create said so', () => {
+      // Without this the tests below would pass on a PATH that still found git.
+      expect(existsSync(join(projectDir(), '.git'))).toBe(false);
+      expect(output).toContain('git not found on PATH');
+    });
+
+    it('still writes a .gitignore with every required security pattern', () => {
+      expect(existsSync(join(projectDir(), '.gitignore'))).toBe(true);
+      expect(validateGitignore(join(projectDir(), '.gitignore'))).toEqual([]);
+    });
+
+    it('a later `git init` and `git add .` leaves the secret files out', () => {
+      // What the operator does once git is installed. The generated secrets
+      // are on disk from create; only .gitignore keeps them out of the index.
+      expect(existsSync(join(projectDir(), '.env'))).toBe(true);
+      expect(existsSync(join(projectDir(), '.env.local'))).toBe(true);
+      const git = (args: string[]) =>
+        execFileSync('git', args, {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          env: gitScrubbedEnv(),
+        });
+      git(['init', '-q']);
+      git(['add', '.']);
+      const staged = git(['ls-files']).split('\n').filter(Boolean);
+      expect(staged).not.toContain('.env');
+      expect(staged).not.toContain('.env.local');
+      // sanity: the add did stage the project.
+      expect(staged).toContain('package.json');
+      expect(staged).toContain('.gitignore');
     });
   });
 

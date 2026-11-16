@@ -91,8 +91,8 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
 
   // The allowlist names whole directories (src/, tests/, volumes/). Without
   // this, a .env file inside one is staged whenever the project's .gitignore
-  // does not cover its name (.env.e2e, .env.production) or is missing (a
-  // project created without git has none).
+  // does not cover its name (.env.e2e, .env.production) or is missing
+  // (deleted, or a project created without git by an older CLI).
   it('stages no .env file inside an allowlisted directory, with no .gitignore to help', async () => {
     const { writeFileSync, mkdirSync, mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
