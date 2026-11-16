@@ -914,6 +914,32 @@ over.
 
 **Guard:** `tests/unit/security/secret-scan-rules-census.test.ts`.
 
+#### 2026-11-16: Session hooks never prompt, and fetch only at a real session start (#500)
+
+`ff-main.sh` and `clean-merged.sh` now run every git network call with ssh in
+batch mode and git's terminal and askpass prompts off, so a fetch that cannot
+log in fails quietly. At session start they run only for a new or resumed
+session (matcher `startup|resume`), no longer on `/clear`, compaction or a
+fork.
+
+**Why:** in one long session with subagents the hooks re-fired until a process
+watcher logged six `git fetch` connections to GitHub in 12 seconds, three per
+hook, and the maintainer reported recurring SSH password prompts on the laptop
+while it happened. Nothing stopped a background fetch from asking a person for
+a password.
+
+**Unproven:** what triggered the prompts. Key login to GitHub worked without
+one every time it was tried, and the key has no passphrase. Which session
+start reason caused the repeats was not recorded either, and the Claude Code
+hooks reference does not say whether a subagent start fires `SessionStart`.
+
+**Do not undo:** an empty `SessionStart` matcher brings back a fetch per hook
+on every compaction. Removing `BatchMode=yes` lets a hook nobody is watching
+ask for a password.
+
+**Guard:** `tests/integration/hooks/never-prompt.test.ts` and the matcher test
+in `tests/unit/template/claude-hooks-lockstep.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

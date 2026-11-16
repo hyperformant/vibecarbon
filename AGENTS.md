@@ -356,6 +356,8 @@ A worktree stays, and the hook tells you why, when this session is working in it
 
 Both hooks do nothing without an `origin` remote. They are registered in `.claude/settings.json`.
 
+They run at session start only for a new or resumed session (matcher `startup|resume`), not on `/clear`, compaction or a fork, because each run fetches from `origin`. They never ask you for anything: ssh runs in batch mode and git's own prompts are off, so a fetch that cannot log in does nothing. Your `GIT_SSH_COMMAND` or `core.sshCommand` keeps its options.
+
 ## Working on Template Files
 
 When modifying files in `carbon/`, follow `carbon/AGENTS.md` for architecture, patterns, and mandatory security rules. (`carbon/CLAUDE.md`, `carbon/.github/copilot-instructions.md`, and `carbon/.cursor/rules/vibecarbon.mdc` are thin pointers to it.)

@@ -93,6 +93,20 @@ describe('claude hooks lockstep', () => {
     }
   });
 
+  // SessionStart also fires on /clear, on every compaction and on every fork.
+  // Each firing is a `git fetch` per hook: 2026-11-16, six fetches in 12 seconds.
+  it('the fetching hooks run at session start only for a new or resumed session', () => {
+    for (const file of SETTINGS) {
+      const atStart = entries(file).filter((e) => e.event === 'SessionStart');
+      for (const name of ['ff-main.sh', 'clean-merged.sh']) {
+        const matchers = atStart
+          .filter((e) => scriptOf(String(e.hook.command)) === name)
+          .map((e) => e.matcher);
+        expect(matchers, `${file}: ${name} on SessionStart`).toEqual(['startup|resume']);
+      }
+    }
+  });
+
   it('every script either settings file runs exists and is executable in git', () => {
     const modes = new Map<string, string>();
     for (const line of execFileSync(
