@@ -355,6 +355,7 @@ describe('create-vibecarbon E2E', () => {
       expect(
         existsSync(join(projectDir(), 'tests/structural/template-migrations-census.test.ts')),
       ).toBe(false);
+      expect(existsSync(join(projectDir(), 'tests/db/addon-init-grants.test.ts'))).toBe(false);
       expect(existsSync(join(projectDir(), 'tests/structural/migrations-drift.test.ts'))).toBe(
         true,
       );

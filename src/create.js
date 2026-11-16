@@ -376,9 +376,14 @@ function makeBiomeConfigRoot(biomeJsonPath) {
  * Template tests that must not reach a generated project. The migrations
  * census pins carbon/db/migrations to its one baseline set; a project's
  * history grows normally, so the census would fail on its first
- * `drizzle-kit generate`. Pinned by tests/unit/create/template-only-tests.test.ts.
+ * `drizzle-kit generate`. The add-on init-grants test reads the add-on
+ * bundles in this repo's services/, which a project does not have.
+ * Pinned by tests/unit/create/template-only-tests.test.ts.
  */
-export const TEMPLATE_ONLY_TESTS = ['template-migrations-census.test.ts'];
+export const TEMPLATE_ONLY_TESTS = [
+  'template-migrations-census.test.ts',
+  'addon-init-grants.test.ts',
+];
 
 function copyTemplateDir(templateSubdir, destDir, variables, exclude = []) {
   const fullTemplatePath = join(TEMPLATE_DIR, templateSubdir);

@@ -8,7 +8,7 @@
  * is asserted on a created project (tests/integration/template/create.test.ts),
  * not on create.js's source text.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TEMPLATE_ONLY_TESTS } from '../../../src/create.js';
@@ -18,8 +18,23 @@ const ROOT = join(import.meta.dirname, '..', '..', '..');
 describe('template-only tests', () => {
   it('lists the migrations census, and it exists in the template', () => {
     expect(TEMPLATE_ONLY_TESTS).toContain('template-migrations-census.test.ts');
+    const tiers = readdirSync(join(ROOT, 'carbon', 'tests'), { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
     for (const name of TEMPLATE_ONLY_TESTS) {
-      expect(existsSync(join(ROOT, 'carbon', 'tests', 'structural', name)), name).toBe(true);
+      const found = tiers.some((tier) => existsSync(join(ROOT, 'carbon', 'tests', tier, name)));
+      expect(found, name).toBe(true);
+    }
+  });
+
+  // It reads services/<addon>/db/init.sh, which exists only in this repo. In a
+  // project it failed on a missing file for every add-on not installed.
+  it("lists the add-on init-grants test, which reads this repo's add-on bundles", () => {
+    expect(TEMPLATE_ONLY_TESTS).toContain('addon-init-grants.test.ts');
+    const test = join(ROOT, 'carbon', 'tests', 'db', 'addon-init-grants.test.ts');
+    expect(existsSync(test)).toBe(true);
+    for (const addon of ['metabase', 'n8n']) {
+      expect(existsSync(join(ROOT, 'services', addon, 'db', 'init.sh')), addon).toBe(true);
     }
   });
 
