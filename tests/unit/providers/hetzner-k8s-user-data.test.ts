@@ -1,75 +1,15 @@
 /**
- * M3 Task 3 — HetznerProvider.getK8sMasterUserData/getK8sWorkerUserData
- * byte-identical pin.
+ * HetznerProvider.getK8sMasterUserData / getK8sWorkerUserData /
+ * getK8sDbUserData are a wrap around the
+ * `carbon/cloud-init/k3s/{master,worker,db}-init.sh` templates. The wrap must
+ * add nothing of its own: each static renders exactly what
+ * loadCloudInit/renderScript render for the same vars, and a full vars
+ * object leaves no placeholder behind.
  *
- * These two statics are an ADDITIVE wrap around the existing
- * `carbon/cloud-init/k3s/{master,worker}-init.sh` templates — hetzner-k8s.js
- * and deploy/k8s/k3s.js's own loadCloudInit/renderScript call sites are left
- * untouched this task (see Task 3 dossier). The wrap must therefore produce
- * BYTE-IDENTICAL output to what those call sites already render.
- *
- * `tests/fixtures/k3s-hetzner-{master,worker,db}-init-rendered.txt`
- * were captured by calling loadCloudInit/renderScript directly (the
- * pre-existing render path) with the vars below — see task-3-report.md for
- * the original capture command.
- *
- * RE-CAPTURED 2026-08-05 (private-NIC guard): the fixtures now include the
- * `# @include _private-net-guard.sh` body. They no longer pin the M3-era
- * bytes — what they pin is that the wrap still adds nothing of its own,
- * which the "algebraically identical" cases below assert independently of
- * any stored bytes. Re-capture the fixtures deliberately when a template
- * changes; never to make a red test go green.
- *
- * RE-CAPTURED 2026-08-20 (apt dpkg-lock timeout): all three init scripts
- * traded their `fuser` lock-poll loop for `apt-get -o
- * DPkg::Lock::Timeout=300` (see src/lib/deploy/apt.js). Same standing
- * reasoning — the "algebraically identical" cases below are what prove the
- * wrap adds nothing, and they hold regardless of the stored bytes.
- *
- * RE-CAPTURED 2026-10-22 (k3s system images from the ghcr mirror, ruling
- * D3): each registries.yaml heredoc gained the system-image alias mirror
- * spliced in from _k3s-system-image-mirror.yaml, and master-init.sh's k3s
- * server gained --system-default-registry; every role's k3s install gained
- * --disable-default-registry-endpoint. The diff is confined to those
- * lines (checked at capture against the pre-change fixture).
- *
- * RE-CAPTURED 2026-11-02 (first-boot timing): each init script gained the
- * one-line `_m` helper and one `_m <id>` line per major phase
- * (src/lib/deploy/boot-timing.js reads them back), and the apt comment's
- * fuser-loop history paragraph became a pointer to src/lib/deploy/apt.js,
- * which holds it, to keep master-init under 27 KiB. No command changed.
- * RE-CAPTURED 2026-11-04 (boot speed): each init script dropped its apt
- * update/install, the apt comments and the `_m a` mark, and asks for its
- * private-NIC lease at the first retry instead of the sixth. The diff is
- * confined to those lines.
- * RE-CAPTURED 2026-11-04 (dhcpcd -A): the lease wait runs `dhcpcd -1 -A -t 4`
- * and a pass that asked sleeps 1 s. The diff is confined to those lines.
- * RE-CAPTURED 2026-11-05 (Kubernetes 1.37): the k3s, CCM and CSI versions and
- * the comments naming the old driver ceiling. The diff is confined to those
- * lines.
- * RE-CAPTURED 2026-11-11 (no provider token in user data): the master no
- * longer creates the hcloud and hcloud-csi Secrets (the CLI applies hcloud
- * itself, applyCloudSecrets), installs k3s with `--agent-token` instead of
- * `--token`, and the comments around both say so. The worker and db fixtures
- * are unchanged. The diff is confined to those lines.
- * RE-CAPTURED 2026-11-13 (container signals): every role gained the
- * `_container-signals.sh` snippet, which turns off
- * kernel.apparmor_restrict_unprivileged_unconfined before the k3s install
- * (tests/unit/deploy/container-signals-census.test.ts). The diff is the
- * snippet's lines and the blank line after it.
- * RE-CAPTURED 2026-11-15 (stable IPv6 flow label): every role gained the
- * `_stable-flowlabel.sh` snippet right after it, which sets
- * net.core.txrehash=0 before the k3s install
- * (tests/unit/deploy/stable-flowlabel-census.test.ts). The diff is the
- * snippet's lines.
- * RE-CAPTURED 2026-11-15 (host reporter): the worker gained the
- * `_host-reporter.sh` snippet after the k3s install; the master and db render
- * are unchanged (tests/unit/deploy/host-reporter-census.test.ts).
- * RE-CAPTURED 2026-11-15 (reporter bounds): the worker snippet gained --request-timeout=30s
- * on both kubectl calls and TimeoutStartSec=120 in the service unit.
+ * What the templates themselves must contain is pinned by the censuses that
+ * own each snippet (tests/unit/deploy/*-census.test.ts), not by stored bytes
+ * here.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadCloudInit, renderScript } from '../../../src/lib/iac/cloud-init.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
@@ -96,25 +36,7 @@ const dbVars = {
   master_ip: '10.0.1.1',
 };
 
-describe('M3 Task 3 — HetznerProvider k8s user-data statics (byte-identical wrap)', () => {
-  it('getK8sMasterUserData matches the stored fixture (pre-existing render, byte-for-byte)', async () => {
-    const fixture = readFileSync(
-      join(__dirname, '../../fixtures/k3s-hetzner-master-init-rendered.txt'),
-      'utf-8',
-    );
-    const rendered = await HetznerProvider.getK8sMasterUserData(masterVars);
-    expect(rendered).toBe(fixture);
-  });
-
-  it('getK8sWorkerUserData matches the stored fixture (pre-existing render, byte-for-byte)', async () => {
-    const fixture = readFileSync(
-      join(__dirname, '../../fixtures/k3s-hetzner-worker-init-rendered.txt'),
-      'utf-8',
-    );
-    const rendered = await HetznerProvider.getK8sWorkerUserData(workerVars);
-    expect(rendered).toBe(fixture);
-  });
-
+describe('HetznerProvider k8s user-data statics (the wrap adds nothing)', () => {
   it('getK8sMasterUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds nothing)', async () => {
     const direct = renderScript(loadCloudInit('master-init.sh'), masterVars);
     const wrapped = await HetznerProvider.getK8sMasterUserData(masterVars);
@@ -132,15 +54,6 @@ describe('M3 Task 3 — HetznerProvider k8s user-data statics (byte-identical wr
     const worker = await HetznerProvider.getK8sWorkerUserData(workerVars);
     expect(master).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     expect(worker).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
-  });
-
-  it('getK8sDbUserData matches the stored fixture (pre-existing render, byte-for-byte)', async () => {
-    const fixture = readFileSync(
-      join(__dirname, '../../fixtures/k3s-hetzner-db-init-rendered.txt'),
-      'utf-8',
-    );
-    const rendered = await HetznerProvider.getK8sDbUserData(dbVars);
-    expect(rendered).toBe(fixture);
   });
 
   it('getK8sDbUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds nothing)', async () => {

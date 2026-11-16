@@ -7,8 +7,8 @@
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  adminSignIn,
   CookieJar,
-  checkAdminLogin,
   checkAuthSignin,
   fetchSessionUser,
   smtpConfiguredFromEnv,
@@ -137,7 +137,7 @@ describe('fetchSessionUser', () => {
   });
 });
 
-describe('checkAdminLogin', () => {
+describe('adminSignIn', () => {
   function fetcherFor(opts: { signIn?: Response; session?: Response }) {
     return vi.fn(async (url: string, _init?: RequestInit) => {
       if (url.endsWith('/api/auth/sign-in/email')) {
@@ -149,8 +149,10 @@ describe('checkAdminLogin', () => {
 
   it('passes when sign-in works and get-session reports super_admin', async () => {
     const fetcher = fetcherFor({});
-    const r = await checkAdminLogin('app.example.com', 'a@b.c', 'pw', fetcher);
+    const { result: r, jar } = await adminSignIn('app.example.com', 'a@b.c', 'pw', fetcher);
     expect(r).toMatchObject({ checkName: 'auth_admin_login', status: 'pass' });
+    // the session the observability checks reuse
+    expect(jar?.header()).toBe('s=tok');
     const [, init] = fetcher.mock.calls[0];
     expect(JSON.parse(init?.body as string)).toEqual({ email: 'a@b.c', password: 'pw' });
     expect(hdrs(init).Origin).toBe('https://app.example.com');
@@ -160,46 +162,50 @@ describe('checkAdminLogin', () => {
   });
 
   it('fails when the role is not super_admin, naming the role', async () => {
-    const r = await checkAdminLogin(
+    const { result: r, jar } = await adminSignIn(
       'app.example.com',
       'a@b.c',
       'pw',
       fetcherFor({ session: new Response(JSON.stringify({ user: { role: 'user' } })) }),
     );
     expect(r.status).toBe('fail');
+    expect(jar).toBeUndefined();
     expect(r.errorMessage).toMatch(/user\.role is "user"/);
   });
 
   it('fails when the role is absent', async () => {
-    const r = await checkAdminLogin(
+    const { result: r, jar } = await adminSignIn(
       'app.example.com',
       'a@b.c',
       'pw',
       fetcherFor({ session: new Response(JSON.stringify({ user: {} })) }),
     );
     expect(r.status).toBe('fail');
+    expect(jar).toBeUndefined();
     expect(r.errorMessage).toMatch(/absent/);
   });
 
   it('fails (not skips) when the admin cannot sign in', async () => {
-    const r = await checkAdminLogin(
+    const { result: r, jar } = await adminSignIn(
       'app.example.com',
       'a@b.c',
       'pw',
       fetcherFor({ signIn: new Response('{"code":"INVALID_EMAIL_OR_PASSWORD"}', { status: 401 }) }),
     );
     expect(r.status).toBe('fail');
+    expect(jar).toBeUndefined();
     expect(r.errorMessage).toMatch(/401.*not provisioned/);
   });
 
   it('fails when sign-in succeeds but there is no session', async () => {
-    const r = await checkAdminLogin(
+    const { result: r, jar } = await adminSignIn(
       'app.example.com',
       'a@b.c',
       'pw',
       fetcherFor({ session: new Response('null') }),
     );
     expect(r.status).toBe('fail');
+    expect(jar).toBeUndefined();
     expect(r.errorMessage).toMatch(/no session/);
   });
 });

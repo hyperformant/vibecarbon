@@ -50,8 +50,8 @@ import {
   notificationsShapeError,
 } from '../../e2e/checks/app-api.js';
 import {
+  adminSignIn,
   CookieJar,
-  checkAdminLogin,
   checkAppApiMeAuthenticated,
   checkAuthProtected,
   checkAuthSignin,
@@ -282,17 +282,17 @@ const MATRIX: Entry[] = [
   },
   {
     label: 'auth_admin_login (get-session)',
-    covers: ['app-functional.ts:checkAdminLogin', 'app-functional.ts:adminSignIn'],
+    covers: ['app-functional.ts:adminSignIn'],
     isTarget: (u) => u.endsWith('/api/auth/get-session'),
     real: authDeploy({ email: EMAIL, role: 'super_admin' }),
-    run: (f) => checkAdminLogin(D, EMAIL, PASSWORD, f),
+    run: async (f) => (await adminSignIn(D, EMAIL, PASSWORD, f)).result,
   },
   {
     label: 'auth_admin_login (sign-in)',
-    covers: ['app-functional.ts:checkAdminLogin'],
+    covers: ['app-functional.ts:adminSignIn'],
     isTarget: (u) => u.endsWith('/api/auth/sign-in/email'),
     real: authDeploy({ email: EMAIL, role: 'super_admin' }),
-    run: (f) => checkAdminLogin(D, EMAIL, PASSWORD, f),
+    run: async (f) => (await adminSignIn(D, EMAIL, PASSWORD, f)).result,
   },
   {
     label: 'app_api_me_authenticated',

@@ -382,10 +382,8 @@ interface RunnerResult {
 
 /**
  * Fail fast if a host-side dep needed by the selected scenarios is missing.
- * `gh` is always required (every mode hits `ensureCIImageReady` via a throwaway
- * repo). `kubectl` is only required for k8s / k8s-ha — chart installs now go
- * through Flux (applied as CRs via kubectl), so no local `helm` is needed.
- * We also check that `gh` is authenticated.
+ * `pulumi` is always required. `kubectl` is only required for k8s / k8s-ha.
+ * `gh` is required, installed and authenticated, unless `requiresGh` is false.
  *
  * `requiresGh: false` waives both gh checks — gh only serves the
  * setup-repo/teardown-repo steps (throwaway GitHub repo for the retired
@@ -618,7 +616,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   const needsScaleway = filteredScenarios.some((s) => s.provider === 'scaleway');
 
   // Verify host-side deps up front — deploy already fails the same way deep
-  // inside a scenario, but we'd rather catch "helm missing" in <1s than after
+  // inside a scenario, but we'd rather catch "kubectl missing" in <1s than after
   // a 10-minute k8s provision.
   checkLocalDependencies(
     // `mode` comes back from resolveSelection as plain `string` (see the

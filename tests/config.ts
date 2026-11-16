@@ -7,66 +7,6 @@
 
 export const testConfig = {
   // ============================================================================
-  // INFRASTRUCTURE TEST SETTINGS
-  // ============================================================================
-
-  infrastructure: {
-    // Hetzner Cloud settings
-    hetzner: {
-      // Server type for test deployments
-      // See: https://www.hetzner.com/cloud#pricing
-      serverType: 'cx23', // 2 vCPU, 4GB RAM, 40GB SSD (replaces deprecated cx22)
-
-      // Primary region for single-instance and HA primary
-      primaryRegion: 'hel1', // Helsinki, Finland
-
-      // Secondary region for HA standby server
-      secondaryRegion: 'nbg1', // Nuremberg, Germany
-
-      // Base image for servers (plain Ubuntu; cloud-init installs the pinned Docker)
-      image: 'ubuntu-26.04',
-
-      // Labels applied to all test resources
-      labels: {
-        'managed-by': 'vibecarbon-test',
-      },
-
-      // Timeouts (in milliseconds)
-      timeouts: {
-        serverCreation: 30000,
-        serverReady: 300000, // 5 minutes
-        sshReady: 180000, // 3 minutes
-        deployment: 600000, // 10 minutes for full deployment
-        serviceHealthy: 180000, // 3 minutes for services to be healthy
-      },
-    },
-
-    // Cloudflare settings
-    cloudflare: {
-      // TTL for test DNS records (in seconds)
-      dnsTTL: 60,
-
-      // Whether to proxy test DNS records through Cloudflare
-      dnsProxied: false,
-
-      // Health check settings
-      healthCheck: {
-        path: '/api/health',
-        port: 443,
-        interval: 60,
-        timeout: 5,
-        retries: 2,
-      },
-    },
-
-    // Resource naming
-    naming: {
-      // Prefix for all test resources (timestamp appended automatically)
-      prefix: 'cs-test',
-    },
-  },
-
-  // ============================================================================
   // SMOKE TEST SETTINGS
   // ============================================================================
 
@@ -94,15 +34,6 @@ export const testConfig = {
       appBuild: 120000, // 2 minutes for app container build
       optionalServices: 120000, // 2 minutes for optional services to start
     },
-  },
-
-  // ============================================================================
-  // UNIT TEST SETTINGS
-  // ============================================================================
-
-  unit: {
-    // Default timeout for unit tests
-    timeout: 5000,
   },
 
   // ============================================================================
@@ -461,23 +392,5 @@ export const testConfig = {
         defaultSelection: ['compose', 'compose-ha'],
       },
     },
-
-    timeouts: {
-      create: 300_000, // 5 min
-      addFeatures: 60_000, // 1 min
-      deploy: 900_000, // 15 min
-      scale: 600_000, // 10 min
-      backup: 300_000, // 5 min
-      restore: 600_000, // 10 min
-      failover: 300_000, // 5 min
-      destroy: 300_000, // 5 min
-      verify: 300_000, // 5 min
-    },
   },
 } as const;
-
-// Type exports for better IDE support
-export type TestConfig = typeof testConfig;
-export type InfraConfig = typeof testConfig.infrastructure;
-export type HetznerConfig = typeof testConfig.infrastructure.hetzner;
-export type CloudflareConfig = typeof testConfig.infrastructure.cloudflare;

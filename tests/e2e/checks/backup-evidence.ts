@@ -85,14 +85,11 @@ interface PrefixProbeCapableS3 {
 }
 
 /**
- * wal-g v3.0.x layout under the configured `WALG_S3_PREFIX`. `basebackups_005/`
- * is the one subdir spelled anywhere in the repo (quoted verbatim in
- * src/lib/deploy/walg-staleness.js's real-world error); `wal_005/` is wal-g's
- * own convention for the WAL archive and is not otherwise pinned — which is
- * itself a reason to assert it live rather than trust it.
+ * wal-g v3.0.x layout under the configured `WALG_S3_PREFIX`: `wal_005/` is
+ * wal-g's own convention for the WAL archive and is not otherwise pinned in
+ * the repo, which is itself a reason to assert it live rather than trust it.
  */
 export const WALG_WAL_SUBDIR = 'wal_005/';
-export const WALG_BASEBACKUP_SUBDIR = 'basebackups_005/';
 
 /**
  * The canonical, SINGLE prefix both roles of one environment share. Each

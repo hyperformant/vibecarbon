@@ -13,7 +13,6 @@ import {
   resolveBackupS3Target,
   resolveObjectStorageCreds,
   runBackupEvidenceChecks,
-  WALG_BASEBACKUP_SUBDIR,
   WALG_WAL_SUBDIR,
   walgPrefixFor,
   walSegmentKeyPrefix,
@@ -46,9 +45,8 @@ describe('wal-g prefix derivation', () => {
     ).toBe('backups/myapp/e3/walg/7699032860122738725/wal_005/000000010000000000000003');
   });
 
-  it('pins the wal-g v3 subdirectory names the restore path depends on', () => {
+  it('pins the wal-g v3 WAL subdirectory name the restore path depends on', () => {
     expect(WALG_WAL_SUBDIR).toBe('wal_005/');
-    expect(WALG_BASEBACKUP_SUBDIR).toBe('basebackups_005/');
   });
 
   it('treats both role namespaces as forbidden', () => {

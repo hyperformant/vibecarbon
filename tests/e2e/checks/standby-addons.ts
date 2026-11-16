@@ -85,12 +85,6 @@ export function parseContainerStates(
   );
 }
 
-/** Container names from `docker ps` output; null when the sentinel is missing. */
-export function parseContainerNames(output: string | null | undefined): string[] | null {
-  const states = parseContainerStates(output);
-  return states ? [...states.keys()] : null;
-}
-
 export function buildContainerListCommand(all: boolean): string {
   return `docker ps ${all ? '-a ' : ''}--format '{{.Names}}\t{{.State}}' && echo ${PROBE_DONE}`;
 }
