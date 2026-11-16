@@ -23,6 +23,7 @@
  */
 import { existsSync as fsExistsSync } from 'node:fs';
 import { DB_CONTAINER, DB_POD_SELECTOR } from '../deploy/db-workload.js';
+import { printable } from '../printable.js';
 import { sshKeyPathFor as defaultGetKey, sshKubectl as defaultKubectl } from '../ssh.js';
 
 const NAMESPACE = 'vibecarbon';
@@ -60,7 +61,11 @@ export function withTimeout(promise, ms) {
 // taking the first line, or "Connection refused" reads as a warning.
 const SSH_NOISE_LINE = /^(Warning:|@+$)/;
 
-/** One line saying why an ssh read failed, never the ssh argv. */
+/**
+ * One line saying why an ssh read failed, never the ssh argv. It is often the
+ * server's own stderr, and status, update and its plan print it: control
+ * characters come out as U+FFFD (printable.js).
+ */
 export function describeSshError(err) {
   if (err?.timedOut) return 'ssh timeout';
   const stderr = typeof err?.stderr === 'string' ? err.stderr : '';
@@ -68,9 +73,9 @@ export function describeSshError(err) {
     .split('\n')
     .map((line) => line.trim())
     .find((line) => line && !SSH_NOISE_LINE.test(line));
-  if (reason) return reason;
+  if (reason) return printable(reason);
   const msg = err instanceof Error ? err.message : String(err);
-  return msg.split('\n')[0].trim();
+  return printable(msg.split('\n')[0].trim());
 }
 
 /**

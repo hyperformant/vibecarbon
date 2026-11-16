@@ -65,7 +65,15 @@ describe('command registry', () => {
       'upgrade',
       'telemetry',
     ]);
-    expect(by('deploy')).toEqual(['deploy', 'destroy', 'backup', 'restore', 'failover', 'scale']);
+    expect(by('deploy')).toEqual([
+      'deploy',
+      'destroy',
+      'backup',
+      'restore',
+      'failover',
+      'scale',
+      'update',
+    ]);
     expect(by('debug')).toEqual(['shell', 'diagnose', 'console', 'access']);
   });
 

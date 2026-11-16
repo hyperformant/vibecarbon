@@ -15,6 +15,7 @@
 
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, relative } from 'node:path';
+import { environmentForStack } from '../environment-name.js';
 
 /**
  * Whether the environment's record names servers a deploy already made: any
@@ -92,7 +93,7 @@ export function requireDeployKey({ environment, envConfig, keyPath, cwd = proces
   };
   // HA clusters deploy under <env>-primary / <env>-standby; the operator
   // types the environment.
-  const operatorEnv = environment.replace(/-(primary|standby)$/, '');
+  const operatorEnv = environmentForStack(environment);
   throw new DeployKeyMissingError({
     environment: operatorEnv,
     missing: missing.map(shown),

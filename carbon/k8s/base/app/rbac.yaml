@@ -34,3 +34,28 @@ subjects:
   - kind: ServiceAccount
     name: vibecarbon-app
     namespace: vibecarbon
+---
+# Read-only view of the nodes, so the app can say which need a restart (each
+# node's vibecarbon.dev/host-state annotation). Nodes are cluster-scoped, so
+# this is a ClusterRole; it grants nothing but list on nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vibecarbon-app-nodes
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vibecarbon-app-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vibecarbon-app-nodes
+subjects:
+  - kind: ServiceAccount
+    name: vibecarbon-app
+    namespace: vibecarbon

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
+import { HostMaintenanceNotice } from './components/admin/HostMaintenanceNotice';
 import { useAuth } from './components/auth/AuthProvider';
 import { SidebarLayout } from './components/layouts/SidebarLayout';
 import { useDocsVisibility } from './hooks/api';
@@ -228,7 +229,7 @@ export default function App() {
         <Route
           element={
             <SuperAdminProtectedRoute>
-              <SidebarLayout />
+              <SidebarLayout banner={<HostMaintenanceNotice />} />
             </SuperAdminProtectedRoute>
           }
         >

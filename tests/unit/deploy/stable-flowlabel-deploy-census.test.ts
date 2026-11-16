@@ -276,7 +276,11 @@ describe('k8s and k8s-ha: deployK3s sets it first on every node', () => {
     expect(calls.map((c) => c.host).sort()).toEqual(nodes);
     for (const c of calls) {
       expect(c.text.startsWith(PREFIX)).toBe(true);
-      expect(c.text.slice(PREFIX.length)).toMatch(/^k3s ctr -n k8s\.io images pull /);
+      // The host reporter's installer (host-reporter-census.test.ts) sits
+      // between the setting and the pulls.
+      expect(c.text.slice(PREFIX.length)).toMatch(
+        /^\(\n[\s\S]*\) >\/dev\/null 2>&1 \|\| true\nk3s ctr -n k8s\.io images pull /,
+      );
     }
   });
 

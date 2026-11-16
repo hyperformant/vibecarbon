@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   formatEnvironmentsSummary,
   formatHealthLines,
@@ -6,7 +6,16 @@ import {
   formatServerLines,
   isEnvironmentUnhealthy,
   isEnvironmentUnreadable,
+  renderEnvironment,
 } from '../../../src/status.js';
+
+const notes = vi.hoisted(() => [] as string[]);
+vi.mock('@clack/prompts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@clack/prompts')>()),
+  note: (message: string) => {
+    notes.push(message);
+  },
+}));
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -417,5 +426,50 @@ describe('isHaConfigured', () => {
         ],
       }),
     ).toBe(true);
+  });
+});
+
+describe('renderEnvironment: restart rows', () => {
+  it('prints the Restart due row when checks.hostState holds a due server', () => {
+    notes.length = 0;
+    renderEnvironment(
+      'production',
+      { deployMode: 'compose', provider: 'hetzner', servers: [] },
+      {
+        hostState: [
+          {
+            name: 'master',
+            reporting: true,
+            state: {
+              host: 'master',
+              rebootRequired: true,
+              since: '2026-11-15T03:12:00Z',
+              packages: ['linux-image-6.8.0-90-generic'],
+            },
+          },
+        ],
+      },
+    );
+    expect(strip(notes.join('\n'))).toContain(
+      'Restart due    master needs a restart for linux-image-6.8.0-90-generic (since Nov 15), run vibecarbon update production to install it',
+    );
+  });
+
+  it('prints nothing about restarts when no server is due', () => {
+    notes.length = 0;
+    renderEnvironment(
+      'production',
+      { deployMode: 'compose', provider: 'hetzner', servers: [] },
+      {
+        hostState: [
+          {
+            name: 'master',
+            reporting: true,
+            state: { host: 'master', rebootRequired: false, since: null, packages: [] },
+          },
+        ],
+      },
+    );
+    expect(strip(notes.join('\n'))).not.toContain('Restart');
   });
 });

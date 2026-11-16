@@ -65,7 +65,9 @@ describe('cloud-init starts the units it installs', () => {
         // A start/restart of the same unit within the next few lines counts.
         const followedByStart = lines
           .slice(i + 1, i + 5)
-          .some((next) => new RegExp(`systemctl\\s+(start|restart)\\s+${unit}`).test(next));
+          .some((next) =>
+            new RegExp(`systemctl\\s+(start|restart)\\s+(--\\S+\\s+)*${unit}`).test(next),
+          );
         if (!followedByStart) {
           offenders.push(`${relative(repoRoot, file)}:${i + 1} — ${unit}`);
         }

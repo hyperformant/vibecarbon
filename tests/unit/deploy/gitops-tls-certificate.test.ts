@@ -198,6 +198,17 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
     });
   });
 
+  it('seeds the operator environment name for the app, without the HA role suffix', async () => {
+    await seedFor('production', {});
+    expect(vi.mocked(seedEnvironmentSecrets).mock.calls[0][1]).toMatchObject({
+      VIBECARBON_ENV: 'production',
+    });
+    await seedFor('production-standby', { role: 'standby' });
+    expect(vi.mocked(seedEnvironmentSecrets).mock.calls[0][1]).toMatchObject({
+      VIBECARBON_ENV: 'production',
+    });
+  });
+
   it('refuses to seed without a domain instead of rendering a localhost Certificate', async () => {
     await expect(seedFor('nodomain', { domain: null })).rejects.toThrow(NO_DOMAIN);
     expect(seedEnvironmentSecrets).not.toHaveBeenCalled();

@@ -56,6 +56,7 @@ import {
   rowsFromDockerPs,
   SERVICE_DISPLAY_NAMES,
 } from './lib/status/container-rows.js';
+import { checkHostStates, hostStateRows } from './lib/status/host-states.js';
 import { checkRemoteContainers } from './lib/status/remote-containers.js';
 import { checkTls, formatTlsLines } from './lib/status/tls-row.js';
 import { deriveComposeProjectName } from './lib/subnet.js';
@@ -799,16 +800,17 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
  * @param {object} envConfig
  * @param {string} projectName
  * @param {object} [deps] the ssh seams (sshRun, sshKubectl, sshKeyPathFor, existsSync) and checkBackupHealth's
- * @returns {Promise<{ replication: PromiseSettledResult<any>, containers: PromiseSettledResult<any>, backups: PromiseSettledResult<any> }>}
+ * @returns {Promise<{ replication: PromiseSettledResult<any>, containers: PromiseSettledResult<any>, backups: PromiseSettledResult<any>, hostState: PromiseSettledResult<any> }>}
  */
 export async function checkEnvironmentRemote(envName, envConfig, projectName, deps = {}) {
   const shared = { ...deps, snapshots: deps.snapshots ?? createClusterSnapshots(envName, deps) };
-  const [replication, containers, backups] = await Promise.allSettled([
+  const [replication, containers, backups, hostState] = await Promise.allSettled([
     checkReplication(envName, envConfig, projectName, shared),
     checkRemoteContainers(envName, envConfig, projectName, shared),
     checkBackupHealth(envName, envConfig, projectName, shared),
+    checkHostStates(envName, envConfig, shared),
   ]);
-  return { replication, containers, backups };
+  return { replication, containers, backups, hostState };
 }
 
 function checkGitSync(envName, envConfig) {
@@ -1565,6 +1567,11 @@ function renderEnvironment(envName, envConfig, checks) {
   const fenceRow = writeFenceRow(envConfig, checks.replication, envName);
   if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
 
+  // Servers that need a restart to finish security updates, or cannot say.
+  for (const row of hostStateRows(envName, checks.hostState || [])) {
+    lines.push(`${c.dim(row.label.padEnd(15))}${c.warning(row.text)}`);
+  }
+
   // Servers
   const servers = envConfig.servers || [];
   if (servers.length > 0) {
@@ -1862,6 +1869,7 @@ async function main(argv = []) {
         replication: replicationResult,
         containers: containersResult,
         backups: backupsResult,
+        hostState: hostStateResult,
       } = await checkEnvironmentRemote(envName, envConfig, projectConfig.projectName);
       checks.replication =
         replicationResult.status === 'fulfilled' ? replicationResult.value : null;
@@ -1871,8 +1879,12 @@ async function main(argv = []) {
         replication: replicationResult,
         containers: containersResult,
         backups: backupsResult,
+        hostState: hostStateResult,
       });
       attachBackups(checks, backupsResult);
+      // Omitted when there is nothing to query, like containers.
+      if (hostStateResult.status === 'fulfilled' && hostStateResult.value.length > 0)
+        checks.hostState = hostStateResult.value;
       if (failed) checks.checkErrors = failed;
       // Omitted, not null, when there is nothing to query (no servers, no
       // project name) — spec §6; consumers key on the key's absence.
@@ -2000,6 +2012,7 @@ export {
   isEnvironmentUnhealthy,
   main,
   providerDisplayName,
+  renderEnvironment,
   resolveEnvProvider,
   SPEC,
   storageAccessRow,

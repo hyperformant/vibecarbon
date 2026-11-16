@@ -26,6 +26,8 @@ const INTERVAL_MS = 3000;
  * @param {number} [options.budgetMs]
  * @param {number} [options.intervalMs] Must stay under the 10 s renew period,
  *   or two renewals can fall between reads and count as one.
+ * @param {() => number} [options.now] clock seam for pollUntil
+ * @param {(ms: number) => Promise<unknown>} [options.sleep] sleep seam for pollUntil
  * @returns {Promise<{settled: boolean, pending: string[]}>} Never throws at the
  *   budget: by then the API has marked a dead node's pods NotReady, so the pod
  *   wait that follows reports the real state with better detail than this can.
@@ -34,6 +36,8 @@ export async function waitForKubeletsRenewing({
   readLeases,
   budgetMs = BUDGET_MS,
   intervalMs = INTERVAL_MS,
+  now,
+  sleep,
 }) {
   /** @type {Map<string, {renewTime: string, renewals: number}>} */
   const nodes = new Map();
@@ -61,6 +65,8 @@ export async function waitForKubeletsRenewing({
       initialDelayMs: intervalMs,
       backoffFactor: 1,
       description: 'kubelets renewing their node leases',
+      now,
+      sleep,
     });
     return { settled: true, pending: [] };
   } catch {

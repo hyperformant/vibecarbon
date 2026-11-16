@@ -127,6 +127,8 @@ const SPEC = {
     '  Never   Your code, never touched (src/**, db/migrations/**, .env, etc.)',
     '',
     'Installed add-ons are upgraded too, from the add-on files this CLI ships.',
+    '',
+    'Looking for vibecarbon update? That one installs system updates and restarts servers.',
   ].join('\n'),
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },

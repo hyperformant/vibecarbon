@@ -14,6 +14,7 @@ import { progressLog, shouldAnimateSpinner, spinner } from '../../cli/progress.j
 import { runCommandAsync } from '../../command.js';
 import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
+import { withHostReporter } from '../../host-reporter.js';
 import { loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
 import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
 import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
@@ -1458,7 +1459,9 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
     'rm -f "$TMP_CRON"',
   ].join('\n');
 
-  await runScript(ip, sshKeyPath, installScript, { timeout: 60_000 });
+  // Every compose deploy and scale passes here on every server, so it also
+  // installs the host reporter (../../host-reporter.js) in the same session.
+  await runScript(ip, sshKeyPath, withHostReporter(installScript), { timeout: 60_000 });
 }
 
 /**

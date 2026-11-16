@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createClusterSnapshots,
   dbPod,
+  describeSshError,
   parseClusterSnapshot,
   SNAPSHOT_ARGV,
   SNAPSHOT_TIMEOUT_MS,
@@ -151,5 +152,17 @@ describe('dbPod', () => {
     expect(() => dbPod(parseClusterSnapshot(list([])))).toThrow(
       'no app=vibecarbon-db pod in namespace vibecarbon',
     );
+  });
+});
+
+describe('describeSshError', () => {
+  // The line reaches status, update and the plan: a server's stderr is not
+  // allowed to drive the terminal.
+  it('filters the control characters a server put in its stderr', () => {
+    const err = Object.assign(new Error('Command failed: ssh ...'), {
+      stderr: 'Warning: Permanently added\nx\u001b]52;c;ZXZpbA==\u0007\u001b[2K\n',
+    });
+    expect(describeSshError(err)).toBe('x\uFFFD]52;c;ZXZpbA==\uFFFD\uFFFD[2K');
+    expect(describeSshError(new Error('bad\u009b31m'))).toBe('bad\uFFFD31m');
   });
 });

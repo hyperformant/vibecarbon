@@ -423,6 +423,13 @@ export function runScale(
 }
 
 /**
+ * Run vibecarbon update: the plan and the run as one JSON object on stdout.
+ */
+export function runUpdate(env: string, options: RunOptions): Promise<CliResult> {
+  return runCli(`update ${env} -y -json`, options);
+}
+
+/**
  * Run vibecarbon backup. E2E always wants the create action; PR 2's
  * interactive-default backup CLI requires `-action <create|list|download>`
  * (or `-l`) under `-y` so the off-TTY guard can name exactly which flag

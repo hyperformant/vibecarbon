@@ -23,6 +23,12 @@ services:
     # tokens included, which the app must never hold.
     env_file: !override
       - app.env
+    # The host reporter's state directory, read-only, so the app can say when
+    # the server needs a restart. The directory, not the file: the reporter
+    # replaces the file atomically, which a file bind would never see. No Z:
+    # the directory is shared with the host and is not ours to relabel.
+    volumes:
+      - /run/vibecarbon-host:/host-status:ro
     environment:
       # Admin Infrastructure pages (service discovery + container logs) reach
       # the Docker Engine API through app-docker-proxy below, which answers

@@ -5,8 +5,9 @@
  * (plan/deploy-plan.js, plan/destroy-plan.js) + effects registry
  * (effects/k8s-ha.js). This module owns what those effects call into for the
  * cross-cluster WireGuard replication transport:
- * - buildReplGatewaySocatArgs / renderReplGatewayManifest — the repl-gateway
- *   DaemonSet that relays the WG tunnel to each node's postgres port
+ * - buildReplGatewaySocatArgs / renderReplGatewayManifest — the repl-gateway,
+ *   a one-replica Deployment pinned to the database node, that relays the WG
+ *   tunnel to the db's postgres port
  * - setupReplication — orchestrates the above into a working primary/standby
  *   streaming pair
  */

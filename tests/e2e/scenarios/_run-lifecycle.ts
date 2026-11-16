@@ -76,6 +76,7 @@ import {
   waitForDnsToPoint,
   waitForHealthy,
 } from '../checks/health.js';
+import { runHostRestartStep, selectRestartTarget } from '../checks/host-restart.js';
 import { assertPilotLightStandby } from '../checks/pilot-light.js';
 import {
   buildMarkerId,
@@ -252,6 +253,10 @@ const TIMEOUTS: Record<string, number> = {
   // sits at warm-deploy's worst-case budget rather than its typical one.
   'warm-redeploy-change': 1_800_000,
   'verify-deploy': 1_800_000, // 30 min — k8s tail (ACME + rollout) past 20 min
+  // 45 min: bounds the `vibecarbon update` CLI call only; the 90 s and 120 s
+  // observation windows come on top. k8s-ha updates its servers one at a time,
+  // and installs on fresh servers plus one restart can pass 25 min.
+  update: 45 * 60_000,
   'verify-status': 300_000, // 5 min — status -json polls up to 3 min for rolling pods
   // 10 parallel /api/health requests with a 15s per-request timeout. Allows
   // generous 2 min budget so a transient network blip during a single burst
@@ -2957,6 +2962,44 @@ EOF`;
             timeoutMs: 180_000,
           });
           if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
+        }),
+    },
+
+    // 4.05 Update: mark a restart due on one server, check every surface
+    // reports it, run `vibecarbon update`, check it clears and that the
+    // measured downtime is within the plan. Non-perf (see NON_PERF_STEPS).
+    {
+      name: 'update',
+      run: () =>
+        executeStep('update', `vibecarbon update ${config.envPrefix} -y -json`, async (stepId) => {
+          const key = sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix);
+          if (!key) throw new Error('update: no ssh key for this environment');
+          const creds = adminCreds ?? readAdminCredentials(config.projectDir);
+          const target = await selectRestartTarget({
+            mode: config.mode,
+            env: config.envPrefix,
+            envConfig: readEnvConfig(config.projectDir, config.envPrefix),
+            key,
+          });
+          console.log(`${tag} [update] marking a restart due on ${target.name} (${target.ip})`);
+          const results = await runHostRestartStep({
+            env: config.envPrefix,
+            mode: config.mode,
+            domain: config.domain,
+            projectDir: config.projectDir,
+            key,
+            target,
+            adminEmail: creds?.adminEmail,
+            adminPassword: creds?.adminPassword,
+            timeouts: { updateMs: TIMEOUTS.update },
+          });
+          collector.recordVerifications(stepId, results);
+          const failed = results.filter((r) => r.status !== 'pass');
+          if (failed.length > 0) {
+            throw new Error(
+              `update: ${failed.map((r) => `${r.checkName}: ${r.errorMessage ?? r.status}`).join('; ')}`,
+            );
+          }
         }),
     },
 

@@ -60,7 +60,9 @@ import { backupStorageConfig } from '../../backups-bucket.js';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
+import { environmentForStack } from '../../environment-name.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
+import { withHostReporter } from '../../host-reporter.js';
 import { CLOUD_INIT_DIR } from '../../iac/cloud-init.js';
 import { infraStepSkips } from '../../iac/state-seal.js';
 import {
@@ -1505,9 +1507,15 @@ export async function prePullImages({ nodeIps, sshKeyPath, khPath, extraImages =
   // This session reaches every node the deploy knows, on every deploy, as
   // soon as k3s answers and minutes before the apply has kubelet pull
   // anything, so it also sets the stable flow label on nodes created before
-  // v0.54.1 (../stable-flowlabel.js). Failover's standby pre-pull rides it too.
+  // v0.54.1 (../stable-flowlabel.js), and installs the host reporter on nodes
+  // created before it existed (../../host-reporter.js). Failover's standby
+  // pre-pull rides it too.
   const script = withStableFlowLabel(
-    images.map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`).join('\n'),
+    withHostReporter(
+      images
+        .map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`)
+        .join('\n'),
+    ),
   );
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
   await Promise.all(
@@ -1793,19 +1801,27 @@ function redisPassword(envLocal) {
  * services/redis/compose/docker-compose.yml). No infra password, cloud or DNS
  * token ever lands here. Pure, so the contents are testable without a cluster.
  *
+ * `environment` becomes VIBECARBON_ENV, the operator's name for the restart
+ * notice.
+ *
  * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX_BASE
  * from s3Config.walgPrefix (buildDbManifestValues) and nothing in carbon/k8s
  * reads it; in k8s-ha the stack env (prod-primary) is not even the env's name.
  *
- * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}}} args
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, environment?: string}} args
  * @returns {Record<string,string>}
  */
-export function buildAppSecretData({ envLocal, s3Config }) {
+export function buildAppSecretData({ envLocal, s3Config, environment }) {
   /** @type {Record<string,string>} */
   const extras = appStorageCredential({ s3Config });
   const redis = redisPassword(envLocal);
   if (redis) extras.REDIS_URL = `redis://:${redis}@redis:6379`;
-  return buildAppRuntimeEnv(envLocal, extras);
+  // VIBECARBON_ENV: the operator's environment name, for the restart notice's
+  // `vibecarbon update <env>` hint (k8s-ha stack names lose their role suffix).
+  return buildAppRuntimeEnv(
+    environment ? { ...envLocal, VIBECARBON_ENV: environmentForStack(environment) } : envLocal,
+    extras,
+  );
 }
 
 /**
@@ -2855,7 +2871,7 @@ export async function applyCloudSecrets({
  * role file on every start, so it has to exist before base/ creates the pod.
  * `kubectl apply`, so a cluster that predates it gets it created.
  *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null, restore?: {backup: string, target: string, recoveryConf: string}|null, walgRole: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupTarget?: import('../../backups-bucket.js').BackupsTarget|null, restore?: {backup: string, target: string, recoveryConf: string}|null, walgRole: 'primary'|'standby', environment?: string}} args
  */
 export async function applyVibecarbonSecrets({
   kubeconfig,
@@ -2864,6 +2880,7 @@ export async function applyVibecarbonSecrets({
   backupTarget,
   restore,
   walgRole,
+  environment,
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // Ensure the namespace exists before we try to land a Secret in it.
@@ -2881,7 +2898,7 @@ export async function applyVibecarbonSecrets({
     description: 'applyVibecarbonSecrets: kubectl apply namespace/vibecarbon',
   });
   const secrets = {
-    'vibecarbon-app-secrets': buildAppSecretData({ envLocal, s3Config }),
+    'vibecarbon-app-secrets': buildAppSecretData({ envLocal, s3Config, environment }),
     'vibecarbon-infra-secrets': buildInfraSecretData({
       envLocal,
       s3Config,
@@ -5074,7 +5091,15 @@ export async function applyK3sManifests({
   // standby. The S3 prefix itself stays canonical.
   const walgRole = role === 'standby' ? 'standby' : 'primary';
   await perfAsync(`deploy.${perfPrefix}.secrets`, () =>
-    applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupTarget, restore, walgRole }),
+    applyVibecarbonSecrets({
+      kubeconfig,
+      envLocal,
+      s3Config,
+      backupTarget,
+      restore,
+      walgRole,
+      environment,
+    }),
   );
   onNamespaceReady?.();
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,

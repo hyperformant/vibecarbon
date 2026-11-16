@@ -11,6 +11,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine, parseDotenv } from '../dotenv.js';
+import { environmentForStack } from '../environment-name.js';
 import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from '../images.js';
 import { perfTimer } from '../perf.js';
 import {
@@ -496,8 +497,13 @@ function writeBundle(stageDir, projectName, options) {
   // server's app.env as `appEnvReplay`; a server deployed before app.env
   // existed gave its app the whole .env, so its S3_* there are what it used.
   const serverEnv = parseDotenv(serverEnvText);
+  // VIBECARBON_ENV is the operator's environment name, for the restart notice's
+  // `vibecarbon update <env>` hint. It joins the app's env here, not .env, so
+  // the server .env (which the db reads) is unchanged.
   const appEnv = buildAppRuntimeEnv(
-    serverEnv,
+    options.environment
+      ? { ...serverEnv, VIBECARBON_ENV: environmentForStack(options.environment) }
+      : serverEnv,
     appStorageCredential({
       s3Config: options.s3,
       previousAppEnv: options.appEnvReplay ?? serverEnv,

@@ -57,6 +57,7 @@ const ALLOW: { why: string; sites: string[] }[] = [
     why: 'request or probe target the CLI fetches or hands to curl, never printed',
     sites: [
       'src/status.js url https://{*}/api/health/ready',
+      'src/lib/update/execute.js readyUrl https://{*}/api/health/ready',
       'src/failover.js promotedProbeArgv https://{*}{*}',
       'src/lib/deploy/orchestrator.js url https://{*}/api/health',
       'src/lib/deploy/orchestrator.js curlVerbose https://{*}/api/health',

@@ -11,7 +11,7 @@
  * Census: every command whose SPEC declares a `json` flag must have a fixture
  * here, so a new JSON command cannot ship without proving the contract.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { destroyRealProject, realProject, runCli } from '../../_harness/index.js';
@@ -38,7 +38,28 @@ const FIXTURES: Record<string, (project: string) => void> = {
     };
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   },
+  // A server with no public address: update lists it as skipped and prints the
+  // plan as JSON without opening a connection.
+  update: (project) => {
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.environments = {
+      prod: {
+        provider: 'hetzner',
+        deployMode: 'compose',
+        domain: 'prod.example.invalid',
+        status: 'deployed',
+        servers: [{ name: 'prod' }],
+      },
+    };
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    mkdirSync(join(project, '.vibecarbon'), { recursive: true });
+    writeFileSync(join(project, '.vibecarbon', 'deploy_key_prod'), 'not a real key\n');
+  },
 };
+
+/** Commands that never reach a credential resolver, so print no notice. */
+const NO_NOTICE = new Set(['update']);
 
 describe('-json keeps stdout to the JSON document', () => {
   const projects: string[] = [];
@@ -69,6 +90,9 @@ describe('-json keeps stdout to the JSON document', () => {
         env: {
           DIGITALOCEAN_ACCESS_KEY: 'DO00FAKEACCESSKEY',
           DIGITALOCEAN_SECRET_KEY: 'fakesecretfakesecretfakesecret',
+          // No real provider token reaches a command under test.
+          HETZNER_API_TOKEN: '',
+          HCLOUD_TOKEN: '',
         },
       });
 
@@ -76,7 +100,7 @@ describe('-json keeps stdout to the JSON document', () => {
       expect(r.stdout).not.toMatch(NOTICE);
       expect(r.stdout).not.toContain('│');
       // The fixture must actually reach the notice, or this proves nothing.
-      expect(r.stderr).toMatch(NOTICE);
+      if (!NO_NOTICE.has(command)) expect(r.stderr).toMatch(NOTICE);
     });
   }
 });

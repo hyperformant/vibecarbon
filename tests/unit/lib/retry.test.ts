@@ -101,6 +101,30 @@ describe('pollUntil', () => {
     expect(probe.mock.calls.length).toBeGreaterThanOrEqual(6);
   });
 
+  // execute.js runs its waits on an injected clock so its tests need no timers.
+  it('runs on an injected clock and sleep when given them', async () => {
+    let t = 0;
+    const sleeps: number[] = [];
+    const now = () => t;
+    const sleep = async (ms: number) => {
+      sleeps.push(ms);
+      t += ms;
+    };
+    const probe = vi.fn().mockResolvedValue(false);
+    await expect(
+      pollUntil(probe, {
+        budgetMs: 20_000,
+        initialDelayMs: 5000,
+        backoffFactor: 1,
+        now,
+        sleep,
+      }),
+    ).rejects.toThrow('Timed out after 20000ms');
+    expect(sleeps).toEqual([5000, 5000, 5000, 5000]);
+    expect(probe).toHaveBeenCalledTimes(5);
+    expect(t).toBe(20_000);
+  });
+
   it('throws a descriptive error after the budget', async () => {
     const probe = vi.fn().mockResolvedValue(false);
     const r = await settled(pollUntil(probe, { budgetMs: 5000, description: 'k3s ready' }));

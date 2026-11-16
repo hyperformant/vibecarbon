@@ -265,6 +265,37 @@ printf 'kernel.apparmor_restrict_unprivileged_unconfined = 0\n' > /etc/sysctl.d/
 sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
 ```
 
+### Security updates and restarts
+
+Your environment's servers keep themselves patched, but only up to a point. Some fixes, mostly kernel updates, take effect only after a restart. vibecarbon never restarts a server on its own, so the restart happens when you choose, and it tells you when one is due.
+
+**What installs by itself, every day.** Every server runs Ubuntu's unattended-upgrades, which installs Ubuntu's security updates from Ubuntu's own sources. It never restarts anything.
+
+**What waits for `vibecarbon update <env>`.**
+
+- Restarts. When an update needs one, Ubuntu leaves a marker (`/var/run/reboot-required`, with the package names in `/var/run/reboot-required.pkgs`) and nothing more happens until you act.
+- Docker Engine on Docker Compose servers. Docker comes from Docker's own package repository, which the daily job does not read, and updating it restarts every container. The deploy's server cloud-init installs it, and `update` upgrades those same packages, only when you run it.
+- Kubernetes nodes run k3s's own container runtime, which `deploy` manages, so `update` leaves it alone.
+
+`update` shows its plan first: each server in the order it will go, whether it restarts, and how long people using your app should expect it to be offline. It changes nothing until you confirm (`-y` confirms for you). It then goes one server at a time, standby side first, and stops at the first failure. See the `update` section of the CLI docs for the plan and the downtime for each mode.
+
+**Why nothing restarts on its own.** A restart takes the app offline for 60 to 180 seconds when it is the single server on Docker Compose or the master on Kubernetes, and requests that need the database fail while the database node restarts. A Kubernetes worker is drained first, so restarting one causes no outage. A Docker-only update takes 30 to 60 seconds. You should pick that moment, not a timer. If a package you did not expect asks for a restart during a run, `update` asks first. With `-y` it does not restart that server, and tells you to run `update` again.
+
+**Where a due restart shows up.**
+
+1. `vibecarbon status` prints a line naming the servers and the main package, with the `vibecarbon update <env>` command to run. A Kubernetes node that has not reported yet shows as "not reporting yet", never as current.
+2. The app shows a notice on its admin pages, visible only to super admins.
+3. When the app's email is set up (`SMTP_*` in `.env`), every super admin gets one email when a restart first becomes due, then a reminder every 7 days while it stays due. The check runs once a day at 09:00 UTC, on one app replica at a time (a Postgres advisory lock), and skips on a standby database and when email is not configured. Each super admin gets their own message.
+
+The notice and the email go away once the servers have restarted.
+
+**How the app learns this, with no new access.** A small reporter on each server (see [Host reporter](technical.md#host-reporter) in the technical guide) publishes whether a restart is due. The app reads it through one narrow door per mode:
+
+- Docker Compose: one directory, `/run/vibecarbon-host`, mounted into the app read-only at `/host-status`. The app reads one small file there (at most 16 KiB). It gets no Docker socket access beyond what it already had, and no other host path.
+- Kubernetes: a node annotation (`vibecarbon.dev/host-state`) and a read-only ClusterRole that lets the app `list` nodes, and nothing else. The reporter writes the annotation with the node's own kubelet credential, which Kubernetes lets annotate only that one Node. The app's service account cannot change a node.
+
+The reader treats what it finds as untrusted. A node's credential can rewrite its own annotation, so both the CLI and the app accept only a strict format: package names and host names limited to safe characters, at most 20 packages, and a size cap. Anything else counts as "not reporting".
+
 ### Database connections
 
 The app is the database's only client on the public path. Each app replica

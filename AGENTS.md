@@ -36,6 +36,7 @@ vibecarbon backup [env]           # Create, list, or download database backups
 vibecarbon restore [env]          # Restore the database from a backup
 vibecarbon failover [env]         # Initiate failover to the standby region
 vibecarbon scale [env]            # Scale worker nodes and instance sizes
+vibecarbon update [env]           # Install system updates and restart servers when needed
 vibecarbon shell [env]            # Open an interactive bash with KUBECONFIG and cloud credentials exported
 vibecarbon diagnose [env]         # Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
 vibecarbon console <node>         # Open Hetzner's web VNC console for a node

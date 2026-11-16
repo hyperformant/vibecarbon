@@ -70,6 +70,8 @@ Available modes: `compose`, `k8s`, and `k8s-ha`. `compose` runs one server, `k8s
 
 To re-tune bounds or worker server types on an existing cluster, run `vibecarbon scale`, and the wizard walks you through what's changeable. Power users can seed a server-type change with `-type`, using an id from that environment's provider catalog (e.g. `vibecarbon scale prod -type cx33 -y` on Hetzner).
 
+To install the security updates waiting on an environment's servers and restart the ones that need it, run `vibecarbon update <env>`; see the [CLI reference](/docs/cli#update).
+
 ## Backups
 
 Backups run automatically on a schedule that differs by environment:

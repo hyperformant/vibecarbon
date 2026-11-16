@@ -39,6 +39,7 @@
  */
 
 import * as pulumi from '@pulumi/pulumi';
+import { environmentForStack } from '../environment-name.js';
 
 /** Minutes a server-class create may take before the provider gives up on it. */
 export const SERVER_CREATE_TIMEOUT_MINUTES = 15;
@@ -278,10 +279,8 @@ function elapsedFor(text, logicalName) {
   return max;
 }
 
-/** `e2-standby` → `e2`: the HA stacks are `<env>-primary` / `<env>-standby`. */
-export function environmentForStack(stackName) {
-  return String(stackName ?? '').replace(/-(primary|standby)$/, '');
-}
+// `e2-standby` → `e2`: the HA stacks are `<env>-primary` / `<env>-standby`.
+export { environmentForStack };
 
 /** `1 minute`, never `1 minutes`. */
 function minutes(n) {

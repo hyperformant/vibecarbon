@@ -37,7 +37,7 @@ export const DOCKER_PACKAGES = Object.freeze([
   'docker-compose-plugin',
 ]);
 
-const DOCKER_SOURCE_ONLY =
+export const DOCKER_SOURCE_ONLY =
   '-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/docker.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0';
 
 // Idempotent / safe to re-run: `install -m` re-applies the same mode, the curl

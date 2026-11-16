@@ -8,6 +8,7 @@ import { timeout } from 'hono/timeout';
 import { auth } from './auth';
 import { pool } from './db/client';
 import { startDatabase } from './db/startup';
+import { startHostMaintenanceEmails } from './jobs/host-maintenance-email';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
@@ -28,6 +29,7 @@ import { healthRoutes } from './routes/health';
 import { v1Routes } from './routes/v1';
 import { adminContactRoutes } from './routes/v1/admin/contact';
 import { crawlerRoutes } from './routes/v1/admin/crawlers';
+import { hostMaintenanceRoutes } from './routes/v1/admin/host-maintenance';
 import { jobsRoutes } from './routes/v1/admin/jobs';
 import { adminNewsletterRoutes } from './routes/v1/admin/newsletter';
 import { authRoutes } from './routes/v1/auth';
@@ -198,6 +200,7 @@ app.route('/api/v1/admin/stats', statsRoutes);
 app.route('/api/v1/admin/performance', performanceRoutes);
 
 app.route('/api/v1/admin/jobs', jobsRoutes);
+app.route('/api/v1/admin/host-maintenance', hostMaintenanceRoutes);
 app.route('/api/v1/admin/crawlers', crawlerRoutes);
 app.route('/api/v1/admin/contact', adminContactRoutes);
 app.route('/api/v1/admin/newsletter', adminNewsletterRoutes);
@@ -414,6 +417,18 @@ const openApiSpec = {
         },
       },
     },
+    '/api/v1/admin/host-maintenance': {
+      get: {
+        summary: 'Which servers need a restart',
+        tags: ['Admin'],
+        security: [{ sessionCookie: [] }],
+        responses: {
+          '200': { description: 'Restart state per server, as the host reporter published it' },
+          '403': { description: 'Forbidden: requires super admin' },
+          '503': { description: 'The restart state could not be read' },
+        },
+      },
+    },
     '/api/v1/admin/contact': {
       get: {
         summary: 'List contact submissions',
@@ -606,6 +621,9 @@ const server = serve({
 // ADMIN_EMAIL super admin exists (db/startup.ts startDatabase).
 void startDatabase();
 
+// Daily 09:00 UTC email to the super admins when servers need a restart.
+const stopHostMaintenanceEmails = startHostMaintenanceEmails();
+
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;
 const SHUTDOWN_TIMEOUT_MS = 10000;
@@ -615,6 +633,7 @@ const shutdown = (signal: string) => {
   isShuttingDown = true;
 
   logger.info({ signal }, 'Shutting down gracefully...');
+  stopHostMaintenanceEmails();
 
   // Stop accepting new connections and wait for in-flight requests to finish
   server.close(() => {
