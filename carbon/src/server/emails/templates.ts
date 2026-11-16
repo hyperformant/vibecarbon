@@ -6,6 +6,8 @@
  * need richer templating.
  */
 
+import type { HostServer } from '../../shared/host-maintenance';
+
 const PROJECT_DISPLAY_NAME = '{{PROJECT_DISPLAY_NAME}}';
 
 /** Escape HTML entities to prevent HTML injection in emails */
@@ -177,5 +179,38 @@ export function magicLinkEmail(params: { url: string }): { subject: string; html
       url: params.url,
       footnote: "If you didn't ask for this link, you can ignore this email.",
     }),
+  };
+}
+
+/**
+ * Sent daily-checked to the super admins when servers need a restart to
+ * finish security updates. The sentences match the admin notice
+ * (en.json admin.hostMaintenance.title and body).
+ */
+export function hostRestartDueEmail(o: {
+  servers: HostServer[];
+  command: string;
+  docsUrl: string;
+  reminder: boolean;
+}): { subject: string; html: string } {
+  const subject = `${o.reminder ? 'Reminder: ' : ''}Restart needed to finish security updates`;
+  const names = o.servers.map((s) => s.name).join(', ');
+  const lists = o.servers
+    .filter((s) => s.packages.length > 0)
+    .map(
+      (s) =>
+        `<p><strong>${escapeHtml(s.name)}</strong></p><div class="highlight">${s.packages
+          .map((p) => escapeHtml(p))
+          .join('<br>')}</div>`
+    )
+    .join('');
+  return {
+    subject,
+    html: layout(`
+      <h1>A restart is needed to finish security updates</h1>
+      <p>Security updates are installed on ${escapeHtml(names)} and take effect after a restart. Nothing restarts on its own. To restart safely, run ${escapeHtml(o.command)} from your project.</p>
+      ${lists}
+      <p><a href="${escapeHtml(o.docsUrl)}">How updates work</a></p>
+    `),
   };
 }

@@ -51,6 +51,8 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
     "Better Auth's drizzle adapter: the auth tables are server-only, app_user has no privileges",
   'auth/lockout.ts': 'sign-in lockout functions, called before the user is authenticated',
   'billing/records.ts': 'billing webhooks write customer and subscription rows (no user session)',
+  'jobs/host-maintenance-email.ts':
+    'server-only job: lists super admins and keeps its own record; takes a try-lock on a dedicated client',
   'lib/docs-settings.ts': 'reads app_settings.api_docs_enabled for the public API-docs gate',
   'lib/mfa-settings.ts': 'reads app_settings.mfa_enabled for the MFA gate',
   'middleware/crawler-tracking.ts': 'records anonymous crawler hits',
@@ -75,6 +77,8 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
 /** Files that may import the raw pg `pool` (bypasses RLS like adminDb). */
 const POOL_ALLOWLIST: Record<string, string> = {
   'index.ts': 'drains the pool on graceful shutdown',
+  'jobs/host-maintenance-email.ts':
+    'server-only job: lists super admins and keeps its own record; takes a try-lock on a dedicated client',
   'auth/bootstrap-admin.ts':
     'holds one dedicated client for the session advisory lock that serializes the super admin ' +
     'bootstrap across replicas; runs no queries on it besides pg_advisory_lock/unlock',

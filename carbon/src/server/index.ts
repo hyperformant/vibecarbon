@@ -8,6 +8,7 @@ import { timeout } from 'hono/timeout';
 import { auth } from './auth';
 import { pool } from './db/client';
 import { startDatabase } from './db/startup';
+import { startHostMaintenanceEmails } from './jobs/host-maintenance-email';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
@@ -620,6 +621,9 @@ const server = serve({
 // ADMIN_EMAIL super admin exists (db/startup.ts startDatabase).
 void startDatabase();
 
+// Daily 09:00 UTC email to the super admins when servers need a restart.
+const stopHostMaintenanceEmails = startHostMaintenanceEmails();
+
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;
 const SHUTDOWN_TIMEOUT_MS = 10000;
@@ -629,6 +633,7 @@ const shutdown = (signal: string) => {
   isShuttingDown = true;
 
   logger.info({ signal }, 'Shutting down gracefully...');
+  stopHostMaintenanceEmails();
 
   // Stop accepting new connections and wait for in-flight requests to finish
   server.close(() => {
