@@ -100,6 +100,8 @@ export function unexpectedRestartPrompt({ target, pkg }) {
 }
 export const unexpectedRestartYesLine = ({ envName, name, pkg }) =>
   `a restart became due on ${name} (${pkg}): run vibecarbon update ${envName} again to restart it`;
+export const recheckSkippedLine = (names) =>
+  `could not re-check ${names.join(', ')} after the update, so a restart may still be due`;
 export const allClearLine = () => 'no reboot due on any server';
 
 /**

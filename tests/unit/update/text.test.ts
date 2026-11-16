@@ -418,3 +418,12 @@ describe('execution lines', () => {
     expect(all).not.toMatch(/[—–]/);
   });
 });
+
+describe('recheckSkippedLine', () => {
+  it('names the servers it could not re-check', async () => {
+    const { recheckSkippedLine } = await import('../../../src/lib/update/text.js');
+    expect(recheckSkippedLine(['a', 'b'])).toBe(
+      'could not re-check a, b after the update, so a restart may still be due',
+    );
+  });
+});

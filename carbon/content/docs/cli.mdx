@@ -804,7 +804,9 @@ With `-y` it skips the confirmation. A restart that becomes due during a `-y` ru
 
 If a server doesn't come back, the command stops and says what it was waiting for. Check the server in your provider console, then run `vibecarbon status <env>`, and run `vibecarbon update <env>` again once it is reachable. A Kubernetes node it had cordoned is released on that next run.
 
-`-json` prints the plan and the result as JSON, for scripts. Without `-y` it only prints the plan and changes nothing.
+If a server can't be reached when the plan is made, the plan lists it as skipped with the command to try next, the others are still updated, and the command exits 1 at the end so a script doesn't read a partly checked environment as done. It never prints the all-clear in that case. After the update it checks each server again for a restart that is still due, and if it can't read one it says so, since the update itself succeeded.
+
+`-json` prints the plan and the result as JSON, for scripts, including `recheckSkipped`, the servers it couldn't check again after the update. Without `-y` it only prints the plan and changes nothing.
 
 This is not `vibecarbon upgrade`. That one updates your project's infrastructure files from the template. `update` installs system updates and restarts servers.
 

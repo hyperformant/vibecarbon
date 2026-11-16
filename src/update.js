@@ -33,6 +33,7 @@ import {
   formatPlan,
   formatTotal,
   nothingToDoLine,
+  recheckSkippedLine,
   summaryLine,
   unexpectedRestartYesLine,
 } from './lib/update/text.js';
@@ -119,6 +120,7 @@ function planJson(plan, extra = {}) {
     outcomes: [],
     becameDue: [],
     measuredDowntimeSeconds: null,
+    recheckSkipped: [],
     ...extra,
   };
 }
@@ -136,7 +138,7 @@ async function restartsDue(plan, outcomes, envName) {
   const { inspected, skipped } = await inspectAll(targets, { envName });
   return {
     due: new Set(inspected.filter((r) => r.state.host?.rebootRequired).map((r) => r.target.name)),
-    unread: skipped.length > 0,
+    unread: skipped,
   };
 }
 
@@ -223,6 +225,8 @@ export async function run(args) {
       p.log.success(nothingToDoLine(envName));
     }
     p.outro('');
+    // A server that was never checked is not "up to date": the run did not finish its job.
+    if (plan.skipped.length > 0) process.exit(1);
     return;
   }
 
@@ -270,7 +274,12 @@ export async function run(args) {
     },
   });
 
-  const { due, unread: unreadAfter } = await restartsDue(plan, outcomes, envName);
+  // A stopped run reads nothing back: the server that stopped it may be dead,
+  // and waiting on it would delay the error.
+  const { due, unread: recheckUnread } = stoppedAt
+    ? { due: new Set(), unread: [] }
+    : await restartsDue(plan, outcomes, envName);
+  const recheckSkipped = recheckUnread.map((u) => ({ name: u.name, reason: u.reason }));
 
   if (json) {
     writeJson(
@@ -278,6 +287,7 @@ export async function run(args) {
         outcomes,
         becameDue,
         measuredDowntimeSeconds: measuredDowntime(outcomes),
+        recheckSkipped,
       }),
     );
   } else {
@@ -285,7 +295,15 @@ export async function run(args) {
     for (const d of becameDue) {
       p.log.info(unexpectedRestartYesLine({ envName, name: d.name, pkg: d.package }));
     }
-    if (!stoppedAt && becameDue.length === 0 && due.size === 0 && !unreadAfter) {
+    if (recheckSkipped.length > 0)
+      p.log.warn(recheckSkippedLine(recheckSkipped.map((u) => u.name)));
+    if (
+      !stoppedAt &&
+      plan.skipped.length === 0 &&
+      becameDue.length === 0 &&
+      due.size === 0 &&
+      recheckSkipped.length === 0
+    ) {
       p.log.success(allClearLine());
     }
   }
@@ -296,6 +314,8 @@ export async function run(args) {
     process.exit(1);
   }
   if (!json) p.outro(c.success('Done'));
+  // The servers that were skipped at plan time were not updated: say so in the exit.
+  if (plan.skipped.length > 0) process.exit(1);
 }
 
 // SPEC is exported for the arg-parser unit tests.

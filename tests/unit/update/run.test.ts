@@ -65,6 +65,7 @@ import {
   allClearLine,
   confirmQuestion,
   nothingToDoLine,
+  recheckSkippedLine,
   unexpectedRestartYesLine,
 } from '../../../src/lib/update/text.js';
 import { run } from '../../../src/update.js';
@@ -261,14 +262,15 @@ describe('update run', () => {
     expect(text()).not.toContain(allClearLine());
   });
 
-  it('a stopped run prints error and hint and exits 1', async () => {
+  it('a stopped run prints error and hint, exits 1, and never re-reads', async () => {
     setup();
     m.executeUpdatePlan.mockResolvedValue({
       outcomes: [outcome({ error: 'could not install', hint: 'run it again' })],
       becameDue: [],
-      stoppedAt: outcome({ error: 'could not install', hint: 'run it again' }),
+      stoppedAt: { name: 'master', error: 'could not install', hint: 'run it again' },
     });
     await go(['prod', '-y']);
+    expect(m.inspectAll).toHaveBeenCalledTimes(1);
     expect(text()).toContain('could not install');
     expect(text()).toContain('run it again');
     expect(exitCode).toBe(1);
@@ -346,5 +348,86 @@ describe('update run', () => {
       expect.objectContaining({ sshKeyPath: '/keys/prod' }),
     );
     expect(text()).toContain('uncordoned w1, left from an earlier update');
+  });
+
+  const skippedOne = { name: 'gone', ip: '5.5.5.5', reason: 'timed out' };
+
+  it('all skipped at plan time: prints them, no nothing-to-do line, exit 1', async () => {
+    m.listUpdateTargets.mockResolvedValue({ tier: 'compose', targets: [], skipped: [skippedOne] });
+    m.inspectAll.mockResolvedValue({ inspected: [], skipped: [] });
+    await go(['prod', '-y']);
+    expect(text()).toContain('gone (5.5.5.5): skipped, timed out.');
+    expect(text()).not.toContain(nothingToDoLine('prod'));
+    expect(m.executeUpdatePlan).not.toHaveBeenCalled();
+    expect(exitCode).toBe(1);
+  });
+
+  it('some skipped, the rest updated: exit 1 and no all-clear', async () => {
+    m.listUpdateTargets.mockResolvedValue({
+      tier: 'compose',
+      targets: [target],
+      skipped: [skippedOne],
+    });
+    m.inspectAll.mockResolvedValue({ inspected: [{ target, state: state(['a']) }], skipped: [] });
+    await go(['prod', '-y']);
+    expect(m.executeUpdatePlan).toHaveBeenCalledTimes(1);
+    expect(text()).not.toContain(allClearLine());
+    expect(exitCode).toBe(1);
+  });
+
+  it('skipped servers do not change the preview exits', async () => {
+    m.listUpdateTargets.mockResolvedValue({
+      tier: 'compose',
+      targets: [target],
+      skipped: [skippedOne],
+    });
+    m.inspectAll.mockResolvedValue({ inspected: [{ target, state: state(['a']) }], skipped: [] });
+    await go(['prod', '-json']);
+    expect(exitCode).toBeNull();
+    expect(m.executeUpdatePlan).not.toHaveBeenCalled();
+  });
+
+  it('a re-check that cannot read a server warns, withholds the all-clear, exits 0', async () => {
+    setup();
+    m.inspectAll
+      .mockResolvedValueOnce({ inspected: [{ target, state: state(['a', 'b']) }], skipped: [] })
+      .mockResolvedValueOnce({
+        inspected: [],
+        skipped: [{ name: 'master', ip: '1.2.3.4', reason: 'timed out' }],
+      });
+    await go(['prod', '-y', '-json']);
+    expect((m.json[0] as { recheckSkipped: unknown }).recheckSkipped).toEqual([
+      { name: 'master', reason: 'timed out' },
+    ]);
+    expect(exitCode).toBeNull();
+    m.out.length = 0;
+    m.json.length = 0;
+    m.inspectAll
+      .mockResolvedValueOnce({ inspected: [{ target, state: state(['a', 'b']) }], skipped: [] })
+      .mockResolvedValueOnce({
+        inspected: [],
+        skipped: [{ name: 'master', ip: '1.2.3.4', reason: 'timed out' }],
+      });
+    await go(['prod', '-y']);
+    expect(text()).toContain(recheckSkippedLine(['master']));
+    expect(text()).not.toContain(allClearLine());
+    expect(exitCode).toBeNull();
+  });
+
+  it('recheckSkipped is empty when every server was read', async () => {
+    setup();
+    await go(['prod', '-y', '-json']);
+    expect((m.json[0] as { recheckSkipped: unknown }).recheckSkipped).toEqual([]);
+  });
+
+  it('the summary prints no null, NaN or 0s for an unmeasured outage', async () => {
+    setup();
+    m.executeUpdatePlan.mockResolvedValue({
+      outcomes: [outcome({ outageSeconds: null })],
+      becameDue: [],
+      stoppedAt: null,
+    });
+    await go(['prod', '-y']);
+    expect(text()).not.toMatch(/null|NaN|0s/);
   });
 });
