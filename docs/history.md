@@ -993,7 +993,7 @@ The module imports Node builtins only, for the same reason.
 all three entry points, and runs a real Node process to prove load-time paths
 land in the e2e home and a preset home is respected.
 
-#### 2026-11-16: A project created without git still gets its `.gitignore`
+#### 2026-11-16: A project created without git still gets its `.gitignore` (#504)
 
 `create` now writes `.gitignore` and checks it for the required patterns on
 every run. Only `git init`, the hooks and the first commit depend on git being
@@ -1012,7 +1012,7 @@ with `git init`. The file belongs to the project, not to the repository step.
 PATH that holds only node, then runs a real `git init` and `git add .` and
 checks that neither env file is staged.
 
-#### 2026-11-16: Deploy stages the lockfile it generated and nothing else
+#### 2026-11-16: Deploy stages the lockfile it generated and nothing else (#504)
 
 When a project has no lockfile, `deploy` generates one and stages it. It now
 stages that one file, through `buildGitAddNamedArgv`. `buildGitAddArgv`, which
