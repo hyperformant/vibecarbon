@@ -530,16 +530,6 @@ export class VultrProvider extends BaseProvider {
     return ip;
   }
 
-  /**
-   * Public IPv6 of an instance (`v6_main_ip`, empty string until/unless
-   * assigned).
-   * @param {object} server
-   * @returns {string|null}
-   */
-  static getPublicIPv6(server) {
-    return server?.v6_main_ip || null;
-  }
-
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors the sibling providers: CRUD via this.apiRequest,
   // listings/teardown via fetchWithRetry (all through _walkCursor),

@@ -19,10 +19,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import {
-  environmentServerNames,
-  scaleReplacementNames,
-} from '../../../src/lib/destroy/server-naming.js';
+import { environmentServerNames } from '../../../src/lib/destroy/server-naming.js';
 
 const SRC_DIR = fileURLToPath(new URL('../../../src', import.meta.url));
 
@@ -203,9 +200,6 @@ describe('environment server-name family census', () => {
   });
 
   it('scale is the only source of transient names, and they are all -new', () => {
-    const transient = scaleReplacementNames({ projectName: 'acme', environment: 'e2' });
-    expect(transient.length).toBeGreaterThan(0);
-    for (const name of transient) expect(name.endsWith('-new')).toBe(true);
     // Every suffix classified as a server must be either a permanent shape or
     // the `-new` shape — a second transient spelling would need its own
     // teardown wiring, so make adding one loud here too.

@@ -368,7 +368,6 @@ export class HetznerProvider extends BaseProvider {
 
   static RESERVED_IP_NAME = 'Floating IP';
 
-  static EU_REGIONS = ['fsn1', 'nbg1', 'hel1'];
   static US_REGIONS = ['ash', 'hil'];
 
   // Prefix-based fallback for region filtering when live data is unavailable.
@@ -1931,14 +1930,5 @@ export class HetznerProvider extends BaseProvider {
    */
   static getPublicIP(server) {
     return server?.public_net?.ipv4?.ip || null;
-  }
-
-  /**
-   * Get public IPv6 address of a server
-   * @param {object} server - Server object
-   * @returns {string|null}
-   */
-  static getPublicIPv6(server) {
-    return server?.public_net?.ipv6?.ip || null;
   }
 }

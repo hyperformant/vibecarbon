@@ -809,15 +809,6 @@ export class DigitalOceanProvider extends BaseProvider {
     return server?.networks?.v4?.find((n) => n.type === 'public')?.ip_address ?? null;
   }
 
-  /**
-   * Get public IPv6 address of a droplet.
-   * @param {object} server - Droplet object (DO API `droplet` shape)
-   * @returns {string|null}
-   */
-  static getPublicIPv6(server) {
-    return server?.networks?.v6?.find((n) => n.type === 'public')?.ip_address ?? null;
-  }
-
   // ── Instance methods (B3) ────────────────────────────────────────────
   // Transport choice mirrors HetznerProvider method-for-method: the original
   // CRUD surface (createServer/deleteServer(no-wait)/getServer/waitForServer/

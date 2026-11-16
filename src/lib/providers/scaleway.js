@@ -833,21 +833,6 @@ export class ScalewayProvider extends BaseProvider {
     return server?.public_ip?.address ?? null;
   }
 
-  /**
-   * Public IPv6 of a server (`public_ips[]` family 'inet6', legacy
-   * `ipv6.address` fallback).
-   * @param {object} server
-   * @returns {string|null}
-   */
-  static getPublicIPv6(server) {
-    const ips = server?.public_ips;
-    if (Array.isArray(ips)) {
-      const v6 = ips.find((ip) => ip?.family === 'inet6' && ip?.address);
-      if (v6) return v6.address;
-    }
-    return server?.ipv6?.address ?? null;
-  }
-
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors the sibling providers: CRUD via this.apiRequest
   // (X-Auth-Token — see the override), listings/teardown via fetchWithRetry

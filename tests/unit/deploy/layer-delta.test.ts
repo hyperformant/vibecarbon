@@ -10,7 +10,6 @@ import {
   buildDelta,
   deliverImage,
   deliverySshArgs,
-  listTargetDiffIds,
   listTargetLayers,
   normalizeImageRef,
 } from '../../../src/lib/deploy/layer-delta.js';
@@ -126,7 +125,7 @@ describe('buildDelta', () => {
   });
 });
 
-describe('listTargetLayers / listTargetDiffIds', () => {
+describe('listTargetLayers', () => {
   const ID_A = `sha256:${sha('img-a')}`;
   const ID_B = `sha256:${sha('img-b')}`;
 
@@ -172,16 +171,13 @@ describe('listTargetLayers / listTargetDiffIds', () => {
     };
     const layers = await listTargetLayers({ run, runtime: 'k3s' });
     expect(Object.fromEntries(layers)).toEqual({ [DIFF_IDS[0]]: gz(0), [DIFF_IDS[2]]: gz(2) });
-    expect(await listTargetDiffIds({ run, runtime: 'k3s' })).toEqual(
-      new Set([DIFF_IDS[0], DIFF_IDS[2]]),
-    );
   });
 
   it('a failed listing fails loudly instead of degrading to a full send', async () => {
     const run = async () => {
       throw new Error('Cannot connect to the Docker daemon');
     };
-    await expect(listTargetDiffIds({ run })).rejects.toThrow('Cannot connect to the Docker daemon');
+    await expect(listTargetLayers({ run })).rejects.toThrow('Cannot connect to the Docker daemon');
   });
 });
 

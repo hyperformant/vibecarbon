@@ -473,13 +473,6 @@ export function buildRestoredTlsSecret(secretJsonText, { namespace, issuerName }
   };
 }
 
-/** True when the stored snapshot should replace the live certificate. */
-export function isSnapshotBetter(liveVerdict, storedVerdict) {
-  if (!storedVerdict.ok) return false;
-  if (!liveVerdict.ok) return true;
-  return storedVerdict.notAfter.getTime() > liveVerdict.notAfter.getTime();
-}
-
 /** Read a snapshot object. Never throws, never logs. */
 export async function readTlsSnapshot(
   s3Config,

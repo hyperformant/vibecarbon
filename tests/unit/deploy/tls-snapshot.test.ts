@@ -10,7 +10,6 @@ import {
   chainReachesTrustedRoot,
   inspectComposeAcme,
   inspectK8sTlsSecret,
-  isSnapshotBetter,
   k8sSecretSerial,
   MIN_REMAINING_VALIDITY_MS,
   normalizeSerial,
@@ -467,17 +466,6 @@ describe('buildRestoredTlsSecret errors', () => {
       'snapshot secret is unparsable',
     );
   });
-});
-
-describe('isSnapshotBetter', () => {
-  const early = { ok: true as const, notAfter: new Date(1000) };
-  const late = { ok: true as const, notAfter: new Date(2000) };
-  const bad = { ok: false as const, reason: 'x' };
-  it('prefers stored when live is unusable', () => expect(isSnapshotBetter(bad, late)).toBe(true));
-  it('prefers stored when it expires later', () =>
-    expect(isSnapshotBetter(early, late)).toBe(true));
-  it('keeps live when it expires later', () => expect(isSnapshotBetter(late, early)).toBe(false));
-  it('never prefers an unusable stored', () => expect(isSnapshotBetter(early, bad)).toBe(false));
 });
 
 describe('readTlsSnapshot', () => {

@@ -1264,25 +1264,16 @@ export class S3CompatibleProvider {
   }
 
   /**
-   * Get all available regions
-   * @returns {Object<string, string>}
-   */
-  static getRegions() {
-    // Deliberately polymorphic: must read the calling subclass's own REGIONS
-    // map (S3CompatibleProvider itself declares none), so
-    // `HetznerS3Provider.getRegions()` returns Hetzner's regions and a
-    // future provider's subclass returns its own.
-    // biome-ignore lint/complexity/noThisInStatic: see comment above
-    return this.REGIONS;
-  }
-
-  /**
    * Get endpoint for a specific region
    * @param {string} region - Region ID
    * @returns {string|null}
    */
   static getEndpointForRegion(region) {
-    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic — see getRegions() above.
+    // Deliberately polymorphic: must read the calling subclass's own ENDPOINTS
+    // map (S3CompatibleProvider itself declares none), so
+    // `HetznerS3Provider.getEndpointForRegion()` answers from Hetzner's map and
+    // another provider's subclass from its own.
+    // biome-ignore lint/complexity/noThisInStatic: see comment above
     return this.ENDPOINTS[region] || null;
   }
 }

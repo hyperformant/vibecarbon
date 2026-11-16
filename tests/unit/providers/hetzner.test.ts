@@ -20,6 +20,9 @@ vi.mock('../../../src/lib/hetzner-guided-setup.js', async (orig) => {
 
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
+// Hetzner's EU locations (every region that is not in US_REGIONS).
+const EU_REGIONS = ['fsn1', 'nbg1', 'hel1'];
+
 describe('HetznerProvider', () => {
   describe('static properties', () => {
     it('has correct NAME', () => {
@@ -455,7 +458,7 @@ describe('HetznerProvider', () => {
 
     it('never offers an EU-retired cpx*1 SKU as an EU default', () => {
       const retiredInEu = ['cpx11', 'cpx21', 'cpx31', 'cpx41', 'cpx51'];
-      for (const region of HetznerProvider.EU_REGIONS) {
+      for (const region of EU_REGIONS) {
         const d = HetznerProvider.getRegionDefaults(region);
         expect(retiredInEu).not.toContain(d.composeType);
         expect(retiredInEu).not.toContain(d.masterType);
@@ -465,7 +468,7 @@ describe('HetznerProvider', () => {
     });
 
     it('every offline default is a known catalog SKU', () => {
-      for (const region of [...HetznerProvider.EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
+      for (const region of [...EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
         const d = HetznerProvider.getRegionDefaults(region);
         for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
           expect(HetznerProvider.FALLBACK_SERVER_TYPES).toHaveProperty(t);
@@ -495,25 +498,15 @@ describe('HetznerProvider', () => {
     });
   });
 
-  describe('instance methods', () => {
-    let provider: HetznerProvider;
-
-    beforeEach(() => {
-      provider = new HetznerProvider('test-api-token');
-    });
-
-    it('getName returns Hetzner Cloud', () => {
-      expect(provider.getName()).toBe('Hetzner Cloud');
-    });
-
-    it('getRegions returns all regions', () => {
-      const regions = provider.getRegions();
+  describe('catalog statics', () => {
+    it('REGIONS lists all five regions', () => {
+      const regions = HetznerProvider.REGIONS;
       expect(Object.keys(regions)).toHaveLength(5);
       expect(regions.fsn1).toBeDefined();
     });
 
-    it('getServerTypes returns all server types', () => {
-      const types = provider.getServerTypes();
+    it('SERVER_TYPES lists all server types', () => {
+      const types = HetznerProvider.SERVER_TYPES;
       // 4 cx*3 + 4 cx*2 (legacy) + 6 cpx*2 + 5 cpx*1 (legacy) + 6 ccx = 25.
       // No cax (ARM) SKUs — dropped when vibecarbon standardized on x86-64.
       expect(Object.keys(types)).toHaveLength(25);
@@ -523,7 +516,7 @@ describe('HetznerProvider', () => {
     });
 
     it('catalogs the current shared-vCPU generations Hetzner actually sells', () => {
-      const types = provider.getServerTypes();
+      const types = HetznerProvider.SERVER_TYPES;
       // Launched 2025-10-16 alongside the cpx*1 / cx*2 deprecations.
       for (const t of ['cpx12', 'cpx22', 'cpx32', 'cpx42', 'cpx52', 'cpx62']) {
         expect(types).toHaveProperty(t);
@@ -534,54 +527,6 @@ describe('HetznerProvider', () => {
       // cpx22 is 2 vCPU / 4 GB / 80 GB — it was previously mis-specced as a
       // copy of cpx21 (3 vCPU).
       expect(types.cpx22).toEqual({ vcpu: 2, ram: 4, disk: 80 });
-    });
-
-    it('isValidRegion returns true for valid regions', () => {
-      expect(provider.isValidRegion('fsn1')).toBe(true);
-      expect(provider.isValidRegion('nbg1')).toBe(true);
-      expect(provider.isValidRegion('hel1')).toBe(true);
-      expect(provider.isValidRegion('ash')).toBe(true);
-      expect(provider.isValidRegion('hil')).toBe(true);
-    });
-
-    it('isValidRegion returns false for invalid regions', () => {
-      expect(provider.isValidRegion('invalid')).toBe(false);
-      expect(provider.isValidRegion('nyc1')).toBe(false);
-      expect(provider.isValidRegion('')).toBe(false);
-    });
-
-    it('isValidServerType returns true for valid types', () => {
-      expect(provider.isValidServerType('cpx11')).toBe(true);
-      expect(provider.isValidServerType('cpx21')).toBe(true);
-      expect(provider.isValidServerType('cpx31')).toBe(true);
-      expect(provider.isValidServerType('cpx41')).toBe(true);
-      expect(provider.isValidServerType('cpx51')).toBe(true);
-    });
-
-    it('isValidServerType returns false for invalid types', () => {
-      expect(provider.isValidServerType('invalid')).toBe(false);
-      expect(provider.isValidServerType('cx11')).toBe(false);
-      expect(provider.isValidServerType('')).toBe(false);
-    });
-
-    it('formatRegion returns display name', () => {
-      expect(provider.formatRegion('fsn1')).toBe('Falkenstein, Germany');
-      expect(provider.formatRegion('hel1')).toBe('Helsinki, Finland');
-    });
-
-    it('formatRegion returns ID for unknown region', () => {
-      expect(provider.formatRegion('unknown')).toBe('unknown');
-    });
-
-    it('formatServerType returns formatted string', () => {
-      const formatted = provider.formatServerType('cpx11');
-      expect(formatted).toContain('cpx11');
-      expect(formatted).toContain('2 vCPU');
-      expect(formatted).toContain('2GB RAM');
-      expect(formatted).toContain('40GB SSD');
-      // Prices are no longer hard-coded — they change too often.
-      expect(formatted).not.toContain('/mo');
-      expect(formatted).not.toContain('€');
     });
   });
 
@@ -610,19 +555,6 @@ describe('HetznerProvider', () => {
     it('returns null for undefined server', () => {
       expect(HetznerProvider.getPublicIP(undefined as unknown as HetznerServer)).toBeNull();
       expect(HetznerProvider.getPublicIP(null as unknown as HetznerServer)).toBeNull();
-    });
-  });
-
-  describe('getPublicIPv6 static method', () => {
-    it('extracts IPv6 from server object', () => {
-      const server = {
-        public_net: {
-          ipv4: { ip: '1.2.3.4' },
-          ipv6: { ip: '2001:db8::1' },
-        },
-      };
-
-      expect(HetznerProvider.getPublicIPv6(server)).toBe('2001:db8::1');
     });
   });
 

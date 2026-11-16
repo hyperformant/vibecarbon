@@ -614,46 +614,6 @@ export class BaseProvider {
     this.apiToken = apiToken;
   }
 
-  /**
-   * Get the provider name
-   * @returns {string}
-   */
-  getName() {
-    return this.constructor.NAME;
-  }
-
-  /**
-   * Get available regions
-   * @returns {Object<string, string>}
-   */
-  getRegions() {
-    return this.constructor.REGIONS;
-  }
-
-  /**
-   * Get available server types
-   * @returns {Object<string, object>}
-   */
-  getServerTypes() {
-    return this.constructor.SERVER_TYPES;
-  }
-
-  /**
-   * Get the default server type
-   * @returns {string}
-   */
-  getDefaultType() {
-    return this.constructor.DEFAULT_TYPE;
-  }
-
-  /**
-   * Get default regions for HA deployment
-   * @returns {string[]}
-   */
-  getHARegions() {
-    return this.constructor.HA_REGIONS;
-  }
-
   // ============================================================================
   // ABSTRACT METHODS - Must be implemented by subclasses
   // ============================================================================
@@ -1432,7 +1392,7 @@ export class BaseProvider {
     // line inherits the base no-op. Rewriting `this` to `BaseProvider` (which
     // is what biome's noThisInStatic autofix does) silently turns this guard
     // into a permanent no-op — same pattern, same reason, as
-    // s3-base.js's getRegions().
+    // s3-base.js's getEndpointForRegion().
     // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic — see comment above
     if (!serverType || !this.isArmServerType(serverType)) return serverType;
     // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic — see comment above
@@ -1455,15 +1415,6 @@ export class BaseProvider {
    */
   static getPublicIP(_server) {
     throw new Error('getPublicIP() must be implemented by subclass');
-  }
-
-  /**
-   * Get public IPv6 address of a server.
-   * @param {object} server - Server object
-   * @returns {string|null}
-   */
-  static getPublicIPv6(_server) {
-    throw new Error('getPublicIPv6() must be implemented by subclass');
   }
 
   // ============================================================================
@@ -1641,44 +1592,6 @@ export class BaseProvider {
     // backoff instead of the previous 3. Transient 5xx / 429 also retry.
     const { fetchWithRetry } = await import('../fetch-retry.js');
     return await fetchWithRetry(url, { ...options, headers });
-  }
-
-  /**
-   * Validate that a region is supported
-   * @param {string} region - Region ID
-   * @returns {boolean}
-   */
-  isValidRegion(region) {
-    return region in this.constructor.REGIONS;
-  }
-
-  /**
-   * Validate that a server type is supported
-   * @param {string} serverType - Server type ID
-   * @returns {boolean}
-   */
-  isValidServerType(serverType) {
-    return serverType in this.constructor.SERVER_TYPES;
-  }
-
-  /**
-   * Format a region ID to display name
-   * @param {string} region - Region ID
-   * @returns {string}
-   */
-  formatRegion(region) {
-    return this.constructor.REGIONS[region] || region;
-  }
-
-  /**
-   * Format a server type to display string
-   * @param {string} serverType - Server type ID
-   * @returns {string}
-   */
-  formatServerType(serverType) {
-    const type = this.constructor.SERVER_TYPES[serverType];
-    if (!type) return serverType;
-    return `${serverType} (${type.vcpu} vCPU, ${type.ram}GB RAM, ${type.disk}GB SSD)`;
   }
 }
 

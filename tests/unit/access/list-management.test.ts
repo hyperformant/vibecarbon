@@ -5,7 +5,6 @@ import {
   loadOperatorCidrs,
   parseAllowedSshIpsEnv,
   pruneCidrs,
-  refreshLastUsed,
   removeCidr,
 } from '../../../src/lib/operator-ip.js';
 
@@ -131,29 +130,6 @@ describe('pruneCidrs', () => {
 
   it('returns empty when input is empty', () => {
     expect(pruneCidrs([], now)).toEqual([]);
-  });
-});
-
-describe('refreshLastUsed', () => {
-  const fixedNow = new Date('2026-04-28T18:00:00Z');
-
-  it('updates lastUsedAt for the matching entry only', () => {
-    const list = [
-      { cidr: '1.2.3.4/32', addedAt: '2026-04-01T00:00:00Z', lastUsedAt: '2026-04-01T00:00:00Z' },
-      { cidr: '5.6.7.8/32', addedAt: '2026-04-02T00:00:00Z', lastUsedAt: '2026-04-02T00:00:00Z' },
-    ];
-    const result = refreshLastUsed(list, '1.2.3.4/32', fixedNow);
-    expect(result[0].lastUsedAt).toBe('2026-04-28T18:00:00.000Z');
-    expect(result[0].addedAt).toBe('2026-04-01T00:00:00Z');
-    expect(result[1].lastUsedAt).toBe('2026-04-02T00:00:00Z');
-  });
-
-  it('returns the list unchanged when CIDR is absent', () => {
-    const list = [
-      { cidr: '1.2.3.4/32', addedAt: '2026-04-01T00:00:00Z', lastUsedAt: '2026-04-01T00:00:00Z' },
-    ];
-    const result = refreshLastUsed(list, '99.99.99.99/32', fixedNow);
-    expect(result).toEqual(list);
   });
 });
 

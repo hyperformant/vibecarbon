@@ -5,7 +5,7 @@
  * The compute half has provider-contract.test.ts; the S3 half had NOTHING
  * iterating its subclasses, and the two existing ones had already diverged
  * in shape unnoticed — HetznerS3Provider.REGIONS was an object
- * {slug: description} (the shape s3-base's getRegions() docblock promises)
+ * {slug: description} (the shape every caller reads)
  * while DigitalOceanSpacesProvider.REGIONS was a bare array of slugs. Each
  * subclass's hand-written mirror test asserted its own drifted shape, so
  * both stayed green.
@@ -49,7 +49,7 @@ describe('S3 provider registry coverage', () => {
 });
 
 describe.each(ENTRIES)('S3 provider contract: %s', (_id, S3Class) => {
-  it('REGIONS is a slug → human-description map (the shape getRegions() promises), not an array', () => {
+  it('REGIONS is a slug → human-description map, not an array', () => {
     expect(Array.isArray(S3Class.REGIONS)).toBe(false);
     expect(typeof S3Class.REGIONS).toBe('object');
     for (const [slug, description] of Object.entries(S3Class.REGIONS)) {
@@ -82,10 +82,6 @@ describe.each(ENTRIES)('S3 provider contract: %s', (_id, S3Class) => {
         `resolveS3Region(${JSON.stringify(unknown)}) → "${resolved}" which has no endpoint`,
       ).toBeDefined();
     }
-  });
-
-  it('getRegions() returns the subclass REGIONS map (polymorphic static intact)', () => {
-    expect(S3Class.getRegions()).toBe(S3Class.REGIONS);
   });
 });
 

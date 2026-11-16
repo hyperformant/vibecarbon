@@ -798,19 +798,6 @@ export class LinodeProvider extends BaseProvider {
     return server?.ipv4?.[0] ?? null;
   }
 
-  /**
-   * Public IPv6 of an instance. Linode reports a single SLAAC address in
-   * CIDR form (`2600:...::/128`) — returned bare, matching the other
-   * providers' address-only contract.
-   * @param {object} server - Linode API instance object
-   * @returns {string|null}
-   */
-  static getPublicIPv6(server) {
-    const raw = server?.ipv6;
-    if (!raw || typeof raw !== 'string') return null;
-    return raw.split('/')[0] || null;
-  }
-
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors hetzner.js/digitalocean.js method-for-method:
   // original CRUD surface through `this.apiRequest`; list/firewall/teardown

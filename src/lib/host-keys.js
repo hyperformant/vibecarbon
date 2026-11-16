@@ -19,26 +19,10 @@ export function knownHostsPath(env, cwd = process.cwd()) {
 }
 
 /**
- * Overwrite the per-environment known_hosts file with the given host-key lines.
- *
- * Enforces `.vibecarbon/` mode 0o700 and file mode 0o600 unconditionally —
- * `mkdirSync`/`writeFileSync` only apply `mode` on initial creation, so we
- * follow each with `chmodSync` to guarantee the mode even when the target
- * already exists (which it will on every re-pin after first deploy).
- *
- * @param {string} env
- * @param {string[]} hostKeyLines - one host-key entry per element
- * @param {string} [cwd=process.cwd()]
- */
-export function pinHostKey(env, hostKeyLines, cwd = process.cwd()) {
-  const path = knownHostsPath(env, cwd);
-  writeKnownHosts(path, hostKeyLines);
-}
-
-/**
- * Low-level writer shared by pinHostKey / seedKnownHosts: overwrite `khPath`
- * with the given lines, enforcing `.vibecarbon/` 0o700 and file 0o600 even
- * when the targets already exist (mkdir/writeFile only apply `mode` on create).
+ * Low-level writer shared by seedKnownHosts / forgetHostKey: overwrite
+ * `khPath` with the given lines, enforcing `.vibecarbon/` 0o700 and file 0o600
+ * even when the targets already exist (`mkdirSync`/`writeFileSync` only apply
+ * `mode` on creation, so each is followed by `chmodSync`).
  *
  * @param {string} khPath
  * @param {string[]} hostKeyLines
@@ -272,37 +256,3 @@ export async function seedKnownHosts(khPath, ip, opts = {}) {
   writeKnownHosts(khPath, merged);
   return true;
 }
-
-/**
- * Opt-OUT of connection multiplexing, for PORT-FORWARD tunnels only.
- *
- * ControlMaster multiplexing (SSH_CONNECTION_OPTS above) is the root fix for
- * per-call connection pressure — but it broke `ssh -f -N -L` tunnels: run
- * 31921730114 showed EVERY compose admin tunnel's first attempt ECONNREFUSED
- * through its full 7.5s reach poll (`ssh: exited 0` — the -f client had
- * backgrounded), where the pre-mux baseline run had zero such failures. A
- * `-f` mux CLIENT registers its forward with the shared master and returns
- * before the listener is usable, and the forward's lifecycle is tied to mux
- * session bookkeeping rather than to the process the caller supervises. The
- * outer retry ladder was silently absorbing that regression — the exact
- * pattern the 2026-08-16 band-aid removal exists to surface.
- *
- * Tunnels gain nothing from multiplexing anyway: they are ONE long-lived
- * connection each, not the per-call churn that caused MaxStartups pressure.
- *
- * ORDER IS LOAD-BEARING, AND IT IS FIRST-WINS: OpenSSH uses the FIRST value
- * obtained for each option (ssh_config(5): "the first obtained value for
- * each parameter is used" — command-line -o included; verified on OpenSSH
- * 9.6: `ssh -o ControlMaster=auto -o ControlMaster=no -G host` resolves
- * `controlmaster auto`). So every `-L`/`-R`/`-D` invocation must place these
- * BEFORE any spread that carries SSH_CONNECTION_OPTS. The first version of
- * this opt-out appended them after — inert, and run 31927810430 failed both
- * compose scenarios on it. The tunnel-census test in tests/unit/lib/ssh.test.ts
- * pins the order at every call site.
- */
-export const SSH_TUNNEL_NO_MUX_OPTS = Object.freeze([
-  '-o',
-  'ControlMaster=no',
-  '-o',
-  'ControlPath=none',
-]);

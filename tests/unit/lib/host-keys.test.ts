@@ -16,7 +16,6 @@ import {
   forgetHostKey,
   knownHostsPath,
   knownHostsPathForKey,
-  pinHostKey,
   seedKnownHosts,
 } from '../../../src/lib/host-keys.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
@@ -29,64 +28,6 @@ describe('knownHostsPath', () => {
   it('defaults cwd to process.cwd() when not provided', () => {
     const p = knownHostsPath('staging');
     expect(p.endsWith('/.vibecarbon/known_hosts_staging')).toBe(true);
-  });
-});
-
-describe('pinHostKey', () => {
-  let tmp: string;
-
-  beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'vb-hostkeys-'));
-  });
-
-  afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
-  });
-
-  it('writes the given lines joined with \\n and a trailing newline', () => {
-    pinHostKey('prod', ['1.2.3.4 ssh-ed25519 AAAA'], tmp);
-    const content = readFileSync(knownHostsPath('prod', tmp), 'utf-8');
-    expect(content).toBe('1.2.3.4 ssh-ed25519 AAAA\n');
-  });
-
-  it('writes multi-line host-key entries correctly', () => {
-    pinHostKey('prod', ['1.2.3.4 ssh-ed25519 AAAA', '1.2.3.4 ssh-rsa BBBB'], tmp);
-    const content = readFileSync(knownHostsPath('prod', tmp), 'utf-8');
-    expect(content).toBe('1.2.3.4 ssh-ed25519 AAAA\n1.2.3.4 ssh-rsa BBBB\n');
-  });
-
-  it('replaces an existing file rather than appending', () => {
-    pinHostKey('prod', ['FIRST'], tmp);
-    pinHostKey('prod', ['SECOND'], tmp);
-    const content = readFileSync(knownHostsPath('prod', tmp), 'utf-8');
-    expect(content).toBe('SECOND\n');
-  });
-
-  it('creates .vibecarbon/ with no group or world perms', () => {
-    pinHostKey('prod', ['x'], tmp);
-    const mode = statSync(join(tmp, '.vibecarbon')).mode & 0o777;
-    expect(mode & 0o077).toBe(0);
-  });
-
-  it('writes the file with 0o600 mode (no group/world perms)', () => {
-    pinHostKey('prod', ['x'], tmp);
-    const mode = statSync(knownHostsPath('prod', tmp)).mode & 0o777;
-    expect(mode & 0o077).toBe(0);
-  });
-
-  it('enforces 0o700 on .vibecarbon/ even when it already exists with looser perms', () => {
-    mkdirSync(join(tmp, '.vibecarbon'), { mode: 0o755 });
-    pinHostKey('prod', ['x'], tmp);
-    const mode = statSync(join(tmp, '.vibecarbon')).mode & 0o777;
-    expect(mode & 0o077).toBe(0);
-  });
-
-  it('enforces 0o600 on file even when overwriting a widened file', () => {
-    pinHostKey('prod', ['FIRST'], tmp);
-    chmodSync(knownHostsPath('prod', tmp), 0o644);
-    pinHostKey('prod', ['SECOND'], tmp);
-    const mode = statSync(knownHostsPath('prod', tmp)).mode & 0o777;
-    expect(mode & 0o077).toBe(0);
   });
 });
 
@@ -127,6 +68,16 @@ describe('seedKnownHosts', () => {
     expect(readFileSync(khPath, 'utf-8')).toBe('1.2.3.4 ssh-ed25519 AAAA\n');
     expect(statSync(khPath).mode & 0o077).toBe(0);
     expect(statSync(join(tmp, '.vibecarbon')).mode & 0o077).toBe(0);
+  });
+
+  it('tightens a .vibecarbon/ and a known_hosts file that already exist with looser modes', async () => {
+    mkdirSync(join(tmp, '.vibecarbon'), { mode: 0o755 });
+    writeFileSync(khPath, '5.6.7.8 ssh-ed25519 OTHER\n');
+    chmodSync(khPath, 0o644);
+    const keyscan = vi.fn().mockResolvedValue('1.2.3.4 ssh-ed25519 AAAA\n');
+    await seedKnownHosts(khPath, '1.2.3.4', { keyscan });
+    expect(statSync(join(tmp, '.vibecarbon')).mode & 0o077).toBe(0);
+    expect(statSync(khPath).mode & 0o077).toBe(0);
   });
 
   it('re-pins a recycled IP: drops the stale line for that IP, keeps other hosts', async () => {
