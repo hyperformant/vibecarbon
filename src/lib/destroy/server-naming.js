@@ -115,16 +115,6 @@ export function scaleReplacementNames(args) {
 }
 
 /**
- * Is `name` a scale replacement server's temporary name?
- *
- * @param {string} name
- * @returns {boolean}
- */
-export function isScaleReplacementName(name) {
-  return typeof name === 'string' && name.endsWith(`-${SCALE_REPLACEMENT_SUFFIX}`);
-}
-
-/**
  * Does this provider-side server name belong to this environment?
  *
  * @param {string} name
