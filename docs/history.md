@@ -893,6 +893,27 @@ in the copy list in `src/create.js`, classified in
 **Guard:** `tests/integration/template/create.test.ts` ("ships
 drizzle.config.ts with every file and path it names").
 
+#### 2026-11-16: One secret-scan rule set for the CLI and for projects (#TBD)
+
+The rules that decide what a secret is now live in one file,
+`src/lib/secret-scan-rules.js`, with a byte-identical copy in the template at
+`scripts/lib/secret-scan-rules.js`. The deploy check and a project's
+pre-commit scan both import it. `vibecarbon upgrade` brings the file and the
+new scanner to existing projects.
+
+**Why:** the project scanner carried a hand-copied rule list with a comment
+asking to keep it in sync, and no test. It fell behind by five rules, so a
+project's pre-commit scan passed DigitalOcean, Linode, Vultr and Scaleway
+tokens. Only Hetzner's was caught. It also still flagged two things the CLI
+had stopped flagging as false alarms: lowercase hyphenated names near the word
+"cloudflare", and `$VAR` references.
+
+**Do not undo:** do not add a rule to either scanner file, and do not edit the
+template copy on its own. Change `src/lib/secret-scan-rules.js` and copy it
+over.
+
+**Guard:** `tests/unit/security/secret-scan-rules-census.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
