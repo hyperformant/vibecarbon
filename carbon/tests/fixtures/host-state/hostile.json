@@ -1,0 +1,1 @@
+{"v":1,"host":"web-1","rebootRequired":true,"since":"2026-11-15T06:42:10Z","packages":["curl","<script>alert(1)</script>","\u001b[31mred","a b","linux-image-6.8.0-90-generic","libc6:amd64"]}

@@ -28,6 +28,7 @@ import { healthRoutes } from './routes/health';
 import { v1Routes } from './routes/v1';
 import { adminContactRoutes } from './routes/v1/admin/contact';
 import { crawlerRoutes } from './routes/v1/admin/crawlers';
+import { hostMaintenanceRoutes } from './routes/v1/admin/host-maintenance';
 import { jobsRoutes } from './routes/v1/admin/jobs';
 import { adminNewsletterRoutes } from './routes/v1/admin/newsletter';
 import { authRoutes } from './routes/v1/auth';
@@ -198,6 +199,7 @@ app.route('/api/v1/admin/stats', statsRoutes);
 app.route('/api/v1/admin/performance', performanceRoutes);
 
 app.route('/api/v1/admin/jobs', jobsRoutes);
+app.route('/api/v1/admin/host-maintenance', hostMaintenanceRoutes);
 app.route('/api/v1/admin/crawlers', crawlerRoutes);
 app.route('/api/v1/admin/contact', adminContactRoutes);
 app.route('/api/v1/admin/newsletter', adminNewsletterRoutes);
@@ -411,6 +413,18 @@ const openApiSpec = {
         responses: {
           '200': { description: 'Job summaries and execution history' },
           '403': { description: 'Forbidden: requires super admin' },
+        },
+      },
+    },
+    '/api/v1/admin/host-maintenance': {
+      get: {
+        summary: 'Which servers need a restart',
+        tags: ['Admin'],
+        security: [{ sessionCookie: [] }],
+        responses: {
+          '200': { description: 'Restart state per server, as the host reporter published it' },
+          '403': { description: 'Forbidden: requires super admin' },
+          '503': { description: 'The restart state could not be read' },
         },
       },
     },

@@ -31,6 +31,43 @@ describe('parseHostState', () => {
   it('caps packages at 20', () => {
     expect(parseHostState(read('many-packages.json'))?.packages.length).toBe(20);
   });
+  it('drops hostile package names and keeps the valid ones', () => {
+    expect(parseHostState(read('hostile.json'))).toEqual({
+      host: 'web-1',
+      rebootRequired: true,
+      since: '2026-11-15T06:42:10Z',
+      packages: ['curl', 'linux-image-6.8.0-90-generic', 'libc6:amd64'],
+    });
+  });
+  const state = (over: object) =>
+    JSON.stringify({
+      v: 1,
+      host: 'web-1',
+      rebootRequired: false,
+      since: null,
+      packages: [],
+      ...over,
+    });
+  it('rejects text over 16384 characters', () => {
+    expect(parseHostState(state({ host: 'a'.repeat(20000) }))).toBeNull();
+    expect(parseHostState(`${state({})}${' '.repeat(16384)}`)).toBeNull();
+  });
+  it.each(['', '-web', 'we b', 'web<1>', 'a'.repeat(254), '\u001b[31m'])(
+    'rejects host %j',
+    (host) => {
+      expect(parseHostState(state({ host }))).toBeNull();
+    },
+  );
+  it.each(['yesterday', '2026-11-15 06:42:10', '2026-11-15T06:42:10+00:00', '<b>'])(
+    'rejects since %j',
+    (since) => {
+      expect(parseHostState(state({ since }))).toBeNull();
+    },
+  );
+  it('keeps the package cap after dropping bad names', () => {
+    const packages = ['a b', ...Array.from({ length: 25 }, (_, i) => `pkg-${i}`)];
+    expect(parseHostState(state({ packages }))?.packages).toHaveLength(20);
+  });
   it.each([read('malformed.txt'), '{"v":2}', ''])('returns null for %j', (text) => {
     expect(parseHostState(text)).toBeNull();
   });

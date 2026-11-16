@@ -8,6 +8,14 @@ export const HOST_STATE_ANNOTATION = 'vibecarbon.dev/host-state';
 
 const MAX_PACKAGES = 20;
 
+// The parser is the trust boundary: a k8s node's own credential can rewrite its
+// annotation, and what passes here reaches a terminal, HTML and email. The app's
+// copy (carbon/src/server/lib/host-maintenance.ts) must stay identical.
+const MAX_TEXT_LENGTH = 16384;
+const HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/;
+const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/;
+
 /**
  * Packages whose maintainer scripts call
  * /usr/share/update-notifier/notify-reboot-required. Checked on Ubuntu 26.04
@@ -35,6 +43,7 @@ const KERNEL_PATTERN = /^linux-/;
  * @returns {HostState | null} null for anything not version 1 or malformed
  */
 export function parseHostState(text) {
+  if (typeof text !== 'string' || text.length > MAX_TEXT_LENGTH) return null;
   let raw;
   try {
     raw = JSON.parse(text);
@@ -43,14 +52,16 @@ export function parseHostState(text) {
   }
   if (!raw || typeof raw !== 'object' || raw.v !== 1) return null;
   if (typeof raw.host !== 'string' || typeof raw.rebootRequired !== 'boolean') return null;
-  if (raw.since !== null && typeof raw.since !== 'string') return null;
+  if (!HOST_PATTERN.test(raw.host)) return null;
+  if (raw.since !== null && (typeof raw.since !== 'string' || !SINCE_PATTERN.test(raw.since)))
+    return null;
   if (!Array.isArray(raw.packages) || !raw.packages.every((p) => typeof p === 'string'))
     return null;
   return {
     host: raw.host,
     rebootRequired: raw.rebootRequired,
     since: raw.since,
-    packages: raw.packages.slice(0, MAX_PACKAGES),
+    packages: raw.packages.filter((p) => PACKAGE_PATTERN.test(p)).slice(0, MAX_PACKAGES),
   };
 }
 
