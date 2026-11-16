@@ -1,7 +1,13 @@
 /**
  * Every line `vibecarbon update` prints about the plan. Pure strings; copy
  * follows the CLI voice rules (lowercase facts, no dashes).
+ *
+ * Names, addresses, packages, versions and error text come from the servers
+ * and the cluster, and a hostile server could hide terminal escapes in them.
+ * Every line that carries one goes through printable(); the CLI's own words
+ * hold no control characters, so filtering the whole line changes only those.
  */
+import { printable } from '../printable.js';
 import { DOWNTIME, decideEffect, stepIsIdle } from './plan.js';
 
 /**
@@ -35,14 +41,24 @@ function noticeLine(step) {
   }
 }
 
+/** Reasons a k8s node's address is not trusted (inventory.js, inspect.js). */
+const BORROWED_ADDRESS = [
+  /^the server at /,
+  /^two nodes report the address /,
+  /^reports the master's address /,
+];
+
 function skippedLine(envName, s) {
   const head = `${s.name} (${s.ip ?? 'no address'}): skipped, ${s.reason}.`;
   let hint = `Check the server is running, then run vibecarbon update ${envName} again`;
   if (s.reason.startsWith('could not check for updates'))
     hint = `The daily security updates may be running, so try vibecarbon update ${envName} again in a few minutes`;
-  else if (s.reason === 'no public address')
+  else if (s.reason === 'no public address' || s.reason === 'reports no valid public address')
     hint =
       'vibecarbon reaches servers over their public address, so this one has to be updated by hand';
+  else if (BORROWED_ADDRESS.some((re) => re.test(s.reason)))
+    hint =
+      'Check its address in your provider console, since vibecarbon updates a node only at an address it can confirm belongs to that node';
   else if (s.reason.startsWith('no recorded address'))
     hint = `Run vibecarbon deploy ${envName} to record it before you try again`;
   return `${head} ${hint}`;
@@ -78,13 +94,15 @@ export function formatPlan(plan) {
     lines.push(`  ${noticeLine(step)}`);
   });
   for (const s of plan.skipped) lines.push(skippedLine(plan.envName, s));
-  return lines;
+  return lines.map(printable);
 }
 
 /** @param {import('./plan.js').UpdatePlan} plan */
 export function formatTotal(plan) {
   if (!plan.total) return 'no downtime expected';
-  return `expected downtime: ${formatDuration(plan.total)} in total, while ${plan.outageServers.join(', ')} restart`;
+  return printable(
+    `expected downtime: ${formatDuration(plan.total)} in total, while ${plan.outageServers.join(', ')} restart`,
+  );
 }
 
 export const nothingToDoLine = (envName) => `everything on ${envName} is up to date, nothing to do`;
@@ -92,9 +110,9 @@ export const noServersError = (envName) => `could not find any servers for ${env
 export const noServersHint = (envName) =>
   `Run vibecarbon deploy ${envName} to record them before you try again`;
 export const releasedLine = (names) =>
-  `uncordoned ${names.join(', ')}, left from an earlier update`;
+  printable(`uncordoned ${names.join(', ')}, left from an earlier update`);
 export const releaseFailedLine = (name, why) =>
-  `could not uncordon ${name} (${why}), so it stays cordoned until the next update`;
+  printable(`could not uncordon ${name} (${why}), so it stays cordoned until the next update`);
 export const confirmQuestion = (envName) => `Update ${envName} now?`;
 /**
  * @param {{ target: import('./inventory.js').UpdateTarget, pkg: string }} input
@@ -110,16 +128,24 @@ export function unexpectedRestartPrompt({ target, pkg }) {
     cost = `Requests that need the database fail for ${d} while it restarts.`;
   else if (target.role === 'master')
     cost = `The app is offline for ${d} while it restarts, since Traefik runs only on the master.`;
-  return `${target.name} now needs a restart for ${pkg}, which the plan did not show. ${cost} Restart it now?`;
+  return printable(
+    `${target.name} now needs a restart for ${pkg}, which the plan did not show. ${cost} Restart it now?`,
+  );
 }
 export const unexpectedRestartYesLine = ({ envName, name, pkg }) =>
-  `a restart became due on ${name} (${pkg}): run vibecarbon update ${envName} again to restart it`;
+  printable(
+    `a restart became due on ${name} (${pkg}): run vibecarbon update ${envName} again to restart it`,
+  );
 export const recheckSkippedLine = (names) =>
-  `could not re-check ${names.join(', ')} after the update, so a restart may still be due`;
+  printable(
+    `could not re-check ${names.join(', ')} after the update, so a restart may still be due`,
+  );
 export const allClearLine = () => 'no reboot due on any server';
 /** @param {{ envName: string, names: string[] }} input */
 export const stillDueLine = ({ envName, names }) =>
-  `a restart is still due on ${names.join(', ')}, so run vibecarbon update ${envName} again`;
+  printable(
+    `a restart is still due on ${names.join(', ')}, so run vibecarbon update ${envName} again`,
+  );
 
 /**
  * @param {{ name: string, installed: number, docker: { from: string, to: string } | null, restarted: boolean, offlineSeconds: number | null }} r
@@ -131,7 +157,7 @@ export function summaryLine({ name, installed, docker, restarted, offlineSeconds
   if (restarted) line += ', restarted';
   if (offlineSeconds != null)
     line += `, app offline ${Math.floor(Math.round(offlineSeconds) / 60)}m ${Math.round(offlineSeconds) % 60}s`;
-  return line;
+  return printable(line);
 }
 
 // Execution: progress lines, errors and hints for src/lib/update/execute.js.
@@ -151,33 +177,38 @@ export function formatBudget(ms) {
   return s === 60 ? '1 minute' : `${s / 60} minutes`;
 }
 
-export const stepLine = ({ name, index, total }) => `${name} (${index} of ${total})`;
+export const stepLine = ({ name, index, total }) => printable(`${name} (${index} of ${total})`);
 export const installingLine = (name, count) =>
-  `${name}: installing ${count} security ${count === 1 ? 'update' : 'updates'}`;
-export const dockerUpdatingLine = (name) => `${name}: updating Docker, every container restarts`;
+  printable(`${name}: installing ${count} security ${count === 1 ? 'update' : 'updates'}`);
+export const dockerUpdatingLine = (name) =>
+  printable(`${name}: updating Docker, every container restarts`);
 export const cordonedLine = (name, draining) =>
-  draining
-    ? `${name}: cordoned, moving its pods to other nodes`
-    : `${name}: cordoned, so no new pods start on it`;
-export const restartingLine = (name) => `${name}: restarting`;
-export const backLine = (name) => `${name}: back up, waiting until it is healthy`;
+  printable(
+    draining
+      ? `${name}: cordoned, moving its pods to other nodes`
+      : `${name}: cordoned, so no new pods start on it`,
+  );
+export const restartingLine = (name) => printable(`${name}: restarting`);
+export const backLine = (name) => printable(`${name}: back up, waiting until it is healthy`);
 export const healthyLine = (name, uncordoned) =>
-  uncordoned ? `${name}: healthy and uncordoned` : `${name}: healthy`;
-export const noRestartAfterAllLine = (name) => `${name}: no restart needed after all`;
-export const noLongerDueLine = (name) => `${name} no longer needs a restart`;
+  printable(uncordoned ? `${name}: healthy and uncordoned` : `${name}: healthy`);
+export const noRestartAfterAllLine = (name) => printable(`${name}: no restart needed after all`);
+export const noLongerDueLine = (name) => printable(`${name} no longer needs a restart`);
 export const reporterFailedLine = (name, why) =>
-  `could not install the restart reporter on ${name} (${why}), so vibecarbon status may not show when it needs a restart`;
+  printable(
+    `could not install the restart reporter on ${name} (${why}), so vibecarbon status may not show when it needs a restart`,
+  );
 export const unmarkFailedLine = (name, why) =>
-  `${name} is uncordoned but kept its update mark (${why}), the next update removes it`;
+  printable(`${name} is uncordoned but kept its update mark (${why}), the next update removes it`);
 /** @param {number | null} status the first probe's HTTP status, null when it got no answer */
 export const notMeasuredLine = (domain, status) =>
   status != null
     ? `${domain} answered ${status} before the update, so downtime is not measured`
     : `could not reach ${domain} from this machine, so downtime is not measured`;
 export const rebootCallFailedLine = (name, why) =>
-  `${name}: the restart command failed (${why}), checking whether it restarts anyway`;
+  printable(`${name}: the restart command failed (${why}), checking whether it restarts anyway`);
 export const alreadyCordonedLine = (name) =>
-  `${name}: already cordoned, it stays cordoned after the restart`;
+  printable(`${name}: already cordoned, it stays cordoned after the restart`);
 
 const ACTIONS = {
   install: (name) => `install the security updates on ${name}`,
@@ -198,7 +229,7 @@ const ACTIONS = {
 export function failureWhy({ timedOut, status, budgetMs, detail }) {
   if (timedOut && budgetMs) return `it did not finish within ${formatBudget(budgetMs)}`;
   if (typeof status === 'number') return `it exited ${status}`;
-  return detail || 'it failed';
+  return detail ? printable(detail) : 'it failed';
 }
 
 /**
@@ -208,7 +239,7 @@ export function failureWhy({ timedOut, status, budgetMs, detail }) {
  */
 export function stepFailedError({ action, name, why, lines = [] }) {
   const head = `could not ${ACTIONS[action](name)}: ${why}`;
-  return lines.length ? [head, ...lines.map((l) => `  ${l}`)].join('\n') : head;
+  return printable(lines.length ? [head, ...lines.map((l) => `  ${l}`)].join('\n') : head);
 }
 
 /**
@@ -217,11 +248,11 @@ export function stepFailedError({ action, name, why, lines = [] }) {
  * @param {{ name: string, what: 'come back' | 'become healthy', budgetMs: number, seen: string }} f
  */
 export const didNotError = ({ name, what, budgetMs, seen }) =>
-  `${name} did not ${what} within ${formatBudget(budgetMs)}: ${seen}`;
+  printable(`${name} did not ${what} within ${formatBudget(budgetMs)}: ${seen}`);
 
 /** The first three names, then how many more. */
 function shortList(names) {
-  const shown = names.slice(0, 3).join(', ');
+  const shown = names.slice(0, 3).map(printable).join(', ');
   return names.length > 3 ? `${shown} and ${names.length - 3} more` : shown;
 }
 
@@ -230,25 +261,29 @@ export const SEEN = {
   oldBootId: 'it still had the boot id from before the restart',
   noAnswer: 'it never answered',
   unreadable: 'its answer could not be read',
-  sshFailed: (detail) => `ssh said: ${detail}`,
-  kubectlFailed: (detail) => `kubectl said: ${detail}`,
-  apiNotReady: (answer) => `the cluster API answered ${answer}`,
+  sshFailed: (detail) => printable(`ssh said: ${detail}`),
+  kubectlFailed: (detail) => printable(`kubectl said: ${detail}`),
+  /** @param {string} answer the /readyz line the master printed */
+  apiNotReady: (answer) => printable(`the cluster API answered ${answer}`),
   nodeFromBefore: 'the cluster still showed the node as it was before the restart',
-  nodeNotReady: (reason) => `the node was not Ready (${reason})`,
+  /** @param {string} reason the kubelet's Ready condition reason */
+  nodeNotReady: (reason) => printable(`the node was not Ready (${reason})`),
   leaseNotRenewing: 'its kubelet did not renew its node lease',
   podsNotReady: (names) => `pods not Ready since the restart: ${shortList(names)}`,
   /** @param {string[]} names `<kind> <namespace>/<name>` of each controller */
   workloadsNotReady: (names) => `no pod Ready since the restart for ${shortList(names)}`,
-  appUnhealthy: (status) => `its health check never passed (last result: ${status})`,
+  appUnhealthy: (status) => printable(`its health check never passed (last result: ${status})`),
   /** @param {{ domain: string, status: number | null, detail: string | null }} last */
   domainDown: ({ domain, status, detail }) =>
-    status != null
-      ? `${domain} answered ${status}`
-      : `${domain} did not answer${detail ? ` (${detail})` : ''}`,
+    printable(
+      status != null
+        ? `${domain} answered ${status}`
+        : `${domain} did not answer${detail ? ` (${detail})` : ''}`,
+    ),
 };
 
 export const installHint = ({ envName, name }) =>
-  `run vibecarbon update ${envName} again once ${name} is reachable and apt is free`;
+  printable(`run vibecarbon update ${envName} again once ${name} is reachable and apt is free`);
 export const cordonedHint = (envName) =>
   `it is still cordoned, run vibecarbon update ${envName} again once it is Ready, which uncordons it`;
 export const consoleHint = (envName) =>

@@ -84,6 +84,97 @@ describe('parseInspectOutput', () => {
   });
 });
 
+describe('names and versions from the server are checked before they are used', () => {
+  const ESC = '\u001b';
+
+  it('drops an Ubuntu package name that is not a package name', () => {
+    const text = FIXTURE.replace(
+      'apt libapt-pkg7.0',
+      `apt linux-image-6.8${ESC}[2J ${ESC}]52;c;ZXZpbA==${ESC}\\ libapt-pkg7.0`,
+    );
+    expect(parseInspectOutput(text, 'compose').ubuntu).toEqual([
+      'apt',
+      'libapt-pkg7.0',
+      'libc-bin',
+      'libc-gconv-modules-extra',
+      'libc6',
+      'libpcre2-8-0',
+      'perl-base',
+    ]);
+  });
+
+  it('drops a Docker package whose name or version does not read as one', () => {
+    const entry = (name: string, from: string, to: string) =>
+      `${name}:\n  Installed: ${from}\n  Candidate: ${to}\n`;
+    const bare = FIXTURE.slice(0, FIXTURE.indexOf('@@docker'));
+    const text = `${bare}@@docker\n${[
+      entry('docker-ce', '5:29.9.0-1~ubuntu.26.04~resolute', '5:29.9.3-1~ubuntu.26.04~resolute'),
+      entry(`containerd.io${ESC}[31m`, '1.7.1-1', '1.7.2-1'),
+      entry('docker-ce-cli', '5:29.9.0-1', `5:29.9.3-1${ESC}]8;;http://x${ESC}\\`),
+      entry('docker-buildx-plugin', `0.1${ESC}[2K`, '0.2'),
+      entry('Docker-Compose-Plugin', '2.1', '2.2'),
+    ].join('')}`;
+    expect(parseInspectOutput(text, 'compose').docker?.packages).toEqual([
+      {
+        name: 'docker-ce',
+        from: '5:29.9.0-1~ubuntu.26.04~resolute',
+        to: '5:29.9.3-1~ubuntu.26.04~resolute',
+      },
+    ]);
+  });
+});
+
+describe('a k8s node is updated only at the address of the server it is', () => {
+  const node = (name: string, ip: string) => ({
+    name,
+    ip,
+    side: 'primary' as const,
+    role: 'worker' as const,
+    kind: 'k8s' as const,
+    masterIp: '10.0.0.1',
+    nodeName: name,
+  });
+  const k8sOutput = (host: string) =>
+    FIXTURE.slice(0, FIXTURE.indexOf('@@reporter')).replace(
+      '"host":"a9333c194b47"',
+      `"host":"${host}"`,
+    );
+
+  it('skips a node whose server says it is another host, naming both', async () => {
+    const sshRun = vi.fn(async (ip: string) =>
+      k8sOutput(ip === '10.0.0.2' ? 'prod-worker-1' : 'prod-db'),
+    );
+    const r = await inspectAll(
+      [node('prod-worker-1', '10.0.0.2'), node('prod-worker-2', '10.0.0.3')],
+      {
+        sshRun,
+        envName: 'prod',
+      },
+    );
+    expect(r.inspected.map((i) => i.target.name)).toEqual(['prod-worker-1']);
+    expect(r.skipped).toEqual([
+      {
+        name: 'prod-worker-2',
+        ip: '10.0.0.3',
+        reason: 'the server at 10.0.0.3 says it is prod-db, not prod-worker-2',
+      },
+    ]);
+  });
+
+  it('k3s names a node after its hostname in lower case, so the case does not count', async () => {
+    const sshRun = vi.fn(async () => k8sOutput('Prod-Worker-1'));
+    const r = await inspectAll([node('prod-worker-1', '10.0.0.2')], { sshRun, envName: 'prod' });
+    expect(r.skipped).toEqual([]);
+    expect(r.inspected).toHaveLength(1);
+  });
+
+  it('compose servers come from the saved config and are not checked by name', async () => {
+    const sshRun = vi.fn(async () => FIXTURE);
+    const r = await inspectAll([target('master')], { sshRun, envName: 'prod' });
+    expect(r.inspected).toHaveLength(1);
+  });
+});
+
 describe('a failed apt check is never read as nothing pending', () => {
   const ubuntuHead = FIXTURE.slice(0, FIXTURE.indexOf('@@ubuntu'));
   const withUbuntu = (body: string) => `${ubuntuHead}@@ubuntu\n${body}`;

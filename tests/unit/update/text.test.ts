@@ -468,3 +468,129 @@ describe('recheckSkippedLine', () => {
     );
   });
 });
+
+describe('remote text never reaches the terminal raw', () => {
+  // OSC 52 sets the clipboard, CSI 2K erases the line, CR returns to its start.
+  const H = 'x\u001b]52;c;ZXZpbA==\u0007\u001b[2K\r\u009b';
+  // Every control character but newline (the plan's own line breaks).
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the point is to find them
+  const RAW = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const hostile = (over = {}) => target(H, H, { kind: 'k8s', role: 'master', ...over });
+
+  it('filters every value a server or the cluster supplied', () => {
+    const p = {
+      envName: 'prod',
+      tier: 'k8s',
+      steps: [
+        step({
+          target: hostile(),
+          install: 1,
+          docker: { packages: [{ name: H, from: H, to: H }] },
+          restart: 'due',
+          restartReason: H,
+          effect: { kind: 'app-offline', seconds: [60, 180] },
+        }),
+        step({ target: hostile(), restart: 'likely', restartReason: H }),
+      ],
+      skipped: [
+        { name: H, ip: H, reason: H },
+        { name: H, ip: null, reason: `could not check for updates: ${H}` },
+      ],
+      uncordon: [{ name: H, masterIp: '1.1.1.1' }],
+      total: [60, 180],
+      outageServers: [H],
+    };
+    const out = [
+      formatTotal(p as never),
+      unexpectedRestartPrompt({ target: hostile() as never, pkg: H }),
+      unexpectedRestartYesLine({ envName: 'prod', name: H, pkg: H }),
+      stillDueLine({ envName: 'prod', names: [H] }),
+      noLongerDueLine(H),
+      releasedLine([H]),
+      releaseFailedLine(H, H),
+      summaryLine({
+        name: H,
+        installed: 1,
+        docker: { from: H, to: H },
+        restarted: true,
+        offlineSeconds: 5,
+      }),
+      stepLine({ name: H, index: 1, total: 1 }),
+      installingLine(H, 1),
+      dockerUpdatingLine(H),
+      cordonedLine(H, true),
+      cordonedLine(H, false),
+      restartingLine(H),
+      backLine(H),
+      healthyLine(H, true),
+      healthyLine(H, false),
+      noRestartAfterAllLine(H),
+      reporterFailedLine(H, H),
+      unmarkFailedLine(H, H),
+      rebootCallFailedLine(H, H),
+      alreadyCordonedLine(H),
+      failureWhy({ detail: H }),
+      ...(
+        ['install', 'docker', 'check', 'cordon', 'mark', 'drain', 'restart', 'uncordon'] as const
+      ).map((action) => stepFailedError({ action, name: H, why: H, lines: [H, H] })),
+      didNotError({ name: H, what: 'come back', budgetMs: 600_000, seen: H }),
+      SEEN.sshFailed(H),
+      SEEN.kubectlFailed(H),
+      SEEN.apiNotReady(H),
+      SEEN.nodeNotReady(H),
+      SEEN.podsNotReady([H, H]),
+      SEEN.workloadsNotReady([H]),
+      SEEN.appUnhealthy(H),
+      SEEN.domainDown({ domain: H, status: null, detail: H }),
+      installHint({ envName: 'prod', name: H }),
+    ];
+    for (const line of out) {
+      expect(line, JSON.stringify(line)).not.toMatch(RAW);
+      expect(line).toContain('�');
+    }
+    // Some plan lines carry nothing from a server ("install 1 security update").
+    const plan = formatPlan(p as never);
+    for (const line of plan) expect(line, JSON.stringify(line)).not.toMatch(RAW);
+    expect(plan.filter((l) => l.includes('�'))).toHaveLength(8);
+  });
+
+  it('keeps the text around the control characters', () => {
+    expect(
+      stepFailedError({ action: 'install', name: 'web-1', why: 'it exited 100', lines: [H] }),
+    ).toBe(
+      'could not install the security updates on web-1: it exited 100\n  x�]52;c;ZXZpbA==��[2K��',
+    );
+  });
+});
+
+describe('a node that does not prove it is the server', () => {
+  const p = (skipped: unknown[]) => ({
+    envName: 'prod',
+    tier: 'k8s',
+    steps: [],
+    skipped,
+    uncordon: [],
+    total: null,
+    outageServers: [],
+  });
+  const IDENTITY_HINT =
+    'Check its address in your provider console, since vibecarbon updates a node only at an address it can confirm belongs to that node';
+
+  it.each([
+    'the server at 1.1.1.2 says it is prod-db, not prod-worker-1',
+    'two nodes report the address 1.1.1.2',
+    "reports the master's address 1.1.1.1",
+  ])('%s: says what to compare, not to retry', (reason) => {
+    const [line] = formatPlan(p([{ name: 'w', ip: '1.1.1.2', reason }]) as never).slice(1);
+    expect(line).toBe(`w (1.1.1.2): skipped, ${reason}. ${IDENTITY_HINT}`);
+  });
+
+  it('an address that is not an IP reads like a missing one', () => {
+    const [line] = formatPlan(
+      p([{ name: 'w', ip: null, reason: 'reports no valid public address' }]) as never,
+    ).slice(1);
+    expect(line).toBe(
+      'w (no address): skipped, reports no valid public address. vibecarbon reaches servers over their public address, so this one has to be updated by hand',
+    );
+  });
+});

@@ -5,7 +5,7 @@
  */
 import { APT_LOCK_TIMEOUT_SECONDS, aptGet, aptQuietUpdate } from '../deploy/apt.js';
 import { hostReporterScript } from '../host-reporter.js';
-import { parseHostState } from '../host-state.js';
+import { PACKAGE_PATTERN, parseHostState } from '../host-state.js';
 import { DOCKER_PACKAGES, DOCKER_SOURCE_ONLY } from '../iac/docker-install.js';
 import { sshKeyPathFor, sshRun } from '../ssh.js';
 import { describeSshError } from '../status/cluster-snapshot.js';
@@ -65,6 +65,9 @@ export function INSPECT_SCRIPT(kind) {
   return `${lines.join('\n')}\n`;
 }
 
+/** A Debian version as apt-cache prints it: epoch, upstream and revision. */
+const VERSION_PATTERN = /^[0-9A-Za-z.+:~-]+$/;
+
 /** @returns {Map<string, string>} section name to its text */
 function sections(stdout) {
   const out = new Map();
@@ -99,7 +102,13 @@ function parseDocker(text) {
     if (cand && name) {
       if (cand[1] === '(none)') continue;
       seen = true;
-      if (installed && installed !== '(none)' && installed !== cand[1]) {
+      // The server wrote these, and they reach the plan: a name or version
+      // that does not read as one is dropped, never shown.
+      const valid =
+        PACKAGE_PATTERN.test(name) &&
+        VERSION_PATTERN.test(installed ?? '') &&
+        VERSION_PATTERN.test(cand[1]);
+      if (valid && installed !== '(none)' && installed !== cand[1]) {
         packages.push({ name, from: installed, to: cand[1] });
       }
     }
@@ -124,7 +133,9 @@ export function parseInspectOutput(stdout, kind) {
   const host = parseHostState(need('host').trim());
   if (!host) throw new Error('inspect output has an unreadable @@host');
   const bootId = need('boot-id').trim();
-  const ubuntu = need('ubuntu').split(/\s+/).filter(Boolean);
+  const ubuntu = need('ubuntu')
+    .split(/\s+/)
+    .filter((n) => PACKAGE_PATTERN.test(n));
   const docker = kind === 'compose' ? parseDocker(need('docker')) : null;
   const reporter = kind === 'compose' ? need('reporter').trim() === 'installed' : null;
   return { host, bootId, ubuntu, docker, reporter };
@@ -147,6 +158,26 @@ export async function inspectTarget(target, deps = { sshRun }) {
 }
 
 /**
+ * The name the server at a k8s node's address gives, when it is not that
+ * node's. A node writes its own ExternalIP, so a compromised node could point
+ * the update's root commands at another server. k3s names a node after its
+ * hostname, in lower case (no install passes --node-name), and the reporter
+ * prints the same hostname.
+ *
+ * @param {import('./inventory.js').UpdateTarget} target
+ * @param {TargetState} state
+ * @returns {string | null}
+ */
+function otherHost(target, state) {
+  if (target.kind !== 'k8s') return null;
+  const node = target.nodeName ?? target.name;
+  return state.host.host.toLowerCase() === node ? null : state.host.host;
+}
+
+/**
+ * Compose servers come from the saved config. A k8s node whose server gives
+ * another name is skipped, at plan time and at the re-check alike.
+ *
  * @param {import('./inventory.js').UpdateTarget[]} targets
  * @param {{ sshRun?: Function, envName?: string }} [deps]
  */
@@ -162,8 +193,18 @@ export async function inspectAll(targets, deps = { sshRun }) {
   const inspected = [];
   const skipped = [];
   for (const r of results) {
-    if (r.err)
-      skipped.push({ name: r.target.name, ip: r.target.ip, reason: describeSshError(r.err) });
+    const { name, ip } = r.target;
+    if (r.err) {
+      skipped.push({ name, ip, reason: describeSshError(r.err) });
+      continue;
+    }
+    const host = otherHost(r.target, r.state);
+    if (host)
+      skipped.push({
+        name,
+        ip,
+        reason: `the server at ${ip} says it is ${host}, not ${r.target.nodeName ?? name}`,
+      });
     else inspected.push(r);
   }
   return { inspected, skipped };

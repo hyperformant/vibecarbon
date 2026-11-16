@@ -808,6 +808,8 @@ With `-y` it skips the confirmation. A restart that becomes due during a `-y` ru
 
 If a server doesn't come back, the command stops and says what it was waiting for. Check the server in your provider console, then run `vibecarbon status <env>`, and run `vibecarbon update <env>` again once it is reachable. A Kubernetes node it had cordoned is listed in that next run's plan and released once you confirm.
 
+On Kubernetes, the command finds each node's address in the cluster, and a node writes its own address there. So it updates a node only when the server at that address answers with the node's name. A node whose address leads to another server, two nodes that report one address, and a node that reports the master's address without being the master are skipped, so a compromised node can never send the update's commands to another server.
+
 If a server can't be reached when the plan is made, the plan lists it as skipped with the command to try next, and the others are still updated. After the update it checks each server again for a restart that is still due, and names any server that still needs one, for example when the daily security updates installed a new kernel during the run. If it can't read a server again it says so, since the update itself succeeded.
 
 The command exits 0 only when the environment is known to be current. It exits 1 when a server was skipped, a restart is still due at the end, or a node could not be uncordoned, so a script never reads an unfinished run as done. It never prints the all-clear in those cases. When the environment has no servers on record, it says so and exits 1: run `vibecarbon deploy <env>` first.

@@ -14,7 +14,8 @@ const MAX_PACKAGES = 20;
 const MAX_TEXT_LENGTH = 16384;
 const HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/;
 const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/;
+/** A Debian package name, with an optional :arch. The update inspector checks names against it too. */
+export const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/;
 
 /**
  * Packages whose maintainer scripts call
@@ -22,10 +23,12 @@ const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/;
  * (tests/integration/docker/host-reporter-ubuntu.test.ts): dbus, libc6 and
  * libpam0g. The kernel and firmware patterns come from Ubuntu's kernel
  * packaging (linux-image, linux-modules, linux-base, linux-firmware), and
- * systemd is listed on the same grounds without a 26.04 check.
+ * systemd is listed on the same grounds without a 26.04 check. Every pattern
+ * matches a whole name, so a name that only starts like a kernel package is
+ * no trigger.
  */
 export const REBOOT_TRIGGER_PATTERNS = [
-  /^linux-(image|modules|base|firmware)/,
+  /^linux-(image|modules|base|firmware)(-[a-z0-9][a-z0-9.+-]*)?$/,
   /^libc6$/,
   /^systemd$/,
   /^dbus$/,

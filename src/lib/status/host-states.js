@@ -12,6 +12,7 @@
 import { existsSync as fsExistsSync } from 'node:fs';
 import { hostReporterScript } from '../host-reporter.js';
 import { hostStateFromNode, mainPackage, parseHostState } from '../host-state.js';
+import { printable } from '../printable.js';
 import { sshKeyPathFor as defaultGetKey, sshRun as defaultSsh } from '../ssh.js';
 import { createClusterSnapshots, describeSshError, withTimeout } from './cluster-snapshot.js';
 import { planContainerTargets } from './remote-containers.js';
@@ -106,7 +107,9 @@ const utcDay = (iso) => {
 
 /**
  * The status rows for a host check: servers due a restart, and servers that
- * could not say. Nothing when every server reports and none is due.
+ * could not say. Nothing when every server reports and none is due. Node
+ * names, packages and ssh errors come from the servers, so each row's text
+ * goes through printable().
  *
  * @param {string} envName
  * @param {HostCheck[]} hosts
@@ -123,14 +126,18 @@ export function hostStateRows(envName, hosts) {
       .sort()[0];
     rows.push({
       label: 'Restart due',
-      text: `${due.map((h) => h.name).join(', ')} ${due.length === 1 ? 'needs' : 'need'} a restart for ${pkg}${since ? ` (since ${utcDay(since)})` : ''}, run vibecarbon update ${envName} to install it`,
+      text: printable(
+        `${due.map((h) => h.name).join(', ')} ${due.length === 1 ? 'needs' : 'need'} a restart for ${pkg}${since ? ` (since ${utcDay(since)})` : ''}, run vibecarbon update ${envName} to install it`,
+      ),
     });
   }
   const notInstalled = hosts.filter((h) => !h.reporting && !h.error);
   if (notInstalled.length > 0) {
     rows.push({
       label: 'Restart check',
-      text: `${notInstalled.map((h) => h.name).join(', ')} not reporting yet, run vibecarbon update ${envName} once to set it up`,
+      text: printable(
+        `${notInstalled.map((h) => h.name).join(', ')} not reporting yet, run vibecarbon update ${envName} once to set it up`,
+      ),
     });
   }
   // A server that could not be read is not one update fixes: say why instead.
@@ -141,7 +148,7 @@ export function hostStateRows(envName, hosts) {
   for (const [reason, names] of byReason) {
     rows.push({
       label: 'Restart check',
-      text: `${names.join(', ')} could not be checked (${reason})`,
+      text: printable(`${names.join(', ')} could not be checked (${reason})`),
     });
   }
   return rows;

@@ -5,6 +5,7 @@
  * recorded.
  */
 
+import { isIP } from 'node:net';
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import { isWorkerNode } from '../deploy/k8s/node-roles.js';
 import { resolveTier } from '../deploy/tier-registry.js';
@@ -56,6 +57,10 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
       skipped.push({ name: nodeName, ip: null, reason: 'no public address' });
       continue;
     }
+    if (typeof ip !== 'string' || !isIP(ip)) {
+      skipped.push({ name: nodeName, ip: null, reason: 'reports no valid public address' });
+      continue;
+    }
     targets.push({
       name: nodeName,
       ip,
@@ -67,6 +72,32 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
       reporting: hostStateFromNode(node).reporting,
     });
   }
+}
+
+/**
+ * Drops the k8s nodes whose address cannot be theirs. A node writes its own
+ * ExternalIP, so a compromised one could claim another server's address and
+ * have the update's root commands run there: two nodes with one address are
+ * both skipped, and a node that is not a master may not claim a master's
+ * recorded address.
+ *
+ * @param {UpdateTarget[]} targets
+ * @param {string[]} masterIps the recorded master address of each cluster
+ * @returns {{ kept: UpdateTarget[], dropped: Skipped[] }}
+ */
+function dropBorrowedAddresses(targets, masterIps) {
+  const count = new Map();
+  for (const t of targets) count.set(t.ip, (count.get(t.ip) ?? 0) + 1);
+  const kept = [];
+  const dropped = [];
+  for (const t of targets) {
+    if (t.role !== 'master' && masterIps.includes(t.ip))
+      dropped.push({ name: t.name, ip: t.ip, reason: `reports the master's address ${t.ip}` });
+    else if (count.get(t.ip) > 1)
+      dropped.push({ name: t.name, ip: t.ip, reason: `two nodes report the address ${t.ip}` });
+    else kept.push(t);
+  }
+  return { kept, dropped };
 }
 
 /**
@@ -139,6 +170,10 @@ export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl 
         }
         await listClusterNodes({ ...c, key, kubectl, targets, skipped, leftovers });
       }
+      const masterIps = clusters.map((c) => c.masterIp).filter(Boolean);
+      const { kept, dropped } = dropBorrowedAddresses(targets, masterIps);
+      targets.splice(0, targets.length, ...kept);
+      skipped.push(...dropped);
     }
   }
   return { tier, targets, skipped, leftovers };

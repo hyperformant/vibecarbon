@@ -20,6 +20,7 @@ import { AmbiguousPrimaryError } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
+import { printable } from './lib/printable.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { sshKeyPathFor } from './lib/ssh.js';
@@ -283,15 +284,17 @@ export async function run(args) {
     domain: envConfig.domain || null,
     projectName: projectConfig.projectName || 'project',
     yes,
+    // Lines from a run carry server and cluster text: filtered here too, so
+    // no line reaches the terminal with its escapes.
     confirm: async (message) => {
-      const answer = await p.confirm({ message, initialValue: false });
+      const answer = await p.confirm({ message: printable(message), initialValue: false });
       if (p.isCancel(answer)) throw new Error('cancelled');
       return answer === true;
     },
     log: {
-      step: (m) => p.log.step(m),
-      info: (m) => p.log.info(m),
-      warn: (m) => p.log.warn(m),
+      step: (m) => p.log.step(printable(m)),
+      info: (m) => p.log.info(printable(m)),
+      warn: (m) => p.log.warn(printable(m)),
     },
   });
 
@@ -336,8 +339,9 @@ export async function run(args) {
   }
 
   if (stoppedAt) {
-    p.log.error(stoppedAt.error);
-    if (stoppedAt.hint) p.log.info(c.dim(stoppedAt.hint));
+    // The error carries the failed command's last output lines.
+    p.log.error(printable(stoppedAt.error));
+    if (stoppedAt.hint) p.log.info(c.dim(printable(stoppedAt.hint)));
     process.exit(1);
   }
   if (!json) p.outro(c.success('Done'));

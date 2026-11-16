@@ -182,6 +182,95 @@ describe('listUpdateTargets', () => {
     expect(r.leftovers).toEqual([]);
   });
 
+  describe('which address a node may be updated at', () => {
+    const cfg = { deployMode: 'kubernetes', servers: [{ name: 'master', ip: '1.1.1.1' }] };
+    const list = async (nodes: Node[]) =>
+      listUpdateTargets('prod', cfg, { sshKubectl: vi.fn().mockResolvedValue(nodeList(nodes)) });
+
+    it('an ExternalIP that is not an IP address is skipped', async () => {
+      const r = await list([
+        { name: 'm', labels: MASTER_LABELS, ip: '1.1.1.1' },
+        { name: 'w1', ip: 'worker.example.test' },
+        { name: 'w2', ip: '1.1.1.2\u001b[2J' },
+        { name: 'w3', ip: '2001:db8::3' },
+      ]);
+      expect(r.targets.map((t) => [t.name, t.ip])).toEqual([
+        ['m', '1.1.1.1'],
+        ['w3', '2001:db8::3'],
+      ]);
+      expect(r.skipped).toEqual([
+        { name: 'w1', ip: null, reason: 'reports no valid public address' },
+        { name: 'w2', ip: null, reason: 'reports no valid public address' },
+      ]);
+    });
+
+    it('two nodes that report the same address are both skipped', async () => {
+      const r = await list([
+        { name: 'm', labels: MASTER_LABELS, ip: '1.1.1.1' },
+        { name: 'w1', ip: '1.1.1.5' },
+        { name: 'd', labels: DB_LABELS, ip: '1.1.1.5' },
+        { name: 'w2', ip: '1.1.1.6' },
+      ]);
+      expect(r.targets.map((t) => t.name)).toEqual(['m', 'w2']);
+      expect(r.skipped).toEqual([
+        { name: 'w1', ip: '1.1.1.5', reason: 'two nodes report the address 1.1.1.5' },
+        { name: 'd', ip: '1.1.1.5', reason: 'two nodes report the address 1.1.1.5' },
+      ]);
+    });
+
+    it("a node that is not the master but reports the master's address is skipped", async () => {
+      // The master itself reports another address, so the two do not collide.
+      const r = await list([
+        { name: 'm', labels: MASTER_LABELS, ip: '1.1.1.9' },
+        { name: 'w1', ip: '1.1.1.1' },
+      ]);
+      expect(r.targets.map((t) => t.name)).toEqual(['m']);
+      expect(r.skipped).toEqual([
+        { name: 'w1', ip: '1.1.1.1', reason: "reports the master's address 1.1.1.1" },
+      ]);
+    });
+
+    it("a worker claiming the master's address takes the master out of the run too", async () => {
+      const r = await list([
+        { name: 'm', labels: MASTER_LABELS, ip: '1.1.1.1' },
+        { name: 'w1', ip: '1.1.1.1' },
+      ]);
+      expect(r.targets).toEqual([]);
+      expect(r.skipped).toEqual([
+        { name: 'm', ip: '1.1.1.1', reason: 'two nodes report the address 1.1.1.1' },
+        { name: 'w1', ip: '1.1.1.1', reason: "reports the master's address 1.1.1.1" },
+      ]);
+    });
+
+    it("k8s-ha: a standby node reporting the primary master's address is skipped", async () => {
+      const sshKubectl = vi.fn(async (ip: string) =>
+        ip === '1.1.1.1'
+          ? nodeList([{ name: 'pm', labels: MASTER_LABELS, ip: '1.1.1.1' }])
+          : nodeList([
+              { name: 'sm', labels: MASTER_LABELS, ip: '2.2.2.2' },
+              { name: 'sw', ip: '1.1.1.1' },
+            ]),
+      );
+      const r = await listUpdateTargets(
+        'prod',
+        {
+          deployMode: 'kubernetes',
+          ha: { enabled: true, primary: { masterIp: '1.1.1.1' }, standby: { masterIp: '2.2.2.2' } },
+          servers: [
+            { name: 'a', ip: '1.1.1.1', role: 'primary' },
+            { name: 'b', ip: '2.2.2.2', role: 'standby' },
+          ],
+        },
+        { sshKubectl },
+      );
+      expect(r.targets.map((t) => t.name)).toEqual(['sm']);
+      expect(r.skipped.map((s) => [s.name, s.reason])).toEqual([
+        ['pm', 'two nodes report the address 1.1.1.1'],
+        ['sw', "reports the master's address 1.1.1.1"],
+      ]);
+    });
+  });
+
   describe('an empty or partial inventory', () => {
     it('k8s-ha with no recorded standby master skips that side, naming it', async () => {
       const sshKubectl = vi.fn(async (ip: string) =>

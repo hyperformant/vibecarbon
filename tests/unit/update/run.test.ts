@@ -613,4 +613,57 @@ describe('update run', () => {
     await go(['prod', '-y']);
     expect(text()).not.toMatch(/null|NaN|0s/);
   });
+
+  describe('text from a server never reaches the terminal raw', () => {
+    // OSC 52 sets the clipboard, CSI 2K erases the line, CR returns to its start.
+    const H = 'x\u001b]52;c;ZXZpbA==\u0007\u001b[2K\r';
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the point is to find them
+    const RAW = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+    // The CLI's own colors (c.dim, c.success) are SGR codes; H holds none, so
+    // dropping them leaves only what came from the server.
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the CLI's own color codes
+    const shown = () => text().replace(/\u001b\[\d+m/g, '');
+
+    it('a failed command tail in stoppedAt.error, and its hint, are filtered', async () => {
+      setup();
+      m.executeUpdatePlan.mockResolvedValue({
+        outcomes: [],
+        becameDue: [],
+        stoppedAt: { name: 'master', error: `could not install: it exited 100\n  ${H}`, hint: H },
+      });
+      await go(['prod', '-y']);
+      expect(exitCode).toBe(1);
+      expect(text()).toContain('could not install: it exited 100\n  x�]52;c;ZXZpbA==');
+      expect(shown()).not.toMatch(RAW);
+    });
+
+    it('what the run logs while it executes is filtered', async () => {
+      setup();
+      m.executeUpdatePlan.mockImplementation(async (_plan, ctx) => {
+        ctx.log.step(`${H}: restarting`);
+        ctx.log.info(H);
+        ctx.log.warn(H);
+        return { outcomes: [outcome()], becameDue: [], stoppedAt: null };
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain('x�]52;c;ZXZpbA==��[2K�: restarting');
+      expect(shown()).not.toMatch(RAW);
+    });
+
+    it('a skipped reason and the names and packages in the summary are filtered', async () => {
+      setup({ skipped: [{ name: H, ip: '1.1.1.9', reason: `could not check for updates: ${H}` }] });
+      m.executeUpdatePlan.mockResolvedValue({
+        outcomes: [outcome({ name: H, docker: [{ name: 'docker-ce', from: H, to: H }] })],
+        becameDue: [{ name: H, package: H }],
+        stoppedAt: null,
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain('could not check for updates: x�]52');
+      expect(shown()).not.toMatch(RAW);
+      // JSON stays raw: JSON.stringify escapes control characters itself.
+      m.json.length = 0;
+      await go(['prod', '-y', '-json']);
+      expect(JSON.stringify(m.json[0])).toContain('\\u001b]52');
+    });
+  });
 });

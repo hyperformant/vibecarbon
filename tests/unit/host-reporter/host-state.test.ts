@@ -5,6 +5,7 @@ import {
   HOST_STATE_ANNOTATION,
   hostStateFromNode,
   mainPackage,
+  PACKAGE_PATTERN,
   parseHostState,
   REBOOT_TRIGGER_PATTERNS,
 } from '../../../src/lib/host-state.js';
@@ -128,5 +129,28 @@ describe('REBOOT_TRIGGER_PATTERNS', () => {
   });
   it.each(['curl', 'openssl'])('does not match %s', (n) => {
     expect(hit(n)).toBe(false);
+  });
+  it.each(['linux-modules-extra-6.8.0-90-generic', 'linux-image-generic', 'linux-base'])(
+    'matches the whole kernel package name %s',
+    (n) => {
+      expect(hit(n)).toBe(true);
+    },
+  );
+  // The kernel pattern is anchored at both ends: a name that only starts like
+  // one, or carries anything but package-name characters, is no trigger.
+  it.each(['linux-imagex', 'linux-image-6.8\u001b[2J', 'linux-firmware ', 'linux-base\nx'])(
+    'does not match %j',
+    (n) => {
+      expect(hit(n)).toBe(false);
+    },
+  );
+});
+
+describe('PACKAGE_PATTERN', () => {
+  it('is the one package-name rule, shared with the update inspector', () => {
+    expect(PACKAGE_PATTERN.test('libc6:amd64')).toBe(true);
+    expect(PACKAGE_PATTERN.test('linux-image-6.8.0-90-generic')).toBe(true);
+    expect(PACKAGE_PATTERN.test('curl\u001b[2J')).toBe(false);
+    expect(PACKAGE_PATTERN.test('Docker')).toBe(false);
   });
 });

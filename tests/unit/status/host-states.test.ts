@@ -111,6 +111,21 @@ describe('hostStateRows', () => {
     expect(rows.map((r) => r.label)).toEqual(['Restart due', 'Restart check']);
   });
 
+  it('names and reasons from a server or the cluster reach the terminal filtered', () => {
+    const H = 'x\u001b]52;c;ZXZpbA==\u0007\u001b[2K\r\u009b';
+    const rows = hostStateRows('production', [
+      { name: H, reporting: true, state: { ...due(H), packages: [H] } },
+      { name: H, reporting: false, state: null },
+      { name: H, reporting: false, state: null, error: `ssh said: ${H}` },
+    ]);
+    expect(rows).toHaveLength(3);
+    for (const r of rows) {
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: the point is to find them
+      expect(r.text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+      expect(r.text).toContain('x\uFFFD]52;c;ZXZpbA==\uFFFD\uFFFD[2K\uFFFD\uFFFD');
+    }
+  });
+
   it('shows nothing when nothing is due and every server reports', () => {
     expect(
       hostStateRows('production', [{ name: 'master', reporting: true, state: clear('master') }]),
