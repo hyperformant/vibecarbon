@@ -79,14 +79,13 @@ const node = (name: string, ip: string, env: string[], args: string[]) =>
     IMAGE,
     ...args,
   ]);
-const annotation = () =>
-  kubectl(
-    'get',
-    'node',
-    AGENT,
-    '-o',
-    `jsonpath={.metadata.annotations.${HOST_STATE_ANNOTATION.replace(/\./g, '\\.')}}`,
-  ).stdout;
+// Read the whole Node and index the annotation by its exact key, so the key
+// never has to be escaped into a jsonpath expression.
+const annotation = (): string => {
+  const r = kubectl('get', 'node', AGENT, '-o', 'json');
+  expect(r.status, r.stderr).toBe(0);
+  return JSON.parse(r.stdout).metadata.annotations?.[HOST_STATE_ANNOTATION] ?? '';
+};
 
 describe.skipIf(SKIPPED)(`the host reporter on real k3s (k3s ${VERSION})`, () => {
   let tmp = '';
