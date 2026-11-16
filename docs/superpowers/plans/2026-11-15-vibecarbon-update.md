@@ -415,7 +415,7 @@ Message: `feat(template): super-admin endpoint for server restart state`.
 
 | Key | Text |
 |---|---|
-| `title` | "Your servers need a restart to finish security updates" |
+| `title` | "A restart is needed to finish security updates" |
 | `body` | "Security updates are installed on {{servers}} and take effect after a restart. Nothing restarts on its own. To restart safely, run {{command}} from your project." |
 | `docsLink` | "How updates work" (links to `/docs/cli#update`) |
 | `showPackages` | "Show packages" |
@@ -776,7 +776,7 @@ Message: `feat(update): run the plan one server at a time`.
 
 **Files:**
 - Create `src/update.js`:
-  - `export const SPEC = { name: 'update', summary: "Install your servers' system updates and restart them when needed", description, positional: [{ name: 'env', optional: true, description: 'Environment to update' }], flags: [h, v, y ('Skip the confirmation prompt'), json ('Print the plan and the result as JSON'), env], examples }`
+  - `export const SPEC = { name: 'update', summary: "Install system updates and restart servers when needed", description, positional: [{ name: 'env', optional: true, description: 'Environment to update' }], flags: [h, v, y ('Skip the confirmation prompt'), json ('Print the plan and the result as JSON'), env], examples }`
   - `export async function run(args)`
 - Modify `src/cli.js` (`KNOWN_COMMANDS` at `:133`, a `case 'update'` next to `:335`) and `src/lib/cli/command-registry.js` (a `deploy` entry after `scale`, `usage: '[env]'`).
 - Modify `src/upgrade.js:117` (its `description` gains the pointer line below), `tests/unit/cli/command-registry.test.ts` (the deploy order ends `..., 'scale', 'update'`), and `tests/integration/cli/routing.test.ts:79`.
@@ -785,10 +785,10 @@ Message: `feat(update): run the plan one server at a time`.
 
 **`description`** (lines joined with `\n`):
 1. `Installs the security updates waiting on each server of an environment, and Docker updates on compose servers, then restarts the servers that need it, one at a time.`
-2. `Before it changes anything it shows the plan and the downtime to expect. Nothing restarts on its own: your servers install security updates daily and wait for you to run this.`
+2. `Before it changes anything it shows the plan and the downtime to expect. Nothing restarts on its own: servers install security updates daily and wait for you to run this.`
 3. `Looking for vibecarbon upgrade? That one updates your project's infrastructure files from the template.`
 
-`upgrade`'s description gains: `Looking for vibecarbon update? That one installs your servers' system updates and restarts them.`
+`upgrade`'s description gains: `Looking for vibecarbon update? That one installs system updates and restarts servers.`
 
 **`run(args)` flow:**
 1. `parseFlagsOrExit`
