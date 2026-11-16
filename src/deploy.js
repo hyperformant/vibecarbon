@@ -177,22 +177,9 @@ function buildLegacyArgs(values, positional) {
     // .vibecarbon.json — see the region-move runbook in docs/deploy-hetzner.md.
     // Name matches `failover -server-type`; `scale -type` means "scale TO".
     serverType: values['server-type'] || null,
-    // Everything below is not settable via CLI flag; the interactive
-    // prompt + `.vibecarbon.json` cover these. Defaults keep
-    // gatherDeploymentConfig's `args.X || envConfig.X || …` chains working
-    // unchanged.
-    masterServerType: null,
-    workerServerType: null,
-    dbServerType: null,
-    domain: null,
-    dnsProvider: null,
-    s3AccessKey: null,
-    s3SecretKey: null,
-    s3Region: null,
-    backupSchedule: null,
-    backupRetentionDays: null,
-    minWorkers: null,
-    maxWorkers: null,
+    // Per-role server types, domain, DNS, object-storage keys and region,
+    // backup settings and worker bounds have no flag: the interactive prompt
+    // and `.vibecarbon.json` cover them.
     // direct / push are mutated by the interactive build-mode prompt
     // in lib/deploy/prompts.js when CI/CD is configured. Keep them
     // initialized for the orchestrator's resolveBuildMode read.
@@ -346,7 +333,7 @@ async function main(values, positional) {
       const { envConfig } = resolveEnvSeed(projectConfig, environment);
       const providerId =
         args.provider ?? envConfig.provider ?? (envConfig.deployMode ? 'hetzner' : null);
-      const dnsProvider = args.dnsProvider ?? envConfig.dnsProvider ?? null;
+      const dnsProvider = envConfig.dnsProvider ?? null;
 
       const { scopes: providerDnsScopes, keys } = operatorScopesForProviderAndDns(
         providerId,

@@ -74,17 +74,15 @@ describe('promptEnvironmentName', () => {
 // seed, and a live env keeps it too, so the DNS prompt never came back.
 describe('shouldReaskManualDns', () => {
   it('re-asks a saved manual pick that never got a domain', () => {
-    expect(shouldReaskManualDns({ dnsProvider: null, yes: false }, 'manual', null)).toBe(true);
+    expect(shouldReaskManualDns({ yes: false }, 'manual', null)).toBe(true);
   });
   it('keeps manual when it has a domain the operator points by hand', () => {
-    expect(shouldReaskManualDns({ dnsProvider: null, yes: false }, 'manual', 'a.example.com')).toBe(
-      false,
-    );
+    expect(shouldReaskManualDns({ yes: false }, 'manual', 'a.example.com')).toBe(false);
   });
   it('keeps an automated provider', () => {
-    expect(shouldReaskManualDns({ dnsProvider: null, yes: false }, 'hetzner', null)).toBe(false);
+    expect(shouldReaskManualDns({ yes: false }, 'hetzner', null)).toBe(false);
   });
   it('stays silent under -y', () => {
-    expect(shouldReaskManualDns({ dnsProvider: null, yes: true }, 'manual', null)).toBe(false);
+    expect(shouldReaskManualDns({ yes: true }, 'manual', null)).toBe(false);
   });
 });

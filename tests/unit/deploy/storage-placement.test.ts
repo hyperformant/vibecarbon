@@ -23,7 +23,6 @@ const fetchMock = vi.fn(
 
 const place = (over: Record<string, unknown> = {}) =>
   resolveStoragePlacement({
-    args: {},
     envConfig: { provider: 'linode' },
     Provider: LinodeProvider,
     region: 'de-fra-2',
@@ -60,13 +59,8 @@ describe('resolveStoragePlacement', () => {
     expect(note).toBeNull();
   });
 
-  it.each([
-    ['a flag', { args: { s3Region: 'de-fra-1' } }],
-    [
-      'a region already on record',
-      { envConfig: { provider: 'linode', s3: { region: 'de-fra-1' } } },
-    ],
-  ])('%s wins, with no note and no API call', async (_name, over) => {
+  it('a region already on record wins, with no note and no API call', async () => {
+    const over = { envConfig: { provider: 'linode', s3: { region: 'de-fra-1' } } };
     await expect(place(over)).resolves.toEqual({ s3Region: 'de-fra-1', note: null });
     expect(fetchMock).not.toHaveBeenCalled();
   });
