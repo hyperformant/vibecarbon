@@ -97,15 +97,6 @@ export const testConfig = {
   },
 
   // ============================================================================
-  // UNIT TEST SETTINGS
-  // ============================================================================
-
-  unit: {
-    // Default timeout for unit tests
-    timeout: 5000,
-  },
-
-  // ============================================================================
   // PERFORMANCE TEST SETTINGS
   // ============================================================================
 
@@ -461,23 +452,5 @@ export const testConfig = {
         defaultSelection: ['compose', 'compose-ha'],
       },
     },
-
-    timeouts: {
-      create: 300_000, // 5 min
-      addFeatures: 60_000, // 1 min
-      deploy: 900_000, // 15 min
-      scale: 600_000, // 10 min
-      backup: 300_000, // 5 min
-      restore: 600_000, // 10 min
-      failover: 300_000, // 5 min
-      destroy: 300_000, // 5 min
-      verify: 300_000, // 5 min
-    },
   },
 } as const;
-
-// Type exports for better IDE support
-export type TestConfig = typeof testConfig;
-export type InfraConfig = typeof testConfig.infrastructure;
-export type HetznerConfig = typeof testConfig.infrastructure.hetzner;
-export type CloudflareConfig = typeof testConfig.infrastructure.cloudflare;
