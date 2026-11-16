@@ -85,6 +85,38 @@ function emailFor(hosts: HostMaintenance, reminder: boolean) {
   });
 }
 
+const SEND_TIMEOUT_MS = 60_000;
+
+/**
+ * One message to one address, bounded. Resolves false (and logs, without the
+ * address) on a failure or a timeout; never throws.
+ */
+async function sendBounded(
+  deps: CheckDeps,
+  to: string[],
+  email: { subject: string; html: string }
+): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const sending = deps.send(to, email);
+    // A send that outlives its timeout must not become an unhandled rejection.
+    sending.catch(() => {});
+    await Promise.race([
+      sending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('send timed out')), SEND_TIMEOUT_MS);
+        timer.unref();
+      }),
+    ]);
+    return true;
+  } catch (err) {
+    logger.warn({ err }, 'host-maintenance-email: one recipient could not be emailed');
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function runHostMaintenanceCheck(now: Date, deps: CheckDeps): Promise<CheckOutcome> {
   if (!deps.emailConfigured()) return 'skipped-no-email';
 
@@ -116,32 +148,51 @@ export async function runHostMaintenanceCheck(now: Date, deps: CheckDeps): Promi
     }
 
     const isNew = !record || record.lastEmailedAt === null || record.since !== hosts.since;
-    if (isNew) {
-      try {
-        const to = await deps.listRecipients();
-        if (to.length > 0) await deps.send(to, emailFor(hosts, false));
-      } catch (err) {
-        logger.error({ err }, 'host-maintenance-email: send failed, will retry tomorrow');
-        return 'error';
-      }
-      await deps.writeRecord({
-        since: hosts.since,
-        firstSeenAt: nowIso,
-        lastEmailedAt: nowIso,
-        lastCheckedAt: nowIso,
-      });
-      return 'sent-first';
-    }
+    const reminder =
+      !isNew && calendarDaysBetween(record.lastEmailedAt as string, now) >= REMINDER_DAYS;
+    // The record as it stands, for writes that only note today's check.
+    const kept: NoticeRecord = record ?? {
+      since: null,
+      firstSeenAt: null,
+      lastEmailedAt: null,
+      lastCheckedAt: null,
+    };
 
-    if (calendarDaysBetween(record.lastEmailedAt as string, now) >= REMINDER_DAYS) {
+    if (isNew || reminder) {
+      let to: string[];
       try {
-        const to = await deps.listRecipients();
-        if (to.length > 0) await deps.send(to, emailFor(hosts, true));
+        to = await deps.listRecipients();
       } catch (err) {
-        logger.error({ err }, 'host-maintenance-email: reminder failed, will retry tomorrow');
+        logger.error({ err }, 'host-maintenance-email: could not list recipients');
+        await deps.writeRecord({ ...kept, lastCheckedAt: nowIso });
         return 'error';
       }
-      await deps.writeRecord({ ...record, lastEmailedAt: nowIso, lastCheckedAt: nowIso });
+      if (to.length === 0) {
+        // Nobody to tell yet: the first real notice goes out once a super
+        // admin exists.
+        await deps.writeRecord({ ...kept, lastCheckedAt: nowIso });
+        return 'not-due-yet';
+      }
+      const email = emailFor(hosts, reminder);
+      let delivered = 0;
+      for (const addr of to) {
+        if (await sendBounded(deps, [addr], email)) delivered++;
+      }
+      if (delivered === 0) {
+        logger.error('host-maintenance-email: no email could be sent, will retry tomorrow');
+        await deps.writeRecord({ ...kept, lastCheckedAt: nowIso });
+        return 'error';
+      }
+      if (isNew) {
+        await deps.writeRecord({
+          since: hosts.since,
+          firstSeenAt: nowIso,
+          lastEmailedAt: nowIso,
+          lastCheckedAt: nowIso,
+        });
+        return 'sent-first';
+      }
+      await deps.writeRecord({ ...kept, lastEmailedAt: nowIso, lastCheckedAt: nowIso });
       return 'sent-reminder';
     }
 

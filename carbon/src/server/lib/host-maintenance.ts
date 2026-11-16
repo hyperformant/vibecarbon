@@ -18,7 +18,7 @@ const MAX_PACKAGES = 20;
 const MAX_TEXT_LENGTH = 16384;
 const HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/;
 const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/;
+const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/;
 const ENV_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 
 export type HostState = {
@@ -42,7 +42,12 @@ export function parseHostState(text: string): HostState | null {
   if (r.v !== 1) return null;
   if (typeof r.host !== 'string' || typeof r.rebootRequired !== 'boolean') return null;
   if (!HOST_PATTERN.test(r.host)) return null;
-  if (r.since !== null && (typeof r.since !== 'string' || !SINCE_PATTERN.test(r.since))) {
+  if (
+    r.since !== null &&
+    (typeof r.since !== 'string' ||
+      !SINCE_PATTERN.test(r.since) ||
+      Number.isNaN(Date.parse(r.since)))
+  ) {
     return null;
   }
   if (!Array.isArray(r.packages) || !r.packages.every((p) => typeof p === 'string')) return null;
@@ -60,6 +65,8 @@ export type HostMaintenanceDeps = {
   isKubernetes?: boolean;
   isDocker?: boolean;
   readFile?: (path: string) => Promise<string>;
+  /** Size in bytes of state.json; rejects ENOENT when it does not exist. */
+  fileSize?: (path: string) => Promise<number>;
   /** Whether /host-status exists (the compose bind mount). */
   dirExists?: () => Promise<boolean>;
   getNodes?: () => Promise<{ items: unknown[] }>;
@@ -140,7 +147,17 @@ export async function readHostMaintenance(
   if (docker) {
     const readFile = deps.readFile ?? ((p: string) => fs.readFile(p, 'utf-8'));
     try {
-      const state = parseHostState(await readFile(COMPOSE_STATE_FILE));
+      // An injected readFile with no fileSize is a test double with no real file.
+      const fileSize =
+        deps.fileSize ??
+        (deps.readFile ? async () => 0 : async (p: string) => (await fs.stat(p)).size);
+      // A file over the parser's limit is never read in full: it is treated
+      // like an unparseable one.
+      const text =
+        (await fileSize(COMPOSE_STATE_FILE)) > MAX_TEXT_LENGTH
+          ? ''
+          : await readFile(COMPOSE_STATE_FILE);
+      const state = parseHostState(text);
       return summarize('compose', [serverFromState(state?.host ?? 'this server', state)]);
     } catch (err) {
       if (!isMissing(err)) throw err;

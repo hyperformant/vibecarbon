@@ -14,7 +14,7 @@ const MAX_PACKAGES = 20;
 const MAX_TEXT_LENGTH = 16384;
 const HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/;
 const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$/;
+const PACKAGE_PATTERN = /^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/;
 
 /**
  * Packages whose maintainer scripts call
@@ -53,7 +53,12 @@ export function parseHostState(text) {
   if (!raw || typeof raw !== 'object' || raw.v !== 1) return null;
   if (typeof raw.host !== 'string' || typeof raw.rebootRequired !== 'boolean') return null;
   if (!HOST_PATTERN.test(raw.host)) return null;
-  if (raw.since !== null && (typeof raw.since !== 'string' || !SINCE_PATTERN.test(raw.since)))
+  if (
+    raw.since !== null &&
+    (typeof raw.since !== 'string' ||
+      !SINCE_PATTERN.test(raw.since) ||
+      Number.isNaN(Date.parse(raw.since)))
+  )
     return null;
   if (!Array.isArray(raw.packages) || !raw.packages.every((p) => typeof p === 'string'))
     return null;

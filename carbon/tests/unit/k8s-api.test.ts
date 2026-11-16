@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // A fake API server: the TCP probe connects at once and https.request answers
 // with the status and body the test sets.
 const server = vi.hoisted(() => ({ status: 200, body: '{}' }));
+const probe = vi.hoisted(() => ({ fail: false }));
 
 vi.mock('node:fs', () => {
   const readFileSync = () => 'x';
@@ -14,7 +15,8 @@ vi.mock('node:net', async () => {
   class Socket extends EventEmitter {
     setTimeout() {}
     connect(_port: number, _host: string, cb: () => void) {
-      queueMicrotask(cb);
+      if (probe.fail) queueMicrotask(() => this.emit('error', new Error('refused')));
+      else queueMicrotask(cb);
     }
     destroy() {}
   }
@@ -44,6 +46,7 @@ describe('k8sGetJson', () => {
     vi.stubEnv('KUBERNETES_SERVICE_HOST', '10.43.0.1');
   });
   afterEach(() => {
+    probe.fail = false;
     vi.unstubAllEnvs();
   });
 
@@ -61,5 +64,15 @@ describe('k8sGetJson', () => {
     const err = await k8sGetJson('/api/v1/nodes').catch((e) => e);
     expect(err).toBeInstanceOf(K8sApiError);
     expect(err.status).toBe(403);
+  });
+
+  it('retries the endpoint probe after a failed one', async () => {
+    server.status = 200;
+    server.body = '{"ok":true}';
+    probe.fail = true;
+    const { k8sGetJson } = await import('@server/lib/k8s-api');
+    await expect(k8sGetJson('/api/v1/nodes')).rejects.toThrow();
+    probe.fail = false;
+    await expect(k8sGetJson('/api/v1/nodes')).resolves.toEqual({ ok: true });
   });
 });

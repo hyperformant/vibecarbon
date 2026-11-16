@@ -22,7 +22,8 @@ describe('parseHostState', () => {
     });
   });
   it('reads a clear state', () => {
-    expect(parseHostState(read('clear.json'))).toMatchObject({
+    expect(parseHostState(read('clear.json'))).toEqual({
+      host: 'web-1',
       rebootRequired: false,
       since: null,
       packages: [],
@@ -58,12 +59,20 @@ describe('parseHostState', () => {
       expect(parseHostState(state({ host }))).toBeNull();
     },
   );
-  it.each(['yesterday', '2026-11-15 06:42:10', '2026-11-15T06:42:10+00:00', '<b>'])(
-    'rejects since %j',
-    (since) => {
-      expect(parseHostState(state({ since }))).toBeNull();
-    },
-  );
+  it.each([
+    'yesterday',
+    '2026-13-45T99:99:99Z',
+    '2026-11-15 06:42:10',
+    '2026-11-15T06:42:10+00:00',
+    '<b>',
+  ])('rejects since %j', (since) => {
+    expect(parseHostState(state({ since }))).toBeNull();
+  });
+  it('drops a package name over 128 characters', () => {
+    expect(parseHostState(state({ packages: ['a'.repeat(200), 'curl'] }))?.packages).toEqual([
+      'curl',
+    ]);
+  });
   it('keeps the package cap after dropping bad names', () => {
     const packages = ['a b', ...Array.from({ length: 25 }, (_, i) => `pkg-${i}`)];
     expect(parseHostState(state({ packages }))?.packages).toHaveLength(20);

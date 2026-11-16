@@ -46,12 +46,15 @@ describe('parseHostState', () => {
   it.each(['', '-web', 'we b', 'web<1>', 'a'.repeat(254), '\u001b[31m'])('rejects host %j', (host) => {
     expect(parseHostState(state({ host }))).toBeNull();
   });
-  it.each(['yesterday', '2026-11-15 06:42:10', '2026-11-15T06:42:10+00:00', '<b>'])(
+  it.each(['yesterday', '2026-13-45T99:99:99Z', '2026-11-15 06:42:10', '2026-11-15T06:42:10+00:00', '<b>'])(
     'rejects since %j',
     (since) => {
       expect(parseHostState(state({ since }))).toBeNull();
     }
   );
+  it('drops a package name over 128 characters', () => {
+    expect(parseHostState(state({ packages: ['a'.repeat(200), 'curl'] }))?.packages).toEqual(['curl']);
+  });
   it('keeps the package cap after dropping bad names', () => {
     const packages = ['a b', ...Array.from({ length: 25 }, (_, i) => `pkg-${i}`)];
     expect(parseHostState(state({ packages }))?.packages).toHaveLength(20);
@@ -116,6 +119,19 @@ describe('readHostMaintenance', () => {
       readFile: async () => read('malformed.txt'),
     });
     expect(result.servers[0]).toMatchObject({ name: 'this server', reporting: false });
+  });
+
+  it('compose with a state.json over 16384 bytes is not reporting and never read', async () => {
+    const readFile = vi.fn(async () => read('due.json'));
+    const result = await readHostMaintenance({
+      isDocker: true,
+      fileSize: async () => 16385,
+      readFile,
+    });
+    expect(readFile).not.toHaveBeenCalled();
+    expect(result.servers).toEqual([
+      { name: 'this server', reporting: false, rebootRequired: false, since: null, packages: [] },
+    ]);
   });
 
   it('compose without /host-status is runtime none', async () => {

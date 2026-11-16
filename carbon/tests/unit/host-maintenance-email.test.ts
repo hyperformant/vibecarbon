@@ -137,7 +137,7 @@ describe('runHostMaintenanceCheck', () => {
     expect(await runHostMaintenanceCheck(at('2026-11-16T14:00:00Z'), h.deps)).toBe(
       'skipped-already-checked'
     );
-    expect(h.sent).toHaveLength(1);
+    expect(h.sent).toHaveLength(2);
     expect(h.writes).toHaveLength(1);
   });
 
@@ -172,9 +172,8 @@ describe('runHostMaintenanceCheck', () => {
     const h = harness();
     const now = at('2026-11-16T09:00:00Z');
     expect(await runHostMaintenanceCheck(now, h.deps)).toBe('sent-first');
-    expect(h.sent).toHaveLength(1);
-    expect(h.sent[0]?.to).toEqual(['a@x.test', 'b@x.test']);
-    expect(h.sent[0]?.subject).toBe(SUBJECT);
+    expect(h.sent.map((m) => m.to)).toEqual([['a@x.test'], ['b@x.test']]);
+    expect(h.sent.every((m) => m.subject === SUBJECT)).toBe(true);
     expect(h.sent[0]?.html).toContain('vibecarbon update prod');
     expect(h.sent[0]?.html).toContain('href="https://app.test/docs/cli#update"');
     expect(h.writes).toEqual([
@@ -187,11 +186,18 @@ describe('runHostMaintenanceCheck', () => {
     ]);
   });
 
-  it('sent-first with no recipients sends nothing but still records', async () => {
-    const h = harness({ listRecipients: async () => [] });
-    expect(await runHostMaintenanceCheck(at('2026-11-16T09:00:00Z'), h.deps)).toBe('sent-first');
+  it('no recipients: only lastCheckedAt is written, and the first notice goes out once one exists', async () => {
+    let recipients: string[] = [];
+    const h = harness({ listRecipients: async () => recipients });
+    const day1 = at('2026-11-16T09:00:00Z');
+    expect(await runHostMaintenanceCheck(day1, h.deps)).toBe('not-due-yet');
     expect(h.sent).toEqual([]);
-    expect(h.writes).toHaveLength(1);
+    expect(h.writes).toEqual([
+      { since: null, firstSeenAt: null, lastEmailedAt: null, lastCheckedAt: day1.toISOString() },
+    ]);
+    recipients = ['a@x.test'];
+    expect(await runHostMaintenanceCheck(at('2026-11-17T09:00:00Z'), h.deps)).toBe('sent-first');
+    expect(h.sent.map((m) => m.to)).toEqual([['a@x.test']]);
   });
 
   it('only the due servers are named', async () => {
@@ -205,7 +211,7 @@ describe('runHostMaintenanceCheck', () => {
     const h = harness();
     await runHostMaintenanceCheck(at('2026-11-16T09:00:00Z'), h.deps);
     expect(await runHostMaintenanceCheck(at('2026-11-22T09:00:00Z'), h.deps)).toBe('not-due-yet');
-    expect(h.sent).toHaveLength(1);
+    expect(h.sent).toHaveLength(2);
     expect(h.writes.at(-1)).toMatchObject({
       lastEmailedAt: '2026-11-16T09:00:00.000Z',
       lastCheckedAt: '2026-11-22T09:00:00.000Z',
@@ -213,9 +219,9 @@ describe('runHostMaintenanceCheck', () => {
 
     const now = at('2026-11-23T09:00:00Z');
     expect(await runHostMaintenanceCheck(now, h.deps)).toBe('sent-reminder');
-    expect(h.sent).toHaveLength(2);
-    expect(h.sent[1]?.subject).toBe(`Reminder: ${SUBJECT}`);
-    expect(h.sent[1]?.to).toEqual(['a@x.test', 'b@x.test']);
+    expect(h.sent).toHaveLength(4);
+    expect(h.sent[2]?.subject).toBe(`Reminder: ${SUBJECT}`);
+    expect(h.sent.slice(2).map((m) => m.to)).toEqual([['a@x.test'], ['b@x.test']]);
     expect(h.record.current).toMatchObject({
       since: SINCE,
       firstSeenAt: '2026-11-16T09:00:00.000Z',
@@ -237,11 +243,11 @@ describe('runHostMaintenanceCheck', () => {
     expect(await runHostMaintenanceCheck(at('2026-11-17T09:00:00Z'), h.deps)).toBe('none-due');
     h.setHosts(due('2026-11-18T03:00:00Z'));
     expect(await runHostMaintenanceCheck(at('2026-11-18T09:00:00Z'), h.deps)).toBe('sent-first');
-    expect(h.sent).toHaveLength(2);
-    expect(h.sent[1]?.subject).toBe(SUBJECT);
+    expect(h.sent).toHaveLength(4);
+    expect(h.sent[2]?.subject).toBe(SUBJECT);
   });
 
-  it('a failed send is logged and leaves lastEmailedAt for tomorrow', async () => {
+  it('a failed first send writes only lastCheckedAt; same day skips, next day sends', async () => {
     let fail = true;
     const h = harness({
       send: async (to, email) => {
@@ -249,11 +255,81 @@ describe('runHostMaintenanceCheck', () => {
         h.sent.push({ to, ...email });
       },
     });
-    expect(await runHostMaintenanceCheck(at('2026-11-16T09:00:00Z'), h.deps)).toBe('error');
-    expect(h.record.current?.lastEmailedAt ?? null).toBeNull();
+    const day1 = at('2026-11-16T09:00:00Z');
+    expect(await runHostMaintenanceCheck(day1, h.deps)).toBe('error');
+    expect(h.writes).toEqual([
+      { since: null, firstSeenAt: null, lastEmailedAt: null, lastCheckedAt: day1.toISOString() },
+    ]);
     fail = false;
+    expect(await runHostMaintenanceCheck(at('2026-11-16T14:00:00Z'), h.deps)).toBe(
+      'skipped-already-checked'
+    );
+    expect(h.sent).toEqual([]);
     expect(await runHostMaintenanceCheck(at('2026-11-17T09:00:00Z'), h.deps)).toBe('sent-first');
-    expect(h.sent).toHaveLength(1);
+    expect(h.sent.map((m) => m.to)).toEqual([['a@x.test'], ['b@x.test']]);
+  });
+
+  it('a failed reminder keeps the record and retries the next date', async () => {
+    let fail = false;
+    const h = harness({
+      send: async (to, email) => {
+        if (fail) throw new Error('smtp down');
+        h.sent.push({ to, ...email });
+      },
+    });
+    await runHostMaintenanceCheck(at('2026-11-16T09:00:00Z'), h.deps);
+    fail = true;
+    const day8 = at('2026-11-23T09:00:00Z');
+    expect(await runHostMaintenanceCheck(day8, h.deps)).toBe('error');
+    expect(h.record.current).toEqual({
+      since: SINCE,
+      firstSeenAt: '2026-11-16T09:00:00.000Z',
+      lastEmailedAt: '2026-11-16T09:00:00.000Z',
+      lastCheckedAt: day8.toISOString(),
+    });
+    fail = false;
+    expect(await runHostMaintenanceCheck(at('2026-11-24T09:00:00Z'), h.deps)).toBe('sent-reminder');
+    expect(h.sent.at(-1)?.subject).toBe(`Reminder: ${SUBJECT}`);
+  });
+
+  it('one bad address does not stop the others, and is not a failure', async () => {
+    const h = harness({
+      send: async (to, email) => {
+        if (to[0] === 'a@x.test') throw new Error('bad address');
+        h.sent.push({ to, ...email });
+      },
+    });
+    expect(await runHostMaintenanceCheck(at('2026-11-16T09:00:00Z'), h.deps)).toBe('sent-first');
+    expect(h.sent.map((m) => m.to)).toEqual([['b@x.test']]);
+    expect(h.record.current?.lastEmailedAt).toBe('2026-11-16T09:00:00.000Z');
+  });
+
+  it('a send that never resolves times out at 60 s, releases the lock, and counts as failed', async () => {
+    vi.useFakeTimers();
+    try {
+      let released = false;
+      const h = harness({
+        send: () => new Promise<void>(() => {}),
+        withTryLock: async (fn) => {
+          try {
+            return await fn();
+          } finally {
+            released = true;
+          }
+        },
+      });
+      const now = at('2026-11-16T09:00:00Z');
+      const run = runHostMaintenanceCheck(now, h.deps);
+      await vi.advanceTimersByTimeAsync(60_000 * 2 + 1);
+      expect(await run).toBe('error');
+      expect(released).toBe(true);
+      expect(h.writes).toEqual([
+        { since: null, firstSeenAt: null, lastEmailedAt: null, lastCheckedAt: now.toISOString() },
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -63,10 +63,11 @@ function testTcpConnection(host: string, port: number): Promise<boolean> {
 }
 
 // Lazily detected API server endpoint (ClusterIP or pod gateway fallback)
-let k8sApiEndpoint: { host: string; port: number } | null | undefined;
+// Only a successful probe is cached: a failed one is retried on the next call.
+let k8sApiEndpoint: { host: string; port: number } | undefined;
 
 async function getK8sApiEndpoint(): Promise<{ host: string; port: number } | null> {
-  if (k8sApiEndpoint !== undefined) return k8sApiEndpoint;
+  if (k8sApiEndpoint) return k8sApiEndpoint;
 
   const clusterIpHost = process.env.KUBERNETES_SERVICE_HOST ?? '';
   const clusterIpPort =
@@ -87,7 +88,6 @@ async function getK8sApiEndpoint(): Promise<{ host: string; port: number } | nul
     return k8sApiEndpoint;
   }
 
-  k8sApiEndpoint = null;
   return null;
 }
 
