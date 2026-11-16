@@ -4,7 +4,7 @@
 #
 # This runs unit tests by default (fast).
 # To skip: git commit --no-verify
-# To run full tests: FULL_TEST=1 git commit
+# To run every local tier (unit, integration, loadtest): FULL_TEST=1 git commit
 
 # CI IS NOT A DEVELOPER MACHINE — and this hook reaches it by accident.
 #
@@ -34,9 +34,9 @@ echo ""
 pnpm lint || exit 1
 
 if [ "$FULL_TEST" = "1" ]; then
-    echo "(Running full test suite - this may take a few minutes)"
+    echo "(Running every local test tier - this may take a few minutes)"
     echo ""
-    pnpm test:e2e
+    pnpm test
 else
     pnpm test:unit
 fi
@@ -53,5 +53,5 @@ fi
 
 echo ""
 echo "All checks passed."
-echo "Tip: Run 'pnpm test:e2e' for full end-to-end tests"
+echo "Tip: FULL_TEST=1 git commit also runs the integration tier (no cloud servers)"
 exit 0

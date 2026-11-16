@@ -8,7 +8,7 @@ Guidance for AI coding agents working on this repository.
 
 Vibecarbon is a CLI tool, MIT licensed, that generates production-ready software applications with Hono + Vite + React 19 on its own Postgres 17 (Better Auth for sign-in, Drizzle for data, Traefik at the edge; extras such as observability and Redis arrive through `vibecarbon add`). The repository contains:
 
-1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`)
+1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `up.js`, `down.js`, `status.js`, `reset.js`, `add.js`, `remove.js`, `configure.js`, `upgrade.js`, `telemetry.js`, `deploy.js`, `destroy.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `update.js`, `shell.js`, `diagnose.js`, `console.js`, `access.js`)
 2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
@@ -135,7 +135,6 @@ pnpm test:template           # Subset: generated-project lint/build
 pnpm test:docker             # Subset: docker compose smoke (requires DOCKER_INTEGRATION=true)
 pnpm test:e2e:batch -- --provider hetzner   # Real-infra matrix (~3hr, REAL_INFRA=true). --provider is REQUIRED: no provider is a default
 pnpm test:e2e:expanded # E2E + VPS autoscaling end-to-end (adds ~25min)
-pnpm test:e2e:single  # Real-infra single-resource tests (former tests/infrastructure/)
 pnpm test:coverage           # Run tests with coverage report
 ```
 
@@ -324,27 +323,25 @@ Compose servers run Docker's classic image store, not the containerd store Docke
 
 ## Agent Team Workflow
 
-This project uses Claude Code's experimental agent teams feature. A **lead-coordinator** orchestrates 5 specialist teammates:
+This project uses Claude Code's experimental agent teams feature. A **lead-coordinator** orchestrates 4 specialist teammates:
 
 | Agent | Role | Quality Gate |
 |-------|------|-------------|
 | `lead-coordinator` | Decomposes tasks, delegates, synthesizes results | — |
-| `backend-engineer` | Backend APIs, database, DevOps, backend/infra `.md` docs | `pnpm lint` + `pnpm typecheck` on idle |
-| `frontend-engineer` | Frontend UI, components, styling, `/docs` route, frontend `.md` docs | `pnpm lint` + `pnpm typecheck` on idle |
+| `backend-engineer` | Backend APIs, database, DevOps, backend/infra `.md` docs | `pnpm lint` (includes the type check) on idle |
+| `frontend-engineer` | Frontend UI, components, styling, `/docs` route, frontend `.md` docs | `pnpm lint` (includes the type check) on idle |
 | `security-reviewer` | Security auditing after backend/infra changes | — |
 | `test-maintainer` | Test writing after any code change | `pnpm test:unit` on task complete |
 
 **Invocation**: Use the lead-coordinator for complex multi-step tasks. For simple single-domain tasks, invoke the specialist directly.
 
 **Quality gates** are enforced via hooks in `.claude/hooks/`:
-- `teammate-idle-gate.sh`: lint + typecheck before backend/frontend engineers go idle
+- `teammate-idle-gate.sh`: lint (which runs `tsc`) before backend/frontend engineers go idle
 - `task-completed-gate.sh`: unit tests must pass before QA marks a task complete
 
 **Configuration**:
 - `.claude/settings.json`: hook registrations (committed, shared with generated projects)
 - `.claude/settings.local.json`: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var (local only)
-
-> **Known issue**: `permissionMode: delegate` has a [bug](https://github.com/anthropics/claude-code/issues/23447) that strips file system tools from teammates. The coordination-only constraint is enforced via the lead-coordinator's system prompt instead. Enable `permissionMode: delegate` once the bug is fixed.
 
 ## Claude Code hooks
 

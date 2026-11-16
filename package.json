@@ -46,9 +46,6 @@
     "test:e2e:expanded": "REAL_INFRA=true NODE_EXTRA_CA_CERTS=tests/e2e/certs/letsencrypt-staging-roots.pem tsx tests/e2e/runner.ts --batch --expanded",
     "test:e2e:report": "tsx tests/e2e/metrics/reporter.ts",
     "test:e2e:rto-rpo": "tsx tests/e2e/metrics/rto-rpo.ts",
-    "bump:patch": "node scripts/bump.js patch",
-    "bump:minor": "node scripts/bump.js minor",
-    "bump:major": "node scripts/bump.js major",
     "prepare": "git config core.hooksPath git-hooks || true",
     "test:prepush": "pnpm lint && pnpm test:unit && pnpm test:integration",
     "prepublishOnly": "if [ -n \"$CI\" ]; then echo \"CI — workflow jobs are the gate, skipping prepublish suite\"; else pnpm test:unit && pnpm lint; fi"
@@ -107,12 +104,8 @@
     "overrides": {
       "postcss@<8.5.10": ">=8.5.10",
       "uuid@<14.0.0": ">=14.0.0",
-      "fast-xml-parser@<5.7.0": ">=5.7.0",
-      "fast-xml-builder@<1.1.7": ">=1.1.7",
-      "ip-address@<10.1.1": ">=10.1.1",
       "protobufjs@<7.5.6": "^7.5.6",
-      "@protobufjs/utf8@<1.1.1": "^1.1.1",
-      "tmp@<0.2.6": ">=0.2.6"
+      "@protobufjs/utf8@<1.1.1": "^1.1.1"
     }
   },
   "devDependencies": {

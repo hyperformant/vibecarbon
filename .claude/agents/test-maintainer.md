@@ -32,7 +32,7 @@ When invoked, follow this systematic process:
   - Unit tests go in `tests/unit/`
   - Integration tests go in `tests/integration/`
   - E2E tests go in `tests/e2e/`
-  - Smoke tests go in `tests/smoke/`
+  - Load tests go in `tests/loadtest/`
   - Use Vitest (`describe`, `it`, `expect`, `vi` for mocking)
 - For generated projects (inside `carbon/`):
   - Tests use Vitest with React Testing Library for client components
@@ -116,10 +116,11 @@ Follow these principles:
 - Don't try to fix these in test files; work around them
 
 ### Test Commands
-- `pnpm test` — Run all tests
+- `pnpm test` — Run all non-e2e tiers
 - `pnpm test:unit` — Unit tests only
-- `pnpm test:e2e` — E2E tests
-- `pnpm test:smoke` — Smoke tests (requires Docker)
+- `pnpm test:integration` — Integration tests (spawns the CLI, cloud stubbed)
+- `pnpm test:docker` — Docker compose smoke (requires Docker)
+- `pnpm test:e2e:batch -- --provider <id>` — E2E on real cloud servers (costs money; only when asked)
 - `pnpm test:coverage` — Coverage report
 
 ## Output Format
