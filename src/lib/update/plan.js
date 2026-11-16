@@ -22,14 +22,19 @@ const ROLE_ORDER = { server: 0, worker: 1, master: 2, db: 3 };
 /** @returns {{ restart: 'due' | 'likely' | 'none', restartReason: string | null }} */
 function decideRestart(state) {
   if (state.host?.rebootRequired)
-    return { restart: 'due', restartReason: mainPackage(state.host.packages) };
-  const trigger = state.ubuntu.find((p) => REBOOT_TRIGGER_PATTERNS.some((re) => re.test(p)));
+    return {
+      restart: 'due',
+      restartReason: mainPackage(state.host.packages) ?? 'system updates',
+    };
+  const trigger = [...state.ubuntu]
+    .sort()
+    .find((p) => REBOOT_TRIGGER_PATTERNS.some((re) => re.test(p)));
   if (trigger) return { restart: 'likely', restartReason: trigger };
   return { restart: 'none', restartReason: null };
 }
 
 /** @returns {Effect} */
-function decideEffect(target, install, hasDocker, restart) {
+export function decideEffect(target, install, hasDocker, restart) {
   const none = { kind: 'none', seconds: null };
   if (!hasDocker && restart === 'none' && install === 0) return none;
   if (target.side === 'standby') return { kind: 'no-traffic', seconds: null };

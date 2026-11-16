@@ -92,7 +92,7 @@ describe('formatPlan', () => {
       '  restart: due (linux-image-6.8)',
       '  users notice: nothing, the node is drained first and the app keeps running elsewhere',
       '2. standby (2.2.2.2)',
-      '  install 1 security updates',
+      '  install 1 security update',
       '  no restart expected',
       '  users notice: nothing, this side takes no traffic',
       '3. web (3.3.3.3)',
@@ -124,7 +124,7 @@ describe('formatPlan', () => {
       formatTotal(plan as never),
       nothingToDoLine('prod'),
       confirmQuestion('prod'),
-      unexpectedRestartPrompt({ name: 'web', pkg: 'libc6' }),
+      unexpectedRestartPrompt({ target: target('web', '3.3.3.3') as never, pkg: 'libc6' }),
       unexpectedRestartYesLine({ envName: 'prod', name: 'web', pkg: 'libc6' }),
       allClearLine(),
     ].join('\n');
@@ -160,13 +160,68 @@ describe('fixed lines', () => {
   it('matches the brief', () => {
     expect(nothingToDoLine('prod')).toBe('everything on prod is up to date, nothing to do');
     expect(confirmQuestion('prod')).toBe('Update prod now?');
-    expect(unexpectedRestartPrompt({ name: 'web', pkg: 'libc6' })).toBe(
+    expect(
+      unexpectedRestartPrompt({ target: target('web', '3.3.3.3') as never, pkg: 'libc6' }),
+    ).toBe(
       'web now needs a restart for libc6, which the plan did not show. The app is offline for about 1 to 3 minutes while it restarts. Restart it now?',
     );
     expect(unexpectedRestartYesLine({ envName: 'prod', name: 'web', pkg: 'libc6' })).toBe(
       'a restart became due on web (libc6): run vibecarbon update prod again to restart it',
     );
     expect(allClearLine()).toBe('no reboot due on any server');
+  });
+  it('says what each role really loses in the unexpected restart prompt', () => {
+    const prompt = (t: unknown, pkg = 'libc6') =>
+      unexpectedRestartPrompt({ target: t as never, pkg });
+    const head = (n: string) => `${n} now needs a restart for libc6, which the plan did not show. `;
+    expect(prompt(target('m', '1.1.1.1', { kind: 'k8s', role: 'master' }))).toBe(
+      `${head('m')}The app is offline for about 1 to 3 minutes while it restarts, since Traefik runs only on the master. Restart it now?`,
+    );
+    expect(prompt(target('d', '1.1.1.1', { kind: 'k8s', role: 'db' }))).toBe(
+      `${head('d')}Requests that need the database fail for about 1 to 3 minutes while it restarts. Restart it now?`,
+    );
+    expect(prompt(target('w', '1.1.1.1', { kind: 'k8s', role: 'worker' }))).toBe(
+      `${head('w')}Users notice nothing: the node is drained first and the app keeps running elsewhere. Restart it now?`,
+    );
+    expect(prompt(target('s', '1.1.1.1', { side: 'standby' }))).toBe(
+      `${head('s')}Users notice nothing: this side takes no traffic. Restart it now?`,
+    );
+    expect(prompt(target('s', '1.1.1.1', { side: 'standby', kind: 'k8s', role: 'db' }))).toBe(
+      `${head('s')}Users notice nothing: this side takes no traffic. Restart it now?`,
+    );
+  });
+  it('says system updates when no package is named', () => {
+    const p = {
+      ...plan,
+      steps: [
+        step({
+          target: target('web', '3.3.3.3'),
+          restart: 'due',
+          restartReason: 'system updates',
+          effect: { kind: 'app-offline', seconds: [60, 180] },
+        }),
+      ],
+      skipped: [],
+    };
+    expect(formatPlan(p as never)).toContain('  restart: due (system updates)');
+    expect(
+      unexpectedRestartPrompt({ target: target('web', '1.1.1.1') as never, pkg: 'system updates' }),
+    ).toContain('for system updates, which');
+    expect(unexpectedRestartYesLine({ envName: 'prod', name: 'web', pkg: 'system updates' })).toBe(
+      'a restart became due on web (system updates): run vibecarbon update prod again to restart it',
+    );
+  });
+  it('says update in the singular for one package', () => {
+    const p = {
+      ...plan,
+      skipped: [],
+      steps: [step({ target: target('web', '3.3.3.3'), install: 1 })],
+    };
+    expect(formatPlan(p as never)).toContain('  install 1 security update');
+  });
+  it('rounds offline seconds before splitting minutes', () => {
+    const r = { name: 'w', installed: 1, docker: null, restarted: true, offlineSeconds: 119.6 };
+    expect(summaryLine(r)).toBe('w: installed 1 updates, restarted, app offline 2m 0s');
   });
   it('builds the summary line', () => {
     expect(

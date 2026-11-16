@@ -2,14 +2,13 @@
  * Every line `vibecarbon update` prints about the plan. Pure strings; copy
  * follows the CLI voice rules (lowercase facts, no dashes).
  */
-import { DOWNTIME, stepIsIdle } from './plan.js';
+import { DOWNTIME, decideEffect, stepIsIdle } from './plan.js';
 
 /**
  * @param {[number, number]} range seconds
  * @returns {string}
  */
 export function formatDuration([min, max]) {
-  if (min < 60 && max < 60) return `about ${min} to ${max} seconds`;
   if (min < 60) return `about ${min} to ${max} seconds`;
   const lo = Math.ceil(min / 60);
   const hi = Math.ceil(max / 60);
@@ -59,7 +58,8 @@ export function formatPlan(plan) {
       lines.push('  nothing to do');
       return;
     }
-    if (step.install > 0) lines.push(`  install ${step.install} security updates`);
+    if (step.install > 0)
+      lines.push(`  install ${step.install} security ${step.install === 1 ? 'update' : 'updates'}`);
     if (step.docker?.packages.length)
       lines.push(
         `  update Docker: ${step.docker.packages.map((p) => `${p.name} ${p.from} to ${p.to}`).join(', ')}`,
@@ -82,8 +82,22 @@ export function formatTotal(plan) {
 
 export const nothingToDoLine = (envName) => `everything on ${envName} is up to date, nothing to do`;
 export const confirmQuestion = (envName) => `Update ${envName} now?`;
-export const unexpectedRestartPrompt = ({ name, pkg }) =>
-  `${name} now needs a restart for ${pkg}, which the plan did not show. The app is offline for ${formatDuration(DOWNTIME.restart)} while it restarts. Restart it now?`;
+/**
+ * @param {{ target: import('./inventory.js').UpdateTarget, pkg: string }} input
+ */
+export function unexpectedRestartPrompt({ target, pkg }) {
+  const effect = decideEffect(target, 0, false, 'due');
+  const d = formatDuration(DOWNTIME.restart);
+  let cost = `The app is offline for ${d} while it restarts.`;
+  if (effect.kind === 'no-traffic') cost = 'Users notice nothing: this side takes no traffic.';
+  else if (effect.kind === 'drained')
+    cost = 'Users notice nothing: the node is drained first and the app keeps running elsewhere.';
+  else if (effect.kind === 'db-offline')
+    cost = `Requests that need the database fail for ${d} while it restarts.`;
+  else if (target.role === 'master')
+    cost = `The app is offline for ${d} while it restarts, since Traefik runs only on the master.`;
+  return `${target.name} now needs a restart for ${pkg}, which the plan did not show. ${cost} Restart it now?`;
+}
 export const unexpectedRestartYesLine = ({ envName, name, pkg }) =>
   `a restart became due on ${name} (${pkg}): run vibecarbon update ${envName} again to restart it`;
 export const allClearLine = () => 'no reboot due on any server';
@@ -96,6 +110,6 @@ export function summaryLine({ name, installed, docker, restarted, offlineSeconds
   if (docker) line += `, Docker ${docker.from} to ${docker.to}`;
   if (restarted) line += ', restarted';
   if (offlineSeconds != null)
-    line += `, app offline ${Math.floor(offlineSeconds / 60)}m ${Math.round(offlineSeconds % 60)}s`;
+    line += `, app offline ${Math.floor(Math.round(offlineSeconds) / 60)}m ${Math.round(offlineSeconds) % 60}s`;
   return line;
 }

@@ -71,6 +71,16 @@ describe('buildUpdatePlan', () => {
     expect(by.b.install).toBe(2);
   });
 
+  it('names system updates when a due restart lists no package', () => {
+    const p = plan([{ target: t('a'), state: state({ host: host({ rebootRequired: true }) }) }]);
+    expect(p.steps[0].restartReason).toBe('system updates');
+  });
+
+  it('picks the likely reason in sorted order, not inspector order', () => {
+    const p = plan([{ target: t('a'), state: state({ ubuntu: ['systemd', 'libc6', 'dbus'] }) }]);
+    expect(p.steps[0].restartReason).toBe('dbus');
+  });
+
   it('plans compose primary docker, restart, and both as one outage', () => {
     const docker = { packages: [{ name: 'docker-ce', from: '1', to: '2' }] };
     const p = plan([
