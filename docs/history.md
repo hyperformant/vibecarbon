@@ -893,7 +893,7 @@ in the copy list in `src/create.js`, classified in
 **Guard:** `tests/integration/template/create.test.ts` ("ships
 drizzle.config.ts with every file and path it names").
 
-#### 2026-11-16: One secret-scan rule set for the CLI and for projects (#TBD)
+#### 2026-11-16: One secret-scan rule set for the CLI and for projects (#498)
 
 The rules that decide what a secret is now live in one file,
 `src/lib/secret-scan-rules.js`, with a byte-identical copy in the template at
