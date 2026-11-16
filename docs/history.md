@@ -893,7 +893,7 @@ in the copy list in `src/create.js`, classified in
 **Guard:** `tests/integration/template/create.test.ts` ("ships
 drizzle.config.ts with every file and path it names").
 
-#### 2026-11-16: The staging allowlist covers every file create ships (#TBD)
+#### 2026-11-16: The staging allowlist covers every file create ships (#501)
 
 `.nvmrc`, `tests/`, `vitest.config.ts`, `tsconfig.test.json`, `TESTING.md`,
 `pnpm-workspace.yaml`, `.cursor/rules/` and `.windsurfrules` joined the list of
