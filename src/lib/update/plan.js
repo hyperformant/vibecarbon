@@ -15,9 +15,18 @@ const ROLE_ORDER = { server: 0, worker: 1, master: 2, db: 3 };
 
 /**
  * @typedef {{ kind: 'none' | 'no-traffic' | 'drained' | 'app-offline' | 'db-offline', seconds: [number, number] | null }} Effect
- * @typedef {{ target: import('./inventory.js').UpdateTarget, state: import('./inspect.js').TargetState, install: number, docker: import('./inspect.js').TargetState['docker'], restart: 'due' | 'likely' | 'none', restartReason: string | null, effect: Effect }} PlanStep
- * @typedef {{ envName: string, tier: string, steps: PlanStep[], skipped: import('./inventory.js').Skipped[], total: [number, number] | null, outageServers: string[] }} UpdatePlan
+ * @typedef {{ target: import('./inventory.js').UpdateTarget, state: import('./inspect.js').TargetState, install: number, docker: import('./inspect.js').TargetState['docker'], restart: 'due' | 'likely' | 'none', restartReason: string | null, installReporter: boolean, effect: Effect }} PlanStep
+ * @typedef {{ envName: string, tier: string, steps: PlanStep[], skipped: import('./inventory.js').Skipped[], uncordon: import('./inventory.js').Leftover[], total: [number, number] | null, outageServers: string[] }} UpdatePlan
  */
+
+/**
+ * Whether the server lacks the restart reporter. k8s: its node carries no
+ * readable host state, the same test status uses for "not reporting yet".
+ * compose: the reporter's path unit is not on the server.
+ */
+function reporterMissing(target, state) {
+  return target.kind === 'k8s' ? target.reporting === false : state.reporter === false;
+}
 
 /** @returns {{ restart: 'due' | 'likely' | 'none', restartReason: string | null }} */
 function decideRestart(state) {
@@ -54,16 +63,25 @@ export function decideEffect(target, install, hasDocker, restart) {
 }
 
 /**
- * @param {{ envName: string, tier: string, inspected: Array<{ target: import('./inventory.js').UpdateTarget, state: import('./inspect.js').TargetState }>, skipped: import('./inventory.js').Skipped[] }} input
+ * @param {{ envName: string, tier: string, inspected: Array<{ target: import('./inventory.js').UpdateTarget, state: import('./inspect.js').TargetState }>, skipped: import('./inventory.js').Skipped[], uncordon?: import('./inventory.js').Leftover[] }} input
  * @returns {UpdatePlan}
  */
-export function buildUpdatePlan({ envName, tier, inspected, skipped }) {
+export function buildUpdatePlan({ envName, tier, inspected, skipped, uncordon = [] }) {
   const steps = inspected.map(({ target, state }) => {
     const install = state.ubuntu.length;
     const hasDocker = (state.docker?.packages.length ?? 0) > 0;
     const { restart, restartReason } = decideRestart(state);
     const effect = decideEffect(target, install, hasDocker, restart);
-    return { target, state, install, docker: state.docker, restart, restartReason, effect };
+    return {
+      target,
+      state,
+      install,
+      docker: state.docker,
+      restart,
+      restartReason,
+      installReporter: reporterMissing(target, state),
+      effect,
+    };
   });
   steps.sort(
     (a, b) =>
@@ -85,17 +103,28 @@ export function buildUpdatePlan({ envName, tier, inspected, skipped }) {
     tier,
     steps,
     skipped,
+    uncordon,
     total,
     outageServers: outages.map((s) => s.target.name),
   };
 }
 
-/** @param {UpdatePlan} plan */
+/**
+ * Nothing to do: every server is current and has its reporter, and no node
+ * waits to be uncordoned.
+ *
+ * @param {UpdatePlan} plan
+ */
 export function isNothingToDo(plan) {
-  return plan.steps.every((s) => stepIsIdle(s));
+  return (plan.uncordon ?? []).length === 0 && plan.steps.every((s) => stepIsIdle(s));
 }
 
 /** @param {PlanStep} step */
 export function stepIsIdle(step) {
-  return step.install === 0 && !(step.docker?.packages.length > 0) && step.restart === 'none';
+  return (
+    step.install === 0 &&
+    !(step.docker?.packages.length > 0) &&
+    step.restart === 'none' &&
+    !step.installReporter
+  );
 }

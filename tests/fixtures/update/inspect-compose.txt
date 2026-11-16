@@ -4,6 +4,8 @@
 2189d752-96e6-4e90-97fd-6ccf5f576e00
 @@ubuntu
 apt libapt-pkg7.0 libc-bin libc-gconv-modules-extra libc6 libpcre2-8-0 perl-base
+@@reporter
+installed
 @@docker
 docker-ce:
   Installed: (none)

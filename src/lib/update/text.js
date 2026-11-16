@@ -43,8 +43,13 @@ function skippedLine(envName, s) {
   else if (s.reason === 'no public address')
     hint =
       'vibecarbon reaches servers over their public address, so this one has to be updated by hand';
+  else if (s.reason.startsWith('no recorded address'))
+    hint = `Run vibecarbon deploy ${envName} to record it before you try again`;
   return `${head} ${hint}`;
 }
+
+/** A node an interrupted run left cordoned: released once the plan is confirmed. */
+const uncordonPlanLine = (name) => `uncordon ${name}, left cordoned by an interrupted update`;
 
 /**
  * @param {import('./plan.js').UpdatePlan} plan
@@ -52,12 +57,14 @@ function skippedLine(envName, s) {
  */
 export function formatPlan(plan) {
   const lines = [`update plan for ${plan.envName} (${plan.tier})`];
+  for (const u of plan.uncordon ?? []) lines.push(uncordonPlanLine(u.name));
   plan.steps.forEach((step, i) => {
     lines.push(`${i + 1}. ${step.target.name} (${step.target.ip})`);
     if (stepIsIdle(step)) {
       lines.push('  nothing to do');
       return;
     }
+    if (step.installReporter) lines.push('  install the restart reporter');
     if (step.install > 0)
       lines.push(`  install ${step.install} security ${step.install === 1 ? 'update' : 'updates'}`);
     if (step.docker?.packages.length)
@@ -81,6 +88,13 @@ export function formatTotal(plan) {
 }
 
 export const nothingToDoLine = (envName) => `everything on ${envName} is up to date, nothing to do`;
+export const noServersError = (envName) => `could not find any servers for ${envName}`;
+export const noServersHint = (envName) =>
+  `Run vibecarbon deploy ${envName} to record them before you try again`;
+export const releasedLine = (names) =>
+  `uncordoned ${names.join(', ')}, left from an earlier update`;
+export const releaseFailedLine = (name, why) =>
+  `could not uncordon ${name} (${why}), so it stays cordoned until the next update`;
 export const confirmQuestion = (envName) => `Update ${envName} now?`;
 /**
  * @param {{ target: import('./inventory.js').UpdateTarget, pkg: string }} input
@@ -103,6 +117,9 @@ export const unexpectedRestartYesLine = ({ envName, name, pkg }) =>
 export const recheckSkippedLine = (names) =>
   `could not re-check ${names.join(', ')} after the update, so a restart may still be due`;
 export const allClearLine = () => 'no reboot due on any server';
+/** @param {{ envName: string, names: string[] }} input */
+export const stillDueLine = ({ envName, names }) =>
+  `a restart is still due on ${names.join(', ')}, so run vibecarbon update ${envName} again`;
 
 /**
  * @param {{ name: string, installed: number, docker: { from: string, to: string } | null, restarted: boolean, offlineSeconds: number | null }} r
@@ -147,6 +164,7 @@ export const backLine = (name) => `${name}: back up, waiting until it is healthy
 export const healthyLine = (name, uncordoned) =>
   uncordoned ? `${name}: healthy and uncordoned` : `${name}: healthy`;
 export const noRestartAfterAllLine = (name) => `${name}: no restart needed after all`;
+export const noLongerDueLine = (name) => `${name} no longer needs a restart`;
 export const reporterFailedLine = (name, why) =>
   `could not install the restart reporter on ${name} (${why}), so vibecarbon status may not show when it needs a restart`;
 export const unmarkFailedLine = (name, why) =>

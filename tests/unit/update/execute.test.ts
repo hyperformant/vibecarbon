@@ -1148,6 +1148,65 @@ describe('executeUpdatePlan on k8s', () => {
     });
   }
 
+  // Traefik runs only on the master and the db serves every request: the next
+  // server waits until users can reach the app again, as on compose.
+  it('waits for the domain to answer after the master restarts, before the next server', async () => {
+    const w = world([
+      { name: 'master', ip: MASTER_IP, rebootRequired: true, pkgs: [PKG], appStartMs: 200_000 },
+      { name: 'db', ip: '10.1.0.3', rebootRequired: true, pkgs: [PKG] },
+    ]);
+    const res = await w.clock.run(
+      executeUpdatePlan(
+        planOf(step(k8s('master', 'master', MASTER_IP)), step(k8s('db', 'db', '10.1.0.3'))),
+        makeCtx(),
+        w.deps,
+      ),
+    );
+    expect(res.stoppedAt).toBeNull();
+    const m = w.byName('master');
+    // The pods were back long before the app answered.
+    expect(w.podsFreshAt(m)).toBeLessThan(w.healthyAt(m) - 60_000);
+    const dbFirst = w.calls.find((c) => c.ip === '10.1.0.3') as Call;
+    expect(dbFirst.t).toBeGreaterThanOrEqual(w.healthyAt(m));
+  });
+
+  it('stops, already uncordoned, when the domain never answers after the db restarts', async () => {
+    const w = world([
+      { name: 'db', ip: '10.1.0.3', rebootRequired: true, pkgs: [PKG], ingressNeverBack: true },
+    ]);
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('db', 'db', '10.1.0.3'))), makeCtx(), w.deps),
+    );
+    expect(res.stoppedAt).toMatchObject({
+      restarted: true,
+      error: 'db did not become healthy within 5 minutes: app.example.test answered 503',
+      hint: CONSOLE_HINT,
+    });
+    expect(w.byName('db')).toMatchObject({ cordoned: false, marked: false });
+    // 300 s from the moment its pods were back.
+    const lastPods = w.calls[last(w.calls, 'pods')];
+    const probes = w.calls.filter((c) => c.via === 'probe' && c.t > lastPods.t);
+    expect((probes.at(-1)?.t ?? 0) - lastPods.t).toBeLessThanOrEqual(300_000);
+    expect((probes.at(-1)?.t ?? 0) - lastPods.t).toBeGreaterThan(290_000);
+  });
+
+  it('a worker restart does not wait for the domain', async () => {
+    const w = world([{ ...worker, ingressNeverBack: true }]);
+    const res = await runWorker(w);
+    expect(res.stoppedAt).toBeNull();
+  });
+
+  it('the master does not wait for the domain when downtime is not measured', async () => {
+    const w = world([{ name: 'master', ip: MASTER_IP, rebootRequired: true, pkgs: [PKG] }], {
+      publicUnreachable: true,
+    });
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('master', 'master', MASTER_IP))), makeCtx(), w.deps),
+    );
+    expect(res.stoppedAt).toBeNull();
+    expect(w.calls.filter((c) => c.via === 'probe')).toHaveLength(1);
+  });
+
   // The backup CronJob's pod is killed by the reboot and fails: its Job
   // retries it or gives up, and neither is the node's health.
   it('never waits on a Job pod, even one that turned Failed after the reboot', async () => {
@@ -1409,11 +1468,11 @@ describe('executeUpdatePlan on k8s', () => {
       argv[0] === 'get' ? JSON.stringify({ items: [leftover] }) : '',
     );
     await expect(
-      releaseLeftoverCordons([MASTER_IP], {
+      releaseLeftoverCordons([{ name: 'worker-1', masterIp: MASTER_IP }], {
         sshKubectl: withSshContract(kubectl),
         sshKeyPath: KEY,
       }),
-    ).resolves.toEqual(['worker-1']);
+    ).resolves.toEqual({ released: ['worker-1'], failed: [] });
   });
 
   // Cordoned with the mark is a cordon an earlier run left, not the operator's.
@@ -1482,6 +1541,36 @@ describe('restarts the plan did not predict', () => {
     expect(first(w.calls, 'reboot')).toBe(-1);
     expect(ctx.log.info).toHaveBeenCalledWith('web-1: no restart needed after all');
     expect(res.outcomes[0].restarted).toBe(false);
+  });
+
+  // The install can clear the flag (a package that superseded the one that set
+  // it): a due step restarts only while /var/run/reboot-required is there.
+  it('does not restart a due step whose restart flag is gone after the install', async () => {
+    const w = world([{ name: 'web-1', ip: '10.0.0.1' }]);
+    const ctx = makeCtx();
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(compose('web-1', '10.0.0.1'))), ctx, w.deps),
+    );
+    expect(sequence(w.calls.filter((c) => c.ip === '10.0.0.1'))).toEqual([
+      'reporter',
+      'upgrade',
+      'check',
+    ]);
+    expect(ctx.log.info).toHaveBeenCalledWith('web-1 no longer needs a restart');
+    expect(res.stoppedAt).toBeNull();
+    expect(res.outcomes[0]).toMatchObject({ restarted: false, error: null });
+  });
+
+  it('k8s: a due node whose flag is gone is never cordoned', async () => {
+    const w = world([{ name: 'worker-1', ip: '10.1.0.2' }]);
+    const ctx = makeCtx();
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('worker-1', 'worker', '10.1.0.2'))), ctx, w.deps),
+    );
+    expect(w.calls.filter((c) => c.via === 'kubectl')).toEqual([]);
+    expect(first(w.calls, 'reboot')).toBe(-1);
+    expect(ctx.log.info).toHaveBeenCalledWith('worker-1 no longer needs a restart');
+    expect(res.outcomes[0]).toMatchObject({ restarted: false, error: null });
   });
 
   it('restarts a likely step when the restart became due', async () => {
@@ -1744,7 +1833,11 @@ describe('releaseLeftoverCordons', () => {
     status: { conditions: [{ type: 'Ready', status: ready }] },
   });
 
-  it('uncordons only the marked nodes that are Ready, and removes their mark', async () => {
+  const planned = (...names: string[]) => names.map((name) => ({ name, masterIp: MASTER_IP }));
+
+  // worker-2 turned not Ready since the plan: it stays cordoned, and the run
+  // says so. worker-3 lost its mark since the plan: someone else owns it now.
+  it('uncordons only the planned nodes still marked and Ready, and removes their mark', async () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
       argv[0] === 'get'
         ? JSON.stringify({
@@ -1752,15 +1845,20 @@ describe('releaseLeftoverCordons', () => {
               node('worker-1', 'True', true),
               node('worker-2', 'False', true),
               node('worker-3', 'True', false),
+              // Marked since the plan was shown: not in the plan, so left alone.
+              node('worker-4', 'True', true),
             ],
           })
         : '',
     );
-    const released = await releaseLeftoverCordons([MASTER_IP, MASTER_IP], {
+    const result = await releaseLeftoverCordons(planned('worker-1', 'worker-2', 'worker-3'), {
       sshKubectl: withSshContract(kubectl),
       sshKeyPath: KEY,
     });
-    expect(released).toEqual(['worker-1']);
+    expect(result).toEqual({
+      released: ['worker-1'],
+      failed: [{ name: 'worker-2', reason: 'it is not Ready' }],
+    });
     expect(kubectl.mock.calls.map((c) => c[2])).toEqual([
       ['get', 'nodes', '-o', 'json'],
       ['uncordon', 'worker-1'],
@@ -1773,16 +1871,40 @@ describe('releaseLeftoverCordons', () => {
     }
   });
 
-  it('leaves a cluster it cannot read for the plan to report', async () => {
-    const kubectl = vi.fn(async () => {
-      throw new Error('ssh: connect to host 10.1.0.1 port 22: Connection refused');
+  it('reports a cluster it cannot read, and a node it cannot release', async () => {
+    const down = vi.fn(async () => {
+      throw Object.assign(new Error('Command failed: ssh ...'), {
+        status: 255,
+        stderr: 'ssh: connect to host 10.1.0.1 port 22: Connection refused\n',
+      });
     });
     await expect(
-      releaseLeftoverCordons([MASTER_IP], {
-        sshKubectl: withSshContract(kubectl),
+      releaseLeftoverCordons(planned('worker-1'), {
+        sshKubectl: withSshContract(down),
         sshKeyPath: KEY,
       }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual({
+      released: [],
+      failed: [
+        {
+          name: 'worker-1',
+          reason: 'kubectl said: ssh: connect to host 10.1.0.1 port 22: Connection refused',
+        },
+      ],
+    });
+    const refuses = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv[0] === 'get') return JSON.stringify({ items: [node('worker-1', 'True', true)] });
+      throw Object.assign(new Error('Command failed: ssh ...'), { status: 1, stderr: 'nope\n' });
+    });
+    await expect(
+      releaseLeftoverCordons(planned('worker-1'), {
+        sshKubectl: withSshContract(refuses),
+        sshKeyPath: KEY,
+      }),
+    ).resolves.toEqual({
+      released: [],
+      failed: [{ name: 'worker-1', reason: 'kubectl said: nope' }],
+    });
   });
 
   it('builds the argv the brief names', () => {

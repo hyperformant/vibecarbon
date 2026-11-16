@@ -110,7 +110,7 @@ beforeEach(() => {
   exitCode = null;
   m.confirm.mockResolvedValue(true);
   m.isCancel.mockReturnValue(false);
-  m.releaseLeftoverCordons.mockResolvedValue([]);
+  m.releaseLeftoverCordons.mockResolvedValue({ released: [], failed: [] });
   m.ensureOperatorIpAccess.mockResolvedValue({ added: false });
   m.executeUpdatePlan.mockResolvedValue({ outcomes: [outcome()], becameDue: [], stoppedAt: null });
   vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -294,11 +294,15 @@ describe('update run', () => {
       docker: null,
       restart: 'none',
       restartReason: null,
+      installReporter: false,
       expectedSeconds: null,
     });
     expect(doc.expectedDowntime).toBeNull();
     expect(doc.skipped).toEqual([]);
     expect(doc.becameDue).toEqual([]);
+    expect(doc.uncordon).toEqual([]);
+    expect(doc.uncordonFailed).toEqual([]);
+    expect(doc.stillDue).toEqual([]);
   });
 
   it('measuredDowntimeSeconds is null when every step is unmeasured', async () => {
@@ -336,18 +340,197 @@ describe('update run', () => {
     expect(m.listUpdateTargets).not.toHaveBeenCalled();
   });
 
-  it('on k8s, releases leftover cordons for each distinct master first', async () => {
-    const w = { ...target, role: 'worker', kind: 'k8s', masterIp: '9.9.9.9', name: 'w1' };
-    const mm = { ...target, role: 'master', kind: 'k8s', masterIp: '9.9.9.9', name: 'm' };
-    m.listUpdateTargets.mockResolvedValue({ tier: 'k8s', targets: [w, mm], skipped: [] });
-    m.inspectAll.mockResolvedValue({ inspected: [], skipped: [] });
-    m.releaseLeftoverCordons.mockResolvedValue(['w1']);
+  describe('a node an interrupted update left cordoned', () => {
+    const w = {
+      ...target,
+      role: 'worker',
+      kind: 'k8s',
+      masterIp: '9.9.9.9',
+      name: 'w1',
+      nodeName: 'w1',
+      reporting: true,
+    };
+    const mm = { ...w, role: 'master', name: 'm', nodeName: 'm' };
+    const leftovers = [{ name: 'w1', masterIp: '9.9.9.9' }];
+    const idle = state([]);
+    const k8sSetup = () => {
+      m.listUpdateTargets.mockResolvedValue({
+        tier: 'k8s',
+        targets: [w, mm],
+        skipped: [],
+        leftovers,
+      });
+      m.inspectAll.mockResolvedValue({
+        inspected: [
+          { target: w, state: idle },
+          { target: mm, state: idle },
+        ],
+        skipped: [],
+      });
+      m.releaseLeftoverCordons.mockResolvedValue({ released: ['w1'], failed: [] });
+    };
+    const UNCORDON_LINE = 'uncordon w1, left cordoned by an interrupted update';
+
+    it('is in the plan and counts as work, released only after the confirmation', async () => {
+      k8sSetup();
+      const order: string[] = [];
+      m.confirm.mockImplementation(async () => {
+        order.push('confirm');
+        return true;
+      });
+      m.releaseLeftoverCordons.mockImplementation(async () => {
+        order.push('release');
+        return { released: ['w1'], failed: [] };
+      });
+      m.executeUpdatePlan.mockImplementation(async () => {
+        order.push('execute');
+        return { outcomes: [outcome({ name: 'w1' })], becameDue: [], stoppedAt: null };
+      });
+      await go(['prod']);
+      expect(text()).toContain(UNCORDON_LINE);
+      expect(text()).not.toContain(nothingToDoLine('prod'));
+      expect(order).toEqual(['confirm', 'release', 'execute']);
+      expect(m.releaseLeftoverCordons).toHaveBeenCalledWith(
+        leftovers,
+        expect.objectContaining({ sshKeyPath: '/keys/prod' }),
+      );
+      expect(text()).toContain('uncordoned w1, left from an earlier update');
+      expect(exitCode).toBeNull();
+    });
+
+    it('a -json dry run lists it and changes nothing in the cluster', async () => {
+      k8sSetup();
+      await go(['prod', '-json']);
+      expect(m.releaseLeftoverCordons).not.toHaveBeenCalled();
+      expect(m.executeUpdatePlan).not.toHaveBeenCalled();
+      expect((m.json[0] as { uncordon: unknown }).uncordon).toEqual(['w1']);
+    });
+
+    it('a declined prompt changes nothing in the cluster', async () => {
+      k8sSetup();
+      m.confirm.mockResolvedValue(false);
+      m.exitDeclined.mockImplementation(() => {
+        throw new Error('exit 1');
+      });
+      await go(['prod']);
+      expect(text()).toContain(UNCORDON_LINE);
+      expect(m.releaseLeftoverCordons).not.toHaveBeenCalled();
+    });
+
+    it('a release that fails is named and the run exits 1', async () => {
+      k8sSetup();
+      m.releaseLeftoverCordons.mockResolvedValue({
+        released: [],
+        failed: [{ name: 'w1', reason: 'kubectl said: timed out' }],
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain(
+        'could not uncordon w1 (kubectl said: timed out), so it stays cordoned until the next update',
+      );
+      expect(m.executeUpdatePlan).toHaveBeenCalledTimes(1);
+      expect(exitCode).toBe(1);
+      m.json.length = 0;
+      await go(['prod', '-y', '-json']);
+      expect((m.json[0] as { uncordonFailed: unknown }).uncordonFailed).toEqual([
+        { name: 'w1', reason: 'kubectl said: timed out' },
+      ]);
+    });
+  });
+
+  describe('a server without the restart reporter', () => {
+    it('compose: the only work is the reporter, so the plan names it and the run goes ahead', async () => {
+      m.listUpdateTargets.mockResolvedValue({ tier: 'compose', targets: [target], skipped: [] });
+      m.inspectAll.mockResolvedValue({
+        inspected: [{ target, state: { ...state([]), reporter: false } }],
+        skipped: [],
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain('  install the restart reporter');
+      expect(text()).toContain('no downtime expected');
+      expect(text()).not.toContain(nothingToDoLine('prod'));
+      expect(m.executeUpdatePlan).toHaveBeenCalledTimes(1);
+    });
+
+    it('k8s: a node without the host-state annotation gets it', async () => {
+      const node = {
+        ...target,
+        role: 'worker',
+        kind: 'k8s',
+        masterIp: '9.9.9.9',
+        name: 'w1',
+        nodeName: 'w1',
+        reporting: false,
+      };
+      m.listUpdateTargets.mockResolvedValue({ tier: 'k8s', targets: [node], skipped: [] });
+      m.inspectAll.mockResolvedValue({
+        inspected: [{ target: node, state: state([]) }],
+        skipped: [],
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain('  install the restart reporter');
+      expect(m.executeUpdatePlan).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a restart still due at the end', () => {
+    const dueAfter = () => {
+      setup();
+      m.inspectAll
+        .mockResolvedValueOnce({ inspected: [{ target, state: state(['a', 'b']) }], skipped: [] })
+        .mockResolvedValueOnce({ inspected: [{ target, state: state([], true) }], skipped: [] });
+    };
+
+    it('is named with the command to run, and the run exits 1', async () => {
+      dueAfter();
+      await go(['prod', '-y']);
+      expect(text()).toContain(
+        'a restart is still due on master, so run vibecarbon update prod again',
+      );
+      expect(text()).not.toContain(allClearLine());
+      expect(exitCode).toBe(1);
+    });
+
+    it('is listed as stillDue in the JSON, and the run exits 1', async () => {
+      dueAfter();
+      await go(['prod', '-y', '-json']);
+      expect((m.json[0] as { stillDue: unknown }).stillDue).toEqual(['master']);
+      expect(exitCode).toBe(1);
+    });
+
+    it('stillDue is empty when nothing is due, and the run exits 0', async () => {
+      setup();
+      await go(['prod', '-y', '-json']);
+      expect((m.json[0] as { stillDue: unknown }).stillDue).toEqual([]);
+      expect(exitCode).toBeNull();
+    });
+
+    it('a restart that became due exits 1, named once', async () => {
+      setup();
+      m.inspectAll
+        .mockResolvedValueOnce({ inspected: [{ target, state: state(['a', 'b']) }], skipped: [] })
+        .mockResolvedValueOnce({ inspected: [{ target, state: state([], true) }], skipped: [] });
+      m.executeUpdatePlan.mockResolvedValue({
+        outcomes: [outcome()],
+        becameDue: [{ name: 'master', package: 'linux-image' }],
+        stoppedAt: null,
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain(
+        unexpectedRestartYesLine({ envName: 'prod', name: 'master', pkg: 'linux-image' }),
+      );
+      expect(text()).not.toContain('a restart is still due on master');
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  it('no servers at all: says so with the deploy hint, exits 1, inspects nothing', async () => {
+    m.listUpdateTargets.mockResolvedValue({ tier: 'compose', targets: [], skipped: [] });
     await go(['prod', '-y']);
-    expect(m.releaseLeftoverCordons).toHaveBeenCalledWith(
-      ['9.9.9.9'],
-      expect.objectContaining({ sshKeyPath: '/keys/prod' }),
-    );
-    expect(text()).toContain('uncordoned w1, left from an earlier update');
+    expect(text()).toContain('could not find any servers for prod');
+    expect(text()).toContain('Run vibecarbon deploy prod to record them before you try again');
+    expect(text()).not.toContain(nothingToDoLine('prod'));
+    expect(m.inspectAll).not.toHaveBeenCalled();
+    expect(exitCode).toBe(1);
   });
 
   const skippedOne = { name: 'gone', ip: '5.5.5.5', reason: 'timed out' };

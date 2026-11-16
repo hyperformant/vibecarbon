@@ -8,14 +8,20 @@
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import { isWorkerNode } from '../deploy/k8s/node-roles.js';
 import { resolveTier } from '../deploy/tier-registry.js';
+import { hostStateFromNode } from '../host-state.js';
 import { sshKeyPathFor, sshKubectl } from '../ssh.js';
 import { describeSshError } from '../status/cluster-snapshot.js';
 
 const CONTROL_PLANE = 'node-role.kubernetes.io/control-plane';
 
+/** The annotation `update` puts on a node it cordons, so a later run can release it. */
+export const CORDON_MARK = 'vibecarbon.dev/cordoned-by-update';
+
 /**
- * @typedef {{ name: string, ip: string, side: 'primary' | 'standby', role: 'server' | 'master' | 'worker' | 'db', kind: 'compose' | 'k8s', masterIp?: string, nodeName?: string }} UpdateTarget
+ * @typedef {{ name: string, ip: string, side: 'primary' | 'standby', role: 'server' | 'master' | 'worker' | 'db', kind: 'compose' | 'k8s', masterIp?: string, nodeName?: string, reporting?: boolean }} UpdateTarget
+ *   reporting (k8s): whether the node carries readable host state from the reporter.
  * @typedef {{ name: string, ip: string | null, reason: string }} Skipped
+ * @typedef {{ name: string, masterIp: string }} Leftover a Ready node an interrupted run left cordoned
  */
 
 function nodeRole(labels) {
@@ -24,7 +30,10 @@ function nodeRole(labels) {
   return 'db';
 }
 
-async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped }) {
+const isReady = (node) =>
+  node?.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') ?? false;
+
+async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped, leftovers }) {
   let nodes;
   try {
     const out = await kubectl(masterIp, key, ['get', 'nodes', '-o', 'json'], { timeout: 20_000 });
@@ -39,6 +48,9 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
   }
   for (const node of nodes) {
     const nodeName = node.metadata?.name ?? '';
+    // Read only: the plan shows it, and only a confirmed run releases it.
+    if (CORDON_MARK in (node.metadata?.annotations ?? {}) && isReady(node))
+      leftovers.push({ name: nodeName, masterIp });
     const ip = node.status?.addresses?.find((a) => a.type === 'ExternalIP')?.address;
     if (!ip) {
       skipped.push({ name: nodeName, ip: null, reason: 'no public address' });
@@ -52,6 +64,7 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
       kind: 'k8s',
       masterIp,
       nodeName,
+      reporting: hostStateFromNode(node).reporting,
     });
   }
 }
@@ -63,7 +76,11 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
  * An `AmbiguousPrimaryError` from `resolvePrimary` propagates on purpose: with
  * unclear roles, guessing which server is primary could update the wrong one.
  *
- * @returns {Promise<{ tier: string, targets: UpdateTarget[], skipped: Skipped[] }>}
+ * Nothing recorded at all lists nothing, for the caller to say so. A k8s
+ * side the tier expects but has no address for is skipped, so the run is
+ * never read as done.
+ *
+ * @returns {Promise<{ tier: string, targets: UpdateTarget[], skipped: Skipped[], leftovers: Leftover[] }>}
  */
 export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl }) {
   const kubectl = deps.sshKubectl ?? sshKubectl;
@@ -73,6 +90,8 @@ export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl 
   const targets = [];
   /** @type {Skipped[]} */
   const skipped = [];
+  /** @type {Leftover[]} */
+  const leftovers = [];
 
   if (tier === 'compose') {
     const sv = resolvePrimary(envConfig, { env: envName })?.entry;
@@ -108,10 +127,19 @@ export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl 
     ];
     if (tier === 'k8s-ha')
       clusters.push({ masterIp: envConfig.ha?.standby?.masterIp, side: 'standby' });
-    for (const c of clusters) {
-      if (!c.masterIp) continue;
-      await listClusterNodes({ ...c, key, kubectl, targets, skipped });
+    if (clusters.some((c) => c.masterIp)) {
+      for (const c of clusters) {
+        if (!c.masterIp) {
+          skipped.push({
+            name: `${c.side} cluster`,
+            ip: null,
+            reason: `no recorded address for the ${c.side} cluster`,
+          });
+          continue;
+        }
+        await listClusterNodes({ ...c, key, kubectl, targets, skipped, leftovers });
+      }
     }
   }
-  return { tier, targets, skipped };
+  return { tier, targets, skipped, leftovers };
 }

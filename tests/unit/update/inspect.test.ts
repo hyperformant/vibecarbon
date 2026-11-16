@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { APT_LOCK_TIMEOUT_SECONDS } from '../../../src/lib/deploy/apt.js';
 import {
   INSPECT_SCRIPT,
   inspectAll,
@@ -65,6 +66,21 @@ describe('parseInspectOutput', () => {
   it('throws on a missing section', () => {
     const noBoot = FIXTURE.replace('@@boot-id', '@@x');
     expect(() => parseInspectOutput(noBoot, 'compose')).toThrow('inspect output missing @@boot-id');
+  });
+
+  it('compose: says whether the restart reporter is installed', () => {
+    expect(parseInspectOutput(FIXTURE, 'compose').reporter).toBe(true);
+    const missing = FIXTURE.replace('@@reporter\ninstalled\n', '@@reporter\nmissing\n');
+    expect(parseInspectOutput(missing, 'compose').reporter).toBe(false);
+    const noSection = FIXTURE.replace('@@reporter\ninstalled\n', '');
+    expect(() => parseInspectOutput(noSection, 'compose')).toThrow(
+      'inspect output missing @@reporter',
+    );
+  });
+
+  it('k8s: the reporter is read from the node annotation, not the server', () => {
+    const k8s = FIXTURE.slice(0, FIXTURE.indexOf('@@reporter'));
+    expect(parseInspectOutput(k8s, 'k8s').reporter).toBeNull();
   });
 });
 
@@ -146,15 +162,26 @@ describe('INSPECT_SCRIPT', () => {
     expect(INSPECT_SCRIPT('k8s')).not.toContain('@@docker');
     expect(INSPECT_SCRIPT('k8s')).toContain('--print');
   });
+
+  it('compose checks for the reporter path unit; k8s does not', () => {
+    expect(INSPECT_SCRIPT('compose')).toContain('@@reporter');
+    expect(INSPECT_SCRIPT('compose')).toContain(
+      'if [ -f /etc/systemd/system/vibecarbon-host-reporter.path ]; then echo installed; else echo missing; fi',
+    );
+    expect(INSPECT_SCRIPT('k8s')).not.toContain('@@reporter');
+  });
 });
 
 describe('inspectTarget and inspectAll', () => {
-  it('sends the script on stdin with a bound and no transport retry', async () => {
+  it('sends the script on stdin with a bound past apt lock wait and no transport retry', async () => {
     const sshRun = vi.fn().mockResolvedValue(FIXTURE);
     await inspectTarget(target('master'), { sshRun, envName: 'prod' });
+    // apt waits up to APT_LOCK_TIMEOUT_SECONDS for the lock: the ssh bound is
+    // 120 s past it, so a busy daily job reads as a failed apt check.
+    expect(APT_LOCK_TIMEOUT_SECONDS).toBe(300);
     expect(sshRun).toHaveBeenCalledWith('10.0.0.6', expect.any(String), ['sh', '-s'], {
       input: INSPECT_SCRIPT('compose'),
-      timeout: 180_000,
+      timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000,
       transportRetry: false,
     });
   });

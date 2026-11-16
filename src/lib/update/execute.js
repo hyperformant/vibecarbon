@@ -14,7 +14,8 @@
  *
  * Downtime is measured from this machine through the app's public readiness,
  * and only when one probe before the first step reaches it. Then a compose
- * server is healthy only once the domain answers again too.
+ * server, and a restarted k8s master or db node, is healthy only once the
+ * domain answers again too.
  *
  * The run never rejects: a prompt or a log line that throws ends it like a
  * failed step, with the outcomes so far.
@@ -39,6 +40,7 @@ import { DOCKER_PACKAGES, DOCKER_SOURCE_ONLY } from '../iac/docker-install.js';
 import { pollUntil } from '../retry.js';
 import { sshKubectl, sshRun, sshRunScript } from '../ssh.js';
 import { describeSshError } from '../status/cluster-snapshot.js';
+import { CORDON_MARK } from './inventory.js';
 import {
   alreadyCordonedLine,
   backLine,
@@ -51,6 +53,7 @@ import {
   healthyLine,
   installHint,
   installingLine,
+  noLongerDueLine,
   noRestartAfterAllLine,
   notMeasuredLine,
   rebootCallFailedLine,
@@ -65,8 +68,7 @@ import {
   unmarkFailedLine,
 } from './text.js';
 
-/** The annotation `update` puts on a node it cordons, so a later run can release it. */
-export const CORDON_MARK = 'vibecarbon.dev/cordoned-by-update';
+export { CORDON_MARK };
 
 const REPORTER_TIMEOUT_MS = 60_000;
 /** 1200 s: up to 300 s for the daily apt units to finish, then 900 s to install. */
@@ -455,21 +457,26 @@ function overlapSeconds(windows, start, end) {
 }
 
 /**
- * Uncordon the Ready nodes an earlier, interrupted `update` left cordoned
- * (they carry CORDON_MARK), and remove the mark. A node that is not Ready
- * stays cordoned for a later run. A cluster that cannot be read is left for
- * the plan to report, and a node whose release fails is tried again next run.
+ * Uncordon the nodes the confirmed plan listed as left cordoned by an earlier,
+ * interrupted `update`, and remove the mark. Each cluster is read again first,
+ * so only a node that still carries CORDON_MARK is touched, and one that is no
+ * longer Ready stays cordoned. A failure leaves the node marked, so the next
+ * run tries again.
  *
- * @param {string[]} masterIps
+ * @param {import('./inventory.js').Leftover[]} leftovers
  * @param {{ sshKubectl?: Function, sshKeyPath: string }} deps
- * @returns {Promise<string[]>} the names released
+ * @returns {Promise<{ released: string[], failed: Array<{ name: string, reason: string }> }>}
  */
-export async function releaseLeftoverCordons(masterIps, deps) {
+export async function releaseLeftoverCordons(leftovers, deps) {
   const kubectl = deps.sshKubectl ?? sshKubectl;
   const key = deps.sshKeyPath;
   const opts = { timeout: QUICK_TIMEOUT_MS, input: NO_STDIN };
   const released = [];
-  for (const ip of new Set(masterIps.filter(Boolean))) {
+  const failed = [];
+  const kubectlSaid = (err) =>
+    err instanceof SyntaxError ? SEEN.unreadable : SEEN.kubectlFailed(oneLine(err));
+  const byMaster = Map.groupBy(leftovers, (l) => l.masterIp);
+  for (const [ip, planned] of byMaster) {
     let nodes;
     try {
       const out = await kubectl(ip, key, ['get', 'nodes', '-o', 'json'], {
@@ -477,22 +484,33 @@ export async function releaseLeftoverCordons(masterIps, deps) {
         timeout: LIST_NODES_TIMEOUT_MS,
       });
       nodes = JSON.parse(out).items ?? [];
-    } catch {
+    } catch (err) {
+      for (const { name } of planned) failed.push({ name, reason: kubectlSaid(err) });
       continue;
     }
-    for (const node of nodes) {
-      const name = node?.metadata?.name;
-      if (!name || !(CORDON_MARK in (node.metadata.annotations ?? {})) || !isReady(node)) continue;
+    for (const { name } of planned) {
+      const node = nodes.find((n) => n?.metadata?.name === name);
+      // Gone, or no longer marked: not this run's to release.
+      if (!node || !(CORDON_MARK in (node.metadata?.annotations ?? {}))) continue;
+      if (!isReady(node)) {
+        failed.push({ name, reason: 'it is not Ready' });
+        continue;
+      }
       try {
         await kubectl(ip, key, uncordonArgv(name), opts);
+      } catch (err) {
+        failed.push({ name, reason: kubectlSaid(err) });
+        continue;
+      }
+      released.push(name);
+      try {
         await kubectl(ip, key, unmarkArgv(name), opts);
-        released.push(name);
       } catch {
-        // Still marked, so the next run tries again.
+        // Uncordoned, still marked: the next run lists it and removes the mark.
       }
     }
   }
-  return released;
+  return { released, failed };
 }
 
 function fail(outcome, error, hint) {
@@ -675,13 +693,17 @@ async function runStep(step, outcome, run) {
 }
 
 /**
- * Restart when the plan said due, or likely and it now is. A restart the plan
+ * Restart when the plan said due or likely and the server still says it needs
+ * one (/var/run/reboot-required, read after the install). A restart the plan
  * did not show is asked about, or with -y left for the next run.
  */
 async function restartNow(step, host, run) {
   const { ctx, becameDue } = run;
   const { target } = step;
-  if (step.restart === 'due') return true;
+  if (step.restart === 'due') {
+    if (!host.rebootRequired) ctx.log.info(noLongerDueLine(target.name));
+    return host.rebootRequired;
+  }
   if (step.restart === 'likely') {
     if (!host.rebootRequired) ctx.log.info(noRestartAfterAllLine(target.name));
     return host.rebootRequired;
@@ -713,10 +735,20 @@ async function waitForApp(target, run) {
   }
   if (!res?.healthy) return { ok: false, seen: SEEN.appUnhealthy(res?.status ?? 'none') };
   if (!monitor) return { ok: true };
-  // Only a probe that started once the app was healthy counts.
-  const healthyAt = deps.now();
-  const deadline = start + HEALTHY_BUDGET_MS;
-  while (!monitor.upSince(healthyAt)) {
+  return domainAnswers(run, start + HEALTHY_BUDGET_MS);
+}
+
+/**
+ * Wait until a probe that started from now on found the domain up (2xx), or
+ * until `deadline`. Only runs when downtime is measured: the baseline probe
+ * reached the domain before anything changed.
+ *
+ * @returns {Promise<{ ok: true } | { ok: false, seen: string }>}
+ */
+async function domainAnswers(run, deadline) {
+  const { ctx, deps, monitor } = run;
+  const from = deps.now();
+  while (!monitor.upSince(from)) {
     const left = deadline - deps.now();
     if (left <= 0) {
       const last = monitor.last();
@@ -995,6 +1027,14 @@ async function restartServer(step, outcome, run) {
   if (drained) {
     const stopped = await release();
     if (stopped) return stopped;
+  }
+
+  // Traefik runs only on the master, and every request that needs data goes
+  // to the db node: before the next server, users reach the app again, as on
+  // compose. Both were uncordoned before their pod wait.
+  if (run.monitor && (target.role === 'master' || target.role === 'db')) {
+    const app = await domainAnswers(run, deps.now() + HEALTHY_BUDGET_MS);
+    if (!app.ok) return notHealthy(app.seen);
   }
   ctx.log.step(healthyLine(name, released));
   return outcome;

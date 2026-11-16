@@ -32,8 +32,13 @@ import {
   confirmQuestion,
   formatPlan,
   formatTotal,
+  noServersError,
+  noServersHint,
   nothingToDoLine,
   recheckSkippedLine,
+  releasedLine,
+  releaseFailedLine,
+  stillDueLine,
   summaryLine,
   unexpectedRestartYesLine,
 } from './lib/update/text.js';
@@ -113,12 +118,16 @@ function planJson(plan, extra = {}) {
       docker: s.docker?.packages ?? null,
       restart: s.restart,
       restartReason: s.restartReason,
+      installReporter: s.installReporter,
       expectedSeconds: s.effect.seconds,
     })),
     skipped: plan.skipped,
+    uncordon: plan.uncordon.map((u) => u.name),
     expectedDowntime: plan.total ? { min: plan.total[0], max: plan.total[1] } : null,
     outcomes: [],
     becameDue: [],
+    stillDue: [],
+    uncordonFailed: [],
     measuredDowntimeSeconds: null,
     recheckSkipped: [],
     ...extra,
@@ -198,13 +207,13 @@ export async function run(args) {
     p.log.error(err.message);
     process.exit(1);
   }
-  const { tier, targets, skipped: unlisted } = listing;
+  const { tier, targets, skipped: unlisted, leftovers = [] } = listing;
 
-  if (tier === 'k8s' || tier === 'k8s-ha') {
-    const masterIps = [...new Set(targets.map((t) => t.masterIp).filter(Boolean))];
-    const released = await releaseLeftoverCordons(masterIps, { sshKeyPath });
-    if (released.length > 0)
-      p.log.info(`uncordoned ${released.join(', ')}, left from an earlier update`);
+  // Nothing recorded is not "up to date": there is nothing to check.
+  if (targets.length === 0 && unlisted.length === 0) {
+    p.log.error(noServersError(envName));
+    p.log.info(noServersHint(envName));
+    process.exit(1);
   }
 
   const { inspected, skipped: unread } = await inspectAll(targets, { envName });
@@ -213,6 +222,7 @@ export async function run(args) {
     tier,
     inspected,
     skipped: [...unlisted, ...unread],
+    uncordon: leftovers,
   });
 
   if (isNothingToDo(plan)) {
@@ -256,6 +266,17 @@ export async function run(args) {
     if (!answer) exitDeclined();
   }
 
+  // Confirmed: the cluster changes from here on, starting with the nodes an
+  // interrupted run left cordoned.
+  const { released, failed: uncordonFailed } =
+    plan.uncordon.length > 0
+      ? await releaseLeftoverCordons(plan.uncordon, { sshKeyPath })
+      : { released: [], failed: [] };
+  if (!json) {
+    if (released.length > 0) p.log.info(releasedLine(released));
+    for (const f of uncordonFailed) p.log.warn(releaseFailedLine(f.name, f.reason));
+  }
+
   const { outcomes, becameDue, stoppedAt } = await executeUpdatePlan(plan, {
     envName,
     sshKeyPath,
@@ -280,12 +301,15 @@ export async function run(args) {
     ? { due: new Set(), unread: [] }
     : await restartsDue(plan, outcomes, envName);
   const recheckSkipped = recheckUnread.map((u) => ({ name: u.name, reason: u.reason }));
+  const stillDue = [...due];
 
   if (json) {
     writeJson(
       planJson(plan, {
         outcomes,
         becameDue,
+        stillDue,
+        uncordonFailed,
         measuredDowntimeSeconds: measuredDowntime(outcomes),
         recheckSkipped,
       }),
@@ -295,13 +319,16 @@ export async function run(args) {
     for (const d of becameDue) {
       p.log.info(unexpectedRestartYesLine({ envName, name: d.name, pkg: d.package }));
     }
+    // A server the line above already named is not named twice.
+    const unnamed = stillDue.filter((n) => !becameDue.some((d) => d.name === n));
+    if (unnamed.length > 0) p.log.warn(stillDueLine({ envName, names: unnamed }));
     if (recheckSkipped.length > 0)
       p.log.warn(recheckSkippedLine(recheckSkipped.map((u) => u.name)));
     if (
       !stoppedAt &&
       plan.skipped.length === 0 &&
       becameDue.length === 0 &&
-      due.size === 0 &&
+      stillDue.length === 0 &&
       recheckSkipped.length === 0
     ) {
       p.log.success(allClearLine());
@@ -314,8 +341,16 @@ export async function run(args) {
     process.exit(1);
   }
   if (!json) p.outro(c.success('Done'));
-  // The servers that were skipped at plan time were not updated: say so in the exit.
-  if (plan.skipped.length > 0) process.exit(1);
+  // Exit 0 means the environment is known to be current. A server skipped at
+  // plan time was not updated, a restart still due is not done, and a node
+  // left cordoned is still out of service.
+  if (
+    plan.skipped.length > 0 ||
+    becameDue.length > 0 ||
+    stillDue.length > 0 ||
+    uncordonFailed.length > 0
+  )
+    process.exit(1);
 }
 
 // SPEC is exported for the arg-parser unit tests.

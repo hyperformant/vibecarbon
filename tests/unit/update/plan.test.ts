@@ -132,6 +132,51 @@ describe('buildUpdatePlan', () => {
     expect(p.outageServers).toEqual([]);
   });
 
+  it('plans the reporter where it is missing: compose from the server, k8s from the node', () => {
+    const p = plan([
+      { target: t('a'), state: state({ reporter: false }) },
+      { target: t('b'), state: state({ reporter: true }) },
+      { target: t('w1', { kind: 'k8s', role: 'worker', reporting: false }), state: state() },
+      { target: t('w2', { kind: 'k8s', role: 'worker', reporting: true }), state: state() },
+    ]);
+    const by = Object.fromEntries(p.steps.map((s) => [s.target.name, s]));
+    expect(by.a.installReporter).toBe(true);
+    expect(by.b.installReporter).toBe(false);
+    expect(by.w1.installReporter).toBe(true);
+    expect(by.w2.installReporter).toBe(false);
+    // Installing the reporter restarts nothing.
+    expect(by.a.effect).toEqual({ kind: 'none', seconds: null });
+    expect(p.total).toBeNull();
+  });
+
+  it('a missing reporter alone is something to do', () => {
+    expect(isNothingToDo(plan([{ target: t('a'), state: state({ reporter: false }) }]))).toBe(
+      false,
+    );
+    expect(
+      isNothingToDo(
+        plan([
+          { target: t('w', { kind: 'k8s', role: 'worker', reporting: false }), state: state() },
+        ]),
+      ),
+    ).toBe(false);
+    expect(isNothingToDo(plan([{ target: t('a'), state: state({ reporter: true }) }]))).toBe(true);
+  });
+
+  it('a leftover cordon alone is something to do, and passes through', () => {
+    const uncordon = [{ name: 'w1', masterIp: '1.1.1.1' }];
+    const p = buildUpdatePlan({
+      envName: 'prod',
+      tier: 'k8s',
+      inspected: [{ target: t('a'), state: state() }],
+      skipped: [],
+      uncordon,
+    } as never);
+    expect(p.uncordon).toEqual(uncordon);
+    expect(isNothingToDo(p)).toBe(false);
+    expect(plan([{ target: t('a'), state: state() }]).uncordon).toEqual([]);
+  });
+
   it('knows nothing to do, and passes skipped through', () => {
     const skipped = [{ name: 'x', ip: null, reason: 'no public address' }];
     const p = plan([{ target: t('a'), state: state() }], skipped);

@@ -17,10 +17,15 @@ import {
   healthyLine,
   installHint,
   installingLine,
+  noLongerDueLine,
   noRestartAfterAllLine,
+  noServersError,
+  noServersHint,
   nothingToDoLine,
   notMeasuredLine,
   rebootCallFailedLine,
+  releasedLine,
+  releaseFailedLine,
   reporterFailedLine,
   restartingLine,
   retryHint,
@@ -28,6 +33,7 @@ import {
   SYSTEM_UPDATES,
   stepFailedError,
   stepLine,
+  stillDueLine,
   summaryLine,
   unexpectedRestartPrompt,
   unexpectedRestartYesLine,
@@ -96,12 +102,15 @@ const plan = {
     }),
     step({ target: target('idle', '6.6.6.6') }),
     step({ target: target('tidy', '7.7.7.7'), install: 4 }),
+    step({ target: target('fresh', '10.10.10.10'), installReporter: true }),
   ],
   skipped: [
     { name: 'a', ip: '8.8.8.8', reason: 'connection refused' },
     { name: 'b', ip: '9.9.9.9', reason: 'could not check for updates: apt exited 100' },
     { name: 'c', ip: null, reason: 'no public address' },
+    { name: 'standby cluster', ip: null, reason: 'no recorded address for the standby cluster' },
   ],
+  uncordon: [{ name: 'worker-3', masterIp: '4.4.4.4' }],
   total: [120, 360],
   outageServers: ['master', 'db'],
 };
@@ -110,6 +119,7 @@ describe('formatPlan', () => {
   it('prints every line exactly', () => {
     expect(formatPlan(plan as never)).toEqual([
       'update plan for prod (launch)',
+      'uncordon worker-3, left cordoned by an interrupted update',
       '1. worker-1 (1.1.1.1)',
       '  install 3 security updates',
       '  restart: due (linux-image-6.8)',
@@ -135,9 +145,14 @@ describe('formatPlan', () => {
       '  install 4 security updates',
       '  no restart expected',
       '  users notice: nothing',
+      '8. fresh (10.10.10.10)',
+      '  install the restart reporter',
+      '  no restart expected',
+      '  users notice: nothing',
       'a (8.8.8.8): skipped, connection refused. Check the server is running, then run vibecarbon update prod again',
       'b (9.9.9.9): skipped, could not check for updates: apt exited 100. The daily security updates may be running, so try vibecarbon update prod again in a few minutes',
       'c (no address): skipped, no public address. vibecarbon reaches servers over their public address, so this one has to be updated by hand',
+      'standby cluster (no address): skipped, no recorded address for the standby cluster. Run vibecarbon deploy prod to record it before you try again',
     ]);
   });
 
@@ -150,8 +165,34 @@ describe('formatPlan', () => {
       unexpectedRestartPrompt({ target: target('web', '3.3.3.3') as never, pkg: 'libc6' }),
       unexpectedRestartYesLine({ envName: 'prod', name: 'web', pkg: 'libc6' }),
       allClearLine(),
+      stillDueLine({ envName: 'prod', names: ['a', 'b'] }),
+      noLongerDueLine('web'),
+      releasedLine(['a']),
+      releaseFailedLine('a', 'b'),
+      noServersError('prod'),
+      noServersHint('prod'),
     ].join('\n');
     expect(all).not.toMatch(/[—–]/);
+  });
+});
+
+describe('lines for an unfinished or empty run', () => {
+  it('matches the brief', () => {
+    expect(stillDueLine({ envName: 'prod', names: ['web-1'] })).toBe(
+      'a restart is still due on web-1, so run vibecarbon update prod again',
+    );
+    expect(stillDueLine({ envName: 'prod', names: ['w1', 'w2'] })).toBe(
+      'a restart is still due on w1, w2, so run vibecarbon update prod again',
+    );
+    expect(noLongerDueLine('web-1')).toBe('web-1 no longer needs a restart');
+    expect(releasedLine(['w1', 'w2'])).toBe('uncordoned w1, w2, left from an earlier update');
+    expect(releaseFailedLine('w1', 'it exited 1')).toBe(
+      'could not uncordon w1 (it exited 1), so it stays cordoned until the next update',
+    );
+    expect(noServersError('prod')).toBe('could not find any servers for prod');
+    expect(noServersHint('prod')).toBe(
+      'Run vibecarbon deploy prod to record them before you try again',
+    );
   });
 });
 

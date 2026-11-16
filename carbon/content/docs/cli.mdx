@@ -788,6 +788,10 @@ It installs the Ubuntu security updates on every server of the environment, and 
 
 Before it changes anything it prints the plan: what each server installs, which ones restart and why, and what your users notice. It then asks you to confirm. It works through the servers one at a time, a standby side first, and stops at the first server that fails, so a problem never spreads to the next one.
 
+The plan also lists a server that doesn't have the restart reporter yet, the small service that tells `vibecarbon status` and the app when a restart is due, and installs it with no downtime. A Kubernetes node that an interrupted update left cordoned is listed too, and uncordoned once you confirm.
+
+Until you confirm, the run changes only what it needs to make the plan. As `deploy` and `backup` do, it adds this machine's IP to the environment's firewall when it is not there yet, so it can reach the servers. Each server refreshes its package lists to see which updates are waiting.
+
 What your users notice depends on the server:
 
 | What restarts | What your users notice |
@@ -802,11 +806,13 @@ What your users notice depends on the server:
 
 With `-y` it skips the confirmation. A restart that becomes due during a `-y` run waits for the next run: the command tells you which server and why, and `vibecarbon update <env>` again restarts it. Without `-y` it asks about that restart as it comes up.
 
-If a server doesn't come back, the command stops and says what it was waiting for. Check the server in your provider console, then run `vibecarbon status <env>`, and run `vibecarbon update <env>` again once it is reachable. A Kubernetes node it had cordoned is released on that next run.
+If a server doesn't come back, the command stops and says what it was waiting for. Check the server in your provider console, then run `vibecarbon status <env>`, and run `vibecarbon update <env>` again once it is reachable. A Kubernetes node it had cordoned is listed in that next run's plan and released once you confirm.
 
-If a server can't be reached when the plan is made, the plan lists it as skipped with the command to try next, the others are still updated, and the command exits 1 at the end so a script doesn't read a partly checked environment as done. It never prints the all-clear in that case. After the update it checks each server again for a restart that is still due, and if it can't read one it says so, since the update itself succeeded.
+If a server can't be reached when the plan is made, the plan lists it as skipped with the command to try next, and the others are still updated. After the update it checks each server again for a restart that is still due, and names any server that still needs one, for example when the daily security updates installed a new kernel during the run. If it can't read a server again it says so, since the update itself succeeded.
 
-`-json` prints the plan and the result as JSON, for scripts, including `recheckSkipped`, the servers it couldn't check again after the update. Without `-y` it only prints the plan and changes nothing.
+The command exits 0 only when the environment is known to be current. It exits 1 when a server was skipped, a restart is still due at the end, or a node could not be uncordoned, so a script never reads an unfinished run as done. It never prints the all-clear in those cases. When the environment has no servers on record, it says so and exits 1: run `vibecarbon deploy <env>` first.
+
+`-json` prints the plan and the result as JSON, for scripts, including `stillDue`, the servers that still need a restart at the end, and `recheckSkipped`, the servers it couldn't check again after the update. Without `-y` it prints the plan and stops there.
 
 This is not `vibecarbon upgrade`. That one updates your project's infrastructure files from the template. `update` installs system updates and restarts servers.
 
@@ -935,7 +941,7 @@ vibecarbon access prune
 ```
 
 Every interactive command that needs SSH or k8s-API access (`deploy`, `shell`,
-`diagnose`, `scale`, `failover`, `backup`, `restore`) auto-detects the
+`diagnose`, `scale`, `failover`, `backup`, `restore`, `destroy`, `update`) auto-detects the
 operator's public IP, persists it under `operatorCidrs` in `.vibecarbon.json`,
 and patches the live firewall via the environment's provider API. Subsequent
 commands from the same IP are silent.

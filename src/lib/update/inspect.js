@@ -3,7 +3,7 @@
  * session. The script it sends changes apt state (apt-get update), so it only
  * ever runs on a server or inside a container.
  */
-import { aptGet, aptQuietUpdate } from '../deploy/apt.js';
+import { APT_LOCK_TIMEOUT_SECONDS, aptGet, aptQuietUpdate } from '../deploy/apt.js';
 import { hostReporterScript } from '../host-reporter.js';
 import { parseHostState } from '../host-state.js';
 import { DOCKER_PACKAGES, DOCKER_SOURCE_ONLY } from '../iac/docker-install.js';
@@ -11,9 +11,20 @@ import { sshKeyPathFor, sshRun } from '../ssh.js';
 import { describeSshError } from '../status/cluster-snapshot.js';
 
 const REPORTER_EOF = 'VC_INSPECT_REPORTER_EOF';
+/** The reporter's path unit: on disk once the installer has run. */
+const REPORTER_UNIT = '/etc/systemd/system/vibecarbon-host-reporter.path';
+/**
+ * apt waits up to APT_LOCK_TIMEOUT_SECONDS for a lock the daily job holds; the
+ * ssh call outlasts that wait by 120 s, so a busy server reads as a failed apt
+ * check (with its "daily security updates may be running" hint), never as an
+ * ssh timeout.
+ */
+const INSPECT_TIMEOUT_MS = (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
 
 /**
- * @typedef {{ host: import('../host-state.js').HostState, bootId: string, ubuntu: string[], docker: { packages: Array<{ name: string, from: string, to: string }> } | null }} TargetState
+ * @typedef {{ host: import('../host-state.js').HostState, bootId: string, ubuntu: string[], docker: { packages: Array<{ name: string, from: string, to: string }> } | null, reporter: boolean | null }} TargetState
+ *   reporter: whether the reporter's path unit is installed (compose); null on
+ *   k8s, where the node's host-state annotation says it.
  */
 
 /**
@@ -44,6 +55,8 @@ export function INSPECT_SCRIPT(kind) {
   ];
   if (kind === 'compose') {
     lines.push(
+      'echo @@reporter',
+      `if [ -f ${REPORTER_UNIT} ]; then echo installed; else echo missing; fi`,
       'echo @@docker',
       `if [ -f /etc/apt/sources.list.d/docker.list ]; then { ${aptQuietUpdate(DOCKER_SOURCE_ONLY)}; } >/dev/null 2>&1 </dev/null || echo "@@error docker apt-get update exited $?"; fi`,
       `apt-cache policy ${DOCKER_PACKAGES.join(' ')} 2>/dev/null </dev/null`,
@@ -113,7 +126,8 @@ export function parseInspectOutput(stdout, kind) {
   const bootId = need('boot-id').trim();
   const ubuntu = need('ubuntu').split(/\s+/).filter(Boolean);
   const docker = kind === 'compose' ? parseDocker(need('docker')) : null;
-  return { host, bootId, ubuntu, docker };
+  const reporter = kind === 'compose' ? need('reporter').trim() === 'installed' : null;
+  return { host, bootId, ubuntu, docker, reporter };
 }
 
 /**
@@ -126,7 +140,7 @@ export async function inspectTarget(target, deps = { sshRun }) {
   const key = sshKeyPathFor(deps.envName ?? '');
   const out = await run(target.ip, key, ['sh', '-s'], {
     input: INSPECT_SCRIPT(target.kind),
-    timeout: 180_000,
+    timeout: INSPECT_TIMEOUT_MS,
     transportRetry: false,
   });
   return parseInspectOutput(out, target.kind);
