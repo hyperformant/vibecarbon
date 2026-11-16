@@ -161,7 +161,6 @@ const REGISTRY: RegistryRow[] = [
     notes:
       'Combines TRANSIENT_S3_ERROR_RE (name/message) with TRANSIENT_HTTP_STATUSES ($metadata).',
   },
-  { file: 'src/lib/deploy/plan/runner.js', name: 'DEPLOY_TRANSIENT', domain: 'network-wording' },
   {
     file: 'src/lib/deploy/k8s/k3s.js',
     name: 'KUBECTL_TRANSIENT_PATTERN',
@@ -357,7 +356,7 @@ describe('transient-classifier census', () => {
       unregistered.map((s) => `${s.file}:${s.line}  ${s.name}`),
       'New transient classifier(s) detected. Add a REGISTRY row with a domain — and before ' +
         'writing a NEW classifier, check whether an existing registered one (fetch-retry, ' +
-        's3-base, DEPLOY_TRANSIENT, KUBECTL_TRANSIENT_PATTERN...) already covers the call site.',
+        's3-base, KUBECTL_TRANSIENT_PATTERN...) already covers the call site.',
     ).toEqual([]);
     expect(
       stale.map(keyOf),
@@ -455,7 +454,8 @@ describe('detector sanity (not vacuously permissive)', () => {
   });
 
   it('the wording floor catches the DEPLOY_TRANSIENT drift shape', () => {
-    // The original DEPLOY_TRANSIENT source: timeout wording present, no drop wording.
+    // The original source of DEPLOY_TRANSIENT (the plan-step classifier, since removed
+    // with step retry): timeout wording present, no drop wording.
     const original =
       '/SlowDown|ServiceUnavailable|\\b503\\b|network is unreachable|banner exchange|timed out/i';
     expect(TIMEOUT_VOCAB.test(original)).toBe(true);

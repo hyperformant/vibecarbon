@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEPLOY_TRANSIENT, runPlan } from '../../../../src/lib/deploy/plan/runner.js';
+import { runPlan } from '../../../../src/lib/deploy/plan/runner.js';
 import { defineStep } from '../../../../src/lib/deploy/plan/step.js';
 
 describe('runPlan', () => {
@@ -10,7 +10,6 @@ describe('runPlan', () => {
     doB: vi.fn(async (ctx, args) => {
       ctx.log.push(`B:${args.v}`);
     }),
-    flaky: vi.fn().mockRejectedValueOnce(new Error('SlowDown')).mockResolvedValueOnce(undefined),
   };
   it('runs steps in order, passes args + ctx, honors when-gates', async () => {
     const ctx = { log: [] };
@@ -25,16 +24,7 @@ describe('runPlan', () => {
     );
     expect(ctx.log).toEqual(['A', 'B:2']);
   });
-  it('retries a step via its retry metadata then succeeds', async () => {
-    const ctx = { log: [] };
-    await runPlan(
-      [defineStep({ name: 'f', effect: 'flaky', retry: { attempts: 2, isTransient: () => true } })],
-      ctx,
-      effects,
-    );
-    expect(effects.flaky).toHaveBeenCalledTimes(2);
-  });
-  it('aborts the plan and surfaces the step name when an effect throws unretried', async () => {
+  it('aborts the plan and surfaces the step name when an effect throws', async () => {
     const boom = { boom: vi.fn().mockRejectedValue(new Error('nope')) };
     await expect(
       runPlan([defineStep({ name: 'kaboom', effect: 'boom' })], { log: [] }, boom),
@@ -112,63 +102,5 @@ describe('runPlan', () => {
     expect(ctx.log).toEqual(['B:1']);
     // ...and the skip was announced loudly, by name.
     expect(writes.join('')).toMatch(/\[plan\] skip optional step 'transfer-image' \(when=false\)/);
-  });
-});
-
-describe('DEPLOY_TRANSIENT', () => {
-  it('retries a step on a classified-transient error then succeeds', async () => {
-    const flakyS3 = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('operation error S3: SlowDown'))
-      .mockRejectedValueOnce(new Error('operation error S3: SlowDown'))
-      .mockResolvedValueOnce(undefined);
-    await runPlan(
-      [
-        defineStep({
-          name: 's3-put',
-          effect: 'flakyS3',
-          retry: { attempts: 3, isTransient: DEPLOY_TRANSIENT },
-        }),
-      ],
-      {},
-      { flakyS3 },
-    );
-    expect(flakyS3).toHaveBeenCalledTimes(3);
-  });
-  it('retries a connection-reset error (transport drop mid-step is as transient as SlowDown)', async () => {
-    const resetSsh = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('read ECONNRESET'))
-      .mockRejectedValueOnce(new Error('Connection reset by peer'))
-      .mockResolvedValueOnce(undefined);
-    await runPlan(
-      [
-        defineStep({
-          name: 'push-config',
-          effect: 'resetSsh',
-          retry: { attempts: 3, isTransient: DEPLOY_TRANSIENT },
-        }),
-      ],
-      {},
-      { resetSsh },
-    );
-    expect(resetSsh).toHaveBeenCalledTimes(3);
-  });
-  it('does not retry a non-transient error and aborts the plan with the step prefix', async () => {
-    const notTransient = vi.fn().mockRejectedValue(new Error('error: no stack named foo'));
-    await expect(
-      runPlan(
-        [
-          defineStep({
-            name: 'stack-lookup',
-            effect: 'notTransient',
-            retry: { attempts: 3, isTransient: DEPLOY_TRANSIENT },
-          }),
-        ],
-        {},
-        { notTransient },
-      ),
-    ).rejects.toThrow(/\[step:stack-lookup\]/);
-    expect(notTransient).toHaveBeenCalledTimes(1);
   });
 });
