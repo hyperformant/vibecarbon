@@ -513,13 +513,14 @@ current pricing for the server types you select at deploy time.
 | Single K8s | Supercharge | Single-region k3s cluster |
 | Multi-Region K8s HA | Fortify | k3s primary + standby clusters with PG streaming replication + one-command failover |
 
-Compose HA gives a primary and a standby for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
+Compose HA gives a primary and a standby without Kubernetes, on every provider. Select it explicitly with `-mode compose-ha`.
 
 Mode support by provider (same facts as the README architecture diagram):
 
 | Deploy mode | Hetzner | DigitalOcean | Linode | Vultr | Scaleway |
 |---|:---:|:---:|:---:|:---:|:---:|
 | `compose` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `compose-ha` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `k8s` | ✅ | ✅ | ✅ | — | — |
 | `k8s-ha` | ✅ | ✅ | ✅ | — | — |
 
@@ -536,10 +537,15 @@ Kubernetes deployments additionally include:
 
 ### Deployment Guides
 
-| Option | Best For | Guide |
-|--------|----------|-------|
-| Hetzner Cloud | Cost-effective hosting (single-node + HA) | [deploy-hetzner.md](./deploy-hetzner.md) |
-| DigitalOcean | Compose and Kubernetes | [deploy-digitalocean.md](./deploy-digitalocean.md) |
+| Provider | Modes | Guide |
+|----------|-------|-------|
+| Hetzner Cloud | `compose`, `compose-ha`, `k8s`, `k8s-ha` | [deploy-hetzner.md](./deploy-hetzner.md) |
+| DigitalOcean | `compose`, `compose-ha`, `k8s`, `k8s-ha` | [deploy-digitalocean.md](./deploy-digitalocean.md) |
+| Linode | `compose`, `compose-ha`, `k8s`, `k8s-ha` | No written guide yet |
+| Vultr | `compose`, `compose-ha` | No written guide yet |
+| Scaleway | `compose`, `compose-ha` | No written guide yet |
+
+You do not need a written guide to deploy on any of the five. `vibecarbon configure` (Providers) and `vibecarbon deploy` both walk you through creating the API token and the object storage keys for the provider you pick, and the `.env.local.example` in your project lists every credential and its format.
 
 ### Integration Guides
 
