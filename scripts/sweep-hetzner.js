@@ -16,6 +16,10 @@
  * Usage: HETZNER_API_TOKEN=xxx node scripts/sweep-hetzner.js
  */
 
+// First, before every other import: e2e destroys record leaked volumes in the
+// e2e home's ledger (~/.vibecarbon-e2e), so that is the ledger this reads.
+import '../tests/e2e/utils/e2e-home.js';
+
 import { HETZNER_API_BASE, listHetznerPages } from '../src/lib/providers/hetzner-pagination.js';
 import { ledgerEntriesFor, pruneVolumeLedger } from '../src/lib/volume-ledger.js';
 

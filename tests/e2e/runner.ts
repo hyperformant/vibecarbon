@@ -36,6 +36,11 @@
  * Environment / credentials:
  *   REAL_INFRA=true              Required — safety gate
  *
+ *   CLI home: every run uses ~/.vibecarbon-e2e, not ~/.vibecarbon, so test
+ *   projects and deploy logs stay out of the developer's own registry and
+ *   log folder (tests/e2e/utils/e2e-home.js). Deploy logs and failure
+ *   diagnostics land in ~/.vibecarbon-e2e/logs. A preset VIBECARBON_HOME wins.
+ *
  *   The runner resolves API tokens from process.env (CI / explicit shell
  *   export). Spawned CLI subprocesses inherit the same env, so a token set
  *   here is visible to every scenario's deploy/destroy/scale/etc. calls.
@@ -62,6 +67,10 @@
  *   DIGITALOCEAN_ACCESS_KEY / DIGITALOCEAN_SECRET_KEY     Required for DigitalOcean scenarios
  *   DOCKER_HUB_USERNAME / DOCKER_HUB_TOKEN             Optional (raises pull rate limit)
  */
+
+// First, before every other import: sets VIBECARBON_HOME to the e2e home
+// (~/.vibecarbon-e2e) before any src module loads and builds a path from it.
+import './utils/e2e-home.js';
 
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

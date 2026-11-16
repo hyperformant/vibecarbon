@@ -964,6 +964,33 @@ what a created project tracks, on npm and pnpm.
 `tests/unit/security/git-add-census.test.ts` allows `git add -A` only in
 `create`'s initial commit.
 
+#### 2026-11-16: The e2e harness has its own CLI home (#NNN)
+
+Real-infrastructure e2e runs now keep their CLI state in `~/.vibecarbon-e2e`
+instead of the developer's `~/.vibecarbon`. `tests/e2e/utils/e2e-home.js` sets
+`VIBECARBON_HOME` when it is imported, and the runner, `scripts/iter-step.js`
+and `scripts/sweep-hetzner.js` import it before anything else. A
+`VIBECARBON_HOME` already in the environment wins. Nothing in the real
+`~/.vibecarbon` is moved or deleted.
+
+**Why:** the unit and integration tiers got their own home earlier, but the
+e2e runner did not. Every e2e `create` and `deploy` wrote the developer's real
+project registry and log folder. One registry held 610 test entries out of
+616, and the log folder held hundreds of test deploy logs.
+
+**Do not undo:** it is one fixed directory for all runs, not one per run or
+per scenario. Runs in parallel must share the uplink lock in it, or their
+image pushes fight over the laptop's uplink. A kept rig must find the same
+fingerprint key, volume ledger and logs on its next invocation. Keep the
+import first in each entry point: a few `src` modules build their path when
+they load, so setting the variable any later leaves the SSH mux directory,
+local Pulumi state and the uplink lock in the real home, with nothing failing.
+The module imports Node builtins only, for the same reason.
+
+**Guard:** `tests/unit/e2e/e2e-home.test.ts` checks the import comes first in
+all three entry points, and runs a real Node process to prove load-time paths
+land in the e2e home and a preset home is respected.
+
 ## Added and later removed
 
 | What | Removed | Why |
