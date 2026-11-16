@@ -2,7 +2,7 @@
  * Vibecarbon is MIT with no keys, no activation and no license service. The
  * strings below belonged to the retired license machinery; if one shows up in
  * the CLI, the template, the scripts, the workflows or the live docs again,
- * someone has revived a removed surface. The historical record (docs/superpowers,
+ * someone has revived a removed surface. The historical record (docs/history.md,
  * carbon/content/changelog, CHANGELOG.md) and tests/ are not scanned. The bare
  * word "activate" is NOT banned: it has unrelated uses.
  */
@@ -40,7 +40,7 @@ const SCANNED = [
   'carbon/AGENTS.md',
 ];
 
-const HISTORICAL = ['docs/superpowers', 'carbon/content/changelog'];
+const HISTORICAL = ['docs/history.md', 'carbon/content/changelog'];
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build']);
 

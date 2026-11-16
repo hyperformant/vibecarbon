@@ -114,6 +114,14 @@ capture of this environment's own PersistentVolumes belongs to someone else
 (a parallel rig), and failing our build for a disk we are forbidden to delete
 would make the signal unreadable.
 
+## Project History
+
+[`docs/history.md`](./docs/history.md) is the record of why the project is shaped the way it is: design and architecture decisions, features added and removed, and the incidents behind them. This file holds the rules; that one holds the reasons.
+
+- **Before reversing or "simplifying" something that looks odd**, search `docs/history.md` for it. Many entries end with a **Do not undo** line.
+- **When a change makes a design decision, adds or removes a feature, or fixes an incident someone could reintroduce**, add an entry in the same pull request, in the format at the top of that file. A routine fix needs none.
+- **Implementation plans are working documents.** Keep one only while its feature is in flight; when it ships, its decision goes into `docs/history.md` and the plan is deleted.
+
 ## Testing
 
 4 tiers: `unit`, `integration`, `loadtest`, `e2e`. See `docs/tests.md`, including its **guard decision procedure** (given a change, which guard class must accompany it) and the **parity rule**: a bugfix on one provider/tier/path must prove every sibling surface is fixed or genuinely unaffected.
@@ -145,8 +153,7 @@ explicit attribution, enforced by `tests/unit/lib/mitigation-attribution-census.
   (`docs/attribution-ledger.md`).
 - A **second mitigation for the same class is prohibited until a root-cause change has
   landed** and measurement shows the residual. Classes are frozen at their audited size;
-  do not bump `frozenSites` to admit another layer: land the root fix. History of why: seven stacked recovery
-  layers, still red.
+  do not bump `frozenSites` to admit another layer: land the root fix.
 - Failures whose trigger is **ours** (our load, concurrency, ordering, or leak residue)
   are never eligible for e2e flake auto-retry.
 - **Our own bugs get root fixes, never retries** (2026-08-16, census rule R7): a class
@@ -155,9 +162,9 @@ explicit attribution, enforced by `tests/unit/lib/mitigation-attribution-census.
   surfacing. An `ours` entry exists only while its root fix is being built (`rootFix:
   "open: <spec>"`); landing the fix DELETES the sites and then the class. New mitigation
   machinery is only admissible for an externally-caused failure with the evidence rules
-  above. History of why: six clusters, mitigated for
-  months while the triggers stayed and its companion
-  root-fix spec.
+  above.
+
+Why this policy exists is in [docs/history.md](./docs/history.md#standing-principles).
 
 ## Node Version
 
@@ -196,10 +203,7 @@ Two things are deliberately **not** automatic:
 
 - **`engines.node` is computed, not copied.** The floor is the highest minimum
   any declared dependency imposes on the `.nvmrc` major, read from the
-  lockfile (currently `>=24.15.0`, bound by `which@7.0.0`). This exists
-  because `engines.node` once claimed `>=20` while `undici` (a runtime
-  dependency on every deploy path) required `>=22.19.0` and threw on import
-  under Node 20. If a dependency doesn't support the new line at all,
+  lockfile (currently `>=24.15.0`, bound by `which@7.0.0`). If a dependency doesn't support the new line at all,
   `node:sync` refuses and names it.
 - **The alpine suffix on `carbon/Dockerfile`'s base image is hand-managed.**
   `node:24-alpine3.23` must track the `FROM alpine:X` runner stage in the same
@@ -261,10 +265,10 @@ decides whether the string needs translating, and it always needs to go through
 The `carbon/k8s/base/` kustomization ships with placeholder-looking values that are intentionally NOT replaced at generation time (they need to be valid YAML so kustomize works locally) and are instead overridden via `kubectl patch` / `kubectl set image` in `applyK3sManifests` (`src/lib/deploy/k8s/k3s.js`) before rollout.
 
 Known deploy-time patches:
-- `Certificate.spec.dnsNames: [app.example.com]` → real domain (cert-manager refuses ACME orders for IANA-reserved `app.example.com`). PR 1AQ
-- `Certificate.spec.issuerRef.name: letsencrypt-prod` → `letsencrypt-{prod,staging}` based on `ACME_CA_SERVER` (see `pickIssuerName` in `src/lib/deploy/k8s/k3s.js`); both issuers are HTTP-01 through the Traefik ingress class and the Certificate lists the apex only. **Single-issuer policy (d4, 2026-08-28):** on a PILOT-STANDBY deploy the issuerRef is redirected to `vibecarbon-standby-selfsigned` instead, with the real issuer stamped in the `vibecarbon.dev/promote-issuer` annotation (both roles carry the annotation); `vibecarbon failover`'s promote step re-points it (see `src/lib/deploy/k8s/acme-issuer-policy.js`)
+- `Certificate.spec.dnsNames: [app.example.com]` → real domain (cert-manager refuses ACME orders for IANA-reserved `app.example.com`)
+- `Certificate.spec.issuerRef.name: letsencrypt-prod` → `letsencrypt-{prod,staging}` based on `ACME_CA_SERVER` (see `pickIssuerName` in `src/lib/deploy/k8s/k3s.js`); both issuers are HTTP-01 through the Traefik ingress class and the Certificate lists the apex only. **Single-issuer policy:** on a PILOT-STANDBY deploy the issuerRef is redirected to `vibecarbon-standby-selfsigned` instead, with the real issuer stamped in the `vibecarbon.dev/promote-issuer` annotation (both roles carry the annotation); `vibecarbon failover`'s promote step re-points it (see `src/lib/deploy/k8s/acme-issuer-policy.js`)
 - cert-manager (upstream manifest) → NOT patched after its apply: the controller flag (a 5m minimum backoff) and the control-plane pin of all three Deployments are kustomize patches RENDERED into the one apply by `carbon/scripts/render-cert-manager.mjs`, which the GitOps workflow runs too. Every kubectl the deploy accepts renders it, kustomize v4 and v5 alike (`src/lib/runtime-floors.js` has the run that showed it). The upstream args are a plain list, so a post-apply patch fought every re-apply and rolled the controller on each deploy; `tests/unit/deploy/cert-manager-no-post-apply-patch-census.test.ts` refuses one. Before the TLS restore and the Certificate, `awaitCertManagerLeader` waits for the controller's rollout and its `kube-system/cert-manager-controller` lease on a current-ReplicaSet pod (the failover promotion runs the same wait over ssh; the GitOps workflow runs `scripts/await-cert-manager-leader.sh`). Only the renderer may name the upstream `releases/download/.../cert-manager.yaml` (same census)
-- `ConfigMap vibecarbon-config.SITE_URL: https://app.example.com` → `https://${domain}` (PR 1AQ)
+- `ConfigMap vibecarbon-config.SITE_URL: https://app.example.com` → `https://${domain}`
 - `Deployment app.image: ghcr.io/<owner>/<repo>:main` → `<masterPrivateIp>:5000/<project>:<tag>`, the tag `deliverImage` put into the master's registry (set in `applyK3sManifests` step 6, after the delivery is awaited)
 - `StatefulSet db` (`carbon/k8s/base/db/statefulset.yaml`) → NOT patched: its double-brace placeholders (db image, wal-g prefix, S3 endpoint, `K8S_STORAGE_CLASS`, the wal-archive ConfigMap sha) are RENDERED into a temp copy of `k8s/base` by `renderK8sBase` before `kubectl apply -k`, which refuses a copy that still carries one, because a StatefulSet's volumeClaimTemplates are immutable. Flux's base Kustomization drops the object (`$patch: delete`) and only health-checks it. Its db container's command is `sh /usr/local/bin/db-guard.sh` (refuse an interrupted restore, apply the wal-g role intent, finish a pending in-place standby reseed, then exec the image entrypoint). Mounts: `postgres-data` and `vibecarbon-role` (the wal-g role file `/var/lib/vibecarbon/role/walg-role`, never env) as two subPaths of the one `data-db-0` volume, plus the `wal-archive.sh`, `walg-env.sh` and `db-guard.sh` keys of the `vibecarbon-wal-archive` ConfigMap (byte-identical to `carbon/volumes/db/`, parity-tested). The role intent comes from the CLI-owned `vibecarbon-db-role` ConfigMap (`VC_WALG_ROLE_INTENT`, optional), applied by the deploy and the failover, never by Flux. Its second key, `VC_WALG_ROLE_LIVE`, records a deploy's write that read back and is cleared by every intent apply; a deploy whose role both keys name does not exec into the db (`setK8sWalgRole` `recordLive`). A standby reseed never detaches the volume: `reseedStandbyInPlace` stages in the running pod and stops postgres with SIGINT to PID 1 only behind `assertLiveDbGuardSupportsReseed` (census `tests/unit/deploy/db-in-pod-stop-census.test.ts`)
 - CSI sidecars (`daemonset/hcloud-csi-node`, `deployment/hcloud-csi-controller` on Hetzner; `daemonset/csi-do-node`, `statefulset/csi-do-controller` on DO) → ghcr mirrors, `set image` at step 0a from `csiSidecarSetImagePlan(providerId)`. Unlike the rows above these manifests are **upstream's**, applied verbatim from a URL by cloud-init, so there is no placeholder to render: `set image` is the only seam.
@@ -273,7 +277,7 @@ Known deploy-time patches:
 
 ### Never pull from `registry.k8s.io`
 
-It is a redirector, not a registry: it routes by client IP to a cloud backend whose GCP leg intermittently **403s datacenter ranges** (Hetzner included). Retries land on the same backend. It cost two deploys: cluster-autoscaler (2026-07-31) and the CSI sidecars (2026-08-05, one node of three lost storage cluster-wide).
+It is a redirector, not a registry: it routes by client IP to a cloud backend whose GCP leg intermittently **403s datacenter ranges** (Hetzner included). Retries land on the same backend. The two deploys it cost are in [docs/history.md](./docs/history.md#before-the-first-public-commit).
 
 Every such image is mirrored into `ghcr.io/hyperformant/<name>` (flat, upstream's tag, deployed as `name:tag@<upstream's amd64 manifest digest>`) by the `mirror-upstream-images` matrix in `.github/workflows/mirror-images.yml`, which `publish-images.yml` and `version-channel.yml` both call. The set lives in `MIRRORED_IMAGES` (`src/lib/images.js`); `scripts/mirror-matrix.mjs` imports it to build the matrix. `tests/unit/deploy/k8s-image-mirrors.test.ts` fails on any non-comment `registry.k8s.io` reference under `src/`, `carbon/`, `scripts/`, `tests/e2e/`, `.github/workflows/`.
 
@@ -295,7 +299,7 @@ Every image this repo ships (compose, k8s manifests, Helm values, cloud-init, Do
 
 `.github/workflows/version-channel.yml` runs daily: it reads upstream, mirrors what is new, smoke-tests it with no cloud spend, and publishes one list, `channel.json` on the `channel` branch. It is the only writer of that branch. A failure at any step leaves the list as it was and opens one issue. It moves patches only: a new minor or major never moves on its own, it stays out and gets one issue, and it reaches people with the CLI release that bundles it.
 
-- **The rule (decided 2026-11-15):** an installed CLI takes a channel version only when it has the same major AND the same minor as the version that CLI bundles, at or above the bundled patch (a k3s `+k3sN` revision counts as patch: `v1.37.2+k3s2` is a patch move, `v1.38.0+k3s1` a minor one). So a fix reaches every installed CLI with no release, and a minor never reaches a CLI whose templates were not tested with it. The job holds the list on the minor `main` bundles, and refuses to publish a list a CLI built from `main` would not take whole (`assertTakenWhole`, `scripts/version-channel.mjs`).
+- **The rule:** an installed CLI takes a channel version only when it has the same major AND the same minor as the version that CLI bundles, at or above the bundled patch (a k3s `+k3sN` revision counts as patch: `v1.37.2+k3s2` is a patch move, `v1.38.0+k3s1` a minor one). So a fix reaches every installed CLI with no release, and a minor never reaches a CLI whose templates were not tested with it. The job holds the list on the minor `main` bundles, and refuses to publish a list a CLI built from `main` would not take whole (`assertTakenWhole`, `scripts/version-channel.mjs`).
 - **The set** is `traefik`, `dockerSocketProxy`, `alpine`, `registry`, `socat`, plus the Kubernetes set `k3s`, `clusterAutoscaler`, `kubectl`, which moves as one (`CHANNEL_IMAGES`, `CHANNEL_KUBERNETES_IMAGES`, `src/lib/images.js`). The constants there are the bundled defaults, the floor, and the minor each key stays on.
 - **A deploy** resolves the set once at its start (`resolveDeployImageSet`, `src/lib/version-channel.js`), records it on the environment as `imageSet`, and both sides of an HA pair run it. Later deploys move the images to the current list; an existing cluster keeps its Kubernetes set. Any problem reading the channel means the bundled copy and one quiet note, within 3 s. Every other command that acts on an environment calls `useRecordedImageSet` and never reads the channel.
 - **A key the channel moved past this CLI's minor** (after a release moved it) keeps the bundled copy, and the rest of the list still applies, so that CLI keeps getting the other keys' patches. The deploy says so in one line (`aheadNote`), naming only what that deploy would have run: nothing about Kubernetes on an existing cluster or a compose deploy.
@@ -307,7 +311,7 @@ Every image this repo ships (compose, k8s manifests, Helm values, cloud-init, Do
 
 The app image is built locally `FROM` the node-runtime base (`NODE_RUNTIME_IMAGE`, `ghcr.io/hyperformant/node-runtime`, published by this repo from `docker/node-runtime/`). The server pulls the base from GHCR at datacenter speed, and `deliverImage` (`src/lib/deploy/layer-delta.js`) sends over SSH only the layers the target lacks, by diffID: on a cold deploy that is the app's own few MB. On compose it loads into the server's Docker. On k8s it goes once into the master's containerd and is `ctr images push`ed into the master's local registry; every node, static or autoscaler-spawned, pulls `<masterPrivateIp>:5000/<project>:<tag>` from there (`registries.yaml`). Nothing is sent node by node. A k8s-ha standby delivers nothing: it copies the primary's image over the tunnel. compose-ha sends the same layers to both servers (`deliverComposeAppImage`, `src/lib/deploy/compose/app-image.js`), and a compose scale sends it to the replacement the same way. A server builds the image itself (`buildRemote`) only when the operator has no docker (direct mode). `tests/unit/deploy/image-delivery-census.test.ts` keeps every call site on `deliverImage` and holds every `buildRemote` call to its direct-mode gate.
 
-Compose servers run Docker's classic image store, not the containerd store Docker 29 defaults to on a fresh install: only the classic store's pull retries a failed layer download (dockerd's `max-download-attempts`), and seven fresh-server first pulls died on a mid-layer `connection reset by peer` before this (decided 2026-11-09). The one `/etc/docker/daemon.json` is written by `carbon/cloud-init/docker-ce-setup.yaml` before Docker is installed. `tests/unit/iac/docker-daemon-config-census.test.ts` holds every compose server (each provider's program and its scale replacement) to it before the first pull, and `tests/integration/docker/server-image-store.test.ts` proves on a real dockerd that the config selects the classic store and that its pull survives a reset. A server made before then keeps its store: switching hides every image and container it holds.
+Compose servers run Docker's classic image store, not the containerd store Docker 29 defaults to on a fresh install: only the classic store's pull retries a failed layer download (dockerd's `max-download-attempts`). The one `/etc/docker/daemon.json` is written by `carbon/cloud-init/docker-ce-setup.yaml` before Docker is installed. `tests/unit/iac/docker-daemon-config-census.test.ts` holds every compose server (each provider's program and its scale replacement) to it before the first pull, and `tests/integration/docker/server-image-store.test.ts` proves on a real dockerd that the config selects the classic store and that its pull survives a reset. A server made before then keeps its store: switching hides every image and container it holds.
 
 ### Adding or bumping an image
 
@@ -361,7 +365,7 @@ When modifying files in `carbon/`, follow `carbon/AGENTS.md` for architecture, p
 
 For running and testing the template locally (the dev-file pattern and placeholder handling), see `carbon/DEVELOPMENT.md`. It ships into generated projects, so keep its content end-user-safe.
 
-**Package managers differ by side of the repo** (decision 2026-07-30): the root CLI uses **pnpm**; `carbon/` and every generated project use **npm**. Running vibecarbon already requires `npx`, so npm is guaranteed present. Requiring pnpm would mean a customer has to install something before their generated project works. `-pm pnpm` / `-pm bun` still adapt the template at create time (`src/lib/package-manager.js`, plus the script rewrite in `src/create.js`). Never introduce a `packageManager` pin into the npm template. That routes the project through corepack and reintroduces the extra dependency.
+**Package managers differ by side of the repo**: the root CLI uses **pnpm**; `carbon/` and every generated project use **npm**. Running vibecarbon already requires `npx`, so npm is guaranteed present. Requiring pnpm would mean a customer has to install something before their generated project works. `-pm pnpm` / `-pm bun` still adapt the template at create time (`src/lib/package-manager.js`, plus the script rewrite in `src/create.js`). Never introduce a `packageManager` pin into the npm template. That routes the project through corepack and reintroduces the extra dependency.
 
 Security dependency pins live in **two** places in `carbon/package.json`: top-level `overrides` (npm/bun) and `pnpm.overrides` (pnpm). Both use the same `name@<range>` selector syntax; keep them identical: `tests/unit/template/package-overrides-parity.test.ts` fails if they drift.
 

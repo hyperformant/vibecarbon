@@ -25,9 +25,8 @@ import { filterAmd64Types } from './server-types.js';
  *   - k8s db 636 MB; k8s-ha primary db 659 MB                -> 2 x 0.66 = 1.32 -> 2
  *   - k8s worker 1,050 MB                                    -> 2 x 1.05 = 2.10 -> 4
  *
- * Sources and the per-provider cost calculation:
- * docs/superpowers/plans/2026-10-20-cost-grid-sources.md (ruling P1 of
- * docs/superpowers/plans/2026-10-20-price-optimized-defaults.md). One table
+ * The decision is in docs/history.md (2026-10-31, default sizes); the
+ * per-provider cost calculation is scripts/cost-grid.js. One table
  * for every provider, never hand-tuned per provider. A busier app outgrows
  * these; `vibecarbon scale -type` is the way up.
  */

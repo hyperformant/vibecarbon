@@ -81,7 +81,7 @@ Long runs (20+ min) need proactive check-ins, not silent waits.
 
 This is the discipline that makes the matrix stabilize.
 
-1. **Iterate on the single failing scenario, not the full matrix.** Save the full matrix for end-of-cycle confidence checks. (Past pattern: 11 PRs in a row chased the same root cause via 3-hr matrix runs.)
+1. **Iterate on the single failing scenario, not the full matrix.** Save the full matrix for end-of-cycle confidence checks.
 2. **Distinguish "more observability" from "real fix".** Adding diagnostics to a failing step does NOT fix the deploy. Read existing logs first (`<tempDir>/<provider>-<mode>-<dnsProvider>.log` and `~/.vibecarbon/logs/<env>-<ts>.log`) to see if the diagnostics already point at root cause before adding more.
 3. **Every "transient" / "flaky" / "Hetzner-side" error gets RCA.** Pull the actual deploy log, identify the precise failure (last successful op, last log line, hung subprocess), and ask: is anything in our code able to prevent or recover from this (timeout, retry, pre-init, idempotent cleanup)? If yes, ship the fix. Only after exhausting "is anything in our code wrong?" can you label it as truly external — and even then, document with citations (Hetzner status page, vendor docs).
 4. **Never propose e2e shortcuts customers can't reuse.** Snapshot baselines, pre-baked images, registry caches scoped to the test rig — all rejected. E2E must reproduce the customer cold-start path or it stops catching production regressions.

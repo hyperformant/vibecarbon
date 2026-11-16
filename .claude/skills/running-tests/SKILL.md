@@ -63,9 +63,9 @@ The harness is in-process — it stubs `fetch`, not subprocess execs. If your CL
 
 ## Common failure modes
 
-**ETIMEDOUT in integration.** The integration tier has `testTimeout` and `hookTimeout` both pinned at **240s** because `realProject()` runs a real `vibecarbon create` on the first call per worker (~7s in isolation; up to ~3 min under full-suite parallel load while caches warm). All three layers — vitest test, vitest hook, and `execFileSync` inside `ensureCached()` — are now aligned at 240s. If you see ETIMEDOUT under 240s, something else is hanging — read the failing test's stderr, don't bump the timeout. See the `vitest.config.ts` comment block for the 2026-05-07 history of this pin.
+**ETIMEDOUT in integration.** The integration tier has `testTimeout` and `hookTimeout` both pinned at **240s** because `realProject()` runs a real `vibecarbon create` on the first call per worker (~7s in isolation; up to ~3 min under full-suite parallel load while caches warm). All three layers — vitest test, vitest hook, and `execFileSync` inside `ensureCached()` — are now aligned at 240s. If you see ETIMEDOUT under 240s, something else is hanging — read the failing test's stderr, don't bump the timeout.
 
-**Test hangs and doesn't exit.** Usually a child process the test spawned didn't get its stdio closed. The pattern fixed in commit `7212bfa` was: replace `process.exit()` in CLI subprocesses with `'exit'` event + kill process group, otherwise orphan stdio holds the runner open. If a CLI verb you're testing hangs in `runCli`, check that its exit path closes stdio.
+**Test hangs and doesn't exit.** Usually a child process the test spawned didn't get its stdio closed. The fix is to replace `process.exit()` in CLI subprocesses with `'exit'` event + kill process group, otherwise orphan stdio holds the runner open. If a CLI verb you're testing hangs in `runCli`, check that its exit path closes stdio.
 
 **Stub said the URL wasn't matched.** `installStubs` throws on unmatched URLs by design. Either the CLI hit a URL that the chosen mode doesn't cover, or you forgot to call `installStubs` at all. Check which mode you passed (`success` vs the failure-flavored ones) and look at `tests/integration/_harness/install-stubs.ts` to see what each mode answers.
 
@@ -94,7 +94,7 @@ A regression test for the bug you just fixed is the floor, not the goal. Before 
 
 ## Coverage and CI
 
-- `pnpm test:coverage` — V8 coverage over `src/**/*.js`. **Informational only:** there are no thresholds and nothing in `.github/workflows` runs `--coverage`, so a coverage regression cannot fail a build. (An earlier `include:` named three files deleted in a refactor, so the report measured nothing and its thresholds passed vacuously — both were removed rather than left as decoration.) If you want a real gate, add thresholds in `vitest.config.ts` *and* wire `--coverage` into CI in the same change.
+- `pnpm test:coverage` — V8 coverage over `src/**/*.js`. **Informational only:** there are no thresholds and nothing in `.github/workflows` runs `--coverage`, so a coverage regression cannot fail a build. If you want a real gate, add thresholds in `vitest.config.ts` *and* wire `--coverage` into CI in the same change.
 - **CI runs `pnpm test:unit` and `pnpm test:integration` directly** (`.github/workflows/test.yml`). There is no separate CI script: the junit reporter switches on by itself when `CI` is set, via `reporters:` in `vitest.config.ts`.
 
 ## What this skill does not cover

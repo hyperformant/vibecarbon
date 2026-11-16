@@ -743,8 +743,8 @@ describe('the advertised requirement matches the enforced one', () => {
 
   it('no other tracked file advertises a stale Node requirement', () => {
     // Catches a *new* page that states a version without being registered
-    // above. Scoped to tracked, human-facing markdown; historical plans and
-    // specs under docs/superpowers/ record what was true when written and are
+    // above. Scoped to tracked, human-facing markdown; the project history
+    // in docs/history.md records what was true when written and is
     // deliberately not rewritten.
     const tracked = execFileSync('git', ['ls-files', '--', '*.md', '*.mdx'], {
       cwd: ROOT,
@@ -752,7 +752,7 @@ describe('the advertised requirement matches the enforced one', () => {
     })
       .split('\n')
       .filter(Boolean)
-      .filter((f) => !f.startsWith('docs/superpowers/'))
+      .filter((f) => f !== 'docs/history.md')
       .filter((f) => !PROSE_SITES.includes(f));
 
     // If the walk ever finds nothing, the assertion below is vacuous.

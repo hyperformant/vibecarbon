@@ -41,6 +41,8 @@
  *   - VENDORED: third-party text we do not edit. None today; an entry must
  *     name a real file.
  *   - This file, which has to spell the terms to search for them.
+ *   - docs/history.md, the project history, which has to name what was
+ *     replaced to record that it was.
  *
  * Scope: tracked files plus untracked files git does not ignore, so a new
  * file is caught before its first commit.
@@ -52,6 +54,7 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const SELF = 'tests/unit/lib/terminology-census.test.ts';
+const HISTORY = 'docs/history.md';
 
 const TERM_PATTERNS = [
   /supabase|gotrue|postgrest|supavisor|pgbouncer/i,
@@ -70,7 +73,7 @@ const BINARY_EXT =
 type Source = { rel: string; text: string };
 
 function isExempt(rel: string): boolean {
-  return rel === SELF || VENDORED.includes(rel);
+  return rel === SELF || rel === HISTORY || VENDORED.includes(rel);
 }
 
 /** Every `path` / `path:line: text` that carries a retired term. */
@@ -123,7 +126,7 @@ describe('terminology census: the retired stack vocabulary', () => {
       found,
       'These name a service the stack no longer runs. Describe what runs now ' +
         '(Postgres, the app with Better Auth and Drizzle, Traefik, `vibecarbon add` ' +
-        'extras), or move a genuine record of the past under docs/rca/.',
+        'extras), or put a genuine record of the past in docs/history.md.',
     ).toEqual([]);
   });
 
