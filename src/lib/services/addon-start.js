@@ -149,11 +149,6 @@ export function backgroundAddons(names) {
     .filter((a) => a.services.length + a.setup.length > 0);
 }
 
-/** Every compose service the job owns, for the core/add-on split. */
-export function backgroundAddonServices(names) {
-  return backgroundAddons(names).flatMap((a) => [...a.services, ...a.setup]);
-}
-
 /**
  * Parse `.vc-addons/status`. Unknown states and malformed lines are dropped.
  * @param {string} text

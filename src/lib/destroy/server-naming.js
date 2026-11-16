@@ -102,29 +102,6 @@ export function environmentServerNames({ projectName, environment, roles } = {})
 }
 
 /**
- * The transient (mid-scale) half of the family — the names that must never
- * outlive a scale run, and which no deploy ever creates.
- *
- * @param {object} args - same shape as environmentServerNames
- * @returns {string[]}
- */
-export function scaleReplacementNames(args) {
-  return environmentServerNames(args).filter((name) =>
-    name.endsWith(`-${SCALE_REPLACEMENT_SUFFIX}`),
-  );
-}
-
-/**
- * Is `name` a scale replacement server's temporary name?
- *
- * @param {string} name
- * @returns {boolean}
- */
-export function isScaleReplacementName(name) {
-  return typeof name === 'string' && name.endsWith(`-${SCALE_REPLACEMENT_SUFFIX}`);
-}
-
-/**
  * Does this provider-side server name belong to this environment?
  *
  * @param {string} name

@@ -52,8 +52,8 @@ describe('DigitalOceanSpacesProvider', () => {
       expect(regions.atl1).toBe('Atlanta, USA');
     });
 
-    it('getRegions returns all regions', () => {
-      const regions = DigitalOceanSpacesProvider.getRegions();
+    it('REGIONS lists every region', () => {
+      const regions = DigitalOceanSpacesProvider.REGIONS;
       expect(Object.keys(regions)).toHaveLength(10);
     });
 

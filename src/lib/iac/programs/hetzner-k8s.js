@@ -21,7 +21,7 @@
 
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
-import { loadCloudInit, renderScript } from '../cloud-init.js';
+import { HetznerProvider } from '../../providers/hetzner.js';
 import {
   SERVER_OWNER_LABELS,
   serverResourceOptions,
@@ -131,10 +131,6 @@ export function buildHetznerK8sProgram(config) {
   const privateNetworkRange = config.privateNetworkRange ?? '10.0.0.0/8';
   const subnetRange = config.subnetRange ?? '10.0.1.0/24';
   const minWorkers = config.minWorkers ?? 1;
-
-  const masterInitTemplate = loadCloudInit('master-init.sh');
-  const dbInitTemplate = loadCloudInit('db-init.sh');
-  const workerInitTemplate = loadCloudInit('worker-init.sh');
 
   return async () => {
     // SSH key — either reuse an existing one (HA shared key) or create.
@@ -271,7 +267,7 @@ export function buildHetznerK8sProgram(config) {
     // from the `hcloud` kube-system Secret, which deployK3s applies from the
     // operator's machine (applyCloudSecrets).
     const masterUserData = floatingIp.ipAddress.apply((ip) =>
-      renderScript(masterInitTemplate, {
+      HetznerProvider.getK8sMasterUserData({
         k3s_version: config.k3sVersion,
         k3s_token: k3sToken,
         cluster_name: clusterName,
@@ -314,7 +310,7 @@ export function buildHetznerK8sProgram(config) {
     // public IP on 6443 at all. Mirrors the worker-init pattern below.
     // Hardcoding 10.0.1.1 also drops the master.ipv4Address.apply() wrapper,
     // removing a needless cross-resource dep that delayed cloud-init render.
-    const dbUserData = renderScript(dbInitTemplate, {
+    const dbUserData = await HetznerProvider.getK8sDbUserData({
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
       master_ip: '10.0.1.1',
@@ -350,7 +346,7 @@ export function buildHetznerK8sProgram(config) {
       type: 'spread',
       labels,
     });
-    const workerUserData = renderScript(workerInitTemplate, {
+    const workerUserData = await HetznerProvider.getK8sWorkerUserData({
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
       master_ip: '10.0.1.1',

@@ -80,7 +80,6 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       expect(Object.hasOwn(Provider, 'conventionalStandbyRegion')).toBe(true);
       expect(typeof Provider.resolveServerTypeForRegion).toBe('function');
       expect(typeof Provider.getPublicIP).toBe('function');
-      expect(typeof Provider.getPublicIPv6).toBe('function');
     });
 
     // x86-64 standardization (2026-07-30) — every provider must answer "is this
@@ -241,12 +240,6 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       expect(Provider.getPublicIP({})).toBeNull();
       expect(Provider.getPublicIP(undefined)).toBeNull();
       expect(Provider.getPublicIP(null)).toBeNull();
-    });
-
-    it('getPublicIPv6 returns null (not throw) for a server missing public_net', () => {
-      expect(Provider.getPublicIPv6({})).toBeNull();
-      expect(Provider.getPublicIPv6(undefined)).toBeNull();
-      expect(Provider.getPublicIPv6(null)).toBeNull();
     });
   });
 });

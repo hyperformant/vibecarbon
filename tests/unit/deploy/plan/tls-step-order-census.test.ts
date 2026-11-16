@@ -10,7 +10,7 @@ import { planDeploy } from '../../../../src/lib/deploy/plan/deploy-plan.js';
 describe('tls restore/snapshot step order census', () => {
   let checked = 0;
   for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
-    const names = planDeploy(tier, {}).map((s) => s.name);
+    const names = planDeploy(tier).map((s) => s.name);
     if (!names.includes('start-compose-stack')) continue;
     checked += 1;
     it(`${tier}: restore-tls after setup-server-files and before start-compose-stack; snapshot-tls after verify-tls`, () => {

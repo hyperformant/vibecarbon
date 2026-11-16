@@ -170,8 +170,10 @@ describe('mitigation attribution census', () => {
     // A collapse toward zero means the sweep went blind — fix the detectors.
     // 17: the k8s tunnel push's classifier (registry-push.js isTransient) was
     // deleted with the push itself (cold-deploy-speed Task 5).
+    // 16: the plan runner's DEPLOY_TRANSIENT was deleted with step retry,
+    // which no step ever declared.
     expect(detectLadderSites().size).toBeGreaterThanOrEqual(15);
-    expect(scrapeClassifierSites().size).toBeGreaterThanOrEqual(17);
+    expect(scrapeClassifierSites().size).toBeGreaterThanOrEqual(16);
   });
 
   it('R5: every detected mitigation site is registered in exactly one class', () => {

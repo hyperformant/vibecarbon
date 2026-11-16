@@ -161,7 +161,7 @@ describe('the configured backup renders into both runtimes, per environment', ()
       schedule: DEFAULT_BACKUP_SCHEDULE,
       retentionDays: DEFAULT_BACKUP_RETENTION_DAYS,
     });
-    expect(resolveBackupConfig({}, {})).toEqual({
+    expect(resolveBackupConfig({})).toEqual({
       schedule: DEFAULT_BACKUP_SCHEDULE,
       retentionDays: DEFAULT_BACKUP_RETENTION_DAYS,
     });
@@ -191,27 +191,25 @@ describe('the configured backup renders into both runtimes, per environment', ()
   );
 
   it('gatherDeploymentConfig validates through it, before any server exists', () => {
-    expect(() => resolveBackupConfig({ backupRetentionDays: '0' }, {})).toThrow(/positive whole/);
-    expect(() => resolveBackupConfig({ backupRetentionDays: 'abc' }, {})).toThrow(/positive whole/);
-    expect(() => resolveBackupConfig({ backupSchedule: '@daily' }, {})).toThrow(/5-field cron/);
-    // A recorded bad value is caught the same way (a hand-edited config).
-    expect(() => resolveBackupConfig({}, { backup: { schedule: 'x', retentionDays: 3 } })).toThrow(
+    // A recorded bad value (a hand-edited config) is caught here.
+    expect(() => resolveBackupConfig({ backup: { retentionDays: '0' } })).toThrow(/positive whole/);
+    expect(() => resolveBackupConfig({ backup: { retentionDays: 'abc' } })).toThrow(
+      /positive whole/,
+    );
+    expect(() => resolveBackupConfig({ backup: { schedule: '@daily' } })).toThrow(/5-field cron/);
+    expect(() => resolveBackupConfig({ backup: { schedule: 'x', retentionDays: 3 } })).toThrow(
       /5-field cron/,
     );
     const src = readFileSync('src/lib/deploy/prompts.js', 'utf8');
     const gather = src.slice(src.indexOf('export async function gatherDeploymentConfig'));
-    expect(gather.indexOf('resolveBackupConfig(args, envConfig)')).toBeGreaterThan(-1);
+    expect(gather.indexOf('resolveBackupConfig(envConfig)')).toBeGreaterThan(-1);
   });
 
-  it('a plain redeploy keeps the recorded values; a flag overrides them', () => {
+  it('a plain redeploy keeps the recorded values', () => {
     const recorded = { backup: { schedule: '30 4 * * *', retentionDays: 14 } };
-    expect(resolveBackupConfig({}, recorded)).toEqual({
+    expect(resolveBackupConfig(recorded)).toEqual({
       schedule: '30 4 * * *',
       retentionDays: 14,
-    });
-    expect(resolveBackupConfig({ backupRetentionDays: '5' }, recorded)).toEqual({
-      schedule: '30 4 * * *',
-      retentionDays: 5,
     });
   });
 });

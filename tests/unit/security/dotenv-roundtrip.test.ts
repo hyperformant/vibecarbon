@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { DotenvValueError, formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
-import { serializeDotenv } from '../../../src/lib/project.js';
 
 describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
   it.each([
@@ -26,7 +25,7 @@ describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
     const value = `shell"'\`$\\ends here`;
     let caught: unknown;
     try {
-      serializeDotenv({ MIXED_PAYLOAD: value });
+      formatDotenvLine('MIXED_PAYLOAD', value);
     } catch (e) {
       caught = e;
     }
@@ -36,7 +35,11 @@ describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
   });
 
   it('parses multiple keys in one file', () => {
-    const text = serializeDotenv({ A: '1', B: '2', C: 'three' });
+    const text = `${[
+      formatDotenvLine('A', '1'),
+      formatDotenvLine('B', '2'),
+      formatDotenvLine('C', 'three'),
+    ].join('\n')}\n`;
     const parsed = parseDotenv(text);
     expect(parsed).toEqual({ A: '1', B: '2', C: 'three' });
   });

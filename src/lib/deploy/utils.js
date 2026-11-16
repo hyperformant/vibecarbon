@@ -5,7 +5,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { runCommand, runCommandAsync } from '../command.js';
+import { runCommand } from '../command.js';
 import { formatDotenvLine, parseDotenv } from '../dotenv.js';
 import { buildHostKeyOpts } from '../host-keys.js';
 import { getProviderClass } from '../providers/index.js';
@@ -174,40 +174,4 @@ export function readReplPassword(cwd = process.cwd()) {
   const envLocalPath = join(cwd, '.env.local');
   if (!existsSync(envLocalPath)) return null;
   return parseDotenv(readFileSync(envLocalPath, 'utf-8')).REPL_PASSWORD || null;
-}
-
-/**
- * Wait for SSH to become available on a host
- * @param {string} host
- * @param {string} sshKeyPath
- * @param {number} maxAttempts
- * @returns {Promise<boolean>}
- */
-export async function waitForSSH(host, sshKeyPath, maxAttempts = 30) {
-  // shell-safety-ignore: pinnedSshOptsString() bakes in BatchMode=yes (validated in its definition)
-  const sshOpts = pinnedSshOptsString(sshKeyPath);
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      // silent:true → runCommandAsync rejects on failure so the retry loop
-      // actually engages (the old sync runCommand returned false without
-      // throwing, so this returned true on the first probe regardless).
-      await runCommandAsync(
-        ['ssh', ...sshOpts.split(' '), '-o', 'ConnectTimeout=5', `root@${host}`, 'echo', 'ok'],
-        {
-          silent: true,
-          timeout: 10000,
-        },
-      );
-      return true;
-    } catch {
-      if (i === maxAttempts - 1) return false;
-      // Adaptive cadence, matching compose/index.js#waitForSSH: SSH is usually
-      // live by attempt 3-5, so a fast 1s leg catches it quickly; the 2s/5s tail
-      // keeps pacing sane on genuinely slow Hetzner boots. Same early-exit
-      // contract — this only shrinks the fresh-VPS wait, never the ceiling.
-      const interval = i < 5 ? 1000 : i < 10 ? 2000 : 5000;
-      await new Promise((r) => setTimeout(r, interval));
-    }
-  }
-  return false;
 }

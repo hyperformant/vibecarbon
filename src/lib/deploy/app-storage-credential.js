@@ -56,11 +56,6 @@ export function appStorageSecretKeys(environment) {
   };
 }
 
-/** True for a per-environment app-key secret name. */
-export function isAppStorageSecretKey(key) {
-  return key.startsWith(APP_STORAGE_SECRET_PREFIX);
-}
-
 /**
  * The project's `.env.local` as the per-environment app-key store. Writes go
  * through setEnvVar's localOnly path, so formatDotenvLine, and never reach

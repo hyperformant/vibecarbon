@@ -1084,74 +1084,6 @@ export class S3CompatibleProvider {
   }
 
   /**
-   * Best-effort listing of remaining bucket contents for diagnostics. Used
-   * when DeleteBucket fails with BucketNotEmpty — returns a one-line summary
-   * like `47 objects (e.g. .placeholder, public/avatar.png), 3 versions + 1
-   * delete marker, 2 incomplete multipart uploads`. Each section is
-   * independently try/caught so partial visibility beats none.
-   * @param {string} bucketName
-   * @returns {Promise<string>}
-   */
-  async _summarizeBucketContents(bucketName) {
-    const parts = [];
-
-    try {
-      const r = await this._send(new ListObjectsV2Command({ Bucket: bucketName, MaxKeys: 5 }), {
-        maxAttempts: 1,
-      });
-      const count = r.KeyCount ?? r.Contents?.length ?? 0;
-      if (count > 0) {
-        const examples = (r.Contents ?? [])
-          .slice(0, 3)
-          .map((o) => o.Key)
-          .join(', ');
-        const more = r.IsTruncated ? '+' : '';
-        parts.push(`${count}${more} objects (e.g. ${examples})`);
-      }
-    } catch (err) {
-      parts.push(`object listing failed: ${err.name || err.message}`);
-    }
-
-    try {
-      const r = await this._send(
-        new ListObjectVersionsCommand({ Bucket: bucketName, MaxKeys: 5 }),
-        { maxAttempts: 1 },
-      );
-      const versionCount = (r.Versions ?? []).length;
-      const markerCount = (r.DeleteMarkers ?? []).length;
-      if (versionCount + markerCount > 0) {
-        parts.push(
-          `${versionCount} version${versionCount === 1 ? '' : 's'} + ${markerCount} delete marker${markerCount === 1 ? '' : 's'}`,
-        );
-      }
-    } catch {
-      // versioning API absent — covered by primary listing
-    }
-
-    try {
-      const r = await this._send(new ListMultipartUploadsCommand({ Bucket: bucketName }), {
-        maxAttempts: 1,
-      });
-      const uploadCount = (r.Uploads ?? []).length;
-      if (uploadCount > 0) {
-        parts.push(`${uploadCount} incomplete multipart upload${uploadCount === 1 ? '' : 's'}`);
-      }
-    } catch {
-      // multipart API absent — covered above
-    }
-
-    // If all three listings succeeded and returned zero items, the bucket
-    // *appears* empty but DeleteBucket still raised BucketNotEmpty. Almost
-    // always eventual-consistency lag — the upstream caller has already
-    // exhausted its retry budget by this point, so tell the operator how to
-    // recover instead of the generic "unable to list" message which sounds
-    // like the diagnostic itself broke.
-    return parts.length > 0
-      ? parts.join(', ')
-      : 'bucket appears empty in all listings — likely S3 eventual-consistency lag. Wait ~60s, then retry the destroy or delete the bucket manually with `aws s3api delete-bucket --bucket <name> --endpoint-url <endpoint>`.';
-  }
-
-  /**
    * Heuristic: does this S3 error mean "the provider doesn't expose this API"
    * vs. a transient or auth failure that we should surface? AWS standard
    * error codes plus a few HTTP status fallbacks for non-AWS providers.
@@ -1332,25 +1264,16 @@ export class S3CompatibleProvider {
   }
 
   /**
-   * Get all available regions
-   * @returns {Object<string, string>}
-   */
-  static getRegions() {
-    // Deliberately polymorphic: must read the calling subclass's own REGIONS
-    // map (S3CompatibleProvider itself declares none), so
-    // `HetznerS3Provider.getRegions()` returns Hetzner's regions and a
-    // future provider's subclass returns its own.
-    // biome-ignore lint/complexity/noThisInStatic: see comment above
-    return this.REGIONS;
-  }
-
-  /**
    * Get endpoint for a specific region
    * @param {string} region - Region ID
    * @returns {string|null}
    */
   static getEndpointForRegion(region) {
-    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic — see getRegions() above.
+    // Deliberately polymorphic: must read the calling subclass's own ENDPOINTS
+    // map (S3CompatibleProvider itself declares none), so
+    // `HetznerS3Provider.getEndpointForRegion()` answers from Hetzner's map and
+    // another provider's subclass from its own.
+    // biome-ignore lint/complexity/noThisInStatic: see comment above
     return this.ENDPOINTS[region] || null;
   }
 }

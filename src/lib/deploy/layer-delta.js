@@ -184,16 +184,6 @@ export async function listTargetLayers({ run, runtime = 'docker', refs = [] }) {
   return layers;
 }
 
-/**
- * The set of diffIDs the target holds (see listTargetLayers).
- *
- * @param {{run: (cmd: string) => Promise<string>, runtime?: 'docker' | 'k3s', refs?: string[]}} args
- * @returns {Promise<Set<string>>}
- */
-export async function listTargetDiffIds(args) {
-  return new Set((await listTargetLayers(args)).keys());
-}
-
 /** manifest.json + config of an extracted `docker save`, paired by index. */
 function readArchive(archiveDir) {
   const manifest = JSON.parse(readFileSync(join(archiveDir, 'manifest.json'), 'utf-8'));

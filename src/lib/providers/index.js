@@ -275,35 +275,6 @@ export function hasProvider(providerName) {
   return providerName.toLowerCase() in PROVIDERS;
 }
 
-/**
- * Validate provider configuration
- * @param {string} providerName - Provider name
- * @param {object} config - Configuration to validate
- * @param {string} [config.region] - Region to validate
- * @param {string} [config.serverType] - Server type to validate
- * @returns {{valid: boolean, errors: string[]}}
- */
-export function validateProviderConfig(providerName, config) {
-  const errors = [];
-
-  const Provider = PROVIDERS[providerName.toLowerCase()];
-  if (!Provider) {
-    return { valid: false, errors: [`Unknown provider: ${providerName}`] };
-  }
-
-  if (config.region && !(config.region in Provider.REGIONS)) {
-    const available = Object.keys(Provider.REGIONS).join(', ');
-    errors.push(`Invalid region "${config.region}". Available regions: ${available}`);
-  }
-
-  if (config.serverType && !(config.serverType in Provider.SERVER_TYPES)) {
-    const available = Object.keys(Provider.SERVER_TYPES).join(', ');
-    errors.push(`Invalid server type "${config.serverType}". Available types: ${available}`);
-  }
-
-  return { valid: errors.length === 0, errors };
-}
-
 // Re-export base class and providers for direct access
 export { BaseProvider } from './base.js';
 export { DigitalOceanProvider } from './digitalocean.js';

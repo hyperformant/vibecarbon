@@ -127,7 +127,7 @@ describe('compose: the A record is written while cloud-init runs', () => {
     const cloudInit = makeGate();
     const ctx = composeCtx();
     const run = runPlan(
-      planDeploy('compose', {}),
+      planDeploy('compose'),
       ctx,
       effects(REAL, { setupServer: cloudInit.promise }),
     );
@@ -151,7 +151,7 @@ describe('compose: the A record is written while cloud-init runs', () => {
       await write.promise;
       return { success: true };
     });
-    const run = runPlan(planDeploy('compose', {}), composeCtx(), effects(REAL));
+    const run = runPlan(planDeploy('compose'), composeCtx(), effects(REAL));
     await vi.waitFor(() => expect(calls).toContain('setupServerFiles'));
     await new Promise((r) => setTimeout(r, 20));
     expect(calls).not.toContain('restoreTlsSnapshot');
@@ -166,14 +166,14 @@ describe('compose: the A record is written while cloud-init runs', () => {
       calls.push('dns:setupSimple');
       return { success: false, error: 'zone not found' };
     });
-    await expect(runPlan(planDeploy('compose', {}), composeCtx(), effects(REAL))).rejects.toThrow(
+    await expect(runPlan(planDeploy('compose'), composeCtx(), effects(REAL))).rejects.toThrow(
       /\[step:update-dns\].*zone not found/s,
     );
     expect(calls).not.toContain('startComposeStack');
   });
 
   it('writes the record exactly once, through setupSimple only', async () => {
-    await runPlan(planDeploy('compose', {}), composeCtx(), effects(REAL));
+    await runPlan(planDeploy('compose'), composeCtx(), effects(REAL));
     expect(setupSimple).toHaveBeenCalledTimes(1);
     expect(setupHA).not.toHaveBeenCalled();
   });
@@ -184,7 +184,7 @@ describe('compose: the A record is written while cloud-init runs', () => {
       return true;
     });
     await runPlan(
-      planDeploy('compose', {}),
+      planDeploy('compose'),
       { ...composeCtx(), dnsProvider: 'digitalocean' },
       effects(REAL),
     );
@@ -219,7 +219,7 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
   it('writes both records before cloud-init finishes on either server', async () => {
     const cloudInit = makeGate();
     const run = runPlan(
-      planDeploy('compose-ha', {}),
+      planDeploy('compose-ha'),
       haCtx(),
       effects(REAL, { haSetupServers: cloudInit.promise }),
     );
@@ -249,7 +249,7 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
   it('waits for the 0.0.0.0 warm-up write before writing the HA records', async () => {
     const warm = makeGate();
     const run = runPlan(
-      planDeploy('compose-ha', {}),
+      planDeploy('compose-ha'),
       { ...haCtx(), dnsWarmupPromise: warm.promise },
       effects(REAL),
     );
@@ -263,7 +263,7 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
 
   it('a refused write fails the deploy at update-dns, before either stack starts', async () => {
     setupHA.mockImplementation(async () => ({ success: false, error: 'rate limited' }));
-    await expect(runPlan(planDeploy('compose-ha', {}), haCtx(), effects(REAL))).rejects.toThrow(
+    await expect(runPlan(planDeploy('compose-ha'), haCtx(), effects(REAL))).rejects.toThrow(
       /\[step:update-dns\].*rate limited/s,
     );
     expect(calls).not.toContain('haStartComposeStack');
@@ -313,7 +313,7 @@ describe('compose: the provisioned server is on disk before the early write', ()
 
   it('persists the server before the record write starts', async () => {
     await runPlan(
-      planDeploy('compose', {}),
+      planDeploy('compose'),
       { ...provisioned(), serverIp: null },
       withProvision(effects(REAL)),
     );
@@ -335,7 +335,7 @@ describe('compose: the provisioned server is on disk before the early write', ()
 
   it('a deploy that fails after the write leaves a record destroy owns', async () => {
     const run = runPlan(
-      planDeploy('compose', {}),
+      planDeploy('compose'),
       { ...provisioned(), serverIp: null },
       withProvision({
         ...effects(REAL),
@@ -354,7 +354,7 @@ describe('compose: the provisioned server is on disk before the early write', ()
 
   it('a warm deploy (server already recorded) writes nothing to disk', async () => {
     await runPlan(
-      planDeploy('compose', {}),
+      planDeploy('compose'),
       { ...provisioned(), serverIp: '203.0.113.10' },
       effects(REAL),
     );

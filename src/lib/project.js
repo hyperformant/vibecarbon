@@ -117,13 +117,6 @@ export function ensureProjectId(projectConfig, cwd = process.cwd()) {
 // The one dotenv reader for the whole codebase lives in dotenv.js (Node's
 // util.parseEnv); import parseDotenv from there, not from here.
 
-/** Serialize a key-value object into dotenv lines in the portable grammar. */
-export function serializeDotenv(obj) {
-  return `${Object.entries(obj)
-    .map(([k, v]) => formatDotenvLine(k, v))
-    .join('\n')}\n`;
-}
-
 /**
  * Load environment variables from .env.local
  *

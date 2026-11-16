@@ -9,7 +9,7 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // Update ONLY with an intentional, reviewed plan change.
 describe('scale plan snapshot', () => {
   it('locks the compose scale step-name sequence', () => {
-    expect(planStepNames(planScale('compose', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planScale('compose'))).toMatchInlineSnapshot(`
       [
         "register-ssh-key",
         "scale-servers",
@@ -20,7 +20,7 @@ describe('scale plan snapshot', () => {
   });
 
   it('locks the compose-ha scale step-name sequence', () => {
-    expect(planStepNames(planScale('compose-ha', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planScale('compose-ha'))).toMatchInlineSnapshot(`
       [
         "register-ssh-key",
         "scale-servers",
@@ -31,7 +31,7 @@ describe('scale plan snapshot', () => {
   });
 
   it('locks the k8s scale step-name sequence', () => {
-    expect(planStepNames(planScale('k8s', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planScale('k8s'))).toMatchInlineSnapshot(`
       [
         "apply-scale-changes",
         "re-establish-ha-tunnel",
@@ -43,7 +43,7 @@ describe('scale plan snapshot', () => {
   });
 
   it('locks the k8s-ha scale step-name sequence', () => {
-    expect(planStepNames(planScale('k8s-ha', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planScale('k8s-ha'))).toMatchInlineSnapshot(`
       [
         "apply-scale-changes",
         "re-establish-ha-tunnel",

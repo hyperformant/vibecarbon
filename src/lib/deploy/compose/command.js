@@ -2,8 +2,8 @@
  * The Compose command on a deployed server.
  *
  * A server's stack is a file set, not a file: docker-compose.yml, the prod
- * override, each enabled add-on's overlays, the DNS-01 override, and on a
- * compose-ha node the replication overlay. A bare `docker compose` reads
+ * override, each enabled add-on's overlays, and on a compose-ha node the
+ * replication overlay. A bare `docker compose` reads
  * docker-compose.yml alone. There app-migrate is a build with no image, so a
  * bare `run app-migrate` tried to build on the server, where there is no build
  * context, and every compose and compose-ha restore died at its migrate step

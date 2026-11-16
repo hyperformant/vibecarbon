@@ -262,7 +262,7 @@ describe('stack pulls overlap the transfer (cold-deploy-speed Task 4)', () => {
   /** The compose plan's own order, cut to the three effects under test. */
   async function runComposePlanWithFakes(): Promise<string[]> {
     const wanted = new Set(['transferImage', 'setupServerFiles', 'startComposeStack']);
-    const steps = planDeploy('compose', {}).filter((s: { effect: string }) => wanted.has(s.effect));
+    const steps = planDeploy('compose').filter((s: { effect: string }) => wanted.has(s.effect));
     const ctx = composeSingleCtx();
     const run = runPlan(steps, ctx, EFFECTS);
     await vi.waitFor(() => expect(H.state.order).toContain('stackPull:start'));
@@ -408,9 +408,7 @@ describe('F1 — compose-ha: one local build, a layer delta to both servers, haS
 
   it('the deltas overlap the stack pull fan in the plan, and reconcile waits for both', async () => {
     const wanted = new Set(['haTransferImage', 'haPullImages', 'haStartComposeStack']);
-    const steps = planDeploy('compose-ha', {}).filter((s: { effect: string }) =>
-      wanted.has(s.effect),
-    );
+    const steps = planDeploy('compose-ha').filter((s: { effect: string }) => wanted.has(s.effect));
     expect(steps.map((s: { effect: string }) => s.effect)).toEqual([
       'haTransferImage',
       'haPullImages',

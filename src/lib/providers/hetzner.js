@@ -368,7 +368,6 @@ export class HetznerProvider extends BaseProvider {
 
   static RESERVED_IP_NAME = 'Floating IP';
 
-  static EU_REGIONS = ['fsn1', 'nbg1', 'hel1'];
   static US_REGIONS = ['ash', 'hil'];
 
   // Prefix-based fallback for region filtering when live data is unavailable.
@@ -497,13 +496,9 @@ export class HetznerProvider extends BaseProvider {
   static K8S_IMAGE = 'ubuntu-26.04';
 
   /**
-   * Render this provider's k3s master-node boot user-data — wraps
-   * `carbon/cloud-init/k3s/master-init.sh` via loadCloudInit/renderScript
-   * (M3 Task 3), the SAME template hetzner-k8s.js's Pulumi program renders
-   * directly today (lib/iac/programs/hetzner-k8s.js:117,223) — this static
-   * is an ADDITIVE wrap, not a replacement of that call site (left
-   * untouched this task to avoid touching the frozen Hetzner render path
-   * mid-refactor; a later task may route it through here instead).
+   * Render this provider's k3s master-node boot user-data from
+   * `carbon/cloud-init/k3s/master-init.sh` via loadCloudInit/renderScript.
+   * hetzner-k8s.js's Pulumi program calls this for its master server.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -511,14 +506,12 @@ export class HetznerProvider extends BaseProvider {
    *   project_name: string,
    *   cluster_name?: string,
    *   disable_traefik?: string,
-   * }} vars - Passed straight through to renderScript; must match
-   *   hetzner-k8s.js's own masterUserData renderScript call vars EXACTLY
-   *   for byte-identical output. Only k3s_version, k3s_token, floating_ip,
-   *   and project_name are actually substituted into master-init.sh's
-   *   `${...}` placeholders — no API token: deployK3s hands it to the
-   *   cluster itself (applyCloudSecrets);
-   *   cluster_name/disable_traefik are accepted for call-site parity with
-   *   hetzner-k8s.js but are unused by the template (same as today).
+   * }} vars - Passed straight through to renderScript. Only k3s_version,
+   *   k3s_token, floating_ip, and project_name are actually substituted
+   *   into master-init.sh's `${...}` placeholders — no API token: deployK3s
+   *   hands it to the cluster itself (applyCloudSecrets);
+   *   cluster_name/disable_traefik are what hetzner-k8s.js passes but are
+   *   unused by the template.
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
@@ -527,22 +520,19 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s worker-node boot user-data — wraps
-   * `carbon/cloud-init/k3s/worker-init.sh` via loadCloudInit/renderScript
-   * (M3 Task 3), the SAME template both hetzner-k8s.js's Pulumi program
-   * (static workers) and deploy/k8s/k3s.js's renderCarbonAutoscalerConfig
-   * (CA-spawned workers) render directly today. See
-   * getK8sMasterUserData's doc for why those call sites are left
-   * untouched this task.
+   * Render this provider's k3s worker-node boot user-data from
+   * `carbon/cloud-init/k3s/worker-init.sh` via loadCloudInit/renderScript.
+   * Both hetzner-k8s.js's Pulumi program (static workers) and
+   * deploy/k8s/k3s.js's renderCarbonAutoscalerConfig (CA-spawned workers)
+   * call this.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
    *   master_ip: string,
    *   cluster_name?: string,
    * }} vars - Only k3s_version, k3s_token, and master_ip are substituted
-   *   into worker-init.sh's `${...}` placeholders; cluster_name is
-   *   accepted for call-site parity (renderCarbonAutoscalerConfig passes
-   *   it) but unused by the template (same as today).
+   *   into worker-init.sh's `${...}` placeholders; cluster_name is what
+   *   both callers pass but is unused by the template.
    * @returns {Promise<string>}
    */
   static async getK8sWorkerUserData(vars) {
@@ -551,18 +541,14 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s database-node boot user-data — wraps
-   * `carbon/cloud-init/k3s/db-init.sh` via loadCloudInit/renderScript
-   * (M3 Task 5), the SAME template hetzner-k8s.js's Pulumi program renders
-   * directly today (lib/iac/programs/hetzner-k8s.js:118,268). See
-   * getK8sMasterUserData's doc for why that call site is left untouched.
+   * Render this provider's k3s database-node boot user-data from
+   * `carbon/cloud-init/k3s/db-init.sh` via loadCloudInit/renderScript.
+   * hetzner-k8s.js's Pulumi program calls this for its db server.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
    *   master_ip: string,
-   * }} vars - Passed straight through to renderScript; must match
-   *   hetzner-k8s.js's own dbUserData renderScript call vars EXACTLY
-   *   for byte-identical output.
+   * }} vars - Passed straight through to renderScript.
    * @returns {Promise<string>}
    */
   static async getK8sDbUserData(vars) {
@@ -1931,14 +1917,5 @@ export class HetznerProvider extends BaseProvider {
    */
   static getPublicIP(server) {
     return server?.public_net?.ipv4?.ip || null;
-  }
-
-  /**
-   * Get public IPv6 address of a server
-   * @param {object} server - Server object
-   * @returns {string|null}
-   */
-  static getPublicIPv6(server) {
-    return server?.public_net?.ipv6?.ip || null;
   }
 }

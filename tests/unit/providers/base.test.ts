@@ -195,10 +195,6 @@ describe('BaseProvider', () => {
         /x86-small/,
       );
     });
-
-    it('getPublicIPv6 throws not implemented', () => {
-      expect(() => BaseProvider.getPublicIPv6({})).toThrow('must be implemented');
-    });
   });
 
   describe('abstract static object-storage dispatch', () => {
@@ -279,42 +275,6 @@ describe('BaseProvider', () => {
         ccmSelector: '',
         networkEnvVar: '',
       });
-    });
-  });
-
-  describe('helper methods', () => {
-    let provider: BaseProvider;
-
-    beforeEach(() => {
-      provider = new BaseProvider('test-token');
-    });
-
-    it('getName returns static NAME', () => {
-      expect(provider.getName()).toBe('Base Provider');
-    });
-
-    it('getRegions returns static REGIONS', () => {
-      expect(provider.getRegions()).toEqual({});
-    });
-
-    it('getServerTypes returns static SERVER_TYPES', () => {
-      expect(provider.getServerTypes()).toEqual({});
-    });
-
-    it('getDefaultType returns static DEFAULT_TYPE', () => {
-      expect(provider.getDefaultType()).toBe('');
-    });
-
-    it('getHARegions returns static HA_REGIONS', () => {
-      expect(provider.getHARegions()).toEqual([]);
-    });
-
-    it('isValidRegion returns false for base provider', () => {
-      expect(provider.isValidRegion('any')).toBe(false);
-    });
-
-    it('isValidServerType returns false for base provider', () => {
-      expect(provider.isValidServerType('any')).toBe(false);
     });
   });
 });

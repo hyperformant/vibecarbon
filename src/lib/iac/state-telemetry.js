@@ -54,16 +54,6 @@ export function recordLockWait(waitedMs) {
   lockWaitMs += waitedMs;
 }
 
-/** Snapshot for tests and for the emitter below. */
-export function stateTelemetrySummary() {
-  return {
-    ops: Object.fromEntries(ops),
-    retries: Object.fromEntries(retries),
-    lockWaits,
-    lockWaitMs,
-  };
-}
-
 /**
  * The strictest documented object-storage ceilings across every provider we
  * ship — the numbers a uniform, provider-agnostic budget has to respect. Nulls

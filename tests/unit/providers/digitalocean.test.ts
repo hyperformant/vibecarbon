@@ -145,7 +145,7 @@ describe('DigitalOceanProvider.getDefaultStandbyRegion offline', () => {
   });
 });
 
-describe('DigitalOceanProvider.getPublicIP / getPublicIPv6', () => {
+describe('DigitalOceanProvider.getPublicIP', () => {
   it('extracts the public v4 address from the networks.v4[] array, ignoring private entries', () => {
     const server = {
       networks: {
@@ -158,15 +158,6 @@ describe('DigitalOceanProvider.getPublicIP / getPublicIPv6', () => {
     expect(DigitalOceanProvider.getPublicIP(server)).toBe('1.2.3.4');
   });
 
-  it('extracts the public v6 address from the networks.v6[] array', () => {
-    const server = {
-      networks: {
-        v6: [{ type: 'public', ip_address: '2001:db8::1' }],
-      },
-    };
-    expect(DigitalOceanProvider.getPublicIPv6(server)).toBe('2001:db8::1');
-  });
-
   it('returns null (not throw) when no public entry is present', () => {
     expect(DigitalOceanProvider.getPublicIP({ networks: { v4: [] } })).toBeNull();
     expect(
@@ -174,7 +165,6 @@ describe('DigitalOceanProvider.getPublicIP / getPublicIPv6', () => {
         networks: { v4: [{ type: 'private', ip_address: 'x' }] },
       }),
     ).toBeNull();
-    expect(DigitalOceanProvider.getPublicIPv6({ networks: { v6: [] } })).toBeNull();
   });
 });
 

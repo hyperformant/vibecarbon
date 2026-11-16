@@ -103,14 +103,13 @@ classes:
       sites have never had retry outcomes measured; the >50s Hetzner
       unreachability evidence was circular (8f7b4190).
     proofDebtSpec: docs/attribution-ledger.md
-    frozenSites: 8
+    frozenSites: 6
     sites:
       - site: "src/lib/fetch-retry.js :: TRANSIENT_STATUS"
       - site: "src/lib/fetch-retry.js :: isTransientNetworkError"
       - site: "src/lib/providers/s3-base.js :: TRANSIENT_HTTP_STATUSES"
       - site: "src/lib/providers/s3-base.js :: TRANSIENT_S3_ERROR_RE"
       - site: "src/lib/providers/s3-base.js :: isTransientS3Error"
-      - site: "src/lib/deploy/plan/runner.js :: DEPLOY_TRANSIENT"
       - site: "src/lib/deploy/prompts.js :: isTransient"
 
   - class: cluster-network-transients

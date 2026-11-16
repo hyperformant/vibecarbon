@@ -177,7 +177,6 @@ describe('IP extraction (routed-IP era)', () => {
       ],
     };
     expect(ScalewayProvider.getPublicIP(server)).toBe('203.0.113.7');
-    expect(ScalewayProvider.getPublicIPv6(server)).toBe('2001:db8::1');
   });
 
   it('falls back to the legacy scalar public_ip', () => {

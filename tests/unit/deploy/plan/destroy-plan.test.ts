@@ -66,17 +66,17 @@ const EXPECTED_K8S_HA_SEQUENCE = EXPECTED_K8S_SEQUENCE;
 
 describe('planDestroy(compose)', () => {
   it('produces the compose teardown step sequence', () => {
-    expect(planStepNames(planDestroy('compose', {}))).toEqual(EXPECTED_COMPOSE_SEQUENCE);
+    expect(planStepNames(planDestroy('compose'))).toEqual(EXPECTED_COMPOSE_SEQUENCE);
   });
 
   it('starts with the tier teardown, then deletes buckets, config, local files, outro', () => {
-    const [first] = planDestroy('compose', {});
+    const [first] = planDestroy('compose');
     expect(first.name).toBe('destroy-compose-services');
     expect(first.effect).toBe('destroyComposeServices');
   });
 
   it('omits the k8s-only GitHub-env delete and summary note', () => {
-    const names = planStepNames(planDestroy('compose', {}));
+    const names = planStepNames(planDestroy('compose'));
     expect(names).not.toContain('delete-github-env');
     expect(names).not.toContain('print-summary');
   });
@@ -84,11 +84,11 @@ describe('planDestroy(compose)', () => {
 
 describe('planDestroy(compose-ha)', () => {
   it('produces the compose-ha teardown step sequence', () => {
-    expect(planStepNames(planDestroy('compose-ha', {}))).toEqual(EXPECTED_COMPOSE_HA_SEQUENCE);
+    expect(planStepNames(planDestroy('compose-ha'))).toEqual(EXPECTED_COMPOSE_HA_SEQUENCE);
   });
 
   it('uses the compose-ha teardown effect (both nodes reaped inside the black box)', () => {
-    const [first] = planDestroy('compose-ha', {});
+    const [first] = planDestroy('compose-ha');
     expect(first.name).toBe('destroy-compose-ha');
     expect(first.effect).toBe('destroyComposeHa');
   });
@@ -96,11 +96,11 @@ describe('planDestroy(compose-ha)', () => {
 
 describe('planDestroy(k8s)', () => {
   it('produces the k8s teardown step sequence (adds github-env + summary)', () => {
-    expect(planStepNames(planDestroy('k8s', {}))).toEqual(EXPECTED_K8S_SEQUENCE);
+    expect(planStepNames(planDestroy('k8s'))).toEqual(EXPECTED_K8S_SEQUENCE);
   });
 
   it('wraps the Pulumi-managed teardown as one black-box step', () => {
-    const [first] = planDestroy('k8s', {});
+    const [first] = planDestroy('k8s');
     expect(first.name).toBe('destroy-k8s-infra');
     expect(first.effect).toBe('destroyK8sInfra');
   });
@@ -108,21 +108,21 @@ describe('planDestroy(k8s)', () => {
 
 describe('planDestroy(k8s-ha)', () => {
   it('produces the k8s-ha teardown step sequence (identical steps to k8s)', () => {
-    expect(planStepNames(planDestroy('k8s-ha', {}))).toEqual(EXPECTED_K8S_HA_SEQUENCE);
+    expect(planStepNames(planDestroy('k8s-ha'))).toEqual(EXPECTED_K8S_HA_SEQUENCE);
   });
 
   it('shares the k8s teardown effect — both clusters reaped via ctx.plan.stackEnvs', () => {
-    const [first] = planDestroy('k8s-ha', {});
+    const [first] = planDestroy('k8s-ha');
     expect(first.effect).toBe('destroyK8sInfra');
     // The primary+standby fan-out is data-driven, so the STEP list matches k8s.
-    expect(planStepNames(planDestroy('k8s-ha', {}))).toEqual(planStepNames(planDestroy('k8s', {})));
+    expect(planStepNames(planDestroy('k8s-ha'))).toEqual(planStepNames(planDestroy('k8s')));
   });
 });
 
 describe('planDestroy — buckets-last safety ordering', () => {
   for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
     it(`deletes buckets AFTER the tier teardown, state bucket after app bucket (${tier})`, () => {
-      const names = planStepNames(planDestroy(tier, {}));
+      const names = planStepNames(planDestroy(tier));
       const idx = (n: string) => names.indexOf(n);
       // The tier teardown (which, for k8s, runs `pulumi destroy` against the
       // state-bucket backend) is step 0.
@@ -152,13 +152,13 @@ describe('planDestroy — retain-state-bucket is unconditional', () => {
   // protect. A `when` reappearing here would mean deletion came back with it.
   for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
     it(`${tier}: retain-state-bucket is present and ungated`, () => {
-      const step = planDestroy(tier, {}).find((s) => s.name === 'retain-state-bucket');
+      const step = planDestroy(tier).find((s) => s.name === 'retain-state-bucket');
       expect(step, 'the step must exist on every tier').toBeDefined();
       expect(step?.when).toBeUndefined();
     });
 
     it(`${tier}: no deletion step for the state bucket survives anywhere in the plan`, () => {
-      const names = planDestroy(tier, {}).map((s) => s.name);
+      const names = planDestroy(tier).map((s) => s.name);
       expect(names).not.toContain('delete-state-bucket');
     });
   }
@@ -178,7 +178,7 @@ describe('planDestroy — update-project-config gating design (M3 Task 9f fix ro
   // see tests/unit/destroy/update-project-config-effect.test.ts.
   for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
     it(`${tier}: update-project-config carries NO plan-level \`when\` gate`, () => {
-      const step = planDestroy(tier, {}).find((s) => s.name === 'update-project-config');
+      const step = planDestroy(tier).find((s) => s.name === 'update-project-config');
       expect(step).toBeDefined();
       expect(step?.when).toBeUndefined();
     });
@@ -189,7 +189,7 @@ describe('planDestroy — purity + validity', () => {
   it('is pure: repeated calls produce structurally identical plans', () => {
     for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
       const shape = () =>
-        planDestroy(tier, {}).map((s) => ({
+        planDestroy(tier).map((s) => ({
           name: s.name,
           effect: s.effect,
           gated: typeof s.when === 'function',
@@ -201,14 +201,14 @@ describe('planDestroy — purity + validity', () => {
   it('every step references an effect that exists in the destroy registry', async () => {
     const { DESTROY_EFFECTS } = await import('../../../../src/destroy.js');
     for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
-      for (const step of planDestroy(tier, {})) {
+      for (const step of planDestroy(tier)) {
         expect(typeof DESTROY_EFFECTS[step.effect]).toBe('function');
       }
     }
   });
 
   it('throws for an unknown tier', () => {
-    expect(() => planDestroy('nope', {})).toThrow('planDestroy: unknown/unsupported tier nope');
+    expect(() => planDestroy('nope')).toThrow('planDestroy: unknown/unsupported tier nope');
   });
 });
 
@@ -217,7 +217,7 @@ describe('planDestroy(unrecorded)', () => {
   // recorded, nothing remote to reap — but the local env entry must still be
   // removed and the operator must get a completion, not a stack trace.
   it('plans ONLY local cleanup — no remote teardown, no bucket deletes', () => {
-    const steps = planDestroy('unrecorded', {}).map((s) => s.name);
+    const steps = planDestroy('unrecorded').map((s) => s.name);
     expect(steps).toEqual(['update-project-config', 'cleanup-local-files', 'finish-outro']);
   });
 });

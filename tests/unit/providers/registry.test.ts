@@ -7,7 +7,6 @@ import {
   hasProvider,
   listProviders,
   PROVIDERS,
-  validateProviderConfig,
 } from '../../../src/lib/providers/index.js';
 // Source of truth for "which providers are implemented so far" — the same
 // shared table provider-contract.test.ts pins its per-provider assertions
@@ -117,62 +116,6 @@ describe('Provider Registry', () => {
       expect(hasProvider('not-a-cloud')).toBe(false);
       expect(hasProvider('aws')).toBe(false);
       expect(hasProvider('')).toBe(false);
-    });
-  });
-
-  describe('validateProviderConfig', () => {
-    it('returns valid for correct config', () => {
-      const result = validateProviderConfig('hetzner', {
-        region: 'fsn1',
-        serverType: 'cpx11',
-      });
-
-      expect(result.valid).toBe(true);
-      expect(result.errors).toHaveLength(0);
-    });
-
-    it('returns errors for invalid region', () => {
-      const result = validateProviderConfig('hetzner', {
-        region: 'invalid-region',
-      });
-
-      expect(result.valid).toBe(false);
-      expect(result.errors[0]).toContain('Invalid region');
-    });
-
-    it('returns errors for invalid server type', () => {
-      const result = validateProviderConfig('hetzner', {
-        serverType: 'invalid-type',
-      });
-
-      expect(result.valid).toBe(false);
-      expect(result.errors[0]).toContain('Invalid server type');
-    });
-
-    it('returns multiple errors', () => {
-      const result = validateProviderConfig('hetzner', {
-        region: 'invalid',
-        serverType: 'also-invalid',
-      });
-
-      expect(result.valid).toBe(false);
-      expect(result.errors).toHaveLength(2);
-    });
-
-    it('returns error for unknown provider', () => {
-      const result = validateProviderConfig('unknown', {});
-
-      expect(result.valid).toBe(false);
-      expect(result.errors[0]).toContain('Unknown provider');
-    });
-
-    it('validates partial config', () => {
-      const result = validateProviderConfig('hetzner', {
-        region: 'fsn1',
-        // serverType not provided
-      });
-
-      expect(result.valid).toBe(true);
     });
   });
 });

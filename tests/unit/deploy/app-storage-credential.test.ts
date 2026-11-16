@@ -316,7 +316,7 @@ describe('revoke on destroy', () => {
       const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
       const { planDestroy } = await import('../../../src/lib/deploy/plan/destroy-plan.js');
       for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const) {
-        const names = planDestroy(tier, {}).map((s: { name: string }) => s.name);
+        const names = planDestroy(tier).map((s: { name: string }) => s.name);
         expect(names.indexOf('revoke-app-storage-key'), tier).toBeGreaterThan(-1);
         expect(names.indexOf('revoke-app-storage-key')).toBeLessThan(
           names.indexOf('delete-app-bucket'),

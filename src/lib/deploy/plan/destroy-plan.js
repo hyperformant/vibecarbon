@@ -1,5 +1,5 @@
 /**
- * Pure destroy planner. `planDestroy(tier, config) → Step[]` returns the ordered
+ * Pure destroy planner. `planDestroy(tier) → Step[]` returns the ordered
  * list of step descriptors for a tier's teardown. It is PURE: no SSH/kubectl/fs,
  * no Hetzner/Cloudflare/S3 calls, no Date.now — every runtime decision and all
  * I/O is deferred to the effects (the destroy registry in src/destroy.js), which
@@ -10,8 +10,7 @@
  * the ownership-aware teardown targets (stackEnvs, clusterNames, ownedIps,
  * hasPulumiStack) from persisted config. planDestroyTargets is called by the
  * runner to populate ctx.plan; planDestroy here only expresses the ORDERED
- * SEQUENCE of teardown operations for a tier. The `config` argument is accepted
- * for signature symmetry with planDeploy (destroy plans are fixed per tier).
+ * SEQUENCE of teardown operations for a tier (destroy plans are fixed per tier).
  *
  * ── Safety properties encoded here (load-bearing; see the destroy safety
  *    notes) ──
@@ -95,10 +94,9 @@ const k8sTail = () => [
 
 /**
  * @param {'compose'|'compose-ha'|'k8s'|'k8s-ha'} tier
- * @param {object} _config
  * @returns {import('./step.js').Step[]}
  */
-export function planDestroy(tier, _config) {
+export function planDestroy(tier) {
   if (tier === 'compose') {
     return [
       defineStep({ name: 'destroy-compose-services', effect: 'destroyComposeServices' }),

@@ -8,7 +8,7 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // deploy. Update it ONLY with an intentional, reviewed change to the plan.
 describe('compose deploy plan snapshot', () => {
   it('locks the compose step-name sequence', () => {
-    expect(planStepNames(planDeploy('compose', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDeploy('compose'))).toMatchInlineSnapshot(`
       [
         "provision-server",
         "persist-provisioned-server",
@@ -34,7 +34,7 @@ describe('compose deploy plan snapshot', () => {
   });
 
   it('locks the compose-ha step-name sequence', () => {
-    expect(planStepNames(planDeploy('compose-ha', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDeploy('compose-ha'))).toMatchInlineSnapshot(`
       [
         "open-state-backend",
         "provision-servers",
@@ -67,7 +67,7 @@ describe('compose deploy plan snapshot', () => {
   });
 
   it('locks the k8s step-name sequence', () => {
-    expect(planStepNames(planDeploy('k8s', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDeploy('k8s'))).toMatchInlineSnapshot(`
       [
         "deploy-cluster",
       ]
@@ -75,7 +75,7 @@ describe('compose deploy plan snapshot', () => {
   });
 
   it('locks the k8s-ha step-name sequence', () => {
-    expect(planStepNames(planDeploy('k8s-ha', {}))).toMatchInlineSnapshot(`
+    expect(planStepNames(planDeploy('k8s-ha'))).toMatchInlineSnapshot(`
       [
         "open-state-backend",
         "generate-ssh-key",

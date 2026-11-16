@@ -101,21 +101,20 @@ const COMPOSE_HA_OPTION = {
 };
 
 /**
- * The backup schedule and retention this deploy runs with: the flag, else what
- * the environment recorded (envConfig.backup survives between deploys), else
- * the default. A plain `vibecarbon deploy <env>` therefore keeps the recorded
+ * The backup schedule and retention this deploy runs with: what the
+ * environment recorded (envConfig.backup survives between deploys), else the
+ * default. A plain `vibecarbon deploy <env>` therefore keeps the recorded
  * values and never resets them.
  *
- * @param {{backupSchedule?: string, backupRetentionDays?: string|number|null}} args
  * @param {{backup?: {schedule?: string, retentionDays?: number|string}}} envConfig
  * @returns {{schedule: string, retentionDays: number}}
  * @throws {Error} on a schedule that is not a 5-field cron expression, or a retention that is not a positive whole number
  */
-export function resolveBackupConfig(args, envConfig) {
+export function resolveBackupConfig(envConfig) {
   const config = {
-    schedule: args.backupSchedule || envConfig.backup?.schedule || DEFAULT_BACKUP_SCHEDULE,
+    schedule: envConfig.backup?.schedule || DEFAULT_BACKUP_SCHEDULE,
     retentionDays: Number.parseInt(
-      args.backupRetentionDays || envConfig.backup?.retentionDays || DEFAULT_BACKUP_RETENTION_DAYS,
+      envConfig.backup?.retentionDays || DEFAULT_BACKUP_RETENTION_DAYS,
       10,
     ),
   };
@@ -438,13 +437,13 @@ async function selectZoneAndDomain(zones, providerLabel, existingDomain) {
  * deploy, leaving no way to add a domain. The caller asks again with Manual
  * preselected, so Enter keeps the old behavior. `-y` keeps it silently.
  *
- * @param {{ dnsProvider?: string|null, yes?: boolean }} args
+ * @param {{ yes?: boolean }} args
  * @param {string|null|undefined} dnsProvider - the saved (or seeded) pick
  * @param {string|null|undefined} domain
  * @returns {boolean}
  */
 export function shouldReaskManualDns(args, dnsProvider, domain) {
-  return !args.dnsProvider && dnsProvider === 'manual' && !domain && !args.yes;
+  return dnsProvider === 'manual' && !domain && !args.yes;
 }
 
 /** Env names become branch, server and bucket name parts. */
@@ -744,16 +743,14 @@ export function regionPromptChoices(Provider, regions, roles, { ha = false } = {
  * wrong city.
  *
  * @param {object} opts
- * @param {{ s3Region?: string }} opts.args
  * @param {{ provider?: string, s3?: { region?: string } }} opts.envConfig
  * @param {object} opts.Provider
  * @param {string} opts.region - compute region
  * @param {string} [opts.apiToken]
  * @returns {Promise<{ s3Region: string, note: string|null }>}
  */
-export async function resolveStoragePlacement({ args, envConfig, Provider, region, apiToken }) {
-  const pinned =
-    args.s3Region || readOperatorVar(Provider.S3_REGION_ENV).value || envConfig.s3?.region;
+export async function resolveStoragePlacement({ envConfig, Provider, region, apiToken }) {
+  const pinned = readOperatorVar(Provider.S3_REGION_ENV).value || envConfig.s3?.region;
   if (pinned) return { s3Region: pinned, note: null };
   const s3Region = await resolveS3RegionFor(providerIdFor(envConfig), region, { apiToken });
   const S3Class = await Provider.getObjectStorageProviderClass();
@@ -975,9 +972,9 @@ export async function gatherDeploymentConfig(args) {
     // interactive prompt. `scale` is the command that takes `-type`.)
     const blanket = args.serverType || envConfig.serverType;
     const chosen = {
-      master: args.masterServerType || envConfig.masterServerType || blanket,
-      db: args.dbServerType || envConfig.dbServerType || blanket,
-      worker: args.workerServerType || envConfig.workerServerType || blanket,
+      master: envConfig.masterServerType || blanket,
+      db: envConfig.dbServerType || blanket,
+      worker: envConfig.workerServerType || blanket,
     };
     for (const [role, type] of Object.entries(chosen)) if (!type) defaultedRoles.push(role);
     masterServerType = chosen.master || regionDefaults.masterType;
@@ -1198,10 +1195,10 @@ export async function gatherDeploymentConfig(args) {
   const providerId = providerIdFor(envConfig);
 
   // S3 (Standardized)
-  let s3AccessKey = args.s3AccessKey || envConfig.s3?.accessKey;
-  let s3SecretKey = args.s3SecretKey || null;
+  let s3AccessKey = envConfig.s3?.accessKey;
+  let s3SecretKey = null;
   // Env-var override (Provider.S3_REGION_ENV — e.g. HETZNER_STORAGE_REGION,
-  // DIGITALOCEAN_STORAGE_REGION) sits between explicit CLI flag and project
+  // DIGITALOCEAN_STORAGE_REGION) wins over project
   // config so operators can route the Pulumi-state + backup buckets to a
   // different object-storage region during a regional incident without
   // editing .vibecarbon.json. Mirrors TOKEN_ENV's role for the cloud API.
@@ -1209,7 +1206,7 @@ export async function gatherDeploymentConfig(args) {
   // on Pulumi backend ops (lock delete 503, history save 504, checkpoint
   // read conn-reset) — polymorphic over Provider since B6 so it applies to
   // every registered provider, not just Hetzner.
-  let s3CredentialSource = args.s3AccessKey ? 'the -s3-access-key flag' : '.vibecarbon.json';
+  let s3CredentialSource = '.vibecarbon.json';
   // deferSave: pasted keys are written to .env.local only after the S3 check
   // below accepts them (or cannot reach the endpoint), never before. A wrong
   // pair saved up front came straight back on the next run.
@@ -1235,7 +1232,7 @@ export async function gatherDeploymentConfig(args) {
   // auth failure against the wrong cluster. Account-wide-key providers
   // (Hetzner/DO/Linode) are indifferent to this order.
   const resolveStorageRegion = () =>
-    resolveStoragePlacement({ args, envConfig, Provider, region, apiToken });
+    resolveStoragePlacement({ envConfig, Provider, region, apiToken });
   const placement = await resolveStorageRegion();
   let s3Region = placement.s3Region;
   if (placement.note) p.log.info(placement.note);
@@ -1288,8 +1285,8 @@ export async function gatherDeploymentConfig(args) {
   // operators rarely hold a HETZNER_API_TOKEN, so the deploy warmed up
   // against a zone lookup that could never succeed).
   const nativeDnsId = Object.hasOwn(DNS_PROVIDERS, providerId) ? providerId : null;
-  let dnsProvider = args.dnsProvider || envConfig.dnsProvider;
-  let domain = args.domain || envConfig.domain || null;
+  let dnsProvider = envConfig.dnsProvider;
+  let domain = envConfig.domain || null;
   let dnsZoneId = envConfig.dns?.zoneId || null;
   let dnsToken = null;
 
@@ -1445,7 +1442,7 @@ export async function gatherDeploymentConfig(args) {
   // NaN stops the deploy here, not at the k8s apply after the servers exist.
   let backupConfig;
   try {
-    backupConfig = resolveBackupConfig(args, envConfig);
+    backupConfig = resolveBackupConfig(envConfig);
   } catch (err) {
     p.log.error(`deploy: ${err.message}`);
     process.exit(1);
@@ -1508,8 +1505,8 @@ export async function gatherDeploymentConfig(args) {
     workerServerType,
     ...(standbyServerTypes ? { standbyServerTypes } : {}),
     standbyRetargeted,
-    minWorkers: args.minWorkers ?? DEFAULT_WORKER_MIN,
-    maxWorkers: args.maxWorkers ?? DEFAULT_WORKER_MAX,
+    minWorkers: DEFAULT_WORKER_MIN,
+    maxWorkers: DEFAULT_WORKER_MAX,
     domain,
     dnsProvider,
     dnsZoneId,

@@ -42,8 +42,8 @@ describe('HetznerS3Provider', () => {
       expect(HetznerS3Provider.REGIONS.hel1).toBe('Helsinki, Finland');
     });
 
-    it('getRegions returns all regions', () => {
-      const regions = HetznerS3Provider.getRegions();
+    it('REGIONS lists every region', () => {
+      const regions = HetznerS3Provider.REGIONS;
       expect(Object.keys(regions)).toHaveLength(3);
       expect(regions).toHaveProperty('fsn1');
       expect(regions).toHaveProperty('nbg1');

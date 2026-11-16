@@ -138,7 +138,7 @@ const CARRIERS: Record<Tier, { carrier: string; before: Record<string, string> }
   },
 };
 
-const stepNames = (tier: Tier) => planDeploy(tier, {}).map((s: { name: string }) => s.name);
+const stepNames = (tier: Tier) => planDeploy(tier).map((s: { name: string }) => s.name);
 
 describe('every deploy tier carries it ahead of its first pull', () => {
   it('names a carrier for every tier', () => {
@@ -149,7 +149,7 @@ describe('every deploy tier carries it ahead of its first pull', () => {
     '%s: only steps that pull nothing run before the carrier, which runs on every deploy',
     (tier) => {
       const { carrier, before } = CARRIERS[tier];
-      const plan = planDeploy(tier, {});
+      const plan = planDeploy(tier);
       const at = plan.findIndex((s: { name: string }) => s.name === carrier);
       expect(at, `${tier}: ${carrier} is in the plan`).toBeGreaterThanOrEqual(0);
       expect(plan[at].when, `${tier}: ${carrier} has no when-gate`).toBeFalsy();

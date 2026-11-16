@@ -104,7 +104,7 @@ describe('the release is told where DNS points', () => {
   });
 
   it("k8s-ha: the plan's update-dns step, read after the plan ran", () => {
-    const plan = src.indexOf("runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS)");
+    const plan = src.indexOf("runPlan(planDeploy('k8s-ha'), k8sHaCtx, EFFECTS)");
     const at = src.indexOf('dnsWrite = k8sHaCtx.dnsWrite ?? null;');
     expect(plan).toBeGreaterThan(0);
     expect(at).toBeGreaterThan(plan);

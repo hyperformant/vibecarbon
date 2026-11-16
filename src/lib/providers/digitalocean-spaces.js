@@ -109,7 +109,7 @@ export class DigitalOceanSpacesProvider extends S3CompatibleProvider {
     atl1: 'https://atl1.digitaloceanspaces.com',
   };
 
-  // Same shape as HetznerS3Provider.REGIONS and the getRegions() docblock:
+  // Same shape as HetznerS3Provider.REGIONS (the S3 provider contract):
   // slug → human description. (Was a bare array of slugs until the 2026-08-07
   // S3 contract suite caught the divergence.)
   static REGIONS = {

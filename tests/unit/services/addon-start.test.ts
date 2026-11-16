@@ -23,7 +23,6 @@ import {
   ADDON_SERVICES_SCRIPT,
   ADDON_STATUS_FILE,
   addonWiresApp,
-  backgroundAddonServices,
   backgroundAddons,
   parseAddonStatus,
   renderAddonJobScript,
@@ -103,9 +102,11 @@ describe('every compose service is classified core or add-on', () => {
     for (const core of ['app', 'app-migrate', 'db', 'traefik']) {
       expect(BASE_SERVICES.has(core)).toBe(true);
     }
-    expect(backgroundAddonServices(declaredAddonNames())).not.toEqual(
-      expect.arrayContaining(['app', 'app-migrate', 'db', 'traefik']),
-    );
+    const deferred = backgroundAddons(declaredAddonNames()).flatMap((a) => [
+      ...a.services,
+      ...a.setup,
+    ]);
+    expect(deferred).not.toEqual(expect.arrayContaining(['app', 'app-migrate', 'db', 'traefik']));
   });
 });
 
@@ -123,7 +124,7 @@ describe('backgroundAddons', () => {
 
   it('nothing enabled: nothing deferred', () => {
     expect(backgroundAddons([])).toEqual([]);
-    expect(backgroundAddonServices(['redis'])).toEqual([]);
+    expect(backgroundAddons(['redis'])).toEqual([]);
   });
 });
 

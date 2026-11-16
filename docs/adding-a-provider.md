@@ -55,7 +55,7 @@ like. The suite tells you what is missing. The guard-decision table in
   you must ship a CSI sidecar mirror spec.
 - `transient-classifier-census.test.ts`: any new retry classifier you add
   must be registered with a domain and meet its floor. Prefer reusing
-  fetch-retry / s3-base / DEPLOY_TRANSIENT over writing a new one.
+  fetch-retry / s3-base over writing a new one.
 
 ## 4. E2E wiring
 

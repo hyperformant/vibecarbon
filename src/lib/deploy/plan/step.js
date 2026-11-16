@@ -1,4 +1,4 @@
-/** @typedef {{name:string, effect:string, args?:object, when?:(ctx:any)=>boolean, retry?:{attempts:number,backoffMs?:number,isTransient?:(e:Error)=>boolean}, required?:boolean}} Step */
+/** @typedef {{name:string, effect:string, args?:object, when?:(ctx:any)=>boolean, required?:boolean}} Step */
 /**
  * `required: true` marks a load-bearing step (a DR gate, a replication setup, a
  * config-persist) whose skip must NEVER be silent. runPlan refuses to skip a
@@ -8,13 +8,12 @@
  * is the worst failure mode this codebase has, and a "behavior-identity" review
  * can miss a mis-gated step — so the runner must make this class loud.
  */
-export function defineStep({ name, effect, args, when, retry, required }) {
+export function defineStep({ name, effect, args, when, required }) {
   if (!name || typeof name !== 'string') throw new Error('step: name required');
   if (!effect || typeof effect !== 'string') throw new Error(`step '${name}': effect required`);
   const s = { name, effect };
   if (args !== undefined) s.args = args;
   if (when !== undefined) s.when = when;
-  if (retry !== undefined) s.retry = retry;
   if (required !== undefined) s.required = required;
   return s;
 }

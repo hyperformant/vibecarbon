@@ -442,107 +442,41 @@ describe('sshKubectl', () => {
   });
 });
 
-describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', () => {
-  it('every -L tunnel argv in src carries ControlMaster=no AFTER the shared opts', async () => {
-    // Run 31921730114: with mux on, EVERY compose admin tunnel first attempt
-    // ECONNREFUSED through its whole reach poll (forward registration raced
-    // the shared master); the pre-mux baseline had zero. Tunnels are one
-    // long-lived connection — mux buys nothing and races lifecycle. This
-    // census walks every `-L` ssh argv and demands the opt-out.
+describe('ssh port-forward tunnels: none exist', () => {
+  it("no '-L' ssh argv under src", async () => {
+    // The CLI opens no port-forward tunnel: the compose admin tunnel went with
+    // the external auth service and the k8s registry push tunnel with
+    // registry-push.js (every image ships by layer delta over one plain ssh
+    // stdin). The opt-out those tunnels needed went with them, so a NEW tunnel
+    // must bring it back: shared ssh opts carry ControlMaster=auto, and a
+    // `-f -N -L` client that joins the shared master returns before its
+    // listener is usable (run 31921730114: every tunnel's first attempt
+    // ECONNREFUSED). The tunnel argv needs `-o ControlMaster=no -o
+    // ControlPath=none` BEFORE any spread of the shared opts: OpenSSH takes the
+    // FIRST value of each option, so appended after them it is inert (run
+    // 31927810430).
     const { readFileSync, readdirSync, statSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const root = join(process.cwd(), 'src', 'lib');
-    const files: string[] = [];
+    const { join, relative } = await import('node:path');
+    const root = join(process.cwd(), 'src');
+    const offenders: string[] = [];
+    let scanned = 0;
     (function walk(d: string) {
       for (const e of readdirSync(d)) {
         const p = join(d, e);
         if (statSync(p).isDirectory()) walk(p);
-        else if (e.endsWith('.js')) files.push(p);
-      }
-    })(root);
-    let tunnels = 0;
-    for (const file of files) {
-      const src = readFileSync(file, 'utf-8');
-      if (!/'-L',/.test(src)) continue;
-      // Every argv block containing '-L' must also reference the opt-out.
-      const blocks = src.split(/\]\s*[,)]/);
-      for (const b of blocks) {
-        if (!b.includes("'-L',") || !b.includes("'ssh'") === false) {
-          if (b.includes("'-L',")) {
-            tunnels++;
-            expect(
-              b.includes('SSH_TUNNEL_NO_MUX_OPTS'),
-              `${file}: an ssh -L tunnel argv without SSH_TUNNEL_NO_MUX_OPTS — a muxed tunnel ` +
-                'races its forward through the shared master',
-            ).toBe(true);
+        else if (e.endsWith('.js')) {
+          scanned++;
+          if (/['"`]-L['"`]/.test(readFileSync(p, 'utf-8'))) {
+            offenders.push(relative(process.cwd(), p));
           }
         }
       }
-    }
-    // None is left: the compose admin tunnel went with the external auth
-    // service and the k8s registry push tunnel with registry-push.js (every
-    // image now ships by layer delta over one plain ssh stdin). An exact count,
-    // so a new tunnel lands here and is checked above, not silently.
-    expect(tunnels).toBe(0);
-  });
-
-  it('the opt-out really overrides: OpenSSH takes the FIRST -o value, so it must PRECEDE the shared opts', async () => {
-    // ssh_config(5): "unless noted otherwise, the first obtained value for
-    // each parameter is used" — command-line -o included. Verified against
-    // OpenSSH 9.6: `ssh -o ControlMaster=auto -o ControlMaster=no -G host`
-    // resolves `controlmaster auto`. Run 31927810430 (post-band-aid-removal
-    // verdict): the opt-out APPENDED after the shared opts was inert, both
-    // compose scenarios failed at create-admin-user. This census walks every
-    // `-L` tunnel argv in src and demands the opt-out spread come BEFORE the
-    // shared-opts spread, so it is the value OpenSSH actually obtains first.
-    const { SSH_TUNNEL_NO_MUX_OPTS, SSH_CONNECTION_OPTS } = await import(
-      '../../../src/lib/host-keys.js'
-    );
-    expect(SSH_TUNNEL_NO_MUX_OPTS).toContain('ControlMaster=no');
-    expect(SSH_TUNNEL_NO_MUX_OPTS).toContain('ControlPath=none');
-    // Shared opts still carry mux for the per-call churn that needed it.
-    expect(SSH_CONNECTION_OPTS).toContain('ControlMaster=auto');
-
-    const { readFileSync, readdirSync, statSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const root = join(process.cwd(), 'src', 'lib');
-    const files: string[] = [];
-    (function walk(d: string) {
-      for (const e of readdirSync(d)) {
-        const p = join(d, e);
-        if (statSync(p).isDirectory()) walk(p);
-        else if (e.endsWith('.js')) files.push(p);
-      }
     })(root);
-    // The spreads that inject ControlMaster=auto into an argv.
-    const SHARED_OPT_SPREADS =
-      /composeSshOpts\(|buildHostKeyOpts(?:ForPath)?\(|SSH_CONNECTION_OPTS/;
-    let tunnels = 0;
-    for (const file of files) {
-      const src = readFileSync(file, 'utf-8');
-      if (!/'-L',/.test(src)) continue;
-      for (const b of src.split(/\]\s*[,)]/)) {
-        if (!b.includes("'-L',")) continue;
-        tunnels++;
-        const optOutIdx = b.indexOf('SSH_TUNNEL_NO_MUX_OPTS');
-        const sharedMatch = SHARED_OPT_SPREADS.exec(b);
-        expect(
-          optOutIdx,
-          `${file}: an ssh -L tunnel argv without SSH_TUNNEL_NO_MUX_OPTS`,
-        ).toBeGreaterThan(-1);
-        if (sharedMatch) {
-          expect(
-            optOutIdx,
-            `${file}: SSH_TUNNEL_NO_MUX_OPTS appears AFTER the mux-carrying shared opts — ` +
-              'OpenSSH takes the first -o value, so the opt-out is inert there',
-          ).toBeLessThan(sharedMatch.index);
-        }
-      }
-    }
-    // None is left: the compose admin tunnel went with the external auth
-    // service and the k8s registry push tunnel with registry-push.js (every
-    // image now ships by layer delta over one plain ssh stdin). An exact count,
-    // so a new tunnel lands here and is checked above, not silently.
-    expect(tunnels).toBe(0);
+    expect(scanned).toBeGreaterThan(200);
+    expect(
+      offenders,
+      'an ssh -L tunnel argv appeared: give it ControlMaster=no and ControlPath=none ahead ' +
+        'of the shared ssh opts, and replace this tripwire with a census of that order',
+    ).toEqual([]);
   });
 });

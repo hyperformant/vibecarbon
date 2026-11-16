@@ -22,9 +22,6 @@
 
 import { updateProjectConfig } from '../config.js';
 
-/** The env field (relative to the env entry) the abort records. */
-export const DISCARDABLE_STANDBY_FIELD = 'ha.discardableStandby';
-
 /**
  * One db's lineage in one read: `<in recovery t|f>|<system identifier>|<timeline, 8 hex>`.
  * The timeline is the current WAL file's, read only outside recovery (a

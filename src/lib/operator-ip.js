@@ -17,7 +17,7 @@
  * Exports:
  *   - detectOperatorIp() — primary + fallback HTTP detector
  *   - cidrFromIp(ip, version) — formats /32 or /128
- *   - loadOperatorCidrs / addCidr / removeCidr / pruneCidrs / refreshLastUsed
+ *   - loadOperatorCidrs / addCidr / removeCidr / pruneCidrs
  *   - findMatchingCidr — checks if an IP is contained by any persisted CIDR
  *   - applyToFirewall — patches the live Hetzner firewall via the Cloud API
  *   - ensureOperatorIpAccess — the all-in-one helper for command run()s
@@ -215,11 +215,6 @@ export function updateOperatorCidrs(projectConfig, change, cwd) {
   }, cwd);
   if (projectConfig) projectConfig.operatorCidrs = written;
   return written;
-}
-
-export function refreshLastUsed(list, cidr, now = new Date()) {
-  const nowIso = now.toISOString();
-  return list.map((e) => (e.cidr === cidr ? { ...e, lastUsedAt: nowIso } : e));
 }
 
 // ============================================================================

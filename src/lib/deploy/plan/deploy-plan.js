@@ -1,12 +1,11 @@
 /**
- * Pure deploy planner. `planDeploy(tier, config) → Step[]` returns the ordered
+ * Pure deploy planner. `planDeploy(tier) → Step[]` returns the ordered
  * list of step descriptors for a tier's deploy. It is PURE: no SSH/kubectl/fs,
  * no Date.now, no I/O of any kind — every runtime decision is deferred to the
  * steps' `when(ctx)` predicates (evaluated by runPlan) and to the effects.
  *
- * The `config` argument is accepted for signature symmetry with the other
- * planners (and future tiers that shape their plan from config); the compose
- * plan is a fixed sequence whose conditionals live in the steps' when-gates.
+ * Each tier's plan is a fixed sequence whose conditionals live in the steps'
+ * when-gates.
  */
 import {
   auditDatabaseStep,
@@ -65,10 +64,9 @@ import {
 
 /**
  * @param {'compose'|'compose-ha'|'k8s'|'k8s-ha'} tier
- * @param {object} _config
  * @returns {import('./step.js').Step[]}
  */
-export function planDeploy(tier, _config) {
+export function planDeploy(tier) {
   if (tier === 'compose') {
     return [
       provisionServerStep(),

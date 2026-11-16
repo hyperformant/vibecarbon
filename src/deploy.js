@@ -6,41 +6,19 @@
 import * as p from '@clack/prompts';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
-import { checkDependency, runCommand } from './lib/command.js';
+import { runCommand } from './lib/command.js';
 import { loadProjectConfig } from './lib/config.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
 import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
-import {
-  gatherDeploymentConfig,
-  promptEnvironmentName,
-  resolveDeployMode,
-} from './lib/deploy/prompts.js';
-// New modular imports
-import {
-  DEFAULT_WORKER_MAX,
-  DEFAULT_WORKER_MIN,
-  generateSSHKeyPair,
-  getBranchName,
-  normalizeEnvName,
-  waitForSSH,
-} from './lib/deploy/utils.js';
+import { gatherDeploymentConfig, promptEnvironmentName } from './lib/deploy/prompts.js';
+import { normalizeEnvName } from './lib/deploy/utils.js';
 import { withDeployLog } from './lib/deploy-logger.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { resolveEnvSeed } from './lib/env-identity.js';
 import { ensureLockfile } from './lib/package-manager.js';
 import { buildGitAddArgv, detectPackageManager, repairLegacyEnvQuoting } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { HetznerS3Provider, sanitizeBucketName } from './lib/providers/hetzner-s3.js';
-import { getProvider, getProviderClass, listProviders } from './lib/providers/index.js';
-import {
-  buildComposeTypeOptions,
-  buildK8sProfileOptions,
-  COMPOSE_MIN_RAM_GB,
-  detectCurrentProfile,
-  K8S_PROFILES,
-} from './lib/server-types.js';
-import { VERSION } from './lib/version.js';
 import { vibecarbonHome } from './lib/vibecarbon-home.js';
 
 // ============================================================================
@@ -177,22 +155,9 @@ function buildLegacyArgs(values, positional) {
     // .vibecarbon.json — see the region-move runbook in docs/deploy-hetzner.md.
     // Name matches `failover -server-type`; `scale -type` means "scale TO".
     serverType: values['server-type'] || null,
-    // Everything below is not settable via CLI flag; the interactive
-    // prompt + `.vibecarbon.json` cover these. Defaults keep
-    // gatherDeploymentConfig's `args.X || envConfig.X || …` chains working
-    // unchanged.
-    masterServerType: null,
-    workerServerType: null,
-    dbServerType: null,
-    domain: null,
-    dnsProvider: null,
-    s3AccessKey: null,
-    s3SecretKey: null,
-    s3Region: null,
-    backupSchedule: null,
-    backupRetentionDays: null,
-    minWorkers: null,
-    maxWorkers: null,
+    // Per-role server types, domain, DNS, object-storage keys and region,
+    // backup settings and worker bounds have no flag: the interactive prompt
+    // and `.vibecarbon.json` cover them.
     // direct / push are mutated by the interactive build-mode prompt
     // in lib/deploy/prompts.js when CI/CD is configured. Keep them
     // initialized for the orchestrator's resolveBuildMode read.
@@ -346,7 +311,7 @@ async function main(values, positional) {
       const { envConfig } = resolveEnvSeed(projectConfig, environment);
       const providerId =
         args.provider ?? envConfig.provider ?? (envConfig.deployMode ? 'hetzner' : null);
-      const dnsProvider = args.dnsProvider ?? envConfig.dnsProvider ?? null;
+      const dnsProvider = envConfig.dnsProvider ?? null;
 
       const { scopes: providerDnsScopes, keys } = operatorScopesForProviderAndDns(
         providerId,
@@ -448,31 +413,6 @@ export async function run(args) {
   }
 }
 
-// Re-exports for testing and backward compatibility
-export {
-  buildComposeTypeOptions,
-  buildK8sProfileOptions,
-  buildLegacyArgs,
-  COMPOSE_MIN_RAM_GB,
-  checkDependency,
-  DEFAULT_WORKER_MAX,
-  DEFAULT_WORKER_MIN,
-  detectCurrentProfile,
-  detectPackageManager,
-  generateSSHKeyPair,
-  getBranchName,
-  getProvider,
-  getProviderClass,
-  HetznerS3Provider,
-  K8S_PROFILES,
-  listProviders,
-  loadProjectConfig,
-  main,
-  normalizeEnvName,
-  resolveDeployMode,
-  runCommand,
-  SPEC,
-  sanitizeBucketName,
-  VERSION,
-  waitForSSH,
-};
+// The command registry and the docs generator read SPEC; the arg tests read
+// buildLegacyArgs.
+export { buildLegacyArgs, SPEC };

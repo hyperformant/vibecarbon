@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { buildK8sProfileOptions, K8S_PROFILES } from '../../../src/lib/server-types.js';
 
+// Hetzner's EU locations (every region that is not in US_REGIONS).
+const EU_REGIONS = ['fsn1', 'nbg1', 'hel1'];
+
 /**
  * Availability invariants for the Hetzner catalog.
  *
@@ -178,7 +181,7 @@ describe('offline constants are coherent', () => {
   const RETIRED_EVERYWHERE = ['cx22', 'cx32', 'cx42', 'cx52'];
 
   it('every offline EU default avoids permanently retired SKUs', () => {
-    for (const region of HetznerProvider.EU_REGIONS) {
+    for (const region of EU_REGIONS) {
       const d = HetznerProvider.getRegionDefaults(region);
       for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
         expect(RETIRED_IN_EU).not.toContain(t);
@@ -188,7 +191,7 @@ describe('offline constants are coherent', () => {
   });
 
   it('no default anywhere names a globally retired SKU', () => {
-    for (const region of [...HetznerProvider.EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
+    for (const region of [...EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
       const d = HetznerProvider.getRegionDefaults(region);
       for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
         expect(t).toBeTruthy();
