@@ -111,13 +111,21 @@ type Spec = {
   downMs?: number; // ssh refused for this long once the reboot fires
   neverBack?: boolean; // the reboot never happens: the old boot id forever
   staysDown?: boolean; // the reboot happens and ssh never answers again
-  rebootCallFails?: boolean; // the reboot is scheduled, then the ssh call fails
+  rebootCall?: { error: Error; scheduled: boolean }; // the reboot's ssh call fails
   apiLagMs?: number; // the API shows the node from before, this long after ssh is back
   apiNeverFresh?: boolean;
   podsLagMs?: number; // pods stay Ready from before, this long after ssh is back
   podsNeverFresh?: boolean;
   podsReadyJustBefore?: boolean; // the stale Ready is from 1 s before the reboot fired
-  podFailsAfterBoot?: { replacedAfterMs?: number }; // a pod turns Failed once it is back
+  // A ReplicaSet pod turns Failed once the server is back. Its replacement
+  // starts this long after it is back on another node, or, with
+  // afterUncordon, on this node this long after the uncordon.
+  podFailsAfterBoot?: { replacedAfterMs?: number; afterUncordon?: boolean };
+  jobPodFailsAfterBoot?: boolean; // a Job's pod turns Failed once it is back, never retried
+  // The StatefulSet's db-0 is deleted at the restart and recreated under the
+  // same name: unbound, so off the node's list, until it is Ready this long
+  // after the server is back (never without readyAfterMs).
+  statefulSet?: { readyAfterMs?: number };
   leaseNeverRenews?: boolean;
   cordonedBefore?: boolean; // cordoned before the run (by the operator, unless markedBefore)
   markedBefore?: boolean; // an earlier update run left its mark
@@ -127,13 +135,14 @@ type Spec = {
   dockerError?: Error;
   checkError?: Error;
   reporterError?: Error;
-  failKubectl?: string; // kubectl calls for this node starting with this fail
+  failKubectl?: string; // kubectl calls naming this node and starting with this fail
 };
 
 type Server = Spec & {
   boots: number;
   rebootAt: number | null;
   dockerAt: number | null;
+  uncordonedAt: number | null;
   marked: boolean;
   cordoned: boolean;
 };
@@ -147,7 +156,15 @@ function sshRefused(ip: string) {
   });
 }
 
-function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
+const controller = (kind: string, name: string, uid: string) => ({
+  kind,
+  name,
+  uid,
+  controller: true,
+});
+const RS_WEB = controller('ReplicaSet', 'web-7f9c', 'rs-web');
+
+function world(specs: Spec[], opts: { publicUnreachable?: boolean; publicAnswer?: number } = {}) {
   const clock = fakeClock();
   const calls: Call[] = [];
   const fresh = (s: Spec): Server => ({
@@ -155,6 +172,7 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
     boots: 0,
     rebootAt: null,
     dockerAt: null,
+    uncordonedAt: null,
     marked: Boolean(s.markedBefore),
     cordoned: Boolean(s.cordonedBefore),
   });
@@ -181,10 +199,22 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
   const podsFreshAt = (s: Server) => backAt(s) + (s.podsLagMs ?? 30_000);
   const podsFresh = (s: Server) => isBack(s) && !s.podsNeverFresh && clock.now() >= podsFreshAt(s);
   const failedAt = (s: Server) => backAt(s) + 5000;
-  const replacedAt = (s: Server) =>
-    s.podFailsAfterBoot?.replacedAfterMs === undefined
+  const hasFailed = (s: Server) => isBack(s) && clock.now() >= failedAt(s);
+  const replacedAt = (s: Server) => {
+    const f = s.podFailsAfterBoot;
+    if (!f) return Number.POSITIVE_INFINITY;
+    if (f.afterUncordon)
+      return s.uncordonedAt === null
+        ? Number.POSITIVE_INFINITY
+        : s.uncordonedAt + (f.replacedAfterMs ?? 10_000);
+    return f.replacedAfterMs === undefined
       ? Number.POSITIVE_INFINITY
-      : backAt(s) + s.podFailsAfterBoot.replacedAfterMs;
+      : backAt(s) + f.replacedAfterMs;
+  };
+  const statefulReadyAt = (s: Server) =>
+    s.statefulSet?.readyAfterMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : backAt(s) + s.statefulSet.readyAfterMs;
   /** When the app went down: the reboot, else the Docker update. */
   const disruptedAt = (s: Server) => s.rebootAt ?? s.dockerAt;
   const healthyAt = (s: Server) =>
@@ -217,17 +247,11 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
         return `${currentBoot(s)}\n${Math.floor(clock.now() / 1000)}\n${btime(s)}`;
       }
       if (argv[0] === 'systemd-run') {
-        if (!s.neverBack) {
+        if (!s.neverBack && (s.rebootCall?.scheduled ?? true)) {
           s.rebootAt = clock.now() + 2000;
           s.boots += 1;
         }
-        if (s.rebootCallFails) {
-          throw Object.assign(new Error('Command failed: ssh ...'), {
-            status: 255,
-            stdout: '',
-            stderr: `Connection to ${ip} closed by remote host.\n`,
-          });
-        }
+        if (s.rebootCall) throw s.rebootCall.error;
         return '';
       }
       if (cmd.includes('--only-upgrade')) {
@@ -269,18 +293,13 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
     phase: string,
     readyStatus: string,
     at: string,
-    more: { owner?: string; created?: string } = {},
+    owner?: ReturnType<typeof controller>,
   ) => ({
     metadata: {
       namespace,
       name,
       uid: `uid-${name}`,
-      creationTimestamp: more.created ?? OLD_READY,
-      ...(more.owner && {
-        ownerReferences: [
-          { kind: 'ReplicaSet', name: 'web-7f9c', uid: more.owner, controller: true },
-        ],
-      }),
+      ...(owner && { ownerReferences: [owner] }),
     },
     spec: { nodeName },
     status: {
@@ -288,42 +307,96 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
       conditions: [{ type: 'Ready', status: readyStatus, lastTransitionTime: at }],
     },
   });
-  const nodePods = (s: Server) => {
+  /** The pods bound to one server's node. */
+  const serverPods = (s: Server) => {
     const stale = s.podsReadyJustBefore && s.rebootAt !== null ? iso(s.rebootAt - 1000) : OLD_READY;
     const ready = podsFresh(s) ? iso(podsFreshAt(s)) : stale;
     const items = [
-      pod('kube-system', `hcloud-csi-node-${s.name}`, s.name, 'Running', 'True', ready),
-      pod('vibecarbon', `app-${s.name}`, s.name, 'Running', 'True', ready),
-      pod('vibecarbon', 'backup-29001', s.name, 'Succeeded', 'False', OLD_READY),
-      // Failed long before this run: never waited on.
-      pod('vibecarbon', 'old-evicted', s.name, 'Failed', 'False', OLD_READY),
+      pod(
+        'kube-system',
+        `hcloud-csi-node-${s.name}`,
+        s.name,
+        'Running',
+        'True',
+        ready,
+        controller('DaemonSet', 'hcloud-csi-node', 'ds-csi'),
+      ),
+      pod(
+        'vibecarbon',
+        `app-${s.name}`,
+        s.name,
+        'Running',
+        'True',
+        ready,
+        controller('ReplicaSet', `app-${s.name}-5d8f`, `rs-app-${s.name}`),
+      ),
+      pod(
+        'vibecarbon',
+        `backup-29001-${s.name}`,
+        s.name,
+        'Succeeded',
+        'False',
+        OLD_READY,
+        controller('Job', 'backup-29001', 'job-29001'),
+      ),
+      // Failed long before this run: never waited on, and its controller,
+      // whose live pods are elsewhere, is not one this restart must bring back.
+      pod(
+        'vibecarbon',
+        `old-evicted-${s.name}`,
+        s.name,
+        'Failed',
+        'False',
+        OLD_READY,
+        controller('ReplicaSet', 'web-6c1a', 'rs-old'),
+      ),
     ];
-    if (s.podFailsAfterBoot && isBack(s) && clock.now() >= failedAt(s)) {
+    if (s.podFailsAfterBoot) {
       items.push(
-        pod('vibecarbon', 'web-7f9c-abcde', s.name, 'Failed', 'False', iso(failedAt(s)), {
-          owner: 'rs-web',
-        }),
+        hasFailed(s)
+          ? pod('vibecarbon', 'web-7f9c-abcde', s.name, 'Failed', 'False', iso(failedAt(s)), RS_WEB)
+          : pod('vibecarbon', 'web-7f9c-abcde', s.name, 'Running', 'True', OLD_READY, RS_WEB),
       );
+    }
+    if (s.jobPodFailsAfterBoot) {
+      const job = controller('Job', 'backup-29002', 'job-29002');
+      items.push(
+        hasFailed(s)
+          ? pod(
+              'vibecarbon',
+              'backup-29002-abcde',
+              s.name,
+              'Failed',
+              'False',
+              iso(failedAt(s)),
+              job,
+            )
+          : pod('vibecarbon', 'backup-29002-abcde', s.name, 'Running', 'True', OLD_READY, job),
+      );
+    }
+    if (s.statefulSet) {
+      const sts = controller('StatefulSet', 'db', 'sts-db');
+      if (!isBack(s))
+        items.push(pod('vibecarbon', 'db-0', s.name, 'Running', 'True', OLD_READY, sts));
+      else if (clock.now() >= statefulReadyAt(s))
+        items.push(
+          pod('vibecarbon', 'db-0', s.name, 'Running', 'True', iso(statefulReadyAt(s)), sts),
+        );
     }
     return items;
   };
-  const namespacePods = (namespace: string) => {
-    const items = servers
-      .filter((s) => s.podFailsAfterBoot)
-      .flatMap((s) => nodePods(s).filter((p) => p.metadata.namespace === namespace));
-    // The other replica, Ready since long before: it is not a replacement.
-    items.push(
-      pod(namespace, 'web-7f9c-other', 'worker-2', 'Running', 'True', OLD_READY, {
-        owner: 'rs-web',
-      }),
-    );
+  /** Every pod in the cluster: each node's, the other web replica, and its replacement. */
+  const allPods = () => {
+    const items = servers.flatMap(serverPods);
     for (const s of servers.filter((x) => x.podFailsAfterBoot)) {
+      // The other replica, Ready since long before: it is not a replacement.
+      items.push(
+        pod('vibecarbon', 'web-7f9c-other', 'worker-2', 'Running', 'True', OLD_READY, RS_WEB),
+      );
       if (clock.now() >= replacedAt(s)) {
+        const node = s.podFailsAfterBoot?.afterUncordon ? s.name : 'worker-2';
         items.push(
-          pod(namespace, 'web-7f9c-fresh', 'worker-2', 'Running', 'True', iso(replacedAt(s)), {
-            owner: 'rs-web',
-            created: iso(failedAt(s) + 1000),
-          }),
+          pod('vibecarbon', 'web-7f9c-fresh', node, 'Running', 'True', iso(replacedAt(s)), RS_WEB),
         );
       }
     }
@@ -337,17 +410,23 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
       if (isDown(master)) throw sshRefused(ip);
       const [verb, ...rest] = argv;
       const cmd = argv.join(' ');
+      const named = servers.find(
+        (s) => argv.includes(s.name) || argv.includes(`spec.nodeName=${s.name}`),
+      );
+      if (named?.failKubectl && cmd.startsWith(named.failKubectl)) {
+        throw Object.assign(new Error('Command failed: ssh ...'), {
+          status: 1,
+          stdout: '',
+          stderr: `error: ${verb} failed for ${named.name}\n`,
+        });
+      }
       if (['cordon', 'uncordon', 'drain', 'annotate'].includes(verb)) {
         const node = byName(verb === 'annotate' ? rest[1] : rest[0]);
-        if (node.failKubectl && cmd.startsWith(node.failKubectl)) {
-          throw Object.assign(new Error('Command failed: ssh ...'), {
-            status: 1,
-            stdout: '',
-            stderr: `error: ${verb} failed for ${node.name}\n`,
-          });
-        }
         if (verb === 'cordon') node.cordoned = true;
-        if (verb === 'uncordon') node.cordoned = false;
+        if (verb === 'uncordon') {
+          node.cordoned = false;
+          node.uncordonedAt = clock.now();
+        }
         if (verb === 'annotate') node.marked = !rest[2].endsWith('-');
         return '';
       }
@@ -370,10 +449,12 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
           'spec.nodeName=',
           '',
         );
-        return JSON.stringify({ items: nodePods(byName(name)) });
+        return JSON.stringify({ items: allPods().filter((p) => p.spec.nodeName === name) });
       }
       if (verb === 'get' && rest[0] === 'pods' && rest[1] === '-n') {
-        return JSON.stringify({ items: namespacePods(rest[2]) });
+        return JSON.stringify({
+          items: allPods().filter((p) => p.metadata.namespace === rest[2]),
+        });
       }
       throw new Error(`unexpected kubectl: ${cmd}`);
     },
@@ -399,6 +480,7 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
   const fetchPublicDomain = vi.fn(async (url: string, init: { signal?: AbortSignal } = {}) => {
     record('probe', url, [], init as Record<string, unknown>);
     if (opts.publicUnreachable) throw new TypeError('fetch failed');
+    if (opts.publicAnswer) return { status: opts.publicAnswer, ok: false };
     const t = clock.now();
     const down = servers.some((s) => {
       const from = disruptedAt(s);
@@ -431,6 +513,7 @@ function world(specs: Spec[], opts: { publicUnreachable?: boolean } = {}) {
     podsFreshAt,
     healthyAt,
     replacedAt,
+    statefulReadyAt,
     deps,
   };
 }
@@ -512,6 +595,18 @@ const UPGRADE = [
 const CORDONED_HINT =
   'it is still cordoned, run vibecarbon update prod again once it is Ready, which uncordons it';
 const CONSOLE_HINT = 'check it in your provider console, then run vibecarbon status prod';
+
+// Any other exit is the remote side's: systemd-run refused, nothing was
+// scheduled, and ten minutes of polling would only wait out the old boot id.
+const refused = () =>
+  Object.assign(new Error('Command failed: ssh ...'), {
+    status: 1,
+    stdout: '',
+    stderr:
+      'Failed to start transient timer unit: Unit vibecarbon-update-reboot.timer already exists.\n',
+  });
+const REFUSED_ERROR = (name: string) =>
+  `could not restart ${name}: it exited 1\n  Failed to start transient timer unit: Unit vibecarbon-update-reboot.timer already exists.`;
 
 /** One label per remote call, so a test can read the order at a glance. */
 function label(c: Call): string {
@@ -772,22 +867,72 @@ describe('executeUpdatePlan on compose', () => {
     ]);
   });
 
-  // A failed or timed out ssh call may come after the reboot was scheduled:
-  // the boot id poll proves which.
-  it('goes on to the boot id poll when the reboot call itself fails', async () => {
+  // When ssh itself failed (OpenSSH's own 255) or timed out, the reboot may
+  // have been scheduled before the session died: the boot id poll proves which.
+  for (const [how, error, why] of [
+    [
+      'ssh itself failed',
+      Object.assign(new Error('Command failed: ssh ...'), {
+        status: 255,
+        stdout: '',
+        stderr: 'Connection to 10.0.0.1 closed by remote host.\n',
+      }),
+      'Connection to 10.0.0.1 closed by remote host.',
+    ],
+    [
+      'ssh timed out',
+      Object.assign(new Error('Command failed: ssh ...'), {
+        status: null,
+        timedOut: true,
+        stdout: '',
+        stderr: '',
+      }),
+      'ssh timeout',
+    ],
+  ] as const) {
+    it(`goes on to the boot id poll when the reboot call fails because ${how}`, async () => {
+      const w = world([
+        {
+          name: 'web-1',
+          ip: '10.0.0.1',
+          rebootRequired: true,
+          pkgs: [PKG],
+          rebootCall: { error, scheduled: true },
+        },
+      ]);
+      const ctx = makeCtx();
+      const res = await w.clock.run(
+        executeUpdatePlan(planOf(step(compose('web-1', '10.0.0.1'))), ctx, w.deps),
+      );
+      expect(ctx.log.warn).toHaveBeenCalledWith(
+        `web-1: the restart command failed (${why}), checking whether it restarts anyway`,
+      );
+      expect(res.stoppedAt).toBeNull();
+      expect(res.outcomes[0]).toMatchObject({ restarted: true, error: null });
+      expect(w.deps.verifyAppHealth).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('stops at once when the reboot command itself exits non-zero, and never polls', async () => {
     const w = world([
-      { name: 'web-1', ip: '10.0.0.1', rebootRequired: true, pkgs: [PKG], rebootCallFails: true },
+      {
+        name: 'web-1',
+        ip: '10.0.0.1',
+        rebootRequired: true,
+        pkgs: [PKG],
+        rebootCall: { error: refused(), scheduled: false },
+      },
     ]);
-    const ctx = makeCtx();
     const res = await w.clock.run(
-      executeUpdatePlan(planOf(step(compose('web-1', '10.0.0.1'))), ctx, w.deps),
+      executeUpdatePlan(planOf(step(compose('web-1', '10.0.0.1'))), makeCtx(), w.deps),
     );
-    expect(ctx.log.warn).toHaveBeenCalledWith(
-      'web-1: the restart command failed (Connection to 10.0.0.1 closed by remote host.), checking whether it restarts anyway',
-    );
-    expect(res.stoppedAt).toBeNull();
-    expect(res.outcomes[0]).toMatchObject({ restarted: true, error: null });
-    expect(w.deps.verifyAppHealth).toHaveBeenCalledTimes(1);
+    expect(res.stoppedAt).toMatchObject({
+      restarted: false,
+      error: REFUSED_ERROR('web-1'),
+      hint: 'run vibecarbon update prod again',
+    });
+    expect(w.calls.slice(first(w.calls, 'reboot')).filter((c) => label(c) === 'boot')).toEqual([]);
+    expect(w.deps.verifyAppHealth).not.toHaveBeenCalled();
   });
 
   // verifyAppHealth asks the container directly: a proxy that did not come
@@ -841,16 +986,31 @@ describe('executeUpdatePlan on k8s', () => {
     const res = await runWorker(w);
     const kube = w.calls.filter((c) => c.via === 'kubectl');
     for (const c of kube) expect(c.ip).toBe(MASTER_IP);
+    // The node's pods are read once more after the drain, before the reboot:
+    // their controllers are what must come back.
     expect(sequence(kube)).toEqual([
       'node',
       'mark',
       'cordon',
       'drain',
+      'pods',
       'node',
       'lease',
       'pods',
       'uncordon',
       'unmark',
+    ]);
+    const owners = w.calls[first(w.calls, 'pods')];
+    expect(w.calls.indexOf(owners)).toBeGreaterThan(first(w.calls, 'drain'));
+    expect(w.calls.indexOf(owners)).toBeLessThan(first(w.calls, 'reboot'));
+    expect(owners.argv).toEqual([
+      'get',
+      'pods',
+      '-A',
+      '--field-selector',
+      'spec.nodeName=worker-1',
+      '-o',
+      'json',
     ]);
     expect(kube[first(kube, 'node')].argv).toEqual(['get', 'node', 'worker-1', '-o', 'json']);
     expect(kube[first(kube, 'cordon')].argv).toEqual(['cordon', 'worker-1']);
@@ -928,20 +1088,154 @@ describe('executeUpdatePlan on k8s', () => {
       'master',
       'db',
     ]);
-    const master = w.calls.slice(0, first(w.calls, 'unmark') + 1);
-    expect(sequence(master.filter((c) => c.via === 'kubectl'))).toEqual([
+    // Neither is drained, so their pods restart in place: the uncordon comes
+    // before the pod wait, or a replacement pinned to the node could not start.
+    const dbStart = kube.findIndex((c) => c.argv.join(' ') === 'get node db -o json');
+    expect(sequence(kube.slice(0, dbStart))).toEqual([
       'node',
       'mark',
       'cordon',
+      'pods',
       'readyz',
       'node',
       'lease',
-      'pods',
       'uncordon',
       'unmark',
+      'pods',
     ]);
-    const db = w.calls.slice(first(w.calls, 'unmark') + 1).filter((c) => c.via === 'kubectl');
-    expect(db.some((c) => label(c) === 'readyz')).toBe(false);
+    expect(sequence(kube.slice(dbStart))).toEqual([
+      'node',
+      'mark',
+      'cordon',
+      'pods',
+      'node',
+      'lease',
+      'uncordon',
+      'unmark',
+      'pods',
+    ]);
+  });
+
+  for (const [role, ip] of [
+    ['master', MASTER_IP],
+    ['db', '10.1.0.3'],
+  ] as const) {
+    // Traefik, repl-gateway and the db do not tolerate a cordon: a pod that
+    // turned Failed at boot gets a replacement that can only start once the
+    // node is uncordoned.
+    it(`uncordons the ${role} before its pod wait, so a replacement pinned to it can start`, async () => {
+      const w = world([
+        {
+          name: role,
+          ip,
+          rebootRequired: true,
+          pkgs: [PKG],
+          podFailsAfterBoot: { afterUncordon: true },
+        },
+      ]);
+      const res = await w.clock.run(
+        executeUpdatePlan(planOf(step(k8s(role, role, ip))), makeCtx(), w.deps),
+      );
+      expect(res.stoppedAt).toBeNull();
+      const s = w.byName(role);
+      const reboot = w.calls[first(w.calls, 'reboot')];
+      const after = w.calls.filter((c) => c.via === 'kubectl' && c.t > reboot.t);
+      expect(first(after, 'uncordon')).toBeGreaterThan(-1);
+      expect(first(after, 'uncordon')).toBeLessThan(first(after, 'pods'));
+      expect(after[first(after, 'uncordon')].t).toBeLessThan(w.replacedAt(s));
+      expect(after.at(-1)?.t).toBeGreaterThanOrEqual(w.replacedAt(s));
+      expect(s).toMatchObject({ cordoned: false, marked: false });
+    });
+  }
+
+  // The backup CronJob's pod is killed by the reboot and fails: its Job
+  // retries it or gives up, and neither is the node's health.
+  it('never waits on a Job pod, even one that turned Failed after the reboot', async () => {
+    const w = world([
+      {
+        name: 'master',
+        ip: MASTER_IP,
+        rebootRequired: true,
+        pkgs: [PKG],
+        jobPodFailsAfterBoot: true,
+      },
+    ]);
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('master', 'master', MASTER_IP))), makeCtx(), w.deps),
+    );
+    expect(res.stoppedAt).toBeNull();
+    const s = w.byName('master');
+    const last = w.calls.filter((c) => c.via === 'kubectl').at(-1) as Call;
+    expect(last.t).toBeLessThan(w.podsFreshAt(s) + 10_000);
+  });
+
+  // A Failed StatefulSet pod is deleted and recreated under the same name, and
+  // while it is unbound it is not on the node's list: the node's own pods can
+  // all be Ready without the db.
+  it('waits until the StatefulSet that ran on the node has a pod Ready since the restart', async () => {
+    const w = world([
+      {
+        name: 'db',
+        ip: '10.1.0.3',
+        rebootRequired: true,
+        pkgs: [PKG],
+        statefulSet: { readyAfterMs: 90_000 },
+      },
+    ]);
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('db', 'db', '10.1.0.3'))), makeCtx(), w.deps),
+    );
+    expect(res.stoppedAt).toBeNull();
+    const s = w.byName('db');
+    const reboot = w.calls[first(w.calls, 'reboot')];
+    const polls = w.calls.filter(
+      (c) => c.via === 'kubectl' && c.t > reboot.t && /pods/.test(label(c)),
+    );
+    expect(polls.filter((c) => c.t < w.statefulReadyAt(s)).length).toBeGreaterThan(5);
+    expect(polls.at(-1)?.t).toBeGreaterThanOrEqual(w.statefulReadyAt(s));
+    expect(polls.find((c) => label(c) === 'namespace-pods')?.argv).toEqual([
+      'get',
+      'pods',
+      '-n',
+      'vibecarbon',
+      '-o',
+      'json',
+    ]);
+  });
+
+  it('stops, already uncordoned, naming the StatefulSet when none of its pods comes back', async () => {
+    const w = world([
+      { name: 'db', ip: '10.1.0.3', rebootRequired: true, pkgs: [PKG], statefulSet: {} },
+    ]);
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(k8s('db', 'db', '10.1.0.3'))), makeCtx(), w.deps),
+    );
+    expect(res.stoppedAt).toMatchObject({
+      restarted: true,
+      error:
+        'db did not become healthy within 5 minutes: no pod Ready since the restart for StatefulSet vibecarbon/db',
+      hint: CONSOLE_HINT,
+    });
+    expect(w.byName('db')).toMatchObject({ cordoned: false, marked: false });
+  });
+
+  it('stops before the reboot, still cordoned, when the node cannot be read for its pods', async () => {
+    const w = world([{ ...worker, failKubectl: 'get pods' }]);
+    const res = await runWorker(w);
+    expect(res.stoppedAt).toMatchObject({
+      restarted: false,
+      error: 'could not restart worker-1: it exited 1\n  error: get failed for worker-1',
+      hint: CORDONED_HINT,
+    });
+    expect(first(w.calls, 'reboot')).toBe(-1);
+  });
+
+  it('stops at once, still cordoned, when the reboot command itself exits non-zero', async () => {
+    const w = world([{ ...worker, rebootCall: { error: refused(), scheduled: false } }]);
+    const res = await runWorker(w);
+    expect(res.stoppedAt).toMatchObject({ error: REFUSED_ERROR('worker-1'), hint: CORDONED_HINT });
+    expect(w.calls.slice(first(w.calls, 'reboot')).filter((c) => label(c) === 'boot')).toEqual([]);
+    expect(w.byName('worker-1')).toMatchObject({ cordoned: true, marked: true });
   });
 
   // An operator's own cordon is theirs: no mark, no uncordon after.
@@ -953,6 +1247,7 @@ describe('executeUpdatePlan on k8s', () => {
     expect(sequence(w.calls.filter((c) => c.via === 'kubectl'))).toEqual([
       'node',
       'drain',
+      'pods',
       'node',
       'lease',
       'pods',
@@ -1025,7 +1320,8 @@ describe('executeUpdatePlan on k8s', () => {
         'worker-1 did not become healthy within 5 minutes: its kubelet did not renew its node lease',
       hint: CORDONED_HINT,
     });
-    expect(first(w.calls, 'pods')).toBe(-1);
+    // The only pod read is the one before the reboot: the pod wait never ran.
+    expect(last(w.calls, 'pods')).toBeLessThan(first(w.calls, 'reboot'));
     expect(first(w.calls, 'uncordon')).toBe(-1);
   });
 
@@ -1375,6 +1671,40 @@ describe('a run that throws', () => {
   });
 });
 
+describe('a run that throws before its first step', () => {
+  it('never rejects: the first step stops with the thrown message and nothing runs', async () => {
+    const w = world([{ name: 'web-1', ip: '10.0.0.1', rebootRequired: true, pkgs: [PKG] }], {
+      publicUnreachable: true,
+    });
+    const ctx = makeCtx();
+    ctx.log.warn = vi.fn(() => {
+      throw new Error('stdout closed');
+    });
+    const res = await w.clock.run(
+      executeUpdatePlan(
+        planOf(step(compose('web-1', '10.0.0.1')), step(compose('web-2', '10.0.0.2'))),
+        ctx,
+        w.deps,
+      ),
+    );
+    expect(res.outcomes).toEqual([
+      {
+        name: 'web-1',
+        installed: 0,
+        docker: null,
+        restarted: false,
+        outageSeconds: null,
+        error: 'stdout closed',
+        hint: 'run vibecarbon update prod again',
+      },
+    ]);
+    expect(res.stoppedAt).toBe(res.outcomes[0]);
+    expect(res.becameDue).toEqual([]);
+    expect(w.calls.filter((c) => c.via !== 'probe')).toEqual([]);
+    expect(w.clock.pending()).toBe(0);
+  });
+});
+
 describe('every remote command', () => {
   it('has a timeout and a stdin that ends (input), on compose and on k8s', async () => {
     const docker = { packages: [{ name: 'docker-ce', from: '1', to: '2' }] };
@@ -1587,6 +1917,23 @@ describe('the outage each step caused', () => {
       'could not reach app.example.test from this machine, so downtime is not measured',
     );
     // One baseline probe, then nothing: no monitor and no wait on the domain.
+    expect(w.calls.filter((c) => c.via === 'probe')).toHaveLength(1);
+    expect(res.stoppedAt).toBeNull();
+    expect(res.outcomes[0]).toMatchObject({ restarted: true, outageSeconds: null });
+  });
+
+  it('is not measured when the domain answers non-2xx at the start, and says what it answered', async () => {
+    const w = world([{ name: 'web-1', ip: '10.0.0.1', rebootRequired: true, pkgs: [PKG] }], {
+      publicAnswer: 503,
+    });
+    const ctx = makeCtx();
+    const res = await w.clock.run(
+      executeUpdatePlan(planOf(step(compose('web-1', '10.0.0.1'))), ctx, w.deps),
+    );
+    expect(ctx.log.warn).toHaveBeenCalledTimes(1);
+    expect(ctx.log.warn).toHaveBeenCalledWith(
+      'app.example.test answered 503 before the update, so downtime is not measured',
+    );
     expect(w.calls.filter((c) => c.via === 'probe')).toHaveLength(1);
     expect(res.stoppedAt).toBeNull();
     expect(res.outcomes[0]).toMatchObject({ restarted: true, outageSeconds: null });

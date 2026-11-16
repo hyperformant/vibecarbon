@@ -149,8 +149,11 @@ export const reporterFailedLine = (name, why) =>
   `could not install the restart reporter on ${name} (${why}), so vibecarbon status may not show when it needs a restart`;
 export const unmarkFailedLine = (name, why) =>
   `${name} is uncordoned but kept its update mark (${why}), the next update removes it`;
-export const notMeasuredLine = (domain) =>
-  `could not reach ${domain} from this machine, so downtime is not measured`;
+/** @param {number | null} status the first probe's HTTP status, null when it got no answer */
+export const notMeasuredLine = (domain, status) =>
+  status != null
+    ? `${domain} answered ${status} before the update, so downtime is not measured`
+    : `could not reach ${domain} from this machine, so downtime is not measured`;
 export const rebootCallFailedLine = (name, why) =>
   `${name}: the restart command failed (${why}), checking whether it restarts anyway`;
 export const alreadyCordonedLine = (name) =>
@@ -196,6 +199,12 @@ export function stepFailedError({ action, name, why, lines = [] }) {
 export const didNotError = ({ name, what, budgetMs, seen }) =>
   `${name} did not ${what} within ${formatBudget(budgetMs)}: ${seen}`;
 
+/** The first three names, then how many more. */
+function shortList(names) {
+  const shown = names.slice(0, 3).join(', ');
+  return names.length > 3 ? `${shown} and ${names.length - 3} more` : shown;
+}
+
 /** The last thing each wait saw, for didNotError. */
 export const SEEN = {
   oldBootId: 'it still had the boot id from before the restart',
@@ -207,11 +216,9 @@ export const SEEN = {
   nodeFromBefore: 'the cluster still showed the node as it was before the restart',
   nodeNotReady: (reason) => `the node was not Ready (${reason})`,
   leaseNotRenewing: 'its kubelet did not renew its node lease',
-  podsNotReady: (names) => {
-    const shown = names.slice(0, 3).join(', ');
-    const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
-    return `pods not Ready since the restart: ${shown}${more}`;
-  },
+  podsNotReady: (names) => `pods not Ready since the restart: ${shortList(names)}`,
+  /** @param {string[]} names `<kind> <namespace>/<name>` of each controller */
+  workloadsNotReady: (names) => `no pod Ready since the restart for ${shortList(names)}`,
   appUnhealthy: (status) => `its health check never passed (last result: ${status})`,
   /** @param {{ domain: string, status: number | null, detail: string | null }} last */
   domainDown: ({ domain, status, detail }) =>

@@ -82,6 +82,8 @@ const COME_BACK_BUDGET_MS = 600_000;
 const HEALTHY_BUDGET_MS = 300_000;
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 10_000;
+/** OpenSSH's own exit status: ssh failed, whatever the remote command did (see ../ssh.js). */
+const SSH_FAILED_STATUS = 255;
 /** One short remote command: a check, a cordon, a mark. */
 const QUICK_TIMEOUT_MS = 30_000;
 /** kubectl drain bounds itself at 300 s (drainArgv); this is its ssh call's bound. */
@@ -108,10 +110,11 @@ export const UPGRADE_ARGV = [
 ];
 /**
  * The reboot starts 2 s after ssh returns, so the command itself never hangs.
- * --collect and RemainAfterElapse=no unload both transient units even when the
- * reboot never happened, so a later run can schedule it again under the same
- * name. RemainAfterElapse is a timer setting (systemd.timer(5)): set with -p it
- * would go to the service, which refuses it, so it goes to the timer.
+ * --collect unloads the transient units even when they failed, so a later run
+ * can schedule the reboot again under the same name. systemd-run already gives
+ * its timers RemainAfterElapse=no; the flag only states it. It is a timer
+ * setting (systemd.timer(5)), so it goes on the timer: with -p it would go to
+ * the service, which refuses it.
  */
 export const REBOOT_ARGV = [
   'systemd-run',
@@ -260,53 +263,63 @@ function lastChangeSeconds(pod) {
   return stamps.length ? Math.max(...stamps) / 1000 : Number.NEGATIVE_INFINITY;
 }
 
+const controllerOf = (pod) => pod?.metadata?.ownerReferences?.find((o) => o?.controller);
+const controllerUid = (pod) => controllerOf(pod)?.uid;
+const isJob = (ref) => ref?.kind === 'Job';
+const podName = (pod) => `${pod?.metadata?.namespace}/${pod?.metadata?.name}`;
+
 /**
  * Where a pod on the restarted node stands: 'back', 'waiting' for Ready, or
  * 'replace' when it turned Failed after the restart, which only a replacement
  * that is Ready can answer. A pod that Succeeded, or failed before the
- * restart, is not this restart's doing.
+ * restart, is not this restart's doing, and a Job's pod never counts.
  *
  * @returns {'back' | 'waiting' | 'replace'}
  */
 function podState(pod, sinceSeconds) {
+  // A Job's pod runs to an end: the Job retries it or gives up, and neither
+  // says anything about the node.
+  if (isJob(controllerOf(pod))) return 'back';
   const phase = pod?.status?.phase;
   if (phase === 'Succeeded') return 'back';
   if (phase === 'Failed') return lastChangeSeconds(pod) >= sinceSeconds ? 'replace' : 'back';
   return readySince(pod, sinceSeconds) ? 'back' : 'waiting';
 }
 
-const controllerUid = (pod) => pod?.metadata?.ownerReferences?.find((o) => o?.controller)?.uid;
+/** A pod of the controller `uid` is Running and Ready since the restart. */
+const hasPodBack = (uid, pods, sinceSeconds, except = null) =>
+  pods.some(
+    (p) =>
+      (except === null || (p !== except && p?.metadata?.uid !== except.metadata?.uid)) &&
+      controllerUid(p) === uid &&
+      p?.status?.phase === 'Running' &&
+      readySince(p, sinceSeconds),
+  );
 
 /**
- * The Failed pods a controller replaced: another pod of the same controller,
- * Running and Ready since the restart. A pod with no controller is never
- * replaced.
+ * The controllers of the pods running on a node, Jobs left out: each must
+ * have a pod Ready again after the restart. A StatefulSet pod that failed is
+ * deleted and recreated under the same name, and until it is bound it is on
+ * no node's list, so the node's own pods alone cannot prove it came back.
  *
- * @param {object[]} failed
- * @param {number} sinceSeconds
- * @param {(namespace: string) => Promise<string>} listNamespace `get pods -n` JSON
- * @returns {Promise<Set<object>>}
+ * @param {object[]} pods the node's pods, read before the reboot
+ * @returns {Array<{ uid: string, kind: string, name: string, namespace: string }>}
  */
-async function replacedPods(failed, sinceSeconds, listNamespace) {
-  const replaced = new Set();
-  const lists = new Map();
-  for (const pod of failed) {
-    const owner = controllerUid(pod);
-    if (!owner) continue;
-    const ns = pod.metadata?.namespace;
-    if (!lists.has(ns)) lists.set(ns, JSON.parse(await listNamespace(ns)).items ?? []);
-    const found = lists
-      .get(ns)
-      .some(
-        (other) =>
-          other?.metadata?.uid !== pod.metadata?.uid &&
-          controllerUid(other) === owner &&
-          other?.status?.phase === 'Running' &&
-          readySince(other, sinceSeconds),
-      );
-    if (found) replaced.add(pod);
+function workloadsOf(pods) {
+  const found = new Map();
+  for (const pod of pods) {
+    const phase = pod?.status?.phase;
+    if (phase === 'Succeeded' || phase === 'Failed') continue;
+    const ref = controllerOf(pod);
+    if (!ref?.uid || isJob(ref)) continue;
+    found.set(ref.uid, {
+      uid: ref.uid,
+      kind: ref.kind,
+      name: ref.name,
+      namespace: pod.metadata?.namespace,
+    });
   }
-  return replaced;
+  return [...found.values()];
 }
 
 /**
@@ -538,8 +551,9 @@ export async function executeUpdatePlan(plan, ctx, deps = {}) {
     if (monitor) {
       measured = await monitor.ready;
       if (!measured) {
+        const first = monitor.last();
         monitor.stop();
-        ctx.log.warn(notMeasuredLine(ctx.domain));
+        ctx.log.warn(notMeasuredLine(ctx.domain, first?.status ?? null));
       }
     }
     const watch = measured ? monitor : null;
@@ -738,9 +752,11 @@ async function appIsBack(target, outcome, run) {
 /**
  * Cordon (k8s), reboot, wait for a new boot id, then wait for the server to be
  * healthy: the app on compose; on k8s the API (master), the node with its new
- * boot id, its kubelet's lease and its pods, then uncordon. A failure after the
- * cordon leaves the node cordoned and marked, so the next run releases it. A
- * node the operator cordoned is left to them: no mark, no uncordon.
+ * boot id and its kubelet's lease, then its pods and the controllers that had
+ * pods on it. A drained worker is uncordoned after its pods are back, the
+ * master and the db node before (see the release below). A failure while the
+ * cordon is held leaves the node cordoned and marked, so the next run releases
+ * it. A node the operator cordoned is left to them: no mark, no uncordon.
  */
 async function restartServer(step, outcome, run) {
   const { ctx, deps, live } = run;
@@ -749,6 +765,9 @@ async function restartServer(step, outcome, run) {
   const key = ctx.sshKeyPath;
   const k8s = target.kind === 'k8s';
   const node = target.nodeName ?? name;
+  const drained = k8s && target.role === 'worker';
+  /** @type {ReturnType<typeof workloadsOf>} */
+  let workloads = [];
   const ssh = (argv, opts) => deps.sshRun(ip, key, argv, { input: NO_STDIN, ...opts });
   const kubectl = (argv, opts) =>
     deps.sshKubectl(target.masterIp, key, argv, {
@@ -796,14 +815,19 @@ async function restartServer(step, outcome, run) {
       }
       live.cordoned = true;
     }
-    const draining = target.role === 'worker';
-    ctx.log.step(cordonedLine(name, draining));
-    if (draining) {
+    ctx.log.step(cordonedLine(name, drained));
+    if (drained) {
       try {
         await kubectl(drainArgv(node), { timeout: DRAIN_TIMEOUT_MS });
       } catch (err) {
         return failed('drain', err, DRAIN_TIMEOUT_MS, beforeHint());
       }
+    }
+    // What runs on the node now, after the drain, is what must come back.
+    try {
+      workloads = workloadsOf(JSON.parse(await kubectl(nodePodsArgv(node))).items ?? []);
+    } catch (err) {
+      return failed('restart', err, QUICK_TIMEOUT_MS, beforeHint());
     }
   }
 
@@ -822,8 +846,11 @@ async function restartServer(step, outcome, run) {
   try {
     await ssh(REBOOT_ARGV, { timeout: QUICK_TIMEOUT_MS, transportRetry: false });
   } catch (err) {
-    // ssh can fail after the reboot was scheduled, or the reboot can cut the
-    // session: only the boot id says whether the server restarted.
+    // A non-zero exit of the command's own is systemd-run refusing: nothing
+    // was scheduled. When ssh itself failed or timed out, the reboot may have
+    // been scheduled before the session died: only the boot id can say.
+    const sshFailed = err?.status === SSH_FAILED_STATUS || Boolean(err?.timedOut);
+    if (!sshFailed) return failed('restart', err, QUICK_TIMEOUT_MS, beforeHint());
     ctx.log.warn(rebootCallFailedLine(name, oneLine(err)));
   }
 
@@ -921,55 +948,116 @@ async function restartServer(step, outcome, run) {
   });
   if (!leases.settled) return notHealthy(SEEN.leaseNotRenewing);
 
-  // A pod Ready from before the restart is the API's memory, not the pod. The
-  // boot's own start time is later than the clock read before the reboot, so
-  // it also rules out a pod that turned Ready in the 2 s before the reboot.
-  //
-  // A drained worker keeps only DaemonSet pods: the provider's CSI node plugin
-  // where it has one (servicelb is disabled, so there are no svclb pods).
-  // Where it has none the list is empty, and the proof is the boot id, Ready
-  // and the lease above. On the master and the db node the pods restart in
-  // place, and each must turn Ready again.
+  // Releases this run's cordon; a failed release returns the failed step.
+  let released = false;
+  const release = async () => {
+    if (!live.cordoned) return null;
+    try {
+      await kubectl(uncordonArgv(node));
+    } catch (err) {
+      return failed('uncordon', err, QUICK_TIMEOUT_MS, afterHint());
+    }
+    live.cordoned = false;
+    released = true;
+    try {
+      await kubectl(unmarkArgv(node));
+    } catch (err) {
+      ctx.log.warn(unmarkFailedLine(name, oneLine(err)));
+    }
+    return null;
+  };
+
+  // A node that was not drained has its pods restart in place, and some of
+  // them (Traefik, repl-gateway, the db) do not tolerate the cordon: the
+  // replacement for one that failed at boot could only start once the node is
+  // uncordoned. So the master and the db node are released before their pods
+  // are waited on; a drained worker only after.
+  if (!drained) {
+    const stopped = await release();
+    if (stopped) return stopped;
+  }
+
   const since = Math.max(before.clock, after.btime ?? 0);
   const pods = await waitFor(
-    async () => {
-      const out = await kubectl(
-        ['get', 'pods', '-A', '--field-selector', `spec.nodeName=${node}`, '-o', 'json'],
-        poll,
-      );
-      const items = JSON.parse(out).items ?? [];
-      const waiting = items.filter((p) => podState(p, since) === 'waiting');
-      const broken = items.filter((p) => podState(p, since) === 'replace');
-      if (broken.length) {
-        const replaced = await replacedPods(broken, since, (ns) =>
-          kubectl(['get', 'pods', '-n', ns, '-o', 'json'], poll),
-        );
-        waiting.push(...broken.filter((p) => !replaced.has(p)));
-      }
-      const names = waiting.map((p) => `${p.metadata?.namespace}/${p.metadata?.name}`);
-      return names.length ? { done: false, seen: SEEN.podsNotReady(names) } : { done: true };
-    },
+    () =>
+      podsBack({
+        node,
+        workloads,
+        sinceSeconds: since,
+        read: (argv) => kubectl(argv, poll),
+      }),
     HEALTHY_BUDGET_MS,
     kubectlSeen,
     deps,
   );
   if (!pods.ok) return notHealthy(pods.seen);
 
-  if (!live.cordoned) {
-    ctx.log.step(healthyLine(name, false));
-    return outcome;
+  if (drained) {
+    const stopped = await release();
+    if (stopped) return stopped;
   }
-  try {
-    await kubectl(uncordonArgv(node));
-  } catch (err) {
-    return failed('uncordon', err, QUICK_TIMEOUT_MS, afterHint());
-  }
-  live.cordoned = false;
-  try {
-    await kubectl(unmarkArgv(node));
-  } catch (err) {
-    ctx.log.warn(unmarkFailedLine(name, oneLine(err)));
-  }
-  ctx.log.step(healthyLine(name, true));
+  ctx.log.step(healthyLine(name, released));
   return outcome;
+}
+
+/** The node's pods, by the node they are bound to. */
+const nodePodsArgv = (node) => [
+  'get',
+  'pods',
+  '-A',
+  '--field-selector',
+  `spec.nodeName=${node}`,
+  '-o',
+  'json',
+];
+
+/**
+ * One look at whether a restarted node's pods came back.
+ *
+ * A pod Ready from before the restart is the API's memory, not the pod, so a
+ * pod counts only when it turned Ready at or after `sinceSeconds`. The boot's
+ * own start time is later than the clock read before the reboot, so it also
+ * rules out a pod that turned Ready in the 2 s before the reboot.
+ *
+ * Three checks, cheapest first: every pod on the node is Ready since the
+ * restart; every pod that turned Failed since has a Ready replacement; and
+ * every controller that had a pod on the node before the reboot (`workloads`)
+ * has a pod Ready since, on any node. The namespace lists the last two need
+ * are read only when the node's own pods do not already prove it.
+ *
+ * A drained worker keeps only DaemonSet pods: the provider's CSI node plugin
+ * where it has one (servicelb is disabled, so there are no svclb pods). Where
+ * it has none the list is empty, and the proof is the boot id, Ready and the
+ * lease. On the master and the db node the pods restart in place.
+ *
+ * @param {{ node: string, workloads: ReturnType<typeof workloadsOf>, sinceSeconds: number, read: (argv: string[]) => Promise<string> }} input
+ * @returns {Promise<{ done: boolean, seen?: string }>}
+ */
+async function podsBack({ node, workloads, sinceSeconds, read }) {
+  const items = JSON.parse(await read(nodePodsArgv(node))).items ?? [];
+  const waiting = items.filter((p) => podState(p, sinceSeconds) === 'waiting');
+  if (waiting.length) return { done: false, seen: SEEN.podsNotReady(waiting.map(podName)) };
+
+  const lists = new Map();
+  const namespacePods = async (ns) => {
+    if (!lists.has(ns))
+      lists.set(ns, JSON.parse(await read(['get', 'pods', '-n', ns, '-o', 'json'])).items ?? []);
+    return lists.get(ns);
+  };
+
+  const unreplaced = [];
+  for (const pod of items.filter((p) => podState(p, sinceSeconds) === 'replace')) {
+    const uid = controllerUid(pod);
+    const ns = pod.metadata?.namespace;
+    if (!uid || !hasPodBack(uid, await namespacePods(ns), sinceSeconds, pod)) unreplaced.push(pod);
+  }
+  if (unreplaced.length) return { done: false, seen: SEEN.podsNotReady(unreplaced.map(podName)) };
+
+  const missing = [];
+  for (const w of workloads) {
+    if (hasPodBack(w.uid, items, sinceSeconds)) continue;
+    if (!hasPodBack(w.uid, await namespacePods(w.namespace), sinceSeconds))
+      missing.push(`${w.kind} ${w.namespace}/${w.name}`);
+  }
+  return missing.length ? { done: false, seen: SEEN.workloadsNotReady(missing) } : { done: true };
 }

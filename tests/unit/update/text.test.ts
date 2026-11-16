@@ -297,8 +297,11 @@ describe('execution lines', () => {
     expect(unmarkFailedLine('w', 'it exited 1')).toBe(
       'w is uncordoned but kept its update mark (it exited 1), the next update removes it',
     );
-    expect(notMeasuredLine('app.example.test')).toBe(
+    expect(notMeasuredLine('app.example.test', null)).toBe(
       'could not reach app.example.test from this machine, so downtime is not measured',
+    );
+    expect(notMeasuredLine('app.example.test', 503)).toBe(
+      'app.example.test answered 503 before the update, so downtime is not measured',
     );
     expect(rebootCallFailedLine('web-1', 'ssh timeout')).toBe(
       'web-1: the restart command failed (ssh timeout), checking whether it restarts anyway',
@@ -334,6 +337,19 @@ describe('execution lines', () => {
       'check it in your provider console, then run vibecarbon status prod',
     );
     expect(retryHint('prod')).toBe('run vibecarbon update prod again');
+    expect(SEEN.workloadsNotReady(['StatefulSet vibecarbon/db'])).toBe(
+      'no pod Ready since the restart for StatefulSet vibecarbon/db',
+    );
+    expect(
+      SEEN.workloadsNotReady([
+        'StatefulSet vibecarbon/db',
+        'Deployment vibecarbon/a',
+        'DaemonSet kube-system/b',
+        'ReplicaSet vibecarbon/c',
+      ]),
+    ).toBe(
+      'no pod Ready since the restart for StatefulSet vibecarbon/db, Deployment vibecarbon/a, DaemonSet kube-system/b and 1 more',
+    );
     expect(SEEN.domainDown({ domain: 'app.example.test', status: 503, detail: null })).toBe(
       'app.example.test answered 503',
     );
@@ -388,7 +404,9 @@ describe('execution lines', () => {
       installHint({ envName: 'p', name: 'a' }),
       cordonedHint('p'),
       consoleHint('p'),
-      notMeasuredLine('a'),
+      notMeasuredLine('a', null),
+      notMeasuredLine('a', 503),
+      SEEN.workloadsNotReady(['a', 'b', 'c', 'd']),
       rebootCallFailedLine('a', 'b'),
       alreadyCordonedLine('a'),
       SEEN.domainDown({ domain: 'a', status: 503, detail: null }),
