@@ -134,13 +134,6 @@ export function getEnabledServices(): AdminService[] {
 }
 
 /**
- * Get all available admin services (for displaying status, etc.)
- */
-export function getAllServices(): AdminService[] {
-  return adminServices;
-}
-
-/**
  * Check if a specific service is enabled
  */
 export function isServiceEnabled(serviceId: string): boolean {

@@ -350,7 +350,6 @@ describe('create-vibecarbon E2E', () => {
         'tests/_helpers/app.ts',
         'tests/_helpers/env.ts',
         'tests/_helpers/factories.ts',
-        'tests/_helpers/jwt.ts',
         'tests/_helpers/setup-rtl.ts',
         'tests/_helpers/setup-integration.ts',
         'tests/unit/shared/pricing.test.ts',
