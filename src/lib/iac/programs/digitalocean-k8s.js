@@ -52,12 +52,8 @@
  *     across failure domains the way Hetzner's workers are.
  *   - User-data is rendered via the provider's own
  *     `DigitalOceanProvider.getK8s{Master,Db,Worker}UserData`
- *     statics (M3 Tasks 3 + 5) rather than this program calling
- *     loadCloudInit/renderScript directly — unlike hetzner-k8s.js, which
- *     predates those statics and was deliberately left on its own direct
- *     call site (Task 3 report) to avoid touching the frozen Hetzner
- *     render path mid-refactor. This program is new, so it wires straight
- *     through the statics from the start.
+ *     statics rather than this program calling loadCloudInit/renderScript
+ *     directly, the same way hetzner-k8s.js goes through HetznerProvider's.
  *   - Every rendered user-data string is run through
  *     `transliterateToAscii` (from `./digitalocean-compose.js`) before
  *     being handed to a Droplet's `userData` — DO's user-data delivery
