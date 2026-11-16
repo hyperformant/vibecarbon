@@ -760,6 +760,7 @@ describe('executeUpdatePlan on compose', () => {
         docker: null,
         restarted: true,
         outageSeconds: expect.any(Number),
+        reporterFailed: false,
         error: null,
         hint: null,
       },
@@ -923,6 +924,43 @@ describe('executeUpdatePlan on compose', () => {
       'could not install the restart reporter on web-1 (boom), so vibecarbon status may not show when it needs a restart',
     );
     expect(res.stoppedAt).toBeNull();
+    expect(sequence(w.calls.filter((c) => c.ip === '10.0.0.1'))).toEqual([
+      'reporter',
+      'upgrade',
+      'check',
+    ]);
+    // It was already installed (not in the plan): a failed refresh is only a warning.
+    expect(res.outcomes[0].reporterFailed).toBe(false);
+  });
+
+  it('records a planned reporter that failed, and still updates the next server', async () => {
+    const boom = Object.assign(new Error('x'), { status: 1, stderr: 'boom\n' });
+    const w = world([
+      { name: 'web-standby', ip: '10.0.0.2', reporterError: boom },
+      { name: 'web-1', ip: '10.0.0.1' },
+    ]);
+    const ctx = makeCtx();
+    const res = await w.clock.run(
+      executeUpdatePlan(
+        planOf(
+          step(compose('web-standby', '10.0.0.2', { side: 'standby' }), {
+            restart: 'none',
+            installReporter: true,
+          }),
+          step(compose('web-1', '10.0.0.1'), { restart: 'none', installReporter: true }),
+        ),
+        ctx,
+        w.deps,
+      ),
+    );
+    expect(ctx.log.warn).toHaveBeenCalledWith(
+      'could not install the restart reporter on web-standby (boom), so vibecarbon status may not show when it needs a restart',
+    );
+    expect(res.stoppedAt).toBeNull();
+    expect(res.outcomes.map((o) => [o.name, o.reporterFailed])).toEqual([
+      ['web-standby', true],
+      ['web-1', false],
+    ]);
     expect(sequence(w.calls.filter((c) => c.ip === '10.0.0.1'))).toEqual([
       'reporter',
       'upgrade',
@@ -1610,12 +1648,14 @@ describe('executeUpdatePlan on k8s', () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
       argv[0] === 'get' ? JSON.stringify({ items: [leftover] }) : '',
     );
+    // Schedulable, so the plan lists it as mark-only (cordoned: false): only the mark goes.
     await expect(
-      releaseLeftoverCordons([{ name: 'worker-1', masterIp: MASTER_IP }], {
+      releaseLeftoverCordons([{ name: 'worker-1', masterIp: MASTER_IP, cordoned: false }], {
         sshKubectl: withSshContract(kubectl),
         sshKeyPath: KEY,
       }),
-    ).resolves.toEqual({ released: ['worker-1'], failed: [] });
+    ).resolves.toEqual({ released: [], unmarked: ['worker-1'], failed: [] });
+    expect(kubectl.mock.calls.map((c) => c[2][0])).toEqual(['get', 'annotate']);
   });
 
   // Cordoned with the mark is a cordon an earlier run left, not the operator's.
@@ -1926,6 +1966,7 @@ describe('a run that throws before its first step', () => {
         docker: null,
         restarted: false,
         outageSeconds: null,
+        reporterFailed: false,
         error: 'stdout closed',
         hint: 'run vibecarbon update prod again',
       },
@@ -1967,16 +2008,18 @@ describe('every remote command', () => {
 
 // Review Focus 4: a run stopped mid-way left a node cordoned.
 describe('releaseLeftoverCordons', () => {
-  const node = (name: string, ready: string, marked: boolean) => ({
+  const node = (name: string, ready: string, marked: boolean, cordoned = true) => ({
     metadata: {
       name,
       annotations: marked ? { 'vibecarbon.dev/cordoned-by-update': 'true' } : {},
     },
-    spec: { unschedulable: true },
+    spec: cordoned ? { unschedulable: true } : {},
     status: { conditions: [{ type: 'Ready', status: ready }] },
   });
 
-  const planned = (...names: string[]) => names.map((name) => ({ name, masterIp: MASTER_IP }));
+  const planned = (...names: string[]) =>
+    names.map((name) => ({ name, masterIp: MASTER_IP, cordoned: true }));
+  const markOnly = (name: string) => ({ name, masterIp: MASTER_IP, cordoned: false });
 
   // worker-2 turned not Ready since the plan: it stays cordoned, and the run
   // says so. worker-3 lost its mark since the plan: someone else owns it now.
@@ -2000,6 +2043,7 @@ describe('releaseLeftoverCordons', () => {
     });
     expect(result).toEqual({
       released: ['worker-1'],
+      unmarked: [],
       failed: [{ name: 'worker-2', reason: 'it is not Ready' }],
     });
     expect(kubectl.mock.calls.map((c) => c[2])).toEqual([
@@ -2028,6 +2072,7 @@ describe('releaseLeftoverCordons', () => {
       }),
     ).resolves.toEqual({
       released: [],
+      unmarked: [],
       failed: [
         {
           name: 'worker-1',
@@ -2046,8 +2091,73 @@ describe('releaseLeftoverCordons', () => {
       }),
     ).resolves.toEqual({
       released: [],
+      unmarked: [],
       failed: [{ name: 'worker-1', reason: 'kubectl said: nope' }],
     });
+  });
+
+  it('warns when the mark stays after the uncordon, and still counts the node released', async () => {
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv[0] === 'get') return JSON.stringify({ items: [node('worker-1', 'True', true)] });
+      if (argv[0] === 'annotate')
+        throw Object.assign(new Error('Command failed: ssh ...'), {
+          status: 1,
+          stderr: 'denied\n',
+        });
+      return '';
+    });
+    const warn = vi.fn();
+    const result = await releaseLeftoverCordons(planned('worker-1'), {
+      sshKubectl: withSshContract(kubectl),
+      sshKeyPath: KEY,
+      log: { warn },
+    });
+    expect(result).toEqual({ released: ['worker-1'], unmarked: [], failed: [] });
+    expect(warn).toHaveBeenCalledWith(
+      'worker-1 is uncordoned but kept its update mark (kubectl said: denied), the next update removes it',
+    );
+  });
+
+  // Marked but schedulable: something already uncordoned it, so only the mark goes.
+  it('removes only the mark from a planned node that is no longer cordoned', async () => {
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
+      argv[0] === 'get'
+        ? JSON.stringify({
+            items: [
+              node('worker-1', 'False', true, false),
+              // Cordoned again since the plan: not what the plan said, so left alone.
+              node('worker-2', 'True', true, true),
+            ],
+          })
+        : '',
+    );
+    const result = await releaseLeftoverCordons([markOnly('worker-1'), markOnly('worker-2')], {
+      sshKubectl: withSshContract(kubectl),
+      sshKeyPath: KEY,
+    });
+    expect(result).toEqual({ released: [], unmarked: ['worker-1'], failed: [] });
+    expect(kubectl.mock.calls.map((c) => c[2])).toEqual([
+      ['get', 'nodes', '-o', 'json'],
+      ['annotate', 'node', 'worker-1', 'vibecarbon.dev/cordoned-by-update-'],
+    ]);
+  });
+
+  it('warns when the mark of a node no longer cordoned cannot be removed', async () => {
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv[0] === 'get')
+        return JSON.stringify({ items: [node('worker-1', 'True', true, false)] });
+      throw Object.assign(new Error('Command failed: ssh ...'), { status: 1, stderr: 'denied\n' });
+    });
+    const warn = vi.fn();
+    const result = await releaseLeftoverCordons([markOnly('worker-1')], {
+      sshKubectl: withSshContract(kubectl),
+      sshKeyPath: KEY,
+      log: { warn },
+    });
+    expect(result).toEqual({ released: [], unmarked: [], failed: [] });
+    expect(warn).toHaveBeenCalledWith(
+      'worker-1 is uncordoned but kept its update mark (kubectl said: denied), the next update removes it',
+    );
   });
 
   it('builds the argv the brief names', () => {

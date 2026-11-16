@@ -37,6 +37,7 @@ import {
   summaryLine,
   unexpectedRestartPrompt,
   unexpectedRestartYesLine,
+  unmarkedLine,
   unmarkFailedLine,
 } from '../../../src/lib/update/text.js';
 
@@ -110,12 +111,35 @@ const plan = {
     { name: 'c', ip: null, reason: 'no public address' },
     { name: 'standby cluster', ip: null, reason: 'no recorded address for the standby cluster' },
   ],
-  uncordon: [{ name: 'worker-3', masterIp: '4.4.4.4' }],
+  uncordon: [{ name: 'worker-3', masterIp: '4.4.4.4', cordoned: true }],
   total: [120, 360],
   outageServers: ['master', 'db'],
 };
 
 describe('formatPlan', () => {
+  it('a node that kept only the mark plans removing the mark, not an uncordon', () => {
+    const p = {
+      ...plan,
+      steps: [],
+      skipped: [
+        { name: 'standby server', ip: null, reason: 'no recorded address for the standby server' },
+      ],
+      uncordon: [
+        { name: 'worker-3', masterIp: '4.4.4.4', cordoned: true },
+        { name: 'worker-4', masterIp: '4.4.4.4', cordoned: false },
+      ],
+    };
+    expect(formatPlan(p as never)).toEqual([
+      'update plan for prod (launch)',
+      'uncordon worker-3, left cordoned by an interrupted update',
+      'remove the leftover update mark from worker-4',
+      'standby server (no address): skipped, no recorded address for the standby server. Run vibecarbon deploy prod to record it before you try again',
+    ]);
+    expect(unmarkedLine(['worker-4', 'worker-5'])).toBe(
+      'removed the leftover update mark from worker-4, worker-5',
+    );
+  });
+
   it('prints every line exactly', () => {
     expect(formatPlan(plan as never)).toEqual([
       'update plan for prod (launch)',

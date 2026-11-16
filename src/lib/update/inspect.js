@@ -28,6 +28,16 @@ const INSPECT_TIMEOUT_MS = (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000;
  */
 
 /**
+ * Print a failed step's `@@error` line and end the script. Each apt step may
+ * wait up to APT_LOCK_TIMEOUT_SECONDS for the lock, and the ssh bound allows
+ * one such wait: after a failure no later step waits again. Exit 0, so the
+ * output is parsed and the error read as a failed apt check.
+ *
+ * @param {string} message sh double-quoted text, may use $?/$rc
+ */
+const stopWith = (message) => `{ echo "@@error ${message}"; exit 0; }`;
+
+/**
  * @param {'compose' | 'k8s'} kind
  * @returns {string} POSIX sh
  */
@@ -41,16 +51,15 @@ export function INSPECT_SCRIPT(kind) {
     'echo @@boot-id',
     'cat /proc/sys/kernel/random/boot_id',
     'echo @@ubuntu',
-    `${aptGet('update -qq')} >/dev/null 2>&1 </dev/null || echo "@@error apt-get update exited $?"`,
+    `${aptGet('update -qq')} >/dev/null 2>&1 </dev/null || ${stopWith('apt-get update exited $?')}`,
     'if command -v unattended-upgrade >/dev/null 2>&1 </dev/null; then',
     '  out=$(unattended-upgrade --dry-run --verbose 2>&1 </dev/null); rc=$?',
     '  if [ "$rc" -ne 0 ]; then',
-    '    echo "@@error unattended-upgrade exited $rc"',
-    '  else',
-    `    printf '%s\\n' "$out" | sed -n 's/^Packages that will be upgraded: *//p'`,
+    `    ${stopWith('unattended-upgrade exited $rc')}`,
     '  fi',
+    `  printf '%s\\n' "$out" | sed -n 's/^Packages that will be upgraded: *//p'`,
     'else',
-    '  echo "@@error unattended-upgrade not installed"',
+    `  ${stopWith('unattended-upgrade not installed')}`,
     'fi',
   ];
   if (kind === 'compose') {
@@ -58,7 +67,7 @@ export function INSPECT_SCRIPT(kind) {
       'echo @@reporter',
       `if [ -f ${REPORTER_UNIT} ]; then echo installed; else echo missing; fi`,
       'echo @@docker',
-      `if [ -f /etc/apt/sources.list.d/docker.list ]; then { ${aptQuietUpdate(DOCKER_SOURCE_ONLY)}; } >/dev/null 2>&1 </dev/null || echo "@@error docker apt-get update exited $?"; fi`,
+      `if [ -f /etc/apt/sources.list.d/docker.list ]; then { ${aptQuietUpdate(DOCKER_SOURCE_ONLY)}; } >/dev/null 2>&1 </dev/null || ${stopWith('docker apt-get update exited $?')}; fi`,
       `apt-cache policy ${DOCKER_PACKAGES.join(' ')} 2>/dev/null </dev/null`,
     );
   }

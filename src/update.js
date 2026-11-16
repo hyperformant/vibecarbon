@@ -42,6 +42,7 @@ import {
   stillDueLine,
   summaryLine,
   unexpectedRestartYesLine,
+  unmarkedLine,
 } from './lib/update/text.js';
 
 // ============================================================================
@@ -123,12 +124,14 @@ function planJson(plan, extra = {}) {
       expectedSeconds: s.effect.seconds,
     })),
     skipped: plan.skipped,
-    uncordon: plan.uncordon.map((u) => u.name),
+    uncordon: plan.uncordon.filter((u) => u.cordoned).map((u) => u.name),
+    unmark: plan.uncordon.filter((u) => !u.cordoned).map((u) => u.name),
     expectedDowntime: plan.total ? { min: plan.total[0], max: plan.total[1] } : null,
     outcomes: [],
     becameDue: [],
     stillDue: [],
     uncordonFailed: [],
+    reporterFailed: [],
     measuredDowntimeSeconds: null,
     recheckSkipped: [],
     ...extra,
@@ -269,12 +272,23 @@ export async function run(args) {
 
   // Confirmed: the cluster changes from here on, starting with the nodes an
   // interrupted run left cordoned.
-  const { released, failed: uncordonFailed } =
-    plan.uncordon.length > 0
-      ? await releaseLeftoverCordons(plan.uncordon, { sshKeyPath })
-      : { released: [], failed: [] };
+  const {
+    released,
+    unmarked,
+    failed: uncordonFailed,
+  } = plan.uncordon.length > 0
+    ? await releaseLeftoverCordons(plan.uncordon, {
+        sshKeyPath,
+        log: {
+          warn: (m) => {
+            if (!json) p.log.warn(printable(m));
+          },
+        },
+      })
+    : { released: [], unmarked: [], failed: [] };
   if (!json) {
     if (released.length > 0) p.log.info(releasedLine(released));
+    if (unmarked.length > 0) p.log.info(unmarkedLine(unmarked));
     for (const f of uncordonFailed) p.log.warn(releaseFailedLine(f.name, f.reason));
   }
 
@@ -305,6 +319,19 @@ export async function run(args) {
     : await restartsDue(plan, outcomes, envName);
   const recheckSkipped = recheckUnread.map((u) => ({ name: u.name, reason: u.reason }));
   const stillDue = [...due];
+  const reporterFailed = outcomes.filter((o) => o.reporterFailed).map((o) => o.name);
+  // Exit 0, and the all-clear, mean the environment is known to be current. A
+  // server skipped at plan time was not updated, a restart still due is not
+  // done, a node left cordoned is out of service, a server not read again is
+  // not known, and a server without its planned reporter cannot say when it
+  // next needs a restart.
+  const unfinished =
+    plan.skipped.length > 0 ||
+    becameDue.length > 0 ||
+    stillDue.length > 0 ||
+    uncordonFailed.length > 0 ||
+    recheckSkipped.length > 0 ||
+    reporterFailed.length > 0;
 
   if (json) {
     writeJson(
@@ -313,6 +340,7 @@ export async function run(args) {
         becameDue,
         stillDue,
         uncordonFailed,
+        reporterFailed,
         measuredDowntimeSeconds: measuredDowntime(outcomes),
         recheckSkipped,
       }),
@@ -327,15 +355,7 @@ export async function run(args) {
     if (unnamed.length > 0) p.log.warn(stillDueLine({ envName, names: unnamed }));
     if (recheckSkipped.length > 0)
       p.log.warn(recheckSkippedLine(recheckSkipped.map((u) => u.name)));
-    if (
-      !stoppedAt &&
-      plan.skipped.length === 0 &&
-      becameDue.length === 0 &&
-      stillDue.length === 0 &&
-      recheckSkipped.length === 0
-    ) {
-      p.log.success(allClearLine());
-    }
+    if (!stoppedAt && !unfinished) p.log.success(allClearLine());
   }
 
   if (stoppedAt) {
@@ -345,16 +365,7 @@ export async function run(args) {
     process.exit(1);
   }
   if (!json) p.outro(c.success('Done'));
-  // Exit 0 means the environment is known to be current. A server skipped at
-  // plan time was not updated, a restart still due is not done, and a node
-  // left cordoned is still out of service.
-  if (
-    plan.skipped.length > 0 ||
-    becameDue.length > 0 ||
-    stillDue.length > 0 ||
-    uncordonFailed.length > 0
-  )
-    process.exit(1);
+  if (unfinished) process.exit(1);
 }
 
 // SPEC is exported for the arg-parser unit tests.

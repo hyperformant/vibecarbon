@@ -58,6 +58,8 @@ type World = {
   /** false: the annotation alone stays due after the update. */
   annotationClears: boolean;
   readyStatus: number;
+  /** More fields for update's -json result (stillDue, outcomes, ...). */
+  updateResult?: Record<string, unknown>;
   /** What admin says about the target's reporting after the update. */
   adminReporting: boolean;
   updated: boolean;
@@ -103,6 +105,7 @@ function fakes(mode: 'compose-ha' | 'k8s', world: World, planName: string, hostN
           skipped: world.skipped,
           expectedDowntime: world.expectedMax === null ? null : { min: 60, max: world.expectedMax },
           measuredDowntimeSeconds: world.downtime,
+          ...world.updateResult,
         }),
       };
     },
@@ -239,6 +242,45 @@ describe('runHostRestartStep', () => {
       const results = await run('compose-ha', w).result;
       expect(results.find((r) => r.checkName === 'update_ran')?.status).toBe('fail');
     }
+  });
+
+  it('a non-zero update exit names what the JSON says is unfinished, and the stopped error', async () => {
+    const results = await run(
+      'compose-ha',
+      world({
+        updateExit: 1,
+        skipped: [{ name: 'prod-e2e1-standby', ip: null, reason: 'no public address' }],
+        updateResult: {
+          stillDue: ['prod-e2e1-primary'],
+          becameDue: [{ name: 'prod-e2e1-standby', package: 'libc6' }],
+          uncordonFailed: [{ name: 'w1', reason: 'it is not Ready' }],
+          reporterFailed: ['prod-e2e1-primary'],
+          recheckSkipped: [{ name: 'prod-e2e1-standby', reason: 'ssh timeout' }],
+          uncordon: [],
+          outcomes: [
+            { name: 'prod-e2e1-standby', error: null },
+            {
+              name: 'prod-e2e1-primary',
+              error: 'could not install the security updates: it exited 100',
+            },
+          ],
+        },
+      }),
+    ).result;
+    const msg = results.find((r) => r.checkName === 'update_ran')?.errorMessage ?? '';
+    expect(msg).toMatch(/^update exited 1: /);
+    for (const part of [
+      'stillDue ["prod-e2e1-primary"]',
+      'becameDue [{"name":"prod-e2e1-standby","package":"libc6"}]',
+      'uncordonFailed [{"name":"w1","reason":"it is not Ready"}]',
+      'reporterFailed ["prod-e2e1-primary"]',
+      'recheckSkipped [{"name":"prod-e2e1-standby","reason":"ssh timeout"}]',
+      'skipped [{"name":"prod-e2e1-standby","ip":null,"reason":"no public address"}]',
+      'stopped: could not install the security updates: it exited 100',
+    ])
+      expect(msg).toContain(part);
+    // Empty lists are not named.
+    expect(msg).not.toContain('uncordon []');
   });
 
   it('fails restart_due_status when the target never shows due within the window', async () => {

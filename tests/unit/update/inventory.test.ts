@@ -145,12 +145,12 @@ describe('listUpdateTargets', () => {
   });
 
   it('k8s lists the Ready nodes an interrupted update left marked, and changes nothing', async () => {
-    const node = (name: string, ip: string, marked: boolean, ready: string) => ({
+    const node = (name: string, ip: string, marked: boolean, ready: string, cordoned = true) => ({
       metadata: {
         name,
         annotations: marked ? { 'vibecarbon.dev/cordoned-by-update': 'true' } : {},
       },
-      spec: { unschedulable: true },
+      spec: cordoned ? { unschedulable: true } : {},
       status: {
         addresses: [{ type: 'ExternalIP', address: ip }],
         conditions: [{ type: 'Ready', status: ready }],
@@ -166,12 +166,17 @@ describe('listUpdateTargets', () => {
           node('w1', '1.1.1.2', true, 'True'),
           node('w2', '1.1.1.3', true, 'False'),
           node('w3', '1.1.1.4', false, 'True'),
+          // Uncordoned by hand since, but still marked: only the mark is left over.
+          node('w4', '1.1.1.5', true, 'True', false),
         ],
       }),
     );
     const cfg = { deployMode: 'kubernetes', servers: [{ name: 'master', ip: '1.1.1.1' }] };
     const r = await listUpdateTargets('prod', cfg, { sshKubectl });
-    expect(r.leftovers).toEqual([{ name: 'w1', masterIp: '1.1.1.1' }]);
+    expect(r.leftovers).toEqual([
+      { name: 'w1', masterIp: '1.1.1.1', cordoned: true },
+      { name: 'w4', masterIp: '1.1.1.1', cordoned: false },
+    ]);
     expect(sshKubectl).toHaveBeenCalledTimes(1);
     expect(sshKubectl.mock.calls[0][2]).toEqual(['get', 'nodes', '-o', 'json']);
   });
@@ -272,6 +277,30 @@ describe('listUpdateTargets', () => {
   });
 
   describe('an empty or partial inventory', () => {
+    it.each([
+      ['standby', [{ name: 'p', ip: '1.1.1.1', role: 'primary' }], ['p']],
+      ['primary', [{ name: 's', ip: '2.2.2.2', role: 'standby' }], ['s']],
+    ])('compose-ha with no %s server skips that side, naming it', async (side, servers, names) => {
+      const r = await listUpdateTargets(
+        'prod',
+        { deployMode: 'compose-ha', servers },
+        { sshKubectl: vi.fn() },
+      );
+      expect(r.targets.map((t) => t.name)).toEqual(names);
+      expect(r.skipped).toEqual([
+        { name: `${side} server`, ip: null, reason: `no recorded address for the ${side} server` },
+      ]);
+    });
+
+    it('compose-ha with no servers at all lists nothing, for the caller to say so', async () => {
+      const r = await listUpdateTargets(
+        'prod',
+        { deployMode: 'compose-ha', servers: [] },
+        { sshKubectl: vi.fn() },
+      );
+      expect(r).toMatchObject({ targets: [], skipped: [] });
+    });
+
     it('k8s-ha with no recorded standby master skips that side, naming it', async () => {
       const sshKubectl = vi.fn(async (ip: string) =>
         nodeList([{ name: `m-${ip}`, labels: MASTER_LABELS, ip }]),

@@ -230,7 +230,8 @@ describe('a failed apt check is never read as nothing pending', () => {
     );
     const offenders = outside
       .split('\n')
-      .filter((l) => /apt-get|apt-cache|unattended-upgrade/.test(l) && !/^\s*echo /.test(l))
+      // An @@error line names apt in its text: `{ echo "..."; exit 0; }` reads nothing.
+      .filter((l) => /apt-get|apt-cache|unattended-upgrade/.test(l) && !/^\s*(\{ )?echo /.test(l))
       .filter((l) => !l.includes('</dev/null'));
     expect(offenders).toEqual([]);
   });
@@ -253,6 +254,19 @@ describe('INSPECT_SCRIPT', () => {
     expect(INSPECT_SCRIPT('k8s')).not.toContain('@@docker');
     expect(INSPECT_SCRIPT('k8s')).toContain('--print');
   });
+
+  // The ssh bound is one apt lock wait plus 120 s: after a failed apt step the
+  // script stops, so a second step never waits for the lock again.
+  it.each(['compose', 'k8s'] as const)(
+    '%s: every @@error ends the script at once, with exit 0 so the error is read',
+    (kind) => {
+      const lines = INSPECT_SCRIPT(kind)
+        .split('\n')
+        .filter((l) => l.includes('@@error'));
+      expect(lines.length).toBe(kind === 'compose' ? 4 : 3);
+      for (const line of lines) expect(line).toMatch(/echo "@@error [^"]*"; exit 0\b/);
+    },
+  );
 
   it('compose checks for the reporter path unit; k8s does not', () => {
     expect(INSPECT_SCRIPT('compose')).toContain('@@reporter');

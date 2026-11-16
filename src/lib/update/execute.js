@@ -170,7 +170,8 @@ export const uncordonArgv = (node) => ['uncordon', node];
 export const unmarkArgv = (node) => ['annotate', 'node', node, `${CORDON_MARK}-`];
 
 /**
- * @typedef {{ name: string, installed: number, docker: Array<{ name: string, from: string, to: string }> | null, restarted: boolean, outageSeconds: number | null, error: string | null, hint: string | null }} StepOutcome
+ * @typedef {{ name: string, installed: number, docker: Array<{ name: string, from: string, to: string }> | null, restarted: boolean, outageSeconds: number | null, reporterFailed: boolean, error: string | null, hint: string | null }} StepOutcome
+ *   reporterFailed: the plan installed the restart reporter here and it failed.
  * @typedef {{ envName: string, sshKeyPath: string, domain: string | null, projectName: string, yes: boolean, confirm: (message: string) => Promise<boolean>, log: { step: (m: string) => void, info: (m: string) => void, warn: (m: string) => void } }} ExecuteContext
  * @typedef {{ sshRun: Function, sshRunScript: Function, sshKubectl: Function, verifyAppHealth: Function, fetchPublicDomain: Function, now: () => number, sleep: (ms: number, signal?: AbortSignal) => Promise<unknown> }} ExecuteDeps
  */
@@ -463,24 +464,41 @@ function overlapSeconds(windows, start, end) {
 }
 
 /**
- * Uncordon the nodes the confirmed plan listed as left cordoned by an earlier,
- * interrupted `update`, and remove the mark. Each cluster is read again first,
- * so only a node that still carries CORDON_MARK is touched, and one that is no
- * longer Ready stays cordoned. A failure leaves the node marked, so the next
- * run tries again.
+ * Release what the confirmed plan listed as left by an earlier, interrupted
+ * `update`: uncordon a node it left cordoned and remove the mark, or only
+ * remove the mark from a node someone has uncordoned since. Each cluster is
+ * read again first, so only a node that still carries CORDON_MARK is touched,
+ * one that is no longer Ready stays cordoned, and a node whose cordon changed
+ * since the plan is left as it is. A failed uncordon leaves the node marked,
+ * so the next run tries again; a mark that stays is a warning, since the node
+ * is in service.
  *
  * @param {import('./inventory.js').Leftover[]} leftovers
- * @param {{ sshKubectl?: Function, sshKeyPath: string }} deps
- * @returns {Promise<{ released: string[], failed: Array<{ name: string, reason: string }> }>}
+ * @param {{ sshKubectl?: Function, sshKeyPath: string, log?: { warn: (m: string) => void } }} deps
+ * @returns {Promise<{ released: string[], unmarked: string[], failed: Array<{ name: string, reason: string }> }>}
+ *   released: uncordoned; unmarked: only the mark removed.
  */
 export async function releaseLeftoverCordons(leftovers, deps) {
   const kubectl = deps.sshKubectl ?? sshKubectl;
   const key = deps.sshKeyPath;
+  const warn = (m) => deps.log?.warn(m);
   const opts = { timeout: QUICK_TIMEOUT_MS, input: NO_STDIN };
   const released = [];
+  const unmarked = [];
   const failed = [];
   const kubectlSaid = (err) =>
     err instanceof SyntaxError ? SEEN.unreadable : SEEN.kubectlFailed(oneLine(err));
+  /** @returns {Promise<boolean>} whether the mark is gone */
+  const unmark = async (ip, name) => {
+    try {
+      await kubectl(ip, key, unmarkArgv(name), opts);
+      return true;
+    } catch (err) {
+      // In service, still marked: the next run lists it and removes the mark.
+      warn(unmarkFailedLine(name, kubectlSaid(err)));
+      return false;
+    }
+  };
   const byMaster = Map.groupBy(leftovers, (l) => l.masterIp);
   for (const [ip, planned] of byMaster) {
     let nodes;
@@ -494,10 +512,16 @@ export async function releaseLeftoverCordons(leftovers, deps) {
       for (const { name } of planned) failed.push({ name, reason: kubectlSaid(err) });
       continue;
     }
-    for (const { name } of planned) {
+    for (const { name, cordoned } of planned) {
       const node = nodes.find((n) => n?.metadata?.name === name);
       // Gone, or no longer marked: not this run's to release.
       if (!node || !(CORDON_MARK in (node.metadata?.annotations ?? {}))) continue;
+      if (!cordoned) {
+        // The plan said only the mark goes: cordoned again since, it is left alone.
+        if (node.spec?.unschedulable === true) continue;
+        if (await unmark(ip, name)) unmarked.push(name);
+        continue;
+      }
       if (!isReady(node)) {
         failed.push({ name, reason: 'it is not Ready' });
         continue;
@@ -509,14 +533,10 @@ export async function releaseLeftoverCordons(leftovers, deps) {
         continue;
       }
       released.push(name);
-      try {
-        await kubectl(ip, key, unmarkArgv(name), opts);
-      } catch {
-        // Uncordoned, still marked: the next run lists it and removes the mark.
-      }
+      await unmark(ip, name);
     }
   }
-  return { released, failed };
+  return { released, unmarked, failed };
 }
 
 function fail(outcome, error, hint) {
@@ -532,6 +552,7 @@ const newOutcome = (name) => ({
   docker: null,
   restarted: false,
   outageSeconds: null,
+  reporterFailed: false,
   error: null,
   hint: null,
 });
@@ -636,7 +657,10 @@ async function runStep(step, outcome, run) {
       input: NO_STDIN,
     });
   } catch (err) {
+    // Not a reason to stop: the updates go on. A reporter the plan installed
+    // is recorded, so the run does not end as current without it.
     ctx.log.warn(reporterFailedLine(name, oneLine(err)));
+    if (step.installReporter) outcome.reporterFailed = true;
   }
 
   if (step.install > 0) {

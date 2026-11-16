@@ -27,6 +27,15 @@ import { dnsSafeFetch } from './health.js';
 export const RESTART_DUE_WINDOW_MS = 90_000;
 export const RESTART_CLEARED_WINDOW_MS = 120_000;
 const POLL_MS = 10_000;
+/** update -json's lists that make it exit 1 when not empty. */
+const UNFINISHED = [
+  'stillDue',
+  'becameDue',
+  'uncordonFailed',
+  'reporterFailed',
+  'recheckSkipped',
+  'skipped',
+] as const;
 /** One poll interval of slack each side of the plan's own maximum. */
 const DOWNTIME_SLACK_SECONDS = 30;
 
@@ -316,14 +325,17 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
   // takes the mark away again.
   const upStart = Date.now();
   const up = await deps.runUpdate(o.env, { cwd, timeout: o.timeouts?.updateMs ?? 45 * 60_000 });
-  let plan: {
-    plan?: Array<{ name: string; restart: string }>;
-    skipped?: unknown[];
-    expectedDowntime?: { min: number; max: number } | null;
-    measuredDowntimeSeconds?: number | null;
-    error?: string;
-    hint?: string;
-  } | null = null;
+  let plan:
+    | ({
+        plan?: Array<{ name: string; restart: string }>;
+        skipped?: unknown[];
+        expectedDowntime?: { min: number; max: number } | null;
+        measuredDowntimeSeconds?: number | null;
+        outcomes?: Array<{ name: string; error?: string | null }>;
+        error?: string;
+        hint?: string;
+      } & Partial<Record<(typeof UNFINISHED)[number], unknown[]>>)
+    | null = null;
   try {
     plan = JSON.parse(up.stdout);
   } catch {
@@ -332,6 +344,15 @@ export async function runHostRestartStep(o: HostRestartStepOptions): Promise<Ver
   let ranProblem: string | null = null;
   if (up.exitCode !== 0) {
     ranProblem = `update exited ${up.exitCode}${plan?.error ? `: ${plan.error}` : ''}${plan?.hint ? ` (${plan.hint})` : ''}${plan ? '' : `: ${(up.stderr || up.stdout).slice(-300)}`}`;
+    // What the result says is unfinished: every reason update exits 1.
+    if (plan) {
+      const unfinished = UNFINISHED.filter((k) => (plan?.[k] ?? []).length > 0).map(
+        (k) => `${k} ${JSON.stringify(plan?.[k]).slice(0, 300)}`,
+      );
+      const stopped = plan.outcomes?.find((o) => o.error)?.error;
+      if (stopped) unfinished.push(`stopped: ${stopped.slice(0, 300)}`);
+      if (unfinished.length > 0) ranProblem += `: ${unfinished.join('; ')}`;
+    }
   } else if (!plan) {
     ranProblem = `update -json was not JSON: ${up.stdout.slice(0, 200)}`;
   } else if ((plan.skipped ?? []).length > 0) {

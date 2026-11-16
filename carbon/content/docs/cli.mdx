@@ -788,7 +788,7 @@ It installs the Ubuntu security updates on every server of the environment, and 
 
 Before it changes anything it prints the plan: what each server installs, which ones restart and why, and what your users notice. It then asks you to confirm. It works through the servers one at a time, a standby side first, and stops at the first server that fails, so a problem never spreads to the next one.
 
-The plan also lists a server that doesn't have the restart reporter yet, the small service that tells `vibecarbon status` and the app when a restart is due, and installs it with no downtime. A Kubernetes node that an interrupted update left cordoned is listed too, and uncordoned once you confirm.
+The plan also lists a server that doesn't have the restart reporter yet, the small service that tells `vibecarbon status` and the app when a restart is due, and installs it with no downtime. A Ready Kubernetes node that an interrupted update left cordoned is listed too, and uncordoned once you confirm. If someone has uncordoned it since, only the update's leftover mark on it is removed.
 
 Until you confirm, the run changes only what it needs to make the plan. As `deploy` and `backup` do, it adds this machine's IP to the environment's firewall when it is not there yet, so it can reach the servers. Each server refreshes its package lists to see which updates are waiting.
 
@@ -810,11 +810,11 @@ If a server doesn't come back, the command stops and says what it was waiting fo
 
 On Kubernetes, the command finds each node's address in the cluster, and a node writes its own address there. So it updates a node only when the server at that address answers with the node's name. A node whose address leads to another server, two nodes that report one address, and a node that reports the master's address without being the master are skipped, so a compromised node can never send the update's commands to another server.
 
-If a server can't be reached when the plan is made, the plan lists it as skipped with the command to try next, and the others are still updated. After the update it checks each server again for a restart that is still due, and names any server that still needs one, for example when the daily security updates installed a new kernel during the run. If it can't read a server again it says so, since the update itself succeeded.
+If a server can't be reached when the plan is made, the plan lists it as skipped with the command to try next, and the others are still updated. After the update it checks each server again for a restart that is still due, and names any server that still needs one, for example when the daily security updates installed a new kernel during the run. If it can't read a server again it says so and exits 1, since it can't tell whether that server still needs a restart.
 
-The command exits 0 only when the environment is known to be current. It exits 1 when a server was skipped, a restart is still due at the end, or a node could not be uncordoned, so a script never reads an unfinished run as done. It never prints the all-clear in those cases. When the environment has no servers on record, it says so and exits 1: run `vibecarbon deploy <env>` first.
+The command exits 0 only when the environment is known to be current. It exits 1 when a server was skipped, a restart is still due at the end, a server could not be checked again, a node could not be uncordoned, or the restart reporter it planned to install could not be installed, so a script never reads an unfinished run as done. It never prints the all-clear in those cases. A failed reporter install doesn't stop the run, so the other servers are still updated. When the environment has no servers on record, it says so and exits 1: run `vibecarbon deploy <env>` first.
 
-`-json` prints the plan and the result as JSON, for scripts, including `stillDue`, the servers that still need a restart at the end, and `recheckSkipped`, the servers it couldn't check again after the update. Without `-y` it prints the plan and stops there.
+`-json` prints the plan and the result as JSON, for scripts, including `stillDue`, the servers that still need a restart at the end, `recheckSkipped`, the servers it couldn't check again after the update, and `reporterFailed`, the servers where the planned reporter install failed. Without `-y` it prints the plan and stops there.
 
 This is not `vibecarbon upgrade`. That one updates your project's infrastructure files from the template. `update` installs system updates and restarts servers.
 

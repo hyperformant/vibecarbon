@@ -22,7 +22,8 @@ export const CORDON_MARK = 'vibecarbon.dev/cordoned-by-update';
  * @typedef {{ name: string, ip: string, side: 'primary' | 'standby', role: 'server' | 'master' | 'worker' | 'db', kind: 'compose' | 'k8s', masterIp?: string, nodeName?: string, reporting?: boolean }} UpdateTarget
  *   reporting (k8s): whether the node carries readable host state from the reporter.
  * @typedef {{ name: string, ip: string | null, reason: string }} Skipped
- * @typedef {{ name: string, masterIp: string }} Leftover a Ready node an interrupted run left cordoned
+ * @typedef {{ name: string, masterIp: string, cordoned: boolean }} Leftover a Ready node an interrupted run left marked;
+ *   cordoned: still unschedulable. One that is not was uncordoned since, and only its mark is left.
  */
 
 function nodeRole(labels) {
@@ -51,7 +52,7 @@ async function listClusterNodes({ masterIp, side, key, kubectl, targets, skipped
     const nodeName = node.metadata?.name ?? '';
     // Read only: the plan shows it, and only a confirmed run releases it.
     if (CORDON_MARK in (node.metadata?.annotations ?? {}) && isReady(node))
-      leftovers.push({ name: nodeName, masterIp });
+      leftovers.push({ name: nodeName, masterIp, cordoned: node.spec?.unschedulable === true });
     const ip = node.status?.addresses?.find((a) => a.type === 'ExternalIP')?.address;
     if (!ip) {
       skipped.push({ name: nodeName, ip: null, reason: 'no public address' });
@@ -107,9 +108,9 @@ function dropBorrowedAddresses(targets, masterIps) {
  * An `AmbiguousPrimaryError` from `resolvePrimary` propagates on purpose: with
  * unclear roles, guessing which server is primary could update the wrong one.
  *
- * Nothing recorded at all lists nothing, for the caller to say so. A k8s
- * side the tier expects but has no address for is skipped, so the run is
- * never read as done.
+ * Nothing recorded at all lists nothing, for the caller to say so. A side
+ * the tier expects but has no address for (a k8s cluster, or a compose-ha
+ * server) is skipped, so the run is never read as done.
  *
  * @returns {Promise<{ tier: string, targets: UpdateTarget[], skipped: Skipped[], leftovers: Leftover[] }>}
  */
@@ -138,18 +139,24 @@ export async function listUpdateTargets(envName, envConfig, deps = { sshKubectl 
       });
     }
   } else if (tier === 'compose-ha') {
+    const sideOf = (sv) => (sv.role === 'standby' ? 'standby' : 'primary');
     for (const sv of servers) {
       if (!sv.ip) {
         skipped.push({ name: sv.name, ip: null, reason: 'no public address' });
         continue;
       }
-      targets.push({
-        name: sv.name,
-        ip: sv.ip,
-        side: sv.role === 'standby' ? 'standby' : 'primary',
-        role: 'server',
-        kind: 'compose',
-      });
+      targets.push({ name: sv.name, ip: sv.ip, side: sideOf(sv), role: 'server', kind: 'compose' });
+    }
+    // A side the tier expects but has no server on record is named, as on k8s.
+    if (servers.length > 0) {
+      for (const side of ['primary', 'standby']) {
+        if (servers.some((sv) => sideOf(sv) === side)) continue;
+        skipped.push({
+          name: `${side} server`,
+          ip: null,
+          reason: `no recorded address for the ${side} server`,
+        });
+      }
     }
   } else {
     const key = sshKeyPathFor(envName);

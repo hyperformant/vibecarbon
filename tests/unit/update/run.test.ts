@@ -110,7 +110,7 @@ beforeEach(() => {
   exitCode = null;
   m.confirm.mockResolvedValue(true);
   m.isCancel.mockReturnValue(false);
-  m.releaseLeftoverCordons.mockResolvedValue({ released: [], failed: [] });
+  m.releaseLeftoverCordons.mockResolvedValue({ released: [], unmarked: [], failed: [] });
   m.ensureOperatorIpAccess.mockResolvedValue({ added: false });
   m.executeUpdatePlan.mockResolvedValue({ outcomes: [outcome()], becameDue: [], stoppedAt: null });
   vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -351,7 +351,7 @@ describe('update run', () => {
       reporting: true,
     };
     const mm = { ...w, role: 'master', name: 'm', nodeName: 'm' };
-    const leftovers = [{ name: 'w1', masterIp: '9.9.9.9' }];
+    const leftovers = [{ name: 'w1', masterIp: '9.9.9.9', cordoned: true }];
     const idle = state([]);
     const k8sSetup = () => {
       m.listUpdateTargets.mockResolvedValue({
@@ -367,7 +367,7 @@ describe('update run', () => {
         ],
         skipped: [],
       });
-      m.releaseLeftoverCordons.mockResolvedValue({ released: ['w1'], failed: [] });
+      m.releaseLeftoverCordons.mockResolvedValue({ released: ['w1'], unmarked: [], failed: [] });
     };
     const UNCORDON_LINE = 'uncordon w1, left cordoned by an interrupted update';
 
@@ -380,7 +380,7 @@ describe('update run', () => {
       });
       m.releaseLeftoverCordons.mockImplementation(async () => {
         order.push('release');
-        return { released: ['w1'], failed: [] };
+        return { released: ['w1'], unmarked: [], failed: [] };
       });
       m.executeUpdatePlan.mockImplementation(async () => {
         order.push('execute');
@@ -421,6 +421,7 @@ describe('update run', () => {
       k8sSetup();
       m.releaseLeftoverCordons.mockResolvedValue({
         released: [],
+        unmarked: [],
         failed: [{ name: 'w1', reason: 'kubectl said: timed out' }],
       });
       await go(['prod', '-y']);
@@ -428,12 +429,61 @@ describe('update run', () => {
         'could not uncordon w1 (kubectl said: timed out), so it stays cordoned until the next update',
       );
       expect(m.executeUpdatePlan).toHaveBeenCalledTimes(1);
+      // A node still out of service is no all-clear.
+      expect(text()).not.toContain(allClearLine());
       expect(exitCode).toBe(1);
       m.json.length = 0;
       await go(['prod', '-y', '-json']);
       expect((m.json[0] as { uncordonFailed: unknown }).uncordonFailed).toEqual([
         { name: 'w1', reason: 'kubectl said: timed out' },
       ]);
+    });
+  });
+
+  // The node is back in service but still carries the mark: only the mark goes.
+  describe('a node that kept only the mark of an interrupted update', () => {
+    const w = {
+      ...target,
+      role: 'worker',
+      kind: 'k8s',
+      masterIp: '9.9.9.9',
+      name: 'w1',
+      nodeName: 'w1',
+      reporting: true,
+    };
+    const leftovers = [{ name: 'w1', masterIp: '9.9.9.9', cordoned: false }];
+    const markSetup = () => {
+      m.listUpdateTargets.mockResolvedValue({ tier: 'k8s', targets: [w], skipped: [], leftovers });
+      m.inspectAll.mockResolvedValue({ inspected: [{ target: w, state: state([]) }], skipped: [] });
+      m.releaseLeftoverCordons.mockResolvedValue({ released: [], unmarked: ['w1'], failed: [] });
+    };
+
+    it('plans removing the mark, not an uncordon, and says it once done', async () => {
+      markSetup();
+      await go(['prod', '-y']);
+      expect(text()).toContain('remove the leftover update mark from w1');
+      expect(text()).not.toContain('uncordon w1');
+      expect(text()).toContain('removed the leftover update mark from w1');
+      expect(text()).not.toContain('uncordoned w1');
+      expect(exitCode).toBeNull();
+    });
+
+    it('-json lists it under unmark, not uncordon', async () => {
+      markSetup();
+      await go(['prod', '-json']);
+      expect(m.json[0]).toMatchObject({ uncordon: [], unmark: ['w1'] });
+    });
+
+    it('the release can warn, through the same log as the run', async () => {
+      markSetup();
+      m.releaseLeftoverCordons.mockImplementation(async (_l, deps) => {
+        deps.log.warn('w1 is uncordoned but kept its update mark (x), the next update removes it');
+        return { released: [], unmarked: [], failed: [] };
+      });
+      await go(['prod', '-y']);
+      expect(text()).toContain(
+        'w1 is uncordoned but kept its update mark (x), the next update removes it',
+      );
     });
   });
 
@@ -469,6 +519,30 @@ describe('update run', () => {
       await go(['prod', '-y']);
       expect(text()).toContain('  install the restart reporter');
       expect(m.executeUpdatePlan).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a planned reporter install that fails', () => {
+    it('is listed as reporterFailed, withholds the all-clear, and exits 1 after every server', async () => {
+      setup();
+      m.executeUpdatePlan.mockResolvedValue({
+        outcomes: [outcome({ reporterFailed: true })],
+        becameDue: [],
+        stoppedAt: null,
+      });
+      await go(['prod', '-y']);
+      expect(text()).not.toContain(allClearLine());
+      expect(exitCode).toBe(1);
+      m.json.length = 0;
+      await go(['prod', '-y', '-json']);
+      expect((m.json[0] as { reporterFailed: unknown }).reporterFailed).toEqual(['master']);
+    });
+
+    it('reporterFailed is empty when every planned reporter went in, and the run exits 0', async () => {
+      setup();
+      await go(['prod', '-y', '-json']);
+      expect((m.json[0] as { reporterFailed: unknown }).reporterFailed).toEqual([]);
+      expect(exitCode).toBeNull();
     });
   });
 
@@ -570,7 +644,7 @@ describe('update run', () => {
     expect(m.executeUpdatePlan).not.toHaveBeenCalled();
   });
 
-  it('a re-check that cannot read a server warns, withholds the all-clear, exits 0', async () => {
+  it('a re-check that cannot read a server warns, withholds the all-clear, exits 1', async () => {
     setup();
     m.inspectAll
       .mockResolvedValueOnce({ inspected: [{ target, state: state(['a', 'b']) }], skipped: [] })
@@ -582,7 +656,7 @@ describe('update run', () => {
     expect((m.json[0] as { recheckSkipped: unknown }).recheckSkipped).toEqual([
       { name: 'master', reason: 'timed out' },
     ]);
-    expect(exitCode).toBeNull();
+    expect(exitCode).toBe(1);
     m.out.length = 0;
     m.json.length = 0;
     m.inspectAll
@@ -594,7 +668,7 @@ describe('update run', () => {
     await go(['prod', '-y']);
     expect(text()).toContain(recheckSkippedLine(['master']));
     expect(text()).not.toContain(allClearLine());
-    expect(exitCode).toBeNull();
+    expect(exitCode).toBe(1);
   });
 
   it('recheckSkipped is empty when every server was read', async () => {

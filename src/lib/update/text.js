@@ -64,8 +64,16 @@ function skippedLine(envName, s) {
   return `${head} ${hint}`;
 }
 
-/** A node an interrupted run left cordoned: released once the plan is confirmed. */
-const uncordonPlanLine = (name) => `uncordon ${name}, left cordoned by an interrupted update`;
+/**
+ * A node an interrupted run left cordoned, released once the plan is
+ * confirmed; or one uncordoned since that only kept the mark.
+ *
+ * @param {import('./inventory.js').Leftover} u
+ */
+const leftoverPlanLine = (u) =>
+  u.cordoned
+    ? `uncordon ${u.name}, left cordoned by an interrupted update`
+    : `remove the leftover update mark from ${u.name}`;
 
 /**
  * @param {import('./plan.js').UpdatePlan} plan
@@ -73,7 +81,7 @@ const uncordonPlanLine = (name) => `uncordon ${name}, left cordoned by an interr
  */
 export function formatPlan(plan) {
   const lines = [`update plan for ${plan.envName} (${plan.tier})`];
-  for (const u of plan.uncordon ?? []) lines.push(uncordonPlanLine(u.name));
+  for (const u of plan.uncordon ?? []) lines.push(leftoverPlanLine(u));
   plan.steps.forEach((step, i) => {
     lines.push(`${i + 1}. ${step.target.name} (${step.target.ip})`);
     if (stepIsIdle(step)) {
@@ -133,6 +141,8 @@ export const noServersHint = (envName) =>
   `Run vibecarbon deploy ${envName} to record them before you try again`;
 export const releasedLine = (names) =>
   printable(`uncordoned ${names.join(', ')}, left from an earlier update`);
+export const unmarkedLine = (names) =>
+  printable(`removed the leftover update mark from ${names.join(', ')}`);
 export const releaseFailedLine = (name, why) =>
   printable(`could not uncordon ${name} (${why}), so it stays cordoned until the next update`);
 export const confirmQuestion = (envName) => `Update ${envName} now?`;
