@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { progressLog } from './cli/progress.js';
 import { runCommandAsync } from './command.js';
 import { DB_POD_SELECTOR } from './deploy/db-workload.js';
+import { environmentForStack } from './environment-name.js';
 import { buildHostKeyOpts, knownHostsPath, SSH_CONNECTION_OPTS } from './host-keys.js';
 import { assertOperatorIpUnchanged } from './operator-ip-guard.js';
 import { runWithRetry } from './retry.js';
@@ -47,18 +48,8 @@ const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
  * @returns {string}
  */
 export function sshKeyPathFor(environment, cwd = process.cwd()) {
-  const baseEnv = baseEnvName(environment);
+  const baseEnv = environmentForStack(environment);
   return join(cwd, '.vibecarbon', `deploy_key_${baseEnv}`);
-}
-
-/**
- * The operator's environment name for a stack name: k8s-ha and compose-ha
- * stacks are `<env>-primary` and `<env>-standby`.
- * @param {string} environment
- * @returns {string}
- */
-export function baseEnvName(environment) {
-  return environment.replace(/-(primary|standby)$/, '');
 }
 
 /**

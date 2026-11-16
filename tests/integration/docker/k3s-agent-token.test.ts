@@ -175,6 +175,33 @@ describe.skipIf(SKIPPED)(`the k3s token joins agents only (k3s ${VERSION})`, () 
     LONG,
   );
 
+  it('no Node annotation or label carries the k3s token (the app can list Nodes)', () => {
+    // Run after the agent joined (it joins with K3S_TOKEN in its env, which
+    // k3s records in k3s.io/node-env). The app's ClusterRole reads every Node; k3s records the server's argv
+    // in the k3s.io/node-args annotation, and --agent-token is on that argv.
+    waitFor(
+      'the master Node to register',
+      () => kubectl('get', 'node', MASTER, '-o', 'name').status === 0,
+      60_000,
+    );
+    const nodes = JSON.parse(kubectl('get', 'nodes', '-o', 'json').stdout) as {
+      items: {
+        metadata: { annotations?: Record<string, string>; labels?: Record<string, string> };
+      }[];
+    };
+    expect(nodes.items.length).toBeGreaterThan(0);
+    const annotations = nodes.items.flatMap((n) => Object.keys(n.metadata.annotations ?? {}));
+    // Not vacuous: the annotation that holds the flags is there, and names the flag.
+    expect(annotations).toContain('k3s.io/node-args');
+    const args = nodes.items.find((n) => n.metadata.name === MASTER)?.metadata.annotations?.[
+      'k3s.io/node-args'
+    ] as string;
+    expect(args).toContain('--agent-token');
+    const metadata = JSON.stringify(nodes.items.map((n) => n.metadata));
+    expect(metadata.includes(K3S_TOKEN), 'the k3s token in Node metadata').toBe(false);
+    console.info(`node annotation keys: ${[...new Set(annotations)].sort().join(', ')}`);
+  });
+
   it(
     'a server that joins with it is turned away',
     () => {

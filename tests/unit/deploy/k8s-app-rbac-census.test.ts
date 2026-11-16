@@ -118,12 +118,28 @@ describe('k8s: the app ServiceAccount reads pods and their logs, nothing else', 
     ]);
   });
 
-  it('no other subject-kind binding reaches the app through a group or the namespace', () => {
-    // A ClusterRoleBinding to a broad group would also give the app power.
+  it('no other ClusterRoleBinding binds the app', () => {
     for (const d of all.filter((x) => x.kind === 'ClusterRoleBinding')) {
       if (d.metadata?.name === 'vibecarbon-app-nodes') continue;
       expect(bindsAppSa(d), d.metadata?.name).toBe(false);
     }
+  });
+
+  it('no binding grants the app anything through a broad group', () => {
+    // Every pod's ServiceAccount is in these groups, the app's included.
+    const BROAD = [
+      'system:serviceaccounts',
+      'system:serviceaccounts:vibecarbon',
+      'system:authenticated',
+      'system:unauthenticated',
+    ];
+    const viaGroup = all
+      .filter((d) => d.kind === 'RoleBinding' || d.kind === 'ClusterRoleBinding')
+      .filter((d) =>
+        (d.subjects ?? []).some((s: Doc) => s.kind === 'Group' && BROAD.includes(s.name)),
+      )
+      .map((d) => `${d.kind}/${d.metadata?.name}`);
+    expect(viaGroup).toEqual([]);
   });
 });
 

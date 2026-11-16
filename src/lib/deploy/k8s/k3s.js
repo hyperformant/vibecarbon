@@ -60,6 +60,7 @@ import { backupStorageConfig } from '../../backups-bucket.js';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { parseDotenv } from '../../dotenv.js';
+import { environmentForStack } from '../../environment-name.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
 import { withHostReporter } from '../../host-reporter.js';
 import { CLOUD_INIT_DIR } from '../../iac/cloud-init.js';
@@ -96,7 +97,7 @@ import {
   k8sStandbyZeroedWorkloads,
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
-import { baseEnvName, scpWithRetry, sshKeyPathFor, sshKubectl, sshRun } from '../../ssh.js';
+import { scpWithRetry, sshKeyPathFor, sshKubectl, sshRun } from '../../ssh.js';
 import { makeTempDir, removeTempDir } from '../../temp-dir.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
@@ -1801,7 +1802,9 @@ function redisPassword(envLocal) {
  * token ever lands here. Pure, so the contents are testable without a cluster.
  *
  * `environment` becomes VIBECARBON_ENV, the operator's name for the restart
- * notice; the Secret holds no VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX_BASE
+ * notice.
+ *
+ * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX_BASE
  * from s3Config.walgPrefix (buildDbManifestValues) and nothing in carbon/k8s
  * reads it; in k8s-ha the stack env (prod-primary) is not even the env's name.
  *
@@ -1816,7 +1819,7 @@ export function buildAppSecretData({ envLocal, s3Config, environment }) {
   // VIBECARBON_ENV: the operator's environment name, for the restart notice's
   // `vibecarbon update <env>` hint (k8s-ha stack names lose their role suffix).
   return buildAppRuntimeEnv(
-    environment ? { ...envLocal, VIBECARBON_ENV: baseEnvName(environment) } : envLocal,
+    environment ? { ...envLocal, VIBECARBON_ENV: environmentForStack(environment) } : envLocal,
     extras,
   );
 }

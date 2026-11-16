@@ -34,6 +34,7 @@ import { gitSafeEnv } from '../../command.js';
 import { loadProjectConfig } from '../../config.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
 import { parseDotenv } from '../../dotenv.js';
+import { environmentForStack } from '../../environment-name.js';
 import {
   listEnvironmentVariables,
   listRepoSecretNames,
@@ -497,7 +498,12 @@ export async function deployK8sGitOps(args) {
   s.start(`Seeding GitHub Environment '${environment}'`);
 
   const envLocal = parseEnvLocal(projectDir);
-  const perEnvSecrets = buildPerEnvSecrets(envLocal, { appStorage });
+  // VIBECARBON_ENV: the operator's environment name, for the app's restart
+  // notice (deploy.yml's APP_KEYS pick it into the app Secret).
+  const perEnvSecrets = {
+    ...buildPerEnvSecrets(envLocal, { appStorage }),
+    VIBECARBON_ENV: environmentForStack(environment),
+  };
   const perEnvVars = {
     SITE_URL: domain ? `https://${domain}` : '',
     // Per environment, never in the committed k8s/base every environment

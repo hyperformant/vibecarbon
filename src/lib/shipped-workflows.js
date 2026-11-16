@@ -34,7 +34,7 @@ export const SHIPPED_WORKFLOWS = Object.freeze({
     'sha256:1a31feb601f9d518b1845b4f540d4bb8b0cc5715d3b6681e65376c1dabc1ccad', // 12c76b22 2026-11-12
     'sha256:42c70cbe1ddbc83c84c8a39bd8b542c1455be5fb6b25bb392dc70484a89c42ff', // e237e3ea 2026-11-12
     'sha256:bd2626fb4a5a1a39b29cb23383a8fa24c9eb61541bcf2eeb6010e037f33bde3b', // a7e8596b 2026-11-14
-    'sha256:d32466c1cfdb312c6556c6b5f974ba8e00d21d27d0d40c8ba440c4a6600d8917', // feat(update) host restart state 2026-11-15
+    'sha256:d32466c1cfdb312c6556c6b5f974ba8e00d21d27d0d40c8ba440c4a6600d8917', // 70fe267a 2026-11-15
   ]),
   '.github/workflows/vibecarbon-build.yml': new Set([
     'sha256:aacf3951c389427d2680f924170968e45542f5af10ba29a50ba1793e7d171a2c', // 32afb12d 2026-08-22

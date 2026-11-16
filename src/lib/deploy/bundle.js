@@ -11,6 +11,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine, parseDotenv } from '../dotenv.js';
+import { environmentForStack } from '../environment-name.js';
 import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from '../images.js';
 import { perfTimer } from '../perf.js';
 import {
@@ -22,7 +23,6 @@ import {
   renderAddonServicesScript,
 } from '../services/addon-start.js';
 import { composeStandbyScaledServices, enabledAddonNames } from '../services/standby-policy.js';
-import { baseEnvName } from '../ssh.js';
 import { makeTempDir, removeTempDir } from '../temp-dir.js';
 import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
 import { renderComposeCommand, VC_COMPOSE, VC_COMPOSE_SCRIPT } from './compose/command.js';
@@ -502,7 +502,7 @@ function writeBundle(stageDir, projectName, options) {
   // the server .env (which the db reads) is unchanged.
   const appEnv = buildAppRuntimeEnv(
     options.environment
-      ? { ...serverEnv, VIBECARBON_ENV: baseEnvName(options.environment) }
+      ? { ...serverEnv, VIBECARBON_ENV: environmentForStack(options.environment) }
       : serverEnv,
     appStorageCredential({
       s3Config: options.s3,
