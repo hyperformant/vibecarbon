@@ -17,7 +17,7 @@ import { requireAal2 } from '@server/middleware/requireAal2';
 import { sessionMiddleware } from '@server/middleware/session';
 import type { HonoVariables } from '@server/types';
 import { totpCode, wrongTotpCode } from '../_helpers/totp';
-import { connectTestDb, dbTestsEnabled } from './_helpers';
+import { CookieJar, connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
  * Two-factor sign-in and the per-session assurance level, against the
@@ -53,32 +53,6 @@ function buildApp() {
   });
   app.delete('/api/v1/gated', requireAal2, (c) => c.json({ ok: true }));
   return app;
-}
-
-/** A browser's cookie store, enough for these flows (one host, no paths). */
-class CookieJar {
-  private cookies = new Map<string, string>();
-
-  take(res: Response): Response {
-    for (const line of res.headers.getSetCookie()) {
-      const [pair, ...attrs] = line.split(';');
-      const at = pair.indexOf('=');
-      const name = pair.slice(0, at).trim();
-      const value = pair.slice(at + 1);
-      const expired = value === '' || attrs.some((a) => /^\s*max-age=0\s*$/i.test(a));
-      if (expired) this.cookies.delete(name);
-      else this.cookies.set(name, value);
-    }
-    return res;
-  }
-
-  get header(): string {
-    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
-  }
-
-  has(name: string): boolean {
-    return this.cookies.has(name);
-  }
 }
 
 /** The signed session cookie a browser would hold for `token`. */
