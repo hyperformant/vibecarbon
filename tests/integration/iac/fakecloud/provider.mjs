@@ -24,6 +24,11 @@
  *     is gone (released by address, outside Pulumi) fails with a 404, as
  *     DigitalOcean's API answers for an address no longer on the account:
  *     the stack that still lists it can then neither refresh nor destroy.
+ *
+ * fakecloud:index:Vpc (destroy-finishes-stack-after-sweeps.test.ts) models
+ * DigitalOcean's VPC: its delete is refused with a 409 while the cloud file
+ * lists members for it (`members[<vpc id>]`, which a test writes for a server
+ * no stack records), and a read of one that is gone returns nothing.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as provider from '@pulumi/pulumi/provider/index.js';
@@ -41,6 +46,7 @@ const save = (cloud) => writeFileSync(file, JSON.stringify(cloud));
 const SERVER = 'fakecloud:index:Server';
 const RESERVED_IP = 'fakecloud:index:ReservedIp';
 const ASSIGNMENT = 'fakecloud:index:ReservedIpAssignment';
+const VPC = 'fakecloud:index:Vpc';
 
 /** A property value without the wrapper the engine puts on a secret. */
 const revealed = (value) =>
@@ -154,6 +160,9 @@ const fakecloud = {
       if (type === ASSIGNMENT) {
         const assignment = thingsOf(cloud, ASSIGNMENT)[id];
         if (assignment) ipOrNotFound(cloud, assignment).assignedTo = null;
+      }
+      if (type === VPC && (cloud.members?.[id] ?? []).length > 0) {
+        throw new Error(`DELETE /v2/vpcs/${id}: 409 Can not delete VPC with members`);
       }
       delete thingsOf(cloud, type)[id];
     }

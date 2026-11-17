@@ -991,6 +991,44 @@ The module imports Node builtins only, for the same reason.
 all three entry points, and runs a real Node process to prove load-time paths
 land in the e2e home and a preset home is respected.
 
+#### 2026-11-16: `destroy` finishes a stack its own cleanup unblocked (#504)
+
+On the k8s tiers, when a stack's `pulumi destroy` runs and leaves resources
+behind, and the cleanup that runs after it (the orphaned-server sweep and the
+per-stack backstop) removes something of that stack, `destroy` runs `pulumi
+destroy` for that stack one more time. When that pass succeeds the stack's state is removed as on any
+clean destroy, and nothing is reported for it. When it fails, the report, exit
+code 2 and the kept environment entry are as before.
+
+**Why:** a DigitalOcean k8s-ha deploy on 2026-11-15 was interrupted while a
+droplet was being created. The droplet existed, but the Pulumi stack held only
+the unfinished create. `pulumi destroy` then failed on the VPC ("409 Can not
+delete VPC with members"), the sweep deleted the droplet, the backstop deleted
+the VPC, and the provider was clean. The stack still listed the VPC, so
+`destroy` reported it UNVERIFIED, exited 2 and told the user to run it again.
+The stack file stayed in the state bucket, and the e2e sweep rightly never
+deletes a stack with an unfinished create, so it was removed by hand.
+
+**Do not undo:** this is one pass, not a retry. It runs only for a stack the
+cleanup removed something of, because that is the only case where the second
+destroy is a different operation from the first. Do not turn it into a loop,
+add a wait, or run it when nothing changed: a repeat of the same destroy
+against the same cloud hides whatever made it fail. A stack another run holds
+gets no second pass either, since no destroy ran against it. A failure is written to
+the leak report only after this pass, so the report never has to take a line
+back; keep it that way instead of teaching the ledger to delete lines. The
+orphan-stack cleanup (`destroy -orphans`) and the compose tiers get no second
+pass: nothing runs between their Pulumi step and their report that could
+change the outcome. The e2e sweep's rule about unfinished creates stays.
+
+**Guard:** `tests/integration/iac/destroy-finishes-stack-after-sweeps.test.ts`
+replays the incident on the real Pulumi engine: a VPC whose delete is refused,
+an unfinished create in the state, then the stack file, its `.json.bak` and
+its history gone and nothing reported.
+`tests/unit/destroy/failed-stack-second-pass.test.ts` runs the real k8s
+teardown and fails on a second pass for a stack nothing was removed of, and on
+a third pass for any stack.
+
 ## Added and later removed
 
 | What | Removed | Why |
