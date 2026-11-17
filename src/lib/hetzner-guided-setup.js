@@ -14,42 +14,45 @@
  */
 
 import * as p from '@clack/prompts';
-import { exitCancelled } from './cli/exit-guard.js';
-import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import {
-  dotenvPromptProblem,
-  normalizeOperatorValue,
-  pastedKeyShapeProblem,
-  readOperatorVar,
-} from './operator-env.js';
-import { describeCredentialSource, setEnvVar } from './project.js';
+  checkApiToken,
+  createCredentialSaver,
+  finishS3Credentials,
+  promptForVerifiedToken,
+  promptS3KeyPair,
+  verifiedEnvToken,
+} from './guided-setup-shared.js';
+import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { describeCredentialSource } from './project.js';
 
 /**
  * Validate a Hetzner API token by making a lightweight API call.
  * @param {string} token
  * @returns {Promise<{ valid: boolean, error?: string }>}
  */
-async function validateHetznerToken(token) {
-  try {
-    const res = await fetch('https://api.hetzner.cloud/v1/locations?per_page=1', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) return { valid: true };
-    if (res.status === 401) return { valid: false, error: 'Token is invalid or expired' };
-    // A 5xx is the PROVIDER's outage, not the operator's credential: treat it
-    // like the network-error catch below (proceed with the env token; real
-    // API calls fail honestly later if the outage persists). Live RCA
-    // 2026-09-01 (run 33557406486): a Vultr API 502 on this preflight read
-    // as "token invalid", and the non-TTY destroy died trying to prompt.
-    if (res.status >= 500) return { valid: true, unreachable: true };
-    return { valid: false, error: `Hetzner API returned status ${res.status}` };
-  } catch {
-    return { valid: true, unreachable: true };
-  }
+function validateHetznerToken(token) {
+  return checkApiToken(
+    'https://api.hetzner.cloud/v1/locations?per_page=1',
+    { Authorization: `Bearer ${token}` },
+    { api: 'Hetzner', unauthorized: 'Token is invalid or expired' },
+  );
 }
+
+// What guided-setup-shared.js needs to look up, prompt for and verify the token.
+const API_TOKEN = {
+  envKey: 'HETZNER_API_TOKEN',
+  provider: 'Hetzner',
+  verify: validateHetznerToken,
+  // Measure the NORMALIZED paste: a quote-wrapped or newline-terminated
+  // 64-char token is fine once cleaned (M11).
+  shapeProblem: (v) =>
+    normalizeOperatorValue(v, registryEntry('HETZNER_API_TOKEN')).value.length !== 64
+      ? 'Token should be 64 characters - please check you copied it correctly'
+      : undefined,
+};
 
 /**
  * Display improved visual guide for API token creation.
@@ -100,41 +103,9 @@ export function displayS3CredentialsGuide(projectName) {
   );
 }
 
-// Session-level save preference: null = not asked yet, true/false = user's answer.
-// Once the user answers "Save keys for future deploys?" the decision applies to all
-// credentials prompted during this process.
-let _savePreference = null;
-
-/**
- * Ask the user once whether to save credentials, then reuse the answer.
- * @param {Record<string, string>} envVars - Flat env-var-name → value map to
- *   persist to the project's .env.local (operator-secret keys — see
- *   config-registry.js — always write localOnly, never .env).
- */
-async function saveIfWanted(envVars) {
-  if (_savePreference === null) {
-    // Unreachable by construction today (this helper only runs after an
-    // interactive prompt already succeeded, so stdin was a TTY), but the
-    // invariant is 'any function that prompts, guards first' — so a future
-    // caller that reaches it non-interactively fails loudly, not silently.
-    assertInteractiveStdin({
-      what: 'whether to save the Hetzner credentials',
-      envVar: 'HETZNER_API_TOKEN',
-    });
-    const shouldSave = await p.confirm({
-      message: 'Save keys for future deploys?',
-      initialValue: true,
-    });
-    _savePreference = shouldSave && !p.isCancel(shouldSave);
-  }
-
-  if (_savePreference) {
-    for (const [key, value] of Object.entries(envVars)) {
-      setEnvVar(key, value, process.cwd(), { localOnly: true });
-    }
-    p.log.info(c.dim('Saved to .env.local'));
-  }
-}
+// Session-level save preference: once the user answers "Save keys for future
+// deploys?" the decision applies to all credentials prompted during this process.
+const saveIfWanted = createCredentialSaver({ provider: 'Hetzner', envVar: 'HETZNER_API_TOKEN' });
 
 /**
  * Get API token with improved visual guidance
@@ -151,25 +122,8 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    // Check environment variable
-    const envToken = readOperatorVar('HETZNER_API_TOKEN').value;
-    if (envToken) {
-      const check = await validateHetznerToken(envToken);
-      if (!check.valid) {
-        p.log.warn(
-          `HETZNER_API_TOKEN from ${describeCredentialSource(['HETZNER_API_TOKEN']).where} is set but invalid: ${check.error}`,
-        );
-        // Fall through to interactive prompt
-      } else {
-        if (check.unreachable) {
-          p.log.warn('Could not reach Hetzner API to verify token, proceeding with saved token');
-        }
-        p.log.info(
-          `✓ Using Hetzner API token from ${describeCredentialSource(['HETZNER_API_TOKEN']).label}`,
-        );
-        return envToken;
-      }
-    }
+    const envToken = await verifiedEnvToken(API_TOKEN);
+    if (envToken) return envToken;
   }
 
   // Off a TTY this prompt can never be answered — clack's promise would
@@ -178,44 +132,7 @@ export async function getApiToken(projectName, options = {}) {
   assertInteractiveStdin({ what: 'the Hetzner API token', envVar: 'HETZNER_API_TOKEN' });
   // Interactive prompt (with retry on invalid token)
   displayApiTokenGuide(projectName);
-
-  let token;
-  while (true) {
-    token = await p.password({
-      message: 'Paste your Hetzner API token here',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'API token is required';
-        // Measure the NORMALIZED paste — a quote-wrapped or newline-
-        // terminated 64-char token is fine once cleaned (M11).
-        if (normalizeOperatorValue(v, registryEntry('HETZNER_API_TOKEN')).value.length !== 64)
-          return 'Token should be 64 characters - please check you copied it correctly';
-        return dotenvPromptProblem('HETZNER_API_TOKEN', v);
-      },
-    });
-
-    if (p.isCancel(token)) {
-      exitCancelled();
-    }
-    // First-time-user path (M11): the paste goes through the same
-    // normalization every later readOperatorVar() read applies — trailing
-    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
-    // against the live API, exported to process.env or saved to .env.local.
-    token = normalizeOperatorValue(token, registryEntry('HETZNER_API_TOKEN')).value;
-
-    const s = spinner();
-    s.start('Verifying API token...');
-    const check = await validateHetznerToken(token);
-    if (check.valid) {
-      if (check.unreachable) {
-        s.stop('Could not reach Hetzner API, proceeding with unverified token');
-      } else {
-        s.stop('API token verified');
-      }
-      break;
-    }
-    s.stop(`Token invalid: ${check.error}`);
-    p.log.warn('Please try again with a valid token.');
-  }
+  const token = await promptForVerifiedToken(API_TOKEN);
 
   // In-process coherence (A2): a freshly-entered token must be visible to
   // any later env-first resolution in this same process, regardless of
@@ -272,46 +189,12 @@ export async function getS3Credentials(projectName, options = {}) {
   });
   // Interactive prompt
   displayS3CredentialsGuide(projectName);
-
-  const accessKeyInput = await p.text({
-    message: 'Paste your S3 Access Key here',
-    validate: (v) => {
-      if (!v || v.length < 10) return 'Access Key is required';
-      return (
-        pastedKeyShapeProblem('HETZNER_ACCESS_KEY', v) ??
-        dotenvPromptProblem('HETZNER_ACCESS_KEY', v)
-      );
-    },
+  const { accessKey, secretKey } = await promptS3KeyPair({
+    provider: 'Hetzner',
+    accessEnvKey: 'HETZNER_ACCESS_KEY',
+    secretEnvKey: 'HETZNER_SECRET_KEY',
+    label: 'S3',
   });
-
-  if (p.isCancel(accessKeyInput)) {
-    exitCancelled();
-  }
-
-  const secretKeyInput = await p.password({
-    message: 'Paste your S3 Secret Key here',
-    validate: (v) => {
-      if (!v || v.length < 10) return 'Secret Key is required';
-      return (
-        pastedKeyShapeProblem('HETZNER_SECRET_KEY', v) ??
-        dotenvPromptProblem('HETZNER_SECRET_KEY', v)
-      );
-    },
-  });
-
-  if (p.isCancel(secretKeyInput)) {
-    exitCancelled();
-  }
-
-  // Same first-time-user normalization as getApiToken above (M11).
-  const accessKey = normalizeOperatorValue(
-    accessKeyInput,
-    registryEntry('HETZNER_ACCESS_KEY'),
-  ).value;
-  const secretKey = normalizeOperatorValue(
-    secretKeyInput,
-    registryEntry('HETZNER_SECRET_KEY'),
-  ).value;
 
   p.log.success('S3 credentials received!');
 
@@ -319,20 +202,10 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.HETZNER_ACCESS_KEY = accessKey;
   process.env.HETZNER_SECRET_KEY = secretKey;
 
-  const keys = { HETZNER_ACCESS_KEY: accessKey, HETZNER_SECRET_KEY: secretKey };
-  // deferSave: the caller verifies the keys against S3 first and calls
-  // save() only once they pass, so a rejected pair is never written.
-  if (deferSave) {
-    return {
-      accessKey,
-      secretKey,
-      source: 'what you pasted',
-      save: save ? () => saveIfWanted(keys) : async () => {},
-    };
-  }
-  if (save) {
-    await saveIfWanted(keys);
-  }
-
-  return { accessKey, secretKey, source: 'what you pasted' };
+  return finishS3Credentials(
+    { accessKey, secretKey, source: 'what you pasted' },
+    { HETZNER_ACCESS_KEY: accessKey, HETZNER_SECRET_KEY: secretKey },
+    { save, deferSave },
+    saveIfWanted,
+  );
 }

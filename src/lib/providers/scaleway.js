@@ -55,7 +55,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
+import { standbyStandIn } from '../sizing.js';
 import {
   BaseProvider,
   deleteFailure,
@@ -732,39 +732,6 @@ export class ScalewayProvider extends BaseProvider {
       ...info,
       architecture: 'x86',
     }));
-  }
-
-  /**
-   * Default type per role in `region` (compose-only: all four are the
-   * compose pick) — the cheapest orderable ROLE_CANDIDATES entry that meets
-   * the RAM floor (src/lib/sizing.js).
-   * @param {string} region - zone
-   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
-   */
-  static getRegionDefaults(region) {
-    return regionRoleDefaults(ScalewayProvider, region);
-  }
-
-  /**
-   * Default HA standby region for a given primary: the cheapest
-   * same-continent partner where every standby role is orderable right now
-   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
-   * conventionalStandbyRegion's pair. The pre-selected value in the
-   * interactive standby prompt and the headless default.
-   * @param {string} primaryRegion
-   * @param {string[]} [roles] - the roles the standby places
-   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
-   *   type by role: a partner must fit each without shrinking it
-   * @returns {string}
-   */
-  static getDefaultStandbyRegion(primaryRegion, roles = ['compose'], primaryTypes = {}) {
-    return cheapestStandbyRegion(
-      ScalewayProvider,
-      primaryRegion,
-      roles,
-      ScalewayProvider.conventionalStandbyRegion(primaryRegion),
-      primaryTypes,
-    );
   }
 
   /**
@@ -1722,15 +1689,6 @@ export class ScalewayProvider extends BaseProvider {
       items.push(...walk.items);
     }
     return items;
-  }
-
-  /**
-   * List ALL volumes (soft-fail contract matching listServers) — BOTH
-   * volume products, see listVolumesDetailed.
-   * @returns {Promise<object[]>}
-   */
-  async listVolumes() {
-    return (await this.listVolumesDetailed()).items;
   }
 
   /**

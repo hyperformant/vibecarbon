@@ -9,7 +9,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
+import { standbyStandIn } from '../sizing.js';
 import {
   BaseProvider,
   deleteFailure,
@@ -88,12 +88,12 @@ export class HetznerProvider extends BaseProvider {
 
   // ── Guided setup delegation (C7d) ────────────────────────────────────
   // hetzner-guided-setup.js stays the single implementation (visual guide,
-  // 64-char token validation, module-level `_savePreference` "save keys for
+  // 64-char token validation, module-level `saveIfWanted` "save keys for
   // future deploys?" session state). Dynamic import (never top-level) keeps
   // that module out of this class's static-load graph and — because ESM
   // caches a module instance per resolved specifier — every call below
   // still shares the SAME module object (and therefore the same
-  // `_savePreference`) as every other call made during the process
+  // `saveIfWanted` answer) as every other call made during the process
   // lifetime, matching the pre-C7d direct-import behavior exactly. Args
   // are forwarded verbatim (no re-declared defaults here) so the module's
   // own `{ save = true }` / `{ save = true, force = false }` defaults stay
@@ -195,28 +195,6 @@ export class HetznerProvider extends BaseProvider {
   };
 
   /**
-   * Default HA standby region for a given primary: the cheapest
-   * same-continent partner where every standby role is orderable right now
-   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
-   * conventionalStandbyRegion's pair. The pre-selected value in the
-   * interactive standby prompt and the headless default.
-   * @param {string} primaryRegion
-   * @param {string[]} [roles] - the roles the standby places
-   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
-   *   type by role: a partner must fit each without shrinking it
-   * @returns {string}
-   */
-  static getDefaultStandbyRegion(primaryRegion, roles = ['compose'], primaryTypes = {}) {
-    return cheapestStandbyRegion(
-      HetznerProvider,
-      primaryRegion,
-      roles,
-      HetznerProvider.conventionalStandbyRegion(primaryRegion),
-      primaryTypes,
-    );
-  }
-
-  /**
    * The static HA standby pair for a given primary: a DIFFERENT region on the
    * same continent, so failover stays intra-continent (a US primary fails over
    * to the other US region, not across the Atlantic). getDefaultStandbyRegion
@@ -311,7 +289,14 @@ export class HetznerProvider extends BaseProvider {
   // Hetzner stocks it (it flips), `cpx21` is the US line. `cpx11` is 2 GB,
   // so it is a db-only candidate; `cpx21` closes the db list as the US 4 GB
   // last resort, so an ash/hil cpx11 stock-out still has a db default. Live,
-  // the cheapest orderable one wins.
+  // the cheapest orderable one wins (BaseProvider.getRegionDefaults reads
+  // `_locationTypes` and `_prices`). Offline it reads
+  // getServerTypesForRegion's offline offer in this order, which gives
+  // `cpx22` / `cpx12` (db) in the EU and `cpx21` / `cpx11` in ash/hil:
+  // Hetzner's catalog is split by geography AND generation (the `cpx*1` line
+  // was deprecated in the EU on 2026-01-01, the `cpx*2` line never reached
+  // ash/hil, and `cx*3` flips `available`), so no single shared x86 SKU is
+  // orderable in every location.
   static ROLE_CANDIDATES = {
     compose: ['cpx22', 'cx23', 'cpx21'],
     master: ['cpx22', 'cx23', 'cpx21'],
@@ -765,23 +750,6 @@ export class HetznerProvider extends BaseProvider {
     if (typeof loc === 'string') return true;
     if (loc?.deprecation) return false;
     return loc?.available !== false;
-  }
-
-  /**
-   * Default type per role in `region`: the cheapest orderable
-   * ROLE_CANDIDATES entry that meets the role's RAM floor
-   * (src/lib/sizing.js). Live, that reads `_locationTypes` and `_prices`.
-   * Offline it reads getServerTypesForRegion's offline offer in declared
-   * order, which gives `cpx22` / `cpx12` (db) in the EU and `cpx21` /
-   * `cpx11` in ash/hil: Hetzner's catalog is split by geography AND
-   * generation (the `cpx*1` line was deprecated in the EU on 2026-01-01, the
-   * `cpx*2` line never reached ash/hil, and `cx*3` flips `available`), so no
-   * single shared x86 SKU is orderable in every location.
-   * @param {string} region
-   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
-   */
-  static getRegionDefaults(region) {
-    return regionRoleDefaults(HetznerProvider, region);
   }
 
   /**
@@ -1768,16 +1736,6 @@ export class HetznerProvider extends BaseProvider {
    */
   async listNetworks() {
     return this.#listAllPages('/networks', 'networks');
-  }
-
-  /**
-   * List ALL volumes, walking pagination. The orphaned-CSI-volume sweep
-   * matches these client-side, so a truncated first page leaks every volume
-   * beyond it (see #listAllPages).
-   * @returns {Promise<object[]>}
-   */
-  async listVolumes() {
-    return (await this.listVolumesDetailed()).items;
   }
 
   /**

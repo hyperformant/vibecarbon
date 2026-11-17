@@ -46,14 +46,14 @@ import {
   displayS3CredentialsGuide,
 } from '../../../src/lib/hetzner-guided-setup.js';
 
-// getApiToken/getS3Credentials share a module-level `_savePreference` flag
+// getApiToken/getS3Credentials share a module-level save preference (its `saveIfWanted`)
 // (by design — one "Save keys for future deploys?" answer applies to every
 // credential prompted in a single guided-setup session). That means the two
 // functions can't be imported once at module scope for these describe
 // blocks: an earlier test's answer would leak into a later test as a
 // already-decided (non-null) preference and short-circuit its confirm
 // prompt. vi.resetModules() + a fresh dynamic import per test isolates each
-// test's `_savePreference` back to null — mirrors the freshImport() pattern
+// test's save preference back to unasked — mirrors the freshImport() pattern
 // in tests/unit/lib/github-environments.test.ts.
 async function freshGuidedSetup() {
   vi.resetModules();
