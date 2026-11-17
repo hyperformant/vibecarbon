@@ -15,7 +15,7 @@ const ENVELOPE_HEAD_RE = /code:\s*-?\d+\s*$/i;
  * True when `text` carries the automation API's raw envelope.
  * @param {string} text
  */
-export function isCommandEnvelope(text) {
+function isCommandEnvelope(text) {
   const lines = String(text ?? '').split('\n');
   return (
     ENVELOPE_HEAD_RE.test(lines[0] ?? '') && lines.some((l) => /^\s*(stdout|stderr):/i.test(l))

@@ -18,7 +18,7 @@ export function pgMajorFromTag(tag) {
 }
 
 /** Longest the throwaway read may take (a first pull included) before the check gives up. */
-export const READ_TIMEOUT_MS = 120_000;
+const READ_TIMEOUT_MS = 120_000;
 
 /** Run docker with argv, returning stdout; throws on a non-zero exit or a timeout. */
 function dockerCli(argv, { timeout } = {}) {

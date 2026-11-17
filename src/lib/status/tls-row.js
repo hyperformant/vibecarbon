@@ -36,7 +36,7 @@ const PROBE_TIMEOUT_MS = 10_000;
  * missing (a deploy removes both), which reads as nothing recorded.
  * @param {string} remoteDir
  */
-export function tlsRetryReadSh(remoteDir) {
+function tlsRetryReadSh(remoteDir) {
   return (
     `cd ${remoteDir} && ` +
     'echo "STATE=$(cat backups/tls-retry.state 2>/dev/null)"; ' +

@@ -68,7 +68,7 @@ export const DB_GUARD_PROTOCOL_MARKER = '# vc-reseed-protocol: 1';
 export const DB_GUARD_COMMAND = Object.freeze(['sh', '/usr/local/bin/db-guard.sh']);
 
 /** The docs/technical.md section that walks the rebuild below. */
-export const STANDBY_DB_REBUILD_DOC =
+const STANDBY_DB_REBUILD_DOC =
   'docs/technical.md, "Rebuilding a k8s-ha standby whose db cannot start"';
 
 /**

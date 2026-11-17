@@ -243,7 +243,7 @@ function listGitTrackedFiles(cwd) {
  * @param {FileFinding[]} findings
  * @returns {string}
  */
-export function formatFindings(findings) {
+function formatFindings(findings) {
   if (!findings || findings.length === 0) return '';
   const lines = [];
   lines.push(`Detected ${findings.length} potential secret${findings.length === 1 ? '' : 's'}:`);

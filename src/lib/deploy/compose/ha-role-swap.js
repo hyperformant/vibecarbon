@@ -158,7 +158,7 @@ export function composeHaStackOf(entry, projectName, environment) {
  * @param {string} environment
  * @returns {string[]}
  */
-export const COMPOSE_HA_SWAPPED_RECOVERY = (environment) => [
+const COMPOSE_HA_SWAPPED_RECOVERY = (environment) => [
   `Run \`vibecarbon deploy ${environment}\` to get back to two nodes: it keeps the promoted node`,
   'serving as the primary and rebuilds the retired node as the new standby from it,',
   'with no downtime.',
@@ -169,7 +169,7 @@ export const COMPOSE_HA_SWAPPED_RECOVERY = (environment) => [
  * role standby is the retired node, frozen at the failover and not replicating:
  * promoting it would serve a database missing every write since.
  */
-export function composeHaFailoverRefusalMessage(detail) {
+function composeHaFailoverRefusalMessage(detail) {
   const { environment, byStack, lastFailover } = detail;
   const liveIp = byStack.standby.ip ?? '(ip unknown)';
   const retiredIp = byStack.primary.ip ?? '(ip unknown)';

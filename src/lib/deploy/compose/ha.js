@@ -470,7 +470,7 @@ export async function ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, proj
  * @param {string} [envName]
  * @returns {string}
  */
-export function composeStandbyDbRebuildHint(projectName, envName) {
+function composeStandbyDbRebuildHint(projectName, envName) {
   return (
     "If the standby's postgres cannot start at all (a crash loop, a damaged data directory), " +
     'rebuild its db on the STANDBY server (never the primary) with ' +
@@ -481,7 +481,7 @@ export function composeStandbyDbRebuildHint(projectName, envName) {
 }
 
 /** How long the compose lineage read waits for a just-recreated db to accept connections. */
-export const COMPOSE_LINEAGE_READY_WAIT_S = 60;
+const COMPOSE_LINEAGE_READY_WAIT_S = 60;
 
 /**
  * One compose node's db lineage (standby-lineage.js DB_LINEAGE_SQL), read in
@@ -921,7 +921,7 @@ export async function openWireguardPortUfw(ip, peerIp, sshKeyPath) {
  * @param {string} peerIp - The current peer's public IPv4.
  * @returns {string[]}
  */
-export function ufwWireguardPeerCommands(ufwStatus, peerIp) {
+function ufwWireguardPeerCommands(ufwStatus, peerIp) {
   const deletes = new Set();
   for (const line of ufwStatus.split('\n')) {
     const m = line.match(/^51821\/udp(\s+\(v6\))?\s+ALLOW(?:\s+IN)?\s+(\S+)/);
@@ -1412,7 +1412,7 @@ export async function waitForNewPrimaryApi(ip, sshKeyPath, domain, opts = {}) {
  * @param {{roleRun?: Function}} [args.deps] roleRun: ssh.js's argv sshRun, for tests
  * @returns {Promise<void>}
  */
-export async function armComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
+async function armComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
   await writeComposeWalgRole({
     ip: promotedIp,
     sshKeyPath,
@@ -1504,7 +1504,7 @@ export async function auditComposeWalgRole({ promotedIp, sshKeyPath, projectName
  * @param {string} projectName
  * @returns {string}
  */
-export function composeDbRoleProbeShell(projectName) {
+function composeDbRoleProbeShell(projectName) {
   return walgRoleReadShell(`/opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`);
 }
 

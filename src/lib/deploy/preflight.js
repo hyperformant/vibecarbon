@@ -434,7 +434,7 @@ export function projectUpgradeProblem(cwd, { read = readFileOrNull } = {}) {
 }
 
 /** The one refusal, worded like the other `vibecarbon upgrade` preflights. */
-export const SCAFFOLD_ROLE_FILE_REFUSAL =
+const SCAFFOLD_ROLE_FILE_REFUSAL =
   "This project's scaffold predates the wal-g role file. Run `vibecarbon upgrade`, then deploy again.";
 
 /**

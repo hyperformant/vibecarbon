@@ -95,7 +95,7 @@ export function recordPendingServerState(environment, entry) {
 }
 
 /** Drop the pending sync for `stack`. A no-op when none is set. */
-export function clearPendingServerState(environment, stack) {
+function clearPendingServerState(environment, stack) {
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[environment];
     const pending = envConfig?.pendingServerState;

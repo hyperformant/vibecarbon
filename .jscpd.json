@@ -1,0 +1,36 @@
+{
+  "path": [
+    "src",
+    "scripts",
+    "tests/e2e",
+    "carbon/src",
+    "carbon/scripts"
+  ],
+  "format": [
+    "javascript",
+    "typescript",
+    "tsx",
+    "jsx"
+  ],
+  "minTokens": 70,
+  "minLines": 8,
+  "gitignore": true,
+  "absolute": false,
+  "reporters": [
+    "console"
+  ],
+  "ignore": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "src/autoscaler/protos/**",
+    "src/assets/**",
+    "carbon/src/client/components/ui/**",
+    "carbon/src/client/components/sections/**",
+    "carbon/src/client/lib/tailwind-colors.ts",
+    "carbon/src/client/locales/**",
+    "carbon/scripts/lib/dotenv.js",
+    "carbon/scripts/lib/dev-s3.js",
+    "carbon/scripts/lib/secret-scan-rules.js"
+  ],
+  "threshold": 1.5
+}

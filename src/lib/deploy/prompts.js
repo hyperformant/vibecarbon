@@ -63,9 +63,6 @@ import {
   normalizeEnvName,
 } from './utils.js';
 
-// Re-export constants
-export { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN };
-
 // Deploy-mode select option value → tier-registry id (see tier-registry.js
 // TIERS). Used to filter the interactive select to Provider.SUPPORTED_TIERS
 // below — the option values themselves predate the tier-id vocabulary
@@ -651,7 +648,7 @@ const ROLE_LABEL = {
  * @returns {{line: string, hint: string}} one error line, and the next step
  *   with its command on its own line
  */
-export function unorderableDefaultRefusal(
+function unorderableDefaultRefusal(
   Provider,
   region,
   role,
@@ -719,7 +716,7 @@ export function unorderableDefaultRefusal(
  * @param {{ha?: boolean}} [options]
  * @returns {{options: Array<{value: string, label: string}>, initialValue: string}}
  */
-export function regionPromptChoices(Provider, regions, roles, { ha = false } = {}) {
+function regionPromptChoices(Provider, regions, roles, { ha = false } = {}) {
   const live = Boolean(Provider._locationTypes);
   const options = Object.entries(regions).map(([id, name]) => {
     const plain = `${id} - ${name}`;

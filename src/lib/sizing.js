@@ -402,7 +402,7 @@ export function haStandbyType(Provider, primaryType, standbyRegion, role) {
  * @param {string} cpuClass
  * @returns {string}
  */
-export function haClassLabel(Provider, cpuClass) {
+function haClassLabel(Provider, cpuClass) {
   return Provider.CPU_CLASS_LABELS?.[cpuClass] ?? cpuClass;
 }
 
@@ -703,7 +703,7 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
  * @param {string[]} roles
  * @returns {string[]}
  */
-export function haStandbyRoles(roles) {
+function haStandbyRoles(roles) {
   return roles.includes('worker') ? roles.filter((r) => r !== 'worker') : roles;
 }
 

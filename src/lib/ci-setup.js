@@ -211,7 +211,7 @@ function getGHCRToken() {
  * symptom (deploy waits 15m for an image CI already published) is miserable
  * to debug otherwise.
  */
-export async function ghcrTagExists(owner, repo, tag) {
+async function ghcrTagExists(owner, repo, tag) {
   try {
     const out = runCommand(
       [

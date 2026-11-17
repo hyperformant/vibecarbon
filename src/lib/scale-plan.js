@@ -23,7 +23,7 @@ import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './deploy/utils.js';
  * @param {Record<string, any>} envConfig
  * @returns {{ masterType: string, dbType: string, workerType: string }}
  */
-export function currentRoleTypes(Provider, envConfig) {
+function currentRoleTypes(Provider, envConfig) {
   const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
   return {
     masterType: envConfig.masterServerType || fallbackType,

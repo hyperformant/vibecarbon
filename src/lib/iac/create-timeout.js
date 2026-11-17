@@ -52,7 +52,7 @@ export const SERVER_CREATE_TIMEOUT = `${SERVER_CREATE_TIMEOUT_MINUTES}m`;
  * `create`: that is the operation the evidence shows stalling, and the hcloud
  * server resource declares a create timeout only.
  */
-export const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIMEOUT });
+const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIMEOUT });
 
 /**
  * The label every program sets on everything it creates, servers included,

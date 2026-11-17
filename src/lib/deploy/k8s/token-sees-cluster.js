@@ -28,7 +28,7 @@ import { fingerprintSecret } from '../secret-fingerprint.js';
  * What a provider answers for a server a token cannot see: no such token,
  * not allowed, or a server outside its project or account.
  */
-export const CANT_SEE_STATUSES = Object.freeze([401, 403, 404]);
+const CANT_SEE_STATUSES = Object.freeze([401, 403, 404]);
 
 /**
  * The verdicts one deploy of one cluster has reached: each a provider, a

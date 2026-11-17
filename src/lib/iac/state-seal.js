@@ -177,7 +177,7 @@ export function plainValueCount(state, types) {
 const STATE_SEAL_VERSION = 1;
 
 /** The ledger step that marks `stackName` sealed, one per stack. */
-export function stateSealStep(stackName) {
+function stateSealStep(stackName) {
   return `state-seal ${stackName}`;
 }
 

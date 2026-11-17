@@ -41,7 +41,7 @@
 export const CHALLENGE_FINAL_STATES = Object.freeze(['valid', 'invalid', 'expired', 'errored']);
 
 /** The final states that mean the Challenge failed (IsFailureState). */
-export const CHALLENGE_FAILURE_STATES = Object.freeze(['invalid', 'expired', 'errored']);
+const CHALLENGE_FAILURE_STATES = Object.freeze(['invalid', 'expired', 'errored']);
 
 /** The cert-manager controller, as the upstream install manifest names it. */
 export const CERT_MANAGER_CONTROLLER = Object.freeze({
@@ -61,7 +61,7 @@ export const CERT_MANAGER_CONTROLLER = Object.freeze({
 export const TRAEFIK_RESTART_CHALLENGE_WAIT_MS = 60_000;
 
 /** Between reads of the Challenges while the restart waits. */
-export const CHALLENGE_POLL_MS = 2_000;
+const CHALLENGE_POLL_MS = 2_000;
 
 /** The one read the restart wait makes, each poll. */
 export const CHALLENGES_ARGV = Object.freeze([
@@ -96,7 +96,7 @@ export function certManagerLogArgv({ sinceMinutes, tailLines, requestTimeoutSec 
 const MAX_CAUSE_CHARS = 600;
 
 /** Collapse whitespace and cap the length, so a cause stays on one line. */
-export function compact(text, max = MAX_CAUSE_CHARS) {
+function compact(text, max = MAX_CAUSE_CHARS) {
   const flat = String(text ?? '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -143,7 +143,7 @@ function summarize(ch) {
 }
 
 /** `HTTP-01 challenge for app.example.com is invalid: <reason>` */
-export function describeChallenge(c) {
+function describeChallenge(c) {
   return `${c.type} challenge for ${c.dnsName} is ${c.state}${c.reason ? `: ${c.reason}` : ''}`;
 }
 

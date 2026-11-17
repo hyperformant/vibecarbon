@@ -202,7 +202,7 @@ export function createLeakLedger() {
  * @param {{ leak: number, unverified: number }} counts
  * @returns {number}
  */
-export function destroyExitCode(counts) {
+function destroyExitCode(counts) {
   return (counts.leak ?? 0) + (counts.unverified ?? 0) > 0
     ? DESTROY_EXIT_LEAKED
     : DESTROY_EXIT_CLEAN;

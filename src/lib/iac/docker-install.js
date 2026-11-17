@@ -43,7 +43,7 @@ export const DOCKER_SOURCE_ONLY =
 // Idempotent / safe to re-run: `install -m` re-applies the same mode, the curl
 // step overwrites the keyring with identical bytes, and installing an already
 // package already at its newest version is a no-op.
-export const DOCKER_INSTALL_RUNCMD = [
+const DOCKER_INSTALL_RUNCMD = [
   "  - [sh, -c, 'install -m 0755 -d /etc/apt/keyrings']",
   "  - [sh, -c, 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc']",
   "  - [sh, -c, 'chmod a+r /etc/apt/keyrings/docker.asc']",

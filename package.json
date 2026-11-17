@@ -47,6 +47,8 @@
     "test:e2e:report": "tsx tests/e2e/metrics/reporter.ts",
     "test:e2e:rto-rpo": "tsx tests/e2e/metrics/rto-rpo.ts",
     "prepare": "git config core.hooksPath git-hooks || true",
+    "unused": "knip --no-progress",
+    "dupes": "jscpd",
     "test:prepush": "pnpm lint && pnpm test:unit && pnpm test:integration",
     "prepublishOnly": "if [ -n \"$CI\" ]; then echo \"CI — workflow jobs are the gate, skipping prepublish suite\"; else pnpm test:unit && pnpm lint; fi"
   },
@@ -120,6 +122,8 @@
     "dotenv": "^18.0.1",
     "dotenv-expand": "^1000.0.0",
     "js-yaml": "^5.4.1",
+    "jscpd": "^5.4.3",
+    "knip": "^6.45.1",
     "playwright-core": "^1.61.1",
     "semantic-release": "^25.0.8",
     "tsx": "^4.22.4",

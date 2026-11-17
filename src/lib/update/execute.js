@@ -68,8 +68,6 @@ import {
   unmarkFailedLine,
 } from './text.js';
 
-export { CORDON_MARK };
-
 const REPORTER_TIMEOUT_MS = 60_000;
 /** 1200 s: up to 300 s for the daily apt units to finish, then 900 s to install. */
 const INSTALL_TIMEOUT_MS = (APT_DAILY_UNITS_WAIT_SECONDS + 900) * 1000;
@@ -103,7 +101,7 @@ const APP_READY_PATH = '/api/health/ready';
  * Installs the security updates the daily job would, the same way it does,
  * once the daily apt units are done, so the two never run apt at once.
  */
-export const UPGRADE_ARGV = [
+const UPGRADE_ARGV = [
   'env',
   'DEBIAN_FRONTEND=noninteractive',
   'sh',
@@ -118,7 +116,7 @@ export const UPGRADE_ARGV = [
  * setting (systemd.timer(5)), so it goes on the timer: with -p it would go to
  * the service, which refuses it.
  */
-export const REBOOT_ARGV = [
+const REBOOT_ARGV = [
   'systemd-run',
   '--on-active=2',
   '--collect',
@@ -144,7 +142,7 @@ const BOOT_ARGV = [
  *
  * @returns {string[]}
  */
-export function dockerUpdateArgv() {
+function dockerUpdateArgv() {
   const install = aptGet(
     `install -y --only-upgrade -o Dpkg::Options::=--force-confold ${DOCKER_PACKAGES.join(' ')}`,
   );

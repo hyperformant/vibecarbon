@@ -33,7 +33,7 @@ import { LINEAGE_RE, WALG_ENV_SOURCE } from './restore-layout.js';
 export const RESTORE_PITR_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$/;
 
 /** Settings removed from postgresql.auto.conf before the recovery lines go in. */
-export const RECOVERY_STRIP_SETTINGS = Object.freeze([
+const RECOVERY_STRIP_SETTINGS = Object.freeze([
   'restore_command',
   'recovery_target',
   'recovery_target_action',

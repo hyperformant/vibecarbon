@@ -75,7 +75,7 @@ function validateNodeGroup(name, group, errors) {
  * Validate a parsed config document. Returns an array of field-path-prefixed
  * problem strings — empty when the document is valid.
  */
-export function validateConfig(config) {
+function validateConfig(config) {
   if (!isPlainObject(config)) {
     return ['config: must be a JSON object'];
   }

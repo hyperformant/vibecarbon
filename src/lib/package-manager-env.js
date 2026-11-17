@@ -49,13 +49,13 @@
  */
 
 /** The lowercase namespaces npm/pnpm/bun/yarn publish their run context into. */
-export const PM_RUN_CONTEXT_RE = /^(npm|pnpm|bun|yarn)_/;
+const PM_RUN_CONTEXT_RE = /^(npm|pnpm|bun|yarn)_/;
 
 /**
  * Uppercase run-context outliers. Everything else uppercase is user
  * environment and is kept.
  */
-export const PM_RUN_CONTEXT_VARS = ['PNPM_PACKAGE_NAME'];
+const PM_RUN_CONTEXT_VARS = ['PNPM_PACKAGE_NAME'];
 
 /**
  * Drop the wrapper package manager's run context from an environment.

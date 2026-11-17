@@ -108,7 +108,7 @@ function isNoCorsRule(error) {
 }
 
 /** True when an S3 error says the credentials themselves are the problem. */
-export function isS3KeyProblem(error) {
+function isS3KeyProblem(error) {
   return Boolean(error && Object.hasOwn(S3_KEY_PROBLEMS, error.name));
 }
 

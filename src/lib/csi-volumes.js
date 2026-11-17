@@ -88,7 +88,7 @@ import { runCommand as nodeRunCommand } from './command.js';
  * `volumeId` reads the provider volume id out of a `volumeHandle`, or returns
  * null for a handle it cannot read.
  */
-export const CSI_DRIVERS = {
+const CSI_DRIVERS = {
   'csi.hetzner.cloud': {
     providerId: 'hetzner',
     regionKeys: ['csi.hetzner.cloud/location'],

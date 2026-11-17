@@ -8,7 +8,7 @@
  * SVG is included deliberately — logo/icon assets should reach projects
  * untouched.
  */
-export const BINARY_EXTENSIONS = new Set([
+const BINARY_EXTENSIONS = new Set([
   '.png',
   '.jpg',
   '.jpeg',

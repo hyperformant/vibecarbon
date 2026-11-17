@@ -44,7 +44,7 @@ export const TLS_READY_POLL_MS = 5_000;
 export const TLS_READY_MANUAL_BUDGET_MS = 60_000;
 
 /** Per-attempt socket timeout for the real probe. */
-export const TLS_PROBE_TIMEOUT_MS = 10_000;
+const TLS_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * One real TLS probe of `domain`:443 with full verification (SNI +

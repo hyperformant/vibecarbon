@@ -466,8 +466,8 @@ export function unfencedBucketsLine(envConfig) {
 }
 
 /** How long a new app key gets to start answering HeadBucket (R9: 5 to 10 s seen). */
-export const APP_KEY_READY_BUDGET_MS = 60_000;
-export const APP_KEY_READY_INTERVAL_MS = 2_000;
+const APP_KEY_READY_BUDGET_MS = 60_000;
+const APP_KEY_READY_INTERVAL_MS = 2_000;
 
 /**
  * Wait until the app key can HeadBucket its bucket, inside a fixed budget. A

@@ -219,7 +219,7 @@ export const WALG_AUDIT_PROBE = buildWalgAuditProbe();
  * discover it was empty. Genuinely broken storage never prints this; it prints
  * credential/connection/NoSuchBucket errors instead.
  */
-export const WALG_EMPTY_STORAGE_RE = /no backups found|backup list is empty/i;
+const WALG_EMPTY_STORAGE_RE = /no backups found|backup list is empty/i;
 
 /** 3 attempts, ~20s worst case — mirrors the SSH transport retry budget. */
 export const WALG_AUDIT_RETRY_DELAYS_MS = [5000, 15000];

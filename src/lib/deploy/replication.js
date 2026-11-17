@@ -55,7 +55,7 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
 export const DB_STS_BOOT_TIMEOUT_S = 600;
 
 /** Staged restore fetches stream at least this fast; it sizes the rollout wait (M1). */
-export const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
+const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
 
 /**
  * The db rollout wait for a restore of `sizeBytes`: the boot floor, or the
@@ -657,7 +657,7 @@ export const STALE_ATTACH_EVENT_PATTERN =
  * slow to appear clears within the first few retries; two minutes of
  * `mkfs` on a device that still does not exist is the stale state itself.
  */
-export const STALE_ATTACH_PERSIST_MS = 120_000;
+const STALE_ATTACH_PERSIST_MS = 120_000;
 
 /**
  * The missing-device half of the signature. STALE_ATTACH_EVENT_PATTERN also
@@ -922,7 +922,7 @@ export async function verifyStreaming({
  * The primary's view of its standby: the best `state` in pg_stat_replication
  * (`streaming` sorts first), or no row when nothing is connected.
  */
-export const STREAMING_STATE_SQL =
+const STREAMING_STATE_SQL =
   "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1";
 
 /**
@@ -1289,7 +1289,7 @@ export function inPlaceProbeBudgetS(probeAttempts, probeDelayS) {
  *
  * @param {{envName?: string, standbyIp: string, primaryIp?: string, envConfig?: object}} o
  */
-export function assertReseedTarget({ envName, standbyIp, primaryIp, envConfig }) {
+function assertReseedTarget({ envName, standbyIp, primaryIp, envConfig }) {
   if (!envName) {
     throw new Error('reseed refused: no envName; the reseed reads its target from the env config');
   }
@@ -1333,7 +1333,7 @@ const DB_ROLE_INTENT_READ = Object.freeze([
  * a reseed's or a proven restore's old cluster) so pg_basebackup never ships
  * it. Prints VC_DISCARD_GONE once it is gone; one sh -c token.
  */
-export const SOURCE_DISCARD_DROP = Object.freeze([
+const SOURCE_DISCARD_DROP = Object.freeze([
   'sh',
   '-c',
   `rm -rf ${PGDATA_DIR}/.vc-discard; if [ -e ${PGDATA_DIR}/.vc-discard ] || [ -L ${PGDATA_DIR}/.vc-discard ]; then echo VC_DISCARD_LEFT; exit 1; fi; echo VC_DISCARD_GONE`,
@@ -1634,7 +1634,7 @@ const RESEEDED_FROM_READ = Object.freeze([
  * @param {(ms: number) => Promise<void>} [o.sleep]
  * @param {() => number} [o.now]
  */
-export async function waitForStandbyRecovery({
+async function waitForStandbyRecovery({
   exec,
   deadlineMs = DB_STS_BOOT_TIMEOUT_S * 1000,
   pollMs = 4000,
@@ -1728,7 +1728,7 @@ const DB_IDENTITY_SQL =
  * @param {string} text
  * @returns {{systemIdentifier: string|null, timeline: number|null}}
  */
-export function parseDbIdentity(text) {
+function parseDbIdentity(text) {
   const [sysid = '', tli = ''] = String(text ?? '')
     .trim()
     .split('|')
@@ -2298,12 +2298,12 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
  * fenced primary's final WAL. A deadline, not a poll count (R3): the poll
  * interval only paces the reads.
  */
-export const CATCH_UP_DEADLINE_MS = 60_000;
+const CATCH_UP_DEADLINE_MS = 60_000;
 
 const LSN_RE = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
 
 /** How long the write fence (or its removal) may take to read back applied. */
-export const WRITE_FENCE_DEADLINE_MS = 15_000;
+const WRITE_FENCE_DEADLINE_MS = 15_000;
 
 /**
  * The backends a write fence terminates: client sessions, plus pg_cron job

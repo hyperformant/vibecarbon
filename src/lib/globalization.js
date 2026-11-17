@@ -35,7 +35,7 @@ export const BASE_LOCALE = 'en';
 /** Locale directory, relative to a generated project's root. */
 export const LOCALES_SUBDIR = join('src', 'client', 'locales');
 
-export function localesDir(cwd = process.cwd()) {
+function localesDir(cwd = process.cwd()) {
   return join(cwd, LOCALES_SUBDIR);
 }
 

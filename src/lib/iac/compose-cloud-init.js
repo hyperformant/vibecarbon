@@ -37,7 +37,7 @@ export function bootPullImages() {
 }
 
 /** Fill the boot pull's image list in the shared cloud-init text. */
-export function renderComposeCloudInit(sharedYaml) {
+function renderComposeCloudInit(sharedYaml) {
   if (!sharedYaml.includes(BOOT_PULL_PLACEHOLDER)) {
     throw new Error(
       `renderComposeCloudInit: ${BOOT_PULL_PLACEHOLDER} not found in the shared cloud-init ` +

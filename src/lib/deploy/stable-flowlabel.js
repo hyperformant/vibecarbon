@@ -32,7 +32,7 @@ import { join } from 'node:path';
 import { CLOUD_INIT_DIR } from '../iac/cloud-init.js';
 
 /** The one source: the snippet every k3s node's cloud-init embeds. */
-export const STABLE_FLOWLABEL_SNIPPET = join(CLOUD_INIT_DIR, '_stable-flowlabel.sh');
+const STABLE_FLOWLABEL_SNIPPET = join(CLOUD_INIT_DIR, '_stable-flowlabel.sh');
 
 let prefix;
 

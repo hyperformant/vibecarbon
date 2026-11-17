@@ -25,7 +25,7 @@
  */
 
 /** The program's logical name for the compose server, in every compose program. */
-export const COMPOSE_SERVER_LOGICAL_NAME = 'server';
+const COMPOSE_SERVER_LOGICAL_NAME = 'server';
 
 /**
  * Per provider: the server resource's type token, its size input and its
