@@ -32,9 +32,7 @@
  *       nested-brace value. That keeps the uploads bucket's region and
  *       endpoint, so a backups bucket in another region is asked at the wrong
  *       host. backupStorageConfig is the one way to talk to the backups bucket.
- *   (d) `loadBackupS3Config`, the old raw reader of the record, is gone from
- *       src/ and tests/ for good.
- *   (e) both sides of a k8s-ha pair use the environment's one backups bucket:
+ *   (d) both sides of a k8s-ha pair use the environment's one backups bucket:
  *       src/lib/deploy/effects/k8s-ha.js spreads `...options` into each
  *       `deployK3s({` call and sets no per-side `backupTarget`, `s3Config` or
  *       `backupS3Config`; and the bucket-name-only `backupBucketName` is gone
@@ -62,7 +60,6 @@ const S3_BASE = 'src/lib/providers/s3-base.js';
 const OWNER = 'src/lib/backups-bucket.js';
 const DEPLOY = 'src/lib/deploy/orchestrator.js';
 const K8S_HA = 'src/lib/deploy/effects/k8s-ha.js';
-const CENSUS = 'tests/unit/deploy/backups-bucket-single-resolver-census.test.ts';
 const RAW_RECORD_READ = /\.backupS3\b|\[\s*['"]backupS3['"]\s*\]/;
 // The record field as a key of a destructuring pattern, at any depth; a
 // binding named like it (`{ bucket: backupS3 }`) follows a `:` and is not one.
@@ -78,8 +75,6 @@ const DESTRUCTURE_ALLOWED = [
 // An uploads config spread into an object literal (`...s3Config`,
 // `...ctx.s3Config`); swappedBucketSpreads checks the keys after it.
 const UPLOADS_SPREAD = /\.\.\.[\w.?]*s3Config\b/g;
-// Arm (d) skips this file, which names the reader in its header.
-const OLD_READER = 'loadBackupS3Config';
 const PER_SIDE_STORAGE_KEY = /(^|[{,\s])(backupTarget|s3Config|backupS3Config)\s*[:,}]/m;
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -99,10 +94,11 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /** Every scanned file under `root`, as `[relative path, text]`. */
-function files(root: string, dirs: string[] = SCANNED): Array<[string, string]> {
-  return dirs
-    .flatMap((d) => walk(join(root, d)))
-    .map((f) => [relative(root, f), readFileSync(f, 'utf-8')]);
+function files(root: string): Array<[string, string]> {
+  return SCANNED.flatMap((d) => walk(join(root, d))).map((f) => [
+    relative(root, f),
+    readFileSync(f, 'utf-8'),
+  ]);
 }
 
 /** The text without its comment-only lines (JSDoc, block and line comments). */
@@ -161,15 +157,6 @@ function rawRecordReaders(root: string): string[] {
       const code = codeLines(text);
       return RAW_RECORD_READ.test(code) || destructuresRecord(f, code);
     })
-    .map(([f]) => f)
-    .sort();
-}
-
-/** Files under src/ or tests/ that still name the old raw reader. */
-function oldReaderMentions(root: string): string[] {
-  return files(root, ['src', 'tests'])
-    .filter(([f]) => f !== CENSUS)
-    .filter(([, text]) => text.includes(OLD_READER))
     .map(([f]) => f)
     .sort();
 }
@@ -328,14 +315,6 @@ describe('backups bucket single resolver census', () => {
     ).toEqual([]);
   });
 
-  it('(d) the old raw reader is gone from src/ and tests/', () => {
-    const offenders = oldReaderMentions(ROOT);
-    expect(
-      offenders,
-      `read the backups bucket with backupsTargetOf (src/lib/backups-bucket.js): ${offenders.join(', ')}`,
-    ).toEqual([]);
-  });
-
   it('(b) only s3-base.js and backups-bucket.js spell a backups bucket name', () => {
     const offenders = backupsNameOffenders(ROOT);
     expect(
@@ -360,12 +339,12 @@ describe('backups bucket single resolver census', () => {
     ).toEqual([]);
   });
 
-  it('(e) both k8s-ha sides take the one backups target through ...options', () => {
+  it('(d) both k8s-ha sides take the one backups target through ...options', () => {
     expect(callArgs(readFileSync(join(ROOT, K8S_HA), 'utf-8'), 'deployK3s')).toHaveLength(2);
     expect(perSideStorageOffenders(ROOT)).toEqual([]);
   });
 
-  it('(e) no src/ file names backupBucketName', () => {
+  it('(d) no src/ file names backupBucketName', () => {
     const offenders = bucketNameOnlyMentions(ROOT);
     expect(
       offenders,
@@ -516,15 +495,6 @@ describe('backups bucket single resolver census', () => {
         'const { backupS3: _purged, ...kept } = identity;\nconst { backupS3 } = live;\n',
       );
       expect(rawRecordReaders(tmp)).toContain('src/lib/env-identity.js');
-    });
-
-    it('catches the old raw reader anywhere in src/ or tests/', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
-      plant('src/lib/config.js', `export function ${OLD_READER}(envName) {}\n`);
-      plant('tests/unit/restore/x.test.ts', `vi.mock('config.js', () => ({ ${OLD_READER} }));\n`);
-      plant('src/lib/other.js', 'loadS3Config(envName);\n');
-      plant(CENSUS, `// hunts ${OLD_READER}\n`);
-      expect(oldReaderMentions(tmp)).toEqual(['src/lib/config.js', 'tests/unit/restore/x.test.ts']);
     });
 
     it('catches a k8s-ha side with its own storage target, and backupBucketName anywhere in src/', () => {

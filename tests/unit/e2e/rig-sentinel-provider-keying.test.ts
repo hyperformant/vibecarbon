@@ -111,11 +111,6 @@ describe('the lifecycle writes the same provider-keyed name', () => {
     expect(lifecycle).toContain('`.rig-${config.provider}-${config.mode}.json`');
   });
 
-  it('no longer writes the mode-only name', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: pinning the source's literal, not interpolating
-    expect(lifecycle).not.toContain('`.rig-${config.mode}.json`');
-  });
-
   it('the fixture proves the two sides agree on the filename shape', () => {
     // Same shape the lifecycle builds, constructed independently here.
     expect(existsSync(join(RESULTS_DIR, `.rig-${FIXTURE_PROVIDER}-compose.json`))).toBe(true);

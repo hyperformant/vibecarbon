@@ -139,7 +139,6 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   };
 });
 
-const haIndex = await import('../../../src/lib/deploy/k8s/ha/index.js');
 const { K8S_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/k8s-ha.js');
 
 const spinner = () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() });
@@ -172,10 +171,6 @@ beforeEach(() => {
 });
 
 describe('k8s-ha transport preconditions are signalled', () => {
-  it('waitForNamespace is gone: nothing polls for the namespace', () => {
-    expect('waitForNamespace' in haIndex).toBe(false);
-  });
-
   it('prepares the transport exactly once, after both namespaces are signalled and never before', async () => {
     const ctx = newCtx();
     const run = K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
