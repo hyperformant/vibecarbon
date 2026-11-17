@@ -1129,6 +1129,28 @@ the call does not count.
 guided setup for a guide call with no check before it, and runs each
 provider's `getS3Credentials` off a terminal expecting a rejection and no guide.
 
+#### 2026-11-16: A bucket that never becomes readable says what was failing (#516)
+
+When a new bucket does not pass its readiness check in two minutes, the
+warning now ends with the last problem seen: the error name and HTTP status of
+the failing call, or that the bucket did not answer HEAD.
+
+**Why:** a Hetzner compose e2e run created its app bucket and the deploy then
+refused it as not readable. The check swallowed every error, so nothing said
+which call was failing or how. The same code created a bucket in five seconds
+minutes later, and the rerun passed. The refused bucket was readable twenty
+minutes on, which matches Hetzner serving "no such bucket" for a while after
+an early read.
+
+**Still open:** that bucket was left behind. `destroy` reported it not found
+in any region and the e2e sweep called it already gone, because both asked
+while Hetzner was still answering "no such bucket" for a bucket it listed.
+
+**Do not undo:** keep the reason on the warning. Without it this failure
+cannot be told apart from an outage.
+
+**Guard:** `tests/unit/providers/bucket-sustained-visibility.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
