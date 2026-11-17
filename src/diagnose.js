@@ -44,6 +44,7 @@ import { loadProjectConfig } from './lib/config.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { certManagerLogArgv } from './lib/deploy/k8s/acme-challenges.js';
 import { isComposeTier, resolveTier } from './lib/deploy/tier-registry.js';
+import { buildHostKeyOpts } from './lib/host-keys.js';
 import { DIAG_BUSYBOX_IMAGE, DIAG_NETSHOOT_IMAGE } from './lib/images.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
@@ -236,15 +237,12 @@ function diagnoseNodes(report, env, kubeconfig, sshKey, controlplaneIp) {
   );
   probe(report, 'node describe', 'kubectl', ['--kubeconfig', kubeconfig, 'describe', 'nodes'], env);
   if (existsSync(sshKey) && controlplaneIp) {
+    // The environment's own known_hosts, as the compose branch's sshRun pins
+    // (buildHostKeyOpts), never the operator's ~/.ssh/known_hosts.
     const sshArgs = (cmd) => [
       '-i',
       sshKey,
-      '-o',
-      'StrictHostKeyChecking=accept-new',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'ConnectTimeout=10',
+      ...buildHostKeyOpts(sshKey),
       `root@${controlplaneIp}`,
       cmd,
     ];
@@ -563,12 +561,7 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
     const sshArgs = (cmd) => [
       '-i',
       sshKey,
-      '-o',
-      'StrictHostKeyChecking=accept-new',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'ConnectTimeout=10',
+      ...buildHostKeyOpts(sshKey),
       `root@${controlplaneIp}`,
       cmd,
     ];
