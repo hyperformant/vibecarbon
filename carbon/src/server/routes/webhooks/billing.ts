@@ -4,9 +4,6 @@
  * Accepts webhooks at /api/webhooks/billing from any configured billing provider
  * (Stripe, Paddle, Polar). The active provider verifies the signature and
  * normalizes the event, and this handler updates subscriptions in the database.
- *
- * The Stripe-specific webhook at /api/webhooks/stripe is kept for backward
- * compatibility with existing deployments.
  */
 
 import { eq } from 'drizzle-orm';

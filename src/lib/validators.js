@@ -109,18 +109,3 @@ export function validateDomain(domain) {
   }
   return undefined;
 }
-
-const BACKUP_FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(tar\.gz|sql\.gz|tar|sql)$/;
-
-/**
- * Validate a backup filename. Must be a safe basename with a recognised extension.
- * Returns undefined on success, error string on failure.
- */
-export function validateBackupFilename(name) {
-  if (!name) return 'Backup filename is required';
-  if (name !== basename(name)) return 'Backup filename must be a basename (no paths)';
-  if (!BACKUP_FILENAME_RE.test(name)) {
-    return 'Backup filename must match <safe-name>.(tar|sql)[.gz]';
-  }
-  return undefined;
-}

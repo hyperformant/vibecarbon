@@ -148,7 +148,7 @@ vibecarbon <command> [options]
 | :------ | :----------- |
 | **`deploy [env]`** | Deploy an environment (interactive picker for mode and region) |
 | **`destroy [env]`** | Tear down a cloud environment |
-| **`backup [env]`** | Create, list, or download database backups |
+| **`backup [env]`** | Create or list database backups |
 | **`restore [env]`** | Restore the database from a backup |
 | **`failover [env]`** | Initiate failover to the standby region |
 | **`scale [env]`** | Scale worker nodes and instance sizes |

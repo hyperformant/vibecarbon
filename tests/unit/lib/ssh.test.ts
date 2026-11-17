@@ -30,7 +30,6 @@ import {
   getPostgresPod,
   isNeverStartedSshTransportFailure,
   SSH_TRANSPORT_NEVER_STARTED_RE,
-  scpDownload,
   scpUpload,
   sshKeyPathFor,
   sshKubectl,
@@ -305,18 +304,10 @@ describe('sshRun transport retry (never-started failures only)', () => {
   });
 });
 
-describe('scpDownload / scpUpload use argv form', () => {
+describe('scpUpload uses argv form', () => {
   beforeEach(() => {
     mockRun.mockReset();
     mockRun.mockResolvedValue('');
-  });
-
-  it('scpDownload puts remote:path before localPath (download direction)', async () => {
-    await scpDownload('1.2.3.4', '/key', '/remote/file', '/local/file');
-    const [cmd] = mockRun.mock.calls[0] as [string[]];
-    const dashIdx = cmd.indexOf('--');
-    expect(cmd[dashIdx + 1]).toBe('root@1.2.3.4:/remote/file');
-    expect(cmd[dashIdx + 2]).toBe('/local/file');
   });
 
   it('scpUpload puts localPath before remote:path (upload direction)', async () => {

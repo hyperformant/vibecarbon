@@ -11,7 +11,6 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
@@ -27,16 +26,8 @@ import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
-import {
-  getPostgresPod,
-  scpDownload,
-  sshKeyPathFor,
-  sshKubectl,
-  sshRun,
-  sshRunScript,
-} from './lib/ssh.js';
+import { sshKeyPathFor, sshKubectl, sshRunScript } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
-import { validateBackupFilename } from './lib/validators.js';
 import { parseBackupResult, pushedBackupNames } from './lib/walg/backup-result.js';
 import {
   AmbiguousLineageError,
@@ -54,7 +45,7 @@ import {
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'backup',
-  summary: 'Create, list, or download database backups',
+  summary: 'Create or list database backups',
   positional: [
     {
       name: 'env',
@@ -75,14 +66,8 @@ const SPEC = {
     {
       name: 'action',
       value: '<verb>',
-      enum: ['create', 'list', 'download'],
-      description: 'Action seed (skips the action prompt): create, list, or download',
-    },
-    {
-      name: 'source',
-      value: '<file>',
-      description:
-        'Backup filename for -action download (legacy backup-pod dumps only, k8s without object storage; wal-g environments restore with `vibecarbon restore`)',
+      enum: ['create', 'list'],
+      description: 'Action seed (skips the action prompt): create or list',
     },
   ],
   examples: [
@@ -99,39 +84,7 @@ const SPEC = {
 const ACTION_CHOICES = [
   { value: 'create', label: 'Create a new backup', hint: 'triggers a fresh dump' },
   { value: 'list', label: 'List existing backups', hint: 'read-only' },
-  {
-    value: 'download',
-    label: 'Download a backup',
-    hint: 'legacy backup-pod dumps only (k8s without object storage)',
-  },
 ];
-
-// ============================================================================
-// LEGACY POD HELPERS (used when a k8s env has no S3 configured)
-// ============================================================================
-
-async function downloadPodBackup(ip, sshKeyPath, filename) {
-  const pod = await getPostgresPod(ip, sshKeyPath);
-
-  // Copy from pod to host. A whole dump: the bound of the scp that follows.
-  // /var/tmp, not /tmp: Ubuntu 26.04's /tmp is a tmpfs of half the RAM, and a
-  // dump does not belong in the database server's memory.
-  await sshKubectl(
-    ip,
-    sshKeyPath,
-    ['cp', `vibecarbon/${pod}:/backups/${filename}`, `/var/tmp/${filename}`],
-    { timeout: 300_000 },
-  );
-
-  // SCP from host to local
-  const localPath = join(process.cwd(), filename);
-  await scpDownload(ip, sshKeyPath, `/var/tmp/${filename}`, localPath);
-
-  // Clean up remote temp file
-  await sshRun(ip, sshKeyPath, ['rm', '-f', `/var/tmp/${filename}`]);
-
-  return localPath;
-}
 
 // ============================================================================
 // K8S JOB BACKUP (triggers CronJob-based backup)
@@ -428,15 +381,6 @@ export async function run(args) {
   const { values, positional, handled } = parseFlagsOrExit(args, SPEC);
   if (handled) return;
 
-  // Validate -source format up front — all downstream code trusts it.
-  if (values.source) {
-    const err = validateBackupFilename(/** @type {string} */ (values.source));
-    if (err) {
-      process.stderr.write(`${c.error('✗')} Invalid -source: ${err}\n`);
-      process.exit(1);
-    }
-  }
-
   // Project guard runs before banner so an accidental `vibecarbon
   // backup` from a parent directory emits the canonical message.
   const projectConfig = assertInProjectDir();
@@ -446,9 +390,9 @@ export async function run(args) {
   // -l is shorthand for -action list; if both supplied, -l wins.
   const actionSeed = values.l ? 'list' : /** @type {string|null} */ (values.action);
 
-  // Action-specific prompts (confirm-on-create, source-on-download) get
-  // their own TTY gate after the action is known, so the failure message
-  // names exactly the flag the operator missed for *this* invocation.
+  // The action-specific prompt (confirm-on-create) gets its own TTY gate
+  // after the action is known, so the failure message names exactly the flag
+  // the operator missed for *this* invocation.
   const { envName, envConfig, serverIp } = await resolveEnvContext({
     actionVerb: 'back up',
     envRequirement: 'name an environment to back up',
@@ -458,7 +402,7 @@ export async function run(args) {
     extraRequirements: [
       {
         flag: 'action',
-        description: 'choose an action (create, list, download; or pass -l for list)',
+        description: 'choose an action (create or list; or pass -l for list)',
         satisfied: !!actionSeed,
       },
     ],
@@ -497,8 +441,8 @@ export async function run(args) {
     yes: !!values.y,
   });
 
-  // SSH key is required for create and download. Bail early with a clear
-  // message if it's missing.
+  // SSH key is required for create. Bail early with a clear message if it's
+  // missing.
   const sshKeyPath = sshKeyPathFor(envName);
   if (!existsSync(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
@@ -513,17 +457,6 @@ export async function run(args) {
   if (action === 'create' && !values.y) {
     requireTTYOrFlags({
       requirements: [{ flag: 'y', description: 'skip the confirmation prompt', satisfied: false }],
-    });
-  }
-  if (action === 'download' && !values.source) {
-    requireTTYOrFlags({
-      requirements: [
-        {
-          flag: 'source',
-          description: 'name the backup file to download',
-          satisfied: false,
-        },
-      ],
     });
   }
 
@@ -548,19 +481,6 @@ export async function run(args) {
   const tracker = createTracker('backup', { environment: envName });
   const s = tracker.spinner();
 
-  if (action === 'download') {
-    await runDownload({
-      s,
-      source: /** @type {string} */ (values.source),
-      isCompose,
-      useS3,
-      serverIp,
-      sshKeyPath,
-    });
-    p.outro('');
-    return;
-  }
-
   // action === 'create'
   await runCreate({
     s,
@@ -584,7 +504,7 @@ export async function run(args) {
 
 /**
  * Refresh operator-IP firewall allowlist before an action that hits the
- * cluster (create, download; list reads the bucket only).
+ * cluster (create; list reads the bucket only).
  */
 async function ensureFirewallAccessIfNeeded({ projectConfig, envName, envConfig, yes }) {
   await requireOperatorIpAccess({
@@ -637,49 +557,6 @@ async function runList({ envName, envConfig, projectName, yes }) {
     process.exit(1);
   }
   printBaseBackupList({ backups: listing.backups, envName, location: listing.location });
-}
-
-/**
- * `-action download`. Only one environment shape still has downloadable
- * backup FILES: k8s with no object storage, whose backup pod writes
- * `*_full.tar.gz` dumps. Every wal-g environment (compose always; k8s with
- * S3) archives base backups + WAL under `walg/` — there is no file to fetch,
- * `backups/<name>` never exists, and a dump could not be restored anyway
- * (restore is wal-g-native and pulls from S3). Refuse those up front rather
- * than failing on a filename-format check or a 404, and name what works.
- *
- * `deps` is a test seam (the pod helper is a module-level import).
- */
-export async function runDownload({
-  s,
-  source,
-  isCompose,
-  useS3,
-  serverIp,
-  sshKeyPath,
-  deps = {},
-}) {
-  const { downloadPod = downloadPodBackup } = deps;
-  if (isCompose || useS3) {
-    p.log.error(
-      'This environment backs up with wal-g (base backups + WAL in object storage); there ' +
-        'is no backup file to download, and a downloaded dump could not be restored. Use ' +
-        '`vibecarbon backup <env> -l` to list restore points and `vibecarbon restore <env> ' +
-        '-source latest|<ISO-8601 timestamp>` to restore one.',
-    );
-    process.exit(1);
-  }
-  s.start(`Downloading ${source}`);
-  try {
-    // k8s without object storage: legacy backup-pod dump.
-    const localPath = await downloadPod(serverIp, sshKeyPath, source);
-    s.stop('Download complete');
-    p.log.success(`Saved to ${c.bold(localPath)}`);
-  } catch (error) {
-    s.stop('Download failed');
-    p.log.error(error.message);
-    process.exit(1);
-  }
 }
 
 /**

@@ -18,7 +18,6 @@ describe('backup SPEC + parseFlags integration', () => {
       l: false,
       env: null,
       action: null,
-      source: null,
     });
     expect(r.positional.env).toBeUndefined();
   });
@@ -35,19 +34,19 @@ describe('backup SPEC + parseFlags integration', () => {
   it('parses -action <verb> against the declared enum', () => {
     expect(parseFlags(['-action', 'create'], SPEC).values.action).toBe('create');
     expect(parseFlags(['-action', 'list'], SPEC).values.action).toBe('list');
-    expect(parseFlags(['-action', 'download'], SPEC).values.action).toBe('download');
   });
 
   it('rejects -action values outside the enum', () => {
     const r = parseFlags(['-action', 'nuke'], SPEC);
     expect(r.values.action).toBeNull();
-    expect(r.errors[0]).toMatch(/-action.*create.*list.*download.*nuke/);
+    expect(r.errors[0]).toMatch(/-action.*create.*list.*nuke/);
   });
 
-  it('parses -source <name>', () => {
-    const r = parseFlags(['-source', 'myapp_2026.tar.gz'], SPEC);
-    expect(r.errors).toEqual([]);
-    expect(r.values.source).toBe('myapp_2026.tar.gz');
+  it('rejects -action download and -source (the pod-dump download is gone)', () => {
+    const action = parseFlags(['-action', 'download'], SPEC);
+    expect(action.values.action).toBeNull();
+    expect(action.errors[0]).toMatch(/-action.*create.*list.*download/);
+    expect(parseFlags(['-source', 'x.tar.gz'], SPEC).errors[0]).toMatch(/unknown flag: -source/);
   });
 
   it('combines positional + flags', () => {
@@ -58,15 +57,11 @@ describe('backup SPEC + parseFlags integration', () => {
     expect(r.values.y).toBe(true);
   });
 
-  it('parses scripted-download invocation end-to-end', () => {
-    const r = parseFlags(
-      ['-env', 'prod', '-action', 'download', '-source', 'myapp_2026.tar.gz', '-y'],
-      SPEC,
-    );
+  it('parses scripted-create invocation end-to-end', () => {
+    const r = parseFlags(['-env', 'prod', '-action', 'create', '-y'], SPEC);
     expect(r.errors).toEqual([]);
     expect(r.values.env).toBe('prod');
-    expect(r.values.action).toBe('download');
-    expect(r.values.source).toBe('myapp_2026.tar.gz');
+    expect(r.values.action).toBe('create');
     expect(r.values.y).toBe(true);
   });
 

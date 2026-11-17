@@ -1091,6 +1091,8 @@ a third pass for any stack.
 | n8n and Metabase add-ons | Parked 2026-11-15 (#482) | Hidden; code remains |
 | Retirement guards for the hcloud autoscaler wiring, the credentials profiles and an e2e Grafana probe line | 2026-11-16 (#505) | The code they named is gone, so they could fail only on a name |
 | The e2e scratch GitHub repository (`setup-repo`, `teardown-repo`, the stale-repo sweep) | 2026-11-16 (#505) | No scenario deploys in push mode, so nothing read it. Bring it back with a scenario that does |
+| The template's Stripe-only webhook route, `/api/webhooks/stripe` | 2026-11-16 (#510) | `/api/webhooks/billing` handles the same Stripe events, and `configure billing` has named only that URL since the first public commit. `npm run stripe:listen` now forwards there |
+| `backup -action download` and its `-source` flag | 2026-11-16 (#510) | It copied a dump file out of the database pod, and no released version wrote one: backups have been wal-g base backups since before the first public commit. `backup -l` lists them and `restore` reads them |
 
 ## Problems that keep coming back
 
@@ -1138,11 +1140,15 @@ a third pass for any stack.
 ## Dated bridges
 
 Compatibility code that is meant to be deleted. When you add one, add it here
-with a date.
+with a date: three months after the release that made it unnecessary. The last
+column says what happens, once the bridge is gone, to a project that never ran
+it. Weigh the removal against that.
 
-| Bridge | Where | Remove after |
-|---|---|---|
-| Migration from the empty state passphrase | `src/lib/iac/index.js` | 2027-02-11 |
-| AppArmor restriction off on k8s nodes | cloud-init for k3s | When k3s ships the upstream fix |
-| DigitalOcean reserved IP migration | `src/lib/deploy/k8s/retired-reserved-ip.js` | No date set yet |
-| Removal of provider tokens left in clusters and on servers | `src/lib/deploy/k8s/k3s.js`, `src/scale.js` | No date set yet |
+| Bridge | Where | Remove after | After removal, a project that never ran it |
+|---|---|---|---|
+| Migration from the empty state passphrase (#420, released in 0.53.0 on 2026-11-13) | `src/lib/iac/index.js`, `StateMigrationError` in `src/lib/iac/state-error.js` | 2027-02-11 | Its state does not open with the project's passphrase, and every command that reads state stops with the passphrase error. Opening it once with a version that still has the migration fixes it |
+| AppArmor restriction off on k8s nodes | cloud-init for k3s | When k3s ships the upstream fix | Not a migration. It is a workaround for new nodes, and nothing old depends on it |
+| Repair of `.env` lines in the old shell quoting (#132, released in 0.46.0 on 2026-09-21) | `src/lib/dotenv-heal.js`, `repairLegacyEnvQuoting` in `src/lib/project.js`, the legacy quoting line in `src/status.js` | 2026-12-21 | A value that holds a single quote and was written by 0.45.0 or earlier reads cut short at the quote in Node, Compose and Vite, and a deploy ships the short value. Enter it again with `vibecarbon configure` |
+| DigitalOcean reserved IP migration (#418, released in 0.53.0 on 2026-11-13) | `src/lib/deploy/k8s/retired-reserved-ip.js`, `src/lib/iac/retired-resources.js` | 2027-02-13 | A DigitalOcean k8s cluster last deployed by 0.52.0 or earlier still lists the address in its state. The next deploy, scale or failover would delete it while DNS still points at it: an outage, then a takeover risk. Remove the bridge only together with a refusal for a stack that still lists the address |
+| Removal of provider tokens left in clusters (#423, released in 0.53.0 on 2026-11-13) | `removeRetired` in `src/lib/deploy/k8s/k3s.js`, `K8S_RETIRED_CLOUD_SECRETS` on the provider classes | 2027-02-13 | A cluster last deployed by 0.52.0 or earlier keeps a second copy of the provider token in `kube-system` that nothing reads. Deploys still work. Delete the copy with kubectl |
+| Removal of DNS tokens left on compose servers (#325, released in 0.51.0 on 2026-11-06) | `dropDnsTokenEnv` in `src/scale.js` | 2027-02-06 | A compose server last deployed by 0.50.1 or earlier can have the DNS provider's token in its `.env`, and a scale copies it to the replacement server. Deploys and scales still work. Delete the lines by hand |
