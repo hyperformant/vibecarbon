@@ -576,12 +576,15 @@ const PROJECT_GIT_ADD_EXCLUDES = [':(exclude,glob)**/.env*'];
  * with no trailing paths — git will exit 0 with a "nothing added" message
  * on stderr. Callers pass silent:true + ignoreError:true to make this a no-op.
  *
+ * It takes no extra paths on purpose: a caller that passed one file here
+ * staged the whole allowlist with it. To stage named files alone, use
+ * buildGitAddNamedArgv.
+ *
  * @param {string} [cwd] - Working directory (defaults to process.cwd())
- * @param {string[]} [extras] - Additional paths to include (also filtered by existsSync)
  * @returns {string[]} argv array safe to pass to runCommand
  */
-export function buildGitAddArgv(cwd = process.cwd(), extras = []) {
-  const paths = [...PROJECT_GIT_ADD_ALLOWLIST, ...extras].filter((p) => existsSync(join(cwd, p)));
+export function buildGitAddArgv(cwd = process.cwd()) {
+  const paths = PROJECT_GIT_ADD_ALLOWLIST.filter((p) => existsSync(join(cwd, p)));
   // Never with no path before it: git reads an exclusion on its own as
   // "everything but this", which would stage the whole project.
   if (paths.length === 0) return ['git', 'add', '--'];
