@@ -958,6 +958,8 @@ dependency security floors.
 example files included, and `.vibecarbon.json` stays the operator's to commit.
 Keep the `.env*` exclusion: the project's `.gitignore` does not cover every
 env file name, and a project created without git has no `.gitignore`.
+(Since the entry "A project created without git still gets its `.gitignore`"
+below it has one. The exclusion stays for the names it does not cover.)
 
 **Guard:** `tests/integration/template/create.test.ts` compares the list with
 what a created project tracks, on npm and pnpm.
@@ -991,7 +993,47 @@ The module imports Node builtins only, for the same reason.
 all three entry points, and runs a real Node process to prove load-time paths
 land in the e2e home and a preset home is respected.
 
-#### 2026-11-16: `destroy` finishes a stack its own cleanup unblocked (#504)
+#### 2026-11-16: A project created without git still gets its `.gitignore` (#504)
+
+`create` now writes `.gitignore` and checks it for the required patterns on
+every run. Only `git init`, the hooks and the first commit depend on git being
+installed.
+
+**Why:** the file was written inside the branch that runs when git is on the
+PATH. On a machine without git the project had its generated secrets in `.env`
+and `.env.local` and no `.gitignore`. The message `create` prints there tells
+the operator to install git and run `git init`, and the first `git add .`
+after that would have staged both files.
+
+**Do not undo:** do not move the write back under the git check to group it
+with `git init`. The file belongs to the project, not to the repository step.
+
+**Guard:** `tests/integration/template/create.test.ts` runs `create` with a
+PATH that holds only node, then runs a real `git init` and `git add .` and
+checks that neither env file is staged.
+
+#### 2026-11-16: Deploy stages the lockfile it generated and nothing else (#504)
+
+When a project has no lockfile, `deploy` generates one and stages it. It now
+stages that one file, through `buildGitAddNamedArgv`. `buildGitAddArgv`, which
+stages the whole allowlist, is left for the first commit `configure` makes.
+
+**Why:** the call passed the lockfile to `buildGitAddArgv` as an extra path.
+That function stages every allowlisted path, so a deploy also staged whatever
+the operator had changed under `src/`, `k8s/`, `package.json` and the rest,
+and their next commit carried work they had not chosen to stage. It had been
+that way since the first public commit.
+
+**Do not undo:** do not reach for `buildGitAddArgv` to stage one file. Keep
+the `.env*` exclusion and the empty-list check in the new helper: an exclusion
+with no path before it tells git to stage everything else.
+
+**Guard:** `tests/unit/security/gitignore-invariants.test.ts` runs real git on
+a project with modified allowlisted files and a new lockfile.
+`tests/unit/security/git-add-census.test.ts` allows `buildGitAddArgv` only in
+`configure`.
+
+#### 2026-11-16: `destroy` finishes a stack its own cleanup unblocked (#506)
 
 On the k8s tiers, when a stack's `pulumi destroy` runs and leaves resources
 behind, and the cleanup that runs after it (the orphaned-server sweep and the

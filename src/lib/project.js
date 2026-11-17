@@ -561,8 +561,9 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
  * Taken back out of whatever the allowlist names. The list holds whole
  * directories (src/, tests/, volumes/), and the project's .gitignore is not
  * enough to keep an env file inside one unstaged: it does not cover every
- * name (.env.e2e, .env.production), and a project created without git has no
- * .gitignore at all. Matches at any depth.
+ * name (.env.e2e, .env.production), and it can be missing (deleted, or a
+ * project created without git before create wrote it in that case too).
+ * Matches at any depth.
  */
 const PROJECT_GIT_ADD_EXCLUDES = [':(exclude,glob)**/.env*'];
 
@@ -583,6 +584,28 @@ export function buildGitAddArgv(cwd = process.cwd(), extras = []) {
   const paths = [...PROJECT_GIT_ADD_ALLOWLIST, ...extras].filter((p) => existsSync(join(cwd, p)));
   // Never with no path before it: git reads an exclusion on its own as
   // "everything but this", which would stage the whole project.
+  if (paths.length === 0) return ['git', 'add', '--'];
+  return ['git', 'add', '--', ...paths, ...PROJECT_GIT_ADD_EXCLUDES];
+}
+
+/**
+ * Build a `git add` argv that stages only the files named, for a command that
+ * wrote one file and means to stage that file alone. buildGitAddArgv is the
+ * wrong tool there: it stages the whole allowlist, so every edit the operator
+ * has in progress under src/, k8s/ or package.json lands in the index too.
+ *
+ * Names that do not exist are dropped, and the same `.env*` exclusion applies,
+ * so a caller can never stage an env file through here, even by naming one.
+ * With nothing left to stage the result is ['git', 'add', '--'], which git
+ * treats as a no-op.
+ *
+ * @param {string} cwd - Working directory the names are relative to
+ * @param {string[]} names - Paths to stage, relative to cwd
+ * @returns {string[]} argv array safe to pass to runCommand
+ */
+export function buildGitAddNamedArgv(cwd, names) {
+  const paths = names.filter((p) => existsSync(join(cwd, p)));
+  // Never with no path before it: see buildGitAddArgv.
   if (paths.length === 0) return ['git', 'add', '--'];
   return ['git', 'add', '--', ...paths, ...PROJECT_GIT_ADD_EXCLUDES];
 }

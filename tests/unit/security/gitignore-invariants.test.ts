@@ -1,7 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildGitAddArgv, validateGitignore } from '../../../src/lib/project.js';
+import {
+  buildGitAddArgv,
+  buildGitAddNamedArgv,
+  validateGitignore,
+} from '../../../src/lib/project.js';
 import { templatePathFor } from '../../../src/lib/template-paths.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 
@@ -91,8 +95,8 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
 
   // The allowlist names whole directories (src/, tests/, volumes/). Without
   // this, a .env file inside one is staged whenever the project's .gitignore
-  // does not cover its name (.env.e2e, .env.production) or is missing (a
-  // project created without git has none).
+  // does not cover its name (.env.e2e, .env.production) or is missing
+  // (deleted, or a project created without git by an older CLI).
   it('stages no .env file inside an allowlisted directory, with no .gitignore to help', async () => {
     const { writeFileSync, mkdirSync, mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
@@ -170,5 +174,112 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
     const argv = buildGitAddArgv(process.cwd(), ['package.json']);
     // package.json is already in the allowlist, so this should just not duplicate
     expect(argv.filter((p) => p === 'package.json').length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// deploy generates a missing lockfile and stages it. It used to do that with
+// buildGitAddArgv, which staged the lockfile and every other allowlisted file
+// the operator had changed.
+describe('buildGitAddNamedArgv stages the named files and nothing else', () => {
+  async function repo(prefix: string) {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { execFileSync } = await import('node:child_process');
+    const tmp = mkdtempSync(join(tmpdir(), prefix));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        env: gitScrubbedEnv(),
+        cwd: tmp,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    const run = (argv: string[]) => git(...argv.slice(1));
+    const staged = () => git('diff', '--cached', '--name-only').split('\n').filter(Boolean).sort();
+    git('init', '-q');
+    return { tmp, git, run, staged, cleanup: () => rmSync(tmp, { recursive: true, force: true }) };
+  }
+
+  it('a new lockfile is staged; a modified allowlisted file and a new one are left alone', async () => {
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { tmp, git, run, staged, cleanup } = await repo('vb-named-add-');
+    try {
+      mkdirSync(join(tmp, 'src'));
+      writeFileSync(join(tmp, 'package.json'), '{}');
+      writeFileSync(join(tmp, 'src', 'app.ts'), 'one');
+      git('add', '--', 'package.json', 'src/app.ts');
+      git(
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@example.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-q',
+        '-m',
+        'base',
+      );
+      // The operator's work in progress, all of it on the allowlist.
+      writeFileSync(join(tmp, 'package.json'), '{"name":"edited"}');
+      writeFileSync(join(tmp, 'src', 'app.ts'), 'two');
+      writeFileSync(join(tmp, 'src', 'new.ts'), 'new');
+      // What deploy generated.
+      writeFileSync(join(tmp, 'pnpm-lock.yaml'), 'lockfileVersion: 9');
+
+      // The mistake, shown on the same tree: the allowlist stages all four.
+      expect(buildGitAddArgv(tmp, ['pnpm-lock.yaml'])).toEqual(
+        expect.arrayContaining(['package.json', 'src/', 'pnpm-lock.yaml']),
+      );
+
+      run(buildGitAddNamedArgv(tmp, ['pnpm-lock.yaml']));
+      expect(staged()).toEqual(['pnpm-lock.yaml']);
+      // Still modified and untracked in the working tree, untouched.
+      expect(git('status', '--porcelain').split('\n').filter(Boolean).sort()).toEqual(
+        ['A  pnpm-lock.yaml', ' M package.json', ' M src/app.ts', '?? src/new.ts'].sort(),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('names only what exists, after git add --', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const { tmp, cleanup } = await repo('vb-named-argv-');
+    try {
+      writeFileSync(join(tmp, 'bun.lock'), '');
+      const argv = buildGitAddNamedArgv(tmp, ['bun.lock', 'bun.lockb']);
+      expect(argv.slice(0, 3)).toEqual(['git', 'add', '--']);
+      expect(argv.slice(3).filter((p) => !p.startsWith(':('))).toEqual(['bun.lock']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('adds no exclusion when no named file exists (a lone exclusion would stage everything)', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const { tmp, run, staged, cleanup } = await repo('vb-named-empty-');
+    try {
+      writeFileSync(join(tmp, 'package.json'), '{}');
+      writeFileSync(join(tmp, 'secret.txt'), 'x');
+      const argv = buildGitAddNamedArgv(tmp, ['package-lock.json']);
+      expect(argv).toEqual(['git', 'add', '--']);
+      run(argv);
+      expect(staged()).toEqual([]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('never stages an env file, even one named outright', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const { tmp, run, staged, cleanup } = await repo('vb-named-env-');
+    try {
+      writeFileSync(join(tmp, '.env.local'), 'SECRET=x');
+      writeFileSync(join(tmp, 'package-lock.json'), '{}');
+      run(buildGitAddNamedArgv(tmp, ['package-lock.json', '.env.local']));
+      expect(staged()).toEqual(['package-lock.json']);
+    } finally {
+      cleanup();
+    }
   });
 });
