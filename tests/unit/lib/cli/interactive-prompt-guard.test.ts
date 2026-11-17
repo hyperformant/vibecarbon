@@ -102,6 +102,37 @@ function promptGuardOffenders(overrides: Map<string, string> = new Map()): strin
   return offenders;
 }
 
+// A CALL to a console guide (`displayApiTokenGuide(`, `displayS3CredentialsGuide(`),
+// not the guide's own definition.
+const GUIDE_CALL = /(?<!function )\bdisplay\w+Guide\(/;
+
+/**
+ * Walk the family for a guide printed before the terminal check: off a
+ * terminal the command must fail with the env var to set, not print setup
+ * steps for a prompt that will never open.
+ * @param overrides in-memory file contents, for the mutation probes.
+ */
+function guideGuardOffenders(overrides: Map<string, string> = new Map()): string[] {
+  const offenders: string[] = [];
+  for (const file of guidedSetupFiles()) {
+    const src = overrides.get(file) ?? readFileSync(join(SRC_LIB, file), 'utf-8');
+    const marks: Array<{ at: number; name: string }> = [];
+    for (const m of src.matchAll(FUNCTION_START)) {
+      marks.push({ at: m.index, name: m[1] ?? m[2] });
+    }
+    for (const [i, mark] of marks.entries()) {
+      const body = src.slice(mark.at, marks[i + 1]?.at ?? src.length);
+      const guide = body.match(GUIDE_CALL);
+      if (!guide) continue;
+      const guardIdx = body.indexOf('assertInteractiveStdin(');
+      if (guardIdx === -1) offenders.push(`${file}:${mark.name} — guide with no guard`);
+      else if (guardIdx > (guide.index ?? 0))
+        offenders.push(`${file}:${mark.name} — guard AFTER the guide`);
+    }
+  }
+  return offenders;
+}
+
 /**
  * Apply a transform to one named function's body, leaving the rest of the
  * module byte-identical.
@@ -186,6 +217,19 @@ const CREDENTIAL_ENTRY_POINTS: Array<{ module: string; envVar: string }> = [
   { module: 'scaleway-guided-setup.js', envVar: 'SCALEWAY_SECRET_KEY' },
 ];
 
+/** The five providers with object storage (Cloudflare is DNS only). */
+const S3_ENTRY_POINTS: Array<{ module: string; accessKey: string; secretKey: string }> = [
+  'vultr',
+  'linode',
+  'hetzner',
+  'digitalocean',
+  'scaleway',
+].map((id) => ({
+  module: `${id}-guided-setup.js`,
+  accessKey: `${id.toUpperCase()}_ACCESS_KEY`,
+  secretKey: `${id.toUpperCase()}_SECRET_KEY`,
+}));
+
 describe('credential prompts off-TTY fail loudly instead of exiting 0', () => {
   const realIsTTY = process.stdin.isTTY;
 
@@ -234,6 +278,26 @@ describe('credential prompts off-TTY fail loudly instead of exiting 0', () => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
+
+  // Scaleway's storage keys are its compute keys, so its getS3Credentials
+  // hands off to getApiToken, and the only terminal check used to be the one
+  // in there: the storage guide was printed first, then the throw.
+  for (const { module, accessKey, secretKey } of S3_ENTRY_POINTS) {
+    it(`${module}: getS3Credentials rejects before printing its guide`, async () => {
+      vi.stubEnv(accessKey, '');
+      vi.stubEnv(secretKey, '');
+      clackMock.note.mockClear();
+      const mod = (await import(`../../../../src/lib/${module}`)) as {
+        getS3Credentials: (p?: string, o?: object) => Promise<unknown>;
+      };
+      await expect(mod.getS3Credentials('my-project', { save: false })).rejects.toThrow(
+        new RegExp(secretKey),
+      );
+      expect(clackMock.note).not.toHaveBeenCalled();
+      expect(clackMock.password).not.toHaveBeenCalled();
+      vi.unstubAllEnvs();
+    });
+  }
 });
 
 // ── 3. Census: the property holds for every member of the family ───────────
@@ -301,6 +365,35 @@ describe('census — every guided-setup credential entry point guards its prompt
     );
     expect(promptGuardOffenders(new Map([[SHARED_PROMPTS, moved]]))).toEqual([
       `${SHARED_PROMPTS}:promptForVerifiedToken — guard AFTER first prompt`,
+    ]);
+  });
+
+  it('every function that prints a console guide checks the terminal first', () => {
+    expect(guideGuardOffenders()).toEqual([]);
+  });
+
+  // Scaleway's getS3Credentials opens no prompt of its own (getApiToken does),
+  // so the prompt census above never looked at it.
+  it('MUTATION: catches a guide printed by a function with no guard', () => {
+    const file = 'scaleway-guided-setup.js';
+    expect(guideGuardOffenders(new Map([[file, disarmGuardIn(file, 'getS3Credentials')]]))).toEqual(
+      [`${file}:getS3Credentials — guide with no guard`],
+    );
+  });
+
+  it('MUTATION: catches a guard placed AFTER the guide', () => {
+    const file = 'hetzner-guided-setup.js';
+    const moved = withinFunction(disarmGuardIn(file, 'getApiToken'), 'getApiToken', (body) => {
+      if (!body.includes('displayApiTokenGuide(projectName);')) {
+        throw new Error('fixture drift: guide call anchor missing');
+      }
+      return body.replace(
+        'displayApiTokenGuide(projectName);',
+        "displayApiTokenGuide(projectName);\n  assertInteractiveStdin({ what: 'x', envVar: 'Y' });",
+      );
+    });
+    expect(guideGuardOffenders(new Map([[file, moved]]))).toEqual([
+      `${file}:getApiToken — guard AFTER the guide`,
     ]);
   });
 });

@@ -729,6 +729,13 @@ export async function getS3Credentials(projectName, options = {}) {
 
   if (skipPrompts) return null;
 
+  // Check the terminal before the guide, as the other providers do. The key
+  // prompt below is getApiToken's and has its own check, but that one runs
+  // after this guide: off a terminal it printed setup steps and then threw.
+  assertInteractiveStdin({
+    what: 'the Scaleway object-storage keys',
+    envVar: 'SCALEWAY_ACCESS_KEY/SCALEWAY_SECRET_KEY',
+  });
   displayS3CredentialsGuide(projectName);
 
   // The triple flow collects (and validates) the pair; force so a partial
