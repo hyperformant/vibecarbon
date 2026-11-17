@@ -44,6 +44,15 @@
  */
 
 import { spinner } from './cli/progress.js';
+import {
+  bearerHeaders,
+  bearerJsonHeaders,
+  matching,
+  pairDeleteResult,
+  relativeToFqdn,
+  toRelativeName,
+  zoneTooLongMessage,
+} from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
@@ -76,16 +85,7 @@ const MAX_PAGES = 20;
  * @returns {string} Zone-relative record name
  */
 function fqdnToRelative(fqdn, zoneName) {
-  const clean = String(fqdn).replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-
-  if (clean === zone) return '';
-  if (clean === `*.${zone}`) return '*';
-  if (clean.endsWith(`.${zone}`)) {
-    return clean.slice(0, -(zone.length + 1));
-  }
-  // No match — caller may have already passed a relative name.
-  return clean;
+  return toRelativeName(fqdn, zoneName, '');
 }
 
 /**
@@ -122,7 +122,7 @@ async function walkCursor(apiToken, path, key, errorPrefix, { pastGuard } = {}) 
   for (let guard = 0; guard < MAX_PAGES; guard++) {
     const response = await fetchWithRetry(
       `${API_BASE}${path}?per_page=${PER_PAGE}${cursor ? `&cursor=${cursor}` : ''}`,
-      { headers: { Authorization: `Bearer ${apiToken}` } },
+      { headers: bearerHeaders(apiToken) },
     );
 
     if (!response.ok) throw await apiError(response, errorPrefix);
@@ -155,39 +155,10 @@ async function getRecords(apiToken, zoneName, { whole = false } = {}) {
     'Vultr DNS API error',
     whole
       ? {
-          pastGuard: `the zone has more than ${MAX_PAGES * PER_PAGE} records, more than vibecarbon reads`,
+          pastGuard: zoneTooLongMessage(MAX_PAGES * PER_PAGE),
         }
       : {},
   );
-}
-
-/**
- * A record's name as the zone stores it, fully qualified: the apex spelling
- * ('@', '') is the zone itself, a name already under the zone stays.
- * @param {string} name
- * @param {string} zoneName
- * @returns {string}
- */
-function relativeToFqdn(name, zoneName) {
-  const clean = String(name ?? '').replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-  if (clean === '@' || clean === '' || clean === zone) return zone;
-  if (clean.endsWith(`.${zone}`)) return clean;
-  return `${clean}.${zone}`;
-}
-
-/**
- * Records at a given (relative name, type). Vultr's own reference shows both
- * relative and fully-qualified spellings for a listed record's `name`, so we
- * accept either — see the module header.
- * @param {object[]} records
- * @param {string} relativeName
- * @param {string} fqdn
- * @param {string} type
- * @returns {object[]}
- */
-function matching(records, relativeName, fqdn, type) {
-  return records.filter((r) => r.type === type && (r.name === relativeName || r.name === fqdn));
 }
 
 // ============================================================================
@@ -229,10 +200,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   const existing = await getRecords(apiToken, zoneId);
   const match = matching(existing, relativeName, String(name).replace(/\.$/, ''), type)[0];
 
-  const headers = {
-    Authorization: `Bearer ${apiToken}`,
-    'Content-Type': 'application/json',
-  };
+  const headers = bearerJsonHeaders(apiToken);
 
   if (match) {
     // PATCH takes only the mutable attributes — `type` is fixed at create.
@@ -349,7 +317,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
     }
     const response = await fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${record.id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: bearerHeaders(apiToken),
     });
     if (response.ok) deleted++;
     else if (response.status !== 404) {
@@ -381,11 +349,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     deleteDNSRecord(apiToken, zoneId, domain, ownedIps),
     deleteDNSRecord(apiToken, zoneId, `*.${domain}`, ownedIps),
   ]);
-  return {
-    deletedAny: root.deleted > 0 || wildcard.deleted > 0,
-    preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
-    failed: [...root.failed, ...wildcard.failed],
-  };
+  return pairDeleteResult(root, wildcard);
 }
 
 /**
