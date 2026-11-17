@@ -43,7 +43,7 @@ import {
   displayS3CredentialsGuide,
 } from '../../../src/lib/vultr-guided-setup.js';
 
-// getApiToken/getS3Credentials share a module-level `_savePreference` flag
+// getApiToken/getS3Credentials share a module-level save preference (its `saveIfWanted`)
 // (see hetzner-guided-setup.test.ts's identical note) — fresh-import per
 // test so one test's save answer can't leak into the next.
 async function freshGuidedSetup() {

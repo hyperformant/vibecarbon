@@ -45,11 +45,22 @@ vi.mock('../../../../src/lib/project.js', async (importOriginal) => ({
 const SRC_LIB = fileURLToPath(new URL('../../../../src/lib/', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
 
+/**
+ * The prompts the guided setups share (token paste, key pair, "save keys?")
+ * live in this one module, so the census walks it with the family.
+ */
+const SHARED_PROMPTS = 'guided-setup-shared.js';
+
 /** Every provider/DNS guided-setup module — the credential-prompt family. */
-function guidedSetupFiles(): string[] {
+function providerGuidedSetupFiles(): string[] {
   return readdirSync(SRC_LIB)
     .filter((f) => f.endsWith('-guided-setup.js'))
     .sort();
+}
+
+/** The family plus the shared module its prompts moved into. */
+function guidedSetupFiles(): string[] {
+  return [SHARED_PROMPTS, ...providerGuidedSetupFiles()];
 }
 
 // EVERY clack prompt that blocks on stdin. `confirm` and the multiselects were
@@ -229,7 +240,8 @@ describe('credential prompts off-TTY fail loudly instead of exiting 0', () => {
 
 describe('census — every guided-setup credential entry point guards its prompt', () => {
   it('finds the whole family (all five providers/DNS)', () => {
-    expect(guidedSetupFiles()).toHaveLength(CREDENTIAL_ENTRY_POINTS.length);
+    expect(providerGuidedSetupFiles()).toHaveLength(CREDENTIAL_ENTRY_POINTS.length);
+    expect(readdirSync(SRC_LIB)).toContain(SHARED_PROMPTS);
   });
 
   it('every function that opens a prompt calls assertInteractiveStdin first', () => {
@@ -241,10 +253,21 @@ describe('census — every guided-setup credential entry point guards its prompt
   // notices, so the widened regexes are proven to bite rather than assumed to.
   it('MUTATION: catches a password prompt whose guard is deleted', () => {
     const mutated = new Map([
-      ['vultr-guided-setup.js', disarmGuardIn('vultr-guided-setup.js', 'getApiToken')],
+      [SHARED_PROMPTS, disarmGuardIn(SHARED_PROMPTS, 'promptForVerifiedToken')],
     ]);
     expect(promptGuardOffenders(mutated)).toEqual([
-      'vultr-guided-setup.js:getApiToken — no assertInteractiveStdin',
+      `${SHARED_PROMPTS}:promptForVerifiedToken — no assertInteractiveStdin`,
+    ]);
+  });
+
+  // A provider module that still opens a prompt of its own (Vultr's cluster)
+  // is walked exactly as before the shared module existed.
+  it('MUTATION: catches a provider-owned prompt whose guard is deleted', () => {
+    const mutated = new Map([
+      ['vultr-guided-setup.js', disarmGuardIn('vultr-guided-setup.js', 'getS3Credentials')],
+    ]);
+    expect(promptGuardOffenders(mutated)).toEqual([
+      'vultr-guided-setup.js:getS3Credentials — no assertInteractiveStdin',
     ]);
   });
 
@@ -252,10 +275,10 @@ describe('census — every guided-setup credential entry point guards its prompt
   // invisible to this census no matter how unguarded it was.
   it('MUTATION: catches a confirm-only function whose guard is deleted', () => {
     const mutated = new Map([
-      ['cloudflare-guided-setup.js', disarmGuardIn('cloudflare-guided-setup.js', 'saveIfWanted')],
+      [SHARED_PROMPTS, disarmGuardIn(SHARED_PROMPTS, 'createCredentialSaver')],
     ]);
     expect(promptGuardOffenders(mutated)).toEqual([
-      'cloudflare-guided-setup.js:saveIfWanted — no assertInteractiveStdin',
+      `${SHARED_PROMPTS}:createCredentialSaver — no assertInteractiveStdin`,
     ]);
   });
 
@@ -264,20 +287,20 @@ describe('census — every guided-setup credential entry point guards its prompt
     // precede — a guard that runs after the prompt has already hung protects
     // nothing, and the census must say so rather than just seeing the name.
     const moved = withinFunction(
-      disarmGuardIn('linode-guided-setup.js', 'getApiToken'),
-      'getApiToken',
+      disarmGuardIn(SHARED_PROMPTS, 'promptForVerifiedToken'),
+      'promptForVerifiedToken',
       (body) => {
-        if (!body.includes('warnIfBadTokenFormat(token);')) {
-          throw new Error('fixture drift: linode post-prompt anchor missing');
+        if (!body.includes('warnIfBadTokenFormat(token, spec);')) {
+          throw new Error('fixture drift: token post-prompt anchor missing');
         }
         return body.replace(
-          'warnIfBadTokenFormat(token);',
-          "warnIfBadTokenFormat(token);\n    assertInteractiveStdin({ what: 'x', envVar: 'Y' });",
+          'warnIfBadTokenFormat(token, spec);',
+          "warnIfBadTokenFormat(token, spec);\n    assertInteractiveStdin({ what: 'x', envVar: 'Y' });",
         );
       },
     );
-    expect(promptGuardOffenders(new Map([['linode-guided-setup.js', moved]]))).toEqual([
-      'linode-guided-setup.js:getApiToken — guard AFTER first prompt',
+    expect(promptGuardOffenders(new Map([[SHARED_PROMPTS, moved]]))).toEqual([
+      `${SHARED_PROMPTS}:promptForVerifiedToken — guard AFTER first prompt`,
     ]);
   });
 });

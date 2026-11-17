@@ -14,18 +14,18 @@
  */
 
 import * as p from '@clack/prompts';
-import { exitCancelled } from './cli/exit-guard.js';
-import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c, link } from './colors.js';
-import { registryEntry } from './config-registry.js';
 import {
-  dotenvPromptProblem,
-  normalizeOperatorValue,
-  pastedKeyShapeProblem,
-  readOperatorVar,
-} from './operator-env.js';
-import { describeCredentialSource, setEnvVar } from './project.js';
+  checkApiToken,
+  createCredentialSaver,
+  finishS3Credentials,
+  promptForVerifiedToken,
+  promptS3KeyPair,
+  verifiedEnvToken,
+} from './guided-setup-shared.js';
+import { readOperatorVar } from './operator-env.js';
+import { describeCredentialSource } from './project.js';
 
 const API_BASE = 'https://api.linode.com/v4';
 
@@ -36,37 +36,26 @@ const API_BASE = 'https://api.linode.com/v4';
 // heuristic would strand an otherwise-valid token behind it.
 const TOKEN_FORMAT = /^[A-Za-z0-9]{64}$/;
 
-function warnIfBadTokenFormat(token) {
-  if (!TOKEN_FORMAT.test(token)) {
-    p.log.warn(
-      'Linode API token does not match the expected format (64 alphanumeric characters), proceeding anyway.',
-    );
-  }
-}
-
 /**
  * Validate a Linode API token by making a lightweight API call.
  * @param {string} token
  * @returns {Promise<{ valid: boolean, error?: string, unreachable?: boolean }>}
  */
-async function validateLinodeToken(token) {
-  try {
-    const res = await fetch(`${API_BASE}/profile`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) return { valid: true };
-    if (res.status === 401) return { valid: false, error: 'Token is invalid or expired' };
-    // A 5xx is the PROVIDER's outage, not the operator's credential: treat it
-    // like the network-error catch below (proceed with the env token; real
-    // API calls fail honestly later if the outage persists). Live RCA
-    // 2026-09-01 (run 33557406486): a Vultr API 502 on this preflight read
-    // as "token invalid", and the non-TTY destroy died trying to prompt.
-    if (res.status >= 500) return { valid: true, unreachable: true };
-    return { valid: false, error: `Linode API returned status ${res.status}` };
-  } catch {
-    return { valid: true, unreachable: true };
-  }
+function validateLinodeToken(token) {
+  return checkApiToken(
+    `${API_BASE}/profile`,
+    { Authorization: `Bearer ${token}` },
+    { api: 'Linode', unauthorized: 'Token is invalid or expired' },
+  );
 }
+
+// What guided-setup-shared.js needs to look up, prompt for and verify the token.
+const API_TOKEN = {
+  envKey: 'LINODE_API_TOKEN',
+  provider: 'Linode',
+  verify: validateLinodeToken,
+  format: { pattern: TOKEN_FORMAT, expected: '64 alphanumeric characters' },
+};
 
 /**
  * Display improved visual guide for API token creation.
@@ -115,40 +104,13 @@ export function displayS3CredentialsGuide(projectName) {
   );
 }
 
-// Session-level save preference — same contract as the identical
-// module-level flag in hetzner-guided-setup.js / digitalocean-guided-setup.js.
-let _savePreference = null;
-
-/**
- * Ask the user once whether to save credentials, then reuse the answer.
- * @param {Record<string, string>} envVars - Flat env-var-name → value map to
- *   persist to the project's .env.local (operator-secret keys — see
- *   config-registry.js — always write localOnly, never .env).
- */
-async function saveIfWanted(envVars) {
-  if (_savePreference === null) {
-    // Unreachable by construction today (this helper only runs after an
-    // interactive prompt already succeeded, so stdin was a TTY), but the
-    // invariant is 'any function that prompts, guards first' — so a future
-    // caller that reaches it non-interactively fails loudly, not silently.
-    assertInteractiveStdin({
-      what: 'whether to save the Linode credentials',
-      envVar: 'LINODE_API_TOKEN',
-    });
-    const shouldSave = await p.confirm({
-      message: 'Save keys for future deploys?',
-      initialValue: true,
-    });
-    _savePreference = shouldSave && !p.isCancel(shouldSave);
-  }
-
-  if (_savePreference) {
-    for (const [key, value] of Object.entries(envVars)) {
-      setEnvVar(key, value, process.cwd(), { localOnly: true });
-    }
-    p.log.info(c.dim('Saved to .env.local'));
-  }
-}
+// Session-level save preference: once the user answers "Save keys for future
+// deploys?" the decision applies to all credentials this module prompts for
+// during this process.
+const saveIfWanted = createCredentialSaver({
+  provider: 'Linode',
+  envVar: 'LINODE_API_TOKEN',
+});
 
 /**
  * Get API token with improved visual guidance.
@@ -165,25 +127,8 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    const envToken = readOperatorVar('LINODE_API_TOKEN').value;
-    if (envToken) {
-      warnIfBadTokenFormat(envToken);
-      const check = await validateLinodeToken(envToken);
-      if (!check.valid) {
-        p.log.warn(
-          `LINODE_API_TOKEN from ${describeCredentialSource(['LINODE_API_TOKEN']).where} is set but invalid: ${check.error}`,
-        );
-        // Fall through to interactive prompt
-      } else {
-        if (check.unreachable) {
-          p.log.warn('Could not reach Linode API to verify token, proceeding with saved token');
-        }
-        p.log.info(
-          `✓ Using Linode API token from ${describeCredentialSource(['LINODE_API_TOKEN']).label}`,
-        );
-        return envToken;
-      }
-    }
+    const envToken = await verifiedEnvToken(API_TOKEN);
+    if (envToken) return envToken;
   }
 
   // Off a TTY this prompt can never be answered — clack's promise would
@@ -192,42 +137,7 @@ export async function getApiToken(projectName, options = {}) {
   assertInteractiveStdin({ what: 'the Linode API token', envVar: 'LINODE_API_TOKEN' });
   // Interactive prompt (with retry on invalid token)
   displayApiTokenGuide(projectName);
-
-  let token;
-  while (true) {
-    token = await p.password({
-      message: 'Paste your Linode API token here',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'API token is required';
-        return dotenvPromptProblem('LINODE_API_TOKEN', v);
-      },
-    });
-
-    if (p.isCancel(token)) {
-      exitCancelled();
-    }
-    // First-time-user path (M11): the paste goes through the same
-    // normalization every later readOperatorVar() read applies — trailing
-    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
-    // against the live API, exported to process.env or saved to .env.local.
-    token = normalizeOperatorValue(token, registryEntry('LINODE_API_TOKEN')).value;
-
-    warnIfBadTokenFormat(token);
-
-    const s = spinner();
-    s.start('Verifying API token...');
-    const check = await validateLinodeToken(token);
-    if (check.valid) {
-      if (check.unreachable) {
-        s.stop('Could not reach Linode API, proceeding with unverified token');
-      } else {
-        s.stop('API token verified');
-      }
-      break;
-    }
-    s.stop(`Token invalid: ${check.error}`);
-    p.log.warn('Please try again with a valid token.');
-  }
+  const token = await promptForVerifiedToken(API_TOKEN);
 
   // In-process coherence (A2): a freshly-entered token must be visible to
   // any later env-first resolution in this same process, regardless of
@@ -280,44 +190,12 @@ export async function getS3Credentials(projectName, options = {}) {
   });
   // Interactive prompt
   displayS3CredentialsGuide(projectName);
-
-  const accessKeyInput = await p.text({
-    message: 'Paste your Object Storage Access Key here',
-    validate: (v) => {
-      if (!v || v.length < 10) return 'Access Key is required';
-      return (
-        pastedKeyShapeProblem('LINODE_ACCESS_KEY', v) ?? dotenvPromptProblem('LINODE_ACCESS_KEY', v)
-      );
-    },
+  const { accessKey, secretKey } = await promptS3KeyPair({
+    provider: 'Linode',
+    accessEnvKey: 'LINODE_ACCESS_KEY',
+    secretEnvKey: 'LINODE_SECRET_KEY',
+    label: 'Object Storage',
   });
-
-  if (p.isCancel(accessKeyInput)) {
-    exitCancelled();
-  }
-
-  const secretKeyInput = await p.password({
-    message: 'Paste your Object Storage Secret Key here',
-    validate: (v) => {
-      if (!v || v.length < 10) return 'Secret Key is required';
-      return (
-        pastedKeyShapeProblem('LINODE_SECRET_KEY', v) ?? dotenvPromptProblem('LINODE_SECRET_KEY', v)
-      );
-    },
-  });
-
-  if (p.isCancel(secretKeyInput)) {
-    exitCancelled();
-  }
-
-  // Same first-time-user normalization as getApiToken above (M11).
-  const accessKey = normalizeOperatorValue(
-    accessKeyInput,
-    registryEntry('LINODE_ACCESS_KEY'),
-  ).value;
-  const secretKey = normalizeOperatorValue(
-    secretKeyInput,
-    registryEntry('LINODE_SECRET_KEY'),
-  ).value;
 
   p.log.success('Object Storage credentials received!');
 
@@ -325,23 +203,10 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.LINODE_ACCESS_KEY = accessKey;
   process.env.LINODE_SECRET_KEY = secretKey;
 
-  const keys = {
-    LINODE_ACCESS_KEY: accessKey,
-    LINODE_SECRET_KEY: secretKey,
-  };
-  // deferSave: the caller verifies the keys against S3 first and calls
-  // save() only once they pass, so a rejected pair is never written.
-  if (deferSave) {
-    return {
-      accessKey,
-      secretKey,
-      source: 'what you pasted',
-      save: save ? () => saveIfWanted(keys) : async () => {},
-    };
-  }
-  if (save) {
-    await saveIfWanted(keys);
-  }
-
-  return { accessKey, secretKey, source: 'what you pasted' };
+  return finishS3Credentials(
+    { accessKey, secretKey, source: 'what you pasted' },
+    { LINODE_ACCESS_KEY: accessKey, LINODE_SECRET_KEY: secretKey },
+    { save, deferSave },
+    saveIfWanted,
+  );
 }

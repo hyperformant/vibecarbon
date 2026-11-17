@@ -23,7 +23,7 @@ import { fetchWithRetry } from '../fetch-retry.js';
 import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-unavailable.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
+import { standbyStandIn } from '../sizing.js';
 import { BaseProvider, deleteFailure, replaceWireguardPeerRules } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
@@ -728,39 +728,6 @@ export class DigitalOceanProvider extends BaseProvider {
       ...info,
       architecture: 'x86',
     }));
-  }
-
-  /**
-   * Default type per role in `region`: the cheapest orderable
-   * ROLE_CANDIDATES entry that meets the role's RAM floor
-   * (src/lib/sizing.js). Offline, declared order over the fallback catalog.
-   * @param {string} region - Region slug
-   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
-   */
-  static getRegionDefaults(region) {
-    return regionRoleDefaults(DigitalOceanProvider, region);
-  }
-
-  /**
-   * Default HA standby region for a given primary: the cheapest
-   * same-continent partner where every standby role is orderable right now
-   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
-   * conventionalStandbyRegion's pair. The pre-selected value in the
-   * interactive standby prompt and the headless default.
-   * @param {string} primaryRegion
-   * @param {string[]} [roles] - the roles the standby places
-   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
-   *   type by role: a partner must fit each without shrinking it
-   * @returns {string}
-   */
-  static getDefaultStandbyRegion(primaryRegion, roles = ['compose'], primaryTypes = {}) {
-    return cheapestStandbyRegion(
-      DigitalOceanProvider,
-      primaryRegion,
-      roles,
-      DigitalOceanProvider.conventionalStandbyRegion(primaryRegion),
-      primaryTypes,
-    );
   }
 
   /**
@@ -1725,18 +1692,6 @@ export class DigitalOceanProvider extends BaseProvider {
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
     }
-  }
-
-  /**
-   * List ALL volumes, walking pagination (M3 Task 5b — same per_page=50 +
-   * guarded links.pages.next walk as listServers). A single-page fetch
-   * could silently miss volumes past the first page, causing the destroy
-   * sweep to leak them. Soft-fail contract: [] on a non-ok first-page
-   * response, matching listServers.
-   * @returns {Promise<object[]>}
-   */
-  async listVolumes() {
-    return (await this.listVolumesDetailed()).items;
   }
 
   /**

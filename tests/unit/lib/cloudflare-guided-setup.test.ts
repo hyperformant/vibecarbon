@@ -35,10 +35,10 @@ vi.mock('../../../src/lib/cloudflare-dns.js', () => ({ verifyToken: verifyTokenM
 
 import { displayApiTokenGuide } from '../../../src/lib/cloudflare-guided-setup.js';
 
-// getApiToken shares a module-level `_savePreference` flag with any future
+// getApiToken shares a module-level save preference (its `saveIfWanted`) with any future
 // credential this module might prompt for (same contract as
 // hetzner/digitalocean-guided-setup.js). vi.resetModules() + a fresh dynamic
-// import per test isolates each test's `_savePreference` back to null.
+// import per test isolates each test's save preference back to unasked.
 async function freshGuidedSetup() {
   vi.resetModules();
   return import('../../../src/lib/cloudflare-guided-setup.js');

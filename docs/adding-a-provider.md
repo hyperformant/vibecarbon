@@ -15,9 +15,9 @@ like. The suite tells you what is missing. The guard-decision table in
 ## 1. Implement the classes
 
 - `src/lib/providers/<id>.js`: `class <Name>Provider extends BaseProvider`.
-  Implement **every** abstract member: ~23 data statics, 16 abstract static
+  Implement **every** abstract member: ~23 data statics, 14 abstract static
   methods (catalog, user-data renderers, Pulumi program loaders,
-  guided-setup prompts, `getObjectStorageProviderClass`), and ~31 abstract
+  guided-setup prompts, `getObjectStorageProviderClass`), and ~30 abstract
   instance methods (server CRUD, firewall ops, listings with completeness
   signals, the destroy-sweep field accessors). The abstract-surface
   completeness check in `provider-contract.test.ts` fails on any member

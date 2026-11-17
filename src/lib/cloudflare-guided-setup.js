@@ -15,14 +15,21 @@
  */
 
 import * as p from '@clack/prompts';
-import { exitCancelled } from './cli/exit-guard.js';
-import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { verifyToken } from './cloudflare-dns.js';
 import { c, link } from './colors.js';
-import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { describeCredentialSource, setEnvVar } from './project.js';
+import {
+  createCredentialSaver,
+  promptForVerifiedToken,
+  verifiedEnvToken,
+} from './guided-setup-shared.js';
+
+// What guided-setup-shared.js needs to look up, prompt for and verify the token.
+const API_TOKEN = {
+  envKey: 'CLOUDFLARE_API_TOKEN',
+  provider: 'Cloudflare',
+  verify: verifyToken,
+};
 
 /**
  * Display improved visual guide for API token creation.
@@ -47,42 +54,13 @@ export function displayApiTokenGuide(projectName) {
   );
 }
 
-// Session-level save preference: null = not asked yet, true/false = user's
-// answer — same contract as hetzner/digitalocean-guided-setup.js's identical
-// module-level flag (kept here for structural parity even though Cloudflare
-// currently prompts for only one credential per session).
-let _savePreference = null;
-
-/**
- * Ask the user once whether to save credentials, then reuse the answer.
- * @param {Record<string, string>} envVars - Flat env-var-name → value map to
- *   persist to the project's .env.local (operator-secret keys — see
- *   config-registry.js — always write localOnly, never .env).
- */
-async function saveIfWanted(envVars) {
-  if (_savePreference === null) {
-    // Unreachable by construction today (this helper only runs after an
-    // interactive prompt already succeeded, so stdin was a TTY), but the
-    // invariant is 'any function that prompts, guards first' — so a future
-    // caller that reaches it non-interactively fails loudly, not silently.
-    assertInteractiveStdin({
-      what: 'whether to save the Cloudflare credentials',
-      envVar: 'CLOUDFLARE_API_TOKEN',
-    });
-    const shouldSave = await p.confirm({
-      message: 'Save keys for future deploys?',
-      initialValue: true,
-    });
-    _savePreference = shouldSave && !p.isCancel(shouldSave);
-  }
-
-  if (_savePreference) {
-    for (const [key, value] of Object.entries(envVars)) {
-      setEnvVar(key, value, process.cwd(), { localOnly: true });
-    }
-    p.log.info(c.dim('Saved to .env.local'));
-  }
-}
+// Session-level save preference: once the user answers "Save keys for future
+// deploys?" the decision applies to all credentials this module prompts for
+// during this process.
+const saveIfWanted = createCredentialSaver({
+  provider: 'Cloudflare',
+  envVar: 'CLOUDFLARE_API_TOKEN',
+});
 
 /**
  * Get API token with improved visual guidance.
@@ -99,25 +77,8 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    // Check environment variable
-    const envToken = readOperatorVar('CLOUDFLARE_API_TOKEN').value;
-    if (envToken) {
-      const check = await verifyToken(envToken);
-      if (!check.valid) {
-        p.log.warn(
-          `CLOUDFLARE_API_TOKEN from ${describeCredentialSource(['CLOUDFLARE_API_TOKEN']).where} is set but invalid: ${check.error}`,
-        );
-        // Fall through to interactive prompt
-      } else {
-        if (check.unreachable) {
-          p.log.warn('Could not reach Cloudflare API to verify token, proceeding with saved token');
-        }
-        p.log.info(
-          `✓ Using Cloudflare API token from ${describeCredentialSource(['CLOUDFLARE_API_TOKEN']).label}`,
-        );
-        return envToken;
-      }
-    }
+    const envToken = await verifiedEnvToken(API_TOKEN);
+    if (envToken) return envToken;
   }
 
   // Off a TTY this prompt can never be answered — clack's promise would
@@ -126,40 +87,7 @@ export async function getApiToken(projectName, options = {}) {
   assertInteractiveStdin({ what: 'the Cloudflare API token', envVar: 'CLOUDFLARE_API_TOKEN' });
   // Interactive prompt (with retry on invalid token)
   displayApiTokenGuide(projectName);
-
-  let token;
-  while (true) {
-    token = await p.password({
-      message: 'Paste your Cloudflare API token here',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'API token is required';
-        return dotenvPromptProblem('CLOUDFLARE_API_TOKEN', v);
-      },
-    });
-
-    if (p.isCancel(token)) {
-      exitCancelled();
-    }
-    // First-time-user path (M11): the paste goes through the same
-    // normalization every later readOperatorVar() read applies — trailing
-    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
-    // against the live API, exported to process.env or saved to .env.local.
-    token = normalizeOperatorValue(token, registryEntry('CLOUDFLARE_API_TOKEN')).value;
-
-    const s = spinner();
-    s.start('Verifying API token...');
-    const check = await verifyToken(token);
-    if (check.valid) {
-      if (check.unreachable) {
-        s.stop('Could not reach Cloudflare API, proceeding with unverified token');
-      } else {
-        s.stop('API token verified');
-      }
-      break;
-    }
-    s.stop(`Token invalid: ${check.error}`);
-    p.log.warn('Please try again with a valid token.');
-  }
+  const token = await promptForVerifiedToken(API_TOKEN);
 
   // In-process coherence (A2): a freshly-entered token must be visible to
   // any later env-first resolution in this same process, regardless of
