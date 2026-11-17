@@ -23,7 +23,7 @@ import { c } from './lib/colors.js';
 import { DB_STATEFULSET, POD_EXEC_WRITE_MS } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
-import { ensureOperatorIpAccess } from './lib/operator-ip.js';
+import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
@@ -587,26 +587,13 @@ export async function run(args) {
  * cluster (create, download; list reads the bucket only).
  */
 async function ensureFirewallAccessIfNeeded({ projectConfig, envName, envConfig, yes }) {
-  const apiToken = resolveProviderToken(providerIdFor(envConfig));
-  if (!apiToken) return;
-
-  try {
-    const isHA = envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled;
-    const result = await ensureOperatorIpAccess({
-      projectConfig,
-      environment: envName,
-      isHA,
-      apiToken,
-      yes,
-      onMessage: (msg) => p.log.info(msg),
-    });
-    if (result.added) {
-      p.log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
-    }
-  } catch (err) {
-    p.log.error(`Operator-IP check failed: ${err.message}`);
-    process.exit(1);
-  }
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment: envName,
+    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
+    apiToken: resolveProviderToken(providerIdFor(envConfig)),
+    yes,
+  });
 }
 
 /**

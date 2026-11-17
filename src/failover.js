@@ -122,7 +122,7 @@ import {
   isStackOpenInterrupted,
   isStatePassphraseFailure,
 } from './lib/iac/state-error.js';
-import { ensureOperatorIpAccess } from './lib/operator-ip.js';
+import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfTimer } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -3428,25 +3428,13 @@ export async function run(args) {
 
   // Failover hits the active and standby clusters via SSH + kubectl, so the
   // operator's IP must be in the firewall allowlist for both.
-  const apiToken = resolveProviderToken(providerIdFor(envConfig));
-  if (apiToken) {
-    try {
-      const result = await ensureOperatorIpAccess({
-        projectConfig,
-        environment: envName,
-        isHA: true,
-        apiToken,
-        yes: !!parsed.yes,
-        onMessage: (msg) => p.log.info(msg),
-      });
-      if (result.added) {
-        p.log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
-      }
-    } catch (err) {
-      p.log.error(`Operator-IP check failed: ${err.message}`);
-      process.exit(1);
-    }
-  }
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment: envName,
+    isHA: true,
+    apiToken: resolveProviderToken(providerIdFor(envConfig)),
+    yes: !!parsed.yes,
+  });
 
   // -abort: call off a failover whose journal is set (failover-abort.js). It
   // keeps the old primary, so it runs before the retirement fence and every
