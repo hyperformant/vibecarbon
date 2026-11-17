@@ -86,8 +86,18 @@ describe('BaseProvider', () => {
       await expect(provider.listNetworks()).rejects.toThrow('must be implemented');
     });
 
-    it('listVolumes throws not implemented', async () => {
-      await expect(provider.listVolumes()).rejects.toThrow('must be implemented');
+    // Not abstract: the base returns listVolumesDetailed's items, so on the
+    // bare base class it is that abstract member which throws.
+    it('listVolumes reads through the abstract listVolumesDetailed', async () => {
+      await expect(provider.listVolumes()).rejects.toThrow(
+        'listVolumesDetailed() must be implemented',
+      );
+      class Listed extends BaseProvider {
+        async listVolumesDetailed() {
+          return { items: [{ id: 'vol-1' }], complete: true };
+        }
+      }
+      expect(await new Listed('test-token').listVolumes()).toEqual([{ id: 'vol-1' }]);
     });
 
     it('deleteVolume throws not implemented', async () => {
@@ -112,12 +122,34 @@ describe('BaseProvider', () => {
       expect(() => BaseProvider.getServerTypesForRegion('region')).toThrow('must be implemented');
     });
 
-    it('getRegionDefaults throws not implemented', () => {
-      expect(() => BaseProvider.getRegionDefaults('region')).toThrow('must be implemented');
+    // Not abstract: both are the same for every provider and read the calling
+    // class's own catalog and static pair, so on the bare base class it is
+    // those abstract members which throw.
+    it('getRegionDefaults reads through the abstract getServerTypesForRegion', () => {
+      expect(() => BaseProvider.getRegionDefaults('region')).toThrow(
+        'getServerTypesForRegion() must be implemented',
+      );
     });
 
-    it('getDefaultStandbyRegion throws not implemented', () => {
-      expect(() => BaseProvider.getDefaultStandbyRegion('region')).toThrow('must be implemented');
+    it('getDefaultStandbyRegion reads through the abstract conventionalStandbyRegion', () => {
+      expect(() => BaseProvider.getDefaultStandbyRegion('region')).toThrow(
+        'conventionalStandbyRegion() must be implemented',
+      );
+    });
+
+    it('getRegionDefaults and getDefaultStandbyRegion answer for the calling subclass', () => {
+      class OneRegion extends BaseProvider {
+        static ROLE_CANDIDATES = { compose: ['small'] };
+        static SERVER_TYPES = { small: { vcpu: 2, ram: 4, disk: 40 } };
+        static getServerTypesForRegion() {
+          return [{ name: 'small', vcpu: 2, ram: 4, disk: 40 }];
+        }
+        static conventionalStandbyRegion() {
+          return 'pair';
+        }
+      }
+      expect(OneRegion.getRegionDefaults('home').composeType).toBe('small');
+      expect(OneRegion.getDefaultStandbyRegion('home')).toBe('pair');
     });
 
     it('conventionalStandbyRegion throws not implemented', () => {

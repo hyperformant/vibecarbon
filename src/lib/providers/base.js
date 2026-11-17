@@ -13,6 +13,8 @@
  * tests then walk you through the rest.
  */
 
+import { cheapestStandbyRegion, regionRoleDefaults } from '../sizing.js';
+
 /**
  * Whether a DELETE's HTTP status is the provider refusing it (4xx). A 5xx,
  * which fetchWithRetry has already retried, proves nothing either way: the
@@ -913,11 +915,14 @@ export class BaseProvider {
   }
 
   /**
-   * List all volumes.
+   * List all volumes, as the bare array: the `items` of listVolumesDetailed,
+   * which each provider implements. It soft-fails to `[]` (or the pages
+   * already read) on a non-ok response, so a caller that turns an empty
+   * listing into a verdict must use listVolumesDetailed instead.
    * @returns {Promise<object[]>}
    */
   async listVolumes() {
-    throw new Error('listVolumes() must be implemented by subclass');
+    return (await this.listVolumesDetailed()).items;
   }
 
   /**
@@ -1258,11 +1263,17 @@ export class BaseProvider {
    * `ROLE_CANDIDATES` entry that meets the role's RAM floor
    * (src/lib/sizing.js regionRoleDefaults). A role with nothing orderable is
    * null. Compose-only providers return `composeType` for all four.
+   *
+   * The same for every provider: what differs is the data it reads
+   * (`ROLE_CANDIDATES`, the catalog, prices), which each provider declares.
    * @param {string} region - Region ID
    * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
-  static getRegionDefaults(_region) {
-    throw new Error('getRegionDefaults() must be implemented by subclass');
+  static getRegionDefaults(region) {
+    // Polymorphic on purpose: picks from the CALLING subclass's candidates
+    // and catalog (see assertAmd64ServerType below for why `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    return regionRoleDefaults(this, region);
   }
 
   /**
@@ -1280,7 +1291,10 @@ export class BaseProvider {
   /**
    * Default HA standby region for a given primary region: the cheapest
    * same-continent partner where every role in `roles` is orderable (see
-   * src/lib/sizing.js cheapestStandbyRegion), else the static pair.
+   * src/lib/sizing.js cheapestStandbyRegion), else the static pair. Ties and
+   * offline keep conventionalStandbyRegion's pair, which each provider
+   * declares. The pre-selected value in the interactive standby prompt and
+   * the headless default.
    * @param {string} primaryRegion
    * @param {string[]} [roles] - ['compose'], or ['master', 'db', 'worker'] for k8s-ha
    *   (the worker weighed in the class match only, never placed or priced)
@@ -1288,8 +1302,19 @@ export class BaseProvider {
    *   type by role, which the standby must fit without shrinking
    * @returns {string}
    */
-  static getDefaultStandbyRegion(_primaryRegion, _roles, _primaryTypes) {
-    throw new Error('getDefaultStandbyRegion() must be implemented by subclass');
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose'], primaryTypes = {}) {
+    // Polymorphic on purpose: ranks the CALLING subclass's regions and falls
+    // back to its own static pair (see assertAmd64ServerType below for why
+    // `this` must stay).
+    return cheapestStandbyRegion(
+      // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+      this,
+      primaryRegion,
+      roles,
+      // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+      this.conventionalStandbyRegion(primaryRegion),
+      primaryTypes,
+    );
   }
 
   /**
