@@ -15,6 +15,12 @@
  */
 
 import { spinner } from './cli/progress.js';
+import {
+  bearerHeaders,
+  bearerJsonHeaders,
+  pairDeleteResult,
+  relativeToFqdn,
+} from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { HetznerProvider } from './providers/hetzner.js';
 
@@ -61,7 +67,7 @@ async function awaitAction(apiToken, action) {
     }
     await new Promise((resolve) => setTimeout(resolve, ACTION_POLL_MS));
     const response = await fetchWithRetry(`${API_BASE}/actions/${action.id}`, {
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: bearerHeaders(apiToken),
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -100,21 +106,6 @@ function fqdnToRelative(fqdn, zoneName) {
   return clean;
 }
 
-/**
- * A record's name as the zone stores it, fully qualified: the apex spelling
- * ('@', '') is the zone itself, a name already under the zone stays.
- * @param {string} name
- * @param {string} zoneName
- * @returns {string}
- */
-function relativeToFqdn(name, zoneName) {
-  const clean = String(name ?? '').replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-  if (clean === '@' || clean === '' || clean === zone) return zone;
-  if (clean.endsWith(`.${zone}`)) return clean;
-  return `${clean}.${zone}`;
-}
-
 // zoneId → zone name, so the uniform record CRUD (which receives only a
 // zoneId, like every other backend) doesn't refetch the zone per call.
 // Zone names are immutable on Hetzner (rename = delete + recreate with a
@@ -145,7 +136,7 @@ export async function getZones(apiToken) {
 
   while (true) {
     const response = await fetchWithRetry(`${API_BASE}/zones?page=${page}&per_page=50`, {
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: bearerHeaders(apiToken),
     });
 
     if (!response.ok) {
@@ -172,7 +163,7 @@ export async function getZones(apiToken) {
  */
 export async function getZone(apiToken, zoneId) {
   const response = await fetchWithRetry(`${API_BASE}/zones/${zoneId}`, {
-    headers: { Authorization: `Bearer ${apiToken}` },
+    headers: bearerHeaders(apiToken),
   });
 
   if (!response.ok) {
@@ -199,7 +190,7 @@ export async function getRrsets(apiToken, zoneId) {
     const response = await fetchWithRetry(
       `${API_BASE}/zones/${zoneId}/rrsets?page=${page}&per_page=100`,
       {
-        headers: { Authorization: `Bearer ${apiToken}` },
+        headers: bearerHeaders(apiToken),
       },
     );
 
@@ -262,10 +253,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
         `${API_BASE}/zones/${zoneId}/rrsets/${relativeName}/${type}/actions/set_records`,
         {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiToken}`,
-            'Content-Type': 'application/json',
-          },
+          headers: bearerJsonHeaders(apiToken),
           body: JSON.stringify({ records: [{ value }] }),
         },
       );
@@ -280,7 +268,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
       `${API_BASE}/zones/${zoneId}/rrsets/${relativeName}/${type}`,
       {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${apiToken}` },
+        headers: bearerHeaders(apiToken),
       },
     );
     if (!delResponse.ok) {
@@ -295,10 +283,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   // Create new rrset
   const response = await fetchWithRetry(`${API_BASE}/zones/${zoneId}/rrsets`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: bearerJsonHeaders(apiToken),
     body: JSON.stringify({
       name: relativeName,
       type,
@@ -426,7 +411,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
     `${API_BASE}/zones/${zoneId}/rrsets/${relativeName}/${type}`,
     {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: bearerHeaders(apiToken),
     },
   );
 
@@ -463,11 +448,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     deleteDNSRecord(apiToken, zoneId, domain, ownedIps),
     deleteDNSRecord(apiToken, zoneId, `*.${domain}`, ownedIps),
   ]);
-  return {
-    deletedAny: root.deleted > 0 || wildcard.deleted > 0,
-    preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
-    failed: [...root.failed, ...wildcard.failed],
-  };
+  return pairDeleteResult(root, wildcard);
 }
 
 /**

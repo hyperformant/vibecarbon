@@ -34,6 +34,15 @@
  */
 
 import { spinner } from './cli/progress.js';
+import {
+  bearerHeaders,
+  bearerJsonHeaders,
+  matching,
+  pairDeleteResult,
+  relativeToFqdn,
+  toRelativeName,
+  zoneTooLongMessage,
+} from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
 const API_BASE = 'https://api.linode.com/v4';
@@ -93,16 +102,7 @@ function nearestTtlSec(ttl) {
  * @returns {string} Zone-relative record name
  */
 function fqdnToRelative(fqdn, zoneName) {
-  const clean = String(fqdn).replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-
-  if (clean === zone) return '';
-  if (clean === `*.${zone}`) return '*';
-  if (clean.endsWith(`.${zone}`)) {
-    return clean.slice(0, -(zone.length + 1));
-  }
-  // No match — caller may have already passed a relative name.
-  return clean;
+  return toRelativeName(fqdn, zoneName, '');
 }
 
 /**
@@ -138,7 +138,7 @@ async function walkPages(apiToken, path, errorPrefix, { pastGuard } = {}) {
   for (let page = 1; page <= MAX_PAGES; page++) {
     const response = await fetchWithRetry(
       `${API_BASE}${path}?page=${page}&page_size=${PAGE_SIZE}`,
-      { headers: { Authorization: `Bearer ${apiToken}` } },
+      { headers: bearerHeaders(apiToken) },
     );
 
     if (!response.ok) throw await apiError(response, errorPrefix);
@@ -154,21 +154,6 @@ async function walkPages(apiToken, path, errorPrefix, { pastGuard } = {}) {
 }
 
 /**
- * A record's name as the zone stores it, fully qualified: the apex spelling
- * ('@', '') is the zone itself, a name already under the zone stays.
- * @param {string} name
- * @param {string} zoneName
- * @returns {string}
- */
-function relativeToFqdn(name, zoneName) {
-  const clean = String(name ?? '').replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-  if (clean === '@' || clean === '' || clean === zone) return zone;
-  if (clean.endsWith(`.${zone}`)) return clean;
-  return `${clean}.${zone}`;
-}
-
-/**
  * Resolve the domain NAME behind a numeric zone id. Every public entry point
  * calls this exactly once and passes the result down, so a multi-record
  * operation costs one lookup rather than one per record.
@@ -178,7 +163,7 @@ function relativeToFqdn(name, zoneName) {
  */
 async function getZoneName(apiToken, zoneId) {
   const response = await fetchWithRetry(`${API_BASE}/domains/${zoneId}`, {
-    headers: { Authorization: `Bearer ${apiToken}` },
+    headers: bearerHeaders(apiToken),
   });
   if (!response.ok) throw await apiError(response, 'Linode DNS API error');
   const data = await response.json();
@@ -200,24 +185,10 @@ async function getRecords(apiToken, zoneId, { whole = false } = {}) {
     'Linode DNS API error',
     whole
       ? {
-          pastGuard: `the zone has more than ${MAX_PAGES * PAGE_SIZE} records, more than vibecarbon reads`,
+          pastGuard: zoneTooLongMessage(MAX_PAGES * PAGE_SIZE),
         }
       : {},
   );
-}
-
-/**
- * Records at a given (relative name, type). Linode documents a record's
- * `name` as "the hostname or FQDN", so we accept either spelling rather than
- * betting on which one a given zone stores.
- * @param {object[]} records
- * @param {string} relativeName
- * @param {string} fqdn
- * @param {string} type
- * @returns {object[]}
- */
-function matching(records, relativeName, fqdn, type) {
-  return records.filter((r) => r.type === type && (r.name === relativeName || r.name === fqdn));
 }
 
 /**
@@ -242,10 +213,7 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
     target: value,
     ttl_sec: nearestTtlSec(ttl),
   });
-  const headers = {
-    Authorization: `Bearer ${apiToken}`,
-    'Content-Type': 'application/json',
-  };
+  const headers = bearerJsonHeaders(apiToken);
 
   const response = match
     ? await fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${match.id}`, {
@@ -313,7 +281,7 @@ async function removeRecords(apiToken, zoneId, zoneName, name, ownedIps, type) {
     }
     const response = await fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${record.id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: bearerHeaders(apiToken),
     });
     if (response.ok) deleted++;
     else if (response.status !== 404) {
@@ -450,11 +418,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     removeRecords(apiToken, zoneId, zoneName, domain, ownedIps, 'A'),
     removeRecords(apiToken, zoneId, zoneName, `*.${domain}`, ownedIps, 'A'),
   ]);
-  return {
-    deletedAny: root.deleted > 0 || wildcard.deleted > 0,
-    preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
-    failed: [...root.failed, ...wildcard.failed],
-  };
+  return pairDeleteResult(root, wildcard);
 }
 
 /**

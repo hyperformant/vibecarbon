@@ -80,6 +80,13 @@
  */
 
 import { spinner } from './cli/progress.js';
+import {
+  matching,
+  pairDeleteResult,
+  relativeToFqdn,
+  toRelativeName,
+  zoneTooLongMessage,
+} from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
 const API_BASE = 'https://api.scaleway.com';
@@ -134,16 +141,7 @@ export const ONBOARDING_WINDOW_DAYS = 14;
  * @returns {string} Zone-relative record name
  */
 function fqdnToRelative(fqdn, zoneName) {
-  const clean = String(fqdn).replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-
-  if (clean === zone) return '';
-  if (clean === `*.${zone}`) return '*';
-  if (clean.endsWith(`.${zone}`)) {
-    return clean.slice(0, -(zone.length + 1));
-  }
-  // No match — caller may have already passed a relative name.
-  return clean;
+  return toRelativeName(fqdn, zoneName, '');
 }
 
 /**
@@ -247,40 +245,10 @@ async function getRecords(apiToken, zone, { whole = false } = {}) {
     'Scaleway DNS API error',
     whole
       ? {
-          pastGuard: `the zone has more than ${MAX_PAGES * PAGE_SIZE} records, more than vibecarbon reads`,
+          pastGuard: zoneTooLongMessage(MAX_PAGES * PAGE_SIZE),
         }
       : {},
   );
-}
-
-/**
- * Records at a given (relative name, type). Scaleway stores and returns the
- * zone-relative name, but we accept the fully-qualified spelling too so an
- * inconsistency can't turn an update into a duplicate create — the same
- * tolerance every sibling backend applies.
- * @param {object[]} records
- * @param {string} relativeName
- * @param {string} fqdn
- * @param {string} type
- * @returns {object[]}
- */
-function matching(records, relativeName, fqdn, type) {
-  return records.filter((r) => r.type === type && (r.name === relativeName || r.name === fqdn));
-}
-
-/**
- * A record's name as the zone stores it, fully qualified: the apex spelling
- * ('@', '') is the zone itself, a name already under the zone stays.
- * @param {string} name
- * @param {string} zoneName
- * @returns {string}
- */
-function relativeToFqdn(name, zoneName) {
-  const clean = String(name ?? '').replace(/\.$/, '');
-  const zone = String(zoneName).replace(/\.$/, '');
-  if (clean === '@' || clean === '' || clean === zone) return zone;
-  if (clean.endsWith(`.${zone}`)) return clean;
-  return `${clean}.${zone}`;
 }
 
 /**
@@ -517,11 +485,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
 export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) {
   const root = await deleteDNSRecord(apiToken, zoneId, domain, ownedIps);
   const wildcard = await deleteDNSRecord(apiToken, zoneId, `*.${domain}`, ownedIps);
-  return {
-    deletedAny: root.deleted > 0 || wildcard.deleted > 0,
-    preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
-    failed: [...root.failed, ...wildcard.failed],
-  };
+  return pairDeleteResult(root, wildcard);
 }
 
 /**

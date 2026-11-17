@@ -5,6 +5,7 @@
 
 import * as p from '@clack/prompts';
 import { spinner } from './cli/progress.js';
+import { bearerJsonHeaders, pairDeleteResult } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
 // ============================================================================
@@ -31,10 +32,7 @@ export async function verifyToken(apiToken) {
     const response = await fetchWithRetry(
       'https://api.cloudflare.com/client/v4/user/tokens/verify',
       {
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          'Content-Type': 'application/json',
-        },
+        headers: bearerJsonHeaders(apiToken),
       },
     );
 
@@ -73,10 +71,7 @@ export async function verifyToken(apiToken) {
  */
 export async function getZones(apiToken) {
   const response = await fetchWithRetry('https://api.cloudflare.com/client/v4/zones', {
-    headers: {
-      Authorization: `Bearer ${apiToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: bearerJsonHeaders(apiToken),
   });
 
   if (!response.ok) {
@@ -138,10 +133,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   const listResponse = await fetchWithRetry(
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=${type}&name=${name}`,
     {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: bearerJsonHeaders(apiToken),
     },
   );
 
@@ -154,10 +146,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
       `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${existing.id}`,
       {
         method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          'Content-Type': 'application/json',
-        },
+        headers: bearerJsonHeaders(apiToken),
         body: JSON.stringify({ content, proxied, ttl }),
       },
     );
@@ -169,10 +158,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`,
     {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: bearerJsonHeaders(apiToken),
       body: JSON.stringify({ type, name, content, proxied, ttl }),
     },
   );
@@ -192,7 +178,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 export async function readARecord(apiToken, zoneId, name) {
   const response = await fetchWithRetry(
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${name}`,
-    { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' } },
+    { headers: bearerJsonHeaders(apiToken) },
   );
   const body = await readCloudflareJson(response, 'Failed to read DNS record');
   return (body.result ?? []).filter((r) => r.name === name && r.type === 'A').map((r) => r.content);
@@ -224,7 +210,7 @@ export async function findARecordsAt(apiToken, zoneId, address) {
     }
     const response = await fetchWithRetry(
       `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&per_page=${RECORD_PAGE_SIZE}&page=${page}`,
-      { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' } },
+      { headers: bearerJsonHeaders(apiToken) },
     );
     const body = await readCloudflareJson(response, 'Failed to list DNS records');
     const rows = body.result ?? [];
@@ -275,10 +261,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
   const listResponse = await fetchWithRetry(
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=${type}&name=${name}`,
     {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: bearerJsonHeaders(apiToken),
     },
   );
 
@@ -304,10 +287,7 @@ export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = '
       `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${record.id}`,
       {
         method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          'Content-Type': 'application/json',
-        },
+        headers: bearerJsonHeaders(apiToken),
       },
     );
     if (response.ok) deleted++;
@@ -349,11 +329,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     deleteDNSRecord(apiToken, zoneId, domain, ownedIps),
     deleteDNSRecord(apiToken, zoneId, `*.${domain}`, ownedIps),
   ]);
-  return {
-    deletedAny: root.deleted > 0 || wildcard.deleted > 0,
-    preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
-    failed: [...root.failed, ...wildcard.failed],
-  };
+  return pairDeleteResult(root, wildcard);
 }
 
 /**
@@ -410,10 +386,7 @@ async function createHealthCheck(apiToken, zoneId, config) {
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/healthchecks`,
     {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: bearerJsonHeaders(apiToken),
       body: JSON.stringify({
         name,
         address,
@@ -469,10 +442,7 @@ export async function deleteHealthCheck(apiToken, zoneId, name) {
   const listResponse = await fetchWithRetry(
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/healthchecks`,
     {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: bearerJsonHeaders(apiToken),
     },
   );
 
@@ -485,10 +455,7 @@ export async function deleteHealthCheck(apiToken, zoneId, name) {
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/healthchecks/${healthCheck.id}`,
     {
       method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'application/json',
-      },
+      headers: bearerJsonHeaders(apiToken),
     },
   );
 
