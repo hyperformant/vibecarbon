@@ -289,7 +289,9 @@ export async function sweepOrphanedVultrResources(
       if (!next) return { items, complete: true };
       cursor = next;
     }
-    return { items, complete: true };
+    // The guard ran out with a next page still pending: residue past it was
+    // never read, so the listing is incomplete (as sweep-scaleway.ts answers).
+    return { items, complete: false };
   };
 
   try {

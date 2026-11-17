@@ -253,7 +253,9 @@ export async function sweepOrphanedDigitalOceanResources(
       }
       page++;
     }
-    return { items, complete: true };
+    // The guard ran out with a next page still pending: residue past it was
+    // never read, so the listing is incomplete (as sweep-scaleway.ts answers).
+    return { items, complete: false };
   };
 
   try {
@@ -433,7 +435,8 @@ export async function sweepOrphanedDigitalOceanResources(
       url = body.links?.pages?.next ?? null;
       reserved.push(...(body.reserved_ips ?? []));
     }
-    if (!pageOk) {
+    // `url` still set means the 20-page guard ran out mid-chain.
+    if (!pageOk || url) {
       markIncomplete('reserved-ip list');
     } else {
       const unassigned = reserved.filter((r) => !r.droplet);

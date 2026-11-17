@@ -129,10 +129,11 @@ async function defaultObjectStorage(
           const cluster = b.hostname.replace(`${b.label}.`, '').replace('.linodeobjects.com', '');
           buckets.push({ name: b.label, cluster });
         }
-        if (!data.pages || page >= data.pages) break;
+        if (!data.pages || page >= data.pages) return buckets;
         page++;
       }
-      return buckets;
+      // The 20-page guard ran out with pages left: unreadable, not complete.
+      return null;
     },
     async emptyAndDeleteBucket(cluster: string, name: string) {
       const provider = new LinodeObjectStorageProvider(key, secret, cluster);
@@ -277,7 +278,9 @@ export async function sweepOrphanedLinodeResources(
       }
       page++;
     }
-    return { items, complete: true };
+    // The guard ran out with a next page still pending: residue past it was
+    // never read, so the listing is incomplete (as sweep-scaleway.ts answers).
+    return { items, complete: false };
   };
 
   try {
@@ -349,6 +352,7 @@ export async function sweepOrphanedLinodeResources(
     // remove (see list-endpoint-pagination-sweep.test.ts).
     const ips: Array<{ address?: string; reserved?: boolean; linode_id?: number | null }> = [];
     let pageOk = true;
+    let ended = false;
     for (let page = 1; page <= 20; page++) {
       const res = await fetchImpl(`${API_BASE}/networking/ips?page=${page}&page_size=100`);
       if (!res.ok) {
@@ -360,9 +364,13 @@ export async function sweepOrphanedLinodeResources(
         pages?: number;
       };
       ips.push(...(body.data ?? []));
-      if (!body.pages || page >= body.pages) break;
+      if (!body.pages || page >= body.pages) {
+        ended = true;
+        break;
+      }
     }
-    if (!pageOk) {
+    // `ended` false with every page ok means the 20-page guard ran out.
+    if (!pageOk || !ended) {
       markIncomplete('reserved-ip list');
     } else {
       const stranded = ips.filter((i) => i.reserved && !i.linode_id);
