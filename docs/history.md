@@ -1087,7 +1087,7 @@ the provider's own filter makes the answer one row.
 
 **Guard:** `tests/unit/dns/cloudflare-zones-all-pages.test.ts`.
 
-#### 2026-11-16: A Linode VPC membership listing cut short is a failed read (#NNN)
+#### 2026-11-16: A Linode VPC membership listing cut short is a failed read (#515)
 
 `_attachVpcMembership` in the Linode provider now returns its "membership read
 failed" error when the `/vpcs/ips` walk stops at its 50-page limit, and attaches
@@ -1107,7 +1107,7 @@ read.
 **Guard:** `tests/unit/providers/linode-vpc-methods.test.ts` serves a listing
 that never ends and expects the error and a rejected `listServers`.
 
-#### 2026-11-16: Scaleway checks the terminal before its storage guide (#NNN)
+#### 2026-11-16: Scaleway checks the terminal before its storage guide (#515)
 
 Scaleway's `getS3Credentials` now calls `assertInteractiveStdin` before it
 prints the Object Storage guide, as the other four providers do. Off a
