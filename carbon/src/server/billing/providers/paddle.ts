@@ -159,6 +159,26 @@ export class PaddleProvider implements BillingProvider {
     logger.info({ customerId: _customerId }, 'Paddle does not support customer deletion; skipping');
   }
 
+  async cancelActiveSubscriptions(customerId: string): Promise<void> {
+    // List Subscriptions, filtered to this customer's active ones. One page of
+    // up to 200, Paddle's maximum: one person's subscriptions fit in it.
+    const query = new URLSearchParams({
+      customer_id: customerId,
+      status: 'active',
+      per_page: '200',
+    });
+    const response = await this.request('GET', `/subscriptions?${query}`);
+    const subscriptions = Array.isArray(response.data) ? (response.data as { id: string }[]) : [];
+
+    // Cancel Subscription. Without effective_from Paddle cancels at the end
+    // of the billing period, which would bill a deleted account once more.
+    for (const sub of subscriptions) {
+      await this.request('POST', `/subscriptions/${encodeURIComponent(sub.id)}/cancel`, {
+        effective_from: 'immediately',
+      });
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------

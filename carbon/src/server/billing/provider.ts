@@ -82,4 +82,11 @@ export interface BillingProvider {
 
   /** Delete a customer in the provider. */
   deleteCustomer(customerId: string): Promise<void>;
+
+  /**
+   * Cancel, effective immediately, every subscription the customer has in
+   * status `active`. Account deletion calls it, so a deleted user is not
+   * billed again. Throws when the provider refuses a call.
+   */
+  cancelActiveSubscriptions(customerId: string): Promise<void>;
 }

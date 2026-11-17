@@ -271,7 +271,9 @@ v1Routes.delete('/me', requireAal2, async (c) => {
     }
   }
 
-  // Cancel any active Stripe subscriptions
+  // Cancel the user's active subscriptions with the active billing provider
+  // (Stripe, Paddle or Polar), so a deleted account is not billed again.
+  // stripe_customer_id holds the customer id at whichever provider that is.
   const [customer] = await adminDb
     .select({ stripeCustomerId: customers.stripeCustomerId })
     .from(customers)
@@ -280,21 +282,15 @@ v1Routes.delete('/me', requireAal2, async (c) => {
 
   if (customer?.stripeCustomerId) {
     try {
-      const { isStripeConfigured, getStripe } = await import('../../lib/stripe');
-      if (isStripeConfigured()) {
-        const stripe = getStripe();
-        const subscriptions = await stripe.subscriptions.list({
-          customer: customer.stripeCustomerId,
-          status: 'active',
-        });
-        for (const sub of subscriptions.data) {
-          await stripe.subscriptions.cancel(sub.id);
-        }
+      const { getBillingProvider } = await import('../../billing');
+      const provider = getBillingProvider();
+      if (provider.isConfigured()) {
+        await provider.cancelActiveSubscriptions(customer.stripeCustomerId);
       }
-    } catch (stripeError) {
+    } catch (billingError) {
       logger.warn(
-        { error: stripeError },
-        'Failed to cancel Stripe subscriptions during account deletion'
+        { error: billingError },
+        'Failed to cancel billing subscriptions during account deletion'
       );
     }
   }

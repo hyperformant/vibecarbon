@@ -153,6 +153,22 @@ export class PolarProvider implements BillingProvider {
     }
   }
 
+  async cancelActiveSubscriptions(customerId: string): Promise<void> {
+    // List Subscriptions, filtered to this customer's active ones. One page of
+    // up to 100, Polar's maximum: one person's subscriptions fit in it.
+    const query = new URLSearchParams({ customer_id: customerId, status: 'active', limit: '100' });
+    const response = await this.request('GET', `/v1/subscriptions/?${query}`);
+    const items = Array.isArray(response.data.items)
+      ? (response.data.items as { id: string }[])
+      : [];
+
+    // Revoke Subscription: Polar's cancel-now. Cancelling at the period end
+    // would bill a deleted account once more.
+    for (const sub of items) {
+      await this.request('DELETE', `/v1/subscriptions/${encodeURIComponent(sub.id)}`);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------

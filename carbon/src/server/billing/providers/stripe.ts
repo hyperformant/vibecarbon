@@ -143,6 +143,17 @@ export class StripeProvider implements BillingProvider {
     await stripe.customers.del(customerId);
   }
 
+  async cancelActiveSubscriptions(customerId: string): Promise<void> {
+    const stripe = getStripe();
+    const subscriptions = await stripe.subscriptions.list({
+      customer: customerId,
+      status: 'active',
+    });
+    for (const sub of subscriptions.data) {
+      await stripe.subscriptions.cancel(sub.id);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
