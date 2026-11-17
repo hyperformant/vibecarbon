@@ -170,7 +170,7 @@ export function localComposeEnv(base = process.env) {
 // the local Docker image store for testing.
 // biome-ignore format: publish-node-runtime-image.yml and scripts/sync-node-version.js read this declaration as one line
 export const NODE_RUNTIME_IMAGE =
-  'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r3@sha256:a4ea2f6d26f35c86337e787a76a56b12aa2bfef84aa3df58b1ec60bd52fc1cc0';
+  'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r4';
 
 // sha256 fingerprint of docker/node-runtime's inputs (every file there but
 // README.md; tests/unit/deploy/node-runtime-image-fingerprint.test.ts has the
@@ -178,7 +178,7 @@ export const NODE_RUNTIME_IMAGE =
 // fails that test until the hash AND the -r revision move together (and the
 // carbon/Dockerfile copy with them).
 export const NODE_RUNTIME_INPUTS_SHA256 =
-  '4841ebd27ef353a57ed151c8418b815867f006867cd18c63bf1f65a2770291e1';
+  'e1cbf36d9940e043bb9cb3313c039e22326ed0448faca81148ea1a0c29c64375';
 
 // Single source of truth for the pre-published carbon-autoscaler image
 // (src/autoscaler/). Built once per version by
