@@ -3158,9 +3158,11 @@ function pulumiResourceClass(type) {
  * saying it has none) and the command that finishes the teardown. When the state could not be read
  * back, the whole stack is the unit, as before.
  *
- * UNVERIFIED, not LEAK: the DO name/address backstop that runs after this
- * may still delete some of them, but the Pulumi state keeps listing them
- * until a destroy completes against it, and only that re-run proves it.
+ * UNVERIFIED, not LEAK: the Pulumi state keeps listing them until a destroy
+ * completes against it, and only that proves them gone. On the k8s tiers the
+ * sweeps that follow `pulumi destroy` may delete what blocked it, so the
+ * failure is recorded only after they ran and the stack's one second pass
+ * (settleFailedStackDestroys) did not finish it.
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
@@ -3219,6 +3221,105 @@ export function recordPulumiDestroyFailure({
     reason: `pulumi destroy failed: ${error?.message}, every Pulumi-managed resource in this stack (servers, firewall, network, SSH key, floating IP) is unverified`,
     hint: `Check for leftover resources in the ${providerName} console, then run \`${finish}\` again to finish. Pulumi state was preserved for this stack.`,
   });
+}
+
+/**
+ * Settle the k8s stacks whose `pulumi destroy` failed, once every sweep that
+ * follows it has run (the orphaned-server sweep and the per-stack backstop).
+ *
+ * A destroy can fail on something Pulumi cannot see. DigitalOcean k8s-ha,
+ * 2026-11-15: a deploy was interrupted while a droplet was being created, so
+ * the droplet existed and the stack held only the unfinished create. `pulumi
+ * destroy` then failed on the VPC ("409 Can not delete VPC with members"),
+ * the sweeps deleted the droplet and the VPC, and the provider was clean. The
+ * stack still listed the VPC, so the report said UNVERIFIED, the exit code
+ * was 2, and the stack file stayed in the state bucket until someone ran
+ * destroy again.
+ *
+ * So destroy runs that second destroy itself: one more `pulumi destroy` for a
+ * stack whose destroy ran and left resources (`remainingResources`), when the
+ * sweeps then removed something of that stack. Its refresh drops what is
+ * already gone, the destroy deletes what is left, and the stack's state is
+ * removed as on any clean destroy (destroyStack: stack file, previous copy and
+ * history). Only then is nothing reported for that stack: Pulumi has read
+ * every resource it listed and found it gone or deleted it.
+ *
+ * This is one pass, never a loop and never a wait. Two failures get none, and
+ * are reported as they are:
+ *   - a stack the sweeps removed nothing of: nothing changed for it, so the
+ *     same destroy would be a blind retry of the same failure;
+ *   - a failure that is not about resources a destroy left (another run holds
+ *     the stack, a migration stopped, Pulumi's own result did not add up):
+ *     no sweep changes that, and a stack another run holds is never touched.
+ * A second pass that fails is reported too, from its own read of what is left
+ * when it has one (the first pass's otherwise), and the entry and the state
+ * stay for the next `vibecarbon destroy`.
+ *
+ * Exported for unit testing (destroyK8sTier itself is not).
+ *
+ * @param {object} params
+ * @param {Array<{stackEnv: string, dirLabel: string, error: Error}>} params.stacks -
+ *   each failed stack with the error its `pulumi destroy` threw.
+ * @param {Set<string>} params.sweptStacks - the stacks a sweep removed something
+ *   of after their `pulumi destroy` failed.
+ * @param {(stackEnv: string) => Promise<{destroyed?: boolean}>} params.destroyAgain -
+ *   the same `pulumi destroy` the first pass ran (destroyK8s).
+ * @param {string} params.environment - the user-facing environment name.
+ * @param {{purgeBackups?: boolean}} [params.args] - this destroy's flags.
+ * @param {object} params.results - the shared destroy `results` accumulator (mutated).
+ * @param {string} params.providerName - `Provider.NAME`, for the hints.
+ */
+export async function settleFailedStackDestroys({
+  stacks,
+  sweptStacks,
+  destroyAgain,
+  environment,
+  args,
+  results,
+  providerName,
+}) {
+  for (const { stackEnv, dirLabel, error } of stacks) {
+    let failure = error;
+    const leftResources =
+      Array.isArray(error?.remainingResources) && error.remainingResources.length > 0;
+    if (leftResources && sweptStacks.has(stackEnv)) {
+      console.log(
+        `  Finishing Pulumi stack ${stackEnv}: the cleanup above removed resources of this stack, so its destroy runs once more`,
+      );
+      try {
+        const again = await destroyAgain(stackEnv);
+        if (again?.destroyed === true) {
+          console.log(
+            `  Pulumi stack ${stackEnv} finished: nothing it listed is left, and its state is removed`,
+          );
+          continue;
+        }
+        // The stack was there when the first pass failed and is not now:
+        // someone else removed it, and nothing here read its resources.
+        console.log(
+          `  Pulumi stack ${stackEnv} was not there for the second pass, so what it listed stays unverified`,
+        );
+      } catch (againError) {
+        console.log(`  Pulumi destroy failed again${dirLabel}: ${againError.message}`);
+        // Its read of what is left is the newer one. An error without one
+        // (the stack is locked, the backend did not answer) says nothing
+        // about the resources, so the first pass's list stands.
+        if (Array.isArray(againError?.remainingResources)) failure = againError;
+      }
+    }
+    p.log.warn(
+      `You may need to manually clean up resources${dirLabel} in the ${providerName} console.`,
+    );
+    recordPulumiDestroyFailure({
+      error: failure,
+      stackEnv,
+      dirLabel,
+      environment,
+      args,
+      results,
+      providerName,
+    });
+  }
 }
 
 /**
@@ -3921,6 +4022,7 @@ function reservedIpRetryHint(environment, args, Provider) {
  * named, so the next destroy retries it.
  *
  * @param {{provider: object, address: string, stacks: string[], projectName?: string, results: object, s: {start: Function, stop: Function}, retry: string}} args
+ * @returns {Promise<boolean>} whether this call released it
  */
 async function releaseRecordedReservedIp({
   provider,
@@ -3933,6 +4035,7 @@ async function releaseRecordedReservedIp({
 }) {
   const Provider = provider.constructor;
   const stackNames = stacks.join(' or ');
+  let released = false;
   s.start(`Verifying ${Provider.NAME} reserved IP is gone: ${address}`);
   try {
     const owner = await savedReservedIpOwner(provider, address, projectName, stacks);
@@ -3977,6 +4080,7 @@ async function releaseRecordedReservedIp({
       const outcome = await provider.deleteReservedIpByAddress(address);
       if (outcome.released) {
         s.stop('Reserved IP released (backstop)');
+        released = true;
       } else {
         s.stop(`Reserved IP ${address} is not released: ${outcome.reason}`);
         keepUnreleased(results, address);
@@ -4008,6 +4112,7 @@ async function releaseRecordedReservedIp({
       hint: retry,
     });
   }
+  return released;
 }
 
 /**
@@ -4030,6 +4135,7 @@ async function releaseRecordedReservedIp({
  *   `<env>-standby`; compose and single k8s: the environment).
  *   `environment`: as the operator names it, and `args`, this destroy's
  *   flags, for the retry line (retryDestroyCommand).
+ * @returns {Promise<boolean>} whether it released any
  */
 export async function sweepTaggedReservedIps({
   provider,
@@ -4080,6 +4186,7 @@ export async function sweepTaggedReservedIps({
         });
       }
     }
+    return swept.deleted.length > 0;
   } catch (error) {
     s.stop(`${noun} label check failed: ${error.message}`);
     // Kept on record by stack (entryKeptReason): the entry is the only way
@@ -4095,6 +4202,7 @@ export async function sweepTaggedReservedIps({
         `stays in .vibecarbon.json until it runs clean. Or look in the ${Provider.NAME} console ` +
         `for a ${noun} labelled ${scope}; it keeps billing until it is released.`,
     });
+    return false;
   }
 }
 
@@ -4117,6 +4225,9 @@ export async function sweepTaggedReservedIps({
  * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string, args?: {purgeBackups?: boolean}}} params
  *   `environment`: the environment as the operator names it, and `args`,
  *   this destroy's flags, for the retry line (retryDestroyCommand).
+ * @returns {Promise<Set<string>>} the stacks it removed something of. A
+ *   reserved IP counts for every stack that may hold it. settleFailedStackDestroys
+ *   reads it: a failed stack named here gets its one second `pulumi destroy`.
  */
 export async function sweepK8sBackstopTargets({
   provider,
@@ -4134,12 +4245,22 @@ export async function sweepK8sBackstopTargets({
   // pass it falls; the label sweep leaves them all to it, so none is handled
   // (or reported) twice.
   const recorded = byName ? targets.flatMap((t) => t.reservedIps.map((r) => r.address)) : [];
+  const swept = new Set();
   for (const target of targets) {
     if (byName) {
-      await sweepByName({ provider, target, results, s, projectName, environment, args });
+      const removedOf = await sweepByName({
+        provider,
+        target,
+        results,
+        s,
+        projectName,
+        environment,
+        args,
+      });
+      for (const stackEnv of removedOf) swept.add(stackEnv);
     }
     if (byLabel) {
-      await sweepTaggedReservedIps({
+      const released = await sweepTaggedReservedIps({
         provider,
         projectName,
         stackEnv: target.stackEnv,
@@ -4149,18 +4270,24 @@ export async function sweepK8sBackstopTargets({
         environment,
         args,
       });
+      if (released) swept.add(target.stackEnv);
     }
-    if (byName) await deleteBackstopNetwork({ provider, target, results, s });
+    if (byName && (await deleteBackstopNetwork({ provider, target, results, s }))) {
+      swept.add(target.stackEnv);
+    }
   }
+  return swept;
 }
 
 /**
  * The name and address half of the backstop for one stack: firewall, SSH
  * key, then each recorded reserved IP.
  * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string, environment: string, args?: {purgeBackups?: boolean}}} params
+ * @returns {Promise<Set<string>>} the stacks it removed something of
  */
 async function sweepByName({ provider, target, results, s, projectName, environment, args }) {
   const Provider = provider.constructor;
+  const removedOf = new Set();
   // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
   const firewallName = target.firewallName;
   s.start(`Verifying ${Provider.NAME} firewall is gone: ${firewallName}`);
@@ -4168,6 +4295,7 @@ async function sweepByName({ provider, target, results, s, projectName, environm
     const result = await provider.deleteFirewallByName(firewallName);
     if (result.deleted) {
       results.firewalls.push(firewallName);
+      removedOf.add(target.stackEnv);
       s.stop('Firewall deleted (backstop)');
     } else if (result.apiError) {
       s.stop(`Firewall backstop failed: ${result.apiError.message}`);
@@ -4199,7 +4327,10 @@ async function sweepByName({ provider, target, results, s, projectName, environm
     s.start(`Verifying ${Provider.NAME} SSH key is gone: ${sshKeyName}`);
     try {
       const deleted = await provider.deleteSSHKeyByName(sshKeyName);
-      if (deleted) results.sshKeys.push(sshKeyName);
+      if (deleted) {
+        results.sshKeys.push(sshKeyName);
+        removedOf.add(target.stackEnv);
+      }
       s.stop(deleted ? 'SSH key deleted (backstop)' : 'SSH key already gone (Pulumi)');
     } catch (error) {
       s.stop(`SSH key backstop check failed: ${error.message}`);
@@ -4232,8 +4363,18 @@ async function sweepByName({ provider, target, results, s, projectName, environm
   // answered a DELETE with success and kept the IP.
   const retry = reservedIpRetryHint(environment, args, Provider);
   for (const { address, stacks } of target.reservedIps) {
-    await releaseRecordedReservedIp({ provider, address, stacks, projectName, results, s, retry });
+    const released = await releaseRecordedReservedIp({
+      provider,
+      address,
+      stacks,
+      projectName,
+      results,
+      s,
+      retry,
+    });
+    if (released) for (const stackEnv of stacks) removedOf.add(stackEnv);
   }
+  return removedOf;
 }
 
 /**
@@ -4243,6 +4384,7 @@ async function sweepByName({ provider, target, results, s, projectName, environm
  * a refusal here is therefore a genuine ordering bug elsewhere, not a
  * not-found, so it is surfaced loudly rather than swallowed.
  * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}}} args
+ * @returns {Promise<boolean>} whether this call deleted the VPC
  */
 async function deleteBackstopNetwork({ provider, target, results, s }) {
   const Provider = provider.constructor;
@@ -4252,7 +4394,9 @@ async function deleteBackstopNetwork({ provider, target, results, s }) {
     const result = await provider.deleteNetworkByName(networkName);
     if (result.deleted) {
       s.stop('VPC deleted (backstop)');
-    } else if (result.apiError) {
+      return true;
+    }
+    if (result.apiError) {
       s.stop(`VPC backstop failed: ${result.apiError.message}`);
       results.leaks.leak({
         resourceClass: 'network',
@@ -4272,6 +4416,7 @@ async function deleteBackstopNetwork({ provider, target, results, s }) {
       hint: `Check the ${Provider.NAME} console for a surviving VPC and any servers or load balancers still inside it.`,
     });
   }
+  return false;
 }
 
 /**
@@ -4679,6 +4824,20 @@ async function destroyK8sTier({
     // ran a destroy for them, so the sweeps below are their teardown, and
     // settleUnreadableStacks decides about their records once those ran.
     const unreadableStacks = [];
+    // Stacks whose `pulumi destroy` failed, and the stacks the sweeps below
+    // then removed something of: settleFailedStackDestroys gives each failed
+    // stack named in both its one second pass, and records what is left.
+    const failedStacks = [];
+    const sweptStacks = new Set();
+    const destroyStackEnv = (stackEnv) =>
+      destroyK8sStack({
+        projectName: projectConfig.projectName,
+        environment: stackEnv,
+        provider: providerIdFor(envConfig),
+        apiToken: providerToken,
+        region: envConfig.region || 'nbg1',
+        s3Config: destroyS3Config,
+      });
     // HA: tear down primary + standby Pulumi stacks in parallel. Each stack
     // owns disjoint Hetzner resources (different network, different servers)
     // so there's no shared state to race on. Saves ~200s on k8s-ha critical
@@ -4691,14 +4850,7 @@ async function destroyK8sTier({
         const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
         try {
           const destroyResult = await perfAsync(`destroy.pulumi.${stackEnv}`, async () =>
-            destroyK8sStack({
-              projectName: projectConfig.projectName,
-              environment: stackEnv,
-              provider: providerIdFor(envConfig),
-              apiToken: providerToken,
-              region: envConfig.region || 'nbg1',
-              s3Config: destroyS3Config,
-            }),
+            destroyStackEnv(stackEnv),
           );
           // recordPulumiDestroyOutcome is the ONLY place that can tell a
           // legitimately-empty destroy (already gone / never deployed) apart
@@ -4731,19 +4883,10 @@ async function destroyK8sTier({
             unreadableStacks.push({ stackEnv, dirLabel, error });
             return;
           }
+          // Not recorded yet: the sweeps below may remove what blocked it,
+          // and settleFailedStackDestroys records what is left after them.
           console.log(`  Pulumi destroy failed${dirLabel}: ${error.message}`);
-          p.log.warn(
-            `You may need to manually clean up resources${dirLabel} in the ${Provider.NAME} console.`,
-          );
-          recordPulumiDestroyFailure({
-            error,
-            stackEnv,
-            dirLabel,
-            environment,
-            args,
-            results,
-            providerName: Provider.NAME,
-          });
+          failedStacks.push({ stackEnv, dirLabel, error });
         }
       }),
     );
@@ -4791,6 +4934,15 @@ async function destroyK8sTier({
               onLeftover: (line) => results.leaks.leak(line),
             });
             results.servers.push(sv.name);
+            const ownerStack = stackEnvs.find((stackEnv) =>
+              labelsNameEnvironment(
+                provider,
+                provider.serverLabels(sv),
+                projectConfig.projectName,
+                [`${projectConfig.projectName}-${stackEnv}`],
+              ),
+            );
+            if (ownerStack) sweptStacks.add(ownerStack);
             s.stop(`Deleted ${sv.name}`);
           } catch (error) {
             s.stop(`Failed to delete ${sv.name}: ${error.message}`);
@@ -4853,7 +5005,7 @@ async function destroyK8sTier({
     // Target list + naming is planK8sBackstopTargets (exported, unit-pinned);
     // single k8s stays byte-identical to the old single-target behavior.
     if (providerToken) {
-      await sweepK8sBackstopTargets({
+      const backstopSwept = await sweepK8sBackstopTargets({
         provider,
         targets: planK8sBackstopTargets({ plan, envConfig, projectConfig }),
         results,
@@ -4862,6 +5014,7 @@ async function destroyK8sTier({
         environment,
         args,
       });
+      for (const stackEnv of backstopSwept) sweptStacks.add(stackEnv);
     }
 
     // HA k8s: delete the shared SSH key created OUTSIDE Pulumi by
@@ -4887,6 +5040,24 @@ async function destroyK8sTier({
           hint: `Delete it via the ${Provider.NAME} console — this key is created OUTSIDE Pulumi, so no destroy retry's \`pulumi destroy\` will remove it, and the next preflight scan flags it every run.`,
         });
       }
+    }
+
+    // Every sweep has run. A stack whose `pulumi destroy` failed and that the
+    // sweeps removed something of gets that destroy once more, which finishes
+    // it when they removed what blocked it; whatever is still left is recorded
+    // now (settleFailedStackDestroys). Before the unreadable stacks are
+    // settled, which read the ledger these lines land in.
+    if (failedStacks.length > 0) {
+      await settleFailedStackDestroys({
+        stacks: failedStacks,
+        sweptStacks,
+        destroyAgain: (stackEnv) =>
+          perfAsync(`destroy.pulumi.again.${stackEnv}`, async () => destroyStackEnv(stackEnv)),
+        environment,
+        args,
+        results,
+        providerName: Provider.NAME,
+      });
     }
 
     // Every sweep that stands in for `pulumi destroy` has run: settle the

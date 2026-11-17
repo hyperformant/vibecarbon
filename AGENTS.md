@@ -54,6 +54,14 @@ at the end: one line per surviving resource (`LEAK` / `UNVERIFIED` / `FOREIGN` /
 `AT-RISK`, class, identity, why it survived), then a summary count. A clean
 destroy prints a one-line all-clear.
 
+On the k8s tiers a failed `pulumi destroy` is written to the ledger only after
+the sweeps that follow it. A stack whose destroy ran and left resources, and
+that the sweeps then removed something of, gets that destroy exactly once more
+(`settleFailedStackDestroys` in `src/destroy.js`), which removes the stack's
+state when they removed what blocked it. It is one pass, gated on that change,
+never a loop or a wait, and never run for a stack nothing was removed of or
+one another run holds.
+
 One survival is sanctioned and deliberately OUTSIDE the ledger: the dedicated
 Pulumi state bucket is KEPT on destroy (announced in its own step line, deleted
 only with `-purge`). Recreating a just-deleted same-name bucket is how acked

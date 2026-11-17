@@ -153,8 +153,10 @@ describe('destroy.js console-hint + orphan-token strings — Provider.NAME/.TOKE
 
   it('the k8s manual-cleanup hint interpolates Provider.NAME', () => {
     expect(DESTROY_SRC).toContain(
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${dirLabel}/${Provider.NAME} placeholders, not a JS template
-      '`You may need to manually clean up resources${dirLabel} in the ${Provider.NAME} console.`,',
+      // providerName is Provider.NAME, handed to settleFailedStackDestroys,
+      // which says this once the sweeps and the second pass left something.
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${dirLabel}/${providerName} placeholders, not a JS template
+      '`You may need to manually clean up resources${dirLabel} in the ${providerName} console.`,',
     );
   });
 
