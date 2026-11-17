@@ -1,9 +1,6 @@
 import {
-  IconArrowsUpDown as ArrowUpDown,
   IconBuilding as Building2,
   IconCircleCheck as CheckCircle,
-  IconChevronLeft as ChevronLeft,
-  IconChevronRight as ChevronRight,
   IconLoader2 as Loader2,
   IconLogin as LogIn,
   IconSearch as Search,
@@ -14,6 +11,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router';
+import { ListPagination, SortableHead } from '@/components/admin/list-controls';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { PageHeader } from '@/components/PageHeader';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -30,6 +28,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { type SortOrder, useListControls } from '@/hooks/useListControls';
 import { apiJson } from '@/lib/api';
 import { ContentPanel } from '../../components/ContentPanel';
 
@@ -46,7 +45,6 @@ type User = {
 };
 
 type SortField = 'email' | 'name' | 'created_at';
-type SortOrder = 'asc' | 'desc';
 
 async function fetchUsers(params: {
   search: string;
@@ -86,10 +84,17 @@ export default function AdminUsers() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { impersonateUser, user: currentUser } = useAuth();
-  const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState<SortField>('created_at');
-  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
-  const [page, setPage] = useState(1);
+  const {
+    search,
+    sortBy,
+    sortOrder,
+    sortValue,
+    page,
+    setPage,
+    toggleSort,
+    handleSearch,
+    selectSort,
+  } = useListControls<SortField>('created_at');
   const [impersonating, setImpersonating] = useState<string | null>(null);
   const limit = 20;
 
@@ -112,21 +117,6 @@ export default function AdminUsers() {
   const totalPages = data?.pagination.totalPages || 1;
   const total = data?.pagination.total || 0;
 
-  const toggleSort = (field: SortField) => {
-    if (sortBy === field) {
-      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortBy(field);
-      setSortOrder('asc');
-    }
-    setPage(1);
-  };
-
-  const handleSearch = (value: string) => {
-    setSearch(value);
-    setPage(1);
-  };
-
   const sortOptions: Record<string, string> = {
     'created_at-desc': 'Newest first',
     'created_at-asc': 'Oldest first',
@@ -135,7 +125,6 @@ export default function AdminUsers() {
     'name-asc': 'Name A-Z',
     'name-desc': 'Name Z-A',
   };
-  const sortValue = `${sortBy}-${sortOrder}`;
 
   return (
     <>
@@ -159,17 +148,7 @@ export default function AdminUsers() {
                     className="pl-8 w-64"
                   />
                 </div>
-                <Select
-                  defaultValue="created_at-desc"
-                  value={`${sortBy}-${sortOrder}`}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    const [field, order] = value.split('-') as [SortField, SortOrder];
-                    setSortBy(field);
-                    setSortOrder(order);
-                    setPage(1);
-                  }}
-                >
+                <Select defaultValue="created_at-desc" value={sortValue} onValueChange={selectSort}>
                   <SelectTrigger className="w-44">
                     <span>{sortOptions[sortValue]}</span>
                   </SelectTrigger>
@@ -203,43 +182,13 @@ export default function AdminUsers() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="-ml-3 h-8"
-                          onClick={() => toggleSort('name')}
-                        >
-                          User
-                          <ArrowUpDown className="ml-2 size-4" />
-                        </Button>
-                      </TableHead>
-                      <TableHead>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="-ml-3 h-8"
-                          onClick={() => toggleSort('email')}
-                        >
-                          Email
-                          <ArrowUpDown className="ml-2 size-4" />
-                        </Button>
-                      </TableHead>
+                      <SortableHead onClick={() => toggleSort('name')}>User</SortableHead>
+                      <SortableHead onClick={() => toggleSort('email')}>Email</SortableHead>
                       <TableHead>Role</TableHead>
                       <TableHead>Verified</TableHead>
                       <TableHead>Organizations</TableHead>
                       <TableHead>Last Sign In</TableHead>
-                      <TableHead>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="-ml-3 h-8"
-                          onClick={() => toggleSort('created_at')}
-                        >
-                          Joined
-                          <ArrowUpDown className="ml-2 size-4" />
-                        </Button>
-                      </TableHead>
+                      <SortableHead onClick={() => toggleSort('created_at')}>Joined</SortableHead>
                       <TableHead className="w-10" />
                     </TableRow>
                   </TableHeader>
@@ -314,34 +263,7 @@ export default function AdminUsers() {
                   </TableBody>
                 </Table>
 
-                {/* Pagination */}
-                {totalPages > 1 && (
-                  <div className="flex items-center justify-between mt-4 pt-4 border-t">
-                    <p className="text-sm text-muted-foreground">
-                      Page {page} of {totalPages}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setPage(page - 1)}
-                        disabled={page === 1}
-                      >
-                        <ChevronLeft className="size-4 mr-1" />
-                        Previous
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setPage(page + 1)}
-                        disabled={page === totalPages}
-                      >
-                        Next
-                        <ChevronRight className="size-4 ml-1" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
+                <ListPagination page={page} totalPages={totalPages} onPage={setPage} />
               </>
             )}
           </CardContent>
