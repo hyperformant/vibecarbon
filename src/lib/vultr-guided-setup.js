@@ -24,17 +24,19 @@
 
 import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
-import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import {
-  dotenvPromptProblem,
-  normalizeOperatorValue,
-  pastedKeyShapeProblem,
-  readOperatorVar,
-} from './operator-env.js';
-import { describeCredentialSource, setEnvVar } from './project.js';
+  checkApiToken,
+  createCredentialSaver,
+  finishS3Credentials,
+  promptForVerifiedToken,
+  promptS3KeyPair,
+  verifiedEnvToken,
+} from './guided-setup-shared.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { describeCredentialSource } from './project.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
 
@@ -51,14 +53,6 @@ const TOKEN_FORMAT = /^[A-Z0-9]{36}$/;
 // NOT a compute region id (the `ord` region's cluster is `chi3`).
 const CLUSTER_FORMAT = /^[a-z0-9]+$/;
 
-function warnIfBadTokenFormat(token) {
-  if (!TOKEN_FORMAT.test(token)) {
-    p.log.warn(
-      'Vultr API key does not match the expected format (36 uppercase alphanumeric characters), proceeding anyway.',
-    );
-  }
-}
-
 /**
  * Validate a Vultr API key by making a lightweight API call.
  * `GET /v2/account` with `Authorization: Bearer <key>` answers 401
@@ -66,31 +60,28 @@ function warnIfBadTokenFormat(token) {
  * @param {string} token
  * @returns {Promise<{ valid: boolean, error?: string, unreachable?: boolean }>}
  */
-async function validateVultrToken(token) {
-  try {
-    const res = await fetch(`${API_BASE}/account`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) return { valid: true };
-    if (res.status === 401) return { valid: false, error: 'API key is invalid or was regenerated' };
-    if (res.status === 403) {
-      return {
-        valid: false,
-        error:
-          'Access denied (403), if you set API Access Control, add this machine’s public IP to the allowed subnets',
-      };
-    }
-    // A 5xx is the PROVIDER's outage, not the operator's credential: treat it
-    // like the network-error catch below (proceed with the env token; real
-    // API calls fail honestly later if the outage persists). Live RCA
-    // 2026-09-01 (run 33557406486): a Vultr API 502 on this preflight read
-    // as "token invalid", and the non-TTY destroy died trying to prompt.
-    if (res.status >= 500) return { valid: true, unreachable: true };
-    return { valid: false, error: `Vultr API returned status ${res.status}` };
-  } catch {
-    return { valid: true, unreachable: true };
-  }
+function validateVultrToken(token) {
+  return checkApiToken(
+    `${API_BASE}/account`,
+    { Authorization: `Bearer ${token}` },
+    {
+      api: 'Vultr',
+      unauthorized: 'API key is invalid or was regenerated',
+      forbidden:
+        'Access denied (403), if you set API Access Control, add this machine’s public IP to the allowed subnets',
+    },
+  );
 }
+
+// What guided-setup-shared.js needs to look up, prompt for and verify the
+// key. Vultr calls it an API key, so every line about it says "key".
+const API_TOKEN = {
+  envKey: 'VULTR_API_TOKEN',
+  provider: 'Vultr',
+  noun: 'key',
+  verify: validateVultrToken,
+  format: { pattern: TOKEN_FORMAT, expected: '36 uppercase alphanumeric characters' },
+};
 
 /**
  * Display improved visual guide for API key creation.
@@ -145,41 +136,10 @@ export function displayS3CredentialsGuide(projectName) {
   );
 }
 
-// Session-level save preference — same contract as the identical
-// module-level flag in linode-guided-setup.js / hetzner-guided-setup.js /
-// digitalocean-guided-setup.js.
-let _savePreference = null;
-
-/**
- * Ask the user once whether to save credentials, then reuse the answer.
- * @param {Record<string, string>} envVars - Flat env-var-name → value map to
- *   persist to the project's .env.local (operator-secret keys — see
- *   config-registry.js — always write localOnly, never .env).
- */
-async function saveIfWanted(envVars) {
-  if (_savePreference === null) {
-    // Unreachable by construction today (this helper only runs after an
-    // interactive prompt already succeeded, so stdin was a TTY), but the
-    // invariant is 'any function that prompts, guards first' — so a future
-    // caller that reaches it non-interactively fails loudly, not silently.
-    assertInteractiveStdin({
-      what: 'whether to save the Vultr credentials',
-      envVar: 'VULTR_API_TOKEN',
-    });
-    const shouldSave = await p.confirm({
-      message: 'Save keys for future deploys?',
-      initialValue: true,
-    });
-    _savePreference = shouldSave && !p.isCancel(shouldSave);
-  }
-
-  if (_savePreference) {
-    for (const [key, value] of Object.entries(envVars)) {
-      setEnvVar(key, value, process.cwd(), { localOnly: true });
-    }
-    p.log.info(c.dim('Saved to .env.local'));
-  }
-}
+// Session-level save preference: once the user answers "Save keys for future
+// deploys?" the decision applies to all credentials this module prompts for
+// during this process.
+const saveIfWanted = createCredentialSaver({ provider: 'Vultr', envVar: 'VULTR_API_TOKEN' });
 
 /**
  * Get API token with improved visual guidance.
@@ -196,25 +156,8 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    const envToken = readOperatorVar('VULTR_API_TOKEN').value;
-    if (envToken) {
-      warnIfBadTokenFormat(envToken);
-      const check = await validateVultrToken(envToken);
-      if (!check.valid) {
-        p.log.warn(
-          `VULTR_API_TOKEN from ${describeCredentialSource(['VULTR_API_TOKEN']).where} is set but invalid: ${check.error}`,
-        );
-        // Fall through to interactive prompt
-      } else {
-        if (check.unreachable) {
-          p.log.warn('Could not reach Vultr API to verify key, proceeding with saved key');
-        }
-        p.log.info(
-          `✓ Using Vultr API key from ${describeCredentialSource(['VULTR_API_TOKEN']).label}`,
-        );
-        return envToken;
-      }
-    }
+    const envToken = await verifiedEnvToken(API_TOKEN);
+    if (envToken) return envToken;
   }
 
   // Off a TTY this prompt can never be answered — clack's promise would
@@ -223,42 +166,7 @@ export async function getApiToken(projectName, options = {}) {
   assertInteractiveStdin({ what: 'the Vultr API key', envVar: 'VULTR_API_TOKEN' });
   // Interactive prompt (with retry on invalid token)
   displayApiTokenGuide(projectName);
-
-  let token;
-  while (true) {
-    token = await p.password({
-      message: 'Paste your Vultr API key here',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'API key is required';
-        return dotenvPromptProblem('VULTR_API_TOKEN', v);
-      },
-    });
-
-    if (p.isCancel(token)) {
-      exitCancelled();
-    }
-    // First-time-user path (M11): the paste goes through the same
-    // normalization every later readOperatorVar() read applies — trailing
-    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
-    // against the live API, exported to process.env or saved to .env.local.
-    token = normalizeOperatorValue(token, registryEntry('VULTR_API_TOKEN')).value;
-
-    warnIfBadTokenFormat(token);
-
-    const s = spinner();
-    s.start('Verifying API key...');
-    const check = await validateVultrToken(token);
-    if (check.valid) {
-      if (check.unreachable) {
-        s.stop('Could not reach Vultr API, proceeding with unverified key');
-      } else {
-        s.stop('API key verified');
-      }
-      break;
-    }
-    s.stop(`Key invalid: ${check.error}`);
-    p.log.warn('Please try again with a valid key.');
-  }
+  const token = await promptForVerifiedToken(API_TOKEN);
 
   // In-process coherence (A2): a freshly-entered token must be visible to
   // any later env-first resolution in this same process, regardless of
@@ -333,37 +241,12 @@ export async function getS3Credentials(projectName, options = {}) {
   // Interactive prompt
   displayS3CredentialsGuide(projectName);
 
-  const accessKeyInput = await p.text({
-    message: 'Paste your Object Storage Access Key here',
-    validate: (v) => {
-      if (!v || v.length < 10) return 'Access Key is required';
-      return (
-        pastedKeyShapeProblem('VULTR_ACCESS_KEY', v) ?? dotenvPromptProblem('VULTR_ACCESS_KEY', v)
-      );
-    },
+  const { accessKey, secretKey } = await promptS3KeyPair({
+    provider: 'Vultr',
+    accessEnvKey: 'VULTR_ACCESS_KEY',
+    secretEnvKey: 'VULTR_SECRET_KEY',
+    label: 'Object Storage',
   });
-
-  if (p.isCancel(accessKeyInput)) {
-    exitCancelled();
-  }
-
-  const secretKeyInput = await p.password({
-    message: 'Paste your Object Storage Secret Key here',
-    validate: (v) => {
-      if (!v || v.length < 10) return 'Secret Key is required';
-      return (
-        pastedKeyShapeProblem('VULTR_SECRET_KEY', v) ?? dotenvPromptProblem('VULTR_SECRET_KEY', v)
-      );
-    },
-  });
-
-  if (p.isCancel(secretKeyInput)) {
-    exitCancelled();
-  }
-
-  // Same first-time-user normalization as getApiToken above (M11).
-  const accessKey = normalizeOperatorValue(accessKeyInput, registryEntry('VULTR_ACCESS_KEY')).value;
-  const secretKey = normalizeOperatorValue(secretKeyInput, registryEntry('VULTR_SECRET_KEY')).value;
 
   const regionInput = await p.text({
     message: 'Which cluster is that subscription in? (hostname prefix, e.g. ewr1)',
@@ -393,25 +276,10 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.VULTR_SECRET_KEY = secretKey;
   process.env.VULTR_STORAGE_REGION = region;
 
-  const keys = {
-    VULTR_ACCESS_KEY: accessKey,
-    VULTR_SECRET_KEY: secretKey,
-    VULTR_STORAGE_REGION: region,
-  };
-  // deferSave: the caller verifies the keys against S3 first and calls
-  // save() only once they pass, so a rejected pair is never written.
-  if (deferSave) {
-    return {
-      accessKey,
-      secretKey,
-      region,
-      source: 'what you pasted',
-      save: save ? () => saveIfWanted(keys) : async () => {},
-    };
-  }
-  if (save) {
-    await saveIfWanted(keys);
-  }
-
-  return { accessKey, secretKey, region, source: 'what you pasted' };
+  return finishS3Credentials(
+    { accessKey, secretKey, region, source: 'what you pasted' },
+    { VULTR_ACCESS_KEY: accessKey, VULTR_SECRET_KEY: secretKey, VULTR_STORAGE_REGION: region },
+    { save, deferSave },
+    saveIfWanted,
+  );
 }

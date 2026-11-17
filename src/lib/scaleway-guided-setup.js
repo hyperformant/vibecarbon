@@ -77,8 +77,9 @@ import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
+import { checkApiToken, createCredentialSaver } from './guided-setup-shared.js';
 import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { describeCredentialSource, setEnvVar } from './project.js';
+import { describeCredentialSource } from './project.js';
 import {
   EXTERNAL_DOMAIN_CHALLENGE_NAME,
   getExternalDomainRegistration,
@@ -121,37 +122,22 @@ function warnIfBadFormat(value, what, format, expected) {
  * @param {string} secretKey
  * @returns {Promise<{ valid: boolean, error?: string, unreachable?: boolean }>}
  */
-async function validateScalewaySecretKey(secretKey) {
-  try {
-    const res = await fetch(`${API_BASE}/instance/v1/zones/fr-par-1/servers?per_page=1`, {
-      headers: { 'X-Auth-Token': secretKey },
-    });
-    if (res.ok) return { valid: true };
-    if (res.status === 401) {
-      return { valid: false, error: 'secret key is invalid or was revoked' };
-    }
-    if (res.status === 403) {
-      return {
-        valid: false,
-        error:
-          'access denied (403); the key authenticates but its BEARER has no usable IAM ' +
-          'permissions. Most common cause: the key belongs to an IAM application with NO ' +
-          'policy attached (applications have zero permissions by default). Attach a policy ' +
-          '(console → IAM → Policies) with the application as principal and resource ' +
-          'permission sets on the project; also note a just-attached policy can take a few ' +
-          'minutes to apply',
-      };
-    }
-    // A 5xx is the PROVIDER's outage, not the operator's credential: treat it
-    // like the network-error catch below (proceed with the env token; real
-    // API calls fail honestly later if the outage persists). Live RCA
-    // 2026-09-01 (run 33557406486): a Vultr API 502 on this preflight read
-    // as "token invalid", and the non-TTY destroy died trying to prompt.
-    if (res.status >= 500) return { valid: true, unreachable: true };
-    return { valid: false, error: `Scaleway API returned status ${res.status}` };
-  } catch {
-    return { valid: true, unreachable: true };
-  }
+function validateScalewaySecretKey(secretKey) {
+  return checkApiToken(
+    `${API_BASE}/instance/v1/zones/fr-par-1/servers?per_page=1`,
+    { 'X-Auth-Token': secretKey },
+    {
+      api: 'Scaleway',
+      unauthorized: 'secret key is invalid or was revoked',
+      forbidden:
+        'access denied (403); the key authenticates but its BEARER has no usable IAM ' +
+        'permissions. Most common cause: the key belongs to an IAM application with NO ' +
+        'policy attached (applications have zero permissions by default). Attach a policy ' +
+        '(console → IAM → Policies) with the application as principal and resource ' +
+        'permission sets on the project; also note a just-attached policy can take a few ' +
+        'minutes to apply',
+    },
+  );
 }
 
 /**
@@ -209,38 +195,13 @@ export function displayS3CredentialsGuide(_projectName) {
   );
 }
 
-// Session-level save preference — same contract as the identical
-// module-level flag in the sibling guided-setup modules.
-let _savePreference = null;
-
-/**
- * Ask the user once whether to save credentials, then reuse the answer.
- * @param {Record<string, string>} envVars
- */
-async function saveIfWanted(envVars) {
-  if (_savePreference === null) {
-    // In practice unreachable off a TTY (an interactive prompt already
-    // succeeded to get here), but the invariant is 'any function that prompts,
-    // guards first' — so a future caller reaching it non-interactively fails
-    // loudly instead of silently.
-    assertInteractiveStdin({
-      what: 'whether to save the Scaleway credentials',
-      envVar: 'SCALEWAY_SECRET_KEY',
-    });
-    const shouldSave = await p.confirm({
-      message: 'Save keys for future deploys?',
-      initialValue: true,
-    });
-    _savePreference = shouldSave && !p.isCancel(shouldSave);
-  }
-
-  if (_savePreference) {
-    for (const [key, value] of Object.entries(envVars)) {
-      setEnvVar(key, value, process.cwd(), { localOnly: true });
-    }
-    p.log.info(c.dim('Saved to .env.local'));
-  }
-}
+// Session-level save preference: once the user answers "Save keys for future
+// deploys?" the decision applies to all credentials this module prompts for
+// during this process.
+const saveIfWanted = createCredentialSaver({
+  provider: 'Scaleway',
+  envVar: 'SCALEWAY_SECRET_KEY',
+});
 
 /**
  * Cancel-aware prompt helper: exits the process on Ctrl-C.

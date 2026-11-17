@@ -88,12 +88,12 @@ export class HetznerProvider extends BaseProvider {
 
   // ── Guided setup delegation (C7d) ────────────────────────────────────
   // hetzner-guided-setup.js stays the single implementation (visual guide,
-  // 64-char token validation, module-level `_savePreference` "save keys for
+  // 64-char token validation, module-level `saveIfWanted` "save keys for
   // future deploys?" session state). Dynamic import (never top-level) keeps
   // that module out of this class's static-load graph and — because ESM
   // caches a module instance per resolved specifier — every call below
   // still shares the SAME module object (and therefore the same
-  // `_savePreference`) as every other call made during the process
+  // `saveIfWanted` answer) as every other call made during the process
   // lifetime, matching the pre-C7d direct-import behavior exactly. Args
   // are forwarded verbatim (no re-declared defaults here) so the module's
   // own `{ save = true }` / `{ save = true, force = false }` defaults stay

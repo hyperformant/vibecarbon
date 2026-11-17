@@ -12,9 +12,11 @@
  *      the six provider guided setups' token prompts, driven through a mocked
  *      @clack/prompts exactly like guided-setup-paste-normalization.test.ts;
  *   3. a source census: every `validate: (<param>) =>` in
- *      `src/lib/*-guided-setup.js` and in `src/lib/configure-providers.js`
- *      (the token-only fallback prompt for a compute provider with no guided
- *      module) hands ITS OWN parameter to the helper, except the listed
+ *      `src/lib/*-guided-setup.js`, in `src/lib/guided-setup-shared.js` (the
+ *      token and key-pair prompts those modules share) and in
+ *      `src/lib/configure-providers.js` (the token-only fallback prompt for a
+ *      compute provider with no guided module) hands ITS OWN parameter to
+ *      the helper, except the listed
  *      prompts whose value never reaches an env file; create.js's
  *      admin-password prompt checks ADMIN_PASSWORD.
  *
@@ -186,15 +188,30 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
   // configure-providers.js holds genericGetApiToken, the prompt a compute
   // provider without a COMPUTE_GUIDED_MODULES entry falls back to; its value
   // reaches setEnvVar through configure.js exactly like a guided token.
+  //
+  // guided-setup-shared.js holds the token and key-pair prompts the provider
+  // modules used to carry one copy each of; it names the key by parameter
+  // (`envKey`, `accessEnvKey`, `secretEnvKey`), not by literal.
   const files = readdirSync(join(ROOT, 'src/lib'))
     .filter((f) => f.endsWith('-guided-setup.js'))
-    .concat(['configure-providers.js']);
+    .concat(['configure-providers.js', 'guided-setup-shared.js']);
 
-  it('finds the six provider modules and the generic fallback', () => {
+  // Modules with no text/password prompt of their own: every value they
+  // collect comes through the shared prompts. Listed, so a module that
+  // silently loses a prompt it should own still fails.
+  const SHARED_PROMPTS_ONLY = new Set([
+    'cloudflare-guided-setup.js',
+    'digitalocean-guided-setup.js',
+    'hetzner-guided-setup.js',
+    'linode-guided-setup.js',
+  ]);
+
+  it('finds the six provider modules, the shared prompts and the generic fallback', () => {
     expect(files.sort()).toEqual([
       'cloudflare-guided-setup.js',
       'configure-providers.js',
       'digitalocean-guided-setup.js',
+      'guided-setup-shared.js',
       'hetzner-guided-setup.js',
       'linode-guided-setup.js',
       'scaleway-guided-setup.js',
@@ -225,9 +242,9 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
   const validateCount = (src: string) =>
     (src.match(/validate: (?:async )?\(\w+(?::\s*\w+)?\) =>/g) ?? []).length;
   const callsHelper = ({ param, body }: Prompt) =>
-    new RegExp(String.raw`dotenvPromptProblem\((?:'[A-Z_]+'|Provider\.TOKEN_ENV), ${param}\)`).test(
-      body,
-    );
+    new RegExp(
+      String.raw`dotenvPromptProblem\((?:'[A-Z_]+'|Provider\.TOKEN_ENV|envKey|accessEnvKey|secretEnvKey), ${param}\)`,
+    ).test(body);
 
   it('judges a prompt by its own validate parameter, not by the name `v`', () => {
     const snippet = (param: string, arg: string) =>
@@ -266,6 +283,11 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
         promptOpenerCount(src),
       );
       expect(prompts.length, `${file}: prompt regex drifted`).toBe(validateCount(src));
+      if (SHARED_PROMPTS_ONLY.has(file)) {
+        expect(prompts.length, `${file}: grew a prompt of its own, drop it from the list`).toBe(0);
+        expect(src).toMatch(/await promptForVerifiedToken\(/);
+        return;
+      }
       expect(prompts.length).toBeGreaterThan(0);
       const missing = prompts
         .filter(({ message }) => !NOT_AN_ENV_VALUE.has(message))

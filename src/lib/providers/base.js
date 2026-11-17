@@ -1515,7 +1515,7 @@ export class BaseProvider {
   // (e.g. hetzner-guided-setup.js) that predates the provider-class seam.
   // These statics are thin delegations to that module — implementations
   // MUST dynamic-import it (never a top-level import) so its module-level
-  // session state (e.g. Hetzner's `_savePreference`) stays a single cached
+  // session state (each module's `saveIfWanted` answer) stays a single cached
   // instance shared by every call site that resolves through the static,
   // and forward args verbatim rather than re-declaring the module
   // function's own option defaults here. Consumers: src/lib/deploy/prompts.js,
