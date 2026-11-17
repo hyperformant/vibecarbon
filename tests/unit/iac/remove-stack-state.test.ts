@@ -52,6 +52,8 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
 // A plain function, not vi.fn: the only thing under test is what
 // removeStackState does with each answer.
 let locateBucket: (bucket: string) => Promise<string | null> = async () => null;
+// The region whose ListBuckets still shows the bucket, or null: read after the search.
+let bucketListedIn: (bucket: string) => Promise<string | null> = async () => null;
 const locatedBuckets: string[] = [];
 vi.mock('../../../src/lib/providers/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/providers/index.js')>()),
@@ -60,6 +62,7 @@ vi.mock('../../../src/lib/providers/index.js', async (importOriginal) => ({
       locatedBuckets.push(bucket);
       return locateBucket(bucket);
     },
+    bucketListedIn: (bucket: string) => bucketListedIn(bucket),
   }),
 }));
 
@@ -166,6 +169,7 @@ describe('removeStackState — state-only stack removal after out-of-band teardo
   describe('state bucket missing (NoSuchBucket)', () => {
     beforeEach(() => {
       locatedBuckets.length = 0;
+      bucketListedIn = async () => null;
     });
 
     it('counts the stack as absent when the state bucket exists in no region', async () => {
@@ -183,6 +187,26 @@ describe('removeStackState — state-only stack removal after out-of-band teardo
     it('stays a failure when the bucket does exist in another region (wrong endpoint, real state)', async () => {
       selectStackMock.mockRejectedValue(new Error(NO_SUCH_BUCKET));
       locateBucket = async () => 'nbg1';
+
+      const { removeStackState } = await import('../../../src/lib/iac/index.js');
+      await expect(removeStackState('prod', OPTS)).rejects.toThrow(/NoSuchBucket/);
+    });
+
+    it('stays a failure when no region holds the bucket but a listing still shows it (2026-11-16)', async () => {
+      // A new Hetzner bucket can answer NoSuchBucket and 404 to every
+      // HeadBucket for up to 15 minutes while it exists.
+      selectStackMock.mockRejectedValue(new Error(NO_SUCH_BUCKET));
+      locateBucket = async () => null;
+      bucketListedIn = async () => 'nbg1';
+
+      const { removeStackState } = await import('../../../src/lib/iac/index.js');
+      await expect(removeStackState('prod', OPTS)).rejects.toThrow(/NoSuchBucket/);
+    });
+
+    it('stays a failure when the listing cannot be read', async () => {
+      selectStackMock.mockRejectedValue(new Error(NO_SUCH_BUCKET));
+      locateBucket = async () => null;
+      bucketListedIn = () => Promise.reject(new Error('nbg1 answered "no answer"'));
 
       const { removeStackState } = await import('../../../src/lib/iac/index.js');
       await expect(removeStackState('prod', OPTS)).rejects.toThrow(/NoSuchBucket/);

@@ -456,7 +456,8 @@ export async function sweepOrphanedHetznerResources(
   // HetznerS3Provider.emptyAndDeleteBucket so we get version + multipart
   // handling for free instead of re-implementing it inline. A bucket it
   // cannot delete fails the sweep (enumFailed), unless the delete said "no
-  // such bucket" and no location holds it: a stale listing, the goal state.
+  // such bucket", no location holds it, and a second listing no longer shows
+  // it: a stale listing, the goal state.
   // A sweep that could not look fails it too: missing storage keys, or a
   // location whose ListBuckets failed, leave its buckets unchecked.
   try {
@@ -507,16 +508,19 @@ export async function sweepOrphanedHetznerResources(
           console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
           counts.s3Buckets++;
         } catch (bucketErr) {
-          const verdict = await classifyBucketDeleteError(bucketErr, () =>
-            store.locateBucket(name),
+          const verdict = await classifyBucketDeleteError(
+            bucketErr,
+            name,
+            () => store.locateBucket(name),
+            () => store.listBuckets(),
           );
           if (verdict.gone) {
-            // Stale listing: destroy already removed it. Goal state, not an
-            // enumeration failure — see bucket-already-gone.ts. Caveat: a
-            // HEAD or LIST in a new bucket's first second can leave it
-            // answering NoSuchBucket for up to 15 minutes (bucketQuietMs in
-            // hetzner-s3.js), so such a live bucket could read as gone here.
-            // No worse than before this verdict, when every error read clean.
+            // Stale listing: destroy already removed it, and a second
+            // listing no longer shows it. Goal state, not an enumeration
+            // failure. See bucket-already-gone.ts. A bucket this location
+            // still lists is never called gone: a new Hetzner bucket can
+            // answer NoSuchBucket for up to 15 minutes (bucketQuietMs in
+            // hetzner-s3.js) while it exists and bills (2026-11-16).
             console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
           } else {
             enumFailed = true;

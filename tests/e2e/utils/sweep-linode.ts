@@ -500,12 +500,16 @@ export async function sweepOrphanedLinodeResources(
           console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
           counts.s3Buckets++;
         } catch (err) {
-          const verdict = await classifyBucketDeleteError(err, () =>
-            objectStorage.locateBucket(cluster, name),
+          const verdict = await classifyBucketDeleteError(
+            err,
+            name,
+            () => objectStorage.locateBucket(cluster, name),
+            async () => (await objectStorage.listAllBuckets())?.map((b) => b.name) ?? null,
           );
           if (verdict.gone) {
-            // Stale listing: destroy already removed it. Goal state, not an
-            // enumeration failure — see bucket-already-gone.ts.
+            // Stale listing: destroy already removed it, and a second
+            // listing no longer shows it. Goal state, not an enumeration
+            // failure. See bucket-already-gone.ts.
             console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
           } else {
             enumFailed = true;

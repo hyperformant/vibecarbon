@@ -236,6 +236,27 @@ function isWrongEndpointError(error) {
 }
 
 /**
+ * The buckets a listing showed, whose delete answered "not at this endpoint"
+ * wherever it was tried, and that no region's pass then deleted. "Lives in
+ * another region" was only a guess, and for these it turned out wrong: no
+ * other region had them. A bucket the provider still lists is never passed
+ * over in silence (a new Hetzner bucket answered NoSuchBucket for 20 minutes
+ * on 2026-11-16 while it existed and billed), so each one fails the sweep and
+ * the next run tries again. No extra request: this reads what the walk
+ * already learned.
+ *
+ * @param {Map<string, string[]>} skipped - bucket name -> the regions that listed it and refused its delete
+ * @param {string[]} deletedNames - the bucket names some region's pass deleted
+ * @returns {Array<{name: string, regions: string[]}>}
+ */
+export function listedButDeletedNowhere(skipped, deletedNames) {
+  const deleted = new Set(deletedNames);
+  return [...skipped]
+    .filter(([name]) => !deleted.has(name))
+    .map(([name, regions]) => ({ name, regions }));
+}
+
+/**
  * Sweep one provider across every region its object-storage class knows.
  *
  * Regions are walked exhaustively rather than resolved from configuration.
@@ -260,6 +281,9 @@ async function sweepProvider(providerId, { prefix, maxAgeMs, dryRun, now }) {
   const S3Class = await Provider.getObjectStorageProviderClass();
   const regions = Object.keys(S3Class.ENDPOINTS);
   let readable = 0;
+  // Each skip below must be answered for at the end (listedButDeletedNowhere).
+  const skipped = new Map();
+  const deletedNames = [];
 
   for (const region of regions) {
     const s3 = await getObjectStorageProvider(providerId, accessKey, secretKey, region);
@@ -298,18 +322,30 @@ async function sweepProvider(providerId, { prefix, maxAgeMs, dryRun, now }) {
         // BucketNotEmpty eventual-consistency note).
         console.log(result.deleted ? 'ok' : 'emptied (shell deferred)');
         summary.deleted.push(`${providerId}/${region}/${bucket.name}`);
+        deletedNames.push(bucket.name);
       } catch (error) {
         if (isWrongEndpointError(error)) {
           // Some backends list an account's buckets from any regional
           // endpoint but only serve deletes from the bucket's own. The
-          // owning region's pass handles it.
-          console.log(`skipped (lives in another region)`);
+          // owning region's pass handles it, and if none does, the bucket
+          // fails the sweep below (listedButDeletedNowhere).
+          console.log(`skipped (not at this endpoint; another region's pass may hold it)`);
+          skipped.set(bucket.name, [...(skipped.get(bucket.name) ?? []), region]);
           continue;
         }
         console.log(`FAILED: ${error.message}`);
         summary.failed.push(`${providerId}/${region}/${bucket.name}: ${error.message}`);
       }
     }
+  }
+
+  for (const { name, regions: listedIn } of listedButDeletedNowhere(skipped, deletedNames)) {
+    const line =
+      `${providerId}/${listedIn.join('+')}/${name}: listed there, but its delete said no such ` +
+      'bucket and no other region deleted it. It may be a live bucket that is not answering ' +
+      'yet, so it is not counted as gone; the next sweep tries again';
+    console.warn(`[buckets]   FAILED ${line}`);
+    summary.failed.push(line);
   }
 
   if (readable === 0) {

@@ -292,7 +292,33 @@ describe('sweepOrphanedScalewayResources', () => {
     expect(counts.s3Buckets).toBe(2);
   });
 
-  it('a bucket destroy removed seconds earlier reads clean once no region holds it', async () => {
+  it('a bucket destroy removed seconds earlier reads clean once no region holds it and a second listing has dropped it', async () => {
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const stores: NonNullable<StoresLike> = {
+      'fr-par': fakeStore({
+        listBuckets: vi.fn().mockResolvedValueOnce(['testapp-s1-backups']).mockResolvedValue([]),
+        emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+        locateBucket,
+      }),
+      'nl-ams': fakeStore(),
+    };
+    const { counts, enumFailed } = await sweepOrphanedScalewayResources(TAG, 'testapp-s1', {
+      provider: fakeProvider(),
+      objectStorageByRegion: stores,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(locateBucket).toHaveBeenCalledWith('testapp-s1-backups');
+    // Read once to enumerate and once more after the search, never again.
+    expect(stores['fr-par'].listBuckets).toHaveBeenCalledTimes(2);
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('the 2026-11-16 leak: no such bucket and no region holds it, but the listing still shows it, so the sweep FAILS and never says gone', async () => {
+    // A new Hetzner bucket answered this way for 20 minutes while it existed
+    // and billed. The listing was the one answer that told the truth.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const locateBucket = vi.fn().mockResolvedValue(null);
     const stores: NonNullable<StoresLike> = {
       'fr-par': fakeStore({
@@ -308,8 +334,16 @@ describe('sweepOrphanedScalewayResources', () => {
       fetchImpl: fakeFetch({}),
     });
     expect(locateBucket).toHaveBeenCalledWith('testapp-s1-backups');
-    expect(enumFailed).toBe(false);
+    const said = (spy: typeof log) => spy.mock.calls.map((c) => String(c[0])).join('\n');
+    const logged = said(log);
+    const warned = said(warn);
+    log.mockRestore();
+    warn.mockRestore();
+    expect(enumFailed).toBe(true);
     expect(counts.s3Buckets).toBe(0);
+    expect(logged).not.toMatch(/already gone/);
+    expect(warned).toMatch(/FAILED testapp-s1-backups: .*listing still shows it/);
+    expect(stores['fr-par'].listBuckets).toHaveBeenCalledTimes(2);
   });
 
   it('a NoSuchBucket for a bucket some region still holds FAILS the sweep', async () => {

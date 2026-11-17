@@ -22,6 +22,7 @@ import {
   DO_SUBSCRIPTION_ANCHOR,
   isProtectedBucket,
   KNOWN_PROVIDER_IDS,
+  listedButDeletedNowhere,
   PROTECTED_BUCKET_NAMES,
   parseSweepArgs,
   SWEEP_PROVIDERS,
@@ -216,5 +217,31 @@ describe('command-line posture', () => {
     // buckets exactly the way the other three did before this reaper existed
     // — invisibly, because nothing was looking.
     expect([...SWEEP_PROVIDERS].sort()).toEqual([...KNOWN_PROVIDER_IDS].sort());
+  });
+});
+
+describe('a bucket a listing showed is never passed over in silence', () => {
+  // 2026-11-16: a Hetzner bucket answered NoSuchBucket to every delete for 20
+  // minutes while ListBuckets still showed it. The reaper's answer to that
+  // shape was "skipped (lives in another region)", and nothing failed.
+  it('fails a bucket its own listing showed when no region deleted it', () => {
+    const skipped = new Map([['testapp-1-storage', ['nbg1']]]);
+    expect(listedButDeletedNowhere(skipped, [])).toEqual([
+      { name: 'testapp-1-storage', regions: ['nbg1'] },
+    ]);
+  });
+
+  it("lets a bucket go that another region's pass deleted: it really lived elsewhere", () => {
+    const skipped = new Map([
+      ['testapp-1-storage', ['fr-par']],
+      ['testapp-2-storage', ['fr-par', 'pl-waw']],
+    ]);
+    expect(listedButDeletedNowhere(skipped, ['testapp-1-storage', 'unrelated'])).toEqual([
+      { name: 'testapp-2-storage', regions: ['fr-par', 'pl-waw'] },
+    ]);
+  });
+
+  it('has nothing to say when nothing was skipped', () => {
+    expect(listedButDeletedNowhere(new Map(), ['testapp-1-storage'])).toEqual([]);
   });
 });

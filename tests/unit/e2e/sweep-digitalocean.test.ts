@@ -244,7 +244,34 @@ describe('sweepOrphanedDigitalOceanResources', () => {
     expect(counts.s3Buckets).toBe(1);
   });
 
-  it('a bucket destroy removed seconds earlier reads clean once no region holds it (run 43757126064)', async () => {
+  it('a bucket destroy removed seconds earlier reads clean once no region holds it and a second listing has dropped it (run 43757126064)', async () => {
+    // For 1-3 s after a delete, Spaces still lists the bucket and answers
+    // ListObjectsV2 with a 404 NoSuchBucket whose message is empty, which the
+    // SDK words "UnknownError" (shape pinned in bucket-already-gone.test.ts).
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const spaces = fakeSpaces({
+      regions: () => ['nyc3'],
+      listBuckets: vi.fn().mockResolvedValueOnce(['testapp-d3-backups']).mockResolvedValue([]),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket,
+    });
+    const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider: fakeProvider(),
+      spaces,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(locateBucket).toHaveBeenCalledWith('nyc3', 'testapp-d3-backups');
+    // Read once to enumerate and once more after the search, never again.
+    expect(spaces.listBuckets).toHaveBeenCalledTimes(2);
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('the 2026-11-16 leak: no such bucket and no region holds it, but the listing still shows it, so the sweep FAILS and never says gone', async () => {
+    // A new Hetzner bucket answered this way for 20 minutes while it existed
+    // and billed. The listing was the one answer that told the truth.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // For 1-3 s after a delete, Spaces still lists the bucket and answers
     // ListObjectsV2 with a 404 NoSuchBucket whose message is empty, which the
     // SDK words "UnknownError" (shape pinned in bucket-already-gone.test.ts).
@@ -261,8 +288,16 @@ describe('sweepOrphanedDigitalOceanResources', () => {
       fetchImpl: fakeFetch({}),
     });
     expect(locateBucket).toHaveBeenCalledWith('nyc3', 'testapp-d3-backups');
-    expect(enumFailed).toBe(false);
+    const said = (spy: typeof log) => spy.mock.calls.map((c) => String(c[0])).join('\n');
+    const logged = said(log);
+    const warned = said(warn);
+    log.mockRestore();
+    warn.mockRestore();
+    expect(enumFailed).toBe(true);
     expect(counts.s3Buckets).toBe(0);
+    expect(logged).not.toMatch(/already gone/);
+    expect(warned).toMatch(/FAILED testapp-d3-backups: .*listing still shows it/);
+    expect(spaces.listBuckets).toHaveBeenCalledTimes(2);
   });
 
   it('a NoSuchBucket for a bucket some region still holds FAILS the sweep', async () => {
