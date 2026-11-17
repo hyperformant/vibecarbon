@@ -98,6 +98,10 @@ describe('readImageConst', () => {
   });
 
   it('resolves the real NODE_RUNTIME_IMAGE even though the formatter wraps it', () => {
-    expect(readImageConst(images, 'NODE_RUNTIME_IMAGE')).toMatch(/^ghcr\.io\/.+@sha256:/);
+    // The digest is optional: a new revision is pinned by tag alone until its
+    // publish workflow has run on main (docker/node-runtime/README.md).
+    expect(readImageConst(images, 'NODE_RUNTIME_IMAGE')).toMatch(
+      /^ghcr\.io\/hyperformant\/node-runtime:[^@\s]+(@sha256:[0-9a-f]{64})?$/,
+    );
   });
 });

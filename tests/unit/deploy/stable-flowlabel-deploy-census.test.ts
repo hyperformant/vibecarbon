@@ -262,7 +262,7 @@ describe('k8s and k8s-ha: deployK3s sets it first on every node', () => {
     await pullK3sRuntimeBase({
       masterIp: '192.0.2.1',
       sshKeyPath: '/k',
-      baseRef: 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r3',
+      baseRef: 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r4',
     });
     const calls = sent();
     expect(calls.map((c) => c.host)).toEqual(['192.0.2.1']);
