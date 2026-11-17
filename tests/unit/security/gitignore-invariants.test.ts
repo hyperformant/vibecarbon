@@ -157,23 +157,8 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
     expect(buildGitAddArgv(join(process.cwd(), 'carbon'))).toContain('drizzle.config.ts');
   });
 
-  it('extras are appended to the allowlist', () => {
-    const argv = buildGitAddArgv();
-    expect(argv).not.toContain('.');
-    // Test with a real path that exists in cwd
-    const realArgv = buildGitAddArgv(process.cwd(), ['package.json']);
-    expect(realArgv).toContain('package.json');
-  });
-
-  it('silently drops extras that do not exist', () => {
-    const argv = buildGitAddArgv(process.cwd(), ['definitely-not-a-real-file.txt']);
-    expect(argv).not.toContain('definitely-not-a-real-file.txt');
-  });
-
-  it('includes extras that do exist', () => {
-    const argv = buildGitAddArgv(process.cwd(), ['package.json']);
-    // package.json is already in the allowlist, so this should just not duplicate
-    expect(argv.filter((p) => p === 'package.json').length).toBeGreaterThanOrEqual(1);
+  it('includes an allowlisted file that exists', () => {
+    expect(buildGitAddArgv(process.cwd())).toContain('package.json');
   });
 });
 
@@ -227,7 +212,7 @@ describe('buildGitAddNamedArgv stages the named files and nothing else', () => {
       writeFileSync(join(tmp, 'pnpm-lock.yaml'), 'lockfileVersion: 9');
 
       // The mistake, shown on the same tree: the allowlist stages all four.
-      expect(buildGitAddArgv(tmp, ['pnpm-lock.yaml'])).toEqual(
+      expect(buildGitAddArgv(tmp)).toEqual(
         expect.arrayContaining(['package.json', 'src/', 'pnpm-lock.yaml']),
       );
 

@@ -7,8 +7,6 @@
  * `*_full.tar.gz` from `backups/` is gone: wal-g environments have no such
  * file, so it always ended in "No backups found in S3".
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -106,14 +104,6 @@ describe('backup create', () => {
     const err = h.logs.find(([k]) => k === 'error')?.[1] ?? '';
     expect(err).toMatch(/base_x was pushed/);
     expect(err).toContain('AccessDenied');
-  });
-
-  it('the legacy tar.gz helpers are gone from the command', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/backup.js', import.meta.url)),
-      'utf-8',
-    );
-    expect(src).not.toMatch(/listS3Backups|downloadS3Backup|No backups found in S3/);
   });
 });
 

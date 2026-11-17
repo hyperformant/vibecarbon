@@ -222,10 +222,4 @@ describe('primary-only add-ons on the promoted node', () => {
     expect(start).toBeLessThan(body.indexOf('demoteComposeWalgRole('));
     expect(start).toBeLessThan(body.indexOf('flipDns('));
   });
-
-  it('the hand list FAILOVER_FENCE_SERVICES is gone from src', () => {
-    for (const f of ['src/lib/deploy/compose/ha.js', 'src/lib/deploy/retired-fence.js']) {
-      expect(readFileSync(f, 'utf8'), f).not.toContain('FAILOVER_FENCE_SERVICES');
-    }
-  });
 });

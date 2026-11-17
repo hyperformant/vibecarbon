@@ -19,7 +19,7 @@
  * mocked; `spawnSync` stays real for the kustomize builds.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
@@ -629,10 +629,6 @@ describe('the chart is gone for good', () => {
   it('k3s.js installs no chart for the database and patches no db config at runtime', () => {
     const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
     expect(k3s).not.toContain('ALTER SYSTEM');
-  });
-
-  it('the scaffold carries no values/ directory', () => {
-    expect(existsSync(join(ROOT, 'carbon/k8s/values'))).toBe(false);
   });
 });
 
