@@ -355,7 +355,10 @@ export class BaseProvider {
    * whole Secret. `copyOf` says what a whole Secret is a copy of when that is
    * not this provider's own API token (a Secret an earlier deploy.yml wrote
    * from a GitHub secret, say), for the lines that remove or keep it. Drop an
-   * entry once no cluster made before its removal is left.
+   * entry once no cluster made before its removal is left. REMOVE AFTER
+   * 2027-02-13, with removeRetired in deploy/k8s/k3s.js: three months after
+   * 0.53.0, the first release that wrote none of them (docs/history.md, Dated
+   * bridges).
    * @type {ReadonlyArray<{namespace: string, name: string, keys?: string[], copyOf?: string}>}
    */
   static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([]);
