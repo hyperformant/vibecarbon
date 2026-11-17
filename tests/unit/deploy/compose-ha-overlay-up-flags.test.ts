@@ -19,9 +19,10 @@
  * server-compose-command-census.test.ts). This suite pins the two
  * recreators that motivated it.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 const EFFECTS_SRC = readFileSync(
@@ -54,16 +55,9 @@ describe('the overlay-write db recreate runs the node own -f set', () => {
   // names its files. Only composeFileFlags (bundle.js) builds the list, from
   // arrays, so no addon overlay ever appears as a `-f` literal in src/.
   it('no file in src/ hand-rolls a -f addon-overlay flag list', () => {
-    const walk = (dir: string, out: string[] = []): string[] => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isDirectory()) walk(join(dir, entry.name), out);
-        else if (entry.name.endsWith('.js')) out.push(join(dir, entry.name));
-      }
-      return out;
-    };
     const ADDON_FLAG_RE = /-f docker-compose\.(?!yml\b|prod\.yml|replication\.yml)[\w.-]+/g;
     const violations: string[] = [];
-    for (const file of walk(join(REPO_ROOT, 'src'))) {
+    for (const file of sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] })) {
       const source = readFileSync(file, 'utf-8');
       for (const m of source.matchAll(ADDON_FLAG_RE)) {
         violations.push(`${file.slice(REPO_ROOT.length + 1)}: ${m[0]}`);

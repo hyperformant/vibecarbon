@@ -13,21 +13,17 @@
  *     the ghcr mirror and the repo's own db image, never Docker Hub.
  * Order against the Docker restart: tests/unit/iac/compose-boot-pull.test.ts.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { bootPullImages } from '../../../src/lib/iac/compose-cloud-init.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 describe('cloud-init pulls images only through the detached compose boot pull', () => {
   const CLOUD_INIT = fileURLToPath(new URL('../../../carbon/cloud-init', import.meta.url));
-  const files = (dir: string): string[] =>
-    readdirSync(dir).flatMap((e) => {
-      const p = join(dir, e);
-      return statSync(p).isDirectory() ? files(p) : [p];
-    });
   const pullLines = () =>
-    files(CLOUD_INIT).flatMap((f) =>
+    sourceFiles(CLOUD_INIT).flatMap((f) =>
       readFileSync(f, 'utf-8')
         .split('\n')
         .filter((l) => !/^\s*#/.test(l) && /\bdocker\b[\s,'"]+pull\b/.test(l))
@@ -35,7 +31,9 @@ describe('cloud-init pulls images only through the detached compose boot pull', 
     );
 
   it('the only docker pull is boot-pull.sh’s loop, in docker-ce-setup.yaml', () => {
-    expect(files(CLOUD_INIT).length, 'positive control: the walk read files').toBeGreaterThan(0);
+    expect(sourceFiles(CLOUD_INIT).length, 'positive control: the walk read files').toBeGreaterThan(
+      0,
+    );
     expect(pullLines().map((p) => `${p.file.split('/').pop()}: ${p.line}`)).toEqual([
       'docker-ce-setup.yaml: docker pull -q "$ref" >> "$out/log" 2>&1 &',
     ]);

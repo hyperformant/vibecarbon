@@ -24,9 +24,10 @@
  *     because the conversion had to thread each wrapper's message through a
  *     new helper without flattening it.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
@@ -61,19 +62,6 @@ function isCommentLine(line: string): boolean {
   return trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*');
 }
 
-function findSourceFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        findSourceFiles(join(dir, entry.name), out);
-      }
-    } else if (entry.name.endsWith('.js')) {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
-}
-
 interface Site {
   file: string;
   line: number;
@@ -83,7 +71,12 @@ interface Site {
 function collectSites(): { spawns: Site[]; consumers: Set<string> } {
   const spawns: Site[] = [];
   const consumers = new Set<string>();
-  for (const file of findSourceFiles(join(ROOT, 'src'))) {
+  for (const file of sourceFiles(join(ROOT, 'src'), {
+    exts: ['.js'],
+    skip: SKIP_DIRS,
+    skipDotDirs: true,
+    relativeTo: ROOT,
+  })) {
     const lines = readFileSync(join(ROOT, file), 'utf-8').split('\n');
     lines.forEach((line, i) => {
       if (isCommentLine(line)) return;

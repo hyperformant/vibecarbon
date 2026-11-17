@@ -33,11 +33,12 @@
  * image the explicit pull already fetched, dockerd's FROM in a direct-mode
  * build). Each runs on a node a carrier above already reached, after it.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { parseAst } from 'vite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 // Every carrier bottoms out here (compose's sshRunAsync, lib/ssh.js's sshRun,
 // prePullImages' own ssh), so the mock sees what each node is sent.
@@ -376,18 +377,10 @@ const PULL_SITES: Record<string, { self: true } | { steps: Partial<Record<Tier, 
 const REMOTE_PULL =
   /\bctr\b[^\n]*\b(?:i|images?)\s+pull\b|\bimages\s+pull\b|\b(?:docker|crictl|nerdctl|podman)\s+pull\b|(?:\bcompose|VC_COMPOSE\}|\bdc)\s+pull\b/;
 
-function* sourceFiles(dir: string): Generator<string> {
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) yield* sourceFiles(path);
-    else if (/\.(js|mjs|sh)$/.test(name)) yield path;
-  }
-}
-
 /** `<file> <function>` for every string or template literal (or .sh line) that pulls. */
 function pullSitesInSrc(): string[] {
   const found = new Set<string>();
-  for (const path of sourceFiles(join(ROOT, 'src'))) {
+  for (const path of sourceFiles(join(ROOT, 'src'), { exts: ['.js', '.mjs', '.sh'] })) {
     const rel = relative(ROOT, path);
     const src = readFileSync(path, 'utf-8');
     if (path.endsWith('.sh')) {

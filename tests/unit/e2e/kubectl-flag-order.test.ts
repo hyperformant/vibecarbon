@@ -24,11 +24,11 @@
  * pinning the one known site, so a new call site cannot reintroduce the
  * class.
  */
-
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const SCAN_ROOTS = ['src', 'tests/e2e', 'scripts'];
@@ -76,21 +76,10 @@ const VERBS = new Set([
   'taint',
 ]);
 
+/** A root that is absent holds no files. */
 function walk(dir: string): string[] {
-  const out: string[] = [];
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (entry === 'node_modules' || entry === '.git') continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walk(full));
-    else if (/\.(ts|js|mjs)$/.test(entry)) out.push(full);
-  }
-  return out;
+  if (!existsSync(dir)) return [];
+  return sourceFiles(dir, { exts: ['.ts', '.js', '.mjs'], skip: ['node_modules', '.git'] });
 }
 
 /**

@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 // Regression guard: `ports: []` DOES NOT clear an inherited port publication.
 //
@@ -33,27 +34,13 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 /** Every docker-compose file we ship, from both template roots. */
 function composeFiles(): string[] {
-  const roots = [join(repoRoot, 'carbon'), join(repoRoot, 'services')];
-  const found: string[] = [];
-  const walk = (dir: string) => {
-    let entries: ReturnType<typeof readdirSync<{ withFileTypes: true }>>;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // Root absent (e.g. a partial checkout) — other roots still sweep.
-    }
-    for (const entry of entries) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === 'dist') continue;
-        walk(full);
-      } else if (/^docker-compose[\w.-]*\.ya?ml$/.test(entry.name)) {
-        found.push(full);
-      }
-    }
-  };
-  for (const root of roots) walk(root);
-  return found.sort();
+  // A root that is absent (a partial checkout) is left out; the other still sweeps.
+  const roots = [join(repoRoot, 'carbon'), join(repoRoot, 'services')].filter((root) =>
+    existsSync(root),
+  );
+  return sourceFiles(roots, { skip: ['node_modules', 'dist'] })
+    .filter((full) => /^docker-compose[\w.-]*\.ya?ml$/.test(basename(full)))
+    .sort();
 }
 
 /** Overlay sites that deliberately drop an inherited publication. */

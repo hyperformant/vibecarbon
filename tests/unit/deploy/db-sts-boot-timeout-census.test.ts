@@ -27,25 +27,21 @@
  * the shared constant interpolation or carry a value >= the constant.
  * New waits added to these files are drafted automatically.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { DB_ROLLOUT_TIMEOUT_S } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DB_STS_BOOT_TIMEOUT_S } from '../../../src/lib/deploy/replication.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const FILES = ['src/lib/deploy/k8s/ha/index.js', 'src/lib/deploy/replication.js'];
-
-function walkJs(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? walkJs(join(dir, e.name)) : e.name.endsWith('.js') ? [join(dir, e.name)] : [],
-  );
-}
 
 // Every src file that touches the db StatefulSet: by its constant, its literal
 // name, or the shared rollout-status argv builder (failover.js reaches the sts
 // only through that builder, which is how it escaped the hand-kept list above).
 const TOUCHES_DB_STS = /DB_STATEFULSET|statefulset\/db|k8sDbRolloutStatusArgv/;
-const DB_STS_FILES = walkJs('src').filter((f) => TOUCHES_DB_STS.test(readFileSync(f, 'utf8')));
+const DB_STS_FILES = sourceFiles('src', { exts: ['.js'] }).filter((f) =>
+  TOUCHES_DB_STS.test(readFileSync(f, 'utf8')),
+);
 
 // A numeric-literal default on an argv builder's timeout parameter, e.g.
 // `function k8sDbRolloutStatusArgv(timeoutSeconds = 300)`.

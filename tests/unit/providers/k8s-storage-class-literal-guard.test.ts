@@ -31,10 +31,11 @@
  * not all of carbon/) — it's a local dev install, not a shipped/checked-in
  * tree, and walking it would make this test both slow and meaningless.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const CARBON_K8S_ROOT = join(process.cwd(), 'carbon', 'k8s');
 const SERVICES_ROOT = join(process.cwd(), 'services');
@@ -56,29 +57,15 @@ const PROVIDER_ROWS: Array<[string, string, string]> = Object.entries(PROVIDERS)
 const bareLiteralPattern = (literal: string) => new RegExp(`\\b${literal}\\b`);
 const quotedLiteralPattern = (literal: string) => new RegExp(`['"]${literal}['"]`);
 
-function walkFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) {
-      out.push(...walkFiles(full));
-    } else if (st.isFile()) {
-      out.push(full);
-    }
-  }
-  return out;
-}
-
 function walkJsFiles(dir: string): string[] {
-  return walkFiles(dir).filter((f) => f.endsWith('.js'));
+  return sourceFiles(dir).filter((f) => f.endsWith('.js'));
 }
 
 describe.each(PROVIDER_ROWS)(
   'no hardcoded %s StorageClass literal (%s) outside its own provider file',
   (_id, literal, homeFile) => {
     it('k8s manifests (carbon/k8s/, services/) never hardcode the bare scalar', () => {
-      const files = [...walkFiles(CARBON_K8S_ROOT), ...walkFiles(SERVICES_ROOT)];
+      const files = [...sourceFiles(CARBON_K8S_ROOT), ...sourceFiles(SERVICES_ROOT)];
       expect(files.length).toBeGreaterThan(50); // sanity: the walk actually found the trees
 
       const offenders: Array<{ file: string; match: string }> = [];

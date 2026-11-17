@@ -5,15 +5,7 @@
  * what it writes, so both directions have to be exact.
  */
 import { execFileSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CICD_WORKFLOW_FILES } from '../../../src/lib/ci-setup.js';
@@ -31,20 +23,13 @@ import {
   writeGitHubRefs,
 } from '../../../src/lib/template-edits.js';
 import { projectPathFor, templatePathFor } from '../../../src/lib/template-paths.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const ROOT = process.cwd();
 const CARBON = join(ROOT, 'carbon');
 const PROJECT = 'test-app';
 const REFS = { projectName: PROJECT, owner: 'acme', repo: 'shop' };
-
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    if (name === 'node_modules' || name === '.git') return [];
-    const p = join(dir, name);
-    return statSync(p).isDirectory() ? walk(p) : [p];
-  });
-}
 
 /** A template file as create lays it down: owner and repo both the project name. */
 function created(rel: string): string {
@@ -57,7 +42,7 @@ describe('GITHUB_REF_FILES is every template file with a GitHub ref', () => {
   const REF = /(ghcr\.io|github\.com)\/\{\{GITHUB_OWNER\}\}\/\{\{PROJECT_NAME\}\}/;
 
   it('lists every file whose refs create bakes as <project>/<project>, and nothing else', () => {
-    const withRefs = walk(CARBON)
+    const withRefs = sourceFiles(CARBON, { skip: ['node_modules', '.git'] })
       .filter((f) => REF.test(readFileSync(f, 'utf-8')))
       .map((f) => projectPathFor(relative(CARBON, f)))
       .sort();

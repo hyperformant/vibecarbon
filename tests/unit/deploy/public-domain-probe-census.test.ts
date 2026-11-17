@@ -46,11 +46,12 @@
  * rule 3 catches only when the system fetch is referenced in the function
  * that builds the URL; and URLs read from config at runtime.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const SRC = join(REPO, 'src');
@@ -427,15 +428,9 @@ function scan(path: string, text: string): { findings: Finding[]; exemptKeys: st
   return { findings, exemptKeys };
 }
 
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const full = join(dir, e.name);
-    if (e.isDirectory()) return jsFiles(full);
-    return e.name.endsWith('.js') ? [full] : [];
-  });
-}
-
-const results = jsFiles(SRC).map((f) => scan(relative(SRC, f), readFileSync(f, 'utf8')));
+const results = sourceFiles(SRC, { exts: ['.js'] }).map((f) =>
+  scan(relative(SRC, f), readFileSync(f, 'utf8')),
+);
 
 describe('census: probes of the app domain resolve through public DNS', () => {
   it('no request to the app domain bypasses public-domain-probe.js', () => {

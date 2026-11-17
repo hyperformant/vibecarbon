@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: the carbon/ docs must only tell a reader to run commands that exist,
@@ -33,14 +34,7 @@ function templateDocs(): string[] {
     }
   };
   pushMd(CARBON, /\.md$/);
-  const walkK8s = (dir: string) => {
-    for (const entry of readdirSync(dir)) {
-      const full = join(dir, entry);
-      if (statSync(full).isDirectory()) walkK8s(full);
-      else if (entry.endsWith('.md')) out.push(relative(ROOT, full));
-    }
-  };
-  walkK8s(join(CARBON, 'k8s'));
+  out.push(...sourceFiles(join(CARBON, 'k8s'), { exts: ['.md'], relativeTo: ROOT }));
   pushMd(join(CARBON, 'content', 'docs'), /\.mdx$/);
   return out.sort();
 }

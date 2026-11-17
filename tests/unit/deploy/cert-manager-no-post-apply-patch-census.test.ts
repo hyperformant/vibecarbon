@@ -21,9 +21,10 @@
  * apply in waiting: it would strip the rendered flags and pin, and roll the
  * controller. Comments included, so a copy-paste source cannot hide there.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 const ROOTS = [
@@ -35,24 +36,14 @@ const ROOTS = [
   '.github/workflows',
 ];
 const SKIP = new Set(['node_modules', 'dist', 'coverage']);
-const EXT = /\.(m?js|ts|sh|ya?ml)$/;
+const EXTS = ['.js', '.mjs', '.ts', '.sh', '.yaml', '.yml'];
 
 const MUTATE = /^(patch|set|edit|label|annotate|scale|restart|replace)$/;
 const CERT_MANAGER = /^cert-manager(-cainjector|-webhook)?$/;
 
-function* files(dir: string): Generator<string> {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    if (SKIP.has(name)) continue;
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) yield* files(path);
-    else if (EXT.test(name)) yield path;
-  }
+/** A root that is absent holds no files. */
+function files(dir: string): string[] {
+  return existsSync(dir) ? sourceFiles(dir, { exts: EXTS, skip: SKIP }) : [];
 }
 
 const stripComments = (text: string) =>
@@ -122,20 +113,11 @@ function upstreamManifestLines(text: string): string[] {
     .map((line) => line.trim());
 }
 
-function* everyFile(dir: string): Generator<string> {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    if (SKIP.has(name) || name === '.git') continue;
-    const path = join(dir, name);
-    const st = statSync(path);
-    if (st.isDirectory()) yield* everyFile(path);
-    else if (st.size < 2_000_000) yield path;
-  }
+function everyFile(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return sourceFiles(dir, { skip: [...SKIP, '.git'] }).filter(
+    (path) => statSync(path).size < 2_000_000,
+  );
 }
 
 describe('the upstream cert-manager manifest is named only by the renderer', () => {

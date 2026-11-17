@@ -1,10 +1,11 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONFIG_KEYS, registryEntry } from '../../../src/lib/config-registry.js';
 import { resolveDockerHubCreds } from '../../../src/lib/deploy/docker-hub.js';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { PROVIDERS, resolveProviderToken } from '../../../src/lib/providers/index.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: every read of a REGISTERED operator key FROM `process.env` goes
@@ -171,14 +172,6 @@ const KNOWN_UNREGISTERED: Record<string, string> = {
 
 const PROVIDER_STATICS = ['TOKEN_ENV', 'S3_REGION_ENV', 'PROJECT_ID_ENV', 'OBJECT_STORAGE_ENV'];
 
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) return jsFiles(full);
-    return entry.endsWith('.js') ? [full] : [];
-  });
-}
-
 /**
  * Remove comments while keeping every newline so line numbers hold:
  * single-line block comments anywhere on a line (`/* x *\/ code`), multi-line
@@ -323,7 +316,7 @@ function literalKeysRead(access: Access[]): string[] {
 }
 
 function scanSrc(): Array<{ rel: string; access: Access[] }> {
-  return jsFiles(SRC)
+  return sourceFiles(SRC, { exts: ['.js'] })
     .map((file) => ({ rel: relative(SRC, file), src: readFileSync(file, 'utf-8') }))
     .filter(({ rel }) => !ALLOWLIST.has(rel))
     .map(({ rel, src }) => ({ rel, access: scan(src) }));
@@ -394,7 +387,7 @@ describe('operator-env census — registered keys are read through readOperatorV
     // A file that got its raw reads routed but then lost the import would
     // fail at runtime, not in the sweep above — this makes the census the
     // place that notices.
-    const missing = jsFiles(SRC)
+    const missing = sourceFiles(SRC, { exts: ['.js'] })
       .map((file) => ({ rel: relative(SRC, file), src: readFileSync(file, 'utf-8') }))
       .filter(({ rel }) => !ALLOWLIST.has(rel))
       .filter(({ src }) => /\breadOperatorVar\s*\(/.test(stripComments(src)))

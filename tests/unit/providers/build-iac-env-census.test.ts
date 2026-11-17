@@ -19,9 +19,10 @@
  * `[<expr>.CLI_TOKEN_ENV]` computed-key/index construction is the
  * env-building idiom this bans.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC_ROOT = join(process.cwd(), 'src');
 const EXEMPT_FILE = join(SRC_ROOT, 'lib', 'providers', 'base.js');
@@ -32,23 +33,9 @@ const EXEMPT_FILE = join(SRC_ROOT, 'lib', 'providers', 'base.js');
 // (`Provider.CLI_TOKEN_ENV` in template strings/comparisons) don't match.
 const CONSTRUCTION_PATTERN = /\[\s*[\w.]+\.CLI_TOKEN_ENV\s*\]/;
 
-function walkJsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) {
-      out.push(...walkJsFiles(full));
-    } else if (st.isFile() && full.endsWith('.js')) {
-      out.push(full);
-    }
-  }
-  return out;
-}
-
 describe('no direct [X.CLI_TOKEN_ENV] env construction outside base.js', () => {
   it('every src/ file routes provider subprocess env through Provider.buildIacEnv', () => {
-    const files = walkJsFiles(SRC_ROOT).filter((f) => f !== EXEMPT_FILE);
+    const files = sourceFiles(SRC_ROOT, { exts: ['.js'] }).filter((f) => f !== EXEMPT_FILE);
     expect(files.length).toBeGreaterThan(50); // sanity: the walk found the tree
 
     const offenders: Array<{ file: string; match: string }> = [];

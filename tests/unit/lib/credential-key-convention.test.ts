@@ -28,12 +28,13 @@
  * spellings have no server-side use at all, so those ARE banned everywhere in
  * `src/`.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { operatorSecretKeys } from '../../../src/lib/config-registry.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Canonical prefix for a provider: its registry id, uppercased.
@@ -161,20 +162,10 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
 });
 
 describe('credential key convention — no legacy operator-only spellings survive in src/', () => {
-  function walk(dir: string): string[] {
-    const out: string[] = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) out.push(...walk(full));
-      else if (/\.(js|ts|mjs)$/.test(entry.name)) out.push(full);
-    }
-    return out;
-  }
-
   it('no *_SPACES_* / *_OBJECT_STORAGE_* credential spelling remains under src/', () => {
     const srcRoot = join(process.cwd(), 'src');
     const offenders: string[] = [];
-    for (const file of walk(srcRoot)) {
+    for (const file of sourceFiles(srcRoot, { exts: ['.js', '.ts', '.mjs'] })) {
       const text = readFileSync(file, 'utf-8');
       for (const line of text.split('\n')) {
         if (LEGACY_OPERATOR_ONLY_PATTERN.test(line)) {

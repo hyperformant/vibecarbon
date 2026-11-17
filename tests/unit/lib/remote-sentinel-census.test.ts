@@ -26,7 +26,7 @@
  *   4. no `new RegExp(...)` builds a sentinel pattern (the helpers do it).
  * Each rule has a bite test below.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -36,6 +36,7 @@ import {
   sentinelLinePayload,
 } from '../../../src/lib/remote-sentinel.js';
 import { shJoin } from '../../../src/lib/shell.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { CODE, findCalls, lex, matchBracket } from '../helpers/js-call-scan.js';
 
 /** An ALL_CAPS token with an underscore: the shape of every remote sentinel. */
@@ -189,19 +190,9 @@ function sentinelViolations(text: string, file = '<src>'): string[] {
   return bad;
 }
 
-function srcFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...srcFiles(p));
-    else if (p.endsWith('.js')) out.push(p);
-  }
-  return out;
-}
-
 describe('remote sentinel census (src/)', () => {
   it('every sentinel is read as a whole stdout line, never from a .message', () => {
-    const bad = srcFiles('src')
+    const bad = sourceFiles('src', { exts: ['.js'] })
       .filter((f) => f !== join('src', 'lib', 'remote-sentinel.js'))
       .flatMap((f) => sentinelViolations(readFileSync(f, 'utf-8'), f));
     expect(bad).toEqual([]);

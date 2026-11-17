@@ -33,13 +33,14 @@
  * programs are out of scope here; (a) still fails if one of them grows a
  * Docker daemon config.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
 import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { resolveOutputs } from '../../_shared/pulumi-secrets.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const { created } = vi.hoisted(() => ({
   created: [] as Array<{ type: string; name: string; args: unknown; opts?: unknown }>,
@@ -72,16 +73,6 @@ const WALK_ROOTS = ['src', 'carbon', 'docker', 'scripts'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', '.git']);
 const TEXT_FILE = /\.(js|mjs|cjs|ts|sh|ya?ml|json|conf|service|tpl|txt)$|(^|\/)Dockerfile[^/]*$/;
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (SKIP_DIRS.has(name)) continue;
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else out.push(p);
-  }
-  return out;
-}
-
 /**
  * The ways a file can configure a Docker daemon. Mentions in prose (a comment
  * naming daemon.json) are not writes; each form below is.
@@ -102,7 +93,7 @@ function writeForms(text: string): string[] {
   return WRITE_FORMS.filter(([, re]) => re.test(text)).map(([label]) => label);
 }
 
-const PRODUCTION_FILES = WALK_ROOTS.flatMap((r) => walk(join(ROOT, r)))
+const PRODUCTION_FILES = WALK_ROOTS.flatMap((r) => sourceFiles(join(ROOT, r), { skip: SKIP_DIRS }))
   .map((f) => relative(ROOT, f))
   .filter((rel) => TEXT_FILE.test(rel) || basename(rel) === 'daemon.json');
 

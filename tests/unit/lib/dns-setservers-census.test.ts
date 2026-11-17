@@ -6,23 +6,18 @@
  * Resolver per server), no src file may call setServers with more than one
  * server. This walks src/, so a new call site is covered the day it lands.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(__dirname, '../../../src');
 const ALLOWED = 'lib/deploy/public-dns-lookup.js';
 
-function walk(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.js') ? [join(dir, e.name)] : [],
-  );
-}
-
 describe('setServers census', () => {
   it('no src file outside public-dns-lookup.js pins more than one server', () => {
     const offenders: string[] = [];
-    for (const file of walk(SRC)) {
+    for (const file of sourceFiles(SRC, { exts: ['.js'] })) {
       const rel = relative(SRC, file);
       if (rel === ALLOWED) continue;
       const src = readFileSync(file, 'utf8');

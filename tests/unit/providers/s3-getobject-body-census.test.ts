@@ -5,20 +5,14 @@
  * Source-shape walk: each file that builds a GetObjectCommand must also
  * consume `.Body` in the same function.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(__dirname, '../../../src');
 const CONSUMERS =
   /transformTo(String|ByteArray|WebStream)|\.pipe\(|\.destroy\??\.?\(|bodyText\(|for await/;
-
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((n) => {
-    const f = join(dir, n);
-    return statSync(f).isDirectory() ? walk(f) : f.endsWith('.js') ? [f] : [];
-  });
-}
 
 /** Text of the enclosing function: from the nearest preceding function header to the next one. */
 function enclosing(src: string, idx: number): string {
@@ -34,7 +28,7 @@ describe('GetObjectCommand body census', () => {
   it('every new GetObjectCommand( sits in a function that consumes .Body', () => {
     const offenders: string[] = [];
     let seen = 0;
-    for (const f of walk(SRC)) {
+    for (const f of sourceFiles(SRC, { exts: ['.js'] })) {
       const src = readFileSync(f, 'utf8');
       for (const m of src.matchAll(/new GetObjectCommand\(/g)) {
         seen++;

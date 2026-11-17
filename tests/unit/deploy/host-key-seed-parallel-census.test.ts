@@ -13,21 +13,13 @@
  * The rule, over src/: no `await seedKnownHosts(` inside a loop body, and no
  * two `await seedKnownHosts(` statements back to back.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (full.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
 
 const SEED = /\bawait seedKnownHosts\(/;
 const LOOP = /^\s*for\s*\(.*\)\s*\{?\s*$/;
@@ -49,7 +41,7 @@ function serialSeeds(file: string, text: string): string[] {
 
 describe('host-key seeds of several servers run together', () => {
   it('no serial seedKnownHosts in src/', () => {
-    const files = walk(join(ROOT, 'src'));
+    const files = sourceFiles(join(ROOT, 'src'), { exts: ['.js'] });
     expect(files.length).toBeGreaterThan(100);
     const offenders = files.flatMap((f) =>
       serialSeeds(relative(ROOT, f), readFileSync(f, 'utf-8')),

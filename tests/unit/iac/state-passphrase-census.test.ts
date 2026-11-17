@@ -9,19 +9,18 @@
  * entry point, that the workspace really receives the project's passphrase and
  * that the project recorded its fingerprint on the way.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importingWorkspace } from '../../_shared/fake-stack-import.js';
 import { fakeHetznerStateStore } from '../../_shared/fake-state-store.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
 const PASSPHRASE = 'Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5';
 
-const srcFiles = readdirSync(SRC, { recursive: true, withFileTypes: true })
-  .filter((d) => d.isFile() && d.name.endsWith('.js'))
-  .map((d) => join(d.parentPath, d.name));
+const srcFiles = sourceFiles(SRC, { exts: ['.js'] });
 
 /** Source with comments blanked out, so prose cannot count as a call. */
 function code(file: string): string {

@@ -11,9 +11,10 @@
  * This walks src/ so a new broad add fails here instead of making the doc
  * false.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 
@@ -23,16 +24,8 @@ const BROAD_ARGV = /['"]add['"]\s*,\s*['"](?:-A|--all|-u|--update|\.|\*|:\/)['"]
 const STRING_COMMAND =
   /\b(?:runCommand|runCommandAsync|exec|execSync|execFile|execFileSync|spawn|spawnSync)\(\s*['"`]git\s+add\b/g;
 
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) return sourceFiles(path);
-    return name.endsWith('.js') ? [path] : [];
-  });
-}
-
 function hits(pattern: RegExp): string[] {
-  return sourceFiles(join(ROOT, 'src')).flatMap((path) => {
+  return sourceFiles(join(ROOT, 'src'), { exts: ['.js'] }).flatMap((path) => {
     const count = [...readFileSync(path, 'utf-8').matchAll(pattern)].length;
     return Array(count).fill(relative(ROOT, path).split(sep).join('/'));
   });

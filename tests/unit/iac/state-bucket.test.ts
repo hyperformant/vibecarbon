@@ -8,6 +8,7 @@ import {
 } from '../../../src/lib/providers/hetzner-s3.js';
 // @ts-expect-error — JS module without types
 import { projectStateBucketBase } from '../../../src/lib/providers/s3-base.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 // Finding 1: Pulumi state must live in a DEDICATED bucket, not the app storage
 // bucket. These tests pin the naming derivation + that resolveBackendUrl
@@ -124,12 +125,10 @@ describe('state-bucket region/endpoint passthrough census', () => {
   // (destroy) found 2026-08-28. Walks src/ so future field lists are drafted
   // into the audited set automatically.
   it('every `stateBucket: <cfg>.stateBucket` field list also carries stateBucketRegion and stateEndpoint', async () => {
-    const { readFileSync, readdirSync } = await import('node:fs');
+    const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const srcRoot = join(new URL('../../..', import.meta.url).pathname, 'src');
-    const files = readdirSync(srcRoot, { recursive: true, withFileTypes: true })
-      .filter((d) => d.isFile() && d.name.endsWith('.js'))
-      .map((d) => join(d.parentPath, d.name));
+    const files = sourceFiles(srcRoot, { exts: ['.js'] });
     const fieldListRe = /stateBucket: (envConfig\.s3|s3Config)\.stateBucket,/;
     let hits = 0;
     const misses: string[] = [];

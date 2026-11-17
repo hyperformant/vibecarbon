@@ -39,10 +39,11 @@
  * expression-bodied arrow has no closing brace of its own, so its range is
  * cut at the next function). Each rule has a bite test below.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { LEGACY_SECRET_TEMP, STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { CODE, lexMask } from '../helpers/js-call-scan.js';
 
 const HELPER = join('src', 'lib', 'temp-dir.js');
@@ -121,16 +122,6 @@ function tempDirPrefixes(files: Record<string, string>): Map<string, string> {
     }
   }
   return found;
-}
-
-function srcFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...srcFiles(p));
-    else if (p.endsWith('.js')) out.push(p);
-  }
-  return out;
 }
 
 /** Code matches of `re` (never comment or string text). */
@@ -377,7 +368,9 @@ function tempViolations(files: Record<string, string>): string[] {
 const one = (text: string, file = join('src', 'lib', 'x.js')) => tempViolations({ [file]: text });
 
 describe('temp dir census (src/)', () => {
-  const files = Object.fromEntries(srcFiles('src').map((f) => [f, readFileSync(f, 'utf-8')]));
+  const files = Object.fromEntries(
+    sourceFiles('src', { exts: ['.js'] }).map((f) => [f, readFileSync(f, 'utf-8')]),
+  );
 
   it('every temp dir src/ makes comes from temp-dir.js and is removed by its holder', () => {
     expect(Object.keys(files)).toContain(HELPER);

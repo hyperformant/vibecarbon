@@ -25,9 +25,10 @@
  * found — this test reads each file as one string (not line-by-line) so a
  * literal split across lines still matches.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC_ROOT = join(process.cwd(), 'src');
 const EXEMPT_DIR = join(SRC_ROOT, 'lib', 'providers') + sep;
@@ -35,23 +36,9 @@ const EXEMPT_DIR = join(SRC_ROOT, 'lib', 'providers') + sep;
 const HARDCODE_PATTERN =
   /(getObjectStorageProvider|resolveS3RegionFor|getProviderClass)\(\s*'hetzner'/;
 
-function walkJsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) {
-      out.push(...walkJsFiles(full));
-    } else if (st.isFile() && full.endsWith('.js')) {
-      out.push(full);
-    }
-  }
-  return out;
-}
-
 describe("no hardcoded 'hetzner' provider-id literal at storage/token dispatch call sites", () => {
   it('no non-provider src/ file passes a hetzner literal into getObjectStorageProvider/resolveS3RegionFor/getProviderClass', () => {
-    const files = walkJsFiles(SRC_ROOT).filter((f) => !f.startsWith(EXEMPT_DIR));
+    const files = sourceFiles(SRC_ROOT, { exts: ['.js'] }).filter((f) => !f.startsWith(EXEMPT_DIR));
     expect(files.length).toBeGreaterThan(50); // sanity: the walk actually found the tree
 
     const offenders: Array<{ file: string; match: string }> = [];

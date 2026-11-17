@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * The platform super admin is one server-controlled column, `user.role`,
@@ -15,16 +16,6 @@ import { describe, expect, it } from 'vitest';
 const ROOT = process.cwd();
 const SERVER = join(ROOT, 'carbon/src/server');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
-function serverFiles(dir = SERVER): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) out.push(...serverFiles(path));
-    else if (/\.tsx?$/.test(name)) out.push(path);
-  }
-  return out;
-}
 
 describe('isSuperAdmin (carbon/src/server/lib/auth.ts)', () => {
   const src = read('carbon/src/server/lib/auth.ts');
@@ -44,7 +35,7 @@ describe('isSuperAdmin (carbon/src/server/lib/auth.ts)', () => {
 
 describe('server role checks go through isSuperAdmin', () => {
   it('no server file compares a role inline', () => {
-    const offenders = serverFiles()
+    const offenders = sourceFiles(SERVER, { exts: ['.ts', '.tsx'] })
       .map((path) => ({ rel: relative(SERVER, path), text: readFileSync(path, 'utf-8') }))
       .filter((f) => f.rel !== 'lib/auth.ts')
       .filter((f) => /\.role\s*[!=]==?\s*['"]super_admin['"]/.test(f.text))

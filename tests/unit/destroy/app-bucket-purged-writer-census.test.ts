@@ -18,23 +18,14 @@
  *   (c) the record key is written only from that flag.
  * The tree is walked rather than a list of sites, so a new writer is caught.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const DESTROY = 'src/destroy.js';
-
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (full.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
 
 /** Block comments and whole-line comments blanked, offsets kept. */
 const code = (source: string) =>
@@ -77,7 +68,9 @@ function functionSlice(source: string, name: string): [number, number] {
 }
 
 describe('appBucketPurged writer census', () => {
-  const all = walk(join(ROOT, 'src')).flatMap(writesIn);
+  const all = sourceFiles(join(ROOT, 'src'), { exts: ['.js'], skip: ['node_modules'] }).flatMap(
+    writesIn,
+  );
 
   it('(a) only destroy.js writes it, in exactly two places', () => {
     expect(all.map((h) => `${h.file}: ${h.text}`)).toEqual([

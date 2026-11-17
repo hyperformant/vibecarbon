@@ -35,32 +35,25 @@
  *   cicd adds it in memory to what it uploads.
  * Each detector is bitten by a synthetic source below.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const MODULE = 'src/lib/kubeconfig.js';
 const K3S = 'src/lib/deploy/k8s/k3s.js';
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (full.endsWith('.js') || full.endsWith('.mjs')) out.push(full);
-  }
-  return out;
-}
-
 /** Names kubectl as data in the floors table. It judges version text and spawns nothing. */
 const NOT_A_SPAWNER = new Set(['src/lib/runtime-floors.js']);
 
-const SRC = walk(join(ROOT, 'src')).map((f) => ({
-  file: relative(ROOT, f),
-  text: readFileSync(f, 'utf-8'),
-}));
+const SRC = sourceFiles(join(ROOT, 'src'), { exts: ['.js', '.mjs'], skip: ['node_modules'] }).map(
+  (f) => ({
+    file: relative(ROOT, f),
+    text: readFileSync(f, 'utf-8'),
+  }),
+);
 
 /** Source text containing template placeholders, written as `#{...}`. */
 const tpl = (s: string) => s.replaceAll('#{', '$' + '{');

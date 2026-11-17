@@ -15,11 +15,11 @@
  * somebody says whether it names a SERVER (in which case the destroy family must
  * cover it) or something else.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { environmentServerNames } from '../../../src/lib/destroy/server-naming.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC_DIR = fileURLToPath(new URL('../../../src', import.meta.url));
 
@@ -34,16 +34,6 @@ const HEADS = [
   // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source-text prefix this census greps for — interpolating it would search for the wrong string
   '`${projectName}-${stackEnv}',
 ];
-
-function jsFilesUnder(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...jsFilesUnder(full));
-    else if (full.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
 
 /**
  * Blank out comment lines. Prose spells these names constantly (every RCA
@@ -151,7 +141,7 @@ interface Occurrence {
 
 function collectOccurrences(): Occurrence[] {
   const found: Occurrence[] = [];
-  for (const file of jsFilesUnder(SRC_DIR)) {
+  for (const file of sourceFiles(SRC_DIR, { exts: ['.js'] })) {
     const source = codeLinesOnly(readFileSync(file, 'utf-8'));
     for (const head of HEADS) {
       let idx = source.indexOf(head);

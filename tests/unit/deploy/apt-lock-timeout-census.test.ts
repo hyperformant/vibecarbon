@@ -18,11 +18,11 @@
  * from shipping bare — which is exactly how this class survived three
  * separate per-site mitigations without ever getting a root fix.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+
+import { readFileSync } from 'node:fs';
+import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-
 import {
   APT_LOCK_OPT,
   APT_LOCK_TIMEOUT_SECONDS,
@@ -30,6 +30,7 @@ import {
   aptGet,
   aptQuietUpdate,
 } from '../../../src/lib/deploy/apt.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
@@ -71,14 +72,10 @@ function isComment(line: string, file: string): boolean {
   return t.startsWith('#');
 }
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const e of readdirSync(dir)) {
-    if (SKIP_DIRS.has(e)) continue;
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (EXTS.some((x) => e.endsWith(x)) || EXTRA_FILES.includes(e)) out.push(p);
-  }
-  return out;
+function walk(dir: string): string[] {
+  return sourceFiles(dir, { skip: SKIP_DIRS }).filter(
+    (p) => EXTS.some((x) => p.endsWith(x)) || EXTRA_FILES.includes(basename(p)),
+  );
 }
 
 function aptSites() {
@@ -216,21 +213,13 @@ describe('outer ssh timeouts outlast the inner apt lock budget', () => {
 
   /** Every src file that both calls sshRun and builds an aptGet command. */
   function execFileSyncLike(): string[] {
-    const out: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
-        if (entry.isDirectory()) {
-          if (!['node_modules', 'dist', '.git', 'coverage'].includes(entry.name)) {
-            walk(join(dir, entry.name));
-          }
-        } else if (entry.name.endsWith('.js')) {
-          const rel = join(dir, entry.name);
-          const src = readFileSync(join(ROOT, rel), 'utf-8');
-          if (/\bsshRun\(/.test(src) && /\baptGet\(/.test(src)) out.push(rel);
-        }
-      }
-    };
-    walk('src');
-    return out;
+    return sourceFiles(join(ROOT, 'src'), {
+      exts: ['.js'],
+      skip: ['node_modules', 'dist', '.git', 'coverage'],
+      relativeTo: ROOT,
+    }).filter((rel) => {
+      const src = readFileSync(join(ROOT, rel), 'utf-8');
+      return /\bsshRun\(/.test(src) && /\baptGet\(/.test(src);
+    });
   }
 });

@@ -17,26 +17,17 @@
  *   (c) no file under src/ other than s3-base.js resets a `._client`.
  * These walk the tree rather than list sites, so a new site is caught.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const S3_BASE = 'src/lib/providers/s3-base.js';
 
-function walk(dir: string, accept: (file: string) => boolean, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, accept, out);
-    else if (accept(full)) out.push(full);
-  }
-  return out;
-}
-
 const rel = (f: string) => relative(ROOT, f);
-const srcFiles = walk(join(ROOT, 'src'), (f) => f.endsWith('.js'));
+const srcFiles = sourceFiles(join(ROOT, 'src'), { exts: ['.js'], skip: ['node_modules'] });
 
 /** [start, end) of the `constructor(` body of the S3CompatibleProvider class. */
 function constructorBody(source: string): [number, number] {

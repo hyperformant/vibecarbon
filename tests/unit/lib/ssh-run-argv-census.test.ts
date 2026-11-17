@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: src/lib/ssh.js's `sshRun` takes an argv ARRAY and throws on anything
@@ -19,13 +20,6 @@ const SRC = join(import.meta.dirname, '../../../src');
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
 type Node = any;
-
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((e) => {
-    const p = join(dir, e);
-    return statSync(p).isDirectory() ? jsFiles(p) : p.endsWith('.js') ? [p] : [];
-  });
-}
 
 function walk(node: Node, fn: (n: Node) => void) {
   fn(node);
@@ -78,7 +72,7 @@ function stringArgvCalls(file: string, text: string): string[] {
 
 describe('ssh.js sshRun always gets an argv array', () => {
   it('no src/ call passes a string, template or concatenation', () => {
-    const offenders = jsFiles(SRC).flatMap((f) =>
+    const offenders = sourceFiles(SRC, { exts: ['.js'] }).flatMap((f) =>
       stringArgvCalls(relative(SRC, f), readFileSync(f, 'utf8')),
     );
     expect(offenders).toEqual([]);

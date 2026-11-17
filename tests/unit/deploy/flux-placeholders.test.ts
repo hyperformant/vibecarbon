@@ -8,15 +8,7 @@
  * kustomize build in flux-base-placeholder-census.test.ts.
  */
 import { execFileSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { PLACEHOLDERS, SECRET_PLACEHOLDERS } from '../../../src/create.js';
@@ -28,6 +20,7 @@ import {
   unrenderedPlaceholders,
 } from '../../../src/lib/deploy/k8s/unrendered-placeholders.js';
 import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
@@ -55,13 +48,6 @@ const TRAEFIK_STRIP =
 const CLAIM_STRIP =
   / {4}# Volumes are the CLI's too[\s\S]*?\n {6}target:\n {8}kind: PersistentVolumeClaim\n/;
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const p = join(dir, name);
-    return statSync(p).isDirectory() ? walk(p) : [p];
-  });
-}
-
 /**
  * A project's k8s/ tree as `vibecarbon create` lays it down, with the deploy
  * workflow `configure cicd` installs as it is (it names the Flux cluster file
@@ -70,7 +56,7 @@ function walk(dir: string): string[] {
 function createdProject(): string {
   const dir = createTempDir('vc-flux-ph-');
   const fill = Object.keys(PLACEHOLDERS).filter((k) => !SECRET_PLACEHOLDERS.has(k));
-  for (const src of walk(CARBON_K8S)) {
+  for (const src of sourceFiles(CARBON_K8S)) {
     let text = readFileSync(src, 'utf-8');
     for (const key of fill) text = text.replaceAll(`{{${key}}}`, 'proj');
     const dest = join(dir, 'k8s', relative(CARBON_K8S, src));
@@ -99,7 +85,7 @@ const BASE_ADDONS = readdirSync(SERVICES).flatMap((name) => {
 function withBaseAddons(dir: string): string {
   for (const { name, entry, into } of BASE_ADDONS) {
     const from = join(SERVICES, name, 'k8s');
-    for (const src of walk(from)) {
+    for (const src of sourceFiles(from)) {
       const dest = join(dir, into, relative(from, src));
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, readFileSync(src, 'utf-8'));
@@ -151,7 +137,7 @@ describe('fluxPlaceholders', () => {
     expect(fluxPlaceholders(dir)).toEqual([]);
     // Each add-on claim keeps {{K8S_STORAGE_CLASS}} for the deploy to render,
     // and only the cluster file's strip keeps it off the cluster.
-    const claims = walk(join(dir, 'k8s/base'))
+    const claims = sourceFiles(join(dir, 'k8s/base'))
       .filter((f) => /^kind: PersistentVolumeClaim$/m.test(readFileSync(f, 'utf-8')))
       .map((f) => relative(dir, f))
       .sort();
@@ -256,7 +242,7 @@ describe('deployK8sGitOps refuses a tree Flux would apply with a token', () => {
   /** Every file of the project outside .git, with its content. */
   const snapshot = (dir: string) =>
     Object.fromEntries(
-      walk(dir)
+      sourceFiles(dir)
         .map((f) => relative(dir, f))
         .filter((rel) => !rel.startsWith('.git/'))
         .map((rel) => [rel, readFileSync(join(dir, rel), 'utf-8')]),

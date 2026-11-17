@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import {
   renderK8sBase,
   renderK8sStorageClassPlaceholder,
 } from '../../../src/lib/deploy/k8s/k3s.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { adoptTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
@@ -45,30 +46,17 @@ const PLACEHOLDER = '{{K8S_STORAGE_CLASS}}';
 
 /** Every PVC we ship, from both addon and bundled-manifest trees. */
 function pvcFiles(): string[] {
-  const found: string[] = [];
-  const walk = (dir: string) => {
-    let entries: ReturnType<typeof readdirSync<{ withFileTypes: true }>>;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === 'node_modules') continue;
-        walk(full);
-      } else if (/\.ya?ml$/.test(entry.name)) {
-        const content = readFileSync(full, 'utf-8');
-        // Column-0 `kind:` only — a kustomize overlay mentions the kind
-        // INDENTED under `target:` when it patches a PVC it does not define.
-        if (/^kind:\s*PersistentVolumeClaim/m.test(content)) found.push(full);
-      }
-    }
-  };
-  walk(join(repoRoot, 'services'));
-  walk(join(repoRoot, 'carbon/k8s'));
-  return found.sort();
+  // A root that is absent holds no PVC.
+  const roots = [join(repoRoot, 'services'), join(repoRoot, 'carbon/k8s')].filter((root) =>
+    existsSync(root),
+  );
+  return (
+    sourceFiles(roots, { exts: ['.yaml', '.yml'], skip: ['node_modules'] })
+      // Column-0 `kind:` only — a kustomize overlay mentions the kind
+      // INDENTED under `target:` when it patches a PVC it does not define.
+      .filter((full) => /^kind:\s*PersistentVolumeClaim/m.test(readFileSync(full, 'utf-8')))
+      .sort()
+  );
 }
 
 describe('every shipped PVC pins its StorageClass', () => {

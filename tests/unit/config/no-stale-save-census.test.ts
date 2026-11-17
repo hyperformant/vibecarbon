@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: every write to .vibecarbon.json is one locked read-modify-write
@@ -19,17 +20,9 @@ import { describe, expect, it } from 'vitest';
 const SRC = join(process.cwd(), 'src');
 const CONFIG = join('lib', 'config.js');
 
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) return jsFiles(full);
-    return entry.endsWith('.js') ? [full] : [];
-  });
-}
-
 type Source = { rel: string; text: string };
 
-const sources: Source[] = jsFiles(SRC).map((file) => ({
+const sources: Source[] = sourceFiles(SRC, { exts: ['.js'] }).map((file) => ({
   rel: relative(SRC, file),
   text: readFileSync(file, 'utf-8'),
 }));

@@ -30,10 +30,11 @@
  * root constant) is deliberately out of scope: the host repo is exactly the
  * repo it means to read.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { basename, join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 
@@ -69,15 +70,11 @@ const HOST_REPO_CWD = new Set([
 const ALLOWLIST: Record<string, string> = {};
 
 function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (entry === 'node_modules' || entry === 'results' || entry.startsWith('.')) continue;
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) out.push(...walk(full));
-    else if (st.isFile() && /\.(js|mjs|ts)$/.test(full) && !full.endsWith('.d.ts')) out.push(full);
-  }
-  return out;
+  return sourceFiles(dir, {
+    exts: ['.js', '.mjs', '.ts'],
+    skip: ['node_modules', 'results'],
+    skipDotDirs: true,
+  }).filter((f) => !basename(f).startsWith('.') && !f.endsWith('.d.ts'));
 }
 
 /**

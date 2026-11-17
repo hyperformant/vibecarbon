@@ -19,11 +19,12 @@
  * Positive controls keep the walk from passing vacuously: it must see
  * Traefik's two exempt ports, the registry's 5000 and the HA db patch's 5433.
  */
-import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { basename, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -40,13 +41,7 @@ type Node = any;
 type Binding = { source: string; owner: string; hostPort: number; hostIP: unknown };
 
 function walkFiles(dir: string, match: RegExp): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...walkFiles(p, match));
-    else if (match.test(name)) out.push(p);
-  }
-  return out;
+  return sourceFiles(dir).filter((p) => match.test(basename(p)));
 }
 
 /** Every object carrying a `hostPort`, anywhere under `node`. */

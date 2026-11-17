@@ -40,19 +40,12 @@
  * These walk the tree rather than list sites, so a new site is caught; the
  * bite test plants each violation in a temporary tree and proves it fails.
  */
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const SCANNED = ['src', 'tests/e2e'];
@@ -77,20 +70,13 @@ const DESTRUCTURE_ALLOWED = [
 const UPLOADS_SPREAD = /\.\.\.[\w.?]*s3Config\b/g;
 const PER_SIDE_STORAGE_KEY = /(^|[{,\s])(backupTarget|s3Config|backupS3Config)\s*[:,}]/m;
 
-function walk(dir: string, out: string[] = []): string[] {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of names) {
-    if (name === 'node_modules') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.(m|c)?[jt]s$/.test(full)) out.push(full);
-  }
-  return out;
+/** A scanned directory a tree lacks holds no files: the fixture trees carry only some. */
+function walk(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return sourceFiles(dir, {
+    exts: ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'],
+    skip: ['node_modules'],
+  });
 }
 
 /** Every scanned file under `root`, as `[relative path, text]`. */

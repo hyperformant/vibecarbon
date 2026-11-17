@@ -8,10 +8,11 @@
  * is off until then. So initial delays are 0 and the startup probe is
  * the only thing gating the early period.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll as loadYamlAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const BASE = join(process.cwd(), 'carbon', 'k8s', 'base');
 
@@ -37,17 +38,9 @@ interface Found {
   container: Container;
 }
 
-function yamlFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry);
-    if (statSync(path).isDirectory()) return yamlFiles(path);
-    return /\.ya?ml$/.test(entry) ? [path] : [];
-  });
-}
-
 function collect(): Found[] {
   const found: Found[] = [];
-  for (const file of yamlFiles(BASE)) {
+  for (const file of sourceFiles(BASE, { exts: ['.yaml', '.yml'] })) {
     // {{TOKEN}} placeholders break a plain YAML parse; swap in a plain string.
     const text = readFileSync(file, 'utf8').replace(/\{\{[A-Z0-9_]+\}\}/g, 'x');
     for (const doc of loadYamlAll(text) as Manifest[]) {

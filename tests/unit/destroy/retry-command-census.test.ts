@@ -18,10 +18,11 @@
  * Allowed by hand: retry-command.js, which is the one spelling; and the
  * `-h` examples in destroy.js's SPEC, which are help, not a rerun.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { retryDestroyCommand } from '../../../src/lib/destroy/retry-command.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { lex, STRING } from '../helpers/js-call-scan.js';
 
 const ROOT = join(__dirname, '../../..');
@@ -29,11 +30,9 @@ const ONE_SPELLING = 'src/lib/destroy/retry-command.js';
 
 function destroySources(): string[] {
   const dir = join(ROOT, 'src/lib/destroy');
-  const walk = (d: string): string[] =>
-    readdirSync(d, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith('.js') ? [join(d, e.name)] : [],
-    );
-  return [join(ROOT, 'src/destroy.js'), ...walk(dir)].map((f) => relative(ROOT, f));
+  return [join(ROOT, 'src/destroy.js'), ...sourceFiles(dir, { exts: ['.js'] })].map((f) =>
+    relative(ROOT, f),
+  );
 }
 
 /** A rerun spelled by hand, or asked for without naming the command. */

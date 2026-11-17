@@ -21,11 +21,12 @@
  * Every rule is an AST walk over every .js file under src/, and every rule
  * has a bite test that plants the violation it bans.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
@@ -33,17 +34,10 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 type Node = any;
 type Src = { file: string; text: string };
 
-function walkDir(dir: string, out: string[] = []): string[] {
-  for (const e of readdirSync(dir)) {
-    if (e === 'node_modules' || e === '.git') continue;
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walkDir(p, out);
-    else if (p.endsWith('.js') || p.endsWith('.mjs')) out.push(p);
-  }
-  return out;
-}
-
-const SRC: Src[] = walkDir(join(ROOT, 'src')).map((f) => ({
+const SRC: Src[] = sourceFiles(join(ROOT, 'src'), {
+  exts: ['.js', '.mjs'],
+  skip: ['node_modules', '.git'],
+}).map((f) => ({
   file: relative(ROOT, f),
   text: readFileSync(f, 'utf-8'),
 }));

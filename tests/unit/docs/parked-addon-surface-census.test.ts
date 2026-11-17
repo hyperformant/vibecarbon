@@ -19,13 +19,14 @@
  * touching this file. Code paths that only run for an existing install
  * (status rows, upgrade, remove) are not user docs and are not scanned.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PARKED_FEATURES } from '../../../src/add.js';
 import { generateEnvLocal, generateReadme } from '../../../src/create.js';
 import { loadAllSpecs } from '../../../src/lib/cli/command-registry.js';
 import { renderCommandList, renderHelp } from '../../../src/lib/cli/help.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 
@@ -34,15 +35,7 @@ const ROOT = join(import.meta.dirname, '..', '..', '..');
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', 'agent-memory']);
 
 function walk(dir: string, keep: (rel: string) => boolean): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = join(dir, entry);
-    const rel = relative(ROOT, full);
-    if (statSync(full).isDirectory()) out.push(...walk(full, keep));
-    else if (keep(rel)) out.push(rel);
-  }
-  return out;
+  return sourceFiles(dir, { skip: SKIP_DIRS, relativeTo: ROOT }).filter(keep);
 }
 
 const isTemplateDoc = (rel: string) =>

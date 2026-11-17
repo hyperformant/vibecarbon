@@ -1,8 +1,9 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { gitSafeEnv } from '../../../src/lib/command.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 // Call-site sweep: every git spawn must have the repo-context env scrubbed.
 //
@@ -26,16 +27,6 @@ import { gitSafeEnv } from '../../../src/lib/command.js';
 //   - image.js — stamps the host repo's sha/dirty flag onto the built image.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const srcRoot = join(repoRoot, 'src');
-
-function jsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...jsFiles(full));
-    else if (entry.name.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
 
 describe('git spawns scrub the inherited repo context', () => {
   it('gitSafeEnv drops GIT_DIR and friends but keeps identity/transport vars', () => {
@@ -68,7 +59,7 @@ describe('git spawns scrub the inherited repo context', () => {
 
   it('every direct git spawn under src/ passes a scrubbed env', () => {
     const offenders: string[] = [];
-    for (const file of jsFiles(srcRoot)) {
+    for (const file of sourceFiles(srcRoot, { exts: ['.js'] })) {
       const lines = readFileSync(file, 'utf-8').split('\n');
       lines.forEach((line, i) => {
         if (/^\s*(\/\/|\*)/.test(line)) return;
@@ -90,7 +81,7 @@ describe('git spawns scrub the inherited repo context', () => {
 
   it('every runCommand git spawn under src/ opts into cleanEnv', () => {
     const offenders: string[] = [];
-    for (const file of jsFiles(srcRoot)) {
+    for (const file of sourceFiles(srcRoot, { exts: ['.js'] })) {
       const src = readFileSync(file, 'utf-8');
       const re = /runCommand(?:Async|ThroughTaskLog)?\(\s*\[\s*['"]git['"][\s\S]{0,400}?\)/g;
       for (const match of src.matchAll(re)) {

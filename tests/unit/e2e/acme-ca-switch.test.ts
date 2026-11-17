@@ -4,11 +4,11 @@
  * staging maintenance, 2026-11-03, was only discovered 15 minutes in, at
  * ssl_valid).
  */
-
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { k8sIssuerName } from '../../../src/lib/deploy/k8s/k3s.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import {
   ACME_PRODUCTION_DIRECTORY,
   ACME_STAGING_DIRECTORY,
@@ -101,18 +101,9 @@ describe('E2E_ACME_CA switch', () => {
 
 describe('no hard-coded CA URL outside the helper', () => {
   const SKIP = new Set(['node_modules', 'certs', '.git', 'results']);
-  const walk = (dir: string, out: string[] = []): string[] => {
-    for (const name of readdirSync(dir)) {
-      if (SKIP.has(name)) continue;
-      const p = join(dir, name);
-      if (statSync(p).isDirectory()) walk(p, out);
-      else if (/\.(ts|js)$/.test(name)) out.push(p);
-    }
-    return out;
-  };
   it('e2e harness files name the directory URLs only in e2e-env.js', () => {
     const files = [
-      ...walk(join(REPO_ROOT, 'tests', 'e2e')),
+      ...sourceFiles(join(REPO_ROOT, 'tests', 'e2e'), { exts: ['.ts', '.js'], skip: SKIP }),
       join(REPO_ROOT, 'scripts', 'iter-step.js'),
     ];
     const offenders = files

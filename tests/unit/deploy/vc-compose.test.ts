@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { composeFileFlags, renderBundle } from '../../../src/lib/deploy/bundle.js';
 import {
@@ -39,6 +39,7 @@ import {
   VC_COMPOSE,
   VC_COMPOSE_SCRIPT,
 } from '../../../src/lib/deploy/compose/command.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 const BASE_FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';
@@ -251,25 +252,18 @@ describe('renderBundle stages vc-compose with the deploy -f set', () => {
     const bundle = stage(FEATURES['every add-on + dns-01']);
     const offenders: string[] = [];
     const callers: string[] = [];
-    const walk = (dir: string) => {
-      for (const name of readdirSync(dir)) {
-        const full = join(dir, name);
-        if (statSync(full).isDirectory()) {
-          walk(full);
-          continue;
+    for (const full of sourceFiles(bundle)) {
+      const name = basename(full);
+      if (name === VC_COMPOSE_SCRIPT || /\.ya?ml$|^\.env$|\.env$/.test(name)) continue;
+      const text = readFileSync(full, 'utf-8');
+      text.split('\n').forEach((line, i) => {
+        if (/^\s*#/.test(line)) return;
+        if (/\bdocker compose\b|-f docker-compose\./.test(line)) {
+          offenders.push(`${relative(bundle, full)}:${i + 1}: ${line.trim()}`);
         }
-        if (name === VC_COMPOSE_SCRIPT || /\.ya?ml$|^\.env$|\.env$/.test(name)) continue;
-        const text = readFileSync(full, 'utf-8');
-        text.split('\n').forEach((line, i) => {
-          if (/^\s*#/.test(line)) return;
-          if (/\bdocker compose\b|-f docker-compose\./.test(line)) {
-            offenders.push(`${relative(bundle, full)}:${i + 1}: ${line.trim()}`);
-          }
-        });
-        if (text.includes(VC_COMPOSE)) callers.push(relative(bundle, full));
-      }
-    };
-    walk(bundle);
+      });
+      if (text.includes(VC_COMPOSE)) callers.push(relative(bundle, full));
+    }
     expect(offenders).toEqual([]);
     // The ones that run Compose at all: reconcile, the unit, the add-on job,
     // and the backup and TLS scripts the cron runs.

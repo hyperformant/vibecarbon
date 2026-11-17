@@ -9,28 +9,20 @@
  * Census: no code line under src/ or carbon/ (args, helm values, install
  * manifests) names it; comments may.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SKIP = new Set(['node_modules', '.git', 'dist', 'protos']);
 const PATTERN = /enable-certificate-owner-ref|enableCertificateOwnerRef/;
-
-function* files(dir: string): Generator<string> {
-  for (const name of readdirSync(dir)) {
-    if (SKIP.has(name)) continue;
-    const path = join(dir, name);
-    const st = statSync(path);
-    if (st.isDirectory()) yield* files(path);
-    else if (st.size < 2_000_000) yield path;
-  }
-}
 
 describe('cert-manager owner-ref census', () => {
   it('no file under src/ or carbon/ enables certificate owner references', () => {
     const hits: string[] = [];
     for (const root of ['src', 'carbon']) {
-      for (const path of files(root)) {
+      for (const path of sourceFiles(root, { skip: SKIP }).filter(
+        (path) => statSync(path).size < 2_000_000,
+      )) {
         // Comments may name the flag (the precondition note does); any
         // setting of it, in args, values or manifests, is code.
         const code = readFileSync(path, 'utf8')

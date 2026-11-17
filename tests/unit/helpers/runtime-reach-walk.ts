@@ -25,8 +25,9 @@
  * unrelated function destructuring the same name counts). The sites list is
  * returned whole so a failing census can show the path it walked.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 export type ReachKind = 'use' | 'forward' | 'excluded';
 
@@ -55,11 +56,7 @@ export interface NonRenderingReader {
 
 /** Every `.js` file under `dir`, paths relative to `root`. */
 export function loadSourceTree(dir: string, root = process.cwd()): SourceFile[] {
-  const walk = (d: string): string[] =>
-    readdirSync(d, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith('.js') ? [join(d, e.name)] : [],
-    );
-  return walk(join(root, dir))
+  return sourceFiles(join(root, dir), { exts: ['.js'] })
     .sort()
     .map((abs) => ({ path: relative(root, abs), src: readFileSync(abs, 'utf8') }));
 }

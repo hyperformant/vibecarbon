@@ -4,12 +4,13 @@
  * could publish something it should not, or stop publishing unnoticed.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { amd64Child, planOutputs } from '../../../scripts/version-channel.mjs';
 import { bundledImageSet } from '../../../src/lib/images.js';
 import { CHANNEL_SCHEMA } from '../../../src/lib/version-channel.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const PATH = '.github/workflows/version-channel.yml';
 
@@ -148,10 +149,9 @@ describe('version-channel workflow', () => {
     // A test that boots k3sVersion() proves something about that release, so
     // it has to prove it about the next one before the list names it.
     const dir = 'tests/integration/docker';
-    const onRelease = readdirSync(dir, { recursive: true, encoding: 'utf-8' })
-      .filter((f) => f.endsWith('.test.ts'))
-      .map((f) => `${dir}/${f}`)
-      .filter((f) => /\bk3sVersion\(\)/.test(readFileSync(f, 'utf-8')));
+    const onRelease = sourceFiles(dir, { exts: ['.test.ts'] }).filter((f) =>
+      /\bk3sVersion\(\)/.test(readFileSync(f, 'utf-8')),
+    );
     expect(onRelease.length).toBeGreaterThan(0);
     expect(k3sSmokeTests().sort()).toEqual(onRelease.sort());
   });

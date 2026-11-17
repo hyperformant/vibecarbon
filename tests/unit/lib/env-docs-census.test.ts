@@ -42,6 +42,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONFIG_KEYS, type ConfigKey, registryEntry } from '../../../src/lib/config-registry.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 
@@ -158,19 +159,11 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   // mechanical check below.
 };
 
-function walkTsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === 'node_modules') continue;
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walkTsFiles(full));
-    else if (/\.(ts|tsx)$/.test(entry.name)) out.push(full);
-  }
-  return out;
-}
-
 function readCarbonSrcSources(): string[] {
-  return walkTsFiles(join(ROOT, 'carbon', 'src')).map((f) => readFileSync(f, 'utf-8'));
+  return sourceFiles(join(ROOT, 'carbon', 'src'), {
+    exts: ['.ts', '.tsx'],
+    skip: ['node_modules'],
+  }).map((f) => readFileSync(f, 'utf-8'));
 }
 
 /**

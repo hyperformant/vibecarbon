@@ -12,28 +12,22 @@
  * The census walks every compose file, k8s manifest and postgresql.conf the
  * template and the db image ship, so a new one cannot bring the override back.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(import.meta.dirname, '../../..');
 const SCAN_DIRS = ['carbon', 'docker', 'services'];
 const SKIP = new Set(['node_modules', 'dist', '.git']);
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    if (SKIP.has(name)) return [];
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) return walk(p);
-    return /\.(ya?ml|conf)$/.test(name) ? [p] : [];
-  });
-}
-
 /** A log_min_messages setting quieter than the default: error, log, fatal or panic. */
 const QUIET = /log_min_messages\s*[=:]?\s*['"]?(error|log|fatal|panic)\b/i;
 
 describe('Postgres server log level', () => {
-  const files = SCAN_DIRS.flatMap((d) => walk(join(ROOT, d)));
+  const files = SCAN_DIRS.flatMap((d) =>
+    sourceFiles(join(ROOT, d), { exts: ['.yaml', '.yml', '.conf'], skip: SKIP }),
+  );
 
   it('scans the compose files, the k8s db StatefulSet and the baked postgresql.conf', () => {
     const names = files.map((f) => relative(ROOT, f));

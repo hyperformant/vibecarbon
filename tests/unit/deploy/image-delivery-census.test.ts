@@ -25,11 +25,12 @@
  * pushImageToLocalRegistry and pushImageOverSshTunnel: k8s delivers once, by
  * layer delta, into the master's registry, and every node pulls from it.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const SRC = join(REPO, 'src');
@@ -155,16 +156,10 @@ function findAliasedImports(path: string, text: string): string[] {
   return out;
 }
 
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) return jsFiles(p);
-    return e.name.endsWith('.js') ? [p] : [];
-  });
-}
-
 function allSites(): Site[] {
-  return jsFiles(SRC).flatMap((abs) => findSites(relative(SRC, abs), readFileSync(abs, 'utf-8')));
+  return sourceFiles(SRC, { exts: ['.js'] }).flatMap((abs) =>
+    findSites(relative(SRC, abs), readFileSync(abs, 'utf-8')),
+  );
 }
 
 describe('image-delivery call-site census', () => {
@@ -286,7 +281,7 @@ function findWholeImageStrings(path: string, text: string): string[] {
 
 describe('only the layer delta ships a whole image', () => {
   it('no string in src/ spells docker save, docker load or ctr images import outside it', () => {
-    const found = jsFiles(SRC).flatMap((abs) =>
+    const found = sourceFiles(SRC, { exts: ['.js'] }).flatMap((abs) =>
       findWholeImageStrings(relative(SRC, abs), readFileSync(abs, 'utf-8')),
     );
     expect(found, 'deliver the image with deliverImage (layer-delta.js)').toEqual([]);
@@ -305,7 +300,7 @@ describe('only the layer delta ships a whole image', () => {
 
 describe('image-delivery primitives are never imported under another name', () => {
   it('no file in src/ aliases one', () => {
-    const aliased = jsFiles(SRC).flatMap((abs) =>
+    const aliased = sourceFiles(SRC, { exts: ['.js'] }).flatMap((abs) =>
       findAliasedImports(relative(SRC, abs), readFileSync(abs, 'utf-8')),
     );
     expect(aliased).toEqual([]);
@@ -459,7 +454,7 @@ function findRemoteBuilds(path: string, text: string): { key: string; gates: str
 describe('the server-side build runs only without local docker', () => {
   let found: { key: string; gates: string[] }[] | null = null;
   const sites = () => {
-    found ??= jsFiles(SRC).flatMap((abs) =>
+    found ??= sourceFiles(SRC, { exts: ['.js'] }).flatMap((abs) =>
       findRemoteBuilds(relative(SRC, abs), readFileSync(abs, 'utf-8')),
     );
     return found;

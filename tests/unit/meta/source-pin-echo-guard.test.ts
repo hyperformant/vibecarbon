@@ -1,6 +1,6 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * CENSUS — no unit test may pin a provider-facing VALUE by echoing the
@@ -55,15 +55,6 @@ const UNIT_TEST_ROOT = 'tests/unit';
  */
 const ALLOWED: Array<{ file: string; literal: string; why: string }> = [];
 
-function walkTests(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir)) {
-    const p = join(dir, entry);
-    if (statSync(p).isDirectory()) walkTests(p, out);
-    else if (p.endsWith('.test.ts')) out.push(p);
-  }
-  return out;
-}
-
 /** `key: 'value'` / `key: "value"` — a config VALUE an external contract owns. */
 const VALUE_PIN = /^[A-Za-z_][\w]*\s*:\s*['"][^'"]+['"]$/;
 
@@ -99,7 +90,7 @@ type Violation = { file: string; line: number; variable: string; literal: string
 
 function findEchoPins(): Violation[] {
   const violations: Violation[] = [];
-  for (const file of walkTests(UNIT_TEST_ROOT)) {
+  for (const file of sourceFiles(UNIT_TEST_ROOT, { exts: ['.test.ts'] })) {
     const text = readFileSync(file, 'utf-8');
     for (const variable of sourceTextVars(text)) {
       // POSITIVE toContain only. `not.toContain` encodes a rule the source can

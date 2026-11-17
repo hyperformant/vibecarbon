@@ -10,10 +10,11 @@
  * head cut hit every line-bounded section (the 400-line postgres log, the
  * 100-event tail), and host-diagnostics.ts already kept tails the right way.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { capTail, DIAGNOSTIC_SECTION_MAX_CHARS } from '../../e2e/utils/diagnostic-cap.js';
 
 const E2E_DIR = fileURLToPath(new URL('../../e2e/', import.meta.url));
@@ -65,22 +66,14 @@ describe('the failure bundle keeps a line-bounded section whole', () => {
 });
 
 describe('census: no e2e diagnostic capture cuts its newest lines', () => {
-  /** Every .ts under tests/e2e, recursively. */
-  function walk(dir: string): string[] {
-    return readdirSync(dir).flatMap((name) => {
-      const p = join(dir, name);
-      if (statSync(p).isDirectory()) return name === 'node_modules' ? [] : walk(p);
-      return p.endsWith('.ts') ? [p] : [];
-    });
-  }
-
   it('finds no head cut to a character budget (`.slice(0, maxChars)`)', () => {
-    const offenders = walk(E2E_DIR).flatMap((file) =>
-      readFileSync(file, 'utf-8')
-        .split('\n')
-        .map((line, i) => ({ line, at: `${relative(E2E_DIR, file)}:${i + 1}` }))
-        .filter(({ line }) => /\.slice\(\s*0\s*,\s*maxChars\s*\)/.test(line))
-        .map(({ at }) => at),
+    const offenders = sourceFiles(E2E_DIR, { exts: ['.ts'], skip: ['node_modules'] }).flatMap(
+      (file) =>
+        readFileSync(file, 'utf-8')
+          .split('\n')
+          .map((line, i) => ({ line, at: `${relative(E2E_DIR, file)}:${i + 1}` }))
+          .filter(({ line }) => /\.slice\(\s*0\s*,\s*maxChars\s*\)/.test(line))
+          .map(({ at }) => at),
     );
     expect(offenders).toEqual([]);
   });

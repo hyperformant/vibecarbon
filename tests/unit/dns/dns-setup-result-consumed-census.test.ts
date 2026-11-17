@@ -10,18 +10,12 @@
  * file that actually inspects the outcome. createDNSRecord is not in the walk:
  * it throws on a refusal (dns-mutation-status-census), so a bare await is safe.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(__dirname, '../../../src');
-
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const full = join(dir, name);
-    return statSync(full).isDirectory() ? walk(full) : full.endsWith('.js') ? [full] : [];
-  });
-}
 
 /** Local names bound to setupSimple / setupHA by destructuring or import. */
 function aliasesOf(source: string): string[] {
@@ -56,7 +50,7 @@ function unconsumed(source: string): string[] {
 const inspects = (source: string) => /requireDnsSetup\(|\.success\b/.test(source);
 
 describe('DNS setup results are consumed', () => {
-  const callers = walk(SRC)
+  const callers = sourceFiles(SRC, { exts: ['.js'] })
     .filter((f) => !/-dns\.js$/.test(f))
     .map((f) => ({ file: relative(SRC, f), source: readFileSync(f, 'utf8') }))
     .filter(({ source }) => aliasesOf(source).length > 0);

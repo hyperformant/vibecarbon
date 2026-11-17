@@ -13,10 +13,11 @@
  * This walks every IngressRoute in the repo, so an add-on that moves to its
  * own namespace is drafted into the check automatically.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 const TRAEFIK_NAMESPACE = 'vibecarbon';
@@ -24,16 +25,6 @@ const TRAEFIK_LABELS = { app: 'vibecarbon-traefik' };
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
-
-function yamlFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) out.push(...yamlFiles(path));
-    else if (/\.ya?ml$/.test(name)) out.push(path);
-  }
-  return out;
-}
 
 function docsIn(path: string): Doc[] {
   const docs: Doc[] = [];
@@ -59,7 +50,7 @@ function kustomizeNamespace(dir: string): string | undefined {
 
 const manifestRoots = [join(ROOT, 'carbon/k8s'), join(ROOT, 'services')];
 const files = manifestRoots
-  .flatMap((r) => yamlFiles(r))
+  .flatMap((r) => sourceFiles(r, { exts: ['.yaml', '.yml'] }))
   .filter((f) => f.includes('/k8s/') || f.startsWith(join(ROOT, 'carbon/k8s')));
 const all = files.flatMap((file) =>
   docsIn(file).map((doc) => ({
