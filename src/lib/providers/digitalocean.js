@@ -133,6 +133,44 @@ function notProven(reason) {
   return { released: false, held: null, region: null, reason };
 }
 
+/**
+ * Walk every page of a DigitalOcean collection (`links.pages.next` says
+ * whether another page follows), at most 20 pages. The one page walk every
+ * listing in this file shares.
+ *
+ * Soft-fail: a non-ok page ends the walk and returns the rows read so far
+ * with its `status`. `complete` is true only when the last page was read, so
+ * a short or empty result with `complete: false` is not the whole account.
+ *
+ * With `find`, the walk stops at the first page holding a matching row and
+ * returns it as `match`, without reading the pages after it.
+ *
+ * @param {string} token - DigitalOcean API token
+ * @param {string} path - collection path with its `per_page` query, e.g.
+ *   `/droplets?per_page=50`
+ * @param {string} key - response body key holding the array, e.g. `droplets`
+ * @param {(row: object) => boolean} [find]
+ * @returns {Promise<{ items: object[], complete: boolean, status?: number, match?: object }>}
+ */
+async function walkPages(token, path, key, find) {
+  const items = [];
+  let page = 1;
+  for (let guard = 0; guard < 20; guard++) {
+    const response = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}${path}&page=${page}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return { items, complete: false, status: response.status };
+    const data = await response.json();
+    const rows = Array.isArray(data[key]) ? data[key] : [];
+    items.push(...rows);
+    const match = find ? rows.find(find) : undefined;
+    if (match) return { items, complete: false, match };
+    if (!data.links?.pages?.next) return { items, complete: true };
+    page++;
+  }
+  return { items, complete: false };
+}
+
 export class DigitalOceanProvider extends BaseProvider {
   /**
    * Documented object-storage operational limits (docs.digitalocean.com,
@@ -587,23 +625,7 @@ export class DigitalOceanProvider extends BaseProvider {
       // per-region availability, the truncated-listing failure class of
       // 2026-07-30). Any non-ok page → false, so a partial catalog can never
       // pose as live truth; the caller keeps the offline fallback instead.
-      const sizes = [];
-      let page = 1;
-      let complete = false;
-      for (let guard = 0; guard < 20; guard++) {
-        const response = await fetchWithRetry(
-          `${DigitalOceanProvider.API_BASE}/sizes?per_page=200&page=${page}`,
-          { headers: { Authorization: `Bearer ${apiToken}` } },
-        );
-        if (!response.ok) return false;
-        const data = await response.json();
-        sizes.push(...(data.sizes || []));
-        if (!data.links?.pages?.next) {
-          complete = true;
-          break;
-        }
-        page++;
-      }
+      const { items: sizes, complete } = await walkPages(apiToken, '/sizes?per_page=200', 'sizes');
       if (!complete) return false;
       // Empty-catalog guard (mirrors HetznerProvider.fetchServerTypes): a
       // 200 whose body lacks the `sizes` key would otherwise count as a
@@ -845,23 +867,18 @@ export class DigitalOceanProvider extends BaseProvider {
   async _resolveSshKeyId(entry) {
     if (typeof entry === 'number' || /^\d+$/.test(String(entry))) return entry;
 
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const res = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/account/keys?per_page=50&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
+    const { match, status } = await walkPages(
+      this.apiToken,
+      '/account/keys?per_page=50',
+      'ssh_keys',
+      (k) => k.name === entry,
+    );
+    if (status !== undefined) {
+      throw new Error(
+        `DigitalOcean ssh key lookup failed (${status}) while resolving "${entry}" to an ID`,
       );
-      if (!res.ok) {
-        throw new Error(
-          `DigitalOcean ssh key lookup failed (${res.status}) while resolving "${entry}" to an ID`,
-        );
-      }
-      const data = await res.json();
-      const match = (data.ssh_keys || []).find((k) => k.name === entry);
-      if (match) return match.id;
-      if (!data.links?.pages?.next) break;
-      page++;
     }
+    if (match) return match.id;
     throw new Error(
       `DigitalOcean ssh key "${entry}" not found — cannot resolve to an ID for droplet create`,
     );
@@ -1188,27 +1205,22 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<{cores: number, memoryGb: number, architecture: string, disk: number}>}
    */
   async getServerType(name) {
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/sizes?per_page=200&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) {
-        throw new Error(`Failed to fetch server type "${name}": ${response.status}`);
-      }
-      const data = await response.json();
-      const match = (data.sizes || []).find((s) => s.slug === name && s.available !== false);
-      if (match) {
-        return {
-          cores: match.vcpus,
-          memoryGb: match.memory / 1024,
-          architecture: 'x86',
-          disk: match.disk,
-        };
-      }
-      if (!data.links?.pages?.next) break;
-      page++;
+    const { match, status } = await walkPages(
+      this.apiToken,
+      '/sizes?per_page=200',
+      'sizes',
+      (s) => s.slug === name && s.available !== false,
+    );
+    if (status !== undefined) {
+      throw new Error(`Failed to fetch server type "${name}": ${status}`);
+    }
+    if (match) {
+      return {
+        cores: match.vcpus,
+        memoryGb: match.memory / 1024,
+        architecture: 'x86',
+        disk: match.disk,
+      };
     }
     throw new Error(`Server type "${name}" not found`);
   }
@@ -1312,32 +1324,13 @@ export class DigitalOceanProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const [primary, ...rest] = Object.entries(labels);
 
-    let baseUrl = `${DigitalOceanProvider.API_BASE}/droplets?per_page=50`;
+    let path = '/droplets?per_page=50';
     if (primary) {
       const [k, v] = primary;
-      baseUrl += `&tag_name=${encodeURIComponent(encodeLabel(k, v))}`;
+      path += `&tag_name=${encodeURIComponent(encodeLabel(k, v))}`;
     }
 
-    const droplets = [];
-    let page = 1;
-    let complete = false;
-    let status;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(`${baseUrl}&page=${page}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
-      if (!response.ok) {
-        status = response.status;
-        break;
-      }
-      const data = await response.json();
-      if (Array.isArray(data.droplets)) droplets.push(...data.droplets);
-      if (!data.links?.pages?.next) {
-        complete = true;
-        break;
-      }
-      page++;
-    }
+    const { items: droplets, complete, status } = await walkPages(this.apiToken, path, 'droplets');
 
     const items =
       rest.length === 0
@@ -1363,25 +1356,14 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async findServersByName(name, { strict = false } = {}) {
-    const droplets = [];
-    let page = 1;
-    let complete = false;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/droplets?per_page=50&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) {
-        if (strict) throw this.serverLookupError(name, response.status);
-        return [];
-      }
-      const data = await response.json();
-      if (Array.isArray(data.droplets)) droplets.push(...data.droplets);
-      if (!data.links?.pages?.next) {
-        complete = true;
-        break;
-      }
-      page++;
+    const {
+      items: droplets,
+      complete,
+      status,
+    } = await walkPages(this.apiToken, '/droplets?per_page=50', 'droplets');
+    if (status !== undefined) {
+      if (strict) throw this.serverLookupError(name, status);
+      return [];
     }
     if (strict && !complete) throw this.serverLookupError(name);
     return droplets.filter((d) => d.name === name);
@@ -1508,20 +1490,13 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object|null>}
    */
   async findFirewallByName(name) {
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const res = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/firewalls?per_page=50&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!res.ok) return null;
-      const data = await res.json();
-      const match = (data.firewalls || []).find((f) => f.name === name);
-      if (match) return match;
-      if (!data.links?.pages?.next) break;
-      page++;
-    }
-    return null;
+    const { match } = await walkPages(
+      this.apiToken,
+      '/firewalls?per_page=50',
+      'firewalls',
+      (f) => f.name === name,
+    );
+    return match ?? null;
   }
 
   /**
@@ -1661,21 +1636,12 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<boolean>}
    */
   async deleteSSHKeyByName(name) {
-    let match = null;
-    let page = 1;
-    for (let guard = 0; guard < 20 && !match; guard++) {
-      const res = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/account/keys?per_page=100&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!res.ok) return false;
-      const data = await res.json();
-      match = (data.ssh_keys || []).find((k) => k.name === name);
-      if (match) break;
-      if (!data.links?.pages?.next) break;
-      page++;
-    }
-
+    const { match } = await walkPages(
+      this.apiToken,
+      '/account/keys?per_page=100',
+      'ssh_keys',
+      (k) => k.name === name,
+    );
     if (!match) return false;
 
     if ((await this.deleteSSHKeyById(match.id)) === 'stuck') {
@@ -1722,20 +1688,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const vpcs = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/vpcs?per_page=50&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) break;
-      const data = await response.json();
-      if (Array.isArray(data.vpcs)) vpcs.push(...data.vpcs);
-      if (!data.links?.pages?.next) break;
-      page++;
-    }
-    return vpcs;
+    return (await walkPages(this.apiToken, '/vpcs?per_page=50', 'vpcs')).items;
   }
 
   /**
@@ -1793,20 +1746,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<{ items: object[], complete: boolean, status?: number }>}
    */
   async listVolumesDetailed() {
-    const volumes = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/volumes?per_page=50&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) return { items: volumes, complete: false, status: response.status };
-      const data = await response.json();
-      if (Array.isArray(data.volumes)) volumes.push(...data.volumes);
-      if (!data.links?.pages?.next) return { items: volumes, complete: true };
-      page++;
-    }
-    return { items: volumes, complete: false };
+    return walkPages(this.apiToken, '/volumes?per_page=50', 'volumes');
   }
 
   /**
@@ -1975,20 +1915,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listLoadBalancers() {
-    const loadBalancers = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/load_balancers?per_page=50&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) break;
-      const data = await response.json();
-      if (Array.isArray(data.load_balancers)) loadBalancers.push(...data.load_balancers);
-      if (!data.links?.pages?.next) break;
-      page++;
-    }
-    return loadBalancers;
+    return (await walkPages(this.apiToken, '/load_balancers?per_page=50', 'load_balancers')).items;
   }
 
   /**

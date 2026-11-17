@@ -863,24 +863,25 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * Page-walk the global IAM ssh-keys listing (`page`/`page_size`
-   * envelope `{ssh_keys}`; a page shorter than page_size ends the walk).
-   * Soft completeness signal like the zone walks.
+   * Page-walk one `page`/`page_size` listing (the IAM, VPC, Block Storage
+   * and Load Balancer APIs; a page shorter than page_size ends the walk).
+   * Soft completeness signal like the zone walks: a non-ok page returns the
+   * rows read so far with its `status`.
+   * @param {string} path - full API path, e.g. '/iam/v1alpha1/ssh-keys'
+   * @param {string} key - response array key (e.g. 'ssh_keys')
    * @param {string} [query] - extra query (e.g. 'project_id=…'), no '?'
-   * @returns {Promise<{items: object[], complete: boolean}>}
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
    */
-  async _walkIamSshKeys(query = '') {
+  async _walkPageSize(path, key, query = '') {
     const items = [];
     for (let page = 1; page <= 20; page++) {
       const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/iam/v1alpha1/ssh-keys?page_size=100&page=${page}${
-          query ? `&${query}` : ''
-        }`,
+        `${ScalewayProvider.API_BASE}${path}?page_size=100&page=${page}${query ? `&${query}` : ''}`,
         { headers: { 'X-Auth-Token': this.apiToken } },
       );
-      if (!res.ok) return { items, complete: false };
+      if (!res.ok) return { items, complete: false, status: res.status };
       const data = await res.json().catch(() => ({}));
-      const pageItems = data.ssh_keys || [];
+      const pageItems = data[key] || [];
       items.push(...pageItems);
       if (pageItems.length < 100) return { items, complete: true };
     }
@@ -1417,7 +1418,9 @@ export class ScalewayProvider extends BaseProvider {
     };
     const targetMaterial = normalize(publicKey);
 
-    const { items: existingKeys } = await this._walkIamSshKeys(
+    const { items: existingKeys } = await this._walkPageSize(
+      '/iam/v1alpha1/ssh-keys',
+      'ssh_keys',
       projectId ? `project_id=${projectId}` : '',
     );
     const match = existingKeys.find((k) => normalize(k.public_key) === targetMaterial);
@@ -1711,17 +1714,12 @@ export class ScalewayProvider extends BaseProvider {
     const regions = [...new Set(ScalewayProvider._zones().map((z) => z.replace(/-\d+$/, '')))];
     const items = [];
     for (const region of regions) {
-      for (let page = 1; page <= 20; page++) {
-        const res = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}/vpc/v2/regions/${region}/private-networks?page_size=100&page=${page}`,
-          { headers: { 'X-Auth-Token': this.apiToken } },
-        );
-        if (!res.ok) return [];
-        const data = await res.json().catch(() => ({}));
-        const pageItems = data.private_networks || [];
-        items.push(...pageItems);
-        if (pageItems.length < 100) break;
-      }
+      const walk = await this._walkPageSize(
+        `/vpc/v2/regions/${region}/private-networks`,
+        'private_networks',
+      );
+      if (walk.status !== undefined) return [];
+      items.push(...walk.items);
     }
     return items;
   }
@@ -1752,21 +1750,11 @@ export class ScalewayProvider extends BaseProvider {
     let status = instanceWalk.status;
 
     for (const zone of ScalewayProvider._zones()) {
-      for (let page = 1; page <= 20; page++) {
-        const res = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}/block/v1/zones/${zone}/volumes?page_size=100&page=${page}`,
-          { headers: { 'X-Auth-Token': this.apiToken } },
-        );
-        if (!res.ok) {
-          complete = false;
-          status ??= res.status;
-          break;
-        }
-        const data = await res.json().catch(() => ({}));
-        const pageItems = data.volumes || [];
-        items.push(...pageItems.map((v) => ({ zone, ...v })));
-        if (pageItems.length < 100) break;
-        if (page === 20) complete = false;
+      const walk = await this._walkPageSize(`/block/v1/zones/${zone}/volumes`, 'volumes');
+      items.push(...walk.items.map((v) => ({ zone, ...v })));
+      if (!walk.complete) {
+        complete = false;
+        status ??= walk.status;
       }
     }
 
@@ -1803,17 +1791,9 @@ export class ScalewayProvider extends BaseProvider {
   async listLoadBalancers() {
     const items = [];
     for (const zone of ScalewayProvider._zones()) {
-      for (let page = 1; page <= 20; page++) {
-        const res = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}/lb/v1/zones/${zone}/lbs?page_size=100&page=${page}`,
-          { headers: { 'X-Auth-Token': this.apiToken } },
-        );
-        if (!res.ok) return [];
-        const data = await res.json().catch(() => ({}));
-        const pageItems = data.lbs || [];
-        items.push(...pageItems.map((lb) => ({ zone, ...lb })));
-        if (pageItems.length < 100) break;
-      }
+      const walk = await this._walkPageSize(`/lb/v1/zones/${zone}/lbs`, 'lbs');
+      if (walk.status !== undefined) return [];
+      items.push(...walk.items.map((lb) => ({ zone, ...lb })));
     }
     return items;
   }

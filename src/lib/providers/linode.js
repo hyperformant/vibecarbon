@@ -250,6 +250,47 @@ export function rewriteOperatorRules(rules, cidrs) {
     });
 }
 
+/**
+ * Walk every page of a Linode collection (`{data, page, pages}`: the last
+ * page is the one where `page >= pages`). The one page walk every listing in
+ * this file shares.
+ *
+ * Soft-fail: a non-ok page ends the walk and returns the rows read so far
+ * with its `status`. `complete` is true only when the last page was read, so
+ * a short or empty result with `complete: false` is not the whole account
+ * (a failed page, or more pages than `maxPages`).
+ *
+ * With `find`, the walk stops at the first page holding a matching row and
+ * returns it as `match`, without reading the pages after it.
+ *
+ * @param {object} init - fetch options carrying the request's headers
+ * @param {string} path - collection path, e.g. `/volumes`
+ * @param {object} [options]
+ * @param {number} [options.pageSize]
+ * @param {number} [options.maxPages] - runaway guard
+ * @param {(row: object) => boolean} [options.find]
+ * @returns {Promise<{ items: object[], complete: boolean, status?: number, match?: object }>}
+ */
+async function walkPages(init, path, { pageSize = 100, maxPages = 20, find } = {}) {
+  const items = [];
+  let page = 1;
+  for (let guard = 0; guard < maxPages; guard++) {
+    const response = await fetchWithRetry(
+      `${LinodeProvider.API_BASE}${path}?page=${page}&page_size=${pageSize}`,
+      init,
+    );
+    if (!response.ok) return { items, complete: false, status: response.status };
+    const data = await response.json();
+    const rows = Array.isArray(data.data) ? data.data : [];
+    items.push(...rows);
+    const match = find ? rows.find(find) : undefined;
+    if (match) return { items, complete: false, match };
+    if (!data.pages || page >= data.pages) return { items, complete: true };
+    page++;
+  }
+  return { items, complete: false };
+}
+
 export class LinodeProvider extends BaseProvider {
   /**
    * Documented object-storage operational limits (techdocs.akamai.com,
@@ -592,23 +633,11 @@ export class LinodeProvider extends BaseProvider {
     if (LinodeProvider._locationTypes) return true; // already fetched
 
     try {
-      const types = [];
-      let page = 1;
-      let complete = false;
-      for (let guard = 0; guard < 20; guard++) {
-        const response = await fetchWithRetry(
-          `${LinodeProvider.API_BASE}/linode/types?page=${page}&page_size=200`,
-          apiToken ? { headers: { Authorization: `Bearer ${apiToken}` } } : {},
-        );
-        if (!response.ok) return false;
-        const data = await response.json();
-        types.push(...(data.data || []));
-        if (!data.pages || page >= data.pages) {
-          complete = true;
-          break;
-        }
-        page++;
-      }
+      const { items: types, complete } = await walkPages(
+        apiToken ? { headers: { Authorization: `Bearer ${apiToken}` } } : {},
+        '/linode/types',
+        { pageSize: 200 },
+      );
       if (!complete) return false;
       // Empty-catalog guard — same reasoning as the DO twin: Linode's type
       // catalog is never legitimately empty, so empty means failure and the
@@ -805,6 +834,16 @@ export class LinodeProvider extends BaseProvider {
   // `fetch` with a hard 5s abort.
 
   /**
+   * walkPages with this account's token.
+   * @param {string} path
+   * @param {Parameters<typeof walkPages>[2]} [options]
+   * @returns {ReturnType<typeof walkPages>}
+   */
+  _walkPages(path, options) {
+    return walkPages({ headers: { Authorization: `Bearer ${this.apiToken}` } }, path, options);
+  }
+
+  /**
    * Resolve one `createServer` `sshKeys`/`sshKeyId` entry to PUBLIC KEY
    * MATERIAL. Linode's instance-create `authorized_keys` field takes raw
    * OpenSSH public keys — never ids or names (the exact inverse of DO's
@@ -821,23 +860,15 @@ export class LinodeProvider extends BaseProvider {
     // Raw OpenSSH public key material (ssh-ed25519 / ssh-rsa / ecdsa-…).
     if (/^(ssh|ecdsa)-/.test(s)) return s;
 
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const res = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/profile/sshkeys?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
+    const { match, status } = await this._walkPages('/profile/sshkeys', {
+      find: (k) => k.label === s || String(k.id) === s,
+    });
+    if (status !== undefined) {
+      throw new Error(
+        `Linode ssh key lookup failed (${status}) while resolving "${entry}" to key material`,
       );
-      if (!res.ok) {
-        throw new Error(
-          `Linode ssh key lookup failed (${res.status}) while resolving "${entry}" to key material`,
-        );
-      }
-      const data = await res.json();
-      const match = (data.data || []).find((k) => k.label === s || String(k.id) === s);
-      if (match) return match.ssh_key;
-      if (!data.pages || page >= data.pages) break;
-      page++;
     }
+    if (match) return match.ssh_key;
     throw new Error(
       `Linode ssh key "${entry}" not found — cannot resolve to key material for instance create`,
     );
@@ -1218,22 +1249,13 @@ export class LinodeProvider extends BaseProvider {
     };
     const targetMaterial = normalize(publicKey);
 
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const res = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/profile/sshkeys?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      // A failed listing degrades to create-anyway rather than blocking the
-      // caller — worst case is the pre-fix behavior (a duplicate key the
-      // sweep reports), never a missing key.
-      if (!res.ok) break;
-      const data = await res.json();
-      const match = (data.data || []).find((k) => normalize(k.ssh_key) === targetMaterial);
-      if (match) return match.id;
-      if (!data.pages || page >= data.pages) break;
-      page++;
-    }
+    // A failed listing degrades to create-anyway rather than blocking the
+    // caller — worst case is the pre-fix behavior (a duplicate key the
+    // sweep reports), never a missing key.
+    const { match } = await this._walkPages('/profile/sshkeys', {
+      find: (k) => normalize(k.ssh_key) === targetMaterial,
+    });
+    if (match) return match.id;
 
     const response = await this.apiRequest('/profile/sshkeys', {
       method: 'POST',
@@ -1277,27 +1299,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{ items: object[], complete: boolean, status?: number }>}
    */
   async listServersDetailed(labels = {}) {
-    const instances = [];
-    let page = 1;
-    let complete = false;
-    let status;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/linode/instances?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) {
-        status = response.status;
-        break;
-      }
-      const data = await response.json();
-      if (Array.isArray(data.data)) instances.push(...data.data);
-      if (!data.pages || page >= data.pages) {
-        complete = true;
-        break;
-      }
-      page++;
-    }
+    const { items: instances, complete, status } = await this._walkPages('/linode/instances');
 
     const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
     const items =
@@ -1327,24 +1329,15 @@ export class LinodeProvider extends BaseProvider {
   async _attachVpcMembership(instances) {
     const byLinode = new Map();
     try {
-      let page = 1;
-      for (let guard = 0; guard < 50; guard++) {
-        const res = await fetchWithRetry(
-          `${LinodeProvider.API_BASE}/vpcs/ips?page=${page}&page_size=100`,
-          { headers: { Authorization: `Bearer ${this.apiToken}` } },
-        );
-        if (!res.ok) {
-          return new Error(`Linode VPC membership read failed (HTTP ${res.status})`);
-        }
-        const data = await res.json();
-        for (const row of data.data || []) {
-          if (row.linode_id == null || row.vpc_id == null) continue;
-          const ids = byLinode.get(row.linode_id) || [];
-          if (!ids.includes(row.vpc_id)) ids.push(row.vpc_id);
-          byLinode.set(row.linode_id, ids);
-        }
-        if (!data.pages || page >= data.pages) break;
-        page++;
+      const { items: rows, status } = await this._walkPages('/vpcs/ips', { maxPages: 50 });
+      if (status !== undefined) {
+        return new Error(`Linode VPC membership read failed (HTTP ${status})`);
+      }
+      for (const row of rows) {
+        if (row.linode_id == null || row.vpc_id == null) continue;
+        const ids = byLinode.get(row.linode_id) || [];
+        if (!ids.includes(row.vpc_id)) ids.push(row.vpc_id);
+        byLinode.set(row.linode_id, ids);
       }
     } catch (err) {
       return new Error(`Linode VPC membership read failed: ${err.message}`);
@@ -1362,25 +1355,10 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async findServersByName(name, { strict = false } = {}) {
-    const instances = [];
-    let page = 1;
-    let complete = false;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/linode/instances?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) {
-        if (strict) throw this.serverLookupError(name, response.status);
-        return [];
-      }
-      const data = await response.json();
-      if (Array.isArray(data.data)) instances.push(...data.data);
-      if (!data.pages || page >= data.pages) {
-        complete = true;
-        break;
-      }
-      page++;
+    const { items: instances, complete, status } = await this._walkPages('/linode/instances');
+    if (status !== undefined) {
+      if (strict) throw this.serverLookupError(name, status);
+      return [];
     }
     if (strict && !complete) throw this.serverLookupError(name);
     // Compare against the WIRE label, not the logical name: the Pulumi
@@ -1402,20 +1380,10 @@ export class LinodeProvider extends BaseProvider {
    */
   async findFirewallByName(name) {
     const wireLabel = squeezeLinodeLabel(name);
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const res = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/networking/firewalls?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!res.ok) return null;
-      const data = await res.json();
-      const match = (data.data || []).find((f) => f.label === wireLabel);
-      if (match) return match;
-      if (!data.pages || page >= data.pages) break;
-      page++;
-    }
-    return null;
+    const { match } = await this._walkPages('/networking/firewalls', {
+      find: (f) => f.label === wireLabel,
+    });
+    return match ?? null;
   }
 
   /**
@@ -1534,21 +1502,9 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<boolean>}
    */
   async deleteSSHKeyByName(name) {
-    let match = null;
-    let page = 1;
-    for (let guard = 0; guard < 20 && !match; guard++) {
-      const res = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/profile/sshkeys?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!res.ok) return false;
-      const data = await res.json();
-      match = (data.data || []).find((k) => k.label === name);
-      if (match) break;
-      if (!data.pages || page >= data.pages) break;
-      page++;
-    }
-
+    const { match } = await this._walkPages('/profile/sshkeys', {
+      find: (k) => k.label === name,
+    });
     if (!match) return false;
 
     const response = await fetchWithRetry(
@@ -1565,19 +1521,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const vpcs = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/vpcs?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) break;
-      const data = await response.json();
-      if (Array.isArray(data.data)) vpcs.push(...data.data);
-      if (!data.pages || page >= data.pages) break;
-      page++;
-    }
+    const { items: vpcs } = await this._walkPages('/vpcs');
     // `name` is the provider-neutral identity callers match on
     // (autoscaler groups.js, destroy.js); Linode calls it `label`.
     return vpcs.map((v) => ({ ...v, name: v.label }));
@@ -1649,21 +1593,17 @@ export class LinodeProvider extends BaseProvider {
    * @throws when a page cannot be read, or there are more pages than the guard reads
    */
   async _listReservedIps() {
-    const ips = [];
     const pageSize = 100;
     const maxPages = 20;
-    for (let page = 1; page <= maxPages; page++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=${pageSize}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) {
-        throw new Error(`GET /networking/reserved/ips failed: HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      ips.push(...(data.data ?? []));
-      if (!data.pages || page >= data.pages) return ips;
+    const {
+      items: ips,
+      complete,
+      status,
+    } = await this._walkPages('/networking/reserved/ips', { pageSize, maxPages });
+    if (status !== undefined) {
+      throw new Error(`GET /networking/reserved/ips failed: HTTP ${status}`);
     }
+    if (complete) return ips;
     throw new Error(
       `the Linode account has more than ${maxPages * pageSize} reserved IPs, more than vibecarbon reads`,
     );
@@ -1752,20 +1692,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{ items: object[], complete: boolean, status?: number }>}
    */
   async listVolumesDetailed() {
-    const volumes = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/volumes?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) return { items: volumes, complete: false, status: response.status };
-      const data = await response.json();
-      if (Array.isArray(data.data)) volumes.push(...data.data);
-      if (!data.pages || page >= data.pages) return { items: volumes, complete: true };
-      page++;
-    }
-    return { items: volumes, complete: false };
+    return this._walkPages('/volumes');
   }
 
   /**
@@ -1789,20 +1716,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listLoadBalancers() {
-    const nodeBalancers = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/nodebalancers?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) break;
-      const data = await response.json();
-      if (Array.isArray(data.data)) nodeBalancers.push(...data.data);
-      if (!data.pages || page >= data.pages) break;
-      page++;
-    }
-    return nodeBalancers;
+    return (await this._walkPages('/nodebalancers')).items;
   }
 
   /**
