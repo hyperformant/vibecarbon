@@ -103,6 +103,35 @@ export function cidrToVultrRuleFields(cidr) {
   return { ip_type: isV6 ? 'v6' : 'v4', subnet, subnet_size };
 }
 
+/**
+ * Cursor-paginated collection walk (Vultr's `meta.links.next` idiom), the
+ * single pagination implementation every listing in this file shares.
+ * Same ≤20-page guard and completeness semantics as the sibling
+ * providers' page walks.
+ * @param {object} init - fetch options carrying the request's headers
+ * @param {string} path - e.g. '/instances' (may carry its own query)
+ * @param {string} key - response array key (e.g. 'instances')
+ * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+ */
+async function walkCursor(init, path, key) {
+  const items = [];
+  const sep = path.includes('?') ? '&' : '?';
+  let cursor = '';
+  for (let guard = 0; guard < 20; guard++) {
+    const response = await fetchWithRetry(
+      `${VultrProvider.API_BASE}${path}${sep}per_page=500${cursor ? `&cursor=${cursor}` : ''}`,
+      init,
+    );
+    if (!response.ok) return { items, complete: false, status: response.status };
+    const data = await response.json();
+    if (Array.isArray(data[key])) items.push(...data[key]);
+    const next = data.meta?.links?.next;
+    if (!next) return { items, complete: true };
+    cursor = next;
+  }
+  return { items, complete: false };
+}
+
 export class VultrProvider extends BaseProvider {
   /**
    * Object-storage operational limits (verified 2026-08-15). Vultr claims
@@ -345,24 +374,11 @@ export class VultrProvider extends BaseProvider {
     if (VultrProvider._locationTypes) return true; // already fetched
 
     try {
-      const plans = [];
-      let cursor = '';
-      let complete = false;
-      for (let guard = 0; guard < 20; guard++) {
-        const response = await fetchWithRetry(
-          `${VultrProvider.API_BASE}/plans?per_page=500${cursor ? `&cursor=${cursor}` : ''}`,
-          apiToken ? { headers: { Authorization: `Bearer ${apiToken}` } } : {},
-        );
-        if (!response.ok) return false;
-        const data = await response.json();
-        plans.push(...(data.plans || []));
-        const next = data.meta?.links?.next;
-        if (!next) {
-          complete = true;
-          break;
-        }
-        cursor = next;
-      }
+      const { items: plans, complete } = await walkCursor(
+        apiToken ? { headers: { Authorization: `Bearer ${apiToken}` } } : {},
+        '/plans',
+        'plans',
+      );
       if (!complete) return false;
       if (plans.length === 0) return false;
 
@@ -536,31 +552,13 @@ export class VultrProvider extends BaseProvider {
   // getServerSummary a raw fetch with a hard 5s abort.
 
   /**
-   * Cursor-paginated collection walk (Vultr's `meta.links.next` idiom) —
-   * the single pagination implementation every listing below shares.
-   * Same ≤20-page guard and completeness semantics as the sibling
-   * providers' page walks.
+   * walkCursor with this account's token.
    * @param {string} path - e.g. '/instances' (may carry its own query)
    * @param {string} key - response array key (e.g. 'instances')
    * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
    */
   async _walkCursor(path, key) {
-    const items = [];
-    const sep = path.includes('?') ? '&' : '?';
-    let cursor = '';
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${VultrProvider.API_BASE}${path}${sep}per_page=500${cursor ? `&cursor=${cursor}` : ''}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) return { items, complete: false, status: response.status };
-      const data = await response.json();
-      if (Array.isArray(data[key])) items.push(...data[key]);
-      const next = data.meta?.links?.next;
-      if (!next) return { items, complete: true };
-      cursor = next;
-    }
-    return { items, complete: false };
+    return walkCursor({ headers: { Authorization: `Bearer ${this.apiToken}` } }, path, key);
   }
 
   /**
