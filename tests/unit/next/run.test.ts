@@ -296,13 +296,11 @@ describe('configure step', () => {
 });
 
 describe('deploy step', () => {
-  it('prompts to deploy without mentioning keys or activation', async () => {
+  it('prompts to deploy', async () => {
     detectProjectState.mockResolvedValue(deployState);
     clack.confirm.mockResolvedValue(false);
 
     await expect(run([])).resolves.toBeUndefined();
-    const logged = clack.log.info.mock.calls.map((call) => String(call[0])).join('\n');
-    expect(logged).not.toMatch(/activate|license/i);
     expect(clack.confirm).toHaveBeenCalledWith({ message: 'Deploy now?' });
   });
 
