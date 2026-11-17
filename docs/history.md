@@ -928,10 +928,10 @@ hook, and the maintainer reported recurring SSH password prompts on the laptop
 while it happened. Nothing stopped a background fetch from asking a person for
 a password.
 
-**Unproven:** what triggered the prompts. Key login to GitHub worked without
-one every time it was tried, and the key has no passphrase. Which session
-start reason caused the repeats was not recorded either, and the Claude Code
-hooks reference does not say whether a subagent start fires `SessionStart`.
+**Unproven:** which session start reason caused the repeats, and whether a
+subagent start fires `SessionStart` (the Claude Code hooks reference does not
+say). The hooks were later cleared of the prompts themselves: see
+[2026-11-17](#2026-11-17-agent-sessions-cannot-open-an-ssh-password-dialog).
 
 **Do not undo:** an empty `SessionStart` matcher brings back a fetch per hook
 on every compaction. Removing `BatchMode=yes` lets a hook nobody is watching
@@ -1150,6 +1150,40 @@ while Hetzner was still answering "no such bucket" for a bucket it listed.
 cannot be told apart from an outage.
 
 **Guard:** `tests/unit/providers/bucket-sustained-visibility.test.ts`.
+
+#### 2026-11-17: Agent sessions cannot open an SSH password dialog
+
+`.claude/settings.json` sets `SSH_ASKPASS_REQUIRE=never` for every Claude Code
+session in this repository, so no `ssh` an agent runs can ask a person for a
+password.
+
+**Why:** the maintainer kept getting SSH password dialogs on the laptop. The
+cause is how OpenSSH asks when it has no terminal: a command run by an agent
+has none, the desktop sets `DISPLAY`, and `/usr/bin/ssh-askpass` exists, so
+ssh opens a password window on the desktop whenever a server refuses the key
+and still offers password login. Reproduced against a local sshd: without the
+variable the askpass program was called with `root@127.0.0.1's password:`;
+with it, or with `BatchMode=yes`, it was not.
+
+The CLI, the e2e harness and the session hooks were already safe (batch mode
+on every call, and the CLI sets the same variable). GitHub offers key login
+only, so a fetch can never ask for a password. The unit and integration tiers
+were run with a logging `ssh` on the path and made no ssh call at all. What
+was not covered is `ssh` typed by an agent while debugging a kept rig: session
+transcripts from 2026-11-02 to 2026-11-15 hold 27 such commands with no batch
+mode. Any of them opens the window if the address now belongs to a server
+that refuses the key and offers password login, such as a recycled IP.
+
+**Unproven:** which of those commands opened a dialog. None of their recorded
+output shows a refused key, and many discarded stderr.
+
+**Do not undo:** removing the variable lets any agent's `ssh` to a server
+that has lost its key stop and wait on a window nobody asked for. It is not in
+the template's settings: there it would stop ssh asking for a key passphrase
+in a project whose owner relies on that.
+
+**Guard:** the session environment test in
+`tests/unit/template/claude-hooks-lockstep.test.ts`.
 
 ## Added and later removed
 
