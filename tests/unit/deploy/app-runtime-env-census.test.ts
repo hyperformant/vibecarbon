@@ -14,7 +14,7 @@
  *
  * Every value here is a SENTINEL_<NAME> stand-in, never a real secret.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -34,6 +34,7 @@ import {
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
@@ -96,15 +97,10 @@ describe('census (a): every key the app reads is delivered', () => {
     // injects KUBERNETES_*, the compose `environment:` block sets
     // DOCKER_API_PROXY, and DOCKER is the image's own marker.
     const platform = new Set(['DOCKER', 'DOCKER_API_PROXY']);
-    const files: string[] = [];
-    const walk = (dir: string) => {
-      for (const n of readdirSync(join(ROOT, dir))) {
-        const rel = join(dir, n);
-        if (statSync(join(ROOT, rel)).isDirectory()) walk(rel);
-        else if (/\.ts$/.test(n) && !/\.test\.ts$/.test(n)) files.push(rel);
-      }
-    };
-    walk('carbon/src/server');
+    const files = sourceFiles(join(ROOT, 'carbon/src/server'), {
+      exts: ['.ts'],
+      relativeTo: ROOT,
+    }).filter((rel) => !/\.test\.ts$/.test(rel));
     const read_ = new Set<string>();
     for (const f of files) {
       for (const m of read(f).matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) read_.add(m[1]);

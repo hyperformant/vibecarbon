@@ -17,10 +17,11 @@
  * deliberate entry) instead of silently running with open egress. The census
  * also bans the retired "service-role" wording in manifest comments.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 
@@ -36,13 +37,7 @@ const DEFAULT_NAMESPACE = 'vibecarbon';
 type Doc = any;
 
 function yamlFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) out.push(...yamlFiles(path));
-    else if (/\.ya?ml$/.test(name)) out.push(path);
-  }
-  return out;
+  return sourceFiles(dir, { exts: ['.yaml', '.yml'] });
 }
 
 function docsIn(path: string): Doc[] {

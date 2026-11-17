@@ -19,22 +19,17 @@
  *   - the cold deploy reaches the same in-place mechanism failover and
  *     restore use.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
 /** Every file under `dir` with one of `exts`, skipping vendored trees. */
-function walk(dir: string, exts: string[], out: string[] = []): string[] {
-  for (const e of readdirSync(dir)) {
-    if (e === 'node_modules' || e === '.git') continue;
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, exts, out);
-    else if (exts.some((x) => e.endsWith(x))) out.push(p);
-  }
-  return out;
+function walk(dir: string, exts: string[]): string[] {
+  return sourceFiles(dir, { exts, skip: ['node_modules', '.git'] });
 }
 
 const SHIPPED = [

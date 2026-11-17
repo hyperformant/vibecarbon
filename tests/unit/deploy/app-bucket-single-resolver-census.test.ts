@@ -16,21 +16,16 @@
  *   (e) nothing reads the retired storageBucketGeneration key.
  * These walk the tree rather than list sites, so a new site is caught.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
-function walk(dir: string, accept: (file: string) => boolean, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, accept, out);
-    else if (accept(full)) out.push(full);
-  }
-  return out;
+function walk(dir: string, accept: (file: string) => boolean): string[] {
+  return sourceFiles(dir, { skip: ['node_modules'] }).filter(accept);
 }
 
 const rel = (f: string) => relative(ROOT, f);

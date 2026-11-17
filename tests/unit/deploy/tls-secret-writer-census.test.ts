@@ -30,43 +30,25 @@
  *      restoreK8sTlsSecret is called only by the deploy (k3s.js) and the
  *      failover promotion (failover.js).
  */
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const ROOTS = ['src', 'carbon', 'scripts', 'services'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', 'coverage']);
-const TEXT_EXT = /\.(js|mjs|cjs|ts|tsx|sh|ya?ml|json|tpl)$/;
+const TEXT_EXTS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.sh', '.yaml', '.yml', '.json', '.tpl'];
 const BUILDER_FILE = 'src/lib/deploy/tls-snapshot.js';
 const SECRET = 'vibecarbon-tls';
 
 type SourceFile = { path: string; text: string };
 
-function walk(dir: string, out: string[] = []): string[] {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of names) {
-    if (SKIP_DIRS.has(name)) continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (TEXT_EXT.test(name)) out.push(full);
-  }
-  return out;
+/** A root a tree lacks holds no files: the fixture trees carry only some. */
+function walk(dir: string): string[] {
+  return existsSync(dir) ? sourceFiles(dir, { exts: TEXT_EXTS, skip: SKIP_DIRS }) : [];
 }
 
 function readTree(root: string): SourceFile[] {

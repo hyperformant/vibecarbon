@@ -11,22 +11,17 @@
  * The walg-restore init stays: it reads only this cluster's restore marker
  * and the backup bucket.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
-
-function walk(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
-  );
-}
 
 const sts: Doc = load(readFileSync(join(BASE, 'db/statefulset.yaml'), 'utf-8'));
 const initContainers: Doc[] = sts.spec.template.spec.initContainers ?? [];
@@ -46,14 +41,14 @@ describe('db init containers reach no peer', () => {
   );
 
   it('no manifest under carbon/k8s/base references the seed ConfigMap', () => {
-    const hits = walk(BASE).filter((f) =>
+    const hits = sourceFiles(BASE).filter((f) =>
       readFileSync(f, 'utf-8').includes('vibecarbon-seed-standby'),
     );
     expect(hits).toEqual([]);
   });
 
   it('no deploy source renders or applies the seed ConfigMap', () => {
-    const hits = walk(join(ROOT, 'src')).filter(
+    const hits = sourceFiles(join(ROOT, 'src')).filter(
       (f) => f.endsWith('.js') && readFileSync(f, 'utf-8').includes('vibecarbon-seed-standby'),
     );
     expect(hits).toEqual([]);

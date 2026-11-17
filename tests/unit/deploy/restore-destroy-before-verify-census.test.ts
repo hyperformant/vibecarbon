@@ -1,9 +1,10 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /** The database lineage (system identifier) whose folder holds the backup. */
 const LINEAGE = '7699032860122738725';
@@ -248,15 +249,8 @@ describe('no wal-g backup-list under src/', () => {
   // the container's own credentials and prefix reach storage at deploy time.
   const ALLOW = new Set(['src/lib/deploy/walg-audit.js']);
 
-  function walk(dir: string): string[] {
-    return readdirSync(dir).flatMap((name) => {
-      const path = join(dir, name);
-      return statSync(path).isDirectory() ? walk(path) : [path];
-    });
-  }
-
   it('only walg-audit.js names it', () => {
-    const offenders = walk(join(ROOT, 'src'))
+    const offenders = sourceFiles(join(ROOT, 'src'))
       .filter((f) => /\.(js|ts|mjs|sh)$/.test(f))
       .map((f) => relative(ROOT, f))
       .filter((f) => !ALLOW.has(f))

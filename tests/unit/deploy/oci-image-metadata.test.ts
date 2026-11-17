@@ -26,10 +26,11 @@
  *       source, so an annotation flag there would look like documentation and
  *       do nothing.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CARBON_AUTOSCALER_IMAGE, DB_IMAGE, NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
@@ -206,9 +207,8 @@ describe('docker/ holds no undocumented publishable image', () => {
     // docker/ is exactly "images this repo publishes to our own ghcr org", so a
     // new subdirectory here is a new package page. Triage it into OWNED_IMAGES
     // rather than letting it ship blank.
-    const found = readdirSync(join(ROOT, 'docker'), { recursive: true, withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name === 'Dockerfile')
-      .map((entry) => relative(ROOT, join(entry.parentPath, entry.name)))
+    const found = sourceFiles(join(ROOT, 'docker'), { relativeTo: ROOT })
+      .filter((rel) => basename(rel) === 'Dockerfile')
       .sort();
     expect(found).toEqual(OWNED_IMAGES.map((i) => i.dockerfile).sort());
   });

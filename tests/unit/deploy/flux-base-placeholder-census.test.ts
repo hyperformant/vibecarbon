@@ -12,21 +12,14 @@
  * substitutions, with the cluster file's `vibecarbon-base` patches applied.
  */
 import { spawnSync } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { dump, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { PLACEHOLDERS, SECRET_PLACEHOLDERS } from '../../../src/create.js';
 import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
@@ -36,17 +29,10 @@ const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
 
-function walkFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const p = join(dir, name);
-    return statSync(p).isDirectory() ? walkFiles(p) : [p];
-  });
-}
-
 /** Copy base as `vibecarbon create` lays it down (non-secret placeholders filled). */
 function createdBase(into: string) {
   const fill = Object.keys(PLACEHOLDERS).filter((k) => !SECRET_PLACEHOLDERS.has(k));
-  for (const src of walkFiles(BASE)) {
+  for (const src of sourceFiles(BASE)) {
     let text = readFileSync(src, 'utf-8');
     for (const key of fill) text = text.replaceAll(`{{${key}}}`, `created-${key.toLowerCase()}`);
     const dest = join(into, 'base', relative(BASE, src));
@@ -81,7 +67,7 @@ function addBaseAddons(into: string) {
   const kustomization = join(into, 'base', 'kustomization.yaml');
   for (const { name, entry, into: sub } of BASE_ADDONS) {
     const from = join(SERVICES, name, 'k8s');
-    for (const src of walkFiles(from)) {
+    for (const src of sourceFiles(from)) {
       const dest = join(into, 'base', sub, relative(from, src));
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, readFileSync(src, 'utf-8'));

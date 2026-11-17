@@ -10,9 +10,10 @@
  * deploy-key-refusal.test.ts runs each of today's callers against a real
  * generator; this census holds the line for the next one.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 import {
   CODE,
   enclosingFunctionName,
@@ -26,14 +27,6 @@ import {
 const ROOT = join(__dirname, '../../..');
 const GENERATORS = ['generateSSHKeyPair', 'ensureSshKey'] as const;
 const GUARD = 'requireDeployKey';
-
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) return jsFiles(path);
-    return /\.(m?js)$/.test(name) ? [path] : [];
-  });
-}
 
 /** Generator calls with no requireDeployKey before them in their own function. */
 function unguardedCalls(text: string): string[] {
@@ -86,7 +79,7 @@ function topLevelKeys(text: string, opener: string): string[] {
   return keys;
 }
 
-const SOURCES = jsFiles(join(ROOT, 'src')).map((path) => ({
+const SOURCES = sourceFiles(join(ROOT, 'src'), { exts: ['.js', '.mjs'] }).map((path) => ({
   rel: relative(ROOT, path),
   text: readFileSync(path, 'utf8'),
 }));

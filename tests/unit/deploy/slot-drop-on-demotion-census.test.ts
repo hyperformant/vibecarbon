@@ -24,21 +24,14 @@
  * balancing scanner (tests/unit/helpers/js-call-scan.ts), so a call whose
  * arguments span lines is read whole; a line-based grep missed those.
  */
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { demoteComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
 import { DROP_INACTIVE_SLOTS_SQL } from '../../../src/lib/deploy/replication-slot.js';
 import { demoteK8sWalgRole } from '../../../src/lib/deploy/walg-role.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import {
   type CallSite,
@@ -257,10 +250,7 @@ describe('demoteComposeWalgRole drops inactive slots', () => {
 
 /** Every file under `dir` (relative to `root`), walked, never listed by hand. */
 const walk = (root: string, dir: string): string[] =>
-  readdirSync(join(root, dir)).flatMap((n) => {
-    const p = join(dir, n);
-    return statSync(join(root, p)).isDirectory() ? walk(root, p) : [p];
-  });
+  sourceFiles(join(root, dir), { relativeTo: root });
 
 const ROLE_MODULE = 'src/lib/deploy/walg-role.js';
 

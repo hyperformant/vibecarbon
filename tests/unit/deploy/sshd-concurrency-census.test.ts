@@ -17,24 +17,15 @@
  * must install the sshd concurrency drop-in; this census walks them all so a
  * new provider's init script cannot silently ship without it.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const CLOUD_INIT_DIR = join(process.cwd(), 'carbon', 'cloud-init');
 
-function allInitFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...allInitFiles(p));
-    else if (/\.(yaml|yml|sh)$/.test(name)) out.push(p);
-  }
-  return out;
-}
-
 describe('sshd concurrency provisioning census', () => {
-  const files = allInitFiles(CLOUD_INIT_DIR);
+  const files = sourceFiles(CLOUD_INIT_DIR, { exts: ['.yaml', '.yml', '.sh'] });
 
   it('walks a non-trivial surface (never vacuously green)', () => {
     expect(files.length).toBeGreaterThanOrEqual(5);

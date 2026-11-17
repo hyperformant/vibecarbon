@@ -11,22 +11,19 @@
  * warm deploy or a promoted failover node. The pinned services are derived
  * from the overlays, never hard-coded.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { TRAEFIK_VOLUME_SH } from '../../../src/lib/deploy/compose/tls-restore.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
-function walk(dir: string, keep: (f: string) => boolean, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules' || name.startsWith('.')) continue;
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) walk(p, keep, out);
-    else if (keep(p)) out.push(p);
-  }
-  return out;
+function walk(dir: string, keep: (f: string) => boolean): string[] {
+  return sourceFiles(dir, { skip: ['node_modules'], skipDotDirs: true }).filter(
+    (p) => !basename(p).startsWith('.') && keep(p),
+  );
 }
 
 /** Services whose compose definition carries an `ipv4_address` (comments skipped). */

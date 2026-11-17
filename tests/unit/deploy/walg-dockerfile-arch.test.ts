@@ -22,12 +22,13 @@
  * Plus a repo-wide sweep so a NEW Dockerfile can't reintroduce a pinned-arch
  * download unnoticed.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
-import { describe, expect, it } from 'vitest';
 
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { describe, expect, it } from 'vitest';
 import { DB_IMAGE_TAG } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 
@@ -47,17 +48,13 @@ const DB_IMAGE_DOCKERFILE = join('docker', 'postgres-walg', 'Dockerfile');
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
 
 /** Every Dockerfile in the repo, as ROOT-relative paths. */
-function findDockerfiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        findDockerfiles(join(dir, entry.name), out);
-      }
-    } else if (entry.name === 'Dockerfile' || entry.name.startsWith('Dockerfile.')) {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
+function findDockerfiles(dir: string): string[] {
+  return sourceFiles(dir, { skip: SKIP_DIRS, skipDotDirs: true, relativeTo: ROOT }).filter(
+    (rel) => {
+      const name = basename(rel);
+      return name === 'Dockerfile' || name.startsWith('Dockerfile.');
+    },
+  );
 }
 
 /**

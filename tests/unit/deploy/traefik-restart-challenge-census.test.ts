@@ -23,30 +23,20 @@
  * certificate the restore just wrote, or to start or stop issuance on
  * purpose.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 const ROOTS = ['src', 'carbon/scripts', 'carbon/.github/workflows', 'carbon/cloud-init'];
 const SKIP = new Set(['node_modules', 'dist', 'coverage']);
-const EXT = /\.(m?js|sh|ya?ml)$/;
+const EXTS = ['.js', '.mjs', '.sh', '.yaml', '.yml'];
 const WAIT = 'awaitAcmeChallengesSettled(';
 
-function walk(dir: string, out: string[] = []): string[] {
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of names) {
-    if (SKIP.has(name)) continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (EXT.test(name)) out.push(full);
-  }
-  return out;
+/** A root that is absent holds no files. */
+function walk(dir: string): string[] {
+  return existsSync(dir) ? sourceFiles(dir, { exts: EXTS, skip: SKIP }) : [];
 }
 
 /** Drop comment lines (JS `//`, `*` doc lines, shell/YAML `#`): history may name a restart. */

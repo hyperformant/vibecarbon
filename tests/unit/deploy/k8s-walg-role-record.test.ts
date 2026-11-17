@@ -13,20 +13,12 @@
  * tests read back is what those scripts actually did.
  */
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { findCalls } from '../helpers/js-call-scan.js';
 
 vi.mock('node:child_process', async () => {
@@ -476,11 +468,7 @@ describe('compose-ha is unaffected', () => {
 
 /** Every JS source under `rel`, relative to `root`. */
 function walk(root: string, rel: string): string[] {
-  return readdirSync(join(root, rel)).flatMap((n) => {
-    const p = join(rel, n);
-    if (statSync(join(root, p)).isDirectory()) return walk(root, p);
-    return /\.(m|c)?js$/.test(p) ? [p] : [];
-  });
+  return sourceFiles(join(root, rel), { exts: ['.js', '.mjs', '.cjs'], relativeTo: root });
 }
 
 const ROLE_MODULE = 'src/lib/deploy/walg-role.js';

@@ -5,15 +5,7 @@
  * Certificate is a spec mismatch that cert-manager acts on, and it would also
  * make a Secret restored from a snapshot look wrong for the Certificate.
  */
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { load } from 'js-yaml';
@@ -21,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
 import { PROMOTE_ISSUER_ANNOTATION } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 import { buildDbManifestValues, renderK8sBase } from '../../../src/lib/deploy/k8s/k3s.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
@@ -33,13 +26,6 @@ const TLS = {
   issuerName: 'letsencrypt-prod',
   effectiveIssuer: 'letsencrypt-prod',
 };
-
-function walkFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const p = join(dir, name);
-    return statSync(p).isDirectory() ? walkFiles(p) : [p];
-  });
-}
 
 const values = () => ({
   ...buildDbManifestValues({
@@ -89,7 +75,7 @@ describe('renderK8sBase renders the Certificate', () => {
       // The only file of the rendered tree still naming the placeholder
       // domain is the vibecarbon-config SITE_URL, which the deploy patches
       // right after the apply (and Flux owns; a separate follow-up).
-      const leftovers = walkFiles(out)
+      const leftovers = sourceFiles(out)
         .filter((f) => /app\.example\.com/.test(readFileSync(f, 'utf-8')))
         .map((f) => relative(out, f));
       expect(leftovers).toEqual(['config/configmap.yaml']);

@@ -20,14 +20,15 @@
  *       db argv already sets, and both argv lists carry the replication
  *       startup flags.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-
 import { primaryReplicationSql } from '../../../src/lib/deploy/replication-slot.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const DIRS = ['src/lib/deploy/compose', 'src/lib/deploy/k8s/ha'];
@@ -45,13 +46,6 @@ const RESTART_SHAPES = [
   /\bdelete\s+pod\b(?!\s+(repl-gateway|registry-relay)\s)/,
   /\brollout\s+restart\s+(statefulset|sts)\b/,
 ];
-
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    return statSync(path).isDirectory() ? jsFiles(path) : path.endsWith('.js') ? [path] : [];
-  });
-}
 
 /** The text of every string and template literal in a source file (comments excluded). */
 function stringsOf(source: string): string[] {
@@ -82,12 +76,12 @@ function restartsIn(file: string, source: string): string[] {
 
 describe('census (a): no deploy-side db restart', () => {
   it('scans the deploy sources', () => {
-    const files = DIRS.flatMap((d) => jsFiles(join(REPO, d)));
+    const files = DIRS.flatMap((d) => sourceFiles(join(REPO, d), { exts: ['.js'] }));
     expect(files.length).toBeGreaterThan(5);
   });
 
   it('nothing under compose/ or k8s/ha/ restarts the db or deletes its pod', () => {
-    const found = DIRS.flatMap((d) => jsFiles(join(REPO, d))).flatMap((f) =>
+    const found = DIRS.flatMap((d) => sourceFiles(join(REPO, d), { exts: ['.js'] })).flatMap((f) =>
       restartsIn(relative(REPO, f), readFileSync(f, 'utf-8')),
     );
     expect(found).toEqual([]);

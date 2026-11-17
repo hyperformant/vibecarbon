@@ -23,10 +23,11 @@
  * Each detector is bitten by a planted offender below, including the original
  * failure planted back into restoreCompose's real source.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
@@ -65,14 +66,8 @@ const LOCAL_ARGV_COMPOSE: Record<string, string> = {
   'src/lib/status/compose-ps.js': 'reads the local dev stack status for `vibecarbon status`',
 };
 
-function walk(dir: string, keep: (f: string) => boolean, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    if (name === 'node_modules') continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, keep, out);
-    else if (keep(full)) out.push(full);
-  }
-  return out;
+function walk(dir: string, keep: (f: string) => boolean): string[] {
+  return sourceFiles(dir, { skip: ['node_modules'] }).filter(keep);
 }
 
 const read = (files: string[]) =>

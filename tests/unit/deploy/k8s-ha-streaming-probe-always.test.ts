@@ -17,20 +17,12 @@
  * The probe costs 5.2 s on a cold deploy; a wrongly wiped replica costs a
  * reseed and, until it finishes, the pair's only replica.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(__dirname, '../../../src');
-
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (full.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
 
 describe('the k8s-ha streaming probe always runs', () => {
   it('setupReplication assigns the probe result unconditionally, before the reseed', () => {
@@ -47,7 +39,7 @@ describe('the k8s-ha streaming probe always runs', () => {
   });
 
   it('no deploy code carries a "fresh cluster" skip signal', () => {
-    const offenders = walk(SRC).filter((f) =>
+    const offenders = sourceFiles(SRC, { exts: ['.js'] }).filter((f) =>
       /\b(freshCluster|standbyFresh)\b/.test(readFileSync(f, 'utf-8')),
     );
     expect(offenders).toEqual([]);

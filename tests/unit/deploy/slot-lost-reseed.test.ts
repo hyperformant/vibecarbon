@@ -14,9 +14,10 @@
  * builder (ensureReplicationSlotSql), so no site can create a slot without
  * the lost-slot drop.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const sshCalls: Array<{ command: string; input?: string }> = [];
 
@@ -108,12 +109,6 @@ describe('the reseed path recreates a lost slot', () => {
 
 describe('census: every slot creation goes through ensureReplicationSlotSql', () => {
   const BUILDER = 'src/lib/deploy/replication-slot.js';
-  const walk = (dir: string): string[] =>
-    readdirSync(dir).flatMap((n) => {
-      const p = join(dir, n);
-      return statSync(p).isDirectory() ? walk(p) : [p];
-    });
-
   /** Files that spell a slot creation outside the builder. */
   function offenders(files: Array<{ path: string; text: string }>): string[] {
     const builderOutput = ensureReplicationSlotSql();
@@ -125,7 +120,7 @@ describe('census: every slot creation goes through ensureReplicationSlotSql', ()
       .map(({ path }) => path);
   }
 
-  const sources = walk(join(ROOT, 'src'))
+  const sources = sourceFiles(join(ROOT, 'src'))
     .filter((p) => /\.(js|sql)$/.test(p))
     .map((p) => ({ path: relative(ROOT, p), text: readFileSync(p, 'utf-8') }));
 

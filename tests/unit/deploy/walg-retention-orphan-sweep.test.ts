@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * CLASS (run 33287840597, hetzner compose backup, 2026-08-30 02:36Z): a
@@ -31,18 +32,6 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const CARBON = join(ROOT, 'carbon');
 const SKIP_DIRS = new Set(['node_modules', '.next', 'dist', 'build']);
 
-function walkFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) out.push(...walkFiles(full));
-    else if (/\.(sh|ya?ml)$/.test(entry)) out.push(full);
-  }
-  return out;
-}
-
 // CODE lines only — a doc comment naming `wal-g delete before` is not a call
 // site (the raw-ssh-opts census was fooled by exactly this once).
 function codeOf(file: string): string {
@@ -53,7 +42,10 @@ function codeOf(file: string): string {
 }
 
 describe('wal-g retention call sites sweep sentinel-less orphans first', () => {
-  const retainSites = walkFiles(CARBON).filter((f) => codeOf(f).includes('wal-g delete before'));
+  const retainSites = sourceFiles(CARBON, {
+    exts: ['.sh', '.yaml', '.yml'],
+    skip: SKIP_DIRS,
+  }).filter((f) => codeOf(f).includes('wal-g delete before'));
 
   it('census still sees the two known retention surfaces', () => {
     // Sanity: if a refactor moves these, the census below is guarding nothing.

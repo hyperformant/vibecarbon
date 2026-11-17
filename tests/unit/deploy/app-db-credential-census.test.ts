@@ -10,7 +10,7 @@
  * tier's compose-secret-reach test checks the same against a real
  * `docker compose config`. Every value is a SENTINEL_<NAME> stand-in.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -22,6 +22,7 @@ import {
   INFRA_SECRET_KEYS,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK } from '../../../src/lib/project.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
@@ -267,14 +268,6 @@ describe('no plain hash is fed secret values anywhere in src/', () => {
     return feeds;
   }
 
-  function* srcFiles(dir: string): Generator<string> {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, e.name);
-      if (e.isDirectory()) yield* srcFiles(full);
-      else if (e.name.endsWith('.js')) yield full;
-    }
-  }
-
   it('bites on the old split chain (digestEnvLocalSecrets before the HMAC fix)', () => {
     const old = [
       "const hash = createHash('sha256');",
@@ -294,7 +287,7 @@ describe('no plain hash is fed secret values anywhere in src/', () => {
   it('no createHash in src/ takes secret-derived values', () => {
     const offenders: string[] = [];
     let seen = 0;
-    for (const file of srcFiles(join(ROOT, 'src'))) {
+    for (const file of sourceFiles(join(ROOT, 'src'), { exts: ['.js'] })) {
       const src = readFileSync(file, 'utf-8');
       for (const feed of hashFeeds(src)) {
         seen++;

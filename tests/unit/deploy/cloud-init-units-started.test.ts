@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 // Regression guard: a systemd unit installed by cloud-init must be STARTED,
 // not merely enabled.
@@ -34,16 +35,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const cloudInitRoot = join(repoRoot, 'carbon/cloud-init');
 
 function cloudInitFiles(): string[] {
-  const found: string[] = [];
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.(sh|ya?ml)$/.test(entry.name)) found.push(full);
-    }
-  };
-  walk(cloudInitRoot);
-  return found.sort();
+  return sourceFiles(cloudInitRoot, { exts: ['.sh', '.yaml', '.yml'] }).sort();
 }
 
 describe('cloud-init starts the units it installs', () => {

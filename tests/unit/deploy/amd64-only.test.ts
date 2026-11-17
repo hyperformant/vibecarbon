@@ -15,7 +15,7 @@
  * to be either pinned (add the platform flag / the guard) or registered below
  * with a reason.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -23,21 +23,11 @@ import {
   PLATFORM_BUILD_FLAG,
   TARGET_PLATFORM,
 } from '../../../src/lib/deploy/platform.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC_ROOT = join(process.cwd(), 'src');
 
-function walkJsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) out.push(...walkJsFiles(full));
-    else if (st.isFile() && full.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
-
-const SRC_FILES = walkJsFiles(SRC_ROOT).map((path) => ({
+const SRC_FILES = sourceFiles(SRC_ROOT, { exts: ['.js'] }).map((path) => ({
   path,
   rel: path.slice(SRC_ROOT.length + 1).replaceAll('\\', '/'),
   src: readFileSync(path, 'utf-8'),

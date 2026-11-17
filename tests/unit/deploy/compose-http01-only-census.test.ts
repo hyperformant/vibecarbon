@@ -1,15 +1,14 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = join(__dirname, '..', '..', '..');
 
 function textFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (name === 'node_modules') return [];
-    if (statSync(path).isDirectory()) return textFiles(path);
-    return /\.(js|mjs|ya?ml|sh|md|json)$/.test(name) ? [path] : [];
+  return sourceFiles(dir, {
+    exts: ['.js', '.mjs', '.yaml', '.yml', '.sh', '.md', '.json'],
+    skip: ['node_modules'],
   });
 }
 

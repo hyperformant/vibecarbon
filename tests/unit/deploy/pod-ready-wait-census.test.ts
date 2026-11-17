@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Every `kubectl wait --for=condition=Ready pods --all` in src/ must exclude
@@ -19,9 +20,7 @@ import { describe, expect, it } from 'vitest';
 describe('pod-Ready wait census', () => {
   it('every `wait --for=condition=Ready pods --all` excludes terminal phases', () => {
     const srcRoot = join(new URL('../../..', import.meta.url).pathname, 'src');
-    const files = readdirSync(srcRoot, { recursive: true, withFileTypes: true })
-      .filter((d) => d.isFile() && d.name.endsWith('.js'))
-      .map((d) => join(d.parentPath, d.name));
+    const files = sourceFiles(srcRoot, { exts: ['.js'] });
     let members = 0;
     const misses: string[] = [];
     for (const file of files) {

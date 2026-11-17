@@ -18,10 +18,11 @@
  * keepalive literal itself (ServerAliveInterval — the load-bearing
  * protection a hand-rolled subset most often drops).
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(fileURLToPath(new URL('../../..', import.meta.url)), 'src');
 
@@ -29,19 +30,10 @@ const RAW_SSH = /(\|\s*ssh\s)|(exec \/usr\/bin\/ssh)/;
 const SHARED_MARKERS = /composeSshOptsString|SSH_CONNECTION_OPTS|ServerAliveInterval/;
 const WINDOW = 15;
 
-function walk(dir: string, out: string[] = []) {
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (e.endsWith('.js')) out.push(p);
-  }
-  return out;
-}
-
 describe('raw-string ssh invocations carry the shared transport opts', () => {
   it('every | ssh / exec ssh site references the shared opts (or the keepalive literal)', () => {
     let sites = 0;
-    for (const file of walk(SRC)) {
+    for (const file of sourceFiles(SRC, { exts: ['.js'] })) {
       const lines = readFileSync(file, 'utf-8').split('\n');
       lines.forEach((line, i) => {
         const trimmed = line.trim();

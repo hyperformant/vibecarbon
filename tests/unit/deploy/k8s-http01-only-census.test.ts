@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const REPO = join(__dirname, '..', '..', '..');
 const ROOT = join(REPO, 'carbon', 'k8s');
@@ -12,18 +13,10 @@ const SCANNED = [
   join(REPO, 'carbon', 'scripts'),
 ];
 
-function yamlFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) return yamlFiles(path);
-    return /\.ya?ml$/.test(name) ? [path] : [];
-  });
-}
-
 // Template placeholders ({{X}}) are not always valid YAML; a file that does
 // not parse is skipped here and covered by the manifest dry-run.
 function docs(): Array<{ file: string; doc: any }> {
-  return yamlFiles(ROOT).flatMap((file) => {
+  return sourceFiles(ROOT, { exts: ['.yaml', '.yml'] }).flatMap((file) => {
     try {
       return loadAll(readFileSync(file, 'utf8'))
         .map((doc) => ({ file, doc: doc as any }))
@@ -35,11 +28,9 @@ function docs(): Array<{ file: string; doc: any }> {
 }
 
 function textFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (name === 'node_modules') return [];
-    if (statSync(path).isDirectory()) return textFiles(path);
-    return /\.(js|mjs|ya?ml|sh|md)$/.test(name) ? [path] : [];
+  return sourceFiles(dir, {
+    exts: ['.js', '.mjs', '.yaml', '.yml', '.sh', '.md'],
+    skip: ['node_modules'],
   });
 }
 
