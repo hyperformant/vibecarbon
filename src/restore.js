@@ -78,7 +78,7 @@ import {
 } from './lib/deploy/walg-role.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
-import { ensureOperatorIpAccess } from './lib/operator-ip.js';
+import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -485,26 +485,13 @@ export async function run(args, deps = {}) {
   }
 
   // Operator-IP firewall refresh: everything below needs SSH/k8s reachability.
-  const apiToken = resolveProviderToken(providerIdFor(envConfig));
-  if (apiToken) {
-    try {
-      const isHA = envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled;
-      const result = await ensureOperatorIpAccess({
-        projectConfig,
-        environment: envName,
-        isHA,
-        apiToken,
-        yes: !!values.y,
-        onMessage: (msg) => p.log.info(msg),
-      });
-      if (result.added) {
-        p.log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
-      }
-    } catch (err) {
-      p.log.error(`Operator-IP check failed: ${err.message}`);
-      process.exit(1);
-    }
-  }
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment: envName,
+    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
+    apiToken: resolveProviderToken(providerIdFor(envConfig)),
+    yes: !!values.y,
+  });
 
   // SSH key is required for everything restore touches.
   const sshKeyPath = sshKeyPathFor(envName);

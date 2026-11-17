@@ -19,7 +19,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { AmbiguousPrimaryError } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { ensureOperatorIpAccess } from './lib/operator-ip.js';
+import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { printable } from './lib/printable.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
@@ -87,25 +87,13 @@ const SPEC = {
 
 /** The operator-IP firewall refresh, as `backup` does it. */
 async function refreshFirewall({ projectConfig, envName, envConfig, yes }) {
-  const apiToken = resolveProviderToken(providerIdFor(envConfig));
-  if (!apiToken) return;
-  try {
-    const isHA = envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled;
-    const result = await ensureOperatorIpAccess({
-      projectConfig,
-      environment: envName,
-      isHA,
-      apiToken,
-      yes,
-      onMessage: (msg) => p.log.info(msg),
-    });
-    if (result.added) {
-      p.log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
-    }
-  } catch (err) {
-    p.log.error(`Operator-IP check failed: ${err.message}`);
-    process.exit(1);
-  }
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment: envName,
+    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
+    apiToken: resolveProviderToken(providerIdFor(envConfig)),
+    yes,
+  });
 }
 
 function planJson(plan, extra = {}) {

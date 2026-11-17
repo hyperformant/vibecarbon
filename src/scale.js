@@ -96,7 +96,7 @@ import {
 import { dotenvValueProblem, parseDotenv } from './lib/dotenv.js';
 import { convergeClusterInfra } from './lib/iac/converge-cluster.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
-import { ensureOperatorIpAccess } from './lib/operator-ip.js';
+import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { repairLegacyEnvQuoting } from './lib/project.js';
 import { runProjectAssignment } from './lib/project-assignment.js';
@@ -263,23 +263,14 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   }
 
   // Ensure operator IP is in the firewall allowlist before any SSH work.
-  try {
-    const isHA = isHATier(tier);
-    const result = await ensureOperatorIpAccess({
-      projectConfig,
-      environment,
-      isHA,
-      apiToken,
-      yes: !!options.yes,
-      onMessage: (msg) => p.log.info(msg),
-    });
-    if (result.added) {
-      p.log.success(`Firewall updated: SSH now allows ${result.cidr}`);
-    }
-  } catch (err) {
-    p.log.error(`Operator-IP check failed: ${err.message}`);
-    process.exit(1);
-  }
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment,
+    isHA: isHATier(tier),
+    apiToken,
+    yes: !!options.yes,
+    opened: 'SSH now allows',
+  });
 
   // A scale that stopped mid-cutover is resumed before anything new: its
   // journal names both servers, and the config may still name the old one.
@@ -2462,26 +2453,15 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // Ensure operator IP is in the firewall allowlist before any SSH or k8s
   // API work. Skip when there's no apiToken (no infra changes and no SSH —
   // a no-op scale that just returns) since both paths below require token.
-  if (apiToken) {
-    try {
-      // Firewall allowlist gate uses ha-vs-not only (no secondaryRegion
-      // conjunct) — isHATier(tier) === `!!envConfig.ha?.enabled` for k8s.
-      const result = await ensureOperatorIpAccess({
-        projectConfig,
-        environment,
-        isHA: isHATier(parsed.tier),
-        apiToken,
-        yes: !!parsed.yes,
-        onMessage: (msg) => p.log.info(msg),
-      });
-      if (result.added) {
-        p.log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
-      }
-    } catch (err) {
-      p.log.error(`Operator-IP check failed: ${err.message}`);
-      process.exit(1);
-    }
-  }
+  // Firewall allowlist gate uses ha-vs-not only (no secondaryRegion
+  // conjunct) — isHATier(tier) === `!!envConfig.ha?.enabled` for k8s.
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment,
+    isHA: isHATier(parsed.tier),
+    apiToken,
+    yes: !!parsed.yes,
+  });
 
   // 7+8. Apply changes — for HA environments, apply to both clusters
   const secondaryRegion = envConfig.secondaryRegion;
