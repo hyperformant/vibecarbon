@@ -1087,6 +1087,26 @@ the provider's own filter makes the answer one row.
 
 **Guard:** `tests/unit/dns/cloudflare-zones-all-pages.test.ts`.
 
+#### 2026-11-16: A Linode VPC membership listing cut short is a failed read (#NNN)
+
+`_attachVpcMembership` in the Linode provider now returns its "membership read
+failed" error when the `/vpcs/ips` walk stops at its 50-page limit, and attaches
+no `vpc_ids` to any instance. `listServers` rejects on it, as it does for a
+failed request.
+
+**Why:** the page walk reports a limit it ran into as `complete: false` with no
+`status`, and the membership read looked only at `status`. On an account with
+more than 5,000 VPC addresses, every instance whose row came after the limit
+read as being in no VPC, and the cluster sweeps in `destroy` skip an instance
+that is in no VPC. Found in review; no account has hit it.
+
+**Do not undo:** a listing that was not read to the end is unknown, not empty.
+Do not go back to checking `status` alone, and do not attach the rows that were
+read.
+
+**Guard:** `tests/unit/providers/linode-vpc-methods.test.ts` serves a listing
+that never ends and expects the error and a rejected `listServers`.
+
 ## Added and later removed
 
 | What | Removed | Why |
