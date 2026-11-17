@@ -58,8 +58,8 @@ pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --skip-steps failover,verify-fa
 node scripts/iter-step.js hetzner/k8s-ha failover
 
 # 3. When green, tear it down. With -purge, iter-step then runs the cleanup
-#    --keep skipped: the provider's orphan sweep, the test repo, local build
-#    images, and the rig file. It reports LEAKED (exit 2) if the sweep had
+#    --keep skipped: the provider's orphan sweep, local build images, and
+#    the rig file. It reports LEAKED (exit 2) if the sweep had
 #    to delete anything. -purge is required: plain destroy preserves the
 #    backup bucket by design and gets no sweep, so it leaks the bucket.
 node scripts/iter-step.js hetzner/k8s-ha destroy -purge

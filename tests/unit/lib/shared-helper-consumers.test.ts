@@ -107,7 +107,7 @@ const REGISTRY = [
     consumers: [
       'tests/integration/template/create.test.ts', // fixture git assertions
       'tests/integration/cli/upgrade/upgrade.test.ts', // upgrade hygiene fixture commits
-      'tests/e2e/scenarios/_run-lifecycle.ts', // setup-repo add/commit/push
+      'tests/e2e/scenarios/_run-lifecycle.ts', // kubectl reads in warm-redeploy-change
     ],
     deepTests: ['tests/unit/lib/git-scrubbed-env.test.ts'],
   },

@@ -43,13 +43,11 @@ describe('isClusterScopedStep', () => {
   it('leaves app-level steps on the narrow (app-namespace) bundle', () => {
     for (const step of [
       'create',
-      'setup-repo',
       'add-features',
       'verify-deploy',
       'verify-load',
       'backup',
       'destroy',
-      'teardown-repo',
     ] as StepName[]) {
       expect(isClusterScopedStep(step)).toBe(false);
     }

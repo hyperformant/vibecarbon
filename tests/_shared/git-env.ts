@@ -23,9 +23,9 @@
  *
  * Deliberately scoped: only REPO-TARGETING vars are stripped. Transport and
  * safety vars (GIT_SSH_COMMAND, GIT_ASKPASS, GIT_TERMINAL_PROMPT, …) are
- * kept — the e2e setup-repo step pushes to a real GitHub remote under the
- * runner's transport config, and stripping those would break or un-guard
- * the push. `isolateConfig` additionally pins the global/system git config
+ * kept — a caller that reaches a real remote does so under the runner's
+ * transport config, and stripping those would break or un-guard it.
+ * `isolateConfig` additionally pins the global/system git config
  * to /dev/null for tests that must neither read nor write an operator
  * identity (their `-c user.*` flags become the only identity git has).
  */

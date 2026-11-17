@@ -122,7 +122,6 @@ import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
 import { decideFlakeRetry } from './utils/retry-policy.js';
 import { overrideDnsProvider, resolveBaseDomain } from './utils/scenario-overrides.js';
-import { sweepStaleScratchRepos } from './utils/scratch-repo-sweep.js';
 
 // Establish the harness environment before anything below reads a token or
 // opens a socket: public-DNS pinning, ssh-askpass guards, the staging ACME
@@ -189,7 +188,7 @@ const scenarioExclude = parseListArg('--except');
 const providerArg = parseListArg('--provider');
 
 // `--keep-on-fail` — sugar for VC_KEEP_ON_FAILURE=1 (lifecycle reads the
-// env var). Skips final-destroy + teardown-repo + sweep when a scenario
+// env var). Skips final-destroy + sweep when a scenario
 // fails so the operator can iterate against the surviving infra.
 if (args.includes('--keep-on-fail')) {
   process.env.VC_KEEP_ON_FAILURE = '1';
@@ -392,16 +391,10 @@ interface RunnerResult {
 /**
  * Fail fast if a host-side dep needed by the selected scenarios is missing.
  * `pulumi` is always required. `kubectl` is only required for k8s / k8s-ha.
- * `gh` is required, installed and authenticated, unless `requiresGh` is false.
- *
- * `requiresGh: false` waives both gh checks — gh only serves the
- * setup-repo/teardown-repo steps (throwaway GitHub repo for the retired
- * CI-image path), so a run that skips setup-repo (--skip-steps, e.g. the
- * CI US-perf workflow) needs no gh auth at all. Deploy's own gh use in
- * the matrix's build modes is nil (destroy's environment cleanup is
- * best-effort try/catch).
+ * `gh` is not required: no scenario deploys in push mode, and destroy's
+ * GitHub environment cleanup is best-effort try/catch.
  */
-function checkLocalDependencies(modes: DeployMode[], requiresGh = true): void {
+function checkLocalDependencies(modes: DeployMode[]): void {
   const which = (bin: string): boolean => {
     try {
       execFileSync('sh', ['-c', `command -v ${bin}`], { stdio: 'pipe' });
@@ -412,9 +405,6 @@ function checkLocalDependencies(modes: DeployMode[], requiresGh = true): void {
   };
 
   const missing: string[] = [];
-  if (requiresGh && !which('gh')) {
-    missing.push('gh — install from https://cli.github.com, then `gh auth login`');
-  }
   // Pulumi drives provisioning for every deploy mode (compose + k8s + HA).
   if (!which('pulumi')) {
     missing.push(
@@ -432,14 +422,6 @@ function checkLocalDependencies(modes: DeployMode[], requiresGh = true): void {
     throw new Error(
       `Missing host-side dependencies for selected scenarios:\n  - ${missing.join('\n  - ')}`,
     );
-  }
-
-  if (requiresGh && which('gh')) {
-    try {
-      execFileSync('gh', ['auth', 'status'], { stdio: 'pipe' });
-    } catch {
-      throw new Error('`gh` is not authenticated. Run `gh auth login` and retry.');
-    }
   }
 }
 
@@ -632,7 +614,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     // ResolvedSelection narrowing above) but is always one of DeployMode's
     // literals — the registry never produces anything else.
     filteredScenarios.map((s) => s.mode as DeployMode),
-    !skipSteps.has('setup-repo'),
   );
 
   // Which db image every scenario deploys: VIBECARBON_DB_IMAGE if set, else
@@ -690,12 +671,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       // exit codes meaningful for CI.
       throw new Error('Preflight failed — at least one infra dependency is down.');
     }
-    // Hygiene, not a gate: delete machine-named scratch repos (vc-e2e-*)
-    // whose last push is older than the kept-rig doctrine's useful life —
-    // teardown-repo only deletes on green runs, and the failed/kept-run
-    // leftovers had accumulated to 99 repos by the 2026-08-28 audit. Fails
-    // open by contract (see scratch-repo-sweep.ts).
-    await sweepStaleScratchRepos({});
   }
 
   // Hygiene, not a gate: remove the Docker images, volumes and temp dirs that

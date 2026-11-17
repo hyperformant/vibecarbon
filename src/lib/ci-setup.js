@@ -612,9 +612,8 @@ export async function ensureCIImageReady(options = {}) {
     // Brand-new repos don't auto-trigger workflows that were added in the
     // same initial commit (a known GitHub Actions quirk). The push event
     // is delivered before the workflow file is indexed, so the run is
-    // silently skipped. E2E test runs hit this every time because
-    // setup-repo creates the throwaway repo + pushes the initial commit
-    // in one shot. Explicitly dispatching here is a no-op when the push
+    // silently skipped. A repo that is created and pushed in one shot
+    // hits this every time. Explicitly dispatching here is a no-op when the push
     // already triggered it (concurrency group cancels duplicates), and a
     // safety net when the push didn't.
     //

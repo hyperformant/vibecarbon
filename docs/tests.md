@@ -208,10 +208,10 @@ cloudflare-DNS dispatches). Hetzner runs target the dedicated
 `vibecarbon-e2e` Hetzner project, which owns the `carbonstack.dev` zone.
 Cost per full Hetzner leg: ~3h runner time + ~$1–2 Hetzner spend.
 
-CI passes `--skip-steps setup-repo`: the throwaway GitHub repo only feeds the
-CI-image build path, which no perf scenario uses; skipping it means no
-repo-create/delete PAT lives in CI (the runner waives its gh-auth requirement
-when setup-repo is skipped, and teardown-repo self-skips when no repo exists).
+No scenario deploys in push mode (the image built by GitHub Actions), so the
+lifecycle creates no GitHub repository and the runner needs no `gh` login,
+locally or in CI. Compose and compose-ha build locally and send the layer
+delta, and k8s uses the master's registry.
 
 Note: every HA scenario fails over on its own provider's native DNS, so a
 failover failure in CI is a real product signal, not CI noise.
