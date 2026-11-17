@@ -5,8 +5,9 @@ import { useEffect, useRef, useState } from 'react';
  *
  * Usage: Place as the first child of a `relative overflow-hidden` container.
  * The glow follows the cursor within the card and fades on mouse leave.
+ * `color` is the gradient's centre colour (any CSS colour).
  */
-export function GlowTracker() {
+export function GlowTracker({ color = 'oklch(0.82 0.14 192 / 0.06)' }: { color?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [visible, setVisible] = useState(false);
@@ -38,7 +39,7 @@ export function GlowTracker() {
         className="absolute -inset-px rounded-[inherit] transition-opacity duration-300"
         style={{
           opacity: visible ? 1 : 0,
-          background: `radial-gradient(600px circle at ${pos.x}px ${pos.y}px, oklch(0.82 0.14 192 / 0.06) 0%, transparent 90%)`,
+          background: `radial-gradient(600px circle at ${pos.x}px ${pos.y}px, ${color} 0%, transparent 90%)`,
         }}
       />
     </div>

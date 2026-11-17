@@ -5,13 +5,13 @@ import {
   IconShieldCheck as Shield,
 } from '@tabler/icons-react';
 import { motion } from 'framer-motion';
-import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router';
 import { useDocsVisibility } from '@/hooks/api';
 import { cn } from '@/lib/utils';
 import logoIcon from '../assets/logo-icon.svg';
 import { FresnelEdge } from './effects/FresnelEdge';
+import { GlowTracker } from './effects/GlowTracker';
 import { Button } from './ui/button';
 
 /*
@@ -182,7 +182,7 @@ function ModeCard({ mode }: { mode: Mode }) {
         >
           {/* Mouse-tracking glow */}
           <div className="absolute inset-0 z-0 pointer-events-none">
-            <GlowTrackerCustom color={mode.accent.glow} />
+            <GlowTracker color={mode.accent.glow} />
           </div>
 
           {/* Icon + name */}
@@ -211,48 +211,5 @@ function ModeCard({ mode }: { mode: Mode }) {
         </div>
       </FresnelEdge>
     </motion.div>
-  );
-}
-
-/**
- * GlowTracker with customizable glow color per mode.
- */
-function GlowTrackerCustom({ color }: { color: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    const parent = el?.parentElement;
-    if (!parent) return;
-
-    const handleMove = (e: MouseEvent) => {
-      const rect = parent.getBoundingClientRect();
-      setPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    };
-    const handleEnter = () => setVisible(true);
-    const handleLeave = () => setVisible(false);
-
-    parent.addEventListener('mousemove', handleMove);
-    parent.addEventListener('mouseenter', handleEnter);
-    parent.addEventListener('mouseleave', handleLeave);
-    return () => {
-      parent.removeEventListener('mousemove', handleMove);
-      parent.removeEventListener('mouseenter', handleEnter);
-      parent.removeEventListener('mouseleave', handleLeave);
-    };
-  }, []);
-
-  return (
-    <div ref={ref} className="absolute inset-0 z-0 pointer-events-none">
-      <div
-        className="absolute -inset-px rounded-[inherit] transition-opacity duration-300"
-        style={{
-          opacity: visible ? 1 : 0,
-          background: `radial-gradient(600px circle at ${pos.x}px ${pos.y}px, ${color} 0%, transparent 90%)`,
-        }}
-      />
-    </div>
   );
 }
