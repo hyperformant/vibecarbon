@@ -64,23 +64,46 @@ export async function verifyToken(apiToken) {
 // ============================================================================
 
 /**
+ * getZones' page size (the most Cloudflare serves for zones) and the most
+ * pages it reads. One unpaged request returns 20 zones, so an account with
+ * more could not find the zone of a domain past the first page.
+ */
+const ZONE_PAGE_SIZE = 50;
+const MAX_ZONE_PAGES = 20;
+
+/**
  * Get all zones in the Cloudflare account
  *
  * @param {string} apiToken - Cloudflare API token
  * @returns {Promise<Array>} - Array of zone objects
  */
 export async function getZones(apiToken) {
-  const response = await fetchWithRetry('https://api.cloudflare.com/client/v4/zones', {
-    headers: bearerJsonHeaders(apiToken),
-  });
+  const zones = [];
+  for (let page = 1; ; page++) {
+    if (page > MAX_ZONE_PAGES) {
+      throw new Error(
+        `Cloudflare account has more than ${MAX_ZONE_PAGES * ZONE_PAGE_SIZE} zones, more than vibecarbon reads`,
+      );
+    }
+    const response = await fetchWithRetry(
+      `https://api.cloudflare.com/client/v4/zones?per_page=${ZONE_PAGE_SIZE}&page=${page}`,
+      { headers: bearerJsonHeaders(apiToken) },
+    );
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(`Cloudflare API error: ${JSON.stringify(error.errors)}`);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(`Cloudflare API error: ${JSON.stringify(error.errors)}`);
+    }
+
+    const data = await response.json();
+    const rows = Array.isArray(data.result) ? data.result : [];
+    zones.push(...rows);
+    // total_pages when Cloudflare says it, else a full page means more.
+    const totalPages = Number(data.result_info?.total_pages);
+    const more = Number.isFinite(totalPages) ? totalPages > page : rows.length === ZONE_PAGE_SIZE;
+    if (!more) break;
   }
-
-  const data = await response.json();
-  return data.result;
+  return zones;
 }
 
 // ============================================================================
