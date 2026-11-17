@@ -5,11 +5,11 @@
 The template assumes subscriptions everywhere except the catalog. A generated
 project selling a one-time product has a working checkout and nothing behind it:
 
-`src/server/routes/webhooks/stripe.ts`
+`src/server/routes/webhooks/billing.ts`
 
 ```js
-if (session.mode !== 'subscription') {
-  logger.debug('Ignoring non-subscription checkout session');
+if (!customerId || !subscriptionId) {
+  logger.debug('Checkout completed event missing customerId or subscriptionId');
   return;
 }
 ```

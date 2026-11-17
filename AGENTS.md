@@ -32,7 +32,7 @@ vibecarbon upgrade                # Upgrade infrastructure files to the latest t
 vibecarbon telemetry [on|off]     # Control anonymous usage analytics (status by default)
 vibecarbon deploy [env]           # Deploy an environment (interactive picker for mode and region)
 vibecarbon destroy [env]          # Tear down a cloud environment
-vibecarbon backup [env]           # Create, list, or download database backups
+vibecarbon backup [env]           # Create or list database backups
 vibecarbon restore [env]          # Restore the database from a backup
 vibecarbon failover [env]         # Initiate failover to the standby region
 vibecarbon scale [env]            # Scale worker nodes and instance sizes

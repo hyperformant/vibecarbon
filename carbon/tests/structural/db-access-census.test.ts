@@ -71,7 +71,6 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
   'routes/v1/stats.ts': 'super-admin dashboard counts',
   'routes/v1/theme.ts': 'public theme read and super-admin theme write',
   'routes/webhooks/billing.ts': 'signature-verified billing webhook writes',
-  'routes/webhooks/stripe.ts': 'signature-verified Stripe webhook writes',
 };
 
 /** Files that may import the raw pg `pool` (bypasses RLS like adminDb). */

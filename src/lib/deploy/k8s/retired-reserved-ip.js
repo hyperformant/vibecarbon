@@ -43,6 +43,11 @@
  *
  * Never on Hetzner or Linode: their recorded floating IP is the cluster's live
  * ingress (retiredReservedIps returns nothing there).
+ *
+ * REMOVE AFTER 2027-02-13, with lib/iac/retired-resources.js: three months
+ * after 0.53.0, the first release that made no reserved IP. A stack that
+ * still lists the address must be refused then, never converged (docs/history.md,
+ * Dated bridges).
  */
 import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { lookupAuthoritativeA, managedRecordNames } from '../../dns-authoritative.js';

@@ -583,6 +583,8 @@ export function dropUnportableEnv(env, { log = p.log } = {}) {
  * Env keys the retired DNS-01 deploys wrote to a server's .env: the provider
  * token lego read, the provider selector, and the lego tuning vars. Every
  * certificate now validates over HTTP-01, so no server keeps a DNS API token.
+ * REMOVE AFTER 2027-02-06, with dropDnsTokenEnv: three months after 0.51.0,
+ * the first release that wrote none of them (docs/history.md, Dated bridges).
  */
 const DNS01_ENV_KEYS = new Set([
   'DO_AUTH_TOKEN',

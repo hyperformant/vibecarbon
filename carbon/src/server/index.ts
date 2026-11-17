@@ -41,7 +41,6 @@ import { performanceRoutes } from './routes/v1/performance';
 import { statsRoutes } from './routes/v1/stats';
 import { themeRoutes } from './routes/v1/theme';
 import { billingWebhookRoutes } from './routes/webhooks/billing';
-import { stripeWebhookRoutes } from './routes/webhooks/stripe';
 import type { HonoVariables } from './types';
 
 const app = new Hono<{ Variables: HonoVariables }>();
@@ -212,7 +211,6 @@ app.route('/api/files', fileReadRoutes);
 // Webhooks (no auth required, signature verified internally)
 // Note: Must receive raw body for signature verification
 app.route('/api/webhooks/billing', billingWebhookRoutes);
-app.route('/api/webhooks/stripe', stripeWebhookRoutes); // Backward compat for existing Stripe deployments
 
 // Backwards compatibility: redirect old /api/* to /api/v1/*
 app.get('/api/me', (c) => c.redirect('/api/v1/me', 301));

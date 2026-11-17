@@ -55,7 +55,6 @@
   - Stripe: `stripe-signature` header with HMAC
   - Paddle: `paddle-signature` header with `ts=...;h1=...` HMAC-SHA256
   - Polar: `webhook-id` + `webhook-timestamp` + `webhook-signature` headers with HMAC-SHA256
-  - Backward-compatible Stripe webhook at `/api/webhooks/stripe`
 - Normalized webhook events: `checkout.completed`, `subscription.created/updated/deleted`, `payment.failed`
 - Lazy customer provisioning (created on first checkout, with rollback on failure)
 - User and organization billing (separate customer records per type)
@@ -419,7 +418,7 @@
   - Scheduled backups (daily default, every 6 hours in production; CronJob on K8s, cron on Compose)
   - S3 backend with auto-created bucket
   - Configurable retention (7 days default, 30 days production)
-  - Manual backup trigger, list, and download
+  - Manual backup trigger and list
   - Restore from backup (`vibecarbon restore`)
 - CI/CD via GitHub Actions
   - Auto-generated workflow: test (lint + typecheck + test) → build (Docker image to ghcr.io) → deploy (SSH)

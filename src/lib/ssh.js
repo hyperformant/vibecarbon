@@ -522,24 +522,6 @@ export async function scpWithRetry(args, options = {}) {
 }
 
 /**
- * Download a file from a remote server via SCP. Argv form.
- */
-export async function scpDownload(ip, sshKeyPath, remotePath, localPath, options = {}) {
-  const { env, firstConnect = false, timeout = 300_000, retries } = options;
-  await scpWithRetry(
-    [
-      '-i',
-      sshKeyPath,
-      ...sshHostKeyOpts(env, { firstConnect, sshKeyPath }),
-      '--',
-      `root@${ip}:${remotePath}`,
-      localPath,
-    ],
-    { timeout, retries, what: `${ip}:${remotePath}` },
-  );
-}
-
-/**
  * Upload a file to a remote server via SCP. Argv form.
  */
 export async function scpUpload(ip, sshKeyPath, localPath, remotePath, options = {}) {

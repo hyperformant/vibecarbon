@@ -1,30 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { validateBackupFilename } from '../../../src/lib/validators.js';
-
-describe('C-4: backup filename validation rejects injection payloads', () => {
-  it.each([
-    ['x;rm -rf /;#.tar.gz'],
-    ['$(whoami).tar.gz'],
-    ['`id`.tar.gz'],
-    ['"; cat /etc/passwd; "'],
-    ['../../etc/passwd'],
-    ['/abs/path.tar.gz'],
-    ['foo/bar.tar.gz'],
-    ['backup.zip'], // wrong extension
-    [''],
-  ])('rejects %s', (payload) => {
-    expect(validateBackupFilename(payload)).toBeTruthy();
-  });
-
-  it.each([['vibecarbon-20260417.tar.gz'], ['dump.sql.gz'], ['backup_2026_01_01.tar']])(
-    'accepts canonical filename %s',
-    (good) => {
-      expect(validateBackupFilename(good)).toBeUndefined();
-    },
-  );
-});
 
 describe('C-4: restore.js uses tar safety flags', () => {
   // GNU tar strips leading `/` by default — the unsafe opt-in is `-P` /

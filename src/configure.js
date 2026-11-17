@@ -256,7 +256,7 @@ function projectDomain(projectConfig) {
 
 // Webhook endpoint that all billing providers point at. The unified handler
 // (carbon/src/server/routes/webhooks/billing.ts) dispatches based on the
-// active provider; Stripe also keeps /api/webhooks/stripe for back-compat.
+// active provider.
 const BILLING_WEBHOOK_PATH = '/api/webhooks/billing';
 
 // `parked: true` disables a billing provider for this release without removing
