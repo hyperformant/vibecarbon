@@ -534,35 +534,3 @@ export function runRestore(env: string, source: string, options: RunOptions): Pr
 export function runFailover(env: string, options: RunOptions): Promise<CliResult> {
   return runCli(`failover ${env} -y`, options);
 }
-
-/**
- * Run the `gh` CLI with full stdout/stderr capture. Used by the e2e
- * lifecycle to bootstrap throwaway GitHub repos that `ensureCIImageReady`
- * relies on, and to delete them during teardown.
- *
- * Argv form — no local shell — so scenario-supplied slugs can't inject.
- */
-export async function runGh(args: string[], options: RunOptions): Promise<CliResult> {
-  const ctx = scenarioContext.getStore();
-  const logPath = options.logPath ?? ctx?.logPath;
-  const echo = options.echo ?? ctx?.echo ?? true;
-  const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
-  const header = `[cli-runner] gh ${args.join(' ')} (cwd: ${options.cwd})\n`;
-  if (echo) process.stdout.write(header);
-  if (logPath) appendFileSync(logPath, header);
-
-  const env = {
-    ...process.env,
-    ...options.env,
-  };
-
-  return spawnAndCapture('gh', args, {
-    cwd: options.cwd,
-    env,
-    timeoutMs: timeout,
-    logPath,
-    echo,
-    commandLabel: 'gh',
-    start: performance.now(),
-  });
-}

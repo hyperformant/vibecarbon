@@ -81,26 +81,17 @@ function runLeg(provider: string, scenarios: string): { stdout: string; flags: s
 describe('e2e-us-perf.yml leg step filters `scenarios` to its own provider', () => {
   it('passes the provider defaults (no --scenario) when the input is empty', () => {
     const { flags } = runLeg('hetzner', '');
-    expect(flags).toEqual(['--skip-steps', 'setup-repo', '--provider', 'hetzner']);
+    expect(flags).toEqual(['--provider', 'hetzner']);
   });
 
   it('keeps only this leg’s tokens from a mixed-provider input', () => {
     const input = 'hetzner/k8s-ha,digitalocean/compose';
 
     const hetzner = runLeg('hetzner', input);
-    expect(hetzner.flags).toEqual([
-      '--skip-steps',
-      'setup-repo',
-      '--provider',
-      'hetzner',
-      '--scenario',
-      'hetzner/k8s-ha',
-    ]);
+    expect(hetzner.flags).toEqual(['--provider', 'hetzner', '--scenario', 'hetzner/k8s-ha']);
 
     const digitalocean = runLeg('digitalocean', input);
     expect(digitalocean.flags).toEqual([
-      '--skip-steps',
-      'setup-repo',
       '--provider',
       'digitalocean',
       '--scenario',

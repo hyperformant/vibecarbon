@@ -116,7 +116,6 @@ import {
   runDestroy,
   runFailover,
   runFinalDestroy,
-  runGh,
   runRestore,
   runScale,
   scenarioContext,
@@ -238,8 +237,6 @@ const TIMEOUTS: Record<string, number> = {
   // still finish in well under a minute, so this only relaxes a ceiling — it
   // doesn't mask real regressions.
   create: 900_000,
-  'setup-repo': 60_000,
-  'teardown-repo': 60_000,
   'add-features': 60_000,
   deploy: 4_500_000, // 75 min — cold k8s-ha = ~55 min, plus margin
   // Warm path: infra already exists, but image rebuild + rolling restart can
@@ -484,8 +481,8 @@ export interface LifecycleOptions {
    * Steps to remove from the lifecycle entirely. Iteration accelerator —
    * when the failing step doesn't depend on what we're skipping, drop them
    * to shorten the cycle. Wired to `--skip-steps` / `--minimal` flags on
-   * the runner. final-destroy + teardown-repo always run regardless (they
-   * live in the `finally` block, not the step list).
+   * the runner. final-destroy always runs regardless (it lives in the
+   * `finally` block, not the step list).
    */
   skipSteps?: Set<string>;
 }
@@ -2551,8 +2548,7 @@ EOF`;
           // prove it reaches the running app (config_secret_propagation
           // canary). setEnvVar writes both .env.local and .env, so it flows
           // through every deploy path (compose env_file, k8s envFrom, CI
-          // seeding). Done here — before setup-repo commits — so the CI path
-          // picks it up too.
+          // seeding).
           setEnvVar('STRIPE_SECRET_KEY', CONFIG_CANARY_SECRET, config.projectDir);
           // OAuth canary: client id ONLY, never the secret — a half-configured
           // provider stays off in the auth instance, while an unused client id
@@ -2560,167 +2556,6 @@ EOF`;
           // config_oauth_app_propagation (compose env_file / k8s envFrom).
           setEnvVar('GOOGLE_CLIENT_ID', OAUTH_CANARY_CLIENT_ID, config.projectDir);
         }),
-    },
-
-    // 1.5. Create a throwaway public GitHub repo and push the project to it.
-    // `vibecarbon deploy` calls `ensureCIImageReady`, which requires an origin
-    // remote pointing at github.com — the test project needs somewhere real
-    // for the workflow + ghcr image to live. Teardown deletes it in `finally`.
-    //
-    // `vibecarbon create` runs `git init` but doesn't commit; we commit here
-    // so `gh repo create --source=. --push` has something to push.
-    {
-      name: 'setup-repo',
-      run: () => {
-        const slug = `vc-e2e-${config.mode}-${scenarioId.slice(0, 8)}`;
-        config.testRepoSlug = slug;
-        return executeStep('setup-repo', `gh repo create ${slug}`, async () => {
-          // Every git spawn in this step scrubs hook-exported repo-targeting
-          // vars (GIT_DIR & friends) so an inherited GIT_DIR can never make
-          // these operate on the RUNNER's repo with the scratch project as
-          // work tree — see tests/_shared/git-env.ts for the incident this
-          // class caused. Transport vars are kept: the push below needs the
-          // runner's ssh/askpass config.
-          const gitEnv = gitScrubbedEnv();
-          const gitAdd = spawnSync('git', ['add', '-A'], {
-            cwd: config.projectDir,
-            encoding: 'utf-8',
-            env: gitEnv,
-          });
-          if (gitAdd.status !== 0) {
-            throw new Error(`git add failed: ${gitAdd.stderr || gitAdd.stdout}`);
-          }
-          // No [skip ci] needed — vibecarbon create no longer ships workflow
-          // files, so the throwaway repo has nothing to trigger.
-          //
-          // `vibecarbon create` now makes its own initial commit (a clean,
-          // tracked starting point), so `git add -A` here usually stages
-          // nothing — the only post-create change is the STRIPE_SECRET_KEY
-          // canary, and .env/.env.local are gitignored. A "nothing to commit"
-          // result is therefore expected and fine: create's commit is already
-          // pushable. Only fail if the repo has NO commit at all (nothing to
-          // push).
-          const gitCommit = spawnSync('git', ['commit', '-m', 'Initial commit', '--no-verify'], {
-            cwd: config.projectDir,
-            encoding: 'utf-8',
-            env: gitEnv,
-          });
-          if (gitCommit.status !== 0) {
-            const combined = `${gitCommit.stdout || ''}${gitCommit.stderr || ''}`;
-            const nothingToCommit = /nothing to commit|no changes added|working tree clean/i.test(
-              combined,
-            );
-            const hasHead =
-              spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
-                cwd: config.projectDir,
-                encoding: 'utf-8',
-                env: gitEnv,
-              }).status === 0;
-            if (!(nothingToCommit && hasHead)) {
-              throw new Error(`git commit failed: ${gitCommit.stderr || gitCommit.stdout}`);
-            }
-          }
-
-          // Disable git hooks for this scratch repo. `vibecarbon create -git`
-          // now installs a pre-push hook that runs `pnpm test:prepush`, but
-          // the e2e flow uses `-skip-lockfile` so node_modules isn't
-          // present at this point — biome/vitest aren't installed, the hook
-          // would fail, and the push would never reach GitHub. E2E
-          // tests deploy infra, not the customer's dev-time hook gate, so
-          // skip them at the repo level (covers both `gh repo create --push`
-          // and the fallback `git push` retry below).
-          spawnSync('git', ['config', 'core.hooksPath', '/dev/null'], {
-            cwd: config.projectDir,
-            encoding: 'utf-8',
-            env: gitEnv,
-          });
-
-          // `gh repo create --source=. --push` is a 3-step chain: (1) create
-          // the empty repo, (2) add origin, (3) git push. Step 1 succeeds
-          // early but GitHub takes a few seconds before the repo is
-          // pushable; gh then reports the push error as the misleading
-          // `Repository not found`. A naive retry loop re-invokes step 1
-          // too, and the second attempt fails with
-          // `GraphQL: Name already exists on this account` — leaving us
-          // stuck with the repo existing but no code pushed.
-          //
-          // Strategy: attempt the full chain once; on ANY failure, check
-          // if the repo was actually created, and if so skip straight to
-          // `git push origin main` + add remote (retry that up to 3×).
-          let lastErr: string | null = null;
-          // --public (not --private): private repos on a free personal
-          // account share the 2000-min/month Actions allowance, and once
-          // it's exhausted, every dispatched workflow run fails in ~3-5s
-          // with no runner allocated (observed 2026-04-26 batch run #3 —
-          // both compose CI runs returned conclusion=failure with empty
-          // steps and runner_name=""). Public repos get unlimited
-          // Actions minutes on free accounts. Throwaway e2e repos
-          // hold only the scaffolded template (no real secrets — the
-          // .env.local that DOES carry secrets is .gitignored). They're
-          // deleted within 90s of creation.
-          const createResult = await runGh(
-            ['repo', 'create', slug, '--public', '--source=.', '--push', '--remote=origin'],
-            { cwd: config.projectDir, timeout: TIMEOUTS['setup-repo'] },
-          );
-          if (createResult.exitCode === 0) {
-            console.log(`${tag} Created throwaway repo: ${slug}`);
-          } else {
-            lastErr = `exit=${createResult.exitCode}: ${createResult.stderr || createResult.stdout}`;
-            // Check whether repo exists despite the failure.
-            const viewResult = await runGh(['repo', 'view', slug, '--json', 'name'], {
-              cwd: config.projectDir,
-              timeout: 30_000,
-            });
-            const repoExists = viewResult.exitCode === 0;
-            if (repoExists) {
-              console.log(
-                `${tag} gh repo create reported "${lastErr}" but repo ${slug} exists; finishing push separately`,
-              );
-              // Ensure origin remote is set — `gh repo create` may or may not have done it.
-              spawnSync('git', ['remote', 'remove', 'origin'], {
-                cwd: config.projectDir,
-                encoding: 'utf-8',
-                env: gitEnv,
-              });
-              const repoUrlRes = await runGh(
-                ['repo', 'view', slug, '--json', 'sshUrl', '-q', '.sshUrl'],
-                {
-                  cwd: config.projectDir,
-                  timeout: 30_000,
-                },
-              );
-              const sshUrl = (repoUrlRes.stdout || '').trim();
-              spawnSync('git', ['remote', 'add', 'origin', sshUrl], {
-                cwd: config.projectDir,
-                encoding: 'utf-8',
-                env: gitEnv,
-              });
-              for (let attempt = 1; attempt <= 3; attempt++) {
-                const push = spawnSync('git', ['push', '-u', 'origin', 'HEAD:main'], {
-                  cwd: config.projectDir,
-                  encoding: 'utf-8',
-                  env: gitEnv,
-                });
-                if (push.status === 0) {
-                  console.log(`${tag} Pushed to existing repo: ${slug}`);
-                  lastErr = null;
-                  break;
-                }
-                lastErr = `git push exit=${push.status}: ${push.stderr || push.stdout}`;
-                if (attempt < 3) {
-                  console.log(
-                    `${tag} git push attempt ${attempt} failed, retrying in 5s: ${lastErr}`,
-                  );
-                  await new Promise((r) => setTimeout(r, 5000));
-                }
-              }
-            }
-          }
-          if (lastErr) {
-            throw new Error(`setup-repo ${slug} failed: ${lastErr}`);
-          }
-        });
-      },
     },
 
     // 2. Add optional features
@@ -4524,7 +4359,7 @@ EOF`;
     scenarioError = outcome.scenarioError;
   } finally {
     // VC_KEEP_ON_FAILURE=1 — operator escape hatch for debugging. Keeps
-    // the cluster + GitHub repo + orphan resources alive past the test
+    // the cluster + orphan resources alive past the test
     // so it can be poked at with `vibecarbon shell` / `vibecarbon
     // diagnose`. Honored only when the scenario actually failed; a
     // clean pass still tears down.
@@ -4534,9 +4369,9 @@ EOF`;
     // failing step) once, then iterate the failing step against it
     // many times via the CLI directly (`vibecarbon failover <env> -y`).
     //
-    // The operator is responsible for running `vibecarbon destroy` +
-    // `gh repo delete` themselves when done — the orphan sweep is also
-    // skipped because it would delete the very cluster they want to debug.
+    // The operator is responsible for running `vibecarbon destroy`
+    // themselves when done — the orphan sweep is also skipped because it
+    // would delete the very cluster they want to debug.
     const failed = steps.some((s) => s.status === 'fail' || s.status === 'error');
     const keepAlways = process.env.VC_KEEP_ALWAYS === '1';
     const keepOnFailure = process.env.VC_KEEP_ON_FAILURE === '1' && failed;
@@ -4546,17 +4381,16 @@ EOF`;
         ? 'VC_KEEP_ALWAYS=1 set'
         : 'VC_KEEP_ON_FAILURE=1 set + scenario failed';
       console.log(
-        `${tag} ⚠ ${why} — skipping final-destroy, teardown-repo, and orphan sweep.\n` +
+        `${tag} ⚠ ${why} — skipping final-destroy and the orphan sweep.\n` +
           `${tag}   Test rig preserved:\n` +
           `${tag}     project dir:  ${config.projectDir}\n` +
-          `${tag}     repo slug:    ${config.testRepoSlug ?? '(none)'}\n` +
           `${tag}     env:          ${config.envPrefix}\n` +
           `${tag}   Iterate a step against it:\n` +
           `${tag}     cd ${config.projectDir} && vibecarbon failover ${config.envPrefix} -y\n` +
           `${tag}     cd ${config.projectDir} && vibecarbon scale ${config.envPrefix} -y\n` +
           `${tag}     cd ${config.projectDir} && vibecarbon backup ${config.envPrefix} -y\n` +
           `${tag}   When done:\n` +
-          `${tag}     cd ${config.projectDir} && vibecarbon destroy ${config.envPrefix} -y -purge && gh repo delete ${config.testRepoSlug ?? '<slug>'} --yes\n` +
+          `${tag}     cd ${config.projectDir} && vibecarbon destroy ${config.envPrefix} -y -purge\n` +
           `${tag}     (-purge is required here: plain destroy preserves the backup bucket by design ` +
           `for production recovery, and the orphan sweep that would otherwise catch it is the very ` +
           `thing --keep skips — without -purge it leaks forever)`,
@@ -4564,7 +4398,7 @@ EOF`;
       // Sentinel file so iter scripts can find the rig without grepping logs.
       // Layout: one file per scenario under
       // tests/results/.rig-<provider>-<mode>.json containing
-      // { projectDir, projectName, envPrefix, repoSlug, provider, mode, createdAt }.
+      // { projectDir, projectName, envPrefix, provider, mode, createdAt }.
       //
       // Keyed by provider AND mode because scenario identity is provider/mode
       // everywhere else too: keyed by mode alone, a kept `digitalocean/k8s`
@@ -4586,7 +4420,6 @@ EOF`;
               envPrefix: config.envPrefix,
               projectName: config.projectName,
               projectDir: config.projectDir,
-              repoSlug: config.testRepoSlug ?? null,
               domain: config.domain,
               // Always a real provider id ('hetzner' | 'digitalocean') —
               // ScenarioConfig.provider is mandatory since the selection
@@ -4674,39 +4507,6 @@ EOF`;
           errorMessage: errMsg,
           errorStack: cleanupErr instanceof Error ? cleanupErr.stack : undefined,
         });
-      }
-
-      // Delete the throwaway GitHub repo created in setup-repo. Non-fatal —
-      // if the repo is already gone (prior cleanup) or `gh repo delete` is
-      // disabled for the token scope, we log and move on. The sweep below
-      // handles orphans from crashed runs.
-      if (config.testRepoSlug) {
-        try {
-          const teardownResult = await executeStep(
-            'teardown-repo',
-            `gh repo delete ${config.testRepoSlug}`,
-            async () => {
-              const result = await runGh(
-                ['repo', 'delete', config.testRepoSlug as string, '--yes'],
-                {
-                  cwd: config.projectDir,
-                  timeout: TIMEOUTS['teardown-repo'],
-                },
-              );
-              if (result.exitCode !== 0) {
-                console.warn(
-                  `${tag} teardown-repo exited with code ${result.exitCode} (non-fatal).\n` +
-                    `STDERR: ${(result.stderr || '').slice(-1000) || '(empty)'}\n` +
-                    `STDOUT tail: ${(result.stdout || '').slice(-2000) || '(empty)'}`,
-                );
-              }
-            },
-          );
-          steps.push(teardownResult);
-        } catch (teardownErr) {
-          const errMsg = teardownErr instanceof Error ? teardownErr.message : String(teardownErr);
-          console.warn(`${tag} teardown-repo crashed (non-fatal): ${errMsg}`);
-        }
       }
 
       // Sweep for orphaned resources that destroy may have missed.

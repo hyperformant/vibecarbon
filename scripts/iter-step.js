@@ -17,8 +17,8 @@
  *        node scripts/iter-step.js hetzner/k8s-ha destroy -purge
  *      After the destroy it runs the cleanup the lifecycle runs after its
  *      own final destroy, which --keep skipped in step 1: the provider's
- *      orphan sweep, deleting the throwaway GitHub repo, reaping local build
- *      images, then removing the rig file (tests/e2e/utils/rig-teardown.ts).
+ *      orphan sweep, reaping local build images, then removing the rig file
+ *      (tests/e2e/utils/rig-teardown.ts).
  *      -purge is required — plain destroy preserves the backup bucket by
  *      design (production recovery), so it gets none of that cleanup: the
  *      sweep would delete the very bucket it kept.

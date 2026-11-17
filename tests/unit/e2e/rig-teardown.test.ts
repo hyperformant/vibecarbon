@@ -1,10 +1,9 @@
 /**
  * `iter-step <rig> destroy -purge` must clean up as the lifecycle's own final
  * cleanup does. It used to stop at the destroy: on Linode, 2026-11-08, two
- * torn-down rigs left their unread CSI volumes and their public test repos
- * behind with nothing to say so, because only the runner swept. These drive
- * finishRigTeardown (tests/e2e/utils/rig-teardown.ts) with each outcome; no
- * cloud, no gh, no docker.
+ * torn-down rigs left their unread CSI volumes behind with nothing to say so,
+ * because only the runner swept. These drive finishRigTeardown
+ * (tests/e2e/utils/rig-teardown.ts) with each outcome; no cloud, no docker.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { finishRigTeardown } from '../../e2e/utils/rig-teardown.js';
@@ -20,14 +19,13 @@ const clean = () => ({
   sshKeys: 0,
 });
 
-const RIG = { provider: 'linode', projectName: 'testapp-k8s-1-abc', repoSlug: 'vc-e2e-k8s-abc' };
+const RIG = { provider: 'linode', projectName: 'testapp-k8s-1-abc' };
 const RIG_PATH = '/repo/tests/results/.rig-linode-k8s.json';
 const ENV = { LINODE_API_TOKEN: 'linode-token', HETZNER_API_TOKEN: 'hetzner-token' };
 
 function harness(sweepResult = { counts: clean(), enumFailed: false }) {
   const deps = {
     sweep: vi.fn(async () => sweepResult),
-    deleteRepo: vi.fn(async (_slug: string) => {}),
     reap: vi.fn(async (_tag: string, _projectName: string) => {}),
     removeRigFile: vi.fn((_path: string) => {}),
   };
@@ -45,7 +43,7 @@ function harness(sweepResult = { counts: clean(), enumFailed: false }) {
 }
 
 describe('finishRigTeardown', () => {
-  it('a clean destroy is swept, its repo and images removed, and the rig file deleted', async () => {
+  it('a clean destroy is swept, its images removed, and the rig file deleted', async () => {
     const h = harness();
     expect(await h.run(0)).toEqual({ verdict: 'PASS', exitCode: 0 });
     expect(h.deps.sweep).toHaveBeenCalledWith(
@@ -55,7 +53,6 @@ describe('finishRigTeardown', () => {
         token: 'linode-token',
       }),
     );
-    expect(h.deps.deleteRepo).toHaveBeenCalledWith('vc-e2e-k8s-abc');
     expect(h.deps.reap).toHaveBeenCalledWith('[iter]', 'testapp-k8s-1-abc');
     expect(h.deps.removeRigFile).toHaveBeenCalledWith(RIG_PATH);
   });
@@ -84,7 +81,6 @@ describe('finishRigTeardown', () => {
     const h = harness();
     expect(await h.run(1)).toEqual({ verdict: 'FAIL', exitCode: 1 });
     expect(h.deps.sweep).not.toHaveBeenCalled();
-    expect(h.deps.deleteRepo).not.toHaveBeenCalled();
     expect(h.deps.reap).not.toHaveBeenCalled();
     expect(h.deps.removeRigFile).not.toHaveBeenCalled();
   });
@@ -96,20 +92,5 @@ describe('finishRigTeardown', () => {
     expect(h.deps.sweep).not.toHaveBeenCalled();
     expect(h.lines.join('\n')).toContain('LINODE_API_TOKEN');
     expect(h.deps.removeRigFile).not.toHaveBeenCalled();
-  });
-
-  it('a repo that cannot be deleted is a note, not a failed teardown', async () => {
-    const h = harness();
-    h.deps.deleteRepo.mockRejectedValueOnce(new Error('HTTP 403: delete_repo scope\nmore'));
-    expect(await h.run(0)).toEqual({ verdict: 'PASS', exitCode: 0 });
-    expect(h.lines.join('\n')).toContain(
-      'could not delete the test repo vc-e2e-k8s-abc (non-fatal): HTTP 403: delete_repo scope',
-    );
-  });
-
-  it('a rig without a repo deletes none', async () => {
-    const h = harness();
-    await h.run(0, { rig: { repoSlug: null } });
-    expect(h.deps.deleteRepo).not.toHaveBeenCalled();
   });
 });

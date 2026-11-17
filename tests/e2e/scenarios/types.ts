@@ -44,7 +44,6 @@ export interface ScenarioConfig {
   scaleTo: Readonly<Record<string, string | readonly string[]>>;
   projectName: string;
   projectDir: string;
-  testRepoSlug?: string;
   /**
    * Cloud provider this scenario deploys against. Always explicit — every
    * scenario the selection grammar produces (tests/e2e/selection.ts,
@@ -71,7 +70,6 @@ export interface ScenarioConfig {
  */
 export const STEP_NAMES = [
   'create',
-  'setup-repo',
   'add-features',
   'deploy',
   'verify-deploy',
@@ -129,7 +127,6 @@ export const STEP_NAMES = [
   'failback',
   'verify-failback',
   'final-destroy',
-  'teardown-repo',
 ] as const;
 
 export type StepName = (typeof STEP_NAMES)[number];

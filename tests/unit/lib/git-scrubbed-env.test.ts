@@ -40,7 +40,7 @@ describe('gitScrubbedEnv', () => {
     expect(env.GIT_CEILING_DIRECTORIES).toBeUndefined();
   });
 
-  it('keeps transport/safety vars — the e2e setup-repo push depends on them', () => {
+  it('keeps transport/safety vars, so a caller that pushes keeps its ssh and prompt guards', () => {
     vi.stubEnv('GIT_SSH_COMMAND', 'ssh -i /tmp/key');
     vi.stubEnv('GIT_ASKPASS', '/bin/false');
     vi.stubEnv('GIT_TERMINAL_PROMPT', '0');
