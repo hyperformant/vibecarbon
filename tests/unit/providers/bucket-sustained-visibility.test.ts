@@ -157,3 +157,38 @@ describe('waitForBucketVisible pacing', () => {
     expect(spent).toBe(0);
   });
 });
+
+/**
+ * A timeout says why. Hetzner e2e 2026-11-16 (hetzner/compose): the app bucket
+ * was created, never passed this probe in two minutes, and the warning said
+ * only that. The loop swallowed every error, so nothing recorded whether HEAD,
+ * LIST or the write was failing, or with what. The bucket was readable twenty
+ * minutes later.
+ */
+describe('waitForBucketVisible: a timeout names the last problem', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('names the error and its HTTP status when a probe call kept failing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { p } = makeProvider({ headResults: [true] });
+    p._send = vi.fn(async () => {
+      const err = new Error('The specified bucket does not exist') as Error & {
+        $metadata?: { httpStatusCode: number };
+      };
+      err.name = 'NoSuchBucket';
+      err.$metadata = { httpStatusCode: 404 };
+      throw err;
+    });
+    expect(await p.waitForBucketVisible('b', { intervalMs: 1, budgetMs: 20 })).toBe(false);
+    expect(warn.mock.calls.at(-1)?.[0]).toMatch(/\(last problem: NoSuchBucket \(HTTP 404\)\)$/);
+  });
+
+  it('says the bucket did not answer HEAD when that is what kept failing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { p } = makeProvider({ headResults: [false] });
+    expect(await p.waitForBucketVisible('b', { intervalMs: 1, budgetMs: 20 })).toBe(false);
+    expect(warn.mock.calls.at(-1)?.[0]).toMatch(
+      /\(last problem: the bucket did not answer HEAD\)$/,
+    );
+  });
+});

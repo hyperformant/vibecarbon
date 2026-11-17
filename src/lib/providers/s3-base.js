@@ -797,6 +797,9 @@ export class S3CompatibleProvider {
     const deadline = Date.now() + budgetMs;
     const probeKey = `.vibecarbon-visibility-probe-${Date.now()}`;
     let streak = 0;
+    // Why the last pass was not clean, for the warning below: without it a
+    // timeout says only that two minutes went by.
+    let lastProblem = 'the bucket did not answer HEAD';
     for (;;) {
       let clean = false;
       // bucketExists translates HeadBucket 403 into a fatal "owned by another
@@ -839,15 +842,18 @@ export class S3CompatibleProvider {
           }
         } else {
           streak = 0;
+          lastProblem = 'the bucket did not answer HEAD';
         }
-      } catch {
+      } catch (error) {
         streak = 0;
         clean = false;
+        const status = error?.$metadata?.httpStatusCode;
+        lastProblem = `${error?.name || 'Error'}${status ? ` (HTTP ${status})` : ''}`;
       }
       if (clean) continue;
       if (Date.now() + intervalMs > deadline) {
         console.warn(
-          `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms`,
+          `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms (last problem: ${lastProblem})`,
         );
         return false;
       }
