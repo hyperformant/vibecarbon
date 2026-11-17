@@ -36,7 +36,7 @@ const WALG_VERSION = 'v3.0.9';
 const WALG_IMAGE = `ghcr.io/hyperformant/wal-g:${WALG_VERSION.slice(1)}`;
 // postgres:<major>.<minor>-alpine<alpine>, by multi-arch index digest.
 const PG_BASE = 'postgres:17.11-alpine3.24';
-const PG_BASE_DIGEST = 'sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac';
+const PG_BASE_DIGEST = 'sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0';
 const PG_CRON_VERSION = '1.6.8';
 
 const WALG_BUILDER = join('docker', 'wal-g', 'Dockerfile');
