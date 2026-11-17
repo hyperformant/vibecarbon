@@ -60,7 +60,7 @@ src/
 │   ├── emails/              # React Email templates
 │   ├── auth/                # In-process auth (Better Auth): sessions, 2FA, impersonation, ForwardAuth tokens
 │   └── lib/                 # auth.ts (isSuperAdmin), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
-├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
+├── shared/                  # Code shared by client and server (pricing.ts, routes.ts, billing catalog)
 content/                     # MDX content (blog/, changelog/, docs/)
 db/migrations/               # Drizzle migrations, applied by the migrate step (see Changing the Database Schema)
 ```
@@ -180,7 +180,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
    npx drizzle-kit generate --custom --name projects_triggers   # an empty migration to fill in
    ```
    Separate statements with `--> statement-breakpoint`. A `SECURITY DEFINER` function needs `SET search_path = ''` and, unless policies call it, `REVOKE EXECUTE ... FROM PUBLIC, app_user`.
-3. Start the app (or `npm run db:migrate`), add API types to `src/shared/types.ts`, and run `npm run test:prepush`.
+3. Start the app (or `npm run db:migrate`), type the API response next to the client hook that fetches it (`src/client/hooks/api/`, exported from there), and run `npm run test:prepush`.
 
 Rules:
 
