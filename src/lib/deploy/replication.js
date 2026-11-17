@@ -2728,14 +2728,26 @@ export async function readK8sReplicationState(primaryIp, sshKeyPath) {
     ],
     { timeout: POD_EXEC_QUERY_MS },
   );
-  const out = (typeof result === 'string' ? result : '').trim();
-  // `psql -tAc` yields exactly one token: a pg_stat_replication.state value, or
-  // '' when no replica is connected. Anything else means the read itself failed —
-  // an SSH/kubectl error banner (e.g. "banner exchange: Connection timed out")
-  // leaked through as stdout. Throw so verifyStreaming RETRIES rather than letting
-  // the error text masquerade as a replication state in the deploy-abort message.
-  const VALID_STATES = new Set(['', 'startup', 'catchup', 'streaming', 'backup', 'stopping']);
-  if (!VALID_STATES.has(out)) {
+  return replicationStateOf((typeof result === 'string' ? result : '').trim());
+}
+
+/** Every pg_stat_replication.state value, and '' for no replica connected. */
+const REPLICATION_STATES = new Set(['', 'startup', 'catchup', 'streaming', 'backup', 'stopping']);
+
+/**
+ * The state a STREAMING_STATE_SQL read printed (trimmed), checked. `psql -tAc`
+ * yields exactly one token: a pg_stat_replication.state value, or '' when no
+ * replica is connected. Anything else means the read itself failed: an
+ * SSH/kubectl/docker error banner (e.g. "banner exchange: Connection timed
+ * out") leaked through as stdout. Throw so verifyStreaming RETRIES rather than
+ * letting the error text masquerade as a replication state in the deploy-abort
+ * message. Both HA tiers' verify reads go through it.
+ *
+ * @param {string} out
+ * @returns {string}
+ */
+export function replicationStateOf(out) {
+  if (!REPLICATION_STATES.has(out)) {
     throw new Error(`could not read pg_stat_replication (unexpected output: ${out.slice(0, 120)})`);
   }
   return out;

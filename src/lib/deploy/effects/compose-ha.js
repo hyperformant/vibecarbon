@@ -80,6 +80,7 @@ import { resolvePublicA } from '../public-dns-lookup.js';
 import {
   assertReplicationStreamingOrDegraded,
   probeStreaming,
+  replicationStateOf,
   verifyStreaming,
 } from '../replication.js';
 import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
@@ -1449,7 +1450,12 @@ async function haVerifyStreaming(ctx) {
         `cd /opt/${projectName} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
         { timeout: 10_000 },
       );
-      return typeof state === 'string' ? state.trim() : '';
+      // A failed read, as a failed exec is on k8s: sshRun answers false, never
+      // "no replica connected" (''). Output that is no state is one too.
+      if (typeof state !== 'string') {
+        throw new Error('could not read pg_stat_replication (the ssh read failed)');
+      }
+      return replicationStateOf(state.trim());
     },
     attempts: 10,
     delaysMs: [250, 500, 1000, 2000, 3000],
