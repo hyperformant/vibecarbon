@@ -1243,6 +1243,19 @@ async function bootstrap(cliArgs) {
     }
   }
 
+  // .gitignore is written and checked whether or not git is installed. It is
+  // a project file, not a product of `git init`: a project created on a
+  // machine without git gets a repository later (`git init`, a GUI client, an
+  // IDE), and its first `git add .` must already find .env.local and the
+  // other secret files ignored.
+  copyTemplate('.gitignore', join(projectDir, '.gitignore'), variables);
+
+  const missingPatterns = validateGitignore(join(projectDir, '.gitignore'));
+  if (missingPatterns.length > 0) {
+    p.log.error(`Generated .gitignore is missing required patterns: ${missingPatterns.join(', ')}`);
+    process.exit(1);
+  }
+
   // Initialize git. Always attempted; skipped silently with a friendly note
   // if the `git` binary isn't on PATH (no flag exposed for opt-out).
   let gitAvailable = true;
@@ -1254,16 +1267,6 @@ async function bootstrap(cliArgs) {
 
   if (gitAvailable) {
     s.message('Initializing git repository');
-    copyTemplate('.gitignore', join(projectDir, '.gitignore'), variables);
-
-    const missingPatterns = validateGitignore(join(projectDir, '.gitignore'));
-    if (missingPatterns.length > 0) {
-      p.log.error(
-        `Generated .gitignore is missing required patterns: ${missingPatterns.join(', ')}`,
-      );
-      process.exit(1);
-    }
-
     runCommand('git init', { cwd: projectDir, cleanEnv: true });
 
     // Install pre-commit hook. Two responsibilities:

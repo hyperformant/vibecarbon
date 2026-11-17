@@ -17,7 +17,11 @@ import { withDeployLog } from './lib/deploy-logger.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { resolveEnvSeed } from './lib/env-identity.js';
 import { ensureLockfile } from './lib/package-manager.js';
-import { buildGitAddArgv, detectPackageManager, repairLegacyEnvQuoting } from './lib/project.js';
+import {
+  buildGitAddNamedArgv,
+  detectPackageManager,
+  repairLegacyEnvQuoting,
+} from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { vibecarbonHome } from './lib/vibecarbon-home.js';
 
@@ -376,9 +380,10 @@ async function main(values, positional) {
 
     // Stage it. CI and GitOps build from what the repo tracks: an untracked
     // lockfile would be present locally yet missing from the repo the runner
-    // builds from.
+    // builds from. The lockfile and nothing else: the operator's own edits
+    // stay unstaged until they stage them.
     if (generated) {
-      runCommand(buildGitAddArgv(cwd, [lockfile]), {
+      runCommand(buildGitAddNamedArgv(cwd, [lockfile]), {
         silent: true,
         ignoreError: true,
         cleanEnv: true,

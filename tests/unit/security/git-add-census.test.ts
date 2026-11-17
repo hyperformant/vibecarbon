@@ -66,6 +66,15 @@ describe('git add census', () => {
     expect(hits(STRING_COMMAND)).toEqual([]);
   });
 
+  it('only configure stages the whole allowlist, for a first commit', () => {
+    // buildGitAddArgv stages every allowlisted path that changed. That is
+    // right for the first commit of a project that has none, and wrong for a
+    // command that wrote one file: deploy staged the operator's work in
+    // progress along with the lockfile it had generated. A command that means
+    // one file uses buildGitAddNamedArgv.
+    expect(hits(/\bbuildGitAddArgv\(/g)).toEqual(['src/configure.js', 'src/lib/project.js']);
+  });
+
   it('create checks the .gitignore it wrote before the repository exists', () => {
     // What makes the one broad add safe: the ignore patterns are verified
     // (the CLI exits if one is missing) before `git init`, and so before the add.

@@ -295,12 +295,14 @@ jobs:
         if: always()
         run: |
           # The vibecarbon CLI writes per-env deploy logs and the e2e runner
-          # writes failure-diagnostic dumps to ~/.vibecarbon/logs — pull them
+          # writes failure-diagnostic dumps to the e2e home's logs folder
+          # (~/.vibecarbon-e2e/logs, tests/e2e/utils/e2e-home.js). Pull them
           # into the artifact root so red runs are debuggable from artifacts
           # alone (upload-artifact does not expand ~).
           mkdir -p tests/results/cli-logs
-          if [ -d "$HOME/.vibecarbon/logs" ]; then
-            cp -r "$HOME/.vibecarbon/logs/." tests/results/cli-logs/ || true
+          CLI_LOGS="${VIBECARBON_HOME:-$HOME/.vibecarbon-e2e}/logs"
+          if [ -d "$CLI_LOGS" ]; then
+            cp -r "$CLI_LOGS/." tests/results/cli-logs/ || true
           fi
 
       - name: Scrub secret values from artifacts

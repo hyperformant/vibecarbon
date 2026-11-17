@@ -11,6 +11,9 @@
  * when they load (the SSH mux dir, local Pulumi state, the uplink lock), so
  * set it before the process starts, as the test setup does.
  *
+ * The real-infra e2e harness uses one fixed home, ~/.vibecarbon-e2e
+ * (tests/e2e/utils/e2e-home.js), for the same reason.
+ *
  * Every path into this directory goes through here
  * (tests/unit/lib/vibecarbon-home-census.test.ts).
  */

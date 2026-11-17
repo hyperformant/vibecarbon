@@ -500,7 +500,7 @@ export interface LifecycleOptions {
  * fix doesn't have to be "re-run the test to see what happened."
  *
  * Output is appended to a per-scenario diagnostics file
- * (~/.vibecarbon/logs/<env>-failure-diagnostics-<step>-<ts>.log) so it
+ * (~/.vibecarbon-e2e/logs/<env>-failure-<step>-<ts>.log) so it
  * survives the test runner's log truncation and is grep-able later.
  *
  * Bounded by: 30s timeout per command, ~4KB per snippet, best-effort
@@ -771,7 +771,7 @@ async function captureFailureDiagnostics(
   //    traefik container) wasn't captured anywhere, so "propagation vs
   //    rate limit vs bad token" was unrecoverable from artifacts. App
   //    container output still lives in the deploy logger's
-  //    ~/.vibecarbon/logs/<env>-<ts>.log.
+  //    ~/.vibecarbon-e2e/logs/<env>-<ts>.log.
   if (config.mode === 'compose' || config.mode === 'compose-ha') {
     const { getServerIps, getSshKeyPath, e2eSshOpts } = await import('../utils/ssh.js');
     // Named nodeIps/nodeKey (not serverIps/sshKeyPath): the verify block's

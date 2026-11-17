@@ -23,7 +23,7 @@
  *   - a spawner (runCommand, runCommandAsync, execFileSync, execSync, spawn,
  *     spawnSync, execFile, exec, execa...) whose first argument is the string
  *     'git', a string/template starting with "git ", an array starting with
- *     'git', or a buildGitAddArgv(...) call.
+ *     'git', or a buildGitAddArgv(...) / buildGitAddNamedArgv(...) call.
  *
  * Scope: all of src/ and bin/; in tests/ every git run in a TEMP repo. A test
  * git call that is read-only against THIS checkout (no cwd, or cwd is the repo
@@ -119,7 +119,7 @@ function startsWithGitCommand(text: string): boolean {
   return (
     /^(['"`])(?:git|gh)(\s|\1)/.test(text) || // 'git' / 'git init' / `git ${x}` / 'gh repo view'
     /^\[\s*['"](?:git|gh)['"]/.test(text) || // ['git', ...] / ['gh', ...]
-    /^buildGitAddArgv\(/.test(text)
+    /^buildGitAdd(?:Named)?Argv\(/.test(text)
   );
 }
 
@@ -261,6 +261,7 @@ describe('every git invocation scrubs the inherited git context', () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the string IS source text under test
     expect(check('runCommand(`git commit -m ${msg}`, { cleanEnv: false })')).toEqual([false]);
     expect(check('runCommand(buildGitAddArgv(), { silent: true })')).toEqual([false]);
+    expect(check('runCommand(buildGitAddNamedArgv(cwd, [f]), { silent: true })')).toEqual([false]);
     expect(check("spawnSync('git', ['ls-files'], { cwd: dir })")).toEqual([false]);
     expect(check("runCommand('gh repo view')")).toEqual([false]);
     expect(check("runCommand(['gh', 'repo', 'view'], { cleanEnv: true })")).toEqual([true]);

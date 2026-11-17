@@ -37,6 +37,10 @@
  *   node scripts/iter-step.js hetzner/k8s scale
  */
 
+// First, before every other import: the same CLI home the run that kept the
+// rig used (~/.vibecarbon-e2e), set before any src module loads.
+import '../tests/e2e/utils/e2e-home.js';
+
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
