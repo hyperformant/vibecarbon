@@ -431,7 +431,7 @@ export function runUpdate(env: string, options: RunOptions): Promise<CliResult> 
 
 /**
  * Run vibecarbon backup. E2E always wants the create action; PR 2's
- * interactive-default backup CLI requires `-action <create|list|download>`
+ * interactive-default backup CLI requires `-action <create|list>`
  * (or `-l`) under `-y` so the off-TTY guard can name exactly which flag
  * is missing.
  */

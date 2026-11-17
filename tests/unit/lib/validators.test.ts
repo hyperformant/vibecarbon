@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   validateAdminEmail,
   validateAdminPassword,
-  validateBackupFilename,
   validateDisplayName,
   validateDomain,
   validateProjectName,
@@ -127,29 +126,6 @@ describe('validateDomain', () => {
   it('rejects a 64-character label but accepts 63', () => {
     expect(validateDomain(`${'a'.repeat(63)}.com`)).toBeUndefined();
     expect(validateDomain(`${'a'.repeat(64)}.com`)).toBeTruthy();
-  });
-});
-
-describe('validateBackupFilename', () => {
-  it.each([['vibecarbon-20260417-120000.tar.gz'], ['dump.sql.gz'], ['backup.tar'], ['dump.sql']])(
-    'accepts %s',
-    (good) => {
-      expect(validateBackupFilename(good)).toBeUndefined();
-    },
-  );
-
-  it.each([
-    ['../../etc/passwd'],
-    ['/abs/path.tar.gz'],
-    ['foo/bar.tar.gz'],
-    ['foo;rm.tar.gz'],
-    ['foo$(whoami).tar.gz'],
-    ['random.zip'],
-    ['..tar.gz'],
-    ['.env.tar.gz'],
-    [''],
-  ])('rejects %s', (bad) => {
-    expect(validateBackupFilename(bad)).toBeTruthy();
   });
 });
 

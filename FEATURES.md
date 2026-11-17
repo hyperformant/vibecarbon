@@ -419,7 +419,7 @@
   - Scheduled backups (daily default, every 6 hours in production; CronJob on K8s, cron on Compose)
   - S3 backend with auto-created bucket
   - Configurable retention (7 days default, 30 days production)
-  - Manual backup trigger, list, and download
+  - Manual backup trigger and list
   - Restore from backup (`vibecarbon restore`)
 - CI/CD via GitHub Actions
   - Auto-generated workflow: test (lint + typecheck + test) → build (Docker image to ghcr.io) → deploy (SSH)

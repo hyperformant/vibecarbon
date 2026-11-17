@@ -32,7 +32,7 @@ describe('vibecarbon backup', () => {
     }
   });
 
-  it.each(['create', 'list', 'download'])('-action %s accepted by parser', (action) => {
+  it.each(['create', 'list'])('-action %s accepted by parser', (action) => {
     const r = runCli('backup', ['prod', '-action', action, '-y'], {
       cwd: project,
       timeoutMs: 15_000,
