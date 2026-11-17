@@ -187,6 +187,33 @@ describe('LinodeProvider VPC reads', () => {
       await expect(p.listServers()).rejects.toThrow(/VPC membership read failed/);
     }
   });
+
+  // The page walk stops at its page guard with no status. Rows past the guard
+  // were never read, so their instances would look VPC-less to the sweeps.
+  it('a membership walk that runs out of pages is a failed read, not an empty one', async () => {
+    const vpcPages: string[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      if (url.includes('/linode/instances?'))
+        return ok({ data: [{ id: 5 }, { id: 6 }], page: 1, pages: 1 });
+      if (url.includes('/vpcs/ips?')) {
+        vpcPages.push(url);
+        // Every page says there are more: instance 6's row is never reached.
+        return ok({ data: [{ linode_id: 5, vpc_id: 77 }], page: vpcPages.length, pages: 9999 });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const p = new LinodeProvider('tok');
+    const detailed = await p.listServersDetailed();
+    expect(vpcPages).toHaveLength(50);
+    expect(detailed.complete).toBe(false);
+    expect(detailed.items).toHaveLength(2);
+    expect((detailed as { membershipError?: Error }).membershipError?.message).toMatch(
+      /VPC membership read failed.*incomplete/,
+    );
+    // No instance is handed out looking VPC-less on a partial read.
+    expect(detailed.items.every((i: { vpc_ids?: unknown }) => i.vpc_ids === undefined)).toBe(true);
+    await expect(p.listServers()).rejects.toThrow(/VPC membership read failed.*incomplete/);
+  });
 });
 
 describe('LinodeProvider deletes', () => {

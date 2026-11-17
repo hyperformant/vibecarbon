@@ -1087,6 +1087,48 @@ the provider's own filter makes the answer one row.
 
 **Guard:** `tests/unit/dns/cloudflare-zones-all-pages.test.ts`.
 
+#### 2026-11-16: A Linode VPC membership listing cut short is a failed read (#515)
+
+`_attachVpcMembership` in the Linode provider now returns its "membership read
+failed" error when the `/vpcs/ips` walk stops at its 50-page limit, and attaches
+no `vpc_ids` to any instance. `listServers` rejects on it, as it does for a
+failed request.
+
+**Why:** the page walk reports a limit it ran into as `complete: false` with no
+`status`, and the membership read looked only at `status`. On an account with
+more than 5,000 VPC addresses, every instance whose row came after the limit
+read as being in no VPC, and the cluster sweeps in `destroy` skip an instance
+that is in no VPC. Found in review; no account has hit it.
+
+**Do not undo:** a listing that was not read to the end is unknown, not empty.
+Do not go back to checking `status` alone, and do not attach the rows that were
+read.
+
+**Guard:** `tests/unit/providers/linode-vpc-methods.test.ts` serves a listing
+that never ends and expects the error and a rejected `listServers`.
+
+#### 2026-11-16: Scaleway checks the terminal before its storage guide (#515)
+
+Scaleway's `getS3Credentials` now calls `assertInteractiveStdin` before it
+prints the Object Storage guide, as the other four providers do. Off a
+terminal it fails with `SCALEWAY_ACCESS_KEY/SCALEWAY_SECRET_KEY` and prints no
+guide.
+
+**Why:** Scaleway's storage keys are its compute keys, so `getS3Credentials`
+opens no prompt of its own and hands off to `getApiToken`. The only terminal
+check was the one in `getApiToken`, which runs after the guide, so a script or
+CI run got setup steps for a prompt that could not open, and then the error.
+The prompt census only looks at functions that open a prompt, so it never
+looked at this one.
+
+**Do not undo:** in a guided setup the terminal check comes before anything is
+printed for the prompt, in the function that prints it. A check further down
+the call does not count.
+
+**Guard:** `tests/unit/lib/cli/interactive-prompt-guard.test.ts` walks every
+guided setup for a guide call with no check before it, and runs each
+provider's `getS3Credentials` off a terminal expecting a rejection and no guide.
+
 ## Added and later removed
 
 | What | Removed | Why |

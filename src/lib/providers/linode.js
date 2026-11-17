@@ -1290,15 +1290,26 @@ export class LinodeProvider extends BaseProvider {
    * serverNetworkIds accessor can read VPC membership; the instance object
    * carries none. One account-wide GET /vpcs/ips walk (rows carry `linode_id`
    * and `vpc_id`), not a request per instance.
+   *
+   * Membership is attached only when the whole listing was read. A walk that
+   * stops at its page guard carries no `status`, and the rows it did not reach
+   * would leave their instances looking VPC-less, so it is reported as a
+   * failed read like any other.
    * @param {object[]} instances
    * @returns {Promise<Error|undefined>} the failure, or undefined when read
    */
   async _attachVpcMembership(instances) {
     const byLinode = new Map();
+    const maxPages = 50;
     try {
-      const { items: rows, status } = await this._walkPages('/vpcs/ips', { maxPages: 50 });
+      const { items: rows, complete, status } = await this._walkPages('/vpcs/ips', { maxPages });
       if (status !== undefined) {
         return new Error(`Linode VPC membership read failed (HTTP ${status})`);
+      }
+      if (!complete) {
+        return new Error(
+          `Linode VPC membership read failed: the listing was incomplete (more than ${maxPages} pages of VPC addresses)`,
+        );
       }
       for (const row of rows) {
         if (row.linode_id == null || row.vpc_id == null) continue;
