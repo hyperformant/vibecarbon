@@ -174,6 +174,34 @@ export async function sweepOrphanedHetznerResources(
     );
   };
 
+  // DELETE one dependent resource and report what the API said. Until
+  // 2026-11-17 the volume, placement-group, firewall, ssh-key, floating-IP
+  // and network passes ignored the response and counted the resource as
+  // swept, so a refused delete (a 409 "still in use", a 5xx, three failed
+  // attempts) read as a cleaned-up orphan while the resource stayed and
+  // billed. 'deleted' is the only outcome a pass may count. 'gone' is a 404:
+  // destroy's own delete landed and the listing was stale, the goal state.
+  // 'failed' marks the sweep incomplete and names the resource.
+  const deleteResource = async (
+    what: string,
+    path: string,
+  ): Promise<'deleted' | 'gone' | 'failed'> => {
+    const resp = await sweepFetch(`https://api.hetzner.cloud/v1${path}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${hetznerToken}` },
+    });
+    if (resp?.ok) return 'deleted';
+    if (resp?.status === 404) {
+      console.log(`${tag} [sweep] ${what} was already gone (stale list)`);
+      return 'gone';
+    }
+    enumFailed = true;
+    console.warn(
+      `${tag} [sweep] ${what} delete failed: returned ${resp?.status ?? 'no response'}, so it may still exist`,
+    );
+    return 'failed';
+  };
+
   // 1. Delete any servers whose name contains the project name
   // We collect the IDs we DELETE'd so we can confirm completion before
   // sweeping dependent resources. Hetzner server DELETE is async — the API
@@ -267,11 +295,12 @@ export async function sweepOrphanedHetznerResources(
       // Only delete unattached PVC volumes (K8s leftovers)
       if (vol.server === null && vol.name.startsWith('pvc-')) {
         console.log(`${tag} [sweep] Deleting orphaned volume ${vol.id} (${vol.name})`);
-        await sweepFetch(`https://api.hetzner.cloud/v1/volumes/${vol.id}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${hetznerToken}` },
-        });
-        counts.volumes++;
+        if (
+          (await deleteResource(`Volume ${vol.id} (${vol.name})`, `/volumes/${vol.id}`)) ===
+          'deleted'
+        ) {
+          counts.volumes++;
+        }
       }
     }
   } catch (e) {
@@ -308,11 +337,14 @@ export async function sweepOrphanedHetznerResources(
       if (!pg.name.startsWith(projectName)) continue;
       if (liveRefs(pg.servers).length > 0) continue; // still referenced by a live server
       console.log(`${tag} [sweep] Deleting orphaned placement-group ${pg.id} (${pg.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/placement_groups/${pg.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.placementGroups++;
+      if (
+        (await deleteResource(
+          `Placement group ${pg.id} (${pg.name})`,
+          `/placement_groups/${pg.id}`,
+        )) === 'deleted'
+      ) {
+        counts.placementGroups++;
+      }
     }
   } catch (e) {
     console.warn(
@@ -348,11 +380,12 @@ export async function sweepOrphanedHetznerResources(
       });
       if (liveAttachments.length > 0) continue;
       console.log(`${tag} [sweep] Deleting orphaned firewall ${fw.id} (${fw.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/firewalls/${fw.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.firewalls++;
+      if (
+        (await deleteResource(`Firewall ${fw.id} (${fw.name})`, `/firewalls/${fw.id}`)) ===
+        'deleted'
+      ) {
+        counts.firewalls++;
+      }
     }
   } catch (e) {
     console.warn(`${tag} [sweep] Firewall cleanup failed: ${e instanceof Error ? e.message : e}`);
@@ -377,11 +410,12 @@ export async function sweepOrphanedHetznerResources(
     for (const key of sshKeys) {
       if (!key.name?.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned SSH key ${key.id} (${key.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/ssh_keys/${key.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.sshKeys++;
+      if (
+        (await deleteResource(`SSH key ${key.id} (${key.name})`, `/ssh_keys/${key.id}`)) ===
+        'deleted'
+      ) {
+        counts.sshKeys++;
+      }
     }
   } catch (e) {
     console.warn(`${tag} [sweep] SSH key cleanup failed: ${e instanceof Error ? e.message : e}`);
@@ -407,11 +441,12 @@ export async function sweepOrphanedHetznerResources(
       // to a server we just DELETE'd as released.
       if (fip.server != null && !deletedServerIds.includes(fip.server)) continue;
       console.log(`${tag} [sweep] Deleting orphaned floating IP ${fip.id} (${fip.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/floating_ips/${fip.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.floatingIps++;
+      if (
+        (await deleteResource(`Floating IP ${fip.id} (${fip.name})`, `/floating_ips/${fip.id}`)) ===
+        'deleted'
+      ) {
+        counts.floatingIps++;
+      }
     }
   } catch (e) {
     console.warn(
@@ -439,11 +474,12 @@ export async function sweepOrphanedHetznerResources(
       const liveServers = (net.servers ?? []).filter((sid) => !deletedServerIds.includes(sid));
       if (liveServers.length > 0) continue;
       console.log(`${tag} [sweep] Deleting orphaned network ${net.id} (${net.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/networks/${net.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.networks++;
+      if (
+        (await deleteResource(`Network ${net.id} (${net.name})`, `/networks/${net.id}`)) ===
+        'deleted'
+      ) {
+        counts.networks++;
+      }
     }
   } catch (e) {
     console.warn(`${tag} [sweep] Network cleanup failed: ${e instanceof Error ? e.message : e}`);
