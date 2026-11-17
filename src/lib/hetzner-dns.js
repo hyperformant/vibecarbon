@@ -14,12 +14,13 @@
  * API Documentation: https://docs.hetzner.cloud/
  */
 
-import { spinner } from './cli/progress.js';
 import {
   bearerHeaders,
   bearerJsonHeaders,
   pairDeleteResult,
   relativeToFqdn,
+  setupApexAndWildcard,
+  setupHaRecords,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { HetznerProvider } from './providers/hetzner.js';
@@ -496,40 +497,19 @@ export async function upsertApexAndWildcard(auth, domain, ip) {
  * @param {string} serverIp - Server IP address
  * @param {object} [options] - Options
  * @param {Function} [options.onProgress] - Progress callback (skips internal spinners)
- * @returns {Promise<object>} Setup result
+ * @returns {Promise<object>} Setup result, without the record (the other
+ *   backends return theirs; nothing reads it)
  */
 export async function setupSimple(apiToken, zoneId, domain, serverIp, options = {}) {
-  const { onProgress } = options;
-  const s = onProgress ? null : spinner();
-
-  try {
-    s?.start(`Creating DNS records for ${domain}`);
-    onProgress?.(`Creating DNS records for ${domain}`);
-
-    // Root A record
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: domain,
-      value: serverIp,
-      ttl: DEFAULT_TTL,
-    });
-
-    // Wildcard A record for subdomains (registry, api, etc.)
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: `*.${domain}`,
-      value: serverIp,
-      ttl: DEFAULT_TTL,
-    });
-
-    s?.stop('DNS records created (root + wildcard)');
-    onProgress?.('DNS records created (root + wildcard)');
-
-    return { success: true, mode: 'simple' };
-  } catch (error) {
-    s?.stop(`Hetzner DNS setup failed: ${error.message}`);
-    return { success: false, error: error.message };
-  }
+  return setupApexAndWildcard({
+    label: 'Hetzner',
+    domain,
+    ip: serverIp,
+    ttl: DEFAULT_TTL,
+    write: (config) => createDNSRecord(apiToken, zoneId, config),
+    withRecord: false,
+    onProgress: options.onProgress,
+  });
 }
 
 /**
@@ -544,43 +524,17 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
  * @param {string} zoneId - DNS zone ID
  * @param {string} domain - Domain name
  * @param {Array} servers - Array of { name, ip } objects (primary first)
- * @param {{onProgress?: (msg: string) => void}} [options]
+ * @param {{onProgress?: (msg: string) => void}} [options] - onProgress: the
+ *   caller owns the line, so no spinner of our own starts
  * @returns {Promise<object>} Setup result
  */
 export async function setupHA(apiToken, zoneId, domain, servers, options = {}) {
-  // onProgress: the caller owns the line (or another step does, for a
-  // background write); no spinner of our own then. Same contract as setupSimple.
-  const { onProgress } = options;
-  const s = onProgress ? null : spinner();
-
-  try {
-    // Root A record (low TTL for fast failover)
-    s?.start(`Creating DNS record for ${domain}`);
-    onProgress?.(`Creating DNS record for ${domain}`);
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: domain,
-      value: servers[0].ip,
-      ttl: HA_TTL,
-    });
-    s?.stop('Primary DNS record created');
-
-    // Wildcard A record (low TTL for fast failover)
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: `*.${domain}`,
-      value: servers[0].ip,
-      ttl: HA_TTL,
-    });
-
-    return {
-      success: true,
-      mode: 'dns',
-      primaryIp: servers[0].ip,
-      standbyIp: servers[1]?.ip,
-    };
-  } catch (error) {
-    s?.stop(`Hetzner DNS setup failed: ${error.message}`);
-    return { success: false, error: error.message };
-  }
+  return setupHaRecords({
+    label: 'Hetzner',
+    domain,
+    servers,
+    ttl: HA_TTL,
+    write: (config) => createDNSRecord(apiToken, zoneId, config),
+    onProgress: options.onProgress,
+  });
 }

@@ -392,14 +392,14 @@ describe('linode-dns setupSimple', () => {
     expect(result.error).toMatch(/Not found/);
   });
 
-  // Structural pin for the concurrent-spinner guard enforced across every DNS
-  // backend by tests/unit/deploy/preplan-spinner-coverage.test.ts.
-  it('uses the shared `onProgress ? null : spinner()` guard literal', () => {
+  // Structural pin: setupSimple runs the shared flow, whose concurrent-spinner
+  // guard tests/unit/deploy/preplan-spinner-coverage.test.ts pins.
+  it('hands setupSimple to the shared setupApexAndWildcard flow', () => {
     const src = readFileSync(
       fileURLToPath(new URL('../../../src/lib/linode-dns.js', import.meta.url)),
       'utf8',
     );
-    expect(src).toMatch(/const s = onProgress \? null : spinner\(\)/);
+    expect(src).toMatch(/return setupApexAndWildcard\(/);
   });
 });
 

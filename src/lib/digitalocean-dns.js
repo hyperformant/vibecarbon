@@ -26,13 +26,14 @@
  *     clears the floor, so DO carries the project-wide failover TTL verbatim)
  */
 
-import { spinner } from './cli/progress.js';
 import {
   bearerHeaders,
   bearerJsonHeaders,
   matching,
   pairDeleteResult,
   relativeToFqdn,
+  setupApexAndWildcard,
+  setupHaRecords,
   toRelativeName,
   zoneTooLongMessage,
 } from './dns-backend-helpers.js';
@@ -379,37 +380,14 @@ export async function upsertApexAndWildcard(auth, domain, ip) {
  * @returns {Promise<object>} Setup result
  */
 export async function setupSimple(apiToken, zoneId, domain, serverIp, options = {}) {
-  const { onProgress } = options;
-  // When caller provides onProgress, skip internal spinners (caller manages UI)
-  const s = onProgress ? null : spinner();
-
-  try {
-    s?.start(`Creating DNS records for ${domain}`);
-    onProgress?.(`Creating DNS records for ${domain}`);
-
-    const record = await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: domain,
-      value: serverIp,
-      ttl: DEFAULT_TTL,
-    });
-
-    // Wildcard A record for subdomains (registry, api, etc.)
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: `*.${domain}`,
-      value: serverIp,
-      ttl: DEFAULT_TTL,
-    });
-
-    s?.stop('DNS records created (root + wildcard)');
-    onProgress?.('DNS records created (root + wildcard)');
-
-    return { success: true, mode: 'simple', record };
-  } catch (error) {
-    s?.stop(`DigitalOcean DNS setup failed: ${error.message}`);
-    return { success: false, error: error.message };
-  }
+  return setupApexAndWildcard({
+    label: 'DigitalOcean',
+    domain,
+    ip: serverIp,
+    ttl: DEFAULT_TTL,
+    write: (config) => createDNSRecord(apiToken, zoneId, config),
+    onProgress: options.onProgress,
+  });
 }
 
 /**
@@ -424,40 +402,17 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
  * @param {string} zoneId - Zone identity — the domain NAME on DO
  * @param {string} domain - Domain name
  * @param {Array} servers - Array of { name, ip, region } objects (primary first)
+ * @param {{onProgress?: (msg: string) => void}} [options] - onProgress: the
+ *   caller owns the line, so no spinner of our own starts
  * @returns {Promise<object>} Setup result
  */
 export async function setupHA(apiToken, zoneId, domain, servers, options = {}) {
-  // onProgress: the caller owns the line (or another step does, for a
-  // background write); no spinner of our own then. Same contract as setupSimple.
-  const { onProgress } = options;
-  const s = onProgress ? null : spinner();
-
-  try {
-    s?.start(`Creating DNS record for ${domain}`);
-    onProgress?.(`Creating DNS record for ${domain}`);
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: domain,
-      value: servers[0].ip,
-      ttl: HA_TTL,
-    });
-    s?.stop('Primary DNS record created');
-
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: `*.${domain}`,
-      value: servers[0].ip,
-      ttl: HA_TTL,
-    });
-
-    return {
-      success: true,
-      mode: 'dns',
-      primaryIp: servers[0].ip,
-      standbyIp: servers[1]?.ip,
-    };
-  } catch (error) {
-    s?.stop(`DigitalOcean DNS setup failed: ${error.message}`);
-    return { success: false, error: error.message };
-  }
+  return setupHaRecords({
+    label: 'DigitalOcean',
+    domain,
+    servers,
+    ttl: HA_TTL,
+    write: (config) => createDNSRecord(apiToken, zoneId, config),
+    onProgress: options.onProgress,
+  });
 }
