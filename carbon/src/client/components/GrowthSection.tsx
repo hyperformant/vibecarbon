@@ -9,9 +9,9 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router';
 import { useDocsVisibility } from '@/hooks/api';
 import { cn } from '@/lib/utils';
-import logoIcon from '../assets/logo-icon.svg';
 import { FresnelEdge } from './effects/FresnelEdge';
 import { GlowTracker } from './effects/GlowTracker';
+import { FloatingLogoMark } from './FloatingLogoMark';
 import { Button } from './ui/button';
 
 /*
@@ -117,19 +117,7 @@ export function GrowthSection() {
           transition={{ duration: 0.5 }}
           className="mx-auto mb-16 max-w-2xl text-center"
         >
-          <motion.div
-            className="flex justify-center mb-6"
-            animate={{ y: [0, -6, 0] }}
-            transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-          >
-            <img
-              src={logoIcon}
-              alt=""
-              width={56}
-              height={56}
-              className="drop-shadow-[0_0_12px_oklch(0.82_0.14_192/0.6)]"
-            />
-          </motion.div>
+          <FloatingLogoMark />
           <h2 className="mb-4 text-3xl font-black tracking-tight md:text-5xl">
             {t('landing.growth.headline')}{' '}
             <span className="text-primary">{t('landing.growth.headlineHighlight')}</span>

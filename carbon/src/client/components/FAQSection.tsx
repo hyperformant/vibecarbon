@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
+import { FloatingLogoMark } from './FloatingLogoMark';
 
-import logoIcon from '../assets/logo-icon.svg';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 
 export function FAQSection() {
@@ -25,19 +25,7 @@ export function FAQSection() {
     <section className="relative py-24 md:py-36">
       <div className="mx-auto max-w-3xl px-6">
         <div className="mb-8 text-center">
-          <motion.div
-            className="flex justify-center mb-6"
-            animate={{ y: [0, -6, 0] }}
-            transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-          >
-            <img
-              src={logoIcon}
-              alt=""
-              width={56}
-              height={56}
-              className="drop-shadow-[0_0_12px_oklch(0.82_0.14_192/0.6)]"
-            />
-          </motion.div>
+          <FloatingLogoMark />
 
           <motion.h2
             initial={{ opacity: 0, y: 20 }}
