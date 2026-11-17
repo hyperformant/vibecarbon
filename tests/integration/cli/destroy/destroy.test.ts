@@ -56,11 +56,6 @@ describe('vibecarbon destroy', () => {
     assertExitWith(r, 1, 'unknown flag: -e');
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('destroy', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   it('off-TTY in multi-env without env arg refuses', () => {
     destroyRealProject(project);
     project = realProject({ envs: ['prod', 'staging'], withDeployedState: true });

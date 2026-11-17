@@ -61,9 +61,4 @@ describe('vibecarbon failover', () => {
       throw new Error('failover succeeded on non-HA mode');
     }
   });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('failover', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
 });

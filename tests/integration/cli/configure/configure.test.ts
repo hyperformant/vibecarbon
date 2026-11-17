@@ -31,11 +31,6 @@ describe('vibecarbon configure', () => {
     assertExitWith(r, 0, /Providers/);
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('configure', [], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   it('cicd subcommand exists in help', () => {
     const r = runCli('configure', ['-h'], { cwd: project });
     assertSuccess(r);

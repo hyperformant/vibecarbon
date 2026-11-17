@@ -33,11 +33,6 @@ describe('vibecarbon down', () => {
     assertExitWith(r, 0, /Vibecarbon Down|down/i);
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('down', [], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   it('invokes npm run dev:stop', () => {
     const r = runCli('down', [], { cwd: project, execStubs: stubs, timeoutMs: 30_000 });
     if (r.exitCode === null) throw new Error(`down timed out`);

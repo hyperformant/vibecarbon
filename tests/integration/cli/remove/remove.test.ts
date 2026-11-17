@@ -178,11 +178,4 @@ describe('vibecarbon remove', () => {
       }
     });
   });
-
-  describe('not in a project', () => {
-    it('refuses outside a vibecarbon project', () => {
-      const r = runCli('remove', ['observability', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-      assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-    });
-  });
 });

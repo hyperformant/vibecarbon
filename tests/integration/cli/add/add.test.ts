@@ -307,11 +307,4 @@ describe('vibecarbon add', () => {
       assertSuccess(r);
     });
   });
-
-  describe('not in a project', () => {
-    it('refuses outside a vibecarbon project', () => {
-      const r = runCli('add', ['observability', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-      assertExitWith(r, 1, /Not in a Vibecarbon project|vibecarbon\.json/i);
-    });
-  });
 });

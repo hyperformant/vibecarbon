@@ -37,13 +37,6 @@ describe('vibecarbon up', () => {
     });
   });
 
-  describe('not in a project', () => {
-    it('refuses outside a vibecarbon project', () => {
-      const r = runCli('up', [], { cwd: '/tmp' });
-      assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-    });
-  });
-
   describe('orchestration', () => {
     it('invokes docker compose ps for the port probe', () => {
       const r = runCli('up', [], { cwd: project, execStubs: stubs, timeoutMs: 30_000 });

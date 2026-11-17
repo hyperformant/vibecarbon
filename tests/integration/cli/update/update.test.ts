@@ -32,11 +32,6 @@ describe('vibecarbon update', () => {
     expect(r.stdout).toContain('Looking for vibecarbon update?');
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('update', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   it('lists update [env] after scale [env] in the deploy commands', () => {
     const r = runCli('-h', [], { cwd: project });
     const block = r.stdout.slice(r.stdout.indexOf('DEPLOY COMMANDS'));

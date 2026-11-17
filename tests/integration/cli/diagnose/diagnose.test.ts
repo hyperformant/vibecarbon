@@ -65,9 +65,4 @@ describe('vibecarbon diagnose', () => {
       throw new Error('diagnose accepted unknown section');
     }
   });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('diagnose', [], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
 });

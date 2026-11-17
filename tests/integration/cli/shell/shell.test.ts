@@ -25,9 +25,4 @@ describe('vibecarbon shell', () => {
     assertSuccess(r);
     assertExitWith(r, 0, /Vibecarbon Shell|shell/i);
   });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('shell', [], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
 });

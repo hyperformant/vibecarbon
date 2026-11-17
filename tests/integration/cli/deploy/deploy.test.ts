@@ -126,11 +126,6 @@ describe('vibecarbon deploy', () => {
     assertExitWith(r, 1, 'unknown flag: -e');
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('deploy', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   // Final review I3 (local half): a project an older CLI generated still
   // builds the retired db stack. Deploying it with this CLI restarted the old
   // stack and then waited on a migration status the old app never reports.

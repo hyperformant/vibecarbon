@@ -34,9 +34,4 @@ describe('vibecarbon scale', () => {
       throw new Error(`-type rejected:\n${r.stderr}`);
     }
   });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('scale', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
 });

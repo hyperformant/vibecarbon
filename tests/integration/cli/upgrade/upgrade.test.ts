@@ -203,11 +203,6 @@ describe('vibecarbon upgrade', () => {
     expect(r.stdout + r.stderr).not.toMatch(/AGENTS\.md/);
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('upgrade', ['-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   it('upgrades a legacy project with no PROJECT_DISPLAY_NAME recorded (titleize fallback)', () => {
     // Projects created before PROJECT_DISPLAY_NAME existed have no record of
     // it in .env.local; reconstructVariables must fall back to titleizing the

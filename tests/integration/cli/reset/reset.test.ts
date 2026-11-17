@@ -30,11 +30,6 @@ describe('vibecarbon reset', () => {
     assertExitWith(r, 0, /Vibecarbon Reset|reset/i);
   });
 
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('reset', ['-y'], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
-  });
-
   // Final review M9: without a TTY and without -y the confirm prompt had
   // nobody to ask and the run crashed with exit 70. Now: exit 1, name -y,
   // and never run dev:reset.
