@@ -1071,6 +1071,22 @@ its history gone and nothing reported.
 teardown and fails on a second pass for a stack nothing was removed of, and on
 a third pass for any stack.
 
+#### 2026-11-16: Cloudflare zone lookup reads every page (#514)
+
+`getZones` in the Cloudflare DNS backend now asks for 50 zones a page and
+follows the pages to the end, with a cap of 20 pages.
+
+**Why:** it sent one request with no paging, and Cloudflare answers that with
+the first 20 zones. On an account with more, a domain whose zone was past the
+first page had no zone as far as `deploy` and `destroy` could tell. Every other
+DNS backend already walked its pages. Found while sharing code between the
+backends.
+
+**Do not undo:** a list call to a provider is never a single request unless
+the provider's own filter makes the answer one row.
+
+**Guard:** `tests/unit/dns/cloudflare-zones-all-pages.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
