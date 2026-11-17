@@ -55,7 +55,6 @@
   - Stripe: `stripe-signature` header with HMAC
   - Paddle: `paddle-signature` header with `ts=...;h1=...` HMAC-SHA256
   - Polar: `webhook-id` + `webhook-timestamp` + `webhook-signature` headers with HMAC-SHA256
-  - Backward-compatible Stripe webhook at `/api/webhooks/stripe`
 - Normalized webhook events: `checkout.completed`, `subscription.created/updated/deleted`, `payment.failed`
 - Lazy customer provisioning (created on first checkout, with rollback on failure)
 - User and organization billing (separate customer records per type)

@@ -1091,6 +1091,7 @@ a third pass for any stack.
 | n8n and Metabase add-ons | Parked 2026-11-15 (#482) | Hidden; code remains |
 | Retirement guards for the hcloud autoscaler wiring, the credentials profiles and an e2e Grafana probe line | 2026-11-16 (#505) | The code they named is gone, so they could fail only on a name |
 | The e2e scratch GitHub repository (`setup-repo`, `teardown-repo`, the stale-repo sweep) | 2026-11-16 (#505) | No scenario deploys in push mode, so nothing read it. Bring it back with a scenario that does |
+| The template's Stripe-only webhook route, `/api/webhooks/stripe` | 2026-11-16 (#NNN) | `/api/webhooks/billing` handles the same Stripe events, and `configure billing` has named only that URL since the first public commit. `npm run stripe:listen` now forwards there |
 | `backup -action download` and its `-source` flag | 2026-11-16 (#NNN) | It copied a dump file out of the database pod, and no released version wrote one: backups have been wal-g base backups since before the first public commit. `backup -l` lists them and `restore` reads them |
 
 ## Problems that keep coming back

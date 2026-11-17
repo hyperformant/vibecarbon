@@ -103,7 +103,6 @@ db/migrations/               # Drizzle migrations, applied by the migrate step (
 | `GET /api/files/<key>` | 302 to a 5-minute signed download URL (404 unless you may read it) |
 | `GET /api/_internal/verify-role` | Traefik ForwardAuth |
 | `POST /api/webhooks/billing` | Billing webhook handler (Stripe/Paddle/Polar) |
-| `POST /api/webhooks/stripe` | Stripe webhook handler (backward compat) |
 | `GET /api/docs` | Scalar API reference (dev only) |
 
 ### Authentication Flow
