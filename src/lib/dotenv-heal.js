@@ -13,6 +13,11 @@
  * truncated string back over the recoverable line, and deploy's k8s path
  * would ship it as the Secret. `hasLegacyDotenvQuoting` is the read-only
  * detector for `status`, which never writes.
+ *
+ * REMOVE AFTER 2026-12-21, with repairLegacyEnvQuoting (project.js) and the
+ * legacy quoting line in status.js: three months after 0.46.0, the first
+ * release that stopped writing the old quoting (docs/history.md, Dated
+ * bridges).
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

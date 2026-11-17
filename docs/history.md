@@ -1148,5 +1148,6 @@ it. Weigh the removal against that.
 |---|---|---|---|
 | Migration from the empty state passphrase (#420, released in 0.53.0 on 2026-11-13) | `src/lib/iac/index.js`, `StateMigrationError` in `src/lib/iac/state-error.js` | 2027-02-11 | Its state does not open with the project's passphrase, and every command that reads state stops with the passphrase error. Opening it once with a version that still has the migration fixes it |
 | AppArmor restriction off on k8s nodes | cloud-init for k3s | When k3s ships the upstream fix | Not a migration. It is a workaround for new nodes, and nothing old depends on it |
+| Repair of `.env` lines in the old shell quoting (#132, released in 0.46.0 on 2026-09-21) | `src/lib/dotenv-heal.js`, `repairLegacyEnvQuoting` in `src/lib/project.js`, the legacy quoting line in `src/status.js` | 2026-12-21 | A value that holds a single quote and was written by 0.45.0 or earlier reads cut short at the quote in Node, Compose and Vite, and a deploy ships the short value. Enter it again with `vibecarbon configure` |
 | DigitalOcean reserved IP migration | `src/lib/deploy/k8s/retired-reserved-ip.js` | No date set yet | |
 | Removal of provider tokens left in clusters and on servers | `src/lib/deploy/k8s/k3s.js`, `src/scale.js` | No date set yet | |
