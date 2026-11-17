@@ -170,7 +170,7 @@ export function localComposeEnv(base = process.env) {
 // the local Docker image store for testing.
 // biome-ignore format: publish-node-runtime-image.yml and scripts/sync-node-version.js read this declaration as one line
 export const NODE_RUNTIME_IMAGE =
-  'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r4';
+  'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r4@sha256:6c978b9ad81f07c6600dd65245b27a96c063486fed798f68c48bc526d954b933';
 
 // sha256 fingerprint of docker/node-runtime's inputs (every file there but
 // README.md; tests/unit/deploy/node-runtime-image-fingerprint.test.ts has the
