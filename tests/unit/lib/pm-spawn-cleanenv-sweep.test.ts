@@ -26,9 +26,10 @@
  * Deliberately source-text based: the alternative is executing every command
  * path, which needs a real registry and a real install.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const SRC = join(ROOT, 'src');
@@ -64,15 +65,6 @@ const PM_COMMAND_RE = new RegExp(
   ].join('|'),
 );
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, out);
-    else if (entry.name.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
-
 /**
  * Every package-manager spawn call site, as `file:line`.
  *
@@ -82,7 +74,7 @@ function walk(dir: string, out: string[] = []): string[] {
 function findPmSpawnCalls(): { site: string; raw: boolean; scrubbed: boolean }[] {
   const found: { site: string; raw: boolean; scrubbed: boolean }[] = [];
 
-  for (const file of walk(SRC)) {
+  for (const file of sourceFiles(SRC, { exts: ['.js'] })) {
     const text = readFileSync(file, 'utf-8');
     for (const fn of [...SPAWN_FNS, ...RAW_SPAWN_FNS]) {
       const raw = RAW_SPAWN_FNS.includes(fn);

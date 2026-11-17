@@ -8,9 +8,10 @@
  * and fails on any positional index-0 read of a servers list that is not on
  * the reason-tagged allowlist. Everything else asks resolvePrimary.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 
@@ -51,15 +52,6 @@ const ALLOWED: Record<string, string> = {
     'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
 };
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, out);
-    else if (full.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
-
 const isComment = (line: string) => /^\s*(\/\/|\*|\/\*)/.test(line);
 
 function hits(file: string): number[] {
@@ -71,7 +63,7 @@ function hits(file: string): number[] {
 }
 
 describe('no positional servers[0] primary under src/', () => {
-  const files = walk(join(ROOT, 'src'));
+  const files = sourceFiles(join(ROOT, 'src'), { exts: ['.js'] });
 
   it('walks a real tree', () => {
     expect(files.length).toBeGreaterThan(100);

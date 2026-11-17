@@ -18,8 +18,8 @@
  *     the incident block in src/lib/images.js.
  */
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
-import { extname, join, relative, sep } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CARBON_AUTOSCALER_IMAGE,
@@ -33,6 +33,7 @@ import {
   clusterAutoscalerUpstreamRef,
   manifestImageValues,
 } from '../../../src/lib/images.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const DOCKERFILE_PATH = join(ROOT, 'docker', 'carbon-autoscaler', 'Dockerfile');
@@ -332,20 +333,12 @@ describe('mirror job copies the manifest — never rebuilds, never multi-arch', 
  */
 function sweepFiles(): string[] {
   const dirs = ['src', join('carbon', 'k8s'), join('.github', 'workflows')];
-  const exts = new Set(['.js', '.ts', '.yaml', '.yml', '.json', '.sh']);
-  const files: string[] = [];
-  for (const dir of dirs) {
-    for (const entry of readdirSync(join(ROOT, dir), {
-      recursive: true,
-      withFileTypes: true,
-    })) {
-      if (!entry.isFile()) continue;
-      const abs = join(entry.parentPath, entry.name);
-      const rel = relative(ROOT, abs);
-      if (rel.split(sep).includes('node_modules')) continue;
-      if (!exts.has(extname(entry.name))) continue;
-      files.push(rel);
-    }
-  }
-  return files;
+  return sourceFiles(
+    dirs.map((dir) => join(ROOT, dir)),
+    {
+      exts: ['.js', '.ts', '.yaml', '.yml', '.json', '.sh'],
+      skip: ['node_modules'],
+      relativeTo: ROOT,
+    },
+  );
 }

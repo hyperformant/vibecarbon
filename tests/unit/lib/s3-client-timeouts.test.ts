@@ -14,7 +14,7 @@
  * SDK against a real silent server, with the option names the CLI ships, so an
  * option that does not stop a call fails here whatever it is called.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DR_S3_CLIENT_OPTIONS } from '../../../src/lib/deploy/tls-snapshot.js';
 import { S3_HTTP_TIMEOUTS } from '../../../src/lib/s3-timeouts.js';
 import { createS3Client } from '../../../src/lib/walg/restore-base.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(import.meta.dirname, '../../../src');
 const CFG = {
@@ -38,13 +39,6 @@ async function handlerConfig(client: { config: { requestHandler: unknown } }) {
     config?: Record<string, unknown>;
   };
   return (await handler.configProvider) ?? handler.config ?? {};
-}
-
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const p = join(dir, name);
-    return statSync(p).isDirectory() ? walk(p) : p.endsWith('.js') ? [p] : [];
-  });
 }
 
 /** The shipped handler options, same names, every duration cut to 300 ms. */
@@ -107,7 +101,7 @@ describe('S3 client timeouts', () => {
   });
 
   it('no code in src/ relies on requestTimeout', () => {
-    const offenders = walk(SRC).filter((file) =>
+    const offenders = sourceFiles(SRC, { exts: ['.js'] }).filter((file) =>
       /\brequestTimeout\b/.test(
         readFileSync(file, 'utf-8')
           .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -134,7 +128,7 @@ describe('S3 client timeouts', () => {
   it('every `new S3Client(` in src/ passes a requestHandler', () => {
     const offenders: string[] = [];
     let seen = 0;
-    for (const file of walk(SRC)) {
+    for (const file of sourceFiles(SRC, { exts: ['.js'] })) {
       const text = readFileSync(file, 'utf-8');
       for (const m of text.matchAll(/new S3Client\(\{/g)) {
         seen += 1;

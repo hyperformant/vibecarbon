@@ -9,10 +9,11 @@
  * unit tier, in-process (scanContent over the files a generated project
  * commits from these two trees).
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { scanContent } from '../../../src/lib/secret-scan.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const CARBON = join(__dirname, '..', '..', '..', 'carbon');
 const TEXT_EXTS = new Set([
@@ -29,12 +30,7 @@ const TEXT_EXTS = new Set([
 ]);
 
 function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    if (name === 'node_modules' || name === 'dist') return [];
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) return walk(full);
-    return TEXT_EXTS.has(extname(name)) ? [full] : [];
-  });
+  return sourceFiles(dir, { exts: [...TEXT_EXTS], skip: ['node_modules', 'dist'] });
 }
 
 describe('the template passes the deploy secret scan', () => {

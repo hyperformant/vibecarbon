@@ -21,9 +21,10 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sourceFiles } from '../../../_shared/source-files.js';
 
 const clackMock = vi.hoisted(() => ({
   password: vi.fn(),
@@ -281,20 +282,18 @@ describe('census — every guided-setup credential entry point guards its prompt
   });
 });
 
+/** Every `.js` under src/, outside node_modules and anything whose name starts with a dot. */
+function srcJsFiles(): string[] {
+  return sourceFiles(join(REPO_ROOT, 'src'), {
+    exts: ['.js'],
+    skip: ['node_modules'],
+    skipDotDirs: true,
+  }).filter((f) => !basename(f).startsWith('.'));
+}
+
 // ── 4. Census: a cancelled prompt must not look like success ───────────────
 
 describe('census — cancelled prompts never exit 0', () => {
-  function jsFilesUnder(dir: string): string[] {
-    const out: string[] = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) out.push(...jsFilesUnder(full));
-      else if (entry.name.endsWith('.js')) out.push(full);
-    }
-    return out;
-  }
-
   /**
    * A cancel that neither exits non-zero NOR throws lets the command carry on
    * (or return) as if the operator had approved. `return` is as much a silent
@@ -303,7 +302,7 @@ describe('census — cancelled prompts never exit 0', () => {
    */
   function cancelEscapeOffenders(overrides: Map<string, string> = new Map()): string[] {
     const offenders: string[] = [];
-    for (const file of jsFilesUnder(join(REPO_ROOT, 'src'))) {
+    for (const file of srcJsFiles()) {
       const rel = file.replace(REPO_ROOT, '');
       const lines = (overrides.get(rel) ?? readFileSync(file, 'utf-8')).split('\n');
       for (let i = 0; i < lines.length; i++) {
@@ -336,17 +335,6 @@ describe('census — cancelled prompts never exit 0', () => {
 // ── 4b. Census: cancel and decline are distinct, and neither is success ────
 
 describe('census — an explicit "no" never routes to 130 or 0', () => {
-  function jsFiles(dir: string): string[] {
-    const out: string[] = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) out.push(...jsFiles(full));
-      else if (entry.name.endsWith('.js')) out.push(full);
-    }
-    return out;
-  }
-
   const CONFLATED =
     /if \(\s*(?:p\.isCancel\((\w+)\)\s*\|\|\s*!\1|!(\w+)\s*\|\|\s*p\.isCancel\(\2\))\s*\)([\s\S]{0,120})/g;
 
@@ -365,7 +353,7 @@ describe('census — an explicit "no" never routes to 130 or 0', () => {
    */
   it('no site that EXITS conflates isCancel with a falsy answer', () => {
     const offenders: string[] = [];
-    for (const file of jsFiles(join(REPO_ROOT, 'src'))) {
+    for (const file of srcJsFiles()) {
       const src = readFileSync(file, 'utf-8');
       for (const m of src.matchAll(CONFLATED)) {
         // Ignore prose: the doc comment in exit-guard.js quotes this pattern.

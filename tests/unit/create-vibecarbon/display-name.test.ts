@@ -1,8 +1,9 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { generateEnvLocal, PLACEHOLDERS, TEMPLATE_DIR } from '../../../src/create.js';
 import { getFilePolicy } from '../../../src/lib/upgrade-policy.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const baseVariables = {
   PROJECT_NAME: 'my-cool-app',
@@ -46,26 +47,17 @@ describe('upgrade-managed files never carry {{PROJECT_DISPLAY_NAME}}', () => {
   // this test forces you to add that end-to-end legacy-upgrade coverage.
   it('no safe/merge template file contains the placeholder', () => {
     const offenders: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name === 'node_modules' || entry.name === '.git') continue;
-          walk(full);
-          continue;
-        }
-        const rel = relative(TEMPLATE_DIR, full);
-        if (getFilePolicy(rel) === 'never') continue;
-        let content: string;
-        try {
-          content = readFileSync(full, 'utf-8');
-        } catch {
-          continue;
-        }
-        if (content.includes('{{PROJECT_DISPLAY_NAME}}')) offenders.push(rel);
+    for (const full of sourceFiles(TEMPLATE_DIR, { skip: ['node_modules', '.git'] })) {
+      const rel = relative(TEMPLATE_DIR, full);
+      if (getFilePolicy(rel) === 'never') continue;
+      let content: string;
+      try {
+        content = readFileSync(full, 'utf-8');
+      } catch {
+        continue;
       }
-    };
-    walk(TEMPLATE_DIR);
+      if (content.includes('{{PROJECT_DISPLAY_NAME}}')) offenders.push(rel);
+    }
     expect(offenders).toEqual([]);
   });
 });

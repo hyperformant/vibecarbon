@@ -22,9 +22,10 @@
  * inventory idiom: a new exception must be added HERE, with a reason, not
  * discovered in production.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const SWEEP_ROOTS = ['src', 'scripts', join('tests', 'e2e')];
@@ -123,19 +124,6 @@ interface Site {
   token: string;
 }
 
-function findSourceFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        findSourceFiles(join(dir, entry.name), out);
-      }
-    } else if (EXTENSIONS.some((ext) => entry.name.endsWith(ext))) {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
-}
-
 // A provider-API URL path: either appended to an API_BASE-style template /
 // literal host, or the path argument of the BaseProvider.apiRequest
 // transport (which prefixes API_BASE itself).
@@ -189,7 +177,12 @@ function collectSites(): { all: Site[]; unsafe: Site[] } {
   const all: Site[] = [];
   const unsafe: Site[] = [];
   for (const root of SWEEP_ROOTS) {
-    for (const file of findSourceFiles(join(ROOT, root))) {
+    for (const file of sourceFiles(join(ROOT, root), {
+      exts: EXTENSIONS,
+      skip: SKIP_DIRS,
+      skipDotDirs: true,
+      relativeTo: ROOT,
+    })) {
       const source = readFileSync(join(ROOT, file), 'utf-8');
       const lines = source.split('\n');
       for (let i = 0; i < lines.length; i++) {

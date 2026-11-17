@@ -8,21 +8,14 @@
  * sshKeyPathFor in src/lib/ssh.js; this census fails any other file in src/ or
  * tests/e2e that joins a key name under `.vibecarbon`.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const OWNER = 'src/lib/ssh.js';
-
-function walk(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) return e.name === 'node_modules' ? [] : walk(p);
-    return /\.(js|ts)$/.test(e.name) ? [p] : [];
-  });
-}
 
 /** A key filename built from a template: deploy_key_${...} or ssh-${...}. */
 const HAND_BUILT = /deploy_key_\$\{|`ssh-\$\{|['"`/]ssh-\$\{/;
@@ -43,7 +36,10 @@ describe('ssh key path census', () => {
   it('no file in src/ or tests/e2e builds a .vibecarbon key path by hand', () => {
     const files: Record<string, string> = {};
     for (const dir of ['src', 'tests/e2e']) {
-      for (const f of walk(join(root, dir))) {
+      for (const f of sourceFiles(join(root, dir), {
+        exts: ['.js', '.ts'],
+        skip: ['node_modules'],
+      })) {
         files[relative(root, f)] = readFileSync(f, 'utf8');
       }
     }

@@ -29,9 +29,10 @@
  * exception is added HERE with a reason, and the exact-match assertions
  * prune a row whose site has gone.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const SWEEP_ROOTS = ['src', 'scripts', join('tests', 'e2e')];
@@ -104,23 +105,17 @@ const TEXT_MATCH_EXCEPTIONS: Array<{ file: string; match: string; reason: string
   },
 ];
 
-function findSourceFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        findSourceFiles(join(dir, entry.name), out);
-      }
-    } else if (EXTENSIONS.some((ext) => entry.name.endsWith(ext))) {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
-}
-
 const isComment = (trimmed: string) =>
   trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*');
 
-const sources = SWEEP_ROOTS.flatMap((root) => findSourceFiles(join(ROOT, root))).map((file) => ({
+const sources = SWEEP_ROOTS.flatMap((root) =>
+  sourceFiles(join(ROOT, root), {
+    exts: EXTENSIONS,
+    skip: SKIP_DIRS,
+    skipDotDirs: true,
+    relativeTo: ROOT,
+  }),
+).map((file) => ({
   file,
   lines: readFileSync(join(ROOT, file), 'utf-8').split('\n'),
 }));

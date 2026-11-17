@@ -45,11 +45,12 @@
  * convention escapes the ladder detector; the positive controls at the
  * bottom keep the detectors themselves honest.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { INFRA_PATTERNS } from '../../e2e/utils/classify-failure.js';
 
 const ROOT = process.cwd();
@@ -111,17 +112,8 @@ function isCommentLine(line: string): boolean {
   return trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*');
 }
 
-function walkFiles(dir: string, ext: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        walkFiles(join(dir, entry.name), ext, out);
-      }
-    } else if (entry.name.endsWith(ext)) {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
+function walkFiles(dir: string, ext: string): string[] {
+  return sourceFiles(dir, { exts: [ext], skip: SKIP_DIRS, skipDotDirs: true, relativeTo: ROOT });
 }
 
 /** `file :: NAME` for every ladder constant in src/**.js and tests/e2e/**.ts. */

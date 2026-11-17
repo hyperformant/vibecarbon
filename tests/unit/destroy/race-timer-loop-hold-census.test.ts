@@ -16,21 +16,12 @@
  * and requires the timer be unref'd or cleared — so the next timeout arm
  * cannot reintroduce the class.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(process.cwd(), 'src');
-
-function allJsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...allJsFiles(p));
-    else if (name.endsWith('.js')) out.push(p);
-  }
-  return out;
-}
 
 interface RaceSite {
   file: string;
@@ -41,7 +32,7 @@ interface RaceSite {
 /** Every Promise.race site, with the ~30 lines that follow it. */
 function raceSites(): RaceSite[] {
   const sites: RaceSite[] = [];
-  for (const file of allJsFiles(SRC)) {
+  for (const file of sourceFiles(SRC, { exts: ['.js'] })) {
     const lines = readFileSync(file, 'utf-8').split('\n');
     lines.forEach((text, i) => {
       if (!text.includes('Promise.race')) return;

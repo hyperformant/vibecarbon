@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,6 +15,7 @@ import {
   resolveDbImage,
   traefikImageRef,
 } from '../../../src/lib/images.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * The boot image pull: every compose server (all five providers) starts
@@ -66,20 +67,11 @@ describe('boot pull db ref follows the deploy', () => {
   });
 
   it('census: no source file outside images.js prefetches through dbImageRef()', () => {
-    const offenders: string[] = [];
-    const walk = (dir: string) => {
-      for (const e of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, e.name);
-        if (e.isDirectory()) walk(full);
-        else if (
-          /\.(js|ts|sh|ya?ml)$/.test(e.name) &&
-          /\bdbImageRef\(/.test(readFileSync(full, 'utf8'))
-        )
-          offenders.push(full.slice(REPO.length + 1));
-      }
-    };
-    walk(join(REPO, 'src'));
-    walk(join(REPO, 'carbon', 'cloud-init'));
+    const offenders = sourceFiles([join(REPO, 'src'), join(REPO, 'carbon', 'cloud-init')], {
+      exts: ['.js', '.ts', '.sh', '.yaml', '.yml'],
+    })
+      .filter((full) => /\bdbImageRef\(/.test(readFileSync(full, 'utf8')))
+      .map((full) => full.slice(REPO.length + 1));
     expect(offenders.filter((f) => f !== 'src/lib/images.js')).toEqual([]);
   });
 });

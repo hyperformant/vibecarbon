@@ -28,9 +28,10 @@
  *     entry, and in the compose plans no step after the stack-state step can
  *     keep it, so the two cannot disagree.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { type Config, projectConfigStore } from '../helpers/project-config-store.js';
 
 const logs: string[] = [];
@@ -214,14 +215,6 @@ afterEach(() => {
 
 const SRC = join(__dirname, '../../../src');
 
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) return jsFiles(path);
-    return path.endsWith('.js') ? [path] : [];
-  });
-}
-
 /** Source without comment lines: JSDoc types name `resourceClass: string`. */
 function codeOf(path: string): string {
   return readFileSync(path, 'utf8')
@@ -370,7 +363,7 @@ function leftoverViolations(files: Record<string, string>): string[] {
 
 describe('ENTRY_KEEP_BY_CLASS census', () => {
   const files = Object.fromEntries(
-    jsFiles(SRC).map((path) => [`src/${relative(SRC, path)}`, codeOf(path)]),
+    sourceFiles(SRC, { exts: ['.js'] }).map((path) => [`src/${relative(SRC, path)}`, codeOf(path)]),
   );
   const { literal, dynamic, bare } = classMentions(files);
 

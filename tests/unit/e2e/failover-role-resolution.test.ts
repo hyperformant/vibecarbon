@@ -27,12 +27,12 @@
  * These tests pin the property on every member of the class: given a config in
  * the exact shape failoverComposeHA persists, the promoted node is the primary.
  */
-
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { identifyServers } from '../../../src/failover.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { resolveHaDbIps } from '../../e2e/checks/replication.js';
 import { getServerIps } from '../../e2e/utils/ssh.js';
 
@@ -212,26 +212,17 @@ describe('resolveEnvContext serverIp selectors (CLI call-site census)', () => {
    */
   const callSites = (): Array<{ file: string; raw: string }> => {
     const out: Array<{ file: string; raw: string }> = [];
-    const walk = (d: string) => {
-      for (const entry of readdirSync(d, { withFileTypes: true })) {
-        const p = join(d, entry.name);
-        if (entry.isDirectory()) {
-          walk(p);
-          continue;
-        }
-        if (!entry.name.endsWith('.js')) continue;
-        if (p.endsWith(join('cli', 'env-context.js'))) continue; // the seam itself
-        const src = readFileSync(p, 'utf-8');
-        if (!src.includes('resolveEnvContext')) continue;
-        // Anchored to line-start property position: `serverIp:` also appears
-        // in prose inside restore.js's explanatory comment, and a census that
-        // trips over its own documentation is a census nobody keeps.
-        for (const m of src.matchAll(/^\s*serverIp:\s*([^,\n}]+)/gm)) {
-          out.push({ file: p, raw: m[1].trim() });
-        }
+    for (const p of sourceFiles(srcDir, { exts: ['.js'] })) {
+      if (p.endsWith(join('cli', 'env-context.js'))) continue; // the seam itself
+      const src = readFileSync(p, 'utf-8');
+      if (!src.includes('resolveEnvContext')) continue;
+      // Anchored to line-start property position: `serverIp:` also appears
+      // in prose inside restore.js's explanatory comment, and a census that
+      // trips over its own documentation is a census nobody keeps.
+      for (const m of src.matchAll(/^\s*serverIp:\s*([^,\n}]+)/gm)) {
+        out.push({ file: p, raw: m[1].trim() });
       }
-    };
-    walk(srcDir);
+    }
     return out;
   };
 

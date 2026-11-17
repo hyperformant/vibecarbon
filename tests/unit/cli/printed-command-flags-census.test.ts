@@ -13,22 +13,15 @@
  * this CLI is single-dash only. Tokens after `vibecarbon` that are not a
  * registered command (e.g. `vibecarbon get pods`) are skipped.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadAllSpecs } from '../../../src/lib/cli/command-registry.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 type Spec = { flags?: { name: string }[] };
 const specs = new Map<string, Set<string>>();
 for (const { entry, spec } of await loadAllSpecs()) {
   specs.set(entry.name, new Set(((spec as Spec).flags ?? []).map((f) => f.name)));
-}
-
-function walkJs(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name);
-    return e.isDirectory() ? walkJs(p) : e.name.endsWith('.js') ? [p] : [];
-  });
 }
 
 interface PrintedFlag {
@@ -55,7 +48,7 @@ function printedFlags(file: string, source: string): PrintedFlag[] {
 }
 
 describe('printed commands name real flags', () => {
-  const files = walkJs('src');
+  const files = sourceFiles('src', { exts: ['.js'] });
 
   it('walks the source tree and finds printed commands (guards against walking nothing)', () => {
     const all = files.flatMap((f) => printedFlags(f, readFileSync(f, 'utf8')));

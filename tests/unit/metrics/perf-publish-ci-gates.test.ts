@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * CI-only gates on the published performance surfaces — the two guards that
@@ -57,19 +58,12 @@ describe('local e2e runs never publish performance surfaces', () => {
     // scripts/ helpers. The workflow file is the one allowed caller.
     const pkg = read('package.json');
     expect(pkg).not.toContain('publish-perf-pr');
-    const offenders: string[] = [];
-    const { readdirSync } = require('node:fs') as typeof import('node:fs');
     // Recursive: scripts/ may have subdirectories — a
     // helper nested one level down is exactly as locally-runnable as a
     // top-level one, so the census walks files at every depth.
-    const walk = (rel: string): void => {
-      for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
-        const childRel = join(rel, entry.name);
-        if (entry.isDirectory()) walk(childRel);
-        else if (read(childRel).includes('publish-perf-pr')) offenders.push(childRel);
-      }
-    };
-    walk('scripts');
+    const offenders = sourceFiles(join(ROOT, 'scripts'), { relativeTo: ROOT }).filter((rel) =>
+      read(rel).includes('publish-perf-pr'),
+    );
     expect(offenders, 'local scripts must not invoke the stat-PR publisher').toEqual([]);
     // Sanity: the allowed CI call site still exists (otherwise this census
     // is guarding a publisher nothing runs).

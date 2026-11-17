@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * CLASS (run 33319907805, hetzner k8s + k8s-ha backup, 2026-08-30): a COMMENT
@@ -31,14 +32,7 @@ const CARBON = join(ROOT, 'carbon');
 const SKIP_DIRS = new Set(['node_modules', '.next', 'dist', 'build']);
 
 function walk(dir: string, pred: (name: string) => boolean): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walk(full, pred));
-    else if (pred(entry)) out.push(full);
-  }
-  return out;
+  return sourceFiles(dir, { skip: SKIP_DIRS }).filter((p) => pred(basename(p)));
 }
 
 function bashN(script: string, label: string): void {

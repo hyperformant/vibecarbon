@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const logged = vi.hoisted(() => [] as string[]);
@@ -165,9 +166,7 @@ function blankComments(source: string): string {
 
 const code = (file: string) => blankComments(readFileSync(file, 'utf8'));
 
-const srcFiles = readdirSync(SRC, { recursive: true, withFileTypes: true })
-  .filter((d) => d.isFile() && d.name.endsWith('.js'))
-  .map((d) => join(d.parentPath, d.name));
+const srcFiles = sourceFiles(SRC, { exts: ['.js'] });
 
 /** The SDK's import, under any spelling: a call, a reference, a computed key. */
 const SDK_IMPORT = /\bimportStack\b/;

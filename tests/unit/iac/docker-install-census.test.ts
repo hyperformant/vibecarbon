@@ -11,7 +11,7 @@
  * compose user data installs every Docker package, unpinned, through the real
  * renderer; (c) no provider's COMPOSE_IMAGE is a prebuilt Docker image.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -26,17 +26,9 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
-
-function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else out.push(p);
-  }
-  return out;
-}
 
 // The only file allowed to spell a Docker install.
 const INSTALL_MODULE = 'src/lib/iac/docker-install.js';
@@ -50,8 +42,8 @@ const K8S_SCRIPTS_ALLOWED_TO_DIFFER =
 
 describe('(a) no compose program or provider spells its own Docker install', () => {
   const files = [
-    ...walk(join(ROOT, 'src')).filter((f) => f.endsWith('.js')),
-    ...walk(join(ROOT, 'carbon', 'cloud-init')).filter(
+    ...sourceFiles(join(ROOT, 'src')).filter((f) => f.endsWith('.js')),
+    ...sourceFiles(join(ROOT, 'carbon', 'cloud-init')).filter(
       (f) => f.endsWith('.yaml') || f.endsWith('.sh'),
     ),
   ].map((f) => relative(ROOT, f));

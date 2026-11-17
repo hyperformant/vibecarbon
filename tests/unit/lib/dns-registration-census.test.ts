@@ -16,11 +16,12 @@
  *     for years with nothing enforcing them — that's how the hetzner side
  *     shipped without deleteApexAndWildcard (wildcard-orphan class).
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DNS_PROVIDERS, getDnsProvider } from '../../../src/lib/dns-provider.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const LIB_DIR = fileURLToPath(new URL('../../../src/lib', import.meta.url));
 
@@ -70,12 +71,7 @@ describe('providers manage A records only', () => {
   it('nothing under src/ or carbon/ names an _acme-challenge record or the DNS01_PROVIDERS table', () => {
     const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
     const walk = (dir: string, exts: string[]): string[] =>
-      readdirSync(dir).flatMap((name) => {
-        if (name === 'node_modules') return [];
-        const path = join(dir, name);
-        if (statSync(path).isDirectory()) return walk(path, exts);
-        return exts.some((e) => path.endsWith(e)) ? [path] : [];
-      });
+      sourceFiles(dir, { exts, skip: ['node_modules'] });
     const src = walk(join(ROOT, 'src'), ['.js']);
     expect(src.length).toBeGreaterThan(100);
     // The template's compose files and scripts: a DNS-01 rationale in a

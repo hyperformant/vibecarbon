@@ -57,9 +57,10 @@
  * ~18 rows below — operator-local HTTP/SDK/CLI calls) correctly has no
  * business adding it.
  */
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = process.cwd();
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
@@ -255,19 +256,6 @@ interface Site {
   window: string;
 }
 
-function findSourceFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-        findSourceFiles(join(dir, entry.name), out);
-      }
-    } else if (entry.name.endsWith('.js')) {
-      out.push(relative(ROOT, join(dir, entry.name)));
-    }
-  }
-  return out;
-}
-
 function isCommentLine(line: string): boolean {
   const trimmed = line.trim();
   return trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*');
@@ -287,7 +275,12 @@ function detectLine(line: string): string | null {
 
 function collectSites(): Site[] {
   const sites: Site[] = [];
-  for (const file of findSourceFiles(join(ROOT, 'src'))) {
+  for (const file of sourceFiles(join(ROOT, 'src'), {
+    exts: ['.js'],
+    skip: SKIP_DIRS,
+    skipDotDirs: true,
+    relativeTo: ROOT,
+  })) {
     const lines = readFileSync(join(ROOT, file), 'utf-8').split('\n');
     const detections: Array<{ index: number; name: string }> = [];
     for (let i = 0; i < lines.length; i++) {

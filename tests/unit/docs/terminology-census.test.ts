@@ -14,6 +14,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { assertTierSupported, PROVIDERS, VultrProvider } from '../../../src/lib/providers/index.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 
@@ -48,19 +49,6 @@ const SURFACES = [
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
 
-// Recursively collect every .js file under a directory (used to walk src/ —
-// the census must cover the CLASS, not a hardcoded list of known offenders).
-function walkJsFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    const stat = statSync(full);
-    if (stat.isDirectory()) out.push(...walkJsFiles(full));
-    else if (entry.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
-
 // Recursively collect every .ts/.tsx file under a directory, for the
 // carbon/src class-sweep (Task 8K). Excludes test/spec files (this repo's
 // carbon tests live under carbon/tests/, not carbon/src/, but the filter is
@@ -75,18 +63,6 @@ function walkTsFiles(dir: string): string[] {
     const stat = statSync(full);
     if (stat.isDirectory()) out.push(...walkTsFiles(full));
     else if (/\.tsx?$/.test(entry) && !/\.(test|spec)\.tsx?$/.test(entry)) out.push(full);
-  }
-  return out;
-}
-
-// Recursively collect every .md file under a directory, for the agent-memory
-// retired-terms sweep below.
-function walkMdFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walkMdFiles(full));
-    else if (entry.endsWith('.md')) out.push(full);
   }
   return out;
 }
@@ -198,7 +174,7 @@ describe('terminology census', () => {
     const memoryDir = join(ROOT, 'carbon', '.claude', 'agent-memory');
     if (!existsSync(memoryDir)) return;
     const offenders: string[] = [];
-    for (const file of walkMdFiles(memoryDir)) {
+    for (const file of sourceFiles(memoryDir, { exts: ['.md'] })) {
       const text = readFileSync(file, 'utf-8');
       for (const [label, pattern] of [
         ['Diamond', /\bDiamond\b/g],
@@ -227,8 +203,8 @@ describe('terminology census', () => {
     // comments may still name it when they record the move away from the
     // mechanism, and must not trip this.
     const codeFiles = [
-      ...walkJsFiles(join(ROOT, 'src')),
-      ...walkJsFiles(join(ROOT, 'carbon', 'src')),
+      ...sourceFiles(join(ROOT, 'src'), { exts: ['.js'] }),
+      ...sourceFiles(join(ROOT, 'carbon', 'src'), { exts: ['.js'] }),
       ...walkTsFiles(join(ROOT, 'carbon', 'src')),
     ];
     expect(codeFiles.length, 'the premise walk found no code files').toBeGreaterThan(100);
@@ -381,7 +357,7 @@ describe('terminology census', () => {
   it('never calls DigitalOcean a "reference provider" anywhere in src/ (strings or comments)', () => {
     const srcDir = join(ROOT, 'src');
     const offenders: string[] = [];
-    for (const file of walkJsFiles(srcDir)) {
+    for (const file of sourceFiles(srcDir, { exts: ['.js'] })) {
       const text = readFileSync(file, 'utf-8');
       if (/reference[- ]provider/i.test(text)) offenders.push(file.slice(ROOT.length + 1));
     }

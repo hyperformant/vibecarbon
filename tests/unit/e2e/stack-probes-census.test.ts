@@ -7,7 +7,7 @@
  * The walk reads the constructions in src/lib and resolves each class from
  * the installed SDK, so the check follows the code, not a list.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as vultr from '@ediri/vultr';
 import * as digitalocean from '@pulumi/digitalocean';
@@ -15,6 +15,7 @@ import * as hcloud from '@pulumi/hcloud';
 import * as linode from '@pulumi/linode';
 import * as scaleway from '@pulumiverse/scaleway';
 import { describe, expect, it } from 'vitest';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { PROBED_TYPES } from '../../e2e/utils/stack-probes.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
@@ -27,13 +28,6 @@ const SDKS: Record<string, { provider: string; mod: unknown }> = {
   '@pulumiverse/scaleway': { provider: 'scaleway', mod: scaleway },
 };
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const p = join(dir, name);
-    return statSync(p).isDirectory() ? walk(p) : p.endsWith('.js') ? [p] : [];
-  });
-}
-
 interface Construction {
   file: string;
   provider: string;
@@ -45,7 +39,7 @@ const badImports: string[] = [];
 
 function constructions(): Construction[] {
   const out: Construction[] = [];
-  for (const file of walk(join(ROOT, 'src', 'lib'))) {
+  for (const file of sourceFiles(join(ROOT, 'src', 'lib'), { exts: ['.js'] })) {
     const src = readFileSync(file, 'utf8');
     // import * as <ns> from '<pkg>'
     const ns: Record<string, string> = {};

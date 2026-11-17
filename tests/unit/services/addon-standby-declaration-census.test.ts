@@ -13,6 +13,7 @@ import {
   k8sStandbyZeroedWorkloads,
   loadAddonStandby,
 } from '../../../src/lib/services/standby-policy.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -170,24 +171,19 @@ const SOURCE_ALLOWLIST: { file: string; contains: string; reason: string }[] = [
   },
 ];
 
-function sourceFiles(): string[] {
-  const out: string[] = ['src/failover.js', 'src/scale.js'];
-  const walk = (rel: string) => {
-    for (const e of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
-      const p = `${rel}/${e.name}`;
-      if (e.isDirectory()) walk(p);
-      else if (e.name.endsWith('.js')) out.push(p);
-    }
-  };
-  walk('src/lib/deploy');
-  return out.filter((f) => existsSync(join(ROOT, f)));
+function censusFiles(): string[] {
+  return [
+    'src/failover.js',
+    'src/scale.js',
+    ...sourceFiles(join(ROOT, 'src/lib/deploy'), { exts: ['.js'], relativeTo: ROOT }),
+  ].filter((f) => existsSync(join(ROOT, f)));
 }
 
 const LITERAL = /['"`](n8n|metabase|redis)(-setup)?['"`]/;
 
 describe('no hand-written add-on lists in deploy/failover/scale', () => {
   const hits: { file: string; line: string }[] = [];
-  for (const file of sourceFiles()) {
+  for (const file of censusFiles()) {
     for (const line of readFileSync(join(ROOT, file), 'utf8').split('\n')) {
       if (LITERAL.test(line)) hits.push({ file, line });
     }

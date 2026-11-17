@@ -19,23 +19,14 @@
  *    everything else dispatches via getDnsProvider so new backends are
  *    reachable from every command automatically.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 const SRC_DIR = fileURLToPath(new URL('../../../src', import.meta.url));
-
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walk(full));
-    else if (entry.endsWith('.js')) out.push(full);
-  }
-  return out;
-}
 
 const BACKEND_IDS = Object.keys(DNS_PROVIDERS);
 
@@ -63,7 +54,7 @@ const IMPORT_ALLOWLIST = new Set([
 ]);
 
 describe('no hand-rolled DNS-provider dispatch in src/', () => {
-  const files = walk(SRC_DIR);
+  const files = sourceFiles(SRC_DIR, { exts: ['.js'] });
 
   it('no literal dnsProvider comparison against a backend id outside the registry', () => {
     const pattern = new RegExp(

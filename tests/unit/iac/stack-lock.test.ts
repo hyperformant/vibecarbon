@@ -9,7 +9,7 @@
  * rules against real locks, so a change to Pulumi's wording fails there.
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -21,6 +21,7 @@ import {
   runPastStaleLock,
   StackHeldError,
 } from '../../../src/lib/iac/stack-lock.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 
 /** A pid that has exited. */
 const deadPid = () => spawnSync('true').pid;
@@ -176,9 +177,9 @@ describe('runPastStaleLock', () => {
 describe('census', () => {
   it('leaves stack-lock.js the only code that can clear a lock', () => {
     const dir = join(process.cwd(), 'src/lib/iac');
-    const callers = readdirSync(dir, { recursive: true, encoding: 'utf-8' })
-      .filter((f) => f.endsWith('.js'))
-      .filter((f) => /\.cancel\(/.test(readFileSync(join(dir, f), 'utf-8')));
+    const callers = sourceFiles(dir, { exts: ['.js'], relativeTo: dir }).filter((f) =>
+      /\.cancel\(/.test(readFileSync(join(dir, f), 'utf-8')),
+    );
     expect(callers).toEqual(['stack-lock.js']);
   });
 });

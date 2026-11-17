@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ciAvailable } from '../../../src/lib/ci-setup.js';
+import { sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -26,20 +27,12 @@ const SRC = join(ROOT, 'src');
 /** `lib/config.js` owns the path (lib/project.js reads the manifest half through it). */
 const CONFIG_OWNERS = [join('lib', 'config.js')];
 
-function jsFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) return jsFiles(full);
-    return entry.endsWith('.js') ? [full] : [];
-  });
-}
-
 /** A path build against the config filename, in either spelling. */
 const HAND_ROLLED = /join\([^)]*['"]\.?vibecarbon\.json['"]\s*\)/;
 
 describe('project config is read through one accessor', () => {
   it('no module outside the owners builds a path to the config file', () => {
-    const offenders = jsFiles(SRC)
+    const offenders = sourceFiles(SRC, { exts: ['.js'] })
       .map((file) => ({ rel: relative(SRC, file), src: readFileSync(file, 'utf-8') }))
       .filter(({ rel }) => !CONFIG_OWNERS.includes(rel))
       .filter(({ src }) =>
