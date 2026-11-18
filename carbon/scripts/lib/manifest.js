@@ -164,7 +164,3 @@ export function parseArgs(args) {
     positional: args.filter((arg) => !arg.startsWith('-')),
   };
 }
-
-// Legacy aliases for backwards compatibility
-export const getEnabledFeatures = getEnabledServices;
-export const isFeatureEnabled = isServiceEnabled;

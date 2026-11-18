@@ -213,12 +213,28 @@ async function getCachedPrice(priceId: string): Promise<unknown> {
 // ============================================================================
 
 /**
- * Check if billing is configured
+ * The two variables each provider needs before billing works: its API key,
+ * which its isConfigured reads, and its webhook secret. The Billing page shows
+ * them when billing is not configured, so the server, which knows the active
+ * provider, sends them.
+ */
+const PROVIDER_ENV_VARS: Record<
+  typeof env.BILLING_PROVIDER,
+  readonly [apiKey: string, webhookSecret: string]
+> = {
+  stripe: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
+  paddle: ['PADDLE_API_KEY', 'PADDLE_WEBHOOK_SECRET'],
+  polar: ['POLAR_ACCESS_TOKEN', 'POLAR_WEBHOOK_SECRET'],
+};
+
+/**
+ * Check if billing is configured, and name the variables the active provider needs
  */
 billingRoutes.get('/status', (c) => {
   return c.json({
     configured: isBillingConfigured(),
     provider: env.BILLING_PROVIDER,
+    envVars: PROVIDER_ENV_VARS[env.BILLING_PROVIDER],
   });
 });
 

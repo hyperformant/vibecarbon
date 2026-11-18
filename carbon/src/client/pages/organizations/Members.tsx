@@ -8,8 +8,9 @@ import {
   IconUserPlus as UserPlus,
 } from '@tabler/icons-react';
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useParams } from 'react-router';
 import { useAuth } from '@/components/auth/AuthProvider';
+import { OrganizationNotFound } from '@/components/OrganizationNotFound';
 import { PageHeader } from '@/components/PageHeader';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -45,6 +46,7 @@ import {
   useOrganizationMembers,
 } from '@/hooks/useOrganizationMembers';
 import { useOrganizations } from '@/hooks/useOrganizations';
+import { getUserInitials } from '@/lib/utils';
 import { ContentPanel } from '../../components/ContentPanel';
 
 function getRoleIcon(role: MemberRole) {
@@ -69,23 +71,8 @@ function getRoleBadgeVariant(role: MemberRole) {
   }
 }
 
-function getUserInitials(member: Member) {
-  if (!member.user) return '?';
-  const name = member.user.name;
-  if (name) {
-    return name
-      .split(' ')
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2);
-  }
-  return member.user.email?.[0]?.toUpperCase() || '?';
-}
-
 export default function Members() {
   const { orgId } = useParams<{ orgId: string }>();
-  const navigate = useNavigate();
   const { user } = useAuth();
   const { organizations } = useOrganizations();
   const { members, isLoading, error, addMember, updateRole, removeMember } =
@@ -135,19 +122,7 @@ export default function Members() {
   };
 
   if (!organization) {
-    return (
-      <>
-        <PageHeader title="Organization Not Found" />
-        <ContentPanel variant="default">
-          <p className="text-muted-foreground">
-            The organization you're looking for doesn't exist or you don't have access.
-          </p>
-          <Button className="mt-4" onClick={() => navigate('/dashboard')}>
-            Go to Dashboard
-          </Button>
-        </ContentPanel>
-      </>
-    );
+    return <OrganizationNotFound />;
   }
 
   return (
@@ -191,7 +166,7 @@ export default function Members() {
                   >
                     <div className="flex items-center gap-3">
                       <Avatar>
-                        <AvatarFallback>{getUserInitials(member)}</AvatarFallback>
+                        <AvatarFallback>{getUserInitials(member.user)}</AvatarFallback>
                       </Avatar>
                       <div>
                         <p className="font-medium">

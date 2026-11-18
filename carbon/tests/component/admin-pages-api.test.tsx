@@ -2,7 +2,7 @@
  * Regression coverage for the admin pages' migration onto the shared client
  * API layer (src/client/lib/api.ts). We exercise the extracted fetchers
  * directly through a stubbed global fetch:
- *  - a migrated READ (Infrastructure's fetchServicesStatus) resolves the parsed
+ *  - a migrated READ (the shared fetchServicesStatus) resolves the parsed
  *    body and carries the session cookie (same-origin), and
  *  - a migrated MUTATION (Notifications' createNotification) surfaces the
  *    server's error message (and the page fallback) as an ApiError on non-2xx.
@@ -10,8 +10,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { fetchServicesStatus } from '@/hooks/api/useServicesStatus';
 import { ApiError } from '@/lib/api';
-import { fetchServicesStatus } from '@/pages/admin/Infrastructure';
 import { createNotification } from '@/pages/admin/Notifications';
 
 const fetchMock = vi.fn();
@@ -25,7 +25,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('Infrastructure fetchServicesStatus (migrated read)', () => {
+describe('fetchServicesStatus (migrated read)', () => {
   it('resolves the parsed body and sends the session cookie', async () => {
     const payload = {
       summary: { healthy: 3, unhealthy: 0, total: 3 },

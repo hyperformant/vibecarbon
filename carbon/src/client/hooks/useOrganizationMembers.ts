@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { apiFetch } from '@/lib/api';
+import { apiJson } from '@/lib/api';
 
 export type MemberRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
@@ -16,53 +16,37 @@ export type Member = {
 };
 
 async function fetchMembers(orgId: string): Promise<Member[]> {
-  const response = await apiFetch(`/api/v1/organizations/${orgId}/members`);
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to fetch members');
-  }
-
-  const data = await response.json();
+  const data = await apiJson<{ members: Member[] }>(
+    `/api/v1/organizations/${orgId}/members`,
+    {},
+    'Failed to fetch members'
+  );
   return data.members;
 }
 
 async function addMember(orgId: string, email: string, role: 'ADMIN' | 'MEMBER'): Promise<Member> {
-  const response = await apiFetch(`/api/v1/organizations/${orgId}/members`, {
-    method: 'POST',
-    body: JSON.stringify({ email, role }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to add member');
-  }
-
-  const data = await response.json();
+  const data = await apiJson<{ member: Member }>(
+    `/api/v1/organizations/${orgId}/members`,
+    { method: 'POST', body: { email, role } },
+    'Failed to add member'
+  );
   return data.member;
 }
 
 async function updateMemberRole(orgId: string, userId: string, role: MemberRole): Promise<void> {
-  const response = await apiFetch(`/api/v1/organizations/${orgId}/members/${userId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ role }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to update role');
-  }
+  await apiJson<void>(
+    `/api/v1/organizations/${orgId}/members/${userId}`,
+    { method: 'PATCH', body: { role } },
+    'Failed to update role'
+  );
 }
 
 async function removeMember(orgId: string, userId: string): Promise<void> {
-  const response = await apiFetch(`/api/v1/organizations/${orgId}/members/${userId}`, {
-    method: 'DELETE',
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to remove member');
-  }
+  await apiJson<void>(
+    `/api/v1/organizations/${orgId}/members/${userId}`,
+    { method: 'DELETE' },
+    'Failed to remove member'
+  );
 }
 
 export function useOrganizationMembers(orgId: string | undefined) {

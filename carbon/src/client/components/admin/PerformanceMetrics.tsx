@@ -14,7 +14,8 @@ import {
   ChartTooltipContent,
 } from '@/components/ui/chart';
 import { Skeleton } from '@/components/ui/skeleton';
-import { apiFetch } from '@/lib/api';
+import { useAdminStats } from '@/hooks/api/useAdminStats';
+import { apiJson } from '@/lib/api';
 
 interface PerformanceData {
   server: {
@@ -33,12 +34,6 @@ interface PerformanceData {
       latencyMs: number;
       status: 'healthy' | 'unhealthy' | 'unknown';
     }>;
-  };
-}
-
-interface StatsResponse {
-  users: {
-    weeklySignups: Array<{ week: string; count: number }>;
   };
 }
 
@@ -66,23 +61,12 @@ const signupsConfig = {
 export function PerformanceMetrics() {
   const { data: perfData, isLoading: perfLoading } = useQuery<PerformanceData>({
     queryKey: ['admin', 'performance'],
-    queryFn: async () => {
-      const res = await apiFetch('/api/v1/admin/performance');
-      if (!res.ok) throw new Error('Failed to fetch performance data');
-      return res.json();
-    },
+    queryFn: () =>
+      apiJson<PerformanceData>('/api/v1/admin/performance', {}, 'Failed to fetch performance data'),
     refetchInterval: 30_000,
   });
 
-  const { data: statsData, isLoading: statsLoading } = useQuery<StatsResponse>({
-    queryKey: ['admin', 'stats'],
-    queryFn: async () => {
-      const res = await apiFetch('/api/v1/admin/stats');
-      if (!res.ok) throw new Error('Failed to fetch stats');
-      return res.json();
-    },
-    refetchInterval: 30_000,
-  });
+  const { data: statsData, isLoading: statsLoading } = useAdminStats({ refetchInterval: 30_000 });
 
   // Only services with a measured round trip: an unhealthy probe's number is
   // its timeout, not a latency.

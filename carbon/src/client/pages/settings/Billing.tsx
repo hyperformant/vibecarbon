@@ -1,4 +1,4 @@
-import { formatPlanPrice, type Plan, type PlanId, plans } from '@shared/pricing';
+import { formatPlanPrice, type Plan, plans } from '@shared/pricing';
 import {
   IconAlertCircle as AlertCircle,
   IconCheck as Check,
@@ -15,12 +15,21 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useSubscription } from '@/hooks/api';
 import { apiJson } from '@/lib/api';
 import { ContentPanel } from '../../components/ContentPanel';
 
 interface BillingStatus {
   configured: boolean;
+  /**
+   * The active provider's API key and webhook secret variables. The server
+   * names them because only it knows BILLING_PROVIDER.
+   */
+  envVars: readonly [apiKey: string, webhookSecret: string];
 }
+
+/** Stripe's variables, for when the status read fails: the server defaults to Stripe. */
+const DEFAULT_ENV_VARS = ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'] as const;
 
 interface PricesResponse {
   configured: boolean;
@@ -29,45 +38,12 @@ interface PricesResponse {
   })[];
 }
 
-interface Subscription {
-  id: string;
-  status: string;
-  priceId: string;
-  planId: PlanId;
-  currentPeriodEnd: string;
-  cancelAtPeriodEnd: boolean;
-  product: {
-    id: string;
-    name: string;
-    description?: string;
-  };
-  price: {
-    id: string;
-    unitAmount: number;
-    currency: string;
-    interval: string;
-  };
-}
-
-interface SubscriptionResponse {
-  subscription: Subscription | null;
-  status: string;
-}
-
 export async function fetchBillingStatus(): Promise<BillingStatus> {
   return apiJson<BillingStatus>('/api/v1/billing/status', {}, 'Failed to fetch billing status');
 }
 
 async function fetchPrices(): Promise<PricesResponse> {
   return apiJson<PricesResponse>('/api/v1/billing/prices', {}, 'Failed to fetch prices');
-}
-
-async function fetchSubscription(): Promise<SubscriptionResponse> {
-  return apiJson<SubscriptionResponse>(
-    '/api/v1/billing/subscription?type=user',
-    {},
-    'Failed to fetch subscription'
-  );
 }
 
 async function createCheckout(priceId: string): Promise<{ url: string }> {
@@ -125,11 +101,14 @@ export default function Billing() {
     enabled: !!user,
   });
 
-  const { data: subscriptionData, isLoading: isLoadingSubscription } = useQuery({
-    queryKey: ['subscription'],
-    queryFn: fetchSubscription,
-    enabled: !!user && billingStatus?.configured,
-  });
+  // The same cache entry the Dashboard and PlanGate read. It starts alongside
+  // the status request and stops once billing is known to be unconfigured.
+  const {
+    subscription,
+    planId: currentPlanId,
+    isActive,
+    isLoading: isLoadingSubscription,
+  } = useSubscription({ enabled: !!user && billingStatus?.configured !== false });
 
   const checkoutMutation = useMutation({
     mutationFn: createCheckout,
@@ -153,10 +132,8 @@ export default function Billing() {
   });
 
   const isLoading = isLoadingStatus || isLoadingSubscription;
-  const subscription = subscriptionData?.subscription;
-  const hasActiveSubscription =
-    subscription && (subscription.status === 'active' || subscription.status === 'trialing');
-  const currentPlanId: PlanId = subscription?.planId ?? 'free';
+  const hasActiveSubscription = subscription && isActive;
+  const [apiKeyVar, webhookSecretVar] = billingStatus?.envVars ?? DEFAULT_ENV_VARS;
 
   type DisplayPlan = Plan & { stripePriceIds?: { monthly?: string } | null };
   const displayPlans: DisplayPlan[] = pricesData?.plans ?? plans;
@@ -175,9 +152,9 @@ export default function Billing() {
             <AlertCircle className="size-4" />
             <AlertDescription>
               Billing is not configured. Set{' '}
-              <code className="bg-muted px-1 rounded">STRIPE_SECRET_KEY</code> and{' '}
-              <code className="bg-muted px-1 rounded">STRIPE_WEBHOOK_SECRET</code> in your
-              environment to enable billing.
+              <code className="bg-muted px-1 rounded">{apiKeyVar}</code> and{' '}
+              <code className="bg-muted px-1 rounded">{webhookSecretVar}</code> in your environment
+              to enable billing.
             </AlertDescription>
           </Alert>
         )}

@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router';
 import { useAuth } from '@/components/auth/AuthProvider';
+import { FormError } from '@/components/auth/FormError';
 import { TwoFactorCodeForm } from '@/components/auth/TwoFactorCodeForm';
 import { PageHeader } from '@/components/PageHeader';
 import { Button } from '@/components/ui/button';
@@ -139,11 +140,7 @@ export default function Security() {
           </div>
         )}
 
-        {error && !confirming && !setup && (
-          <div role="alert" className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg">
-            {error}
-          </div>
-        )}
+        {error && !confirming && !setup && <FormError>{error}</FormError>}
 
         <Card>
           <CardHeader>
@@ -225,14 +222,7 @@ export default function Security() {
                 />
               </>
             )}
-            {error && (
-              <div
-                role="alert"
-                className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg"
-              >
-                {error}
-              </div>
-            )}
+            {error && <FormError>{error}</FormError>}
           </form>
 
           <DialogFooter className="gap-2 sm:gap-0">

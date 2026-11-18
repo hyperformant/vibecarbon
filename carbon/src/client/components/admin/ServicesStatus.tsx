@@ -6,7 +6,7 @@ import {
   IconPower as Power,
   IconRefresh as RefreshCw,
 } from '@tabler/icons-react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
@@ -17,6 +17,11 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import {
+  type ServiceStatus,
+  servicesStatusQueryKey,
+  useServicesStatus,
+} from '@/hooks/api/useServicesStatus';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -24,34 +29,6 @@ const APP_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
 // VITE_ENVIRONMENT is set during deployment (qa, staging, prod, etc.)
 // Falls back to Vite's MODE for local development
 const ENVIRONMENT = import.meta.env.VITE_ENVIRONMENT || import.meta.env.MODE || 'development';
-
-interface ServiceStatus {
-  name: string;
-  container: string;
-  status: 'healthy' | 'unhealthy' | 'unknown';
-  latencyMs?: number;
-  error?: string;
-  /** The dashboard can restart this container in this deployment. */
-  restartable?: boolean;
-}
-
-interface ServicesStatusResponse {
-  summary: {
-    healthy: number;
-    unhealthy: number;
-    total: number;
-  };
-  services: ServiceStatus[];
-  timestamp: string;
-}
-
-async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
-  const response = await apiFetch('/api/_internal/services/status');
-  if (!response.ok) {
-    throw new Error('Failed to fetch services status');
-  }
-  return response.json();
-}
 
 async function restartService(container: string): Promise<{ success: boolean; error?: string }> {
   const response = await apiFetch(`/api/_internal/services/status/restart/${container}`, {
@@ -97,12 +74,7 @@ export function ServicesStatus() {
   const queryClient = useQueryClient();
   const [restartingContainers, setRestartingContainers] = useState<Set<string>>(new Set());
 
-  const { data, isLoading, isFetching, error, refetch } = useQuery({
-    queryKey: ['services-status'],
-    queryFn: fetchServicesStatus,
-    refetchInterval: 30000, // Refresh every 30 seconds
-    staleTime: 10000,
-  });
+  const { data, isLoading, isFetching, error, refetch } = useServicesStatus();
 
   // Track if we're refreshing with a minimum display time
   // This ensures the spinner is visible even for very fast responses
@@ -133,7 +105,7 @@ export function ServicesStatus() {
         return next;
       });
       // Refetch status after restart
-      queryClient.invalidateQueries({ queryKey: ['services-status'] });
+      queryClient.invalidateQueries({ queryKey: servicesStatusQueryKey });
     },
   });
 
@@ -149,7 +121,7 @@ export function ServicesStatus() {
     onSettled: () => {
       setRestartingContainers(new Set());
       // Refetch status after restart
-      queryClient.invalidateQueries({ queryKey: ['services-status'] });
+      queryClient.invalidateQueries({ queryKey: servicesStatusQueryKey });
     },
   });
 

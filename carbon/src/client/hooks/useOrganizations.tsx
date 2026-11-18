@@ -9,7 +9,7 @@ import {
   useState,
 } from 'react';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { apiFetch } from '@/lib/api';
+import { apiJson } from '@/lib/api';
 
 export type OrganizationRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
@@ -90,13 +90,11 @@ export function OrganizationsProvider({ children }: { children: ReactNode }) {
   } = useQuery({
     queryKey: ['organizations', user?.id],
     queryFn: async () => {
-      const response = await apiFetch('/api/v1/me');
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch organizations');
-      }
-
-      const { memberships: data } = await response.json();
+      const { memberships: data } = await apiJson<{ memberships: Record<string, unknown>[] }>(
+        '/api/v1/me',
+        {},
+        'Failed to fetch organizations'
+      );
       return transformMemberships(data);
     },
     enabled: !!user,
@@ -137,18 +135,12 @@ export function OrganizationsProvider({ children }: { children: ReactNode }) {
     mutationFn: async (name: string) => {
       const slug = generateSlug(name);
 
-      const response = await apiFetch('/api/v1/organizations', {
-        method: 'POST',
-        body: JSON.stringify({ name, slug }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to create organization');
-      }
-
-      return data.organization as Organization;
+      const data = await apiJson<{ organization: Organization }>(
+        '/api/v1/organizations',
+        { method: 'POST', body: { name, slug } },
+        'Failed to create organization'
+      );
+      return data.organization;
     },
     onSuccess: (org) => {
       queryClient.invalidateQueries({ queryKey: ['organizations'] });

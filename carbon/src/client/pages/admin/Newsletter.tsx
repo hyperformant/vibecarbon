@@ -68,7 +68,7 @@ export default function AdminNewsletter() {
     queryFn: () => apiJson<Stats>('/api/v1/admin/newsletter/stats', {}, 'Failed to fetch stats'),
   });
 
-  const { data, isLoading } = useQuery<{ subscribers: Subscriber[]; total: number }>({
+  const { data, isLoading, error } = useQuery<{ subscribers: Subscriber[]; total: number }>({
     queryKey: [...subscribersKey, search],
     queryFn: () => {
       const params = new URLSearchParams({ limit: '50' });
@@ -195,6 +195,10 @@ export default function AdminNewsletter() {
               {isLoading ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : error ? (
+                <div className="py-8 text-center text-destructive">
+                  {error instanceof Error ? error.message : 'Failed to load subscribers'}
                 </div>
               ) : subscribers.length === 0 ? (
                 <p className="text-sm text-muted-foreground text-center py-8">

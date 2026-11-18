@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createContext, type ReactNode, useCallback, useContext, useState } from 'react';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { apiFetch } from '@/lib/api';
+import { ApiError, apiJson } from '@/lib/api';
 
 export type NotificationType = 'info' | 'warning' | 'error' | 'success';
 export type NotificationVisibility = 'all' | 'authenticated' | 'public';
@@ -35,28 +35,26 @@ type NotificationContextValue = {
 const NotificationContext = createContext<NotificationContextValue | null>(null);
 
 async function fetchNotifications(): Promise<Notification[]> {
-  const response = await apiFetch('/api/v1/notifications');
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      return [];
-    }
-    throw new Error('Failed to fetch notifications');
+  try {
+    const data = await apiJson<{ notifications: Notification[] }>(
+      '/api/v1/notifications',
+      {},
+      'Failed to fetch notifications'
+    );
+    return data.notifications;
+  } catch (err) {
+    // Signed out: no notifications, not an error.
+    if (err instanceof ApiError && err.status === 401) return [];
+    throw err;
   }
-
-  const data = await response.json();
-  return data.notifications;
 }
 
 async function dismissNotificationApi(notificationId: string): Promise<void> {
-  const response = await apiFetch(`/api/v1/notifications/${notificationId}/dismiss`, {
-    method: 'POST',
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to dismiss notification');
-  }
+  await apiJson<void>(
+    `/api/v1/notifications/${notificationId}/dismiss`,
+    { method: 'POST' },
+    'Failed to dismiss notification'
+  );
 }
 
 export function NotificationProvider({ children }: { children: ReactNode }) {

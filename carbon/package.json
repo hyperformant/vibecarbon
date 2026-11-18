@@ -45,8 +45,6 @@
     "docker:prod:down": "node scripts/docker-down.js --prod",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:reset": "node scripts/docker-down.js -v && node scripts/docker-up.js",
-    "k8s:apply": "node scripts/k8s-apply.js",
-    "k8s:delete": "node scripts/k8s-delete.js",
     "stripe:listen": "stripe listen --forward-to localhost:3000/api/webhooks/billing"
   },
   "dependencies": {

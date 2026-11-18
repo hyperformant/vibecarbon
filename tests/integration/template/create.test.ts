@@ -356,7 +356,7 @@ describe('create-vibecarbon E2E', () => {
         'src/client/App.tsx',
         'src/client/main.tsx',
         'src/client/lib/auth-client.ts',
-        'src/shared/types.ts',
+        'src/shared/pricing.ts',
       ];
 
       for (const file of sourceFiles) {

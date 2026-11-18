@@ -11,7 +11,6 @@ import {
   IconNetwork as Network,
   IconServer as Server,
 } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { ServicesStatus } from '@/components/admin/ServicesStatus';
@@ -19,26 +18,8 @@ import { ContentPanel } from '@/components/ContentPanel';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { apiJson } from '@/lib/api';
+import { useServicesStatus } from '@/hooks/api/useServicesStatus';
 import { cn } from '@/lib/utils';
-
-interface ServiceStatus {
-  name: string;
-  container: string;
-  status: 'healthy' | 'unhealthy' | 'unknown';
-  latencyMs?: number;
-  error?: string;
-}
-
-interface ServicesStatusResponse {
-  summary: { healthy: number; unhealthy: number; total: number };
-  services: ServiceStatus[];
-  timestamp: string;
-}
-
-export async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
-  return apiJson<ServicesStatusResponse>('/api/_internal/services/status', {}, 'Failed to fetch');
-}
 
 // Service topology: layers from top (user-facing) to bottom (data)
 function topologyLayers(t: TFunction) {
@@ -101,12 +82,7 @@ function StatusDot({ status }: { status: 'healthy' | 'unhealthy' | 'unknown' | '
 export default function Infrastructure() {
   const { t } = useTranslation();
   const layers = topologyLayers(t);
-  const { data, isLoading } = useQuery({
-    queryKey: ['services-status'],
-    queryFn: fetchServicesStatus,
-    refetchInterval: 30000,
-    staleTime: 10000,
-  });
+  const { data, isLoading } = useServicesStatus();
 
   const serviceMap = new Map(data?.services.map((s) => [s.container, s]) ?? []);
 
