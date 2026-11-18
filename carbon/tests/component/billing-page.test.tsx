@@ -5,6 +5,12 @@
  * cache entry with every other reader (the Dashboard, PlanGate). It used to
  * keep its own query under a different key, so opening Billing fetched the
  * same subscription a second time.
+ *
+ * Not-configured notice: it names the environment variables of the active
+ * billing provider, which /api/v1/billing/status reports as envVars, not
+ * always Stripe's. The names come from the server: a client source spelling
+ * POLAR's access token variable would trip the no-session-token invariant
+ * in tests/structural/security-invariants.test.ts.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -26,11 +32,11 @@ import Billing from '@/pages/settings/Billing';
 
 const fetchMock = vi.fn();
 
-function answer(status: Record<string, unknown>) {
+function answer(status: Record<string, unknown>, statusCode = 200) {
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url === '/api/v1/billing/status') {
-      return new Response(JSON.stringify(status), { status: 200 });
+      return new Response(JSON.stringify(status), { status: statusCode });
     }
     if (url === '/api/v1/billing/prices') {
       return new Response(JSON.stringify({ configured: true, plans: [] }), { status: 200 });
@@ -82,5 +88,28 @@ describe('Billing subscription', () => {
 
     expect(subscriptionCalls()).toHaveLength(1);
     expect(String(subscriptionCalls()[0][0])).toBe('/api/v1/billing/subscription?type=user');
+  });
+});
+
+describe('Billing not-configured notice', () => {
+  it.each([
+    ['stripe', ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET']],
+    ['paddle', ['PADDLE_API_KEY', 'PADDLE_WEBHOOK_SECRET']],
+    ['polar', ['POLAR_ACCESS_TOKEN', 'POLAR_WEBHOOK_SECRET']],
+  ])('names the %s variables', async (provider, names) => {
+    answer({ configured: false, provider, envVars: names });
+    renderBilling();
+
+    const notice = await screen.findByText(/Billing is not configured/);
+    for (const name of names) expect(notice).toHaveTextContent(name);
+    if (provider !== 'stripe') expect(notice).not.toHaveTextContent('STRIPE_');
+  });
+
+  it("falls back to Stripe's variables when the status read fails", async () => {
+    answer({ error: 'down' }, 500);
+    renderBilling();
+
+    const notice = await screen.findByText(/Billing is not configured/);
+    expect(notice).toHaveTextContent('STRIPE_SECRET_KEY');
   });
 });

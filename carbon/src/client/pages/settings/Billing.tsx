@@ -21,7 +21,15 @@ import { ContentPanel } from '../../components/ContentPanel';
 
 interface BillingStatus {
   configured: boolean;
+  /**
+   * The active provider's API key and webhook secret variables. The server
+   * names them because only it knows BILLING_PROVIDER.
+   */
+  envVars: readonly [apiKey: string, webhookSecret: string];
 }
+
+/** Stripe's variables, for when the status read fails: the server defaults to Stripe. */
+const DEFAULT_ENV_VARS = ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'] as const;
 
 interface PricesResponse {
   configured: boolean;
@@ -125,6 +133,7 @@ export default function Billing() {
 
   const isLoading = isLoadingStatus || isLoadingSubscription;
   const hasActiveSubscription = subscription && isActive;
+  const [apiKeyVar, webhookSecretVar] = billingStatus?.envVars ?? DEFAULT_ENV_VARS;
 
   type DisplayPlan = Plan & { stripePriceIds?: { monthly?: string } | null };
   const displayPlans: DisplayPlan[] = pricesData?.plans ?? plans;
@@ -143,9 +152,9 @@ export default function Billing() {
             <AlertCircle className="size-4" />
             <AlertDescription>
               Billing is not configured. Set{' '}
-              <code className="bg-muted px-1 rounded">STRIPE_SECRET_KEY</code> and{' '}
-              <code className="bg-muted px-1 rounded">STRIPE_WEBHOOK_SECRET</code> in your
-              environment to enable billing.
+              <code className="bg-muted px-1 rounded">{apiKeyVar}</code> and{' '}
+              <code className="bg-muted px-1 rounded">{webhookSecretVar}</code> in your environment
+              to enable billing.
             </AlertDescription>
           </Alert>
         )}
