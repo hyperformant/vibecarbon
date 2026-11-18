@@ -1038,7 +1038,11 @@ describe('compose-backup.sh refuses on a retired node', () => {
     const r = spawnSync('bash', [script], {
       cwd: base,
       encoding: 'utf-8',
-      env: { PATH: `${join(base, 'bin')}:${process.env.PATH}`, RETAIN: '3' },
+      env: {
+        PATH: `${join(base, 'bin')}:${process.env.PATH}`,
+        RETAIN: '3',
+        VC_BACKUP_LOCKFILE: join(base, 'backup.lock'),
+      },
       timeout: 10_000,
     });
     return { ...r, calls: calls() };
@@ -1099,6 +1103,7 @@ describe('the k8s backup CronJob refuses on a retired cluster', () => {
       encoding: 'utf-8',
       env: {
         PATH: `${join(base, 'bin')}:${process.env.PATH}`,
+        VC_BACKUP_LOCKFILE: join(base, 'backup.lock'),
         // From the per-cluster vibecarbon-backup-settings ConfigMap; no default.
         BACKUP_RETENTION_DAYS: '7',
         ...(role !== undefined && { [RETIRED_ROLE_KEY]: role }),
