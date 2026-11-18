@@ -34,7 +34,7 @@ export function matchesSelector(labels: Record<string, string>, selector: string
 }
 
 /** The nodes `argv` (kubectl's own, no leading `kubectl`) would list. */
-export function selectNodes(nodes: FakeNode[], argv: string[]): FakeNode[] {
+function selectNodes(nodes: FakeNode[], argv: string[]): FakeNode[] {
   const i = argv.indexOf('-l');
   const selector = i >= 0 ? argv[i + 1] : '';
   return nodes.filter((n) => matchesSelector(n.labels ?? {}, selector));

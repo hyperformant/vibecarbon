@@ -98,7 +98,7 @@ export interface SweepBucketStore {
 }
 
 /** A bucket as a listing showed it: its name and where it is (region or cluster, '' for none). */
-export interface ListedBucket {
+interface ListedBucket {
   name: string;
   where: string;
 }

@@ -38,7 +38,7 @@ export interface ExecStubSpec {
   recordEnv?: string[];
 }
 
-export interface ExecCall {
+interface ExecCall {
   command: string;
   argv: string[];
   /** ISO timestamp of the call. */

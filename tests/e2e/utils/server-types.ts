@@ -22,7 +22,7 @@
 
 import { type PageDialect, walkProviderPages } from './provider-pages.js';
 
-export type ServerTypeProvider = 'hetzner' | 'digitalocean' | 'linode' | 'vultr' | 'scaleway';
+type ServerTypeProvider = 'hetzner' | 'digitalocean' | 'linode' | 'vultr' | 'scaleway';
 
 export interface FetchServerTypesOptions {
   /** Cloud provider to query. Defaults to 'hetzner' — every existing caller is unaffected. */

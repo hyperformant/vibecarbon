@@ -28,7 +28,7 @@ import { resolveE2EAcmeCa } from '../utils/e2e-env.js';
  * out forces callers to retry until both resolvers agree on a real IP.
  * Observed run #7 compose db_insert (PR 1Y).
  */
-export async function resolvePublicIp(domain: string): Promise<string | null> {
+async function resolvePublicIp(domain: string): Promise<string | null> {
   // The CLI's own public lookup (one approach): each public resolver is asked
   // on its own and any live answer wins, so one resolver's cached NXDOMAIN
   // (a destroy and restore on the same name, 2026-11-04) or stale 0.0.0.0
@@ -388,7 +388,7 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  * catch-all answered 200 HTML for any path it did not know, so a check that
  * keyed on the status alone passed with the API not mounted at all.
  */
-export function isAppHealthBody(contentType: string, body: string): boolean {
+function isAppHealthBody(contentType: string, body: string): boolean {
   if (contentType.includes('text/html')) return false;
   try {
     return (JSON.parse(body) as { status?: unknown } | null)?.status === 'ok';

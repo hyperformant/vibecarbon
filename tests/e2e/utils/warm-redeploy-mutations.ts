@@ -48,7 +48,7 @@ export const WARM_REDEPLOY_CONFIGMAP_KEY = 'E2E_WARM_REDEPLOY_MARKER';
 export const WARM_REDEPLOY_CONFIGMAP_NAME = 'vibecarbon-config';
 
 /** Route path appended to the health router; served at /api/health<this>. */
-export const WARM_REDEPLOY_ROUTE_PATH = '/e2e-warm-marker';
+const WARM_REDEPLOY_ROUTE_PATH = '/e2e-warm-marker';
 
 /** Full public path of the marker route. */
 export const WARM_REDEPLOY_ROUTE_URL_PATH = `/api/health${WARM_REDEPLOY_ROUTE_PATH}`;

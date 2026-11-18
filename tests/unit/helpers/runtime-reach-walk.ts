@@ -29,7 +29,7 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { sourceFiles } from '../../_shared/source-files.js';
 
-export type ReachKind = 'use' | 'forward' | 'excluded';
+type ReachKind = 'use' | 'forward' | 'excluded';
 
 export interface ReachSite {
   file: string;

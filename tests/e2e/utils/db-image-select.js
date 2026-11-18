@@ -65,7 +65,7 @@ function git(args) {
 }
 
 /** @type {{ dirtyInputs: () => string[], lastInputCommit: () => string }} */
-export const defaultGit = {
+const defaultGit = {
   // Modified, staged, deleted or untracked input files, relative to HEAD.
   dirtyInputs: () =>
     git(['status', '--porcelain', '--untracked-files=all', '--', ...DB_IMAGE_INPUT_PATHSPEC])

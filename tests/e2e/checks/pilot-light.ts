@@ -65,9 +65,7 @@ export interface K8sDeploymentSummary {
  * Returns null (not an empty array) on unparseable input so callers can
  * distinguish "no deployments" from "couldn't read the response".
  */
-export function parseDeploymentList(
-  json: string | null | undefined,
-): K8sDeploymentSummary[] | null {
+function parseDeploymentList(json: string | null | undefined): K8sDeploymentSummary[] | null {
   if (!json) return null;
   try {
     const parsed = JSON.parse(json) as {
@@ -105,13 +103,13 @@ export function findNonZeroReplicaDeployments(deployments: K8sDeploymentSummary[
     .map((d) => d.name);
 }
 
-export interface StatefulSetStatus {
+interface StatefulSetStatus {
   specReplicas: number;
   readyReplicas: number;
 }
 
 /** Parse `kubectl get statefulset <name> -o json` into replicas/readyReplicas. */
-export function parseStatefulSetStatus(json: string | null | undefined): StatefulSetStatus | null {
+function parseStatefulSetStatus(json: string | null | undefined): StatefulSetStatus | null {
   if (!json) return null;
   try {
     const parsed = JSON.parse(json) as {
@@ -128,7 +126,7 @@ export function parseStatefulSetStatus(json: string | null | undefined): Statefu
 }
 
 /** Parse `kubectl get deployment <name> -o json` into just spec.replicas. */
-export function parseDeploymentReplicaCount(json: string | null | undefined): number | null {
+function parseDeploymentReplicaCount(json: string | null | undefined): number | null {
   if (!json) return null;
   try {
     const parsed = JSON.parse(json) as { spec?: { replicas?: number } };

@@ -1,7 +1,7 @@
 /**
  * Spawn the vibecarbon CLI as a child process and capture its result.
  *
- * The harness deliberately uses spawn/spawnSync (not exec) so child stdio is
+ * The harness deliberately uses spawnSync (not exec) so child stdio is
  * piped — no shell-quoting hazards. ANSI is stripped from stdout/stderr
  * for stable assertions across local + CI.
  *
@@ -14,7 +14,7 @@
  * isn't a TTY.
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createTempDir } from '../../_shared/temp-dir.js';
@@ -111,52 +111,4 @@ export function runCli(verb: string, flags: string[], opts: RunOptions = {}): Ru
     stdout: stripAnsi(result.stdout),
     stderr: stripAnsi(result.stderr),
   };
-}
-
-/**
- * runCli, asynchronously. Same argv, env, HOME and ANSI handling; the only
- * difference is that this one does not block the event loop.
- *
- * That difference is load-bearing for anything pointed at a server in the
- * test process. spawnSync parks the event loop for the whole child run, so
- * such a server can never accept the child's connection and records no call
- * at all. Every case that passes an `apiBase` of its own must therefore await
- * this instead of calling runCli.
- */
-export function runCliAsync(
-  verb: string,
-  flags: string[],
-  opts: RunOptions = {},
-): Promise<RunResult> {
-  return new Promise((resolveResult, rejectResult) => {
-    const child = spawn(process.execPath, [CLI_PATH, ...argvFor(verb, flags)], {
-      cwd: opts.cwd ?? process.cwd(),
-      env: childEnv(opts),
-      timeout: opts.timeoutMs ?? 60_000,
-    });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf-8');
-    child.stderr.setEncoding('utf-8');
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk: string) => {
-      stderr += chunk;
-    });
-    // A CLI that exits before reading stdin (a flag error, `-h`) makes the
-    // write fail with EPIPE, which arrives as an unhandled 'error' on the
-    // stream and would take the whole test process down.
-    child.stdin.on('error', () => {});
-    child.stdin.end(opts.stdin ?? '');
-
-    // Spawn itself failing (a bad path, a fork limit) is a harness fault, not
-    // a CLI outcome: surface it instead of hanging until the test times out.
-    // A no-op once 'close' has already settled the promise.
-    child.on('error', rejectResult);
-    child.on('close', (code) => {
-      resolveResult({ exitCode: code, stdout: stripAnsi(stdout), stderr: stripAnsi(stderr) });
-    });
-  });
 }

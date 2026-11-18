@@ -116,7 +116,7 @@ export function saysBucketMissing(err: unknown): boolean {
  * One line for a failed delete: the S3 code and HTTP status first, so
  * "UnknownError" alone never reaches the log again.
  */
-export function describeBucketError(err: unknown): string {
+function describeBucketError(err: unknown): string {
   if (typeof err !== 'object' || err === null) return String(err);
   const { name, Code, message, $metadata } = err as S3ErrorShape;
   const code = name && name !== 'Error' ? name : Code;

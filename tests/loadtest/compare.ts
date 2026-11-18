@@ -16,11 +16,11 @@
 import { readFileSync } from 'node:fs';
 import type { PerfRunFile, ScenarioResult } from './runner';
 
-export const REGRESSION_THRESHOLD = 0.2; // 20% p95 increase
+const REGRESSION_THRESHOLD = 0.2; // 20% p95 increase
 
-export type Status = 'STABLE' | 'IMPROVED' | 'REGRESSED';
+type Status = 'STABLE' | 'IMPROVED' | 'REGRESSED';
 
-export function load(filepath: string): PerfRunFile {
+function load(filepath: string): PerfRunFile {
   try {
     return JSON.parse(readFileSync(filepath, 'utf-8')) as PerfRunFile;
   } catch (err) {
@@ -29,14 +29,14 @@ export function load(filepath: string): PerfRunFile {
   }
 }
 
-export function delta(before: number, after: number): string {
+function delta(before: number, after: number): string {
   if (before === 0) return 'N/A';
   const pct = ((after - before) / before) * 100;
   const sign = pct >= 0 ? '+' : '';
   return `${sign}${pct.toFixed(1)}%`;
 }
 
-export function endpointStatus(beforeP95: number, afterP95: number): Status {
+function endpointStatus(beforeP95: number, afterP95: number): Status {
   if (beforeP95 === 0) return 'STABLE';
   const change = (afterP95 - beforeP95) / beforeP95;
   if (change > REGRESSION_THRESHOLD) return 'REGRESSED';

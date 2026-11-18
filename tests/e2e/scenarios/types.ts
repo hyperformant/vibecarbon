@@ -149,7 +149,7 @@ export type FailureCategory = 'infra' | 'regression' | 'flake' | 'unknown';
  * to SSH into a (now-destroyed) box to figure out what went wrong. Each
  * entry is a short label + a stdout/stderr blob (truncated to ~4KB).
  */
-export interface DiagnosticSnippet {
+interface DiagnosticSnippet {
   label: string;
   output: string;
   exitCode?: number;
@@ -241,15 +241,4 @@ export interface ScenarioResult {
   failureCategory?: FailureCategory;
   /** Number of times the scenario was attempted. 1 = no retry, 2 = retried once. */
   attempts?: number;
-}
-
-export interface RunResult {
-  id: string;
-  startedAt: string;
-  finishedAt: string;
-  gitSha: string;
-  gitBranch: string;
-  vibecarbonVersion: string;
-  overallStatus: 'pass' | 'fail' | 'error';
-  scenarios: ScenarioResult[];
 }

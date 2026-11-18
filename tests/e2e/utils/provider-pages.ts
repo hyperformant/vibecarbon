@@ -68,7 +68,7 @@ export interface PageWalkOptions {
 }
 
 /** Default page guard: 20 pages, as every sweep walker has used. */
-export const DEFAULT_MAX_PAGES = 20;
+const DEFAULT_MAX_PAGES = 20;
 
 const SIZE_PARAM: Record<PageDialect, string> = {
   hetzner: 'per_page',

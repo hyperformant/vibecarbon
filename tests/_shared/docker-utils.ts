@@ -73,7 +73,7 @@ export interface DockerCleanupOptions {
   projectName?: string;
 }
 
-export interface ExecResult {
+interface ExecResult {
   success: boolean;
   output: string;
   error?: string;
@@ -272,7 +272,7 @@ export async function waitForHttpHealth(
 /**
  * Wait for a Docker command to succeed
  */
-export async function waitForDockerCommand(
+async function waitForDockerCommand(
   command: string,
   execOptions: ExecSyncOptions,
   options: WaitOptions = {},

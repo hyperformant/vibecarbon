@@ -201,6 +201,25 @@ updates:
       js-pins:
         patterns: ["*"]
 
+  # The linters scripts/lint-infra.sh runs (shellcheck, actionlint, hadolint,
+  # gitleaks). A bump here changes only what the Lint job runs.
+  - package-ecosystem: docker
+    directory: /.github/lint-tools
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      lint-tools:
+        patterns: ["*"]
+
   - package-ecosystem: docker
     directory: /docker/postgres-walg
     # A PostgreSQL major is a data-format change (dump/restore or

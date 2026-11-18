@@ -40,7 +40,7 @@ export interface RunRow {
   machine_info: string | null;
 }
 
-export interface ScenarioRow {
+interface ScenarioRow {
   id: string;
   run_id: string;
   mode: string;
@@ -106,7 +106,7 @@ export interface SweepBreakdown {
  */
 export type ColdWarm = 'cold' | 'warm';
 
-export interface StepRow {
+interface StepRow {
   id: string;
   scenario_id: string;
   name: string;
@@ -120,7 +120,7 @@ export interface StepRow {
   cold_warm: ColdWarm;
 }
 
-export interface MetricRow {
+interface MetricRow {
   id: string;
   step_id: string;
   metric_type: string;
@@ -129,7 +129,7 @@ export interface MetricRow {
   recorded_at: string | null;
 }
 
-export interface VerificationRow {
+interface VerificationRow {
   id: string;
   step_id: string;
   check_name: string;

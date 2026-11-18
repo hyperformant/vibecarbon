@@ -146,6 +146,7 @@ const NON_NODE_DOCKERFILES = [
   join('docker', 'postgres-walg', 'Dockerfile'),
   join('docker', 'wal-g', 'Dockerfile'),
   join('.github', 'image-pins', 'Dockerfile'),
+  join('.github', 'lint-tools', 'Dockerfile'),
 ];
 
 // Only genuinely irrelevant trees are skipped. Dot-directories are NOT

@@ -9,7 +9,7 @@
  * `WALG_ROLE_FILE=<the role in the script>`. Anything else is undefined, for
  * the caller's own stub to answer.
  */
-export const WALG_ROLE_DIR = '/var/lib/vibecarbon/role';
+const WALG_ROLE_DIR = '/var/lib/vibecarbon/role';
 
 export function k8sRoleReply(
   argv: string[],

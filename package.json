@@ -27,6 +27,7 @@
     "dev:stop": "node scripts/dev-stop.js",
     "lint": "node scripts/check-shell-safety.js && node scripts/check-stale-deploy-references.js && biome check src/ tests/ scripts/cost-grid.js && tsc -p tsconfig.e2e.json",
     "docs:cli": "node scripts/gen-cli-docs.js",
+    "lint:infra": "bash scripts/lint-infra.sh",
     "lint:shell": "node scripts/check-shell-safety.js",
     "lint:stale-deploy": "node scripts/check-stale-deploy-references.js",
     "lint:fix": "biome check --write src/ tests/ scripts/cost-grid.js",
