@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
+import { AuthCardLayout } from '../components/auth/AuthCardLayout';
 import { syncAdminCookie, useAuth } from '../components/auth/AuthProvider';
-import { Wordmark } from '../components/Logo';
+import { FormError } from '../components/auth/FormError';
 import { Button } from '../components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { useAuthSettings } from '../hooks/api';
 import { authErrorKey } from '../lib/auth-errors';
@@ -162,208 +163,180 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      {/* Header */}
-      <header className="h-20">
-        <div className="mx-auto max-w-7xl h-full px-6 flex items-center">
-          <Link to="/" className="group">
-            <Wordmark />
-          </Link>
-        </div>
-      </header>
+    <AuthCardLayout>
+      <CardHeader className="text-center">
+        <CardTitle className="text-2xl text-primary">
+          {magicLinkSent || verificationSent
+            ? t('auth.checkYourEmail')
+            : isSignUp
+              ? t('auth.createAccount')
+              : t('auth.signIn')}
+        </CardTitle>
+        <CardDescription>
+          {magicLinkSent
+            ? t('auth.magicLinkSent', { email })
+            : verificationSent
+              ? t('auth.verificationSent', { email })
+              : isSignUp
+                ? t('auth.signUpDescription')
+                : t('auth.signInDescription')}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        {magicLinkSent || verificationSent ? (
+          <div className="text-center space-y-4">
+            <p className="text-sm text-muted-foreground">
+              {magicLinkSent ? t('auth.magicLinkExpiry') : t('auth.verificationHint')}
+            </p>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setMagicLinkSent(false);
+                setVerificationSent(false);
+                setShowMagicLink(false);
+                navigate('/login');
+              }}
+            >
+              {t('auth.backToSignIn')}
+            </Button>
+          </div>
+        ) : showMagicLink ? (
+          <>
+            <form onSubmit={handleMagicLink} className="space-y-4">
+              {error && <FormError>{error}</FormError>}
+              <Input
+                type="email"
+                placeholder={t('auth.emailPlaceholder')}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                autoFocus
+              />
+              <Button type="submit" disabled={loading} className="w-full">
+                {loading ? t('auth.sending') : t('auth.sendMagicLink')}
+              </Button>
+            </form>
+            <button
+              type="button"
+              onClick={() => setShowMagicLink(false)}
+              className="w-full text-center text-sm text-primary hover:underline"
+            >
+              {t('auth.passwordInstead')}
+            </button>
+          </>
+        ) : (
+          <>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {notice && !error && (
+                <div role="status" className="p-3 text-sm bg-muted rounded-lg">
+                  {notice}
+                </div>
+              )}
+              {error && <FormError>{error}</FormError>}
 
-      {/* Main content */}
-      <div className="flex-1 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md shadow-lg shadow-primary/5">
-          <CardHeader className="text-center">
-            <CardTitle className="text-2xl text-primary">
-              {magicLinkSent || verificationSent
-                ? t('auth.checkYourEmail')
-                : isSignUp
-                  ? t('auth.createAccount')
-                  : t('auth.signIn')}
-            </CardTitle>
-            <CardDescription>
-              {magicLinkSent
-                ? t('auth.magicLinkSent', { email })
-                : verificationSent
-                  ? t('auth.verificationSent', { email })
-                  : isSignUp
-                    ? t('auth.signUpDescription')
-                    : t('auth.signInDescription')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {magicLinkSent || verificationSent ? (
-              <div className="text-center space-y-4">
-                <p className="text-sm text-muted-foreground">
-                  {magicLinkSent ? t('auth.magicLinkExpiry') : t('auth.verificationHint')}
-                </p>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setMagicLinkSent(false);
-                    setVerificationSent(false);
-                    setShowMagicLink(false);
-                    navigate('/login');
-                  }}
-                >
-                  {t('auth.backToSignIn')}
-                </Button>
-              </div>
-            ) : showMagicLink ? (
-              <>
-                <form onSubmit={handleMagicLink} className="space-y-4">
-                  {error && (
-                    <div
-                      role="alert"
-                      className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg"
-                    >
-                      {error}
-                    </div>
-                  )}
-                  <Input
-                    type="email"
-                    placeholder={t('auth.emailPlaceholder')}
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    autoFocus
-                  />
-                  <Button type="submit" disabled={loading} className="w-full">
-                    {loading ? t('auth.sending') : t('auth.sendMagicLink')}
-                  </Button>
-                </form>
-                <button
-                  type="button"
-                  onClick={() => setShowMagicLink(false)}
-                  className="w-full text-center text-sm text-primary hover:underline"
-                >
-                  {t('auth.passwordInstead')}
-                </button>
-              </>
-            ) : (
-              <>
-                <form onSubmit={handleSubmit} className="space-y-4">
-                  {notice && !error && (
-                    <div role="status" className="p-3 text-sm bg-muted rounded-lg">
-                      {notice}
-                    </div>
-                  )}
-                  {error && (
-                    <div
-                      role="alert"
-                      className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg"
-                    >
-                      {error}
-                    </div>
-                  )}
+              {isSignUp && (
+                <Input
+                  type="text"
+                  placeholder={t('auth.namePlaceholder')}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              )}
 
-                  {isSignUp && (
-                    <Input
-                      type="text"
-                      placeholder={t('auth.namePlaceholder')}
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                    />
-                  )}
+              <Input
+                type="email"
+                placeholder={t('auth.emailPlaceholder')}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                autoFocus
+              />
 
-                  <Input
-                    type="email"
-                    placeholder={t('auth.emailPlaceholder')}
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    autoFocus
-                  />
+              <Input
+                type="password"
+                placeholder={t('auth.passwordPlaceholder')}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
 
-                  <Input
-                    type="password"
-                    placeholder={t('auth.passwordPlaceholder')}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    minLength={8}
-                  />
-
-                  <div className="flex justify-between items-center">
-                    {magicLinkEnabled && !isSignUp && (
-                      <button
-                        type="button"
-                        onClick={() => setShowMagicLink(true)}
-                        className="text-sm text-primary hover:underline cursor-pointer"
-                      >
-                        {t('auth.signInWithMagicLink')}
-                      </button>
-                    )}
-                    {!isSignUp && (
-                      <Link
-                        to="/forgot-password"
-                        className="text-sm text-primary hover:underline ml-auto"
-                      >
-                        {t('auth.forgotPassword')}
-                      </Link>
-                    )}
-                  </div>
-
-                  <Button type="submit" disabled={loading} className="w-full">
-                    {loading
-                      ? t('common.loading')
-                      : isSignUp
-                        ? t('auth.signUp')
-                        : t('auth.signInAction')}
-                  </Button>
-                </form>
-
-                {enabledProviders.length > 0 && (
-                  <>
-                    <div className="relative">
-                      <div className="absolute inset-0 flex items-center">
-                        <div className="w-full border-t border-border/50" />
-                      </div>
-                      <div className="relative flex justify-center text-sm">
-                        <span className="px-2 bg-transparent text-muted-foreground">
-                          {t('auth.orContinueWith')}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div
-                      className={`grid gap-4 ${
-                        enabledProviders.length === 1 ? 'grid-cols-1' : 'grid-cols-2'
-                      }`}
-                    >
-                      {enabledProviders.map((provider) => (
-                        <Button
-                          key={provider}
-                          type="button"
-                          variant="outline"
-                          onClick={() => handleOAuth(provider)}
-                          disabled={loading}
-                        >
-                          {providerConfig[provider].icon}
-                          {providerConfig[provider].label}
-                        </Button>
-                      ))}
-                    </div>
-                  </>
-                )}
-
-                <p className="text-center text-sm text-muted-foreground">
-                  {isSignUp ? t('auth.alreadyHaveAccount') : t('auth.dontHaveAccount')}{' '}
+              <div className="flex justify-between items-center">
+                {magicLinkEnabled && !isSignUp && (
                   <button
                     type="button"
-                    onClick={() => navigate(isSignUp ? '/login' : '/signup')}
-                    className="text-primary hover:underline font-medium cursor-pointer"
+                    onClick={() => setShowMagicLink(true)}
+                    className="text-sm text-primary hover:underline cursor-pointer"
                   >
-                    {isSignUp ? t('auth.signIn') : t('nav.signUp')}
+                    {t('auth.signInWithMagicLink')}
                   </button>
-                </p>
+                )}
+                {!isSignUp && (
+                  <Link
+                    to="/forgot-password"
+                    className="text-sm text-primary hover:underline ml-auto"
+                  >
+                    {t('auth.forgotPassword')}
+                  </Link>
+                )}
+              </div>
+
+              <Button type="submit" disabled={loading} className="w-full">
+                {loading
+                  ? t('common.loading')
+                  : isSignUp
+                    ? t('auth.signUp')
+                    : t('auth.signInAction')}
+              </Button>
+            </form>
+
+            {enabledProviders.length > 0 && (
+              <>
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-border/50" />
+                  </div>
+                  <div className="relative flex justify-center text-sm">
+                    <span className="px-2 bg-transparent text-muted-foreground">
+                      {t('auth.orContinueWith')}
+                    </span>
+                  </div>
+                </div>
+
+                <div
+                  className={`grid gap-4 ${
+                    enabledProviders.length === 1 ? 'grid-cols-1' : 'grid-cols-2'
+                  }`}
+                >
+                  {enabledProviders.map((provider) => (
+                    <Button
+                      key={provider}
+                      type="button"
+                      variant="outline"
+                      onClick={() => handleOAuth(provider)}
+                      disabled={loading}
+                    >
+                      {providerConfig[provider].icon}
+                      {providerConfig[provider].label}
+                    </Button>
+                  ))}
+                </div>
               </>
             )}
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+
+            <p className="text-center text-sm text-muted-foreground">
+              {isSignUp ? t('auth.alreadyHaveAccount') : t('auth.dontHaveAccount')}{' '}
+              <button
+                type="button"
+                onClick={() => navigate(isSignUp ? '/login' : '/signup')}
+                className="text-primary hover:underline font-medium cursor-pointer"
+              >
+                {isSignUp ? t('auth.signIn') : t('nav.signUp')}
+              </button>
+            </p>
+          </>
+        )}
+      </CardContent>
+    </AuthCardLayout>
   );
 }
