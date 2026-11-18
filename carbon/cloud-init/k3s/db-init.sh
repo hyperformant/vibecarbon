@@ -172,4 +172,3 @@ fi
 
 echo "k3s database node installation complete!"
 _m e
-
