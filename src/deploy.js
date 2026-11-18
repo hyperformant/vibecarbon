@@ -353,7 +353,7 @@ async function main(values, positional) {
     const pm = detectPackageManager(cwd);
     const s = spinner();
     let started = false;
-    const { lockfile, generated, accepted } = ensureLockfile(cwd, pm, {
+    const { lockfile, generated, accepted } = await ensureLockfile(cwd, pm, {
       onStep: (message) => {
         if (!started) {
           s.start(message);
