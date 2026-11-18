@@ -162,3 +162,23 @@ describe('sweepOrphanedHetznerResources: a delete the API refused', () => {
     });
   }
 });
+
+describe('sweepOrphanedHetznerResources: a pass that threw', () => {
+  const KINDS: Array<[Kind, string]> = [
+    ['servers', 'server list'],
+    ['volumes', 'volume list'],
+    ['placement_groups', 'placement-group list'],
+    ['firewalls', 'firewall list'],
+    ['ssh_keys', 'ssh-key list'],
+    ['floating_ips', 'floating-IP list'],
+    ['networks', 'network list'],
+  ];
+  for (const [kind, what] of KINDS) {
+    it(`${kind}: a listing whose body cannot be read marks the sweep incomplete`, async () => {
+      const { enumFailed, warned } = await sweep({}, { listThrows: [kind] });
+      expect(enumFailed).toBe(true);
+      expect(warned).toContain(`${what} enumeration incomplete`);
+      expect(warned).toContain('could not enumerate');
+    });
+  }
+});

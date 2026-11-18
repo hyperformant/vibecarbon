@@ -239,6 +239,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('server list');
     console.warn(`${tag} [sweep] Server cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -304,6 +306,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('volume list');
     console.warn(`${tag} [sweep] Volume cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -347,6 +351,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('placement-group list');
     console.warn(
       `${tag} [sweep] Placement-group cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
@@ -388,6 +394,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('firewall list');
     console.warn(`${tag} [sweep] Firewall cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -418,6 +426,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('ssh-key list');
     console.warn(`${tag} [sweep] SSH key cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -449,6 +459,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('floating-IP list');
     console.warn(
       `${tag} [sweep] Floating IP cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
@@ -482,6 +494,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('network list');
     console.warn(`${tag} [sweep] Network cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
