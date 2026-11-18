@@ -17,7 +17,7 @@ like. The suite tells you what is missing. The guard-decision table in
 - `src/lib/providers/<id>.js`: `class <Name>Provider extends BaseProvider`.
   Implement **every** abstract member: ~23 data statics, 12 abstract static
   methods (catalog, user-data renderers, Pulumi program loaders,
-  guided-setup prompts, `getObjectStorageProviderClass`), and 30 abstract
+  guided-setup prompts, `getObjectStorageProviderClass`), and 29 abstract
   instance methods (server CRUD, firewall ops, listings with completeness
   signals, the destroy-sweep field accessors). The abstract-surface
   completeness check in `provider-contract.test.ts` fails on any member
@@ -26,7 +26,8 @@ like. The suite tells you what is missing. The guard-decision table in
   `resolveServerTypeForRegion` have a base answer, built from your
   `SERVER_TYPES`, `FALLBACK_SERVER_TYPES` and `_locationTypes`, that suits a
   provider with no ARM line; override them only if you sell ARM (see
-  Hetzner).
+  Hetzner). `listServers` has one too: the `items` of your
+  `listServersDetailed`.
 - `src/lib/providers/<id>-<storage>.js`: `extends S3CompatibleProvider`
   with `ENDPOINTS`, `REGIONS` (slug → human description map: the S3
   contract suite rejects arrays), and `resolveS3Region`. Keep it thin; all

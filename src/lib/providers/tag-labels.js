@@ -47,3 +47,19 @@ export function decodeLabels(tags = []) {
   }
   return out;
 }
+
+/**
+ * The rows tagged with every label in `labels`, each label encoded as a tag
+ * by the provider's own `encodeLabel`; all rows when `labels` is empty.
+ * The listServersDetailed filter of Linode, Vultr and Scaleway.
+ * @template {{tags?: string[]}} T
+ * @param {T[]} rows
+ * @param {Record<string, string>} labels
+ * @param {(key: string, value: string) => string} encodeLabel
+ * @returns {T[]}
+ */
+export function withAllTags(rows, labels, encodeLabel) {
+  const wanted = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
+  if (wanted.length === 0) return rows;
+  return rows.filter((row) => wanted.every((tag) => (row.tags || []).includes(tag)));
+}

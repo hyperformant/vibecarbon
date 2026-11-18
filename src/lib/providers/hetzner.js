@@ -1252,21 +1252,6 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * List ALL servers, optionally filtered by labels, walking pagination
-   * (B0-4). Long-lived projects exceed one 50-entry page, and the destroy
-   * sweeps that filter this list client-side would silently miss servers on
-   * pages 2+. Keeps the C10a destroy semantics otherwise: direct
-   * `fetchWithRetry` (NOT apiRequest — no Content-Type on a GET) and `[]` on
-   * a non-ok first page; a non-ok mid-walk returns the pages already
-   * collected.
-   * @param {object} [labels] - Labels to filter by
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
-  }
-
-  /**
    * Server listing that preserves the page-walker's `complete` flag — see
    * BaseProvider.listServersDetailed for why a soft-failed `[]` must not be
    * allowed to read as "the project is quiet".

@@ -65,7 +65,7 @@ import {
   sweepLabels,
   waitUntilServerUp,
 } from './base.js';
-import { decodeLabels } from './tag-labels.js';
+import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -1306,17 +1306,6 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * List ALL servers across the REGIONS zones, optionally filtered by
-   * labels — client-side tag matching via the SAME encodeLabel encoding
-   * createServer tags with.
-   * @param {object} [labels]
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
-  }
-
-  /**
    * Server listing preserving the completeness signal — see
    * BaseProvider.listServersDetailed. Complete only when EVERY zone's walk
    * completed (a truncated zone hides residue exactly like a truncated
@@ -1327,11 +1316,7 @@ export class ScalewayProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const { items, complete, status } = await this._walkAllZones('/servers', 'servers');
 
-    const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
-    const filtered =
-      wantedTags.length === 0
-        ? items
-        : items.filter((s) => wantedTags.every((tag) => (s.tags || []).includes(tag)));
+    const filtered = withAllTags(items, labels, encodeLabel);
 
     return status === undefined
       ? { items: filtered, complete }

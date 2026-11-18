@@ -878,14 +878,16 @@ export class BaseProvider {
   }
 
   /**
-   * List servers matching labels/tags. Contract: returns ALL matching
-   * servers — implementations must walk the provider's pagination, not
-   * return a single page (B0-4).
+   * List servers matching labels/tags, as the bare array: the `items` of
+   * listServersDetailed, which each provider implements and which walks the
+   * provider's pagination (B0-4), so ALL matching servers come back. It
+   * soft-fails like listVolumes; LinodeProvider overrides it to reject an
+   * unfiltered listing whose VPC membership could not be read.
    * @param {object} labels - Labels to filter by
    * @returns {Promise<object[]>}
    */
-  async listServers(_labels = {}) {
-    throw new Error('listServers() must be implemented by subclass');
+  async listServers(labels = {}) {
+    return (await this.listServersDetailed(labels)).items;
   }
 
   /**

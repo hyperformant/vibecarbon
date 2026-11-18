@@ -31,7 +31,7 @@ import {
   waitUntilServerUp,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
-import { decodeLabels } from './tag-labels.js';
+import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -728,16 +728,6 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
-   * List ALL instances, optionally filtered by labels — client-side tag
-   * matching via the SAME encodeLabel encoding createServer tags with.
-   * @param {object} [labels]
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
-  }
-
-  /**
    * Instance listing preserving the walk's completeness signal — see
    * BaseProvider.listServersDetailed.
    * @param {object} [labels]
@@ -746,11 +736,7 @@ export class VultrProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const { items, complete, status } = await this._walkCursor('/instances', 'instances');
 
-    const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
-    const filtered =
-      wantedTags.length === 0
-        ? items
-        : items.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
+    const filtered = withAllTags(items, labels, encodeLabel);
 
     return status === undefined
       ? { items: filtered, complete }

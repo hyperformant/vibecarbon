@@ -25,7 +25,7 @@ import {
   sweepLabels,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
-import { decodeLabels } from './tag-labels.js';
+import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
 // HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
@@ -1135,17 +1135,13 @@ export class LinodeProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const { items: instances, complete, status } = await this._walkPages('/linode/instances');
 
-    const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
-    const items =
-      wantedTags.length === 0
-        ? instances
-        : instances.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
+    const items = withAllTags(instances, labels, encodeLabel);
 
     // VPC membership is read only for an UNFILTERED listing, which is the
     // destroy sweep's. The autoscaler always lists with a selector and never
     // reads membership, so it pays no extra request.
     let membershipError;
-    if (status === undefined && wantedTags.length === 0) {
+    if (status === undefined && Object.keys(labels).length === 0) {
       membershipError = await this._attachVpcMembership(items);
     }
     if (membershipError) return { items, complete: false, membershipError };

@@ -1095,29 +1095,6 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * List ALL droplets, optionally filtered by labels, walking pagination
-   * (B0-4 semantics: non-ok first page → [], mid-walk → collected so far).
-   * DO's droplet list only supports filtering by a SINGLE `tag_name` per
-   * request (no AND-combination query param, and `tag_name` can't be
-   * combined with other filters) — this is a genuine behavior change from
-   * Hetzner's server-side `label_selector=k=v,k2=v2` AND, not a rename (M3
-   * dossier §7). The FIRST entry of `labels` (caller-ordered — put the most
-   * selective predicate first, e.g. groups.js's
-   * `{'cluster-autoscaler/node': groupId, cluster: clusterName}` already
-   * does) drives the single server-side `tag_name` query; any remaining
-   * entries are matched client-side against each returned droplet's
-   * `tags[]` array using the SAME `encodeLabel` encoding, so the wire tag
-   * string here is byte-identical to what createServer/the k8s Pulumi
-   * programs tag droplets with — this is the destroy-sweep + carbon-
-   * autoscaler correctness contract (M3 Task 1).
-   * @param {object} [labels]
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
-  }
-
-  /**
    * Droplet listing that preserves the page-walk's completeness signal — see
    * BaseProvider.listServersDetailed for why a soft-failed `[]` must not be
    * allowed to read as "the project is quiet".
