@@ -12,22 +12,16 @@
  * Self-skips with exit 0 when LINODE_API_TOKEN is absent, so the CI step is
  * inert until the e2e-infra environment carries the Linode secrets. Exits 1
  * when the sweep could not fully enumerate (an unverifiable sweep must not
- * pose as a clean one).
+ * pose as a clean one). Both are runCiSweep's (utils/sweep-ci.ts).
  */
 
-import { scratchNamePrefix } from './utils/namespace.ts';
+import { runCiSweep } from './utils/sweep-ci.ts';
 import { sweepOrphanedLinodeResources } from './utils/sweep-linode.ts';
 
-if (!process.env.LINODE_API_TOKEN) {
-  console.log(
-    '[sweep-linode-ci] LINODE_API_TOKEN not set — skipping (no Linode secrets configured).',
-  );
-  process.exit(0);
-}
-
-const prefix = scratchNamePrefix();
-const { counts, enumFailed } = await sweepOrphanedLinodeResources('[sweep-linode-ci]', prefix, {
-  token: process.env.LINODE_API_TOKEN,
+const tag = '[sweep-linode-ci]';
+await runCiSweep({
+  tag,
+  tokenEnv: 'LINODE_API_TOKEN',
+  cloud: 'Linode',
+  sweep: (prefix, token) => sweepOrphanedLinodeResources(tag, prefix, { token }),
 });
-console.log(`[sweep-linode-ci] ${prefix}*: ${JSON.stringify(counts)}`);
-if (enumFailed) process.exit(1);

@@ -177,6 +177,21 @@ const REGISTRY = [
     deepTests: ['tests/unit/e2e/checks-ssh-exec.test.ts'],
   },
   {
+    // The verdict of a CI safety-net sweep step: exit 0 without a token,
+    // exit 1 when the sweep could not look at everything. An entry point
+    // with its own copy can lose the exit 1, and residue the sweep never saw
+    // then bills under a green run.
+    helper: 'runCiSweep',
+    definition: 'tests/e2e/utils/sweep-ci.ts',
+    consumers: [
+      'tests/e2e/sweep-digitalocean-ci.ts',
+      'tests/e2e/sweep-linode-ci.ts',
+      'tests/e2e/sweep-vultr-ci.ts',
+      'tests/e2e/sweep-scaleway-ci.ts',
+    ],
+    deepTests: ['tests/unit/e2e/sweep-ci.test.ts', 'tests/unit/e2e/sweep-ci-entry-points.test.ts'],
+  },
+  {
     helper: 'e2eCliEnv',
     definition: 'tests/e2e/utils/e2e-env.js',
     consumers: [

@@ -13,22 +13,16 @@
  * Self-skips with exit 0 when DIGITALOCEAN_API_TOKEN is absent, so the CI
  * step is inert until the e2e-infra environment carries the DO secrets.
  * Exits 1 when the sweep could not fully enumerate (an unverifiable sweep
- * must not pose as a clean one).
+ * must not pose as a clean one). Both are runCiSweep's (utils/sweep-ci.ts).
  */
 
-import { scratchNamePrefix } from './utils/namespace.ts';
+import { runCiSweep } from './utils/sweep-ci.ts';
 import { sweepOrphanedDigitalOceanResources } from './utils/sweep-digitalocean.ts';
 
-if (!process.env.DIGITALOCEAN_API_TOKEN) {
-  console.log(
-    '[sweep-do-ci] DIGITALOCEAN_API_TOKEN not set — skipping (no DO secrets configured).',
-  );
-  process.exit(0);
-}
-
-const prefix = scratchNamePrefix();
-const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources('[sweep-do-ci]', prefix, {
-  token: process.env.DIGITALOCEAN_API_TOKEN,
+const tag = '[sweep-do-ci]';
+await runCiSweep({
+  tag,
+  tokenEnv: 'DIGITALOCEAN_API_TOKEN',
+  cloud: 'DO',
+  sweep: (prefix, token) => sweepOrphanedDigitalOceanResources(tag, prefix, { token }),
 });
-console.log(`[sweep-do-ci] ${prefix}*: ${JSON.stringify(counts)}`);
-if (enumFailed) process.exit(1);
