@@ -73,6 +73,15 @@ const CALL_SITE_EXCEPTIONS: Array<{ file: string; call: string; reason: string }
       "so the bucket's own region deletes a real one. A bucket it skipped that no region then " +
       'deleted fails the sweep (listedButDeletedNowhere).',
   },
+  {
+    file: 'scripts/sweep-hetzner.js',
+    call: 'const result = await store.emptyAndDeleteBucket(name);',
+    reason:
+      'The CI safety-net script decides nothing about a missing bucket: every error from the ' +
+      'delete, that one included, is recorded as a gap (sweepS3Buckets), and a gap fails the ' +
+      "script's verdict (sweepVerdict), so it can never read clean " +
+      '(behaviour: tests/unit/scripts/sweep-hetzner-buckets.test.ts).',
+  },
 ];
 
 /** Regex literals that name a missing-bucket spelling, sanctioned because their input is text. */

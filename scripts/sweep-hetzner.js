@@ -11,7 +11,9 @@
  * the sweep to <ns>test-* resources instead.
  *
  * Safe to run before, between, and after e2e scenarios. Exits 0
- * when nothing remains, 1 on failure to clean a resource.
+ * when nothing remains, 1 on failure to clean a resource or when a class
+ * of resource could not be checked (an unreadable listing, or a bucket pass
+ * that had no keys, could not list a location or could not delete a bucket).
  *
  * Usage: HETZNER_API_TOKEN=xxx node scripts/sweep-hetzner.js
  */
@@ -361,8 +363,41 @@ const listVolumePages = () => listPages('volumes', 'volumes');
 // volume exists. A truncated listing proves nothing about volumes, and a
 // deferred CSI pass leaves touched at 0, so either one must fall through to
 // recheckResidue, which fails the sweep.
-export function canSkipRecheck({ touched, volumes }) {
-  return touched === 0 && volumes.complete && unattachedCsiVolumes(volumes.items).length === 0;
+// A bucket pass that could not look (bucketGaps) cannot support "clean" either.
+export function canSkipRecheck({ touched, volumes, bucketGaps = [] }) {
+  return (
+    touched === 0 &&
+    bucketGaps.length === 0 &&
+    volumes.complete &&
+    unattachedCsiVolumes(volumes.items).length === 0
+  );
+}
+
+// The script's exit code after the recheck, and the lines that explain it.
+// Three things fail it: residue still listed, a Cloud API listing that
+// stopped early, and a bucket pass with gaps (sweepS3Buckets). Until
+// 2026-11-17 the third did not exist: missing storage keys, a failed
+// ListBuckets and a failed bucket delete all read as "0 buckets", and the
+// script printed "clean" over buckets it had never looked at.
+export function sweepVerdict({ leaked, blind, bucketGaps = [] }) {
+  const lines = [];
+  if (leaked > 0) {
+    lines.push(`[sweep] WARNING: ${leaked} resource(s) still present after delete attempts`);
+  }
+  // A listing that stopped early cannot support a "clean" verdict — the next
+  // run's preflight would be the one to discover the residue, which is exactly
+  // the failure this sweep exists to prevent. Say so and exit non-zero.
+  if (blind > 0) {
+    lines.push(
+      `[sweep] WARNING: ${blind} resource kind(s) could not be listed completely — cannot certify clean`,
+    );
+  }
+  if (bucketGaps.length > 0) {
+    lines.push(
+      `[sweep] WARNING: Object Storage buckets were not fully checked (${bucketGaps.join('; ')}) — cannot certify clean`,
+    );
+  }
+  return { code: lines.length > 0 ? 1 : 0, lines };
 }
 
 // Re-list everything the sweep owns and report what is still there. Returns
@@ -413,13 +448,14 @@ async function main() {
 
   // Sweep orphaned S3 buckets too. Hetzner Object Storage is a separate
   // service from the Cloud API and isn't reachable with HETZNER_API_TOKEN,
-  // so we read S3 creds from HETZNER_ACCESS_KEY/HETZNER_SECRET_KEY when present.
-  // Missing/invalid creds are non-fatal — the cloud-resource sweep above is
-  // the primary job.
-  const s3Touched = await sweepS3Buckets();
-  touched += s3Touched;
+  // so we read S3 creds from HETZNER_ACCESS_KEY/HETZNER_SECRET_KEY.
+  // Missing or invalid creds do not stop the script (the Cloud API passes
+  // above have already run), but they are a gap in what it checked, and a
+  // gap fails the verdict below: see sweepVerdict.
+  const s3 = await sweepS3Buckets();
+  touched += s3.deleted;
 
-  if (canSkipRecheck({ touched, volumes: await listVolumePages() })) {
+  if (canSkipRecheck({ touched, volumes: await listVolumePages(), bucketGaps: s3.gaps })) {
     console.log('[sweep] clean — no vibecarbon-managed resources remaining');
     process.exit(0);
   }
@@ -428,24 +464,15 @@ async function main() {
   // Recheck EVERY cloud kind, not just servers: a FAILED delete above
   // (e.g. a locked floating IP that outlasted the retries) must fail the
   // sweep loudly — exiting 0 with residue just moves the failure to the
-  // next run's preflight abort. S3 buckets are deliberately excluded:
-  // preflight does not gate on them, and Hetzner Ceph's BucketNotEmpty
-  // eventual consistency makes freshly-emptied shells transiently
-  // undeletable — successive sweeps converge on those.
+  // next run's preflight abort. S3 buckets are deliberately excluded from
+  // the RE-LISTING: preflight does not gate on them, and Hetzner Ceph's
+  // BucketNotEmpty eventual consistency makes freshly-emptied shells
+  // transiently undeletable — successive sweeps converge on those. What the
+  // bucket pass could not check or delete is carried in s3.gaps instead.
   const { leaked, blind } = await recheckResidue();
-  if (leaked > 0) {
-    console.error(`[sweep] WARNING: ${leaked} resource(s) still present after delete attempts`);
-    process.exit(1);
-  }
-  // A listing that stopped early cannot support a "clean" verdict — the next
-  // run's preflight would be the one to discover the residue, which is exactly
-  // the failure this sweep exists to prevent. Say so and exit non-zero.
-  if (blind > 0) {
-    console.error(
-      `[sweep] WARNING: ${blind} resource kind(s) could not be listed completely — cannot certify clean`,
-    );
-    process.exit(1);
-  }
+  const verdict = sweepVerdict({ leaked, blind, bucketGaps: s3.gaps });
+  for (const line of verdict.lines) console.error(line);
+  if (verdict.code !== 0) process.exit(verdict.code);
   console.log('[sweep] recheck clean');
 }
 
@@ -458,24 +485,14 @@ if (process.argv[1]?.endsWith('sweep-hetzner.js')) {
   });
 }
 
-async function sweepS3Buckets() {
-  // Env-only: populate HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY via tests/.env.e2e or export directly.
-  const accessKey = process.env.HETZNER_ACCESS_KEY;
-  const secretKey = process.env.HETZNER_SECRET_KEY;
-  if (!accessKey || !secretKey) {
-    console.log('[sweep] S3 credentials incomplete (HETZNER_ACCESS_KEY/HETZNER_SECRET_KEY) — skipping bucket sweep');
-    return 0;
-  }
-
-  // Dynamically import so this script still runs on systems without the SDK
-  // (the S3 block is optional — cloud-API sweep is the primary job).
-  let sdk;
-  try {
-    sdk = await import('@aws-sdk/client-s3');
-  } catch (err) {
-    console.warn(`[sweep] @aws-sdk/client-s3 not installed (${err.message}) — skipping bucket sweep`);
-    return 0;
-  }
+/**
+ * One store per Object Storage location, hand-rolled on the S3 SDK: the
+ * shape sweepS3Buckets reads (and tests fake).
+ *   listBuckets(): names this location lists; throws when the listing fails.
+ *   emptyAndDeleteBucket(name): { deleted, shellDeferred, objectsRemoved };
+ *     throws when the bucket could not be emptied or deleted.
+ */
+function defaultS3Stores(sdk, accessKey, secretKey) {
   const {
     S3Client,
     ListBucketsCommand,
@@ -486,11 +503,8 @@ async function sweepS3Buckets() {
     DeleteObjectsCommand,
     DeleteBucketCommand,
   } = sdk;
-
-  const TEST_PREFIX = E2E_SCRATCH_PREFIX;
   const REGIONS = ['nbg1', 'fsn1', 'hel1'];
-  let deleted = 0;
-
+  const stores = {};
   for (const region of REGIONS) {
     const client = new S3Client({
       endpoint: `https://${region}.your-objectstorage.com`,
@@ -498,23 +512,13 @@ async function sweepS3Buckets() {
       credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
       forcePathStyle: true,
     });
-
-    let resp;
-    try {
-      resp = await client.send(new ListBucketsCommand({}));
-    } catch (err) {
-      console.warn(`[sweep] s3/${region} list-buckets failed: ${err.message}`);
-      continue;
-    }
-
-    const matches = (resp.Buckets ?? []).filter((b) => b.Name?.startsWith(TEST_PREFIX));
-    if (matches.length === 0) continue;
-    console.log(`[sweep] s3/${region} testapp-* buckets: ${matches.length}`);
-
-    for (const bucket of matches) {
-      const name = bucket.Name;
-      process.stdout.write(`[sweep]   DELETE bucket ${region}/${name} ... `);
-      try {
+    stores[region] = {
+      async listBuckets() {
+        const resp = await client.send(new ListBucketsCommand({}));
+        return (resp.Buckets ?? []).map((b) => b.Name).filter(Boolean);
+      },
+      async emptyAndDeleteBucket(name) {
+        let objectsRemoved = 0;
         // Empty current objects
         let cont;
         do {
@@ -526,6 +530,7 @@ async function sweepS3Buckets() {
             await client.send(
               new DeleteObjectsCommand({ Bucket: name, Delete: { Objects: objs, Quiet: true } }),
             );
+            objectsRemoved += objs.length;
           }
           cont = list.NextContinuationToken;
         } while (cont);
@@ -576,15 +581,105 @@ async function sweepS3Buckets() {
           // Non-fatal
         }
 
-        await client.send(new DeleteBucketCommand({ Bucket: name }));
+        try {
+          await client.send(new DeleteBucketCommand({ Bucket: name }));
+        } catch (err) {
+          // Everything above was removed, so BucketNotEmpty here is Ceph's
+          // eventual consistency on the empty shell, not data: a later sweep
+          // collects it (the same call the product's emptyAndDeleteBucket makes).
+          if (err?.name !== 'BucketNotEmpty' && err?.Code !== 'BucketNotEmpty') throw err;
+          return { deleted: false, shellDeferred: true, objectsRemoved };
+        }
+        return { deleted: true, shellDeferred: false, objectsRemoved };
+      },
+    };
+  }
+  return stores;
+}
+
+/**
+ * Delete the scratch-prefixed buckets in every Hetzner Object Storage location.
+ *
+ * Returns what it deleted and its GAPS: each thing it could not check or
+ * delete, in words a person can act on. A gap is not thrown (the Cloud API
+ * passes have run and the remaining locations are still swept), but it fails
+ * the script's verdict (sweepVerdict), as the same three cases fail the
+ * harness sweep in tests/e2e/utils/sweep-hetzner.ts:
+ *   - a storage key is not set (named, never its value);
+ *   - a location's ListBuckets failed;
+ *   - a bucket could not be emptied or deleted.
+ * Not a gap, on purpose: a bucket that was emptied but whose empty shell the
+ * store would not remove yet (`deleted: false`). It holds nothing, and the
+ * next sweep collects it.
+ *
+ * `storesByRegion` is injectable for unit tests only.
+ *
+ * @returns {Promise<{ deleted: number, gaps: string[] }>}
+ */
+export async function sweepS3Buckets({
+  // Env-only: populate HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY via tests/.env.e2e or export directly.
+  accessKey = process.env.HETZNER_ACCESS_KEY,
+  secretKey = process.env.HETZNER_SECRET_KEY,
+  storesByRegion = undefined,
+  prefix = E2E_SCRATCH_PREFIX,
+} = {}) {
+  const gaps = [];
+  let stores = storesByRegion;
+  if (!stores) {
+    if (!accessKey || !secretKey) {
+      // Names only, never a value.
+      const missing = [
+        accessKey ? '' : 'HETZNER_ACCESS_KEY',
+        secretKey ? '' : 'HETZNER_SECRET_KEY',
+      ].filter(Boolean);
+      const gap = `${missing.join(' and ')} not set`;
+      console.warn(`[sweep] S3 buckets not checked: ${gap}, so leftover buckets cannot be ruled out`);
+      return { deleted: 0, gaps: [gap] };
+    }
+
+    // Dynamically import so this script still runs on systems without the SDK:
+    // the Cloud API passes do not need it. The bucket pass does, so without
+    // it the buckets go unchecked and that is a gap like any other.
+    try {
+      stores = defaultS3Stores(await import('@aws-sdk/client-s3'), accessKey, secretKey);
+    } catch (err) {
+      console.warn(`[sweep] S3 buckets not checked: @aws-sdk/client-s3 could not be loaded (${err.message})`);
+      return { deleted: 0, gaps: ['@aws-sdk/client-s3 could not be loaded'] };
+    }
+  }
+
+  let deleted = 0;
+  for (const [region, store] of Object.entries(stores)) {
+    let names;
+    try {
+      names = await store.listBuckets();
+    } catch (err) {
+      console.warn(`[sweep] s3/${region} list-buckets failed: ${err.message}`);
+      gaps.push(`s3/${region} bucket listing failed`);
+      continue;
+    }
+
+    const matches = names.filter((n) => n.startsWith(prefix));
+    if (matches.length === 0) continue;
+    console.log(`[sweep] s3/${region} ${prefix}* buckets: ${matches.length}`);
+
+    for (const name of matches) {
+      process.stdout.write(`[sweep]   DELETE bucket ${region}/${name} ... `);
+      try {
+        const result = await store.emptyAndDeleteBucket(name);
+        if (result.deleted === false) {
+          console.log('emptied; the empty shell is not removable yet, a later sweep collects it');
+          continue;
+        }
         console.log('ok');
         deleted++;
       } catch (err) {
         console.log(`FAILED: ${err.message}`);
+        gaps.push(`s3/${region}/${name} delete failed`);
       }
     }
   }
 
   if (deleted > 0) console.log(`[sweep] s3 deleted ${deleted} bucket(s)`);
-  return deleted;
+  return { deleted, gaps };
 }
