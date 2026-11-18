@@ -53,11 +53,14 @@ const ROOTS = [
 /** The kubectl verbs that go through the kubelet to a pod. */
 const POD_VERB = /^(exec|logs|attach|cp|port-forward)$/;
 
-/** The functions that return a pod argv, whose callers the census reads instead. */
+/**
+ * The functions that return a pod argv, whose callers the census reads instead.
+ * dbExecArgv (db-workload.js) is the database container's; a listed builder
+ * that returns its argv is judged at its own callers too.
+ */
 const ARGV_BUILDERS = [
   'certManagerLogArgv',
   'dbExecArgv',
-  'k8sDbMarkerExec',
   'k8sWalgAuditArgv',
   'k8sWalgRoleExecArgv',
 ];
@@ -192,6 +195,8 @@ function scan(file: string, text: string) {
   }
 
   for (const call of findCalls(text, ARGV_BUILDERS)) {
+    // A listed builder that returns another's argv runs nothing: its callers are judged.
+    if (ARGV_BUILDERS.includes(call.fn)) continue;
     judge(call.at, call.at + call.text.length, call.name);
   }
 
@@ -313,6 +318,10 @@ describe('the census bites', () => {
     ['logs', "async function a() { await kubectl(ip, ['logs', pod]); }"],
     ['a builder call', 'async function a() { await kubectl(dbExecArgv(["ls"])); }'],
     [
+      'an unlisted function returning a builder argv',
+      "function newPodArgv(p) { return dbExecArgv(['ls'], { pod: p }); }",
+    ],
+    [
       'an options variable with no timeout',
       "async function a() { const opts = { silent: true }; await kubectl(ip, ['exec', pod], opts); }",
     ],
@@ -366,6 +375,10 @@ describe('the census bites', () => {
     ['a word in a comment', "// await kubectl(ip, ['exec', pod]);\nfunction a() {}"],
     ['a word in a longer string', 'const s = "the \'exec\' verb";'],
     ['a verb tested, never run', "function a(argv) { return argv.includes('exec'); }"],
+    [
+      'a listed builder built on another',
+      "function k8sWalgRoleExecArgv(role) { return dbExecArgv(['sh', '-c', role]); }",
+    ],
   ])('leaves %s alone', (_name, body) => {
     expect(plant(body).unbounded).toEqual([]);
   });

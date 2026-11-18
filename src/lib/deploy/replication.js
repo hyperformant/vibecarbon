@@ -27,6 +27,7 @@ import {
   DB_GUARD_PROTOCOL_MARKER,
   DB_POD,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_QUERY_MS,
   POD_EXEC_WRITE_MS,
 } from './db-workload.js';
@@ -1057,21 +1058,10 @@ export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = RE
   await sshKubectl(
     primaryIp,
     sshKeyPath,
-    [
-      'exec',
-      '-i',
-      '-n',
-      'vibecarbon',
+    dbExecArgv(['psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
+      stdin: true,
       pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-d',
-      'postgres',
-      '-v',
-      'ON_ERROR_STOP=1',
-    ],
+    }),
     { input: sql, timeout: POD_EXEC_WRITE_MS },
   );
 }
@@ -1514,7 +1504,7 @@ export async function reseedStandbyInPlace({
   try {
     stage = await runInPlaceStage(
       () =>
-        kubectl(['-n', 'vibecarbon', 'exec', '-i', DB_POD, '-c', DB_CONTAINER, '--', 'sh'], {
+        kubectl(dbExecArgv(['sh'], { stdin: true }), {
           input: script,
           timeout: clientS * 1000,
         }),
@@ -1827,16 +1817,6 @@ export const DB_IN_PLACE_STOP_UNSEEDED = Object.freeze([
 export const DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S = 120;
 
 const DB_POD_GET_ARGV = ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'];
-const dbExecArgv = (argv) => [
-  '-n',
-  'vibecarbon',
-  'exec',
-  DB_POD,
-  '-c',
-  DB_CONTAINER,
-  '--',
-  ...argv,
-];
 
 /** The db container's spec and status from a parsed pod, or nulls. */
 function dbContainerOf(pod) {
@@ -2274,19 +2254,17 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
     const out = await sshKubectl(
       ip,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        sql,
-      ],
+      dbExecArgv(
+        [
+          ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+          'psql',
+          '-U',
+          'postgres',
+          '-tAc',
+          sql,
+        ],
+        { pod },
+      ),
       { timeout: POD_EXEC_QUERY_MS },
     );
     return typeof out === 'string' ? out : '';

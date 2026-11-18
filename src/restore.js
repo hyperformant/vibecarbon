@@ -45,6 +45,7 @@ import {
   DB_CONTAINER,
   DB_POD,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_PROBE_MS,
   POD_EXEC_QUERY_MS,
 } from './lib/deploy/db-workload.js';
@@ -262,12 +263,9 @@ export async function verifyPostgres(ip, sshKeyPath, opts = {}) {
   let lastErr = '';
   for (;;) {
     try {
-      await exec(
-        ip,
-        sshKeyPath,
-        ['exec', '-n', 'vibecarbon', pod, '--', 'pg_isready', '-U', 'postgres'],
-        { timeout: POD_EXEC_PROBE_MS },
-      );
+      await exec(ip, sshKeyPath, dbExecArgv(['pg_isready', '-U', 'postgres'], { pod }), {
+        timeout: POD_EXEC_PROBE_MS,
+      });
       return; // exit 0 = accepting connections
     } catch (err) {
       lastErr = err instanceof Error ? err.message : String(err);
@@ -1092,18 +1090,7 @@ async function k8sPgdataFreeBytes(ip, sshKeyPath) {
     const out = await sshKubectl(
       ip,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        DB_POD,
-        '-c',
-        DB_CONTAINER,
-        '--',
-        'df',
-        '-Pk',
-        '/var/lib/postgresql/data',
-      ],
+      dbExecArgv(['df', '-Pk', '/var/lib/postgresql/data']),
       { timeout: POD_EXEC_PROBE_MS },
     );
     const row =
@@ -1130,21 +1117,7 @@ async function waitForK8sPromotion(
       const out = await sshKubectl(
         ip,
         sshKeyPath,
-        [
-          'exec',
-          '-n',
-          'vibecarbon',
-          DB_POD,
-          '-c',
-          DB_CONTAINER,
-          '--',
-          'psql',
-          '-U',
-          'postgres',
-          '-At',
-          '-c',
-          'SELECT pg_is_in_recovery()',
-        ],
+        dbExecArgv(['psql', '-U', 'postgres', '-At', '-c', 'SELECT pg_is_in_recovery()']),
         { timeout: POD_EXEC_QUERY_MS },
       );
       if (String(out ?? '').trim() === 'f') return;
@@ -1313,7 +1286,7 @@ export async function runK8sRestore({
       await sshKubectl(
         serverIp,
         sshKeyPath,
-        ['exec', '-n', 'vibecarbon', pod, '--', 'psql', '-U', 'postgres', '-q', '-c', 'ANALYZE'],
+        dbExecArgv(['psql', '-U', 'postgres', '-q', '-c', 'ANALYZE'], { pod }),
         { timeout: 300_000 },
       );
     } catch (err) {
@@ -1347,19 +1320,13 @@ export async function runK8sRestore({
   //    crash after this can only leave garbage, never a .vc-prev the next
   //    restore reads as "unproven"), clear the marker (a later pod restart
   //    boots normally), then remove the discard.
-  await sshKubectl(
-    serverIp,
-    sshKeyPath,
-    ['exec', '-n', 'vibecarbon', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', RETIRE_PREVIOUS_SH],
-    { timeout: 60_000 },
-  );
+  await sshKubectl(serverIp, sshKeyPath, dbExecArgv(['sh', '-c', RETIRE_PREVIOUS_SH]), {
+    timeout: 60_000,
+  });
   await clearRestoreMarker({ ip: serverIp, sshKeyPath });
-  await sshKubectl(
-    serverIp,
-    sshKeyPath,
-    ['exec', '-n', 'vibecarbon', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', REMOVE_DISCARD_SH],
-    { timeout: 300_000 },
-  );
+  await sshKubectl(serverIp, sshKeyPath, dbExecArgv(['sh', '-c', REMOVE_DISCARD_SH]), {
+    timeout: 300_000,
+  });
   // 7. Bring the app back.
   await perfAsync('restore.scaleUpApp', async () => scaleUpApp(serverIp, sshKeyPath));
   s.stop('Database restored');

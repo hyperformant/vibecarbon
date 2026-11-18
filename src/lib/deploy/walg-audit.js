@@ -102,7 +102,7 @@ import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { VC_COMPOSE } from './compose/command.js';
-import { DB_POD } from './db-workload.js';
+import { DB_POD, dbExecArgv } from './db-workload.js';
 
 /**
  * SQL read from `pg_stat_archiver`, written for `psql -tAX` (tuples-only,
@@ -701,5 +701,5 @@ export function composeWalgAuditShell(opts = {}) {
  * @returns {string[]}
  */
 export function k8sWalgAuditArgv(dbPod = DB_POD, opts = {}) {
-  return ['-n', 'vibecarbon', 'exec', dbPod, '--', 'bash', '-c', buildWalgAuditProbe(opts)];
+  return dbExecArgv(['bash', '-c', buildWalgAuditProbe(opts)], { pod: dbPod });
 }

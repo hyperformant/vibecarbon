@@ -28,10 +28,10 @@ import {
   writeK8sBackupFence,
 } from './lib/deploy/backup-fence.js';
 import {
-  DB_CONTAINER,
   DB_POD,
   DB_POD_SELECTOR,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_PROBE_MS,
 } from './lib/deploy/db-workload.js';
 import { abortFailover } from './lib/deploy/failover-abort.js';
@@ -323,7 +323,7 @@ async function isPrimaryPostgresReady(primaryIp, sshKeyPath) {
     const result = await sshKubectl(
       primaryIp,
       sshKeyPath,
-      ['exec', '-n', 'vibecarbon', pod, '--', 'pg_isready', '-U', 'postgres', '-t', '3'],
+      dbExecArgv(['pg_isready', '-U', 'postgres', '-t', '3'], { pod }),
       { timeout: POD_EXEC_PROBE_MS },
     );
     return result?.includes('accepting connections') ?? false;
@@ -2106,17 +2106,7 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
       try {
         const out = await kubectl(
           primary.ip,
-          [
-            ...ns,
-            'exec',
-            DB_POD,
-            '-c',
-            DB_CONTAINER,
-            '--',
-            'sh',
-            '-c',
-            walgRoleReadShell(WALG_ROLE_DIR),
-          ],
+          dbExecArgv(['sh', '-c', walgRoleReadShell(WALG_ROLE_DIR)]),
           { timeout: POD_EXEC_PROBE_MS },
         );
         live = parseWalgRoleReadBack(out);

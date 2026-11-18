@@ -123,6 +123,7 @@ import {
   DB_POD_SELECTOR,
   DB_PVC,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_PROBE_MS,
   POD_EXEC_QUERY_MS,
   standbyDbRebuildHint,
@@ -3543,21 +3544,9 @@ export async function auditRls({ kubeconfig }) {
   const auditOut = await runCommandAsync(
     [
       'kubectl',
-      '-n',
-      'vibecarbon',
-      'exec',
-      '-i',
-      DB_POD,
-      '-c',
-      DB_CONTAINER,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-d',
-      'postgres',
-      '-tAc',
-      RLS_AUDIT_SQL,
+      ...dbExecArgv(['psql', '-U', 'postgres', '-d', 'postgres', '-tAc', RLS_AUDIT_SQL], {
+        stdin: true,
+      }),
     ],
     { env, silent: true, timeout: POD_EXEC_QUERY_MS },
   );
@@ -4195,10 +4184,11 @@ async function readRestoreSwapState(env, marker) {
     'echo VC_OK';
   let out;
   try {
-    out = await runCommandAsync(
-      ['kubectl', '-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', probe],
-      { env, silent: true, timeout: POD_EXEC_PROBE_MS },
-    );
+    out = await runCommandAsync(['kubectl', ...dbExecArgv(['sh', '-c', probe])], {
+      env,
+      silent: true,
+      timeout: POD_EXEC_PROBE_MS,
+    });
   } catch {
     return { state: 'unknown', previous: false };
   }
@@ -4323,19 +4313,14 @@ function dbPsql(env) {
       (await runCommandAsync(
         [
           'kubectl',
-          '-n',
-          'vibecarbon',
-          'exec',
-          DB_POD,
-          '-c',
-          DB_CONTAINER,
-          '--',
-          ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
-          'psql',
-          '-U',
-          'postgres',
-          '-tAc',
-          sql,
+          ...dbExecArgv([
+            ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+            'psql',
+            '-U',
+            'postgres',
+            '-tAc',
+            sql,
+          ]),
         ],
         { env, silent: true, timeout: POD_EXEC_QUERY_MS },
       )) ?? '',
@@ -4381,10 +4366,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
   // The bounds `vibecarbon restore` gives the same two scripts: a rename, and
   // an `rm -rf` of a whole cluster.
   const execInDb = (script, description, timeout) =>
-    runKubectlWithRetry(
-      ['-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', script],
-      { env, description, timeout },
-    );
+    runKubectlWithRetry(dbExecArgv(['sh', '-c', script]), { env, description, timeout });
   await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster', 60_000);
   try {
     await runKubectlWithRetry(

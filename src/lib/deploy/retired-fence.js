@@ -57,7 +57,7 @@ import {
 } from '../services/standby-policy.js';
 import { sshKeyPathFor, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
-import { DB_CONTAINER, DB_POD } from './db-workload.js';
+import { dbExecArgv } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
 import {
   fenceDatabaseWrites,
@@ -222,19 +222,6 @@ async function clearDbReadOnly(exec) {
 // k8s-ha: kubectl over ssh on the retired cluster's master
 // ---------------------------------------------------------------------------
 
-const k8sDbMarkerExec = (script) => [
-  '-n',
-  NS,
-  'exec',
-  DB_POD,
-  '-c',
-  DB_CONTAINER,
-  '--',
-  'sh',
-  '-c',
-  script,
-];
-
 const NO_FLUX =
   /doesn't have a resource type|no matches for kind|could not find the requested resource/i;
 
@@ -380,7 +367,11 @@ export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   const walgIntentStandby = configMap(DB_ROLE_CONFIGMAP)?.data?.[DB_ROLE_INTENT_KEY] === 'standby';
   if (walgIntentStandby) {
     try {
-      const out = await kubectl(ip, k8sDbMarkerExec(walgRoleReadShell(WALG_ROLE_DIR)), opts);
+      const out = await kubectl(
+        ip,
+        dbExecArgv(['sh', '-c', walgRoleReadShell(WALG_ROLE_DIR)]),
+        opts,
+      );
       walgStandby = parseWalgRoleReadBack(out) === 'standby';
     } catch {
       // db pod not running: the second pass, after the db settles, retries.
@@ -391,7 +382,11 @@ export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   try {
     const out = await kubectl(
       ip,
-      k8sDbMarkerExec(`if [ -f ${DB_MARKER_PATH} ]; then echo present; else echo absent; fi`),
+      dbExecArgv([
+        'sh',
+        '-c',
+        `if [ -f ${DB_MARKER_PATH} ]; then echo present; else echo absent; fi`,
+      ]),
       opts,
     );
     const v = String(out ?? '').trim();
@@ -479,9 +474,11 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
         what: 'the PGDATA marker',
         apply: (ip) =>
           attempt(async () => {
-            const out = await kubectl(ip, k8sDbMarkerExec(`touch ${DB_MARKER_PATH} && echo OK`), {
-              timeout: PROBE_TIMEOUT_MS,
-            });
+            const out = await kubectl(
+              ip,
+              dbExecArgv(['sh', '-c', `touch ${DB_MARKER_PATH} && echo OK`]),
+              { timeout: PROBE_TIMEOUT_MS },
+            );
             if (String(out ?? '').trim() !== 'OK') throw new Error('touch did not confirm');
           }),
       },
@@ -908,9 +905,11 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
         '-p',
         JSON.stringify({ data: { [RETIRED_ROLE_KEY]: null } }),
       ]);
-      const out = await kubectl(ip, k8sDbMarkerExec(`rm -f ${DB_MARKER_PATH} && echo OK`), {
-        timeout: PROBE_TIMEOUT_MS,
-      });
+      const out = await kubectl(
+        ip,
+        dbExecArgv(['sh', '-c', `rm -f ${DB_MARKER_PATH} && echo OK`]),
+        { timeout: PROBE_TIMEOUT_MS },
+      );
       if (String(out ?? '').trim() !== 'OK') throw new Error('rm did not confirm');
       await clearDbReadOnly(exec);
       for (const k of (await listFluxKustomizations(ip, kubectl)) ?? []) {
