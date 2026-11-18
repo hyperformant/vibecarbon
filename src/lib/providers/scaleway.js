@@ -1256,7 +1256,11 @@ export class ScalewayProvider extends BaseProvider {
     const response = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to get server: ${error.message || 'Unknown error'}`);
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the server (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${error.message || 'Unknown error'}`), {
+        status: response.status,
+      });
     }
     const { server } = await response.json();
     return { zone, ...server };

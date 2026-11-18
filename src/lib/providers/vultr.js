@@ -691,7 +691,11 @@ export class VultrProvider extends BaseProvider {
     const response = await this.apiRequest(`/instances/${serverId}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to get server: ${error.error || 'Unknown error'}`);
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the instance (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${error.error || 'Unknown error'}`), {
+        status: response.status,
+      });
     }
     const { instance } = await response.json();
     return instance;
