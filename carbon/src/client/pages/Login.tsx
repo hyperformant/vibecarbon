@@ -215,7 +215,10 @@ export default function Login() {
               <>
                 <form onSubmit={handleMagicLink} className="space-y-4">
                   {error && (
-                    <div className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg">
+                    <div
+                      role="alert"
+                      className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg"
+                    >
                       {error}
                     </div>
                   )}
@@ -248,7 +251,10 @@ export default function Login() {
                     </div>
                   )}
                   {error && (
-                    <div className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg">
+                    <div
+                      role="alert"
+                      className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg"
+                    >
                       {error}
                     </div>
                   )}
