@@ -153,6 +153,30 @@ const REGISTRY = [
     deepTests: ['tests/unit/e2e/provider-pages.test.ts', 'tests/unit/e2e/sweep-page-guard.test.ts'],
   },
   {
+    // One ssh attempt for a check, as data: the options, the time limit and
+    // what a failed exit carries. replication.ts and pilot-light.ts each had
+    // a copy under their own retry, and grafana-ready.ts a third. The retries
+    // stay in those files (registered sites in docs/mitigations.yml).
+    helper: 'sshExecOnce',
+    definition: 'tests/e2e/utils/ssh.ts',
+    consumers: [
+      'tests/e2e/checks/replication.ts', // under sshExecWithRetry, with the unreachable-host latch
+      'tests/e2e/checks/pilot-light.ts', // under its own retry, no latch
+      'tests/e2e/checks/grafana-ready.ts', // one attempt, the rollout's own time limit
+    ],
+    deepTests: ['tests/unit/e2e/checks-ssh-exec.test.ts'],
+  },
+  {
+    // The same call for a check that wants the output or the thrown error.
+    helper: 'sshOutput',
+    definition: 'tests/e2e/utils/ssh.ts',
+    consumers: [
+      'tests/e2e/checks/config-canary.ts', // 30 s; the poll reads the thrown message
+      'tests/e2e/checks/backup-evidence.ts', // 60 s; sshFailureReason reads the thrown error
+    ],
+    deepTests: ['tests/unit/e2e/checks-ssh-exec.test.ts'],
+  },
+  {
     helper: 'e2eCliEnv',
     definition: 'tests/e2e/utils/e2e-env.js',
     consumers: [

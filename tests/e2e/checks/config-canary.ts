@@ -14,9 +14,8 @@
  * sk_test_ prefix: a Stripe *test-mode* sentinel, never a real key.
  */
 
-import { execFileSync } from 'node:child_process';
 import type { VerificationResult } from '../scenarios/types.js';
-import { e2eSshOpts } from '../utils/ssh.js';
+import { sshOutput } from '../utils/ssh.js';
 import {
   isSshConnectTimeout,
   noteSshConnectTimeout,
@@ -36,15 +35,6 @@ export const CONFIG_CANARY_SECRET = 'sk_test_e2e_canary_propagation';
  * instance, and an unused client id is inert.
  */
 export const OAUTH_CANARY_CLIENT_ID = 'e2e-canary-client-id.apps.example.invalid';
-
-function ssh(ip: string, sshKeyPath: string, cmd: string): string {
-  // SECURITY: all args come from trusted test config, not user input.
-  return execFileSync('ssh', [...e2eSshOpts(10), '-i', sshKeyPath, `root@${ip}`, cmd], {
-    encoding: 'utf-8',
-    timeout: 30_000,
-    stdio: 'pipe',
-  }).trim();
-}
 
 /**
  * Poll `probe` until it returns a non-empty string or the attempt budget is
@@ -186,7 +176,7 @@ export async function runConfigCanaryChecks(
     // even this first spec stops after one attempt instead of re-probing a
     // black-holed :22 for the whole budget.
     const { value, lastErr, aborted } = await pollForEnvValue(
-      () => ssh(masterIp, sshKeyPath, spec.cmd),
+      () => sshOutput(masterIp, sshKeyPath, spec.cmd, 30_000),
       {
         budgetMs: 90_000,
         intervalMs: 5_000,

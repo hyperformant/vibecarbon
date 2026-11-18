@@ -64,7 +64,6 @@
  * `DIGITALOCEAN_ACCESS_KEY` / `_SECRET_KEY` without a branch here.
  */
 
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { backupsTargetOf } from '../../../src/lib/backups-bucket.js';
@@ -72,7 +71,7 @@ import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { getObjectStorageProvider, getProviderClass } from '../../../src/lib/providers/index.js';
 import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
 import type { VerificationResult } from '../scenarios/types.js';
-import { e2eSshOpts, sshFailureReason } from '../utils/ssh.js';
+import { sshFailureReason, sshOutput } from '../utils/ssh.js';
 
 /**
  * The slice of `S3CompatibleProvider` this check uses. The JS module's inferred
@@ -355,15 +354,9 @@ export function buildArchiverEvidenceCommand(projectName: string, isCompose: boo
   );
 }
 
+/** The WAL probe over ssh (sshOutput, utils/ssh.ts), on its 60 s limit. */
 function ssh(ip: string, sshKeyPath: string, cmd: string): string {
-  // SECURITY: all arguments come from trusted test config, never user input.
-  // e2eSshOpts carries BatchMode=yes (a password fallback would hang the step
-  // for the full timeout instead of failing fast).
-  return execFileSync('ssh', [...e2eSshOpts(10), '-i', sshKeyPath, `root@${ip}`, cmd], {
-    encoding: 'utf-8',
-    timeout: 60_000,
-    stdio: 'pipe',
-  }).trim();
+  return sshOutput(ip, sshKeyPath, cmd, 60_000);
 }
 
 function timer() {

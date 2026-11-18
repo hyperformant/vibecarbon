@@ -68,6 +68,74 @@ export function e2eSshOpts(connectTimeoutSec = 5): string[] {
   ];
 }
 
+/**
+ * Run one command as root on a server, for a check: 10 s to connect, the
+ * caller's time limit on the whole call. Returns what it printed, trimmed.
+ * Throws what execFileSync throws (a non-zero exit, the time limit), with
+ * `status`, `stdout` and `stderr` on the error: sshFailureReason reads them.
+ *
+ * The one place the checks spawn ssh for a command's output. feature-redis.ts
+ * keeps its own: 5 s to connect, untrimmed, and the remote stderr left on the
+ * runner's.
+ */
+export function sshOutput(
+  ip: string,
+  sshKeyPath: string,
+  remote: string,
+  timeoutMs: number,
+): string {
+  // SECURITY: execFileSync invokes ssh directly (no local shell). ip and key
+  // come from our own config; `remote` is one argv word that ssh hands to the
+  // remote shell, built by the caller from fixed text and trusted test config.
+  return execFileSync('ssh', [...e2eSshOpts(10), '-i', sshKeyPath, `root@${ip}`, remote], {
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    stdio: 'pipe',
+  }).trim();
+}
+
+/** One ssh attempt, as data. `status` is null when ssh was killed (the time limit). */
+export interface SshExecOnceResult {
+  ok: boolean;
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  message: string;
+}
+
+/**
+ * sshOutput for a caller that classifies the failure itself. Never throws,
+ * never retries: a retry is its caller's, and stays there (replication.ts and
+ * pilot-light.ts each own a registered one, docs/mitigations.yml).
+ */
+export function sshExecOnce(
+  ip: string,
+  sshKeyPath: string,
+  remote: string,
+  timeoutMs = 30_000,
+): SshExecOnceResult {
+  try {
+    const stdout = sshOutput(ip, sshKeyPath, remote, timeoutMs);
+    return { ok: true, status: 0, stdout, stderr: '', message: '' };
+  } catch (err) {
+    // execFileSync throws on non-zero exit / timeout; stdout/stderr still
+    // carry the remote command's own error text, which is the useful part.
+    const e = err as {
+      status?: number | null;
+      stdout?: Buffer | string;
+      stderr?: Buffer | string;
+      message?: string;
+    };
+    return {
+      ok: false,
+      status: typeof e.status === 'number' ? e.status : null,
+      stdout: e.stdout ? e.stdout.toString().trim() : '',
+      stderr: e.stderr ? e.stderr.toString().trim() : '',
+      message: e.message ?? 'ssh exec failed',
+    };
+  }
+}
+
 const SSH_OPTS = e2eSshOpts(5);
 
 /**
