@@ -184,6 +184,20 @@ function probe(report, label, cmd, args, env) {
   }
 }
 
+/** probe() for one kubectl read through the operator's kubeconfig. */
+function kube(report, label, kubeconfig, args, env) {
+  probe(report, label, 'kubectl', ['--kubeconfig', kubeconfig, ...args], env);
+}
+
+/**
+ * Raw ssh argv for one shell command on a k8s host, pinned to the
+ * environment's own known_hosts (buildHostKeyOpts) as the compose branch's
+ * sshRun pins, never the operator's ~/.ssh/known_hosts.
+ */
+function k8sHostSshArgs(sshKey, ip, cmd) {
+  return ['-i', sshKey, ...buildHostKeyOpts(sshKey), `root@${ip}`, cmd];
+}
+
 /**
  * Remote analogue of probe(): run an argv over SSH via sshRun and capture its
  * output into the report. sshRun throws on a non-zero remote exit (attaching
@@ -228,24 +242,10 @@ function diagnoseHcloud(report, env) {
 
 function diagnoseNodes(report, env, kubeconfig, sshKey, controlplaneIp) {
   report.section('NODES');
-  probe(
-    report,
-    'nodes wide',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, 'get', 'nodes', '-o', 'wide'],
-    env,
-  );
-  probe(report, 'node describe', 'kubectl', ['--kubeconfig', kubeconfig, 'describe', 'nodes'], env);
+  kube(report, 'nodes wide', kubeconfig, ['get', 'nodes', '-o', 'wide'], env);
+  kube(report, 'node describe', kubeconfig, ['describe', 'nodes'], env);
   if (existsSync(sshKey) && controlplaneIp) {
-    // The environment's own known_hosts, as the compose branch's sshRun pins
-    // (buildHostKeyOpts), never the operator's ~/.ssh/known_hosts.
-    const sshArgs = (cmd) => [
-      '-i',
-      sshKey,
-      ...buildHostKeyOpts(sshKey),
-      `root@${controlplaneIp}`,
-      cmd,
-    ];
+    const sshArgs = (cmd) => k8sHostSshArgs(sshKey, controlplaneIp, cmd);
     probe(report, 'k3s service status', 'ssh', sshArgs('systemctl status k3s --no-pager'), env);
     probe(
       report,
@@ -272,25 +272,12 @@ function diagnoseNodes(report, env, kubeconfig, sshKey, controlplaneIp) {
 
 function diagnosePods(report, env, kubeconfig) {
   report.section('PODS');
-  probe(
-    report,
-    'pods all-ns wide',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, 'get', 'pods', '-A', '-o', 'wide'],
-    env,
-  );
-  probe(
+  kube(report, 'pods all-ns wide', kubeconfig, ['get', 'pods', '-A', '-o', 'wide'], env);
+  kube(
     report,
     'non-running pods',
-    'kubectl',
-    [
-      '--kubeconfig',
-      kubeconfig,
-      'get',
-      'pods',
-      '-A',
-      '--field-selector=status.phase!=Running,status.phase!=Succeeded',
-    ],
+    kubeconfig,
+    ['get', 'pods', '-A', '--field-selector=status.phase!=Running,status.phase!=Succeeded'],
     env,
   );
   // Describe pods in non-running state
@@ -317,25 +304,13 @@ function diagnosePods(report, env, kubeconfig) {
     for (const [ns, name] of pairs) {
       if (!ns || !name) continue;
       report.subsection(`${ns}/${name}`);
-      probe(
-        report,
-        'describe',
-        'kubectl',
-        ['--kubeconfig', kubeconfig, '-n', ns, 'describe', `pod/${name}`],
-        env,
-      );
-      probe(
-        report,
-        'logs (current)',
-        'kubectl',
-        ['--kubeconfig', kubeconfig, '-n', ns, 'logs', name, '--tail=40'],
-        env,
-      );
-      probe(
+      kube(report, 'describe', kubeconfig, ['-n', ns, 'describe', `pod/${name}`], env);
+      kube(report, 'logs (current)', kubeconfig, ['-n', ns, 'logs', name, '--tail=40'], env);
+      kube(
         report,
         'logs (previous)',
-        'kubectl',
-        ['--kubeconfig', kubeconfig, '-n', ns, 'logs', name, '--previous', '--tail=40'],
+        kubeconfig,
+        ['-n', ns, 'logs', name, '--previous', '--tail=40'],
         env,
       );
     }
@@ -362,13 +337,11 @@ export const DIAGNOSE_LOG_BOUNDS = Object.freeze({
  */
 export function diagnoseTls(report, env, kubeconfig) {
   report.section('TLS (cert-manager)');
-  probe(
+  kube(
     report,
     'certificates, requests, orders, challenges (all namespaces)',
-    'kubectl',
+    kubeconfig,
     [
-      '--kubeconfig',
-      kubeconfig,
       'get',
       'certificate,certificaterequest,order,challenge',
       '--all-namespaces',
@@ -378,29 +351,29 @@ export function diagnoseTls(report, env, kubeconfig) {
     ],
     env,
   );
-  probe(
+  kube(
     report,
     `cert-manager controller log (last ${DIAGNOSE_LOG_BOUNDS.sinceMinutes} min, at most ${DIAGNOSE_LOG_BOUNDS.tailLines} lines)`,
-    'kubectl',
-    ['--kubeconfig', kubeconfig, ...certManagerLogArgv(DIAGNOSE_LOG_BOUNDS)],
+    kubeconfig,
+    certManagerLogArgv(DIAGNOSE_LOG_BOUNDS),
     env,
   );
 }
 
 function diagnoseNetwork(report, env, kubeconfig, Provider) {
   report.section('NETWORK');
-  probe(
+  kube(
     report,
     'CoreDNS configmap',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, '-n', 'kube-system', 'get', 'cm', 'coredns', '-o', 'yaml'],
+    kubeconfig,
+    ['-n', 'kube-system', 'get', 'cm', 'coredns', '-o', 'yaml'],
     env,
   );
-  probe(
+  kube(
     report,
     'kube-system pods',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, '-n', 'kube-system', 'get', 'pods', '-o', 'wide'],
+    kubeconfig,
+    ['-n', 'kube-system', 'get', 'pods', '-o', 'wide'],
     env,
   );
   // Hetzner keeps its historical "hcloud-" labels byte-identical; any other
@@ -439,13 +412,7 @@ function diagnoseNetwork(report, env, kubeconfig, Provider) {
     );
     if (list.ok && list.stdout.trim()) {
       for (const pod of list.stdout.trim().split(/\s+/)) {
-        probe(
-          report,
-          pod,
-          'kubectl',
-          ['--kubeconfig', kubeconfig, '-n', 'kube-system', 'logs', pod, '--tail=30'],
-          env,
-        );
+        kube(report, pod, kubeconfig, ['-n', 'kube-system', 'logs', pod, '--tail=30'], env);
       }
     } else {
       report.warn(`No pods found matching ${labelSel.sel}`);
@@ -454,13 +421,11 @@ function diagnoseNetwork(report, env, kubeconfig, Provider) {
   // In-cluster DNS + egress probe
   report.subsection('busybox in-cluster probe (nslookup + wget)');
   const probeName = `vc-diag-${Math.random().toString(36).slice(2, 8)}`;
-  probe(
+  kube(
     report,
     'pod probe',
-    'kubectl',
+    kubeconfig,
     [
-      '--kubeconfig',
-      kubeconfig,
       '-n',
       'kube-system',
       'run',
@@ -515,13 +480,11 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
         ? `CCM env vars (${Provider.K8S_ASSETS.networkEnvVar} present?)`
         : 'CCM env vars',
     );
-    probe(
+    kube(
       report,
       'CCM deploy env',
-      'kubectl',
+      kubeconfig,
       [
-        '--kubeconfig',
-        kubeconfig,
         '-n',
         'kube-system',
         'get',
@@ -536,21 +499,11 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
 
   // CoreDNS Corefile — forwarders are the upstream resolver pod-DNS depends on.
   report.subsection('CoreDNS Corefile');
-  probe(
+  kube(
     report,
     'coredns Corefile',
-    'kubectl',
-    [
-      '--kubeconfig',
-      kubeconfig,
-      '-n',
-      'kube-system',
-      'get',
-      'cm',
-      'coredns',
-      '-o',
-      'jsonpath={.data.Corefile}',
-    ],
+    kubeconfig,
+    ['-n', 'kube-system', 'get', 'cm', 'coredns', '-o', 'jsonpath={.data.Corefile}'],
     env,
   );
 
@@ -558,13 +511,7 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
   // can't egress, no pod can either.
   if (existsSync(sshKey) && controlplaneIp) {
     report.subsection('node-level routes / addresses / links / resolv.conf');
-    const sshArgs = (cmd) => [
-      '-i',
-      sshKey,
-      ...buildHostKeyOpts(sshKey),
-      `root@${controlplaneIp}`,
-      cmd,
-    ];
+    const sshArgs = (cmd) => k8sHostSshArgs(sshKey, controlplaneIp, cmd);
     probe(report, 'host routes', 'ssh', sshArgs('ip route'), env);
     probe(report, 'host addresses', 'ssh', sshArgs('ip addr'), env);
     probe(report, 'host links', 'ssh', sshArgs('ip link'), env);
@@ -605,13 +552,11 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
     'echo "## I. ping -M do -s 1372 1.1.1.1 (vxlan-MTU 1400 OK)"; ping -M do -s 1372 -c1 -W2 1.1.1.1 2>&1 | tail -2; echo',
     'echo "## J. ping -M do -s 1444 1.1.1.1 (full-MTU 1472; expect FAIL on Hetzner private)"; ping -M do -s 1444 -c1 -W2 1.1.1.1 2>&1 | tail -2; echo',
   ].join('; ');
-  probe(
+  kube(
     report,
     'create pod',
-    'kubectl',
+    kubeconfig,
     [
-      '--kubeconfig',
-      kubeconfig,
       '-n',
       'default',
       'run',
@@ -625,13 +570,11 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
     ],
     env,
   );
-  probe(
+  kube(
     report,
     'wait pod ready',
-    'kubectl',
+    kubeconfig,
     [
-      '--kubeconfig',
-      kubeconfig,
       '-n',
       'default',
       'wait',
@@ -643,53 +586,36 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
     ],
     env,
   );
-  probe(
+  kube(
     report,
     'exec battery',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, '-n', 'default', 'exec', podName, '--', 'sh', '-c', battery],
+    kubeconfig,
+    ['-n', 'default', 'exec', podName, '--', 'sh', '-c', battery],
     env,
   );
-  probe(
+  kube(
     report,
     'cleanup pod',
-    'kubectl',
-    [
-      '--kubeconfig',
-      kubeconfig,
-      '-n',
-      'default',
-      'delete',
-      'pod',
-      podName,
-      '--wait=false',
-      '--grace-period=1',
-    ],
+    kubeconfig,
+    ['-n', 'default', 'delete', 'pod', podName, '--wait=false', '--grace-period=1'],
     env,
   );
 }
 
 function diagnoseFlux(report, env, kubeconfig) {
   report.section('FLUX');
-  probe(
+  kube(
     report,
     'flux resources',
-    'kubectl',
-    [
-      '--kubeconfig',
-      kubeconfig,
-      '-n',
-      'flux-system',
-      'get',
-      'gitrepository,kustomization,helmrelease',
-    ],
+    kubeconfig,
+    ['-n', 'flux-system', 'get', 'gitrepository,kustomization,helmrelease'],
     env,
   );
-  probe(
+  kube(
     report,
     'flux events',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, '-n', 'flux-system', 'get', 'events', '--sort-by=.lastTimestamp'],
+    kubeconfig,
+    ['-n', 'flux-system', 'get', 'events', '--sort-by=.lastTimestamp'],
     env,
   );
   for (const controller of [
@@ -699,28 +625,20 @@ function diagnoseFlux(report, env, kubeconfig) {
     'notification-controller',
   ]) {
     report.subsection(`${controller} logs`);
-    probe(
+    kube(
       report,
       controller,
-      'kubectl',
-      [
-        '--kubeconfig',
-        kubeconfig,
-        '-n',
-        'flux-system',
-        'logs',
-        `deployment/${controller}`,
-        '--tail=40',
-      ],
+      kubeconfig,
+      ['-n', 'flux-system', 'logs', `deployment/${controller}`, '--tail=40'],
       env,
     );
   }
   // Describe the GitRepository — this is where stale-URL / auth errors appear
-  probe(
+  kube(
     report,
     'GitRepository describe',
-    'kubectl',
-    ['--kubeconfig', kubeconfig, '-n', 'flux-system', 'describe', 'gitrepository'],
+    kubeconfig,
+    ['-n', 'flux-system', 'describe', 'gitrepository'],
     env,
   );
 }
