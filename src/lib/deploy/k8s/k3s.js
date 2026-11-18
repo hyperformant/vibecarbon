@@ -158,6 +158,7 @@ import {
 import { awaitAcmeChallengesSettled, challengeWaitLine } from './acme-challenges.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { DEPLOY_OWNED_CERTIFICATES } from './acme-order-recovery.js';
+import { carbonAutoscalerSecretYaml } from './autoscaler-secret.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -4735,26 +4736,15 @@ export async function applyK3sManifests({
             signal: caStop.signal,
           })
         : null;
-      {
-        const caSecretYaml = [
-          'apiVersion: v1',
-          'kind: Secret',
-          'metadata:',
-          '  name: carbon-autoscaler-config',
-          '  namespace: kube-system',
-          'type: Opaque',
-          'stringData:',
-          `  token: ${JSON.stringify(apiToken)}`,
-          `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
-          '',
-        ].join('\n');
-        await runKubectlWithRetry(['apply', '-f', '-'], {
-          env,
-          signal: caStop.signal,
-          input: caSecretYaml,
-          description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
-        });
-      }
+      await runKubectlWithRetry(['apply', '-f', '-'], {
+        env,
+        signal: caStop.signal,
+        input: carbonAutoscalerSecretYaml({
+          token: apiToken,
+          configJson: carbonAutoscalerConfigJson,
+        }),
+        description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
+      });
       // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
       //      kube-system but base/'s parent kustomization sets
       //      `namespace: vibecarbon`, whose namespace transformer would

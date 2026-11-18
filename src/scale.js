@@ -70,6 +70,7 @@ import {
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
+import { carbonAutoscalerSecretYaml } from './lib/deploy/k8s/autoscaler-secret.js';
 import { sweepStaleDeltaDirs } from './lib/deploy/layer-delta.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
@@ -2700,21 +2701,9 @@ async function repatchClusterAutoscaler({
       'base64',
     ).toString('utf8');
     const mutatedConfigJson = applyCaBoundsToConfig(configJson, { newMin, newMax, newType });
-    // Mirrors renderCarbonAutoscalerConfig's Secret YAML shape in
-    // applyK3sManifests (k3s.js) exactly: stringData keeps both the
-    // token and the JSON off argv, piped via stdin.
-    const caSecretYaml = [
-      'apiVersion: v1',
-      'kind: Secret',
-      'metadata:',
-      '  name: carbon-autoscaler-config',
-      '  namespace: kube-system',
-      'type: Opaque',
-      'stringData:',
-      `  token: ${JSON.stringify(token)}`,
-      `  config.json: ${JSON.stringify(mutatedConfigJson)}`,
-      '',
-    ].join('\n');
+    // The Secret applyK3sManifests writes, piped via stdin so neither the
+    // token nor the JSON reaches argv.
+    const caSecretYaml = carbonAutoscalerSecretYaml({ token, configJson: mutatedConfigJson });
     runCommand(kubectlArgv(kubeconfigPath, ['apply', '-f', '-']), {
       silent: true,
       input: caSecretYaml,
