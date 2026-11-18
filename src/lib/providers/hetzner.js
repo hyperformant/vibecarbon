@@ -1138,7 +1138,7 @@ export class HetznerProvider extends BaseProvider {
       });
 
       if (!response.ok && response.status !== 404) {
-        const error = await response.json();
+        const error = await response.json().catch(() => ({}));
         throw new Error(`Failed to delete server: ${error.error?.message || 'Unknown error'}`);
       }
       return;
@@ -1150,7 +1150,7 @@ export class HetznerProvider extends BaseProvider {
     });
 
     if (!response.ok && response.status !== 404) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({}));
       throw new Error(`Failed to delete server: ${error.error?.message || 'Unknown error'}`);
     }
 
@@ -1313,7 +1313,7 @@ export class HetznerProvider extends BaseProvider {
     });
 
     if (!createResponse.ok) {
-      const error = await createResponse.json();
+      const error = await createResponse.json().catch(() => ({}));
       throw new Error(`Failed to create SSH key: ${error.error?.message || 'Unknown error'}`);
     }
 

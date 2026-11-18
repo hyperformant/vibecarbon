@@ -1019,7 +1019,7 @@ export class DigitalOceanProvider extends BaseProvider {
     if (!waitUntilGone) {
       const response = await this.apiRequest(`/droplets/${serverId}`, { method: 'DELETE' });
       if (!response.ok && response.status !== 404) {
-        const error = await response.json();
+        const error = await response.json().catch(() => ({}));
         throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
       }
       return;
@@ -1031,7 +1031,7 @@ export class DigitalOceanProvider extends BaseProvider {
     });
 
     if (!response.ok && response.status !== 404) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({}));
       throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
     }
 
@@ -1072,7 +1072,7 @@ export class DigitalOceanProvider extends BaseProvider {
       body: JSON.stringify({ type: 'rename', name }),
     });
     if (!response.ok) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({}));
       throw new Error(`Failed to rename server: ${error.message || 'Unknown error'}`);
     }
   }
@@ -1221,7 +1221,7 @@ export class DigitalOceanProvider extends BaseProvider {
       return ssh_key.id;
     }
 
-    const error = await createResponse.json();
+    const error = await createResponse.json().catch(() => ({}));
     const message = error.message || 'Unknown error';
 
     if (createResponse.status === 422 && /already in use/i.test(message)) {
