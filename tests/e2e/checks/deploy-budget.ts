@@ -46,11 +46,13 @@
  * stock samples only), so the check reports `skip` naming the add-ons,
  * never a verdict.
  */
+
 import { readFileSync } from 'node:fs';
 import { getProviderClass } from '../../../src/lib/providers/index.js';
 import { parsePerfLines } from '../metrics/reporter.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 import { isStockFeatures } from '../utils/feature-set.js';
+import { stripAnsi } from '../utils/strip-ansi.js';
 
 /** What a budget is keyed on: where the scenario deployed, and on which CPU class. */
 export interface BudgetKey {
@@ -172,8 +174,6 @@ const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
 const NOT_SERIAL =
   /^(cli\.)?deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|setupFan$|\.iac\.upStack(\.(primary|standby))?\.(prepare|seal|resource\..+)$|^deploy\.preamble\.s3Setup\.stateSeed$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-const ANSI = /\x1b\[[0-9;]*m/g;
 const STATE_UP =
   /\[state\] up (\S+): .*?\| backpressure (.+?) \| lock-waits (\d+)(?: \((\d+)s\))?/g;
 
@@ -210,7 +210,7 @@ export function checkDeployBudget(
     };
   }
   const budget = budgetFor(table, mode, key);
-  const clean = output.replace(ANSI, '');
+  const clean = stripAnsi(output);
   const perf = parsePerfLines(clean);
   const all = (name: string) => perf.filter((p) => p.name === name);
   const failures: string[] = [];

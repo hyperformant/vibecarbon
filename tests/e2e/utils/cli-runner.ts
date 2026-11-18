@@ -20,6 +20,7 @@ import { isLeakReportLine } from '../../../src/lib/destroy/leak-ledger.js';
 import { logPerfBreakdown, parsePerfLines } from '../metrics/reporter.js';
 import type { CliResult } from '../scenarios/types.js';
 import { e2eCliEnv } from './e2e-env.js';
+import { stripAnsi } from './strip-ansi.js';
 
 /**
  * Per-scenario defaults propagated via AsyncLocalStorage. Each scenario wraps
@@ -504,11 +505,7 @@ export { DESTROY_EXIT_LEAKED } from '../../../src/lib/destroy/leak-ledger.js';
  * the ANSI strip.
  */
 export function extractLeakReport(result: CliResult): string {
-  const text = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.replace(
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
-    /\x1b\[[0-9;]*m/g,
-    '',
-  );
+  const text = stripAnsi(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
   const lines = text
     .split('\n')
     .filter((line) => isLeakReportLine(line))
