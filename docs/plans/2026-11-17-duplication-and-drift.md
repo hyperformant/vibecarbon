@@ -1,6 +1,6 @@
 # Plan: remove duplicated code and the drift it caused
 
-Status: first wave merged on 2026-11-18 (Phase 1 mostly, Phase 2, and the first clusters of every area in Phase 3). Still open: the shared test scaffolding in `tests/unit`, the per-class sweep skeleton and its CI entry points, the SSH helpers in the e2e checks, and turning `pnpm dupes` and `pnpm unused` into pull request gates. This is a working document: when
+Status: two waves merged on 2026-11-18. The second (#542 to #545) ported the last three template mirror tests, added the organisation rename route, shared the sweep pass outline, the ssh helper in the e2e checks and the CI sweep entry points, and moved tests onto shared repo, temp directory and prompt helpers. Still open: real-server proof of both waves, the deploy wizard test harness, the per-provider table tests, the knip blind spot behind 14 `new URL` reads, and the smaller rows of Phase 3 not named in `docs/history.md`. This is a working document: when
 the work ships, its decisions go into `docs/history.md` and this file is
 deleted.
 

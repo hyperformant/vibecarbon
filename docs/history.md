@@ -1253,6 +1253,41 @@ bug that existed in one copy and not in its siblings.
 (`pod-exec-bound-census`, `list-endpoint-pagination-sweep`,
 `bucket-gone-census`, `shared-helper-consumers`).
 
+#### 2026-11-18: Second pass: one sweep outline, one ssh helper for the checks, shared test scaffolding
+
+The DigitalOcean, Linode, Vultr and Scaleway sweeps run each resource class
+through `sweepClass` and one volume rule (`sweepOwnsVolume`) in
+`tests/e2e/utils/sweep-core.ts`. Five e2e checks run their ssh command through
+`sshOutput` and `sshExecOnce` (`tests/e2e/utils/ssh.ts`). The four CI sweep
+entry points share their skip and exit code (`tests/e2e/utils/sweep-ci.ts`).
+Tests read the repository through `REPO_ROOT` and `readRepoFile`, make temp
+directories with `createTempDir`, and fake `@clack/prompts` with `clackFake`
+or `quietClack` (`tests/_shared/`). `pnpm dupes` went from 51 clones to 42.
+
+**Why:** the same reasons as the first pass, and about 60 tests depended on
+the directory they were run from.
+
+**Do not undo:**
+- A delete that throws stops at one resource for some classes (`thrown`
+  given) and ends the pass for others (`thrown` left out). Each sweep had it
+  that way and it is kept per class.
+- The CSI volume prefix is `pvc-` on DigitalOcean and `pvc` on the other
+  three. The difference is carried, not decided.
+- The retry loops in `replication.ts` and `pilot-light.ts` stay in their
+  files; only the single attempt under them is shared.
+- A prompt fake lists its own functions. Do not give `clackFake` defaults: a
+  prompt the test did not name has to throw.
+- 14 tests keep a `new URL(..., import.meta.url)` read. knip counts that read
+  as the use of four DNS backends, `orchestrator.js` and
+  `feature-observability.ts`; converting them fails `pnpm unused`.
+
+**Not proven on real servers:** the sweep outline, the ssh helper and the CI
+entry points were proven with fakes only.
+
+**Guard:** `tests/unit/e2e/sweep-pass-transcript.test.ts` (every printed line
+and provider call of every pass), `checks-ssh-exec.test.ts`,
+`sweep-ci.test.ts`, and the rows in `shared-helper-consumers.test.ts`.
+
 #### 2026-11-18: Leak detection in the e2e sweeps no longer reads "could not look" as clean
 
 - A listing that runs out of its 20-page budget is incomplete, not complete.
