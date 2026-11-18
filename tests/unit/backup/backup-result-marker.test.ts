@@ -225,6 +225,8 @@ const STANDBY_ROLE_FILE = roleFile('standby', 'standby\n');
 
 const baseEnv = (bin: string): Record<string, string> => ({
   PATH: `${bin}:${process.env.PATH}`,
+  // Not the scripts' fixed /tmp default, which concurrent test runs share.
+  VC_BACKUP_LOCKFILE: join(bin, 'backup.lock'),
   // walg-env.sh (the real file) turns the base into the lineage folder, with
   // pg_controldata stubbed below.
   WALG_S3_PREFIX_BASE: 's3://bkt/backups/p/e/walg',

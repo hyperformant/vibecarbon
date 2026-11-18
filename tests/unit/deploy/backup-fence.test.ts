@@ -326,6 +326,9 @@ const env = (bin: string) => ({
   PGDATA: join(work, 'pgdata-none'),
   RETAIN: '2',
   BACKUP_RETENTION_DAYS: '2',
+  // Both backup scripts default to one fixed path in /tmp, which two test
+  // runs on the same machine would fight over (the loser exits 75).
+  VC_BACKUP_LOCKFILE: join(work, 'backup.lock'),
 });
 
 const archive = (name: string, segment: string, opts: Parameters<typeof stubs>[1]) => {

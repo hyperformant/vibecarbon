@@ -190,6 +190,8 @@ esac
         PATH: `${bin}:${process.env.PATH}`,
         BACKUP_RETENTION_DAYS: '7',
         TLS_SNAPSHOT_S3_PREFIX: prefix,
+        // Not the fixed /tmp default, which concurrent test runs share.
+        VC_BACKUP_LOCKFILE: join(bin, 'backup.lock'),
       },
       timeout: 10_000,
     });
