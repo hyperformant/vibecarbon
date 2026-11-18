@@ -21,18 +21,14 @@
  * Needs Docker and the wireguard module (the flags ask for wireguard-native).
  * Every container and network here is named vctest-* and removed in afterAll.
  */
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { k3sVersion } from '../../../src/lib/images.js';
+import { dockerRunner, dockerTierSkip, waitFor } from '../../_shared/docker-sync.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
 
-const SKIPPED =
-  process.env.DOCKER_INTEGRATION === 'true'
-    ? null
-    : 'skipped: needs Docker and the wireguard module; run it with DOCKER_INTEGRATION=true (pnpm test:docker)';
-if (SKIPPED) console.info(`k3s-agent-token: ${SKIPPED}`);
+const SKIPPED = dockerTierSkip('k3s-agent-token', 'Docker and the wireguard module');
 
 const ROOT = process.cwd();
 const VERSION = process.env.VC_K3S_VERSION || k3sVersion();
@@ -48,25 +44,8 @@ const SERVER_IP = '10.0.1.20';
 const K3S_TOKEN = 'vctest-k3s-join-token-4b7e';
 const LONG = 180_000;
 
-const run = (cmd: string, args: string[], timeout = LONG) =>
-  spawnSync(cmd, args, { encoding: 'utf-8', timeout });
-const must = (cmd: string, args: string[]) => {
-  const r = run(cmd, args);
-  if (r.status !== 0) {
-    throw new Error(`${cmd} ${args.slice(0, 4).join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
-  }
-  return r.stdout;
-};
+const { run, must } = dockerRunner({ timeoutMs: LONG });
 const kubectl = (...args: string[]) => run('docker', ['exec', MASTER, 'kubectl', ...args]);
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const waitFor = (what: string, probe: () => boolean, timeoutMs: number) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (probe()) return;
-    sleepSync(1000);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
 const script = (file: string) => readFileSync(join(ROOT, 'carbon/cloud-init/k3s', file), 'utf-8');
 /** `docker run` for a k3s node on the test network, at its own address. */
 const node = (name: string, ip: string, env: string[], args: string[]) =>

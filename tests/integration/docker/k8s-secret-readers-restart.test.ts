@@ -32,7 +32,6 @@
  * cluster. Every container and network here is named vctest-* and removed
  * in afterAll.
  */
-import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
@@ -42,13 +41,10 @@ import { k3sVersion } from '../../../src/lib/images.js';
 import { BaseProvider } from '../../../src/lib/providers/base.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { CLOUD_SECRET_READERS } from '../../_shared/cloud-secret-readers.js';
+import { dockerRunner, dockerTierSkip, waitFor } from '../../_shared/docker-sync.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
-const SKIPPED =
-  process.env.DOCKER_INTEGRATION === 'true'
-    ? null
-    : 'skipped: needs Docker and kubectl; run it with DOCKER_INTEGRATION=true (pnpm test:docker)';
-if (SKIPPED) console.info(`k8s-secret-readers-restart: ${SKIPPED}`);
+const SKIPPED = dockerTierSkip('k8s-secret-readers-restart', 'Docker and kubectl');
 
 const VERSION = process.env.VC_K3S_VERSION || k3sVersion();
 const IMAGE = `rancher/k3s:${VERSION.replace('+', '-')}`;
@@ -67,26 +63,7 @@ const TOKEN_B = 'vc-sentinel-token-readers-b';
 const CCM_PORT = '10258';
 const LONG = 240_000;
 
-const run = (cmd: string, args: string[], input?: string | Buffer, env?: NodeJS.ProcessEnv) =>
-  spawnSync(cmd, args, { input, env, timeout: LONG, maxBuffer: 512 * 1024 * 1024 });
-const must = (cmd: string, args: string[], input?: string | Buffer, env?: NodeJS.ProcessEnv) => {
-  const r = run(cmd, args, input, env);
-  if (r.status !== 0) {
-    throw new Error(
-      `${cmd} ${args.slice(0, 4).join(' ')} exited ${r.status}: ${String(r.stderr).trim()}`,
-    );
-  }
-  return String(r.stdout);
-};
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const waitFor = (what: string, probe: () => boolean, timeoutMs: number) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (probe()) return;
-    sleepSync(1000);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
+const { run, runBinary, must } = dockerRunner({ timeoutMs: LONG, maxBuffer: 512 * 1024 * 1024 });
 
 /** The cluster's master, as the provisioning recorded it. */
 const MASTER_ID = '4242';
@@ -131,7 +108,7 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
   let dir: string;
   let kubeconfig: string;
   const kube = (args: string[], input?: string) =>
-    must('kubectl', args, input, { ...process.env, KUBECONFIG: kubeconfig });
+    must('kubectl', args, { input, env: { ...process.env, KUBECONFIG: kubeconfig } });
   const pods = (app: string, ns = NS): Pod[] =>
     JSON.parse(kube(['-n', ns, 'get', 'pods', '-l', `app=${app}`, '-o', 'json'])).items;
   const workload = (id: string, ns = NS) => JSON.parse(kube(['-n', ns, 'get', id, '-o', 'json']));
@@ -311,8 +288,7 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
               '-o',
               'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
             ],
-            undefined,
-            { ...process.env, KUBECONFIG: kubeconfig },
+            { env: { ...process.env, KUBECONFIG: kubeconfig } },
           ).stdout,
         ) === 'True',
       120_000,
@@ -326,13 +302,11 @@ describe.skipIf(SKIPPED)(`a cloud Secret's readers, on a node (k3s ${VERSION})`,
     for (const image of [BUSYBOX, pause as string]) {
       if (run('docker', ['image', 'inspect', image]).status !== 0) must('docker', ['pull', image]);
     }
-    const tar = run('docker', ['save', BUSYBOX, pause as string]);
+    const tar = runBinary('docker', ['save', BUSYBOX, pause as string]);
     expect(tar.status, String(tar.stderr)).toBe(0);
-    must(
-      'docker',
-      ['exec', '-i', AGENT, 'ctr', '-n', 'k8s.io', 'images', 'import', '-'],
-      tar.stdout,
-    );
+    must('docker', ['exec', '-i', AGENT, 'ctr', '-n', 'k8s.io', 'images', 'import', '-'], {
+      input: tar.stdout,
+    });
     kube(['create', 'namespace', NS]);
   }, LONG);
 

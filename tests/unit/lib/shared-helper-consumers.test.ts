@@ -394,6 +394,81 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/source-files.test.ts'],
   },
+  {
+    // The Docker tier's synchronous spawn wrappers. Eight files each had
+    // their own run, seven their own must, with two error-message forms and
+    // two ways of passing stdin and env, so a fix to one (stderr empty, a
+    // binary stdout) reached only the file it was made in.
+    helper: 'dockerRunner',
+    definition: 'tests/_shared/docker-sync.ts',
+    consumers: [
+      'tests/integration/docker/host-reporter-k3s.test.ts',
+      'tests/integration/docker/host-reporter-ubuntu.test.ts',
+      'tests/integration/docker/k3s-agent-token.test.ts',
+      'tests/integration/docker/k3s-recorded-flags.test.ts',
+      'tests/integration/docker/k8s-cloud-secrets-takeover.test.ts',
+      'tests/integration/docker/k8s-secret-readers-restart.test.ts',
+      'tests/integration/docker/layer-delta-roundtrip.test.ts',
+      'tests/integration/docker/server-image-store.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/docker-sync.test.ts'],
+  },
+  {
+    // The Docker tier's polling wait, copied six times with the same body.
+    helper: 'waitFor',
+    definition: 'tests/_shared/docker-sync.ts',
+    consumers: [
+      'tests/integration/docker/host-reporter-k3s.test.ts',
+      'tests/integration/docker/k3s-agent-token.test.ts',
+      'tests/integration/docker/k3s-recorded-flags.test.ts',
+      'tests/integration/docker/k8s-secret-readers-restart.test.ts',
+      'tests/integration/docker/layer-delta-roundtrip.test.ts',
+      'tests/integration/docker/server-image-store.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/docker-sync.test.ts'],
+  },
+  {
+    // The blocking sleep under waitFor, which one file also calls itself.
+    helper: 'sleepSync',
+    definition: 'tests/_shared/docker-sync.ts',
+    consumers: ['tests/integration/docker/k8s-cloud-secrets-takeover.test.ts'],
+    deepTests: ['tests/unit/lib/docker-sync.test.ts'],
+  },
+  {
+    // The Docker tier's skip gate and its one-line banner. A copy that
+    // tests DOCKER_INTEGRATION differently runs (or skips) on its own terms.
+    helper: 'dockerTierSkip',
+    definition: 'tests/_shared/docker-sync.ts',
+    consumers: [
+      'tests/integration/docker/host-reporter-k3s.test.ts',
+      'tests/integration/docker/host-reporter-ubuntu.test.ts',
+      'tests/integration/docker/k3s-agent-token.test.ts',
+      'tests/integration/docker/k8s-cloud-secrets-takeover.test.ts',
+      'tests/integration/docker/k8s-secret-readers-restart.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/docker-sync.test.ts'],
+  },
+  {
+    // The real-engine iac tests' `pulumi version` probe, eleven
+    // byte-identical copies. Each file keeps its own `hasPulumi` name, which
+    // ci-pulumi-cli-pin.test.ts pins in server-state-follows-scale.test.ts.
+    helper: 'pulumiOnPath',
+    definition: 'tests/_shared/pulumi-cli.ts',
+    consumers: [
+      'tests/integration/iac/deploy-drop-retired.test.ts',
+      'tests/integration/iac/destroy-finishes-stack-after-sweeps.test.ts',
+      'tests/integration/iac/destroy-removes-stack-backup.test.ts',
+      'tests/integration/iac/pulumi-home-isolated.test.ts',
+      'tests/integration/iac/retired-resources-surgery.test.ts',
+      'tests/integration/iac/server-state-follows-scale.test.ts',
+      'tests/integration/iac/stack-lock.test.ts',
+      'tests/integration/iac/state-passphrase-destroy.test.ts',
+      'tests/integration/iac/state-passphrase.test.ts',
+      'tests/integration/iac/state-seal.test.ts',
+      'tests/integration/iac/workspace-dir-exit.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/pulumi-cli.test.ts'],
+  },
 ] as const;
 
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');

@@ -21,12 +21,12 @@
  *
  * Every container and network here is named vctest-* and removed in afterAll.
  */
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { K3S_SYSTEM_REGISTRY, k3sVersion, traefikImageRef } from '../../../src/lib/images.js';
+import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
 
 const describeDocker =
@@ -48,25 +48,8 @@ const TAINT = 'node.cloudprovider.kubernetes.io/uninitialized-';
 // Long, because a first pull of every system image is the point.
 const LONG = 230_000;
 
-const run = (cmd: string, args: string[], input?: string) =>
-  spawnSync(cmd, args, { encoding: 'utf-8', input, timeout: LONG });
-const must = (cmd: string, args: string[], input?: string) => {
-  const r = run(cmd, args, input);
-  if (r.status !== 0) {
-    throw new Error(`${args.slice(0, 6).join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
-  }
-  return r.stdout;
-};
+const { run, must } = dockerRunner({ timeoutMs: LONG });
 const kubectl = (...args: string[]) => must('docker', ['exec', NODE, 'kubectl', ...args]);
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const waitFor = (what: string, probe: () => boolean, timeoutMs: number) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (probe()) return;
-    sleepSync(2000);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
 
 /** registries.yaml as master-init.sh writes it, with the same snippet. */
 function registriesYaml() {
@@ -122,6 +105,7 @@ describeDocker(`k3s ${VERSION} with the flags in master-init.sh`, () => {
       'the node to register',
       () => run('docker', ['exec', NODE, 'kubectl', 'get', 'node', '-o', 'name']).stdout.length > 0,
       120_000,
+      2000,
     );
     kubectl('taint', 'nodes', '--all', TAINT);
   }, LONG);
@@ -157,6 +141,7 @@ describeDocker(`k3s ${VERSION} with the flags in master-init.sh`, () => {
               `deployment/${deployment}`,
             ]).status === 0,
           60_000,
+          2000,
         );
         kubectl(
           '-n',
@@ -206,7 +191,7 @@ describeDocker(`k3s ${VERSION} with the flags in master-init.sh`, () => {
       must(
         'docker',
         ['exec', '-i', NODE, 'sh', '-c', 'cat > /tmp/traefik-crds/kustomization.yaml'],
-        kustomization,
+        { input: kustomization },
       );
       kubectl('apply', '-k', '/tmp/traefik-crds');
       kubectl(

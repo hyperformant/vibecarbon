@@ -17,13 +17,13 @@
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDeployDropRetired } from '../../../src/lib/deploy/k8s/retired-reserved-ip.js';
 import { getOrCreateStack, importStackState, upStack } from '../../../src/lib/iac/index.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 
 // The surgery's progress line ([pulumi] took ... out of ...'s state) and the
 // state telemetry ([state] ...) go to the progress log: kept here, where the
@@ -34,14 +34,7 @@ vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
   progressLog: (line: string) => progress.push(line),
 }));
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const PROJECT = 'droptest';
 const dir = mkdtempSync(join(tmpdir(), 'vc-deploy-drop-'));

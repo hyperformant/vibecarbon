@@ -28,7 +28,6 @@
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -50,16 +49,10 @@ import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const PROJECT = 'migrationtest';
 const PASSPHRASE = 'bWlncmF0aW9ubWlncmF0aW9ubWlncmF0aW9ubWlncmF0';

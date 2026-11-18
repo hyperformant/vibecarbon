@@ -6,7 +6,6 @@
  *
  * The container is named vctest-* and removed in afterAll.
  */
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,19 +13,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hostReporterScript } from '../../../src/lib/host-reporter.js';
 import { parseHostState, REBOOT_TRIGGER_PATTERNS } from '../../../src/lib/host-state.js';
 import { INSPECT_SCRIPT, parseInspectOutput } from '../../../src/lib/update/inspect.js';
+import { dockerRunner, dockerTierSkip } from '../../_shared/docker-sync.js';
 
-const SKIPPED =
-  process.env.DOCKER_INTEGRATION === 'true'
-    ? null
-    : 'skipped: needs Docker; run it with DOCKER_INTEGRATION=true (pnpm test:docker)';
-if (SKIPPED) console.info(`host-reporter-ubuntu: ${SKIPPED}`);
+const SKIPPED = dockerTierSkip('host-reporter-ubuntu', 'Docker');
 
 const NAME = `vctest-hostrep-ubuntu-${process.pid}`;
 const LONG = 240_000;
 const STATE = '/run/vibecarbon-host/state.json';
 
-const run = (cmd: string, args: string[], timeout = LONG) =>
-  spawnSync(cmd, args, { encoding: 'utf-8', timeout });
+const { run } = dockerRunner({ timeoutMs: LONG });
 const sh = (script: string) => run('docker', ['exec', NAME, 'sh', '-c', script]);
 
 describe.skipIf(SKIPPED)('the host reporter on Ubuntu 26.04 (compose mode)', () => {
@@ -113,9 +108,7 @@ describe.skipIf(SKIPPED)('the host reporter on Ubuntu 26.04 (compose mode)', () 
   });
 
   const inspect = (pathPrefix = '') =>
-    spawnSync('docker', ['exec', '-i', NAME, 'sh', '-s'], {
-      encoding: 'utf-8',
-      timeout: LONG,
+    run('docker', ['exec', '-i', NAME, 'sh', '-s'], {
       input: `${pathPrefix}${INSPECT_SCRIPT('compose')}`,
     });
 

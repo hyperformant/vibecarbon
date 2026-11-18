@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
 
 // A compose server's Docker daemon config, run for real: every distinct
 // /etc/docker/daemon.json the compose user data writes
@@ -46,34 +46,12 @@ const BLOB_TAG = 'vcstore/blob:test';
 const CUT_BYTES = 1 << 20;
 const LONG = 900_000;
 
-type Run = { status: number | null; stdout: string; stderr: string };
-const run = (cmd: string, args: string[]): Run => {
-  const r = spawnSync(cmd, args, { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-};
-const must = (cmd: string, args: string[]): string => {
-  const r = run(cmd, args);
-  if (r.status !== 0) {
-    throw new Error(
-      `${cmd} ${args.join(' ')} exited ${r.status}: ${r.stderr.trim() || r.stdout.trim()}`,
-    );
-  }
-  return r.stdout;
-};
+const { run, must } = dockerRunner();
 const docker = (...args: string[]) => must('docker', args);
 const fact = (key: string, value: unknown) =>
   console.log(
     `[server-image-store] ${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`,
   );
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const waitFor = (what: string, probe: () => boolean, timeoutMs = 120_000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (probe()) return;
-    sleepSync(1000);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
 const rmContainers = (...names: string[]) => {
   for (const n of names) run('docker', ['rm', '-f', '-v', n]);
 };

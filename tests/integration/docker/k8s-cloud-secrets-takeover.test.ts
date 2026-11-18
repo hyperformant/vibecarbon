@@ -44,7 +44,6 @@
  * channel's k3s smoke runs it too (.github/workflows/version-channel.yml).
  * Every container here is named vctest-* and removed in afterAll.
  */
-import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -57,16 +56,13 @@ import {
   manifestUrls,
   type SecretRef,
 } from '../../_shared/cloud-secret-readers.js';
+import { dockerRunner, dockerTierSkip, sleepSync } from '../../_shared/docker-sync.js';
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
-const SKIPPED =
-  process.env.DOCKER_INTEGRATION === 'true'
-    ? null
-    : 'skipped: needs Docker, kubectl and GitHub; run it with DOCKER_INTEGRATION=true (pnpm test:docker)';
-if (SKIPPED) console.info(`k8s-cloud-secrets-takeover: ${SKIPPED}`);
+const SKIPPED = dockerTierSkip('k8s-cloud-secrets-takeover', 'Docker, kubectl and GitHub');
 
 const VERSION = process.env.VC_K3S_VERSION || k3sVersion();
 const IMAGE = `rancher/k3s:${VERSION.replace('+', '-')}`;
@@ -98,16 +94,7 @@ const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
   P.SUPPORTED_TIERS.includes('k8s'),
 );
 
-const run = (cmd: string, args: string[], input?: string, env?: NodeJS.ProcessEnv) =>
-  spawnSync(cmd, args, { encoding: 'utf-8', input, env, timeout: LONG });
-const must = (cmd: string, args: string[], input?: string, env?: NodeJS.ProcessEnv) => {
-  const r = run(cmd, args, input, env);
-  if (r.status !== 0) {
-    throw new Error(`${cmd} ${args.slice(0, 4).join(' ')} exited ${r.status}: ${r.stderr.trim()}`);
-  }
-  return r.stdout;
-};
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const { run, must } = dockerRunner({ timeoutMs: LONG });
 
 /** The old boot script's value for a template variable, by the naming the scripts used. */
 const bootValue = (variable: string) =>
@@ -119,7 +106,7 @@ describe.skipIf(SKIPPED)(
     let dir: string;
     let kubeconfig: string;
     const kube = (args: string[], input?: string) =>
-      must('kubectl', args, input, { ...process.env, KUBECONFIG: kubeconfig });
+      must('kubectl', args, { input, env: { ...process.env, KUBECONFIG: kubeconfig } });
 
     /** A Secret as the apiserver holds it: data decoded, its managers, annotations, version. */
     const read = (namespace: string, name: string) => {
@@ -377,7 +364,7 @@ describe.skipIf(SKIPPED)(
         }
         for (const { namespace, name, keys, command } of legacy) {
           const vars = Object.fromEntries(Object.values(keys).map((v) => [v, bootValue(v)]));
-          must('docker', ['exec', '-i', NODE, 'sh', '-eu'], renderScript(command, vars));
+          must('docker', ['exec', '-i', NODE, 'sh', '-eu'], { input: renderScript(command, vars) });
           expect(read(namespace, name).managers).toEqual(['kubectl-client-side-apply:Update']);
         }
         expect(restarted()).toEqual([]);
@@ -397,7 +384,10 @@ describe.skipIf(SKIPPED)(
               from.startsWith('secrets.') ? BOOT_TOKEN : NETWORK,
             ]),
           );
-          must('sh', ['-eu'], shell, { ...process.env, KUBECONFIG: kubeconfig, ...values });
+          must('sh', ['-eu'], {
+            input: shell,
+            env: { ...process.env, KUBECONFIG: kubeconfig, ...values },
+          });
         }
         for (const { namespace, name } of gitops) {
           expect(read(namespace, name).managers).toContain('github-actions-deploy:Apply');

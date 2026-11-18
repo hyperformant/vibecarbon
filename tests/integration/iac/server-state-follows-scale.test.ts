@@ -18,7 +18,6 @@
  * integration job installs the CLI pinned to the SDK version, and a missing
  * CLI there fails this test instead of skipping it.
  */
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -29,15 +28,9 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { importStackState } from '../../../src/lib/iac/index.js';
 import { retargetServerResource } from '../../../src/lib/iac/server-state.js';
 import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const dir = mkdtempSync(join(tmpdir(), 'vc-server-state-'));
 const cloudFile = join(dir, 'cloud.json');
