@@ -8,8 +8,9 @@ import {
   IconUserPlus as UserPlus,
 } from '@tabler/icons-react';
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useParams } from 'react-router';
 import { useAuth } from '@/components/auth/AuthProvider';
+import { OrganizationNotFound } from '@/components/OrganizationNotFound';
 import { PageHeader } from '@/components/PageHeader';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -72,7 +73,6 @@ function getRoleBadgeVariant(role: MemberRole) {
 
 export default function Members() {
   const { orgId } = useParams<{ orgId: string }>();
-  const navigate = useNavigate();
   const { user } = useAuth();
   const { organizations } = useOrganizations();
   const { members, isLoading, error, addMember, updateRole, removeMember } =
@@ -122,19 +122,7 @@ export default function Members() {
   };
 
   if (!organization) {
-    return (
-      <>
-        <PageHeader title="Organization Not Found" />
-        <ContentPanel variant="default">
-          <p className="text-muted-foreground">
-            The organization you're looking for doesn't exist or you don't have access.
-          </p>
-          <Button className="mt-4" onClick={() => navigate('/dashboard')}>
-            Go to Dashboard
-          </Button>
-        </ContentPanel>
-      </>
-    );
+    return <OrganizationNotFound />;
   }
 
   return (

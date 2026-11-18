@@ -7,6 +7,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { toast } from 'sonner';
+import { OrganizationNotFound } from '@/components/OrganizationNotFound';
 import { PageHeader } from '@/components/PageHeader';
 import {
   AlertDialog,
@@ -69,19 +70,7 @@ export default function OrgDetails() {
   }
 
   if (!organization) {
-    return (
-      <>
-        <PageHeader title="Organization Not Found" />
-        <ContentPanel variant="default">
-          <p className="text-muted-foreground">
-            The organization you're looking for doesn't exist or you don't have access.
-          </p>
-          <Button className="mt-4" onClick={() => navigate('/dashboard')}>
-            Go to Dashboard
-          </Button>
-        </ContentPanel>
-      </>
-    );
+    return <OrganizationNotFound />;
   }
 
   return (
