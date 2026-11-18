@@ -472,9 +472,8 @@ describe('census — an explicit "no" never routes to 130 or 0', () => {
    * SCOPED TO BRANCHES THAT EXIT. Conflation is only a defect when the branch
    * ENDS THE PROCESS, because then the code is the only thing the caller sees.
    * Where the branch instead returns a value the caller consumes — "Add Redis?"
-   * → `return false`, "Replace license?" → `return`, "Overwrite?" → `return
-   * null` — declining is an ordinary answer the surrounding flow handles, not a
-   * silent success, and forcing an exit code on those would be wrong. That
+   * → `return false`, "Overwrite?" → `return null` — declining is an ordinary
+   * answer the surrounding flow handles, not a silent success, and forcing an exit code on those would be wrong. That
    * distinction is why this walks the branch BODY rather than the condition.
    */
   it('no site that EXITS conflates isCancel with a falsy answer', () => {

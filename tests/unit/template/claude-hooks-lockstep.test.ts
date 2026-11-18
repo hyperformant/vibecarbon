@@ -134,3 +134,20 @@ describe('claude hooks lockstep', () => {
     }
   });
 });
+
+describe('session environment', () => {
+  const env = (file: string): Record<string, string> =>
+    JSON.parse(readFileSync(join(REPO_ROOT, file), 'utf-8')).env ?? {};
+
+  it('no ssh an agent runs in this repo can open a password dialog', () => {
+    // A command an agent runs has no terminal, so on a desktop OpenSSH hands a
+    // password question to /usr/bin/ssh-askpass: a window on the maintainer's
+    // screen. Reproduced against a local sshd on 2026-11-17; `never` stops it.
+    expect(env('.claude/settings.json').SSH_ASKPASS_REQUIRE).toBe('never');
+  });
+
+  it('the template leaves the question to the project owner', () => {
+    // Their key may have a passphrase that only the askpass window can take.
+    expect(env('carbon/.claude/settings.json')).not.toHaveProperty('SSH_ASKPASS_REQUIRE');
+  });
+});
