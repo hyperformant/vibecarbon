@@ -1,5 +1,6 @@
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
+import { transliterateWith } from '../../providers/cloud-init-ascii.js';
 import { encodeLabels } from '../../providers/digitalocean.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
@@ -28,38 +29,21 @@ import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-
 // responsible: never hand DO user-data any non-ASCII byte in the first
 // place. ASCII-only output is the wire contract for DO user-data. Known
 // typography used in the shared cloud-init template is transliterated
-// explicitly below; anything else non-ASCII (unexpected today — the
-// shared file is maintained outside this program) falls back to '?'
-// rather than risk shipping bytes the downstream pipeline can mangle into
-// invalid YAML. The Hetzner path is untouched: its user-data goes to the
-// Hetzner API directly with no observed mangling, so byte-identity there
-// is preserved.
-export const ASCII_TRANSLITERATION_MAP = {
-  '—': '--', // em dash
-  '–': '-', // – en dash
-  '‘': "'", // ' left single quote
-  '’': "'", // ' right single quote
-  '“': '"', // " left double quote
-  '”': '"', // " right double quote
-  '…': '...', // … ellipsis
-};
+// explicitly (the map in providers/cloud-init-ascii.js, shared with
+// Scaleway); anything else non-ASCII (unexpected today — the shared file is
+// maintained outside this program) falls back to '?' rather than risk
+// shipping bytes the downstream pipeline can mangle into invalid YAML. The
+// Hetzner path is untouched: its user-data goes to the Hetzner API directly
+// with no observed mangling, so byte-identity there is preserved.
 
 /**
- * Transliterate a string to pure ASCII using ASCII_TRANSLITERATION_MAP,
- * with a '?' fallback for any non-ASCII character the map doesn't cover.
+ * Transliterate a string to pure ASCII using the shared typography map, with
+ * a '?' fallback for any non-ASCII character the map doesn't cover.
  * @param {string} input
  * @returns {string}
  */
 export function transliterateToAscii(input) {
-  let out = '';
-  for (const ch of input) {
-    if (ch.codePointAt(0) <= 0x7f) {
-      out += ch;
-      continue;
-    }
-    out += ASCII_TRANSLITERATION_MAP[ch] ?? '?';
-  }
-  return out;
+  return transliterateWith(input, () => '?');
 }
 
 /**
@@ -70,7 +54,7 @@ export function transliterateToAscii(input) {
  * changes such that the `runcmd:` anchor can't be found, since a silent
  * no-op splice would ship a droplet that fails at `docker compose up` with
  * no diagnostic pointing back here. The final render is transliterated to
- * pure ASCII — see ASCII_TRANSLITERATION_MAP above for why.
+ * pure ASCII — see transliterateToAscii above for why.
  * @param {string} sharedYaml - carbon/cloud-init/docker-ce-setup.yaml content
  * @returns {string}
  */

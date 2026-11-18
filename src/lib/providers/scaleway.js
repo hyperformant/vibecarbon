@@ -65,6 +65,7 @@ import {
   sweepLabels,
   waitUntilServerUp,
 } from './base.js';
+import { transliterateWith } from './cloud-init-ascii.js';
 import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
@@ -141,41 +142,25 @@ export { decodeLabels };
 // crosses the wire as PLAIN TEXT with NO base64 leg (unlike Linode/Vultr)
 // and no gzip — so there is no 7-bit-clean safety net between us and
 // whatever the Pulumi bridge / Scaleway ingestion does with non-ASCII
-// bytes. Same wire-contract decision as DigitalOcean's (see
-// digitalocean-compose.js's ASCII_TRANSLITERATION_MAP RCA — a mangled
-// em-dash there produced a C1 control char that made cloud-init reject the
-// ENTIRE #cloud-config part): never hand the wire a non-ASCII byte.
-// Known typography is transliterated explicitly; anything unmapped falls
-// through to assertAsciiCloudInit's loud refusal rather than a silent '?'.
-const ASCII_TRANSLITERATION_MAP = {
-  '—': '--', // em dash
-  '–': '-', // en dash
-  '‘': "'", // left single quote
-  '’': "'", // right single quote
-  '“': '"', // left double quote
-  '”': '"', // right double quote
-  '…': '...', // ellipsis
-};
+// bytes. Same wire-contract decision as DigitalOcean's (see the RCA in
+// digitalocean-compose.js — a mangled em-dash there produced a C1 control
+// char that made cloud-init reject the ENTIRE #cloud-config part): never
+// hand the wire a non-ASCII byte. Known typography is transliterated
+// explicitly, with the map DigitalOcean uses (cloud-init-ascii.js);
+// anything unmapped falls through to assertAsciiCloudInit's loud refusal
+// rather than a silent '?'.
 
 /**
  * Transliterate known typographic characters to ASCII — the Scaleway leg
- * of DO's wire-contract decision (see the map comment above). Applied by
+ * of DO's wire-contract decision (see the comment above). Applied by
  * loadScalewayComposeUserData BEFORE assertAsciiCloudInit, so mapped
  * typography degrades deterministically and anything unmapped still fails
- * loudly.
+ * loudly. A missing input reads as empty.
  * @param {string} input
  * @returns {string}
  */
 export function transliterateCloudInitToAscii(input) {
-  let out = '';
-  for (const ch of input ?? '') {
-    if (/** @type {number} */ (ch.codePointAt(0)) <= 0x7f) {
-      out += ch;
-      continue;
-    }
-    out += ASCII_TRANSLITERATION_MAP[ch] ?? ch;
-  }
-  return out;
+  return transliterateWith(input ?? '', (ch) => ch);
 }
 
 /**
