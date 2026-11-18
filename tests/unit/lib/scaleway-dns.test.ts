@@ -18,8 +18,6 @@
  *      error carries the pointer that says so — and the external-domain
  *      primitives that close the gap live in this module.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({
@@ -614,16 +612,6 @@ describe('scaleway-dns setupSimple', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/domain not found/);
-  });
-
-  // Structural pin for the concurrent-spinner guard enforced across every DNS
-  // backend by tests/unit/deploy/preplan-spinner-coverage.test.ts.
-  it('uses the shared `onProgress ? null : spinner()` guard literal', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/scaleway-dns.js', import.meta.url)),
-      'utf8',
-    );
-    expect(src).toMatch(/const s = onProgress \? null : spinner\(\)/);
   });
 });
 

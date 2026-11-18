@@ -14,8 +14,6 @@
  *   - deleteDNSRecord's ownership filter (the 2026-05-16 blast-radius bug)
  *   - deleteApexAndWildcard deletes BOTH halves of the pair deploy creates
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({
@@ -404,16 +402,6 @@ describe('digitalocean-dns setupSimple', () => {
     });
 
     expect(beats.length).toBeGreaterThan(0);
-  });
-
-  // Structural pin for the concurrent-spinner guard enforced across every DNS
-  // backend by tests/unit/deploy/preplan-spinner-coverage.test.ts.
-  it('uses the shared `onProgress ? null : spinner()` guard literal', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/digitalocean-dns.js', import.meta.url)),
-      'utf8',
-    );
-    expect(src).toMatch(/const s = onProgress \? null : spinner\(\)/);
   });
 });
 
