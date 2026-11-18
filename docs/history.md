@@ -756,7 +756,10 @@ sold.
 **Do not undo:** do not reintroduce keys, licence checks or tier gating.
 Releases up to v0.52.0 stay under the terms they shipped with.
 
-**Guard:** `tests/unit/docs/removed-license-surface-census.test.ts`.
+The two guards that watched for the old surface coming back (a census of
+banned strings and a deploy test against a stand-in licence server) were
+removed on 2026-11-17 with the last stored signing key. Nothing is left to
+revive: this entry is the record.
 
 #### 2026-11-07: Linode k8s and k8s-ha (#390)
 
