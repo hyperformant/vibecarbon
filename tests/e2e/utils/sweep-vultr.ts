@@ -511,6 +511,7 @@ export async function sweepOrphanedVultrResources(
     counts.servers +
     counts.volumes +
     counts.firewalls +
+    counts.floatingIps +
     (counts.loadBalancers ?? 0) +
     counts.networks +
     counts.s3Buckets +
@@ -520,6 +521,7 @@ export async function sweepOrphanedVultrResources(
       `instances=${counts.servers}`,
       `volumes=${counts.volumes}`,
       `firewalls=${counts.firewalls}`,
+      `reserved-ips=${counts.floatingIps}`,
       `load-balancers=${counts.loadBalancers ?? 0}`,
       `vpcs=${counts.networks}`,
       `buckets=${counts.s3Buckets}`,
