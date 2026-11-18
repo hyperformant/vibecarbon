@@ -29,6 +29,7 @@ import {
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
 } from './base.js';
+import { decodeLabels } from './tag-labels.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
 // touches, mirroring Hetzner's set: SSH and the k8s API.
@@ -70,46 +71,9 @@ export function encodeLabels(labels = {}) {
   return Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
 }
 
-/**
- * The one key this codebase tags resources with whose canonical (pre-encode)
- * form contains a character `encodeLabel` mangles — `/` becomes `-`, so
- * `cluster-autoscaler/node` round-trips through the wire as
- * `cluster-autoscaler-node`. `encodeLabel`'s mangling is lossy IN GENERAL
- * (any `-` on the wire is ambiguous between "was always a dash" and "was
- * some other disallowed character"), but within this codebase's known,
- * fixed tag-key set (see serverLabels/volumeLabels' consumers — destroy.js's
- * cleanup* policy functions and carbon-autoscaler's node-group selector) no
- * OTHER key is spelled `cluster-autoscaler-node` before encoding, so
- * un-mangling this one prefix back to its slash form is unambiguous here. A
- * future key that introduces its own `/` (or any other mangled character)
- * needs its own entry, or decodeLabels silently returns the wire-mangled key
- * instead of the original.
- * @type {Object<string,string>}
- */
-const KNOWN_MANGLED_LABEL_KEYS = { 'cluster-autoscaler-node': 'cluster-autoscaler/node' };
-
-/**
- * Decode a DO tag array back into a flat label map — the inverse of
- * encodeLabels for this codebase's known key set (see
- * KNOWN_MANGLED_LABEL_KEYS's doc for the one collision this does NOT attempt
- * to resolve generically). Splits each tag on its FIRST `:` — safe because
- * every value this codebase encodes (cluster/environment/project names,
- * `vibecarbon`, `static`, `worker-pool`, ...) is itself colon-free. Tags
- * that don't contain `:` (e.g. a plain un-encoded tag from outside
- * vibecarbon) are skipped rather than guessed at.
- * @param {string[]|null} [tags]
- * @returns {Object<string,string>}
- */
-export function decodeLabels(tags = []) {
-  const out = {};
-  for (const tag of tags || []) {
-    const sep = tag.indexOf(':');
-    if (sep === -1) continue;
-    const wireKey = tag.slice(0, sep);
-    out[KNOWN_MANGLED_LABEL_KEYS[wireKey] ?? wireKey] = tag.slice(sep + 1);
-  }
-  return out;
-}
+// decodeLabels, the inverse of encodeLabels, is the same for the four
+// tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
+export { decodeLabels };
 
 /**
  * Normalize an OpenSSH public key to `${type} ${base64Body}` for MATERIAL

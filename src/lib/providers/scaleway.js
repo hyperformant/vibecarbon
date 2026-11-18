@@ -63,6 +63,7 @@ import {
   standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
+import { decodeLabels } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -129,29 +130,9 @@ export function encodeLabels(labels = {}) {
   return Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
 }
 
-/**
- * See DigitalOcean's KNOWN_MANGLED_LABEL_KEYS — same single known collision,
- * same unambiguity argument within this codebase's fixed tag-key set.
- * @type {Object<string,string>}
- */
-const KNOWN_MANGLED_LABEL_KEYS = { 'cluster-autoscaler-node': 'cluster-autoscaler/node' };
-
-/**
- * Decode a Scaleway tag array back into a flat label map — inverse of
- * encodeLabels for this codebase's known key set.
- * @param {string[]|null} [tags]
- * @returns {Object<string,string>}
- */
-export function decodeLabels(tags = []) {
-  const out = {};
-  for (const tag of tags || []) {
-    const sep = tag.indexOf(':');
-    if (sep === -1) continue;
-    const wireKey = tag.slice(0, sep);
-    out[KNOWN_MANGLED_LABEL_KEYS[wireKey] ?? wireKey] = tag.slice(sep + 1);
-  }
-  return out;
-}
+// decodeLabels, the inverse of encodeLabels, is the same for the four
+// tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
+export { decodeLabels };
 
 // The shared cloud-init template carries typographic characters in its
 // comments (em-dashes, live as of 2026-08-09), and Scaleway user data
