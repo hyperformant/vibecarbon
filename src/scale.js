@@ -16,6 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { getGHCRCredentials } from './lib/build.js';
+import { errorFirstLine } from './lib/cli/error-line.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -799,7 +800,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
       });
     } catch (err) {
       p.log.warn(
-        `could not restart the add-on job on ${newIp} (${firstLineOf(err)}); the add-ons keep ` +
+        `could not restart the add-on job on ${newIp} (${errorFirstLine(err)}); the add-ons keep ` +
           'running, and vibecarbon status reads them from their containers until the next deploy',
       );
     }
@@ -905,7 +906,7 @@ export async function resumeComposeCutover(ctx) {
       await provider.deleteServer(newServerId);
     } catch (err) {
       throw new Error(
-        `could not delete the new server ${newIp} (id ${newServerId}): ${firstLineOf(err)}; ` +
+        `could not delete the new server ${newIp} (id ${newServerId}): ${errorFirstLine(err)}; ` +
           `the old server stays write-fenced so two primaries never take writes. ` +
           `Delete it, then ${scaleCutoverNextStep(environment)}.`,
       );
@@ -941,7 +942,7 @@ export async function resumeComposeCutover(ctx) {
         }
       } catch (err) {
         problems.push(
-          `could not point DNS back at the old server ${cutover.oldIp} (${firstLineOf(err)}); check ${domain} and *.${domain}`,
+          `could not point DNS back at the old server ${cutover.oldIp} (${errorFirstLine(err)}); check ${domain} and *.${domain}`,
         );
       }
     }
@@ -1044,8 +1045,6 @@ function formatPause(ms) {
   const total = Math.max(0, Math.round(ms / 1000));
   return total < 60 ? `${total}s` : `${Math.floor(total / 60)}m ${total % 60}s`;
 }
-
-const firstLineOf = (err) => String(err?.message ?? err).split('\n')[0];
 
 /** A promise with its resolve/reject in hand: the standby arm waits on the primary arm. */
 function deferred() {
@@ -1717,7 +1716,7 @@ async function scaleServers(ctx) {
             delete server._replacement;
             held = true;
             throw new Error(
-              `the DNS update failed (${firstLineOf(dnsErr)}) and where the records point now is ` +
+              `the DNS update failed (${errorFirstLine(dnsErr)}) and where the records point now is ` +
                 `unknown: ${move.pending.join(', ')}. The old server ${server.ip} stays write-fenced ` +
                 `and the new server ${newIp} is kept; ${scaleCutoverNextStep(environment)}.`,
             );
@@ -1726,14 +1725,14 @@ async function scaleServers(ctx) {
             flipped = true;
             saveScaledServers(ctx);
             throw new Error(
-              `the DNS update failed part way (${firstLineOf(dnsErr)}); ` +
+              `the DNS update failed part way (${errorFirstLine(dnsErr)}); ` +
                 `still to point at ${newIp}: ${move.pending.join(', ')}`,
             );
           }
           // `moved`: the update reported an error, but every record reads back
           // on the new server. The flip landed; carry on.
           p.log.warn(
-            `The DNS update reported an error (${firstLineOf(dnsErr)}), but every record now points at ${newIp}.`,
+            `The DNS update reported an error (${errorFirstLine(dnsErr)}), but every record now points at ${newIp}.`,
           );
         }
         s.stop('DNS updated');
@@ -1804,7 +1803,7 @@ async function scaleServers(ctx) {
       // Past the flip: nothing rolls back; the journal names what is left.
       throw new Error(
         `scale moved ${label}'s database to the new server ${newIp}, then failed: ` +
-          `${firstLineOf(scaleErr)}. The old server ${server.ip} (id ${server.id}) is kept, ` +
+          `${errorFirstLine(scaleErr)}. The old server ${server.ip} (id ${server.id}) is kept, ` +
           `write-fenced. Still to run: ${remainingCutoverSteps(progress).join(', ')}; ` +
           `${scaleCutoverNextStep(environment)}.`,
       );
@@ -1909,7 +1908,7 @@ async function scaleServers(ctx) {
     if (deleteErr) {
       throw new Error(
         `the new standby ${newIp} serves, but deleting ${describeOldServer(stateEntry.old)} failed: ` +
-          `${firstLineOf(deleteErr)}. It keeps billing and nothing tracks it any more: ` +
+          `${errorFirstLine(deleteErr)}. It keeps billing and nothing tracks it any more: ` +
           `delete it in the ${ctx.Provider?.NAME ?? 'provider'} console.`,
       );
     }

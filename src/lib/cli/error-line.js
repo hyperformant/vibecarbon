@@ -54,3 +54,11 @@ export function displayLine(message) {
   if (typeof message !== 'string' || !isCommandEnvelope(message)) return message;
   return summarizeCommandError(message);
 }
+
+/**
+ * The first line of an error's message (or of the value itself when it has
+ * no message), for a warning that names the cause without the dump under it.
+ * @param {unknown} err
+ * @returns {string}
+ */
+export const errorFirstLine = (err) => String(err?.message ?? err).split('\n')[0];
