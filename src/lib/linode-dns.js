@@ -34,15 +34,17 @@
  */
 
 import {
+  aTargetsAt,
   bearerHeaders,
   bearerJsonHeaders,
+  deleteOwnedRecords,
   matching,
+  namesPointingAt,
   pairDeleteResult,
-  relativeToFqdn,
   setupApexAndWildcard,
   setupHaRecords,
   toRelativeName,
-  zoneTooLongMessage,
+  wholeZone,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -184,11 +186,7 @@ async function getRecords(apiToken, zoneId, { whole = false } = {}) {
     apiToken,
     `/domains/${zoneId}/records`,
     'Linode DNS API error',
-    whole
-      ? {
-          pastGuard: zoneTooLongMessage(MAX_PAGES * PAGE_SIZE),
-        }
-      : {},
+    wholeZone(whole, MAX_PAGES * PAGE_SIZE),
   );
 }
 
@@ -238,11 +236,7 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
   return response.json();
 }
 
-/**
- * A record delete the DNS API refused: the record still exists. A 404 is a
- * record already gone, never one of these. destroy reports each as a leak.
- * @typedef {{name: string, target: string, reason: string}} DnsDeleteFailure
- */
+/** @typedef {import('./dns-backend-helpers.js').DnsDeleteFailure} DnsDeleteFailure */
 
 /**
  * Ownership-filtered delete core. Takes the already-resolved `zoneName` for
@@ -250,7 +244,7 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
  * page guard a partial read would miss the record and answer `total: 0`,
  * and destroy would report it gone while it still points at an address
  * being released. destroy's DNS cleanup catches the throw and reports the
- * records as a leak.
+ * records as a leak. A Linode record holds its address in `target`.
  * @param {string} apiToken
  * @param {string} zoneId
  * @param {string} zoneName
@@ -260,37 +254,16 @@ async function putRecord(apiToken, zoneId, zoneName, config) {
  * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 async function removeRecords(apiToken, zoneId, zoneName, name, ownedIps, type) {
-  const relativeName = fqdnToRelative(name, zoneName);
   const all = await getRecords(apiToken, zoneId, { whole: true });
-  const fqdn = String(name).replace(/\.$/, '');
-  const records = matching(all, relativeName, fqdn, type);
-  const total = records.length;
-
-  if (total === 0) {
-    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] };
-  }
-
-  const owned = new Set(ownedIps || []);
-  let deleted = 0;
-  const skippedTargets = [];
-  const failed = [];
-
-  for (const record of records) {
-    if (!owned.has(record.target)) {
-      skippedTargets.push(record.target);
-      continue;
-    }
-    const response = await fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${record.id}`, {
-      method: 'DELETE',
-      headers: bearerHeaders(apiToken),
-    });
-    if (response.ok) deleted++;
-    else if (response.status !== 404) {
-      failed.push({ name: fqdn, target: record.target, reason: `HTTP ${response.status}` });
-    }
-  }
-
-  return { deleted, skipped: skippedTargets.length, total, skippedTargets, failed };
+  return deleteOwnedRecords(
+    all,
+    { relativeName: fqdnToRelative(name, zoneName), name, type, ownedIps, field: 'target' },
+    (record) =>
+      fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${record.id}`, {
+        method: 'DELETE',
+        headers: bearerHeaders(apiToken),
+      }),
+  );
 }
 
 // ============================================================================
@@ -343,8 +316,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 export async function readARecord(apiToken, zoneId, name) {
   const zoneName = await getZoneName(apiToken, zoneId);
   const records = await getRecords(apiToken, zoneId);
-  const fqdn = String(name).replace(/\.$/, '');
-  return matching(records, fqdnToRelative(name, zoneName), fqdn, 'A').map((r) => r.target);
+  return aTargetsAt(records, fqdnToRelative(name, zoneName), name, 'target');
 }
 
 /**
@@ -365,10 +337,7 @@ export async function findARecordsAt(apiToken, zoneId, address) {
   // The whole zone or a throw: a partial read that missed the record would
   // let the address go.
   const records = await getRecords(apiToken, zoneId, { whole: true });
-  const names = records
-    .filter((r) => r.type === 'A' && r.target === address)
-    .map((r) => relativeToFqdn(r.name, zoneName));
-  return [...new Set(names)].sort();
+  return namesPointingAt(records, address, zoneName, 'target');
 }
 
 /**

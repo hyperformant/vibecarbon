@@ -44,15 +44,17 @@
  */
 
 import {
+  aTargetsAt,
   bearerHeaders,
   bearerJsonHeaders,
+  deleteOwnedRecords,
   matching,
+  namesPointingAt,
   pairDeleteResult,
-  relativeToFqdn,
   setupApexAndWildcard,
   setupHaRecords,
   toRelativeName,
-  zoneTooLongMessage,
+  wholeZone,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -154,11 +156,7 @@ async function getRecords(apiToken, zoneName, { whole = false } = {}) {
     `/domains/${zoneName}/records`,
     'records',
     'Vultr DNS API error',
-    whole
-      ? {
-          pastGuard: zoneTooLongMessage(MAX_PAGES * PER_PAGE),
-        }
-      : {},
+    wholeZone(whole, MAX_PAGES * PER_PAGE),
   );
 }
 
@@ -236,8 +234,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
  */
 export async function readARecord(apiToken, zoneId, name) {
   const records = await getRecords(apiToken, zoneId);
-  const fqdn = String(name).replace(/\.$/, '');
-  return matching(records, fqdnToRelative(name, zoneId), fqdn, 'A').map((r) => r.data);
+  return aTargetsAt(records, fqdnToRelative(name, zoneId), name);
 }
 
 /**
@@ -257,17 +254,10 @@ export async function findARecordsAt(apiToken, zoneId, address) {
   // The whole zone or a throw: a partial read that missed the record would
   // let the address go.
   const records = await getRecords(apiToken, zoneId, { whole: true });
-  const names = records
-    .filter((r) => r.type === 'A' && r.data === address)
-    .map((r) => relativeToFqdn(r.name, zoneId));
-  return [...new Set(names)].sort();
+  return namesPointingAt(records, address, zoneId);
 }
 
-/**
- * A record delete the DNS API refused: the record still exists. A 404 is a
- * record already gone, never one of these. destroy reports each as a leak.
- * @typedef {{name: string, target: string, reason: string}} DnsDeleteFailure
- */
+/** @typedef {import('./dns-backend-helpers.js').DnsDeleteFailure} DnsDeleteFailure */
 
 /**
  * Delete a DNS record, but only if its target IP belongs to this caller.
@@ -296,37 +286,16 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = 'A') {
-  const relativeName = fqdnToRelative(name, zoneId);
   const all = await getRecords(apiToken, zoneId, { whole: true });
-  const fqdn = String(name).replace(/\.$/, '');
-  const records = matching(all, relativeName, fqdn, type);
-  const total = records.length;
-
-  if (total === 0) {
-    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] };
-  }
-
-  const owned = new Set(ownedIps || []);
-  let deleted = 0;
-  const skippedTargets = [];
-  const failed = [];
-
-  for (const record of records) {
-    if (!owned.has(record.data)) {
-      skippedTargets.push(record.data);
-      continue;
-    }
-    const response = await fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${record.id}`, {
-      method: 'DELETE',
-      headers: bearerHeaders(apiToken),
-    });
-    if (response.ok) deleted++;
-    else if (response.status !== 404) {
-      failed.push({ name: fqdn, target: record.data, reason: `HTTP ${response.status}` });
-    }
-  }
-
-  return { deleted, skipped: skippedTargets.length, total, skippedTargets, failed };
+  return deleteOwnedRecords(
+    all,
+    { relativeName: fqdnToRelative(name, zoneId), name, type, ownedIps },
+    (record) =>
+      fetchWithRetry(`${API_BASE}/domains/${zoneId}/records/${record.id}`, {
+        method: 'DELETE',
+        headers: bearerHeaders(apiToken),
+      }),
+  );
 }
 
 /**

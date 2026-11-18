@@ -2,11 +2,13 @@
  * Leaf helpers the DNS backends (`<id>-dns.js`) share.
  *
  * Only what is the same in every backend that uses it lives here: header
- * construction, record-name conversion, the name-and-type match, two result
- * shapes, and the two setup flows the non-Cloudflare backends run around
- * their own record writer. Each backend keeps its own request flow (page
- * walk, error envelope, upsert, delete loop): those differ per provider, and
- * the source censuses under tests/unit/dns/ read them per backend file.
+ * construction, record-name conversion, the name-and-type match, the record
+ * reads over a listed zone, the ownership-filtered delete loop around a
+ * backend's own delete request, two result shapes, and the two setup flows
+ * the non-Cloudflare backends run around their own record writer. Each
+ * backend keeps its own requests (page walk, error envelope, upsert,
+ * delete): those differ per provider, and the source censuses under
+ * tests/unit/dns/ read them per backend file.
  */
 
 import { spinner } from './cli/progress.js';
@@ -94,8 +96,101 @@ export function matching(records, relativeName, fqdn, type) {
  * @param {number} limit - the most records the walk reads
  * @returns {string}
  */
-export function zoneTooLongMessage(limit) {
+function zoneTooLongMessage(limit) {
   return `the zone has more than ${limit} records, more than vibecarbon reads`;
+}
+
+/**
+ * A backend's page-walk options for getRecords: a whole-zone read throws past
+ * the page guard rather than return part of the zone.
+ * @param {boolean} whole
+ * @param {number} limit - the most records the walk reads
+ * @returns {{pastGuard?: string}}
+ */
+export function wholeZone(whole, limit) {
+  return whole ? { pastGuard: zoneTooLongMessage(limit) } : {};
+}
+
+/**
+ * Every A record target at a name, for readARecord's flip check. Empty when
+ * the name has no A record; a stale second value stays visible.
+ * @param {object[]} records - the zone's records
+ * @param {string} relativeName - the name as the backend stores it
+ * @param {string} name - the name, fully qualified
+ * @param {string} [field='data'] - the record field that holds the address
+ * @returns {string[]}
+ */
+export function aTargetsAt(records, relativeName, name, field = 'data') {
+  const fqdn = String(name).replace(/\.$/, '');
+  return matching(records, relativeName, fqdn, 'A').map((r) => r[field]);
+}
+
+/**
+ * Every A record name whose value is `address`, fully qualified: what
+ * findARecordsAt answers from a whole-zone read.
+ * @param {object[]} records - the whole zone's records
+ * @param {string} address - an IPv4 address
+ * @param {string} zoneName
+ * @param {string} [field='data'] - the record field that holds the address
+ * @returns {string[]} sorted, each name once
+ */
+export function namesPointingAt(records, address, zoneName, field = 'data') {
+  const names = records
+    .filter((r) => r.type === 'A' && r[field] === address)
+    .map((r) => relativeToFqdn(r.name, zoneName));
+  return [...new Set(names)].sort();
+}
+
+/**
+ * The records at one (name, type), split by ownership. A record is ours iff
+ * the address it holds is in `ownedIps`; an empty `ownedIps` owns nothing,
+ * the safer default when the caller has no server IPs to compare against
+ * (the 2026-05-16 blast-radius bug, where one scenario's destroy zeroed a
+ * neighbour's record in a shared zone). Order is the zone's.
+ * @param {object[]} records - the whole zone's records
+ * @param {{relativeName: string, name: string, type: string, ownedIps?: string[], field?: string}} at
+ * @returns {{fqdn: string, total: number, owned: object[], skippedTargets: string[]}}
+ */
+export function recordsOwnedAt(records, { relativeName, name, type, ownedIps, field = 'data' }) {
+  const fqdn = String(name).replace(/\.$/, '');
+  const atName = matching(records, relativeName, fqdn, type);
+  const ours = new Set(ownedIps || []);
+  return {
+    fqdn,
+    total: atName.length,
+    owned: atName.filter((r) => ours.has(r[field])),
+    skippedTargets: atName.filter((r) => !ours.has(r[field])).map((r) => r[field]),
+  };
+}
+
+/**
+ * A record delete the DNS API refused: the record still exists. A 404 is a
+ * record already gone, never one of these. destroy reports each as a leak.
+ * @typedef {{name: string, target: string, reason: string}} DnsDeleteFailure
+ */
+
+/**
+ * deleteDNSRecord for a backend that stores one row per record and deletes
+ * them one request at a time: each owned record at the name, in zone order,
+ * through the backend's own `remove`. A 404 is a record already gone.
+ * @param {object[]} records - the whole zone's records
+ * @param {{relativeName: string, name: string, type: string, ownedIps?: string[], field?: string}} at
+ * @param {(record: object) => Promise<Response>} remove - the backend's DELETE of one record
+ * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
+ */
+export async function deleteOwnedRecords(records, at, remove) {
+  const field = at.field ?? 'data';
+  const { fqdn, total, owned, skippedTargets } = recordsOwnedAt(records, at);
+  let deleted = 0;
+  const failed = [];
+  for (const record of owned) {
+    const response = await remove(record);
+    if (response.ok) deleted++;
+    else if (response.status !== 404) {
+      failed.push({ name: fqdn, target: record[field], reason: `HTTP ${response.status}` });
+    }
+  }
+  return { deleted, skipped: skippedTargets.length, total, skippedTargets, failed };
 }
 
 /**
