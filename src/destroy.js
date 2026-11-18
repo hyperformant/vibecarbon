@@ -2792,6 +2792,34 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
   }
 }
 
+/**
+ * The compose tiers' surviving-server backstop (sweepEnvironmentServers) under
+ * a spinner: the servers it deletes join `results.servers`, and the spinner
+ * stops on one of three lines: what it deleted, none left, or inconclusive
+ * (the sweep recorded why in the leak report).
+ *
+ * @param {{ start: (m: string) => void, message: (m: string) => void, stop: (m: string) => void }} spin
+ * @param {object} opts sweepEnvironmentServers' arguments, with `results` for
+ *   its leak ledger and `envConfig` for the persisted roles
+ */
+async function sweepSurvivingServers(spin, { results, envConfig, ...sweep }) {
+  spin.start('Checking for surviving environment servers');
+  const { deleted, scanned } = await sweepEnvironmentServers({
+    ...sweep,
+    leaks: results.leaks,
+    roles: (envConfig.servers || []).map((sv) => sv.role),
+    onProgress: (message) => spin.message(message),
+  });
+  results.servers.push(...deleted);
+  spin.stop(
+    deleted.length > 0
+      ? `Deleted ${deleted.length} surviving server(s): ${deleted.join(', ')}`
+      : scanned
+        ? 'No surviving environment servers'
+        : 'Surviving-server check inconclusive (see the leak report)',
+  );
+}
+
 async function destroyComposeHATier({
   envConfig,
   projectConfig,
@@ -2855,28 +2883,17 @@ async function destroyComposeHATier({
   // or UNVERIFIED line instead of silence.
   if (!providerToken) return;
   const provider = new Provider(providerToken);
-  const s3 = tracker.spinner();
-  s3.start('Checking for surviving environment servers');
-  const { deleted: sweptServers, scanned } = await sweepEnvironmentServers({
+  await sweepSurvivingServers(tracker.spinner(), {
     provider,
-    leaks: results.leaks,
+    results,
     projectName: projectConfig.projectName,
     environment,
     args,
     deployMode: 'compose-ha',
-    roles: (envConfig.servers || []).map((sv) => sv.role),
+    envConfig,
     alreadyHandledIds: handledServerIds,
     providerName: Provider.NAME,
-    onProgress: (message) => s3.message(message),
   });
-  results.servers.push(...sweptServers);
-  s3.stop(
-    sweptServers.length > 0
-      ? `Deleted ${sweptServers.length} surviving server(s): ${sweptServers.join(', ')}`
-      : scanned
-        ? 'No surviving environment servers'
-        : 'Surviving-server check inconclusive (see the leak report)',
-  );
 
   // A flexible IP either side's compose program made before its server
   // (Scaleway, COMPOSE_FLOATING_IP): each side is its own stack
@@ -3014,27 +3031,17 @@ async function destroyComposeTier({
   // by-name lookup here was ever asked for (see lib/destroy/server-sweep.js).
   // Runs BEFORE the firewall delete so a straggler isn't holding it attached.
   if (providerToken) {
-    s.start('Checking for surviving environment servers');
-    const { deleted: sweptServers, scanned } = await sweepEnvironmentServers({
+    await sweepSurvivingServers(s, {
       provider,
-      leaks: results.leaks,
+      results,
       projectName: projectConfig.projectName,
       environment,
       args,
       deployMode: envConfig.deployMode,
-      roles: (envConfig.servers || []).map((sv) => sv.role),
+      envConfig,
       alreadyHandledIds: (envConfig.servers || []).map((sv) => sv.id).filter(Boolean),
       providerName: Provider.NAME,
-      onProgress: (message) => s.message(message),
     });
-    results.servers.push(...sweptServers);
-    s.stop(
-      sweptServers.length > 0
-        ? `Deleted ${sweptServers.length} surviving server(s): ${sweptServers.join(', ')}`
-        : scanned
-          ? 'No surviving environment servers'
-          : 'Surviving-server check inconclusive (see the leak report)',
-    );
   }
 
   // A flexible IP the compose program made before its server (Scaleway,
