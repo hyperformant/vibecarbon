@@ -348,7 +348,7 @@ function oneLine(text) {
  *   finding: NonNullable<ReturnType<typeof reissueAfterRestore>> }} args
  * @returns {string}
  */
-export function reissueWarning({ domain, environment, restoredAt, finding }) {
+function reissueWarning({ domain, environment, restoredAt, finding }) {
   const revision = finding.revision === null ? '' : `, Certificate revision ${finding.revision}`;
   return (
     `TLS certificate for ${domain} was restored at ${restoredAt}, but cert-manager requested a new one after it ` +

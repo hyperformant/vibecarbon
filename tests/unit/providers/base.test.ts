@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { BaseProvider } from '../../../src/lib/providers/base.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { BaseProvider, standbyPairOrNeighbour } from '../../../src/lib/providers/base.js';
 
 describe('BaseProvider', () => {
   describe('constructor', () => {
@@ -118,17 +118,85 @@ describe('BaseProvider', () => {
       await expect(BaseProvider.fetchServerTypes('token')).rejects.toThrow('must be implemented');
     });
 
-    it('getServerTypesForRegion throws not implemented', () => {
-      expect(() => BaseProvider.getServerTypesForRegion('region')).toThrow('must be implemented');
+    // Not abstract: the same for every provider with no ARM line, reading the
+    // calling class's own catalog. Hetzner overrides it.
+    describe('getServerTypesForRegion answers for the calling subclass', () => {
+      class Catalog extends BaseProvider {
+        static SERVER_TYPES = {
+          big: { vcpu: 4, ram: 8, disk: 160 },
+          small: { vcpu: 2, ram: 4, disk: 80 },
+        };
+        static FALLBACK_SERVER_TYPES = { offline: { vcpu: 1, ram: 2, disk: 50 } };
+      }
+      afterEach(() => {
+        Catalog._locationTypes = null;
+      });
+
+      it('lists the whole offline catalog before a live fetch, each entry x86', () => {
+        expect(Catalog.getServerTypesForRegion('home')).toEqual([
+          { name: 'offline', vcpu: 1, ram: 2, disk: 50, architecture: 'x86' },
+        ]);
+      });
+
+      it("lists the region's live types it knows, smallest first", () => {
+        Catalog._locationTypes = { home: new Set(['big', 'unknown', 'small']) };
+        expect(Catalog.getServerTypesForRegion('home')).toEqual([
+          { name: 'small', vcpu: 2, ram: 4, disk: 80, architecture: 'x86' },
+          { name: 'big', vcpu: 4, ram: 8, disk: 160, architecture: 'x86' },
+        ]);
+      });
+
+      it('lists the offline catalog for a region the live catalog does not name', () => {
+        Catalog._locationTypes = { home: new Set(['big']) };
+        expect(Catalog.getServerTypesForRegion('away').map((t) => t.name)).toEqual(['offline']);
+      });
+
+      it('lists nothing on the bare base class', () => {
+        expect(BaseProvider.getServerTypesForRegion('region')).toEqual([]);
+      });
     });
 
-    // Not abstract: both are the same for every provider and read the calling
-    // class's own catalog and static pair, so on the bare base class it is
-    // those abstract members which throw.
-    it('getRegionDefaults reads through the abstract getServerTypesForRegion', () => {
-      expect(() => BaseProvider.getRegionDefaults('region')).toThrow(
-        'getServerTypesForRegion() must be implemented',
-      );
+    describe('resolveServerTypeForRegion answers for the calling subclass', () => {
+      class Stocked extends BaseProvider {
+        static ROLE_CANDIDATES = { compose: ['small', 'big'] };
+        static SERVER_TYPES = {
+          small: { vcpu: 2, ram: 4, disk: 80 },
+          big: { vcpu: 4, ram: 8, disk: 160 },
+        };
+      }
+      afterEach(() => {
+        Stocked._locationTypes = null;
+      });
+
+      it('keeps the type offline, where every type is assumed stocked', () => {
+        expect(Stocked.resolveServerTypeForRegion('small', 'away', 'compose')).toBe('small');
+      });
+
+      it('keeps a type the live catalog stocks there', () => {
+        Stocked._locationTypes = { away: new Set(['small', 'big']) };
+        expect(Stocked.resolveServerTypeForRegion('small', 'away', 'compose')).toBe('small');
+      });
+
+      it("stands in the role's stocked pick of at least its RAM, never smaller", () => {
+        Stocked._locationTypes = { away: new Set(['big']) };
+        expect(Stocked.resolveServerTypeForRegion('small', 'away', 'compose')).toBe('big');
+      });
+
+      it('answers null where the live catalog stocks nothing, for the caller to refuse', () => {
+        Stocked._locationTypes = { home: new Set(['small']) };
+        expect(Stocked.resolveServerTypeForRegion('small', 'away', 'compose')).toBeNull();
+      });
+    });
+
+    // Not abstract: the same for every provider, reading the calling class's
+    // own candidates and catalog; the bare base class has none.
+    it('getRegionDefaults has nothing to pick on the bare base class', () => {
+      expect(BaseProvider.getRegionDefaults('region')).toEqual({
+        composeType: null,
+        masterType: null,
+        dbType: null,
+        workerType: null,
+      });
     });
 
     it('getDefaultStandbyRegion reads through the abstract conventionalStandbyRegion', () => {
@@ -152,15 +220,20 @@ describe('BaseProvider', () => {
       expect(OneRegion.getDefaultStandbyRegion('home')).toBe('pair');
     });
 
+    // The walk each provider's own conventionalStandbyRegion takes before its
+    // own last resort.
+    it('standbyPairOrNeighbour: the pair, else the first same-continent region, else nothing', () => {
+      const continents = { a1: 'eu', a2: 'eu', a3: 'eu', b1: 'us', c1: 'sa' };
+      expect(standbyPairOrNeighbour(continents, 'a1', { a1: 'a3' })).toBe('a3');
+      expect(standbyPairOrNeighbour(continents, 'a2', { a1: 'a3' })).toBe('a1');
+      expect(standbyPairOrNeighbour(continents, 'a1')).toBe('a2');
+      expect(standbyPairOrNeighbour(continents, 'c1', { a1: 'a3' })).toBeUndefined();
+      expect(standbyPairOrNeighbour(continents, 'nowhere')).toBeUndefined();
+    });
+
     it('conventionalStandbyRegion throws not implemented', () => {
       expect(() => BaseProvider.conventionalStandbyRegion('region')).toThrow(
         'conventionalStandbyRegion() must be implemented by subclass',
-      );
-    });
-
-    it('resolveServerTypeForRegion throws not implemented', () => {
-      expect(() => BaseProvider.resolveServerTypeForRegion('type', 'region')).toThrow(
-        'must be implemented',
       );
     });
 

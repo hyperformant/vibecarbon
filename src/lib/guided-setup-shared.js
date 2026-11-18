@@ -2,15 +2,18 @@
  * The steps every provider guided setup runs the same way.
  *
  * Each `*-guided-setup.js` module keeps what is its own: the console guide,
- * the env var names, the order of its flow, and anything only that provider
- * needs (Vultr's cluster prompt, Scaleway's credential triple and domain
- * onboarding). This module holds the parts that were copied between them
- * word for word, so a fix lands in every provider at once:
+ * the env var names, and anything only that provider needs (Vultr's cluster
+ * prompt, Scaleway's credential triple and domain onboarding). This module
+ * holds the parts that were copied between them word for word, so a fix
+ * lands in every provider at once:
  *
  *   - checkApiToken: the live token probe and how its status codes are read
- *   - verifiedEnvToken: the env-first lookup of an API token
- *   - promptForVerifiedToken: the paste, verify, retry loop
+ *   - verifiedEnvToken (private): the env-first lookup of an API token
+ *   - promptForVerifiedToken (private): the paste, verify, retry loop
+ *   - resolveApiToken: the whole getApiToken flow built from the three above
  *   - promptS3KeyPair: the access key and secret key prompts
+ *   - resolveS3KeyPair: the whole getS3Credentials flow for a provider whose
+ *     storage keys are one plain pair (DigitalOcean, Hetzner, Linode)
  *   - createCredentialSaver: the "Save keys for future deploys?" question
  *   - finishS3Credentials: save the pair now, or hand the save to the caller
  *
@@ -85,7 +88,7 @@ function warnIfBadTokenFormat(token, { provider, noun = 'token', format }) {
  * @returns {Promise<string|null>} the token, or null when it is unset or the
  *   provider rejected it (the caller then falls through to the prompt)
  */
-export async function verifiedEnvToken(spec) {
+async function verifiedEnvToken(spec) {
   const { envKey, provider, noun = 'token', verify } = spec;
   const envToken = readOperatorVar(envKey).value;
   if (!envToken) return null;
@@ -117,7 +120,7 @@ export async function verifiedEnvToken(spec) {
  * @param {object} spec - see the module doc
  * @returns {Promise<string>} the normalized, verified token
  */
-export async function promptForVerifiedToken(spec) {
+async function promptForVerifiedToken(spec) {
   const { envKey, provider, noun = 'token', verify, shapeProblem } = spec;
   assertInteractiveStdin({ what: `the ${provider} API ${noun}`, envVar: envKey });
   const Noun = noun[0].toUpperCase() + noun.slice(1);
@@ -158,6 +161,125 @@ export async function promptForVerifiedToken(spec) {
     p.log.warn(`Please try again with a valid ${noun}.`);
   }
   return token;
+}
+
+/**
+ * A provider module's getApiToken. Lookup order: the env var (shell, or the
+ * project's .env.local via bootstrapOperatorEnv), then the interactive
+ * prompt.
+ *
+ * @param {object} spec - see the module doc
+ * @param {object} own - what the calling module owns
+ * @param {(projectName?: string) => void} own.displayTokenGuide - its console guide
+ * @param {(envVars: Record<string, string>) => Promise<void>} own.saveIfWanted -
+ *   its createCredentialSaver
+ * @param {string} [projectName] - project name for display in the guide
+ * @param {{ save?: boolean, force?: boolean }} [options]
+ *   save: offer to save credentials (default true)
+ *   force: skip the env lookup and go straight to the interactive prompt (default false)
+ * @returns {Promise<string>}
+ */
+export async function resolveApiToken(
+  spec,
+  { displayTokenGuide, saveIfWanted },
+  projectName,
+  options = {},
+) {
+  const { save = true, force = false } = options;
+  const { envKey, provider, noun = 'token' } = spec;
+
+  if (!force) {
+    const envToken = await verifiedEnvToken(spec);
+    if (envToken) return envToken;
+  }
+
+  // Off a TTY this prompt can never be answered — clack's promise would
+  // neither resolve nor cancel, draining the event loop into a silent
+  // exit 0 (the 2026-08-11 v1 RCA). Fail loudly with the env var instead.
+  assertInteractiveStdin({ what: `the ${provider} API ${noun}`, envVar: envKey });
+  // Interactive prompt (with retry on invalid token)
+  displayTokenGuide(projectName);
+  const token = await promptForVerifiedToken(spec);
+
+  // In-process coherence (A2): a freshly-entered token must be visible to
+  // any later env-first resolution in this same process, regardless of
+  // whether the operator chooses to persist it to .env.local below.
+  process.env[envKey] = token;
+
+  if (save) {
+    await saveIfWanted({ [envKey]: token });
+  }
+
+  return token;
+}
+
+/**
+ * A provider module's getS3Credentials, for a provider whose storage keys
+ * are one plain access/secret pair. Lookup order: the env vars (shell, or
+ * the project's .env.local via bootstrapOperatorEnv), then the interactive
+ * prompt.
+ *
+ * @param {object} pair - as promptS3KeyPair takes it: provider, accessEnvKey,
+ *   secretEnvKey and label ('Spaces', 'S3' or 'Object Storage')
+ * @param {object} own - what the calling module owns
+ * @param {(projectName?: string) => void} own.displayKeysGuide - its console guide
+ * @param {(envVars: Record<string, string>) => Promise<void>} own.saveIfWanted -
+ *   its createCredentialSaver
+ * @param {string} [projectName] - project name for display in the guide
+ * @param {{ save?: boolean, force?: boolean, skipPrompts?: boolean, deferSave?: boolean }} [options]
+ *   save: offer to save credentials (default true)
+ *   force: skip the env lookup and go straight to the interactive prompt (default false)
+ *   skipPrompts: never fall through to the interactive prompt; return null
+ *     instead when the env vars are missing (default false). For batch and
+ *     non-TTY callers (destroy.js's resolveDestroyS3Config, M3 Task 9g):
+ *     clack's prompt primitives have no isTTY/stdin-close handling of their
+ *     own, so without this a non-TTY caller with missing creds hangs
+ *     instead of getting a fast, loud result.
+ *   deferSave: see finishS3Credentials
+ * @returns {Promise<{accessKey: string, secretKey: string, source: string}|null>}
+ */
+export async function resolveS3KeyPair(
+  pair,
+  { displayKeysGuide, saveIfWanted },
+  projectName,
+  options = {},
+) {
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
+  const { provider, accessEnvKey, secretEnvKey, label } = pair;
+
+  if (!force) {
+    const envAccessKey = readOperatorVar(accessEnvKey).value;
+    const envSecretKey = readOperatorVar(secretEnvKey).value;
+
+    if (envAccessKey && envSecretKey) {
+      const from = describeCredentialSource([accessEnvKey, secretEnvKey]);
+      p.log.info(`✓ Using ${label} credentials from ${from.label}`);
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
+    }
+  }
+
+  if (skipPrompts) return null;
+
+  // Off a TTY this prompt can never be answered (see resolveApiToken).
+  assertInteractiveStdin({
+    what: `the ${provider} object-storage keys`,
+    envVar: `${accessEnvKey}/${secretEnvKey}`,
+  });
+  displayKeysGuide(projectName);
+  const { accessKey, secretKey } = await promptS3KeyPair(pair);
+
+  p.log.success(`${label} credentials received!`);
+
+  // In-process coherence (A2), as in resolveApiToken.
+  process.env[accessEnvKey] = accessKey;
+  process.env[secretEnvKey] = secretKey;
+
+  return finishS3Credentials(
+    { accessKey, secretKey, source: 'what you pasted' },
+    { [accessEnvKey]: accessKey, [secretEnvKey]: secretKey },
+    { save, deferSave },
+    saveIfWanted,
+  );
 }
 
 /**

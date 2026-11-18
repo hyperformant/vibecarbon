@@ -6,9 +6,12 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { planIdFromPriceId } from '../../../shared/pricing';
 import { env } from '../../lib/env';
 import { logger } from '../../lib/logger';
+import { priceIdsFor } from '../price-ids';
 import type { BillingProvider, CheckoutResult, PortalResult, SubscriptionInfo } from '../provider';
+import { assertFreshWebhookTimestamp } from '../webhook-timestamp';
 
 const POLAR_API_URL = 'https://api.polar.sh';
 
@@ -81,7 +84,7 @@ export class PolarProvider implements BillingProvider {
       return {
         id: sub.id as string,
         status: this.normalizePolarStatus(sub.status as string),
-        planId: this.resolvePlanId((price?.id as string) ?? ''),
+        planId: planIdFromPriceId((price?.id as string) ?? '', priceIdsFor('polar')),
         priceId: (price?.id as string) ?? '',
         currentPeriodEnd: (sub.current_period_end as string) ?? null,
         cancelAtPeriodEnd: (sub.cancel_at_period_end as boolean) ?? false,
@@ -150,6 +153,22 @@ export class PolarProvider implements BillingProvider {
         { error, customerId },
         'Failed to delete Polar customer (may already be deleted)'
       );
+    }
+  }
+
+  async cancelActiveSubscriptions(customerId: string): Promise<void> {
+    // List Subscriptions, filtered to this customer's active ones. One page of
+    // up to 100, Polar's maximum: one person's subscriptions fit in it.
+    const query = new URLSearchParams({ customer_id: customerId, status: 'active', limit: '100' });
+    const response = await this.request('GET', `/v1/subscriptions/?${query}`);
+    const items = Array.isArray(response.data.items)
+      ? (response.data.items as { id: string }[])
+      : [];
+
+    // Revoke Subscription: Polar's cancel-now. Cancelling at the period end
+    // would bill a deleted account once more.
+    for (const sub of items) {
+      await this.request('DELETE', `/v1/subscriptions/${encodeURIComponent(sub.id)}`);
     }
   }
 
@@ -245,19 +264,9 @@ export class PolarProvider implements BillingProvider {
       throw new Error('Invalid Polar webhook signature');
     }
 
-    // SECURITY: reject stale events to blunt replay attacks. A captured, validly
-    // signed payload can otherwise be resent forever to re-assert subscription
-    // state. Standard Webhooks timestamps are Unix seconds; use the same
-    // 5-minute tolerance as the Paddle/Stripe verifiers.
-    const timestampSec = Number.parseInt(timestamp, 10);
-    if (!Number.isFinite(timestampSec)) {
-      throw new Error('Invalid Polar webhook timestamp');
-    }
-    const ageSec = Math.abs(Date.now() / 1000 - timestampSec);
-    const TOLERANCE_SEC = 5 * 60;
-    if (ageSec > TOLERANCE_SEC) {
-      throw new Error('Polar webhook timestamp outside tolerance');
-    }
+    // SECURITY: reject stale events (replay). Standard Webhooks timestamps are
+    // Unix seconds.
+    assertFreshWebhookTimestamp(timestamp, 'Polar');
   }
 
   /** Map Polar event types to normalized billing event names. */
@@ -285,13 +294,6 @@ export class PolarProvider implements BillingProvider {
       unpaid: 'past_due',
     };
     return map[polarStatus] ?? polarStatus;
-  }
-
-  /** Map a Polar price ID to a plan ID using configured env vars. */
-  private resolvePlanId(priceId: string): string {
-    if (priceId === env.POLAR_PRICE_STARTER) return 'starter';
-    if (priceId === env.POLAR_PRICE_PRO) return 'pro';
-    return 'free';
   }
 
   /** Extract relevant data from a Polar webhook event payload. */

@@ -37,7 +37,7 @@ export class FailoverRefusedError extends Error {
  * walreceiver's view. The receiver subqueries return no row on a primary, which
  * psql -tA prints as an empty field.
  */
-export const REPLICA_STATE_SQL =
+const REPLICA_STATE_SQL =
   'SELECT pg_is_in_recovery(), ' +
   '(SELECT system_identifier FROM pg_control_system()), ' +
   'pg_last_wal_replay_lsn(), ' +
@@ -90,7 +90,7 @@ export async function readReplicaState({ exec }) {
 export const PRIMARY_ALIVE_MAX_AGE_S = 60;
 
 /** The R8 refusal: the operator is partitioned from a primary that is alive. */
-export const PRIMARY_ALIVE_MESSAGE =
+const PRIMARY_ALIVE_MESSAGE =
   'the primary is still streaming to the standby; your machine cannot reach it. ' +
   'Rerun with -force-unplanned to fail over anyway';
 

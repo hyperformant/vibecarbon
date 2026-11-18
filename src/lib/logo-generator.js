@@ -27,12 +27,12 @@ const FONT_PATH = join(
 // mapped onto this band so, at the sidebar's `h-8 w-auto`, they sit on the
 // icon's vertical side exactly like the original lockup. If the icon is ever
 // replaced these must be re-measured (a rebrand step, documented in the spec).
-export const ICON_CANVAS = 1012;
+const ICON_CANVAS = 1012;
 export const ICON_SIDE_TOP = 257.63;
 export const ICON_BASELINE = 744.93;
 // Gap between the icon and the wordmark in the composite lockup (icon 877 wide;
 // original composite 6354 = 877 + 300 + 5177 wordmark).
-export const COMPOSITE_GAP = 300;
+const COMPOSITE_GAP = 300;
 // Max wordmark aspect (width / 1012-canvas). At `h-8` (32px) this is ≈170px
 // wide, which fits the 15rem (240px) expanded sidebar beside the icon; longer
 // names are uniformly scaled down to fit rather than overflow.

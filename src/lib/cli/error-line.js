@@ -15,7 +15,7 @@ const ENVELOPE_HEAD_RE = /code:\s*-?\d+\s*$/i;
  * True when `text` carries the automation API's raw envelope.
  * @param {string} text
  */
-export function isCommandEnvelope(text) {
+function isCommandEnvelope(text) {
   const lines = String(text ?? '').split('\n');
   return (
     ENVELOPE_HEAD_RE.test(lines[0] ?? '') && lines.some((l) => /^\s*(stdout|stderr):/i.test(l))
@@ -54,3 +54,11 @@ export function displayLine(message) {
   if (typeof message !== 'string' || !isCommandEnvelope(message)) return message;
   return summarizeCommandError(message);
 }
+
+/**
+ * The first line of an error's message (or of the value itself when it has
+ * no message), for a warning that names the cause without the dump under it.
+ * @param {unknown} err
+ * @returns {string}
+ */
+export const errorFirstLine = (err) => String(err?.message ?? err).split('\n')[0];

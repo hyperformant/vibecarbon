@@ -9,6 +9,7 @@ import { isoTimestamp } from '../../db/values';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { createRateLimiter } from '../../lib/rate-limiter';
+import { parseJsonBody } from '../../lib/validation';
 import { requireAal2 } from '../../middleware/requireAal2';
 import { isBillingTargetType, requireOrgRole } from '../../middleware/requireOrgRole';
 import type { HonoVariables } from '../../types';
@@ -213,12 +214,28 @@ async function getCachedPrice(priceId: string): Promise<unknown> {
 // ============================================================================
 
 /**
- * Check if billing is configured
+ * The two variables each provider needs before billing works: its API key,
+ * which its isConfigured reads, and its webhook secret. The Billing page shows
+ * them when billing is not configured, so the server, which knows the active
+ * provider, sends them.
+ */
+const PROVIDER_ENV_VARS: Record<
+  typeof env.BILLING_PROVIDER,
+  readonly [apiKey: string, webhookSecret: string]
+> = {
+  stripe: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
+  paddle: ['PADDLE_API_KEY', 'PADDLE_WEBHOOK_SECRET'],
+  polar: ['POLAR_ACCESS_TOKEN', 'POLAR_WEBHOOK_SECRET'],
+};
+
+/**
+ * Check if billing is configured, and name the variables the active provider needs
  */
 billingRoutes.get('/status', (c) => {
   return c.json({
     configured: isBillingConfigured(),
     provider: env.BILLING_PROVIDER,
+    envVars: PROVIDER_ENV_VARS[env.BILLING_PROVIDER],
   });
 });
 
@@ -413,20 +430,9 @@ billingRoutes.post('/checkout', requireAal2, requireOrgRole(ORG_BILLING_ROLES), 
 
   // Parse and validate request body. Organization access is enforced by the
   // requireOrgRole middleware above (which reads the same cached body).
-  let body: z.infer<typeof checkoutSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = checkoutSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, checkoutSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     const provider = getBillingProvider();
@@ -509,20 +515,9 @@ billingRoutes.post('/setup', requireAal2, requireOrgRole(ORG_BILLING_ROLES), asy
   }
 
   // Organization access is enforced by requireOrgRole above.
-  let body: z.infer<typeof setupSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = setupSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, setupSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     // Import Stripe directly for setup mode (Stripe-specific feature)
@@ -581,20 +576,9 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
 
   // Parse and validate request body. Organization access is enforced by the
   // requireOrgRole middleware above.
-  let body: z.infer<typeof portalSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = portalSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, portalSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     // Find existing customer

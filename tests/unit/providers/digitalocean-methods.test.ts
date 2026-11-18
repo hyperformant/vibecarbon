@@ -23,12 +23,12 @@ vi.mock('../../../src/lib/fetch-retry.js', () => ({
   fetchWithRetry: (...args: unknown[]) => fetchWithRetryMock(...args),
 }));
 
+import { normalizePublicKey } from '../../../src/lib/providers/base.js';
 import {
   DigitalOceanProvider,
   decodeLabels,
   encodeLabel,
   encodeLabels,
-  normalizePublicKey,
 } from '../../../src/lib/providers/digitalocean.js';
 
 const TOKEN = 'tok-do-methods';

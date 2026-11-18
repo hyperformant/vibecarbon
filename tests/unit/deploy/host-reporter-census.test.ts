@@ -95,12 +95,25 @@ describe('host reporter: the SSH sessions every deploy opens carry the installer
   });
 });
 
+describe('host reporter: the db node takes it over SSH, not from its user data', () => {
+  // Deliberate (6095af55): the deploy installs it on the db node and the
+  // master in prePullImages, every run. Only autoscaler-spawned workers, which
+  // no deploy session reaches, need it at boot.
+  it.each([
+    ['hetzner', HetznerProvider],
+    ['digitalocean', DigitalOceanProvider],
+    ['linode', LinodeProvider],
+  ])('%s: the db node boots without it, from the worker script', async (_id, P) => {
+    expect(await P.getK8sWorkerUserData({})).toContain(MARK);
+    expect(await P.getK8sDbUserData({})).not.toContain(MARK);
+  });
+});
+
 describe('host reporter: Hetzner renders stay under the user-data cap', () => {
   it('worker and db stay under 28 KiB; the master does not carry the snippet', async () => {
     const hetzner = (await k8sBootScripts()).filter((s) => s.provider === 'hetzner');
     expect(hetzner.length).toBe(3);
-    for (const { role, files } of hetzner) {
-      const text = loadCloudInit(files[0]);
+    for (const { role, userData: text } of hetzner) {
       if (role === 'master') {
         expect(text).not.toContain(MARK);
       } else {

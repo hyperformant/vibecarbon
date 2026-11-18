@@ -6,16 +6,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { requireDevScript, runDevScript } from './lib/cli/dev-script.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
-import { runCommandThroughTaskLog } from './lib/command.js';
 import { localComposeEnv } from './lib/images.js';
 import { findOrphanStacks, formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
-import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string }} */
@@ -174,27 +171,10 @@ export async function run(args = []) {
   introCommand('down');
 
   const cwd = process.cwd();
-  const pkgPath = join(cwd, 'package.json');
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-  if (!pkg.scripts?.['dev:stop']) {
-    p.log.error('No "dev:stop" script found in package.json.');
-    process.exit(1);
-  }
-
-  const pm = detectPackageManager(cwd);
-  const spawnArgs = pm === 'npm' ? ['run', 'dev:stop'] : ['dev:stop'];
-  try {
-    await runCommandThroughTaskLog([pm, ...spawnArgs], {
-      cwd,
-      title: `Stopping dev environment with ${pm}`,
-      successMessage: 'Dev environment stopped',
-      // dev:stop runs `docker compose down`, which interpolates the compose
-      // file: it needs the db image pair just as `up` does.
-      env: localComposeEnv(),
-      // See PM_RUN_CONTEXT_RE in lib/command.js.
-      cleanEnv: true,
-    });
-  } catch (err) {
-    process.exit(err?.status ?? 1);
-  }
+  requireDevScript(cwd, 'dev:stop');
+  // dev:stop runs `docker compose down`.
+  await runDevScript(cwd, 'dev:stop', {
+    title: (pm) => `Stopping dev environment with ${pm}`,
+    successMessage: 'Dev environment stopped',
+  });
 }

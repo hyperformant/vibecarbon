@@ -10,6 +10,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { isIP } from 'node:net';
 import * as p from '@clack/prompts';
+import { errorFirstLine } from '../../cli/error-line.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
 import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
@@ -470,7 +471,7 @@ export async function ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, proj
  * @param {string} [envName]
  * @returns {string}
  */
-export function composeStandbyDbRebuildHint(projectName, envName) {
+function composeStandbyDbRebuildHint(projectName, envName) {
   return (
     "If the standby's postgres cannot start at all (a crash loop, a damaged data directory), " +
     'rebuild its db on the STANDBY server (never the primary) with ' +
@@ -481,7 +482,7 @@ export function composeStandbyDbRebuildHint(projectName, envName) {
 }
 
 /** How long the compose lineage read waits for a just-recreated db to accept connections. */
-export const COMPOSE_LINEAGE_READY_WAIT_S = 60;
+const COMPOSE_LINEAGE_READY_WAIT_S = 60;
 
 /**
  * One compose node's db lineage (standby-lineage.js DB_LINEAGE_SQL), read in
@@ -921,7 +922,7 @@ export async function openWireguardPortUfw(ip, peerIp, sshKeyPath) {
  * @param {string} peerIp - The current peer's public IPv4.
  * @returns {string[]}
  */
-export function ufwWireguardPeerCommands(ufwStatus, peerIp) {
+function ufwWireguardPeerCommands(ufwStatus, peerIp) {
   const deletes = new Set();
   for (const line of ufwStatus.split('\n')) {
     const m = line.match(/^51821\/udp(\s+\(v6\))?\s+ALLOW(?:\s+IN)?\s+(\S+)/);
@@ -1412,7 +1413,7 @@ export async function waitForNewPrimaryApi(ip, sshKeyPath, domain, opts = {}) {
  * @param {{roleRun?: Function}} [args.deps] roleRun: ssh.js's argv sshRun, for tests
  * @returns {Promise<void>}
  */
-export async function armComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
+async function armComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
   await writeComposeWalgRole({
     ip: promotedIp,
     sshKeyPath,
@@ -1504,7 +1505,7 @@ export async function auditComposeWalgRole({ promotedIp, sshKeyPath, projectName
  * @param {string} projectName
  * @returns {string}
  */
-export function composeDbRoleProbeShell(projectName) {
+function composeDbRoleProbeShell(projectName) {
   return walgRoleReadShell(`/opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`);
 }
 
@@ -1712,8 +1713,6 @@ export function composeStartPrimaryOnlyCmd(projectName, services) {
 export function composeStartAddonJobCmd(projectName, attemptId) {
   return addonJobStartCmd(projectName, attemptId, 'promoted');
 }
-
-const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
  * Stop the old primary's writers, by container name. Fail closed: only docker's
@@ -2305,7 +2304,7 @@ export async function failoverComposeHA(
         p.log.info('Fence lifted; the original primary is serving again.');
       }
     } catch (err) {
-      p.log.warn(`Could not lift the fence on the old primary: ${firstLine(err)}`);
+      p.log.warn(`Could not lift the fence on the old primary: ${errorFirstLine(err)}`);
     }
   };
 
@@ -2321,7 +2320,7 @@ export async function failoverComposeHA(
       return 'The standby was disarmed (wal-g role standby).';
     } catch (err) {
       return (
-        `The standby could NOT be disarmed (${firstLine(err)}): run ` +
+        `The standby could NOT be disarmed (${errorFirstLine(err)}): run ` +
         `\`vibecarbon deploy ${envName}\` before it can push a backup.`
       );
     }
@@ -2353,7 +2352,7 @@ export async function failoverComposeHA(
         deps: { roleRun },
       });
     } catch (err) {
-      const cause = `the wal-g role could not be armed on the standby (${firstLine(err)})`;
+      const cause = `the wal-g role could not be armed on the standby (${errorFirstLine(err)})`;
       if (journalAtEntry) {
         throw new Error(`Failover aborted before this run's promote: ${cause}. ${keptArmedLine()}`);
       }
@@ -2389,12 +2388,12 @@ export async function failoverComposeHA(
       if (mode === 'promote') {
         await unfence();
         throw new Error(
-          `Failover aborted: ${firstLine(err)}. Nothing was promoted; fix it and rerun ` +
+          `Failover aborted: ${errorFirstLine(err)}. Nothing was promoted; fix it and rerun ` +
             `vibecarbon failover ${envName}`,
         );
       }
       p.log.warn(
-        `Could not fence the old primary (${primaryServer.ip}): ${firstLine(err)}. Stop its ` +
+        `Could not fence the old primary (${primaryServer.ip}): ${errorFirstLine(err)}. Stop its ` +
           `writers by hand: ssh root@${primaryServer.ip} 'docker stop ${writerServices.map((svc) => `${projectName}-${svc}`).join(' ')}'`,
       );
     }
@@ -2510,7 +2509,7 @@ export async function failoverComposeHA(
         // The arm landed and nothing will promote: disarm it, unless an
         // earlier run's journaled promote may still land.
         throw new Error(
-          `${firstLine(err)}. ${journalAtEntry ? keptArmedLine() : await disarmComposeStandby()}`,
+          `${errorFirstLine(err)}. ${journalAtEntry ? keptArmedLine() : await disarmComposeStandby()}`,
         );
       }
     } catch (err) {
@@ -2535,7 +2534,7 @@ export async function failoverComposeHA(
       // leave the serving primary read-only (unfence never throws).
       await unfence();
       await clearJournal({ environment: envName }).catch((err) =>
-        p.log.warn(`Could not clear the failover journal: ${firstLine(err)}`),
+        p.log.warn(`Could not clear the failover journal: ${errorFirstLine(err)}`),
       );
       throw new Error(promotionNotIssuedMessage(envName, standbyServer.ip));
     }

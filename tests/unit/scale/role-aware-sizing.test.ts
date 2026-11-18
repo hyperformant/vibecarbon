@@ -238,7 +238,8 @@ describe('scaleApplyK8sChanges — role-aware HA stack/region resolution', () =>
     // Finds the `kubectl apply -f -` call for this clusterEnv and decodes
     // the worker-pool node group off the re-applied config.json (the YAML
     // is built with JSON.stringify per field, so each stringData key is a
-    // single line — see the caSecretYaml block in src/scale.js).
+    // single line — see carbonAutoscalerSecretYaml in
+    // src/lib/deploy/k8s/autoscaler-secret.js).
     const findAppliedWorkerPool = (clusterEnv: string) => {
       const call = vi
         .mocked(runCommand)

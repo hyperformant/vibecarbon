@@ -60,7 +60,7 @@ src/
 │   ├── emails/              # React Email templates
 │   ├── auth/                # In-process auth (Better Auth): sessions, 2FA, impersonation, ForwardAuth tokens
 │   └── lib/                 # auth.ts (isSuperAdmin), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
-├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
+├── shared/                  # Code shared by client and server (pricing.ts, routes.ts, billing catalog)
 content/                     # MDX content (blog/, changelog/, docs/)
 db/migrations/               # Drizzle migrations, applied by the migrate step (see Changing the Database Schema)
 ```
@@ -180,7 +180,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
    npx drizzle-kit generate --custom --name projects_triggers   # an empty migration to fill in
    ```
    Separate statements with `--> statement-breakpoint`. A `SECURITY DEFINER` function needs `SET search_path = ''` and, unless policies call it, `REVOKE EXECUTE ... FROM PUBLIC, app_user`.
-3. Start the app (or `npm run db:migrate`), add API types to `src/shared/types.ts`, and run `npm run test:prepush`.
+3. Start the app (or `npm run db:migrate`), type the API response next to the client hook that fetches it (`src/client/hooks/api/`, exported from there), and run `npm run test:prepush`.
 
 Rules:
 
@@ -218,6 +218,7 @@ Rules:
 - **Gate authenticated queries** with `enabled: !!user` to prevent 401s for logged-out users
 - **Call the API through `apiJson` / `apiFetch`** from `@/lib/api.ts`. The session is an HttpOnly cookie the browser sends same-origin; there is no token in page JS, so never add an `Authorization` header. When a route answers 403 `mfa_required`, `apiFetch` asks the user for a code (or sends them to enroll) and retries once; `reauth_required` sends them to sign in again
 - **Place reusable hooks** in `src/client/hooks/api/` — page-specific queries can live in the page file
+- **One query key, one fetcher.** When two components read the same endpoint, both call the same hook from `src/client/hooks/api/` (for example `useSubscription`, `useServicesStatus`, `useAdminStats`), which exports its key, fetcher and response type. Two `useQuery` calls with different keys fetch and cache the same data twice; the same key with two fetchers leaves the cache's failure behaviour to whichever component fetched first
 - **Invalidate related queries** after mutations: `queryClient.invalidateQueries({ queryKey: ['items'] })`
 - **Set `staleTime`** to control cache freshness (default is 5min via QueryClient config)
 

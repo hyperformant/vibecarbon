@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { FormError } from '@/components/auth/FormError';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp';
@@ -63,11 +64,7 @@ export function TwoFactorCodeForm({
         submit();
       }}
     >
-      {error && (
-        <div role="alert" className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg">
-          {error}
-        </div>
-      )}
+      {error && <FormError>{error}</FormError>}
 
       {kind === 'totp' ? (
         <div className="flex justify-center">

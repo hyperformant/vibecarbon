@@ -239,7 +239,7 @@ done
 # csi-do-node (the CSI NODE plugin, a DaemonSet) ships from upstream with
 # NO tolerations at all (confirmed against the v4.19.0 driver.yaml itself
 # -- its spec.template.spec has no tolerations key), so it never schedules
-# onto the tainted dedicated=db node (do-db-init.sh taints it
+# onto the tainted dedicated=db node (its k3s agent taints it
 # dedicated=db:NoSchedule). That node's CSINode object then never
 # gets the driver's `region` topologyKey, so the block-storage PV bound to
 # the db PVC (which carries nodeAffinity: region In [<region>]) can

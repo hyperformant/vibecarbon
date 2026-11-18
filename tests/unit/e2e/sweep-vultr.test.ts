@@ -40,9 +40,7 @@ function fakeProvider(
     deleteVolume: vi.fn().mockResolvedValue(true),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
     deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
-    listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(true),
-    listNetworks: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -246,13 +244,16 @@ describe('sweepOrphanedVultrResources', () => {
   it('sweeps a VPC identified only by `description` (Vultr VPCs carry no label)', async () => {
     // Matching on `label` alone would make the whole VPC pass a silent
     // no-op against raw API rows — the leak would never be reported.
-    const fetchImpl = fakeFetch({});
-    const provider = fakeProvider({
-      listNetworks: vi.fn().mockResolvedValue([
-        { id: 'vpc-1', description: 'testapp-v1-net' },
-        { id: 'vpc-2', description: 'someone-elses-net' },
-      ]),
+    const fetchImpl = fakeFetch({
+      '/vpcs': {
+        vpcs: [
+          { id: 'vpc-1', description: 'testapp-v1-net' },
+          { id: 'vpc-2', description: 'someone-elses-net' },
+        ],
+        meta: { links: { next: '' } },
+      },
     });
+    const provider = fakeProvider();
 
     const { counts } = await sweepOrphanedVultrResources(TAG, 'testapp-v1', {
       provider,

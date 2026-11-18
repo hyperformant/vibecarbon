@@ -19,6 +19,7 @@ import {
   IconSettings as Settings,
   IconShield as Shield,
   IconSun as Sun,
+  type TablerIcon,
   IconCursorText as TextCursorInput,
   IconUser as User,
   IconUsers as Users,
@@ -118,6 +119,64 @@ function IconSlot({ children, className = '' }: { children: React.ReactNode; cla
   );
 }
 
+interface NavItemProps {
+  path: string;
+  icon: TablerIcon;
+  label: string;
+  /** Shown while the sidebar is collapsed; defaults to the label. */
+  tooltip?: string;
+}
+
+// A sidebar link: active on its own path, and prefetches its page on hover or
+// focus (a no-op for a path that is not in prefetchMap).
+function NavItem({ path, icon: Icon, label, tooltip = label }: NavItemProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        isActive={location.pathname === path}
+        onClick={() => navigate(path)}
+        onMouseEnter={() => prefetch(path)}
+        onFocus={() => prefetch(path)}
+        tooltip={tooltip}
+        className="gap-0 p-0"
+      >
+        <IconSlot>
+          <Icon className="size-4" />
+        </IconSlot>
+        <span className="group-data-[collapsible=icon]:hidden">{label}</span>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
+// The "Back" entry at the top of the settings, organization and admin menus.
+function BackToApp() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+
+  return (
+    <SidebarGroup>
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            onClick={() => navigate('/dashboard')}
+            tooltip={t('common.back')}
+            className="gap-0 p-0"
+          >
+            <IconSlot>
+              <ArrowLeft className="size-4" />
+            </IconSlot>
+            <span className="group-data-[collapsible=icon]:hidden">{t('common.back')}</span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      </SidebarMenu>
+    </SidebarGroup>
+  );
+}
+
 export function AppSidebar() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -180,6 +239,42 @@ export function AppSidebar() {
   };
 
   const displayName = user?.name || 'User';
+
+  const settingsItems: NavItemProps[] = [
+    { path: '/settings/profile', icon: User, label: t('sidebar.profile') },
+    { path: '/settings/billing', icon: CreditCard, label: t('sidebar.billing') },
+    { path: '/settings/security', icon: Shield, label: t('sidebar.security') },
+  ];
+
+  const orgItems: NavItemProps[] = [
+    {
+      path: `/organizations/${currentOrgId}/details`,
+      icon: Building2,
+      label: t('sidebar.orgDetails'),
+    },
+    { path: `/organizations/${currentOrgId}/members`, icon: Users, label: t('sidebar.members') },
+  ];
+
+  // Jobs, AI Visibility, Contact and Newsletter are English literals, and two
+  // of them have a longer tooltip than their label.
+  const adminItems: NavItemProps[] = [
+    { path: '/admin/dashboard', icon: LayoutDashboard, label: t('sidebar.overview') },
+    { path: '/admin/organizations', icon: Building2, label: t('sidebar.organizations') },
+    { path: '/admin/users', icon: Users, label: t('sidebar.users') },
+    { path: '/admin/notifications', icon: Bell, label: t('sidebar.notifications') },
+    { path: '/admin/logs', icon: FileText, label: t('sidebar.logs') },
+    { path: '/admin/theme', icon: Palette, label: t('sidebar.theme') },
+    { path: '/admin/jobs', icon: Clock, label: 'Jobs', tooltip: 'Background Jobs' },
+    { path: '/admin/crawlers', icon: Robot, label: 'AI Visibility' },
+    {
+      path: '/admin/contact',
+      icon: MessageSquare,
+      label: 'Contact',
+      tooltip: 'Contact Submissions',
+    },
+    { path: '/admin/newsletter', icon: Mail, label: 'Newsletter' },
+    { path: '/admin/settings', icon: Settings, label: t('sidebar.settings') },
+  ];
 
   return (
     <>
@@ -264,23 +359,12 @@ export function AppSidebar() {
                 <SidebarGroupContent>
                   <SidebarMenu>
                     {menuItems.map((item) => (
-                      <SidebarMenuItem key={item.titleKey}>
-                        <SidebarMenuButton
-                          isActive={location.pathname === item.path}
-                          onClick={() => navigate(item.path)}
-                          onMouseEnter={() => prefetch(item.path)}
-                          onFocus={() => prefetch(item.path)}
-                          tooltip={t(item.titleKey)}
-                          className="gap-0 p-0"
-                        >
-                          <IconSlot>
-                            <item.icon className="size-4" />
-                          </IconSlot>
-                          <span className="group-data-[collapsible=icon]:hidden">
-                            {t(item.titleKey)}
-                          </span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
+                      <NavItem
+                        key={item.titleKey}
+                        path={item.path}
+                        icon={item.icon}
+                        label={t(item.titleKey)}
+                      />
                     ))}
                   </SidebarMenu>
                 </SidebarGroupContent>
@@ -290,82 +374,16 @@ export function AppSidebar() {
 
           {sidebarMode === 'settings' && (
             <>
-              {/* Back to App */}
-              <SidebarGroup>
-                <SidebarMenu>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton
-                      onClick={() => navigate('/dashboard')}
-                      tooltip={t('common.back')}
-                      className="gap-0 p-0"
-                    >
-                      <IconSlot>
-                        <ArrowLeft className="size-4" />
-                      </IconSlot>
-                      <span className="group-data-[collapsible=icon]:hidden">
-                        {t('common.back')}
-                      </span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                </SidebarMenu>
-              </SidebarGroup>
+              <BackToApp />
 
               {/* Settings Menu */}
               <SidebarGroup>
                 <SidebarGroupLabel>{t('sidebar.userSettings')}</SidebarGroupLabel>
                 <SidebarGroupContent>
                   <SidebarMenu>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/settings/profile'}
-                        onClick={() => navigate('/settings/profile')}
-                        onMouseEnter={() => prefetch('/settings/profile')}
-                        onFocus={() => prefetch('/settings/profile')}
-                        tooltip={t('sidebar.profile')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <User className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.profile')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/settings/billing'}
-                        onClick={() => navigate('/settings/billing')}
-                        onMouseEnter={() => prefetch('/settings/billing')}
-                        onFocus={() => prefetch('/settings/billing')}
-                        tooltip={t('sidebar.billing')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <CreditCard className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.billing')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/settings/security'}
-                        onClick={() => navigate('/settings/security')}
-                        onMouseEnter={() => prefetch('/settings/security')}
-                        onFocus={() => prefetch('/settings/security')}
-                        tooltip={t('sidebar.security')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Shield className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.security')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
+                    {settingsItems.map((item) => (
+                      <NavItem key={item.path} {...item} />
+                    ))}
                   </SidebarMenu>
                 </SidebarGroupContent>
               </SidebarGroup>
@@ -374,61 +392,16 @@ export function AppSidebar() {
 
           {sidebarMode === 'org-settings' && currentOrg && (
             <>
-              {/* Back to App */}
-              <SidebarGroup>
-                <SidebarMenu>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton
-                      onClick={() => navigate('/dashboard')}
-                      tooltip={t('common.back')}
-                      className="gap-0 p-0"
-                    >
-                      <IconSlot>
-                        <ArrowLeft className="size-4" />
-                      </IconSlot>
-                      <span className="group-data-[collapsible=icon]:hidden">
-                        {t('common.back')}
-                      </span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                </SidebarMenu>
-              </SidebarGroup>
+              <BackToApp />
 
               {/* Org Settings Menu */}
               <SidebarGroup>
                 <SidebarGroupLabel className="truncate">{currentOrg.name}</SidebarGroupLabel>
                 <SidebarGroupContent>
                   <SidebarMenu>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === `/organizations/${currentOrgId}/details`}
-                        onClick={() => navigate(`/organizations/${currentOrgId}/details`)}
-                        tooltip={t('sidebar.orgDetails')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Building2 className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.orgDetails')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === `/organizations/${currentOrgId}/members`}
-                        onClick={() => navigate(`/organizations/${currentOrgId}/members`)}
-                        tooltip={t('sidebar.members')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Users className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.members')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
+                    {orgItems.map((item) => (
+                      <NavItem key={item.path} {...item} />
+                    ))}
                   </SidebarMenu>
                 </SidebarGroupContent>
               </SidebarGroup>
@@ -437,210 +410,16 @@ export function AppSidebar() {
 
           {sidebarMode === 'admin' && (
             <>
-              {/* Back to App */}
-              <SidebarGroup>
-                <SidebarMenu>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton
-                      onClick={() => navigate('/dashboard')}
-                      tooltip={t('common.back')}
-                      className="gap-0 p-0"
-                    >
-                      <IconSlot>
-                        <ArrowLeft className="size-4" />
-                      </IconSlot>
-                      <span className="group-data-[collapsible=icon]:hidden">
-                        {t('common.back')}
-                      </span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                </SidebarMenu>
-              </SidebarGroup>
+              <BackToApp />
 
               {/* Admin Menu */}
               <SidebarGroup>
                 <SidebarGroupLabel>{t('sidebar.superAdmin')}</SidebarGroupLabel>
                 <SidebarGroupContent>
                   <SidebarMenu>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/dashboard'}
-                        onClick={() => navigate('/admin/dashboard')}
-                        onMouseEnter={() => prefetch('/admin/dashboard')}
-                        onFocus={() => prefetch('/admin/dashboard')}
-                        tooltip={t('sidebar.overview')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <LayoutDashboard className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.overview')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/organizations'}
-                        onClick={() => navigate('/admin/organizations')}
-                        onMouseEnter={() => prefetch('/admin/organizations')}
-                        onFocus={() => prefetch('/admin/organizations')}
-                        tooltip={t('sidebar.organizations')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Building2 className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.organizations')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/users'}
-                        onClick={() => navigate('/admin/users')}
-                        onMouseEnter={() => prefetch('/admin/users')}
-                        onFocus={() => prefetch('/admin/users')}
-                        tooltip={t('sidebar.users')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Users className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.users')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/notifications'}
-                        onClick={() => navigate('/admin/notifications')}
-                        onMouseEnter={() => prefetch('/admin/notifications')}
-                        onFocus={() => prefetch('/admin/notifications')}
-                        tooltip={t('sidebar.notifications')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Bell className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.notifications')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/logs'}
-                        onClick={() => navigate('/admin/logs')}
-                        onMouseEnter={() => prefetch('/admin/logs')}
-                        onFocus={() => prefetch('/admin/logs')}
-                        tooltip={t('sidebar.logs')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <FileText className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.logs')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/theme'}
-                        onClick={() => navigate('/admin/theme')}
-                        onMouseEnter={() => prefetch('/admin/theme')}
-                        onFocus={() => prefetch('/admin/theme')}
-                        tooltip={t('sidebar.theme')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Palette className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.theme')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/jobs'}
-                        onClick={() => navigate('/admin/jobs')}
-                        onMouseEnter={() => prefetch('/admin/jobs')}
-                        onFocus={() => prefetch('/admin/jobs')}
-                        tooltip="Background Jobs"
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Clock className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">Jobs</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/crawlers'}
-                        onClick={() => navigate('/admin/crawlers')}
-                        onMouseEnter={() => prefetch('/admin/crawlers')}
-                        onFocus={() => prefetch('/admin/crawlers')}
-                        tooltip="AI Visibility"
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Robot className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">AI Visibility</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/contact'}
-                        onClick={() => navigate('/admin/contact')}
-                        onMouseEnter={() => prefetch('/admin/contact')}
-                        onFocus={() => prefetch('/admin/contact')}
-                        tooltip="Contact Submissions"
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <MessageSquare className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">Contact</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/newsletter'}
-                        onClick={() => navigate('/admin/newsletter')}
-                        onMouseEnter={() => prefetch('/admin/newsletter')}
-                        onFocus={() => prefetch('/admin/newsletter')}
-                        tooltip="Newsletter"
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Mail className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">Newsletter</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        isActive={location.pathname === '/admin/settings'}
-                        onClick={() => navigate('/admin/settings')}
-                        onMouseEnter={() => prefetch('/admin/settings')}
-                        onFocus={() => prefetch('/admin/settings')}
-                        tooltip={t('sidebar.settings')}
-                        className="gap-0 p-0"
-                      >
-                        <IconSlot>
-                          <Settings className="size-4" />
-                        </IconSlot>
-                        <span className="group-data-[collapsible=icon]:hidden">
-                          {t('sidebar.settings')}
-                        </span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
+                    {adminItems.map((item) => (
+                      <NavItem key={item.path} {...item} />
+                    ))}
                     {enabledServices.map((service) => {
                       const url = getServiceUrl(service);
                       return (

@@ -8,11 +8,12 @@
  *
  * Usage: REAL_INFRA=true tsx tests/e2e/audit-residue.ts
  */
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+
+import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseDotenv } from '../../src/lib/dotenv.js';
 import { applyNetworkDefaults } from '../../src/lib/net-defaults.js';
 import { testConfig } from '../config.js';
+import { readE2EEnv } from './utils/e2e-env-file.js';
 import {
   auditExitCode,
   classify,
@@ -25,10 +26,7 @@ applyNetworkDefaults();
 
 // The operator env file fills in only what the real env leaves blank; CI
 // passes everything through env.
-const envFile = join(import.meta.dirname, '..', '.env.e2e');
-const fileEnv = existsSync(envFile) ? parseDotenv(readFileSync(envFile, 'utf-8')) : {};
-const env: Record<string, string | undefined> = { ...fileEnv };
-for (const [k, v] of Object.entries(process.env)) if (v) env[k] = v;
+const env = readE2EEnv(join(import.meta.dirname, '..', '.env.e2e'));
 
 const providers = [...Object.keys(testConfig.e2e.providers), 'cloudflare'];
 const results = await Promise.all(

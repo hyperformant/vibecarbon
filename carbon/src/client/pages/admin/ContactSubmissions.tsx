@@ -49,7 +49,7 @@ export default function AdminContactSubmissions() {
   const queryClient = useQueryClient();
   const [selectedSubmission, setSelectedSubmission] = useState<ContactSubmission | null>(null);
 
-  const { data, isLoading } = useQuery<{
+  const { data, isLoading, error } = useQuery<{
     submissions: ContactSubmission[];
     total: number;
   }>({
@@ -106,6 +106,10 @@ export default function AdminContactSubmissions() {
             {isLoading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : error ? (
+              <div className="py-8 text-center text-destructive">
+                {error instanceof Error ? error.message : 'Failed to load submissions'}
               </div>
             ) : submissions.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">

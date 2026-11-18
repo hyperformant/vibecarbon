@@ -1126,6 +1126,39 @@ async function upStackImpl(stackName, program, options = {}) {
 }
 
 /**
+ * `pulumi refresh` before an up or a destroy, past a stale lock and the
+ * state backend's transient errors. A stack another process holds stops the
+ * caller, and so does a passphrase the state refuses: it refuses every later
+ * step the same way (the up; or exportStack, the destroy and the read-back of
+ * what is left), so the caller stops with the error that says what still
+ * works, and the stack record stays. Any other failure (a corrupt state file,
+ * an unreachable resource) is logged and the caller goes on: the up or the
+ * destroy may still succeed or surface a cleaner error.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {string} stackName
+ * @param {'pre-up refresh' | 'pre-destroy refresh'} label
+ * @param {{ onOutput?: (out: string) => void }} options
+ */
+async function refreshBestEffort(stack, stackName, label, options) {
+  try {
+    await withStateBackendRetry(
+      () =>
+        runPastStaleLock(stack, () =>
+          stack.refresh({ onOutput: options.onOutput, color: 'never' }),
+        ),
+      label,
+    );
+  } catch (err) {
+    if (err instanceof StackHeldError) throw err;
+    if (isStatePassphraseFailure(err)) {
+      throw passphraseRefusal(err, stackName, label, projectDirOf(options));
+    }
+    progressLog(`[pulumi] ${label} warning: ${summarizePulumiError(err)}`);
+  }
+}
+
+/**
  * Select (or create) the stack and bring its state up to date for `up`:
  * refresh a populated stack, repair what the refresh poisons.
  */
@@ -1173,26 +1206,7 @@ async function prepareStackForUp(stackName, program, options) {
     /* exportStack failed — fall through and refresh as before */
   }
   if (needsRefresh) {
-    try {
-      await withStateBackendRetry(
-        () =>
-          runPastStaleLock(stack, () =>
-            stack.refresh({ onOutput: options.onOutput, color: 'never' }),
-          ),
-        'pre-up refresh',
-      );
-    } catch (err) {
-      if (err instanceof StackHeldError) throw err;
-      // A passphrase the state refuses here refuses the up the same way:
-      // stop with the error that says what still works.
-      if (isStatePassphraseFailure(err)) {
-        throw passphraseRefusal(err, stackName, 'pre-up refresh', projectDirOf(options));
-      }
-      // refresh can fail if the state file is completely corrupt or a
-      // resource is unreachable. Log and proceed — `up` may still succeed
-      // or surface a cleaner error.
-      progressLog(`[pulumi] pre-up refresh warning: ${summarizePulumiError(err)}`);
-    }
+    await refreshBestEffort(stack, stackName, 'pre-up refresh', options);
     // The refresh above is what makes this necessary — see the function's
     // own doc. Runs whether or not the refresh threw: a partially-applied
     // refresh poisons state just as thoroughly as a complete one.
@@ -1782,24 +1796,7 @@ export async function destroyStack(stackName, program, options = {}) {
   // by direct API cleanup). Without this, hcloud returns 404 and pulumi
   // treats it as a hard error — surfaced in orphan-stack cleanup as
   // "server not found (not_found, ...)".
-  try {
-    await withStateBackendRetry(
-      () =>
-        runPastStaleLock(stack, () =>
-          stack.refresh({ onOutput: options.onOutput, color: 'never' }),
-        ),
-      'pre-destroy refresh',
-    );
-  } catch (err) {
-    if (err instanceof StackHeldError) throw err;
-    // A passphrase that cannot open the state refuses every later step the
-    // same way (exportStack, destroy, the read-back of what is left), so stop
-    // here with the error that says what still works. The stack record stays.
-    if (isStatePassphraseFailure(err)) {
-      throw passphraseRefusal(err, stackName, 'pre-destroy refresh', projectDirOf(options));
-    }
-    progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
-  }
+  await refreshBestEffort(stack, stackName, 'pre-destroy refresh', options);
   // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
   // deleting. That is handled before this runs, against the live API, not in
   // state: the provider's Droplet delete re-reads `volume_ids` from DO and

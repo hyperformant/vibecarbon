@@ -6,8 +6,11 @@
  * carried on as if the flip had landed. The rule, for every `src/lib/*-dns.js`
  * backend: a function that sends a mutating request (POST, PUT, PATCH, DELETE)
  * must check `.ok` itself, or hand the Response to a same-file helper that
- * does, or hand the raw Response straight back to callers that all check it. This walks the source, so a new backend or a new mutating
- * function is covered the day it lands.
+ * does, or hand the raw Response straight back to callers that all check it,
+ * or hand the request itself, as a callback, to a dns-backend-helpers.js
+ * function that checks the Response it returns (deleteOwnedRecords). This
+ * walks the source, so a new backend or a new mutating function is covered
+ * the day it lands.
  *
  * It also pins the verification half: every backend exports `readARecord`,
  * the read-back that failover compares with the promoted IP.
@@ -37,8 +40,11 @@ function functionsOf(source: string): Fn[] {
 const MUTATING = /method:\s*'(?:POST|PUT|PATCH|DELETE)'/;
 const FETCHES = /\bfetch(?:WithRetry)?\(/;
 
+/** The functions every backend may share (dns-backend-helpers.js). */
+const SHARED = functionsOf(readFileSync(join(LIB, 'dns-backend-helpers.js'), 'utf8'));
+
 /** Mutating functions that neither check `.ok` nor are covered by checking callers. */
-function unchecked(source: string): string[] {
+function unchecked(source: string, shared: Fn[] = SHARED): string[] {
   const fns = functionsOf(source);
   const bad: string[] = [];
   for (const fn of fns) {
@@ -52,6 +58,14 @@ function unchecked(source: string): string[] {
         new RegExp(`\\b${h.name}\\(\\s*\\w*[rR]esponse\\b`).test(fn.body),
     );
     if (delegates) continue;
+    // Shared delegation: the mutating request is an argument of a call to a
+    // shared helper that checks the Response it gets back.
+    const handsToShared = shared.some(
+      (h) =>
+        /\.ok\b/.test(h.body) &&
+        new RegExp(`\\b${h.name}\\([\\s\\S]*${MUTATING.source}`).test(fn.body),
+    );
+    if (handsToShared) continue;
     const returnsRaw = /return\s+fetch(?:WithRetry)?\(/.test(fn.body);
     const callers = fns.filter((o) => o !== fn && new RegExp(`\\b${fn.name}\\(`).test(o.body));
     if (returnsRaw && callers.length > 0 && callers.every((o) => /\.ok\b/.test(o.body))) continue;
@@ -85,5 +99,27 @@ describe('DNS backends check the status of every mutating request', () => {
       '}',
     ].join('\n');
     expect(unchecked(broken)).toEqual(['createThing']);
+  });
+
+  it('a request handed to a shared helper counts only when that helper checks .ok (self-test)', () => {
+    const backend = [
+      'export async function deleteThing(token) {',
+      '  return removeAll(records, (r) =>',
+      "    fetchWithRetry(urlOf(r), { method: 'DELETE' }),",
+      '  );',
+      '}',
+    ].join('\n');
+    const checks = functionsOf(
+      'export async function removeAll(records, remove) {\n  if ((await remove(records[0])).ok) return 1;\n}',
+    );
+    const ignores = functionsOf(
+      'export async function removeAll(records, remove) {\n  await remove(records[0]);\n}',
+    );
+    expect(unchecked(backend, checks)).toEqual([]);
+    expect(unchecked(backend, ignores)).toEqual(['deleteThing']);
+  });
+
+  it('the shared helpers the backends delegate to are walked (not vacuous)', () => {
+    expect(SHARED.map((f) => f.name)).toContain('deleteOwnedRecords');
   });
 });

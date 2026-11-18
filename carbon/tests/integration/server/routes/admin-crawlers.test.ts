@@ -15,6 +15,7 @@ import { getTableName } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
+import { SUPER_ADMIN } from '../../../_helpers/factories';
 
 const { rawMock, dailyMock } = vi.hoisted(() => ({
   rawMock: vi.fn(),
@@ -75,7 +76,6 @@ interface CrawlerStatsBody {
   topPaths: Array<{ path: string; hits: number; errors: number; crawlers: string[] }>;
 }
 
-const SUPER_ADMIN: Partial<User> = { id: 'admin-1', role: 'super_admin' };
 
 function appWithUser(user: Partial<User> | null) {
   const app = new Hono<{ Variables: HonoVariables }>();

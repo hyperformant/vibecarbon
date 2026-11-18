@@ -1,0 +1,57 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/*.js",
+    "src/autoscaler/server.js",
+    "src/autoscaler/healthcheck.js",
+    "src/lib/iac/programs/*.js",
+    "scripts/*.{js,mjs}",
+    "tests/e2e/*.ts",
+    "tests/setup/*.{ts,js}",
+    ".github/**/*.{js,mjs}"
+  ],
+  "project": [
+    "src/**/*.js",
+    "scripts/**/*.{js,mjs}",
+    "tests/**/*.{ts,js,mjs}"
+  ],
+  "ignore": [
+    "carbon/**",
+    "services/**",
+    "src/autoscaler/protos/**",
+    "tests/**/fixtures/**"
+  ],
+  "ignoreBinaries": [
+    "pulumi",
+    "docker",
+    "kubectl",
+    "ssh",
+    "hcloud",
+    "resolvectl",
+    "jq",
+    "flock",
+    "openssl",
+    "ssh-keygen"
+  ],
+  "ignoreDependencies": [
+    "@semantic-release/github",
+    "conventional-changelog-conventionalcommits"
+  ],
+  "ignoreIssues": {
+    "src/lib/dev-s3.js": [
+      "exports"
+    ],
+    "src/lib/deploy/uplink-lock.js": [
+      "exports"
+    ],
+    "src/lib/deploy/walg-role.js": [
+      "exports"
+    ],
+    "tests/integration/cli/deploy/_fixtures/fetch-tripwire.mjs": [
+      "files"
+    ],
+    "tests/integration/iac/fakecloud/provider.mjs": [
+      "files"
+    ]
+  }
+}

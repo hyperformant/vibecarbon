@@ -213,7 +213,7 @@ export async function awaitCertManagerAdmission({
  * The controller's leader lease: cert-manager's default
  * `--leader-election-namespace=kube-system` and lock name.
  */
-export const CERT_MANAGER_LEADER_LEASE = Object.freeze({
+const CERT_MANAGER_LEADER_LEASE = Object.freeze({
   namespace: 'kube-system',
   name: 'cert-manager-controller',
 });
@@ -662,7 +662,7 @@ async function newestAppPodObject({ env, namespace, exec }) {
 }
 
 /** The app pod's init container that runs the migrations (deployment.yaml). */
-export const MIGRATE_INIT_CONTAINER = 'migrate';
+const MIGRATE_INIT_CONTAINER = 'migrate';
 
 /**
  * The exit code of the pod's `migrate` init container when its current or

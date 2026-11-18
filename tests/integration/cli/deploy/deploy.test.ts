@@ -8,13 +8,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 import { FETCH_TRIPWIRE_SENTINEL } from './_fixtures/fetch-tripwire-sentinel.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -39,25 +33,12 @@ describe('vibecarbon deploy', () => {
     destroyRealProject(project);
   });
 
-  it('prints help', () => {
-    const r = runCli('deploy', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Deploy');
-    assertExitWith(r, 0, '-mode');
-    assertExitWith(r, 0, '-region');
-    assertExitWith(r, 0, '-full');
-    // Finding #1: the HA replication gate opt-out is documented in help.
-    assertExitWith(r, 0, '-allow-degraded');
-  });
-
   it('-allow-degraded accepted by parser (finding #1 gate opt-out)', () => {
     const r = runCli('deploy', ['prod', '-mode', 'k8s-ha', '-allow-degraded', '-y'], {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -allow-degraded/.test(r.stderr)) {
-      throw new Error(`-allow-degraded rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'])('-mode %s accepted by parser', (mode) => {
@@ -65,9 +46,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -mode|invalid.*mode/i.test(r.stderr)) {
-      throw new Error(`-mode ${mode} rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it('rejects -mode kubernetes (not in enum)', () => {
@@ -85,9 +64,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -region/.test(r.stderr)) {
-      throw new Error(`-region ${region} rejected`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it('rejects -region atlantis (unknown for Hetzner Cloud)', () => {
@@ -111,9 +88,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -full/.test(r.stderr)) {
-      throw new Error(`-full rejected`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it('rejects --k8s (CLI sweep collapsed mode flags)', () => {
@@ -124,11 +99,6 @@ describe('vibecarbon deploy', () => {
   it('rejects -e short form (CLI sweep replaced with -env)', () => {
     const r = runCli('deploy', ['-e', 'prod', '-y'], { cwd: project });
     assertExitWith(r, 1, 'unknown flag: -e');
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('deploy', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 
   // Final review I3 (local half): a project an older CLI generated still

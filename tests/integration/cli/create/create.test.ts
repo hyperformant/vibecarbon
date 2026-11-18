@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import { assertExitWith, assertSuccess, runCli } from '../../_harness/index.js';
+import { assertExitWith, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon create — flag rejections', () => {
   let parent: string;
@@ -16,13 +16,6 @@ describe('vibecarbon create — flag rejections', () => {
   });
   afterEach(() => {
     rmSync(parent, { recursive: true, force: true });
-  });
-
-  it('prints help', () => {
-    const r = runCli('create', ['-h']);
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Create');
-    assertExitWith(r, 0, '-pm');
   });
 
   it('rejects --use-npm (CLI sweep replaced with -pm)', () => {

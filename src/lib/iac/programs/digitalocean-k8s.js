@@ -71,7 +71,8 @@
  *   - Tag (pre-created `cluster:<name>` tag — see Task 9b note below)
  *   - Firewall (tag-attached)
  *   - Master droplet (cloud-init: do-master-init.sh via the provider static)
- *   - database droplet (cloud-init: do-db-init.sh via the provider static)
+ *   - database droplet (cloud-init: do-worker-init.sh as the db role, via the
+ *     provider static)
  *   - Worker droplets × N (cloud-init: do-worker-init.sh via the provider static)
  *
  * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp,
@@ -94,12 +95,9 @@
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
-import {
-  SERVER_OWNER_LABELS,
-  serverResourceOptions,
-  workerResourceOptions,
-} from '../create-timeout.js';
+import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
+import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -209,29 +207,8 @@ export function vpcCidrForCluster(clusterName) {
  * @returns {() => Promise<Record<string, unknown>>}
  */
 export function buildDigitalOceanK8sProgram(config) {
-  const clusterName = `${config.projectName}-${config.environment}`;
-  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
-  // caller has always passed it: the same keys in the same order.
-  const labels = {
-    project: config.projectName,
-    environment: config.environment,
-    ...SERVER_OWNER_LABELS,
-    ...(config.labels ?? {}),
-  };
-  // Operator-IP firewall lock (H-2) — byte-parity with hetzner-k8s.js and
-  // digitalocean-compose.js's identical guard. An empty list = nothing can
-  // SSH in or hit the k8s API; refuse to build a program that would do
-  // that rather than silently apply an open `0.0.0.0/0`.
-  if (!config.allowedSshIps?.length) {
-    throw new Error(
-      'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
-  if (!config.allowedK8sApiIps?.length) {
-    throw new Error(
-      'allowedK8sApiIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
+  const { name: clusterName, labels } = stackIdentity(config);
+  requireOperatorCidrs(config, { k8sApi: true });
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
   // Always the CLI's: the stack's recorded token or the one derived from the
@@ -362,7 +339,7 @@ export function buildDigitalOceanK8sProgram(config) {
 
     // Database droplet — joins master via k3s agent, pinned to the
     // dedicated database node-pool (label + NoSchedule taint baked into
-    // do-db-init.sh's k3s agent argv). master_ip MUST be the
+    // the db role's k3s agent argv). master_ip MUST be the
     // master's REAL private IP, only known once Pulumi has created it —
     // unlike Hetzner's hardcoded '10.0.1.1', DO has no static-IP
     // assignment to pin this to ahead of time (M3 dossier §4-repo).
@@ -463,7 +440,7 @@ export function buildDigitalOceanK8sProgram(config) {
       dbPrivateIp: dbServer.ipv4AddressPrivate,
       workerIps: workers.map((w) => w.ipv4Address),
       networkId: network.id,
-      sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
+      sshKeyId: sshKeyIdOutput(sshKeyId),
       k3sToken: pulumi.secret(k3sToken),
       clusterName,
       // M3 Task 9c: the Vpc's actual ipRange (a plain string — Vpc.ipRange

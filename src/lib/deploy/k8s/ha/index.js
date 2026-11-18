@@ -264,7 +264,7 @@ export async function withRegistryRelay(
  * @param {string} stsJson
  * @returns {number|null}
  */
-export function dbReplicationHostPort(stsJson) {
+function dbReplicationHostPort(stsJson) {
   try {
     const containers = JSON.parse(String(stsJson))?.spec?.template?.spec?.containers ?? [];
     const port = (containers.find((c) => c?.name === DB_CONTAINER)?.ports ?? []).find(
@@ -662,7 +662,7 @@ export function standbyKubectlCommand(argv) {
  * @param {{slotCount: number|null, envName?: string}} o the guard's slot count (null: no guard verdict, or unread)
  * @returns {Error}
  */
-export function coldReseedError(error, { slotCount, envName }) {
+function coldReseedError(error, { slotCount, envName }) {
   if (error?.reseedSwapped) return error;
   let message = String(error?.message ?? error);
   if (error?.dbNotRunning === true) message += ` ${standbyDbRebuildHint(envName)}`;
@@ -681,7 +681,7 @@ export function coldReseedError(error, { slotCount, envName }) {
 }
 
 /** The standby looks promoted outside vibecarbon: the cold reseed would overwrite a live primary. */
-export class StandbyPromotedOutsideError extends Error {
+class StandbyPromotedOutsideError extends Error {
   constructor(message) {
     super(message);
     this.name = 'StandbyPromotedOutsideError';
@@ -711,7 +711,7 @@ export class StandbyPromotedOutsideError extends Error {
  * @param {object|null} [o.discardable] the env's ha.discardableStandby
  * @returns {'standby'|'fresh'|'retired'|'discardable'} why the reseed may proceed
  */
-export function assertStandbyNotPromotedOutside({
+function assertStandbyNotPromotedOutside({
   target,
   source,
   standbyIp,

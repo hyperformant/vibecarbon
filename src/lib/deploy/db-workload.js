@@ -58,6 +58,29 @@ export const DB_APP_LABEL = 'vibecarbon-db';
 export const DB_POD_SELECTOR = `app=${DB_APP_LABEL}`;
 
 /**
+ * kubectl argv (no leading `kubectl`) that runs `argv` in the database
+ * container: `-n vibecarbon exec [-i] db-0 -c db -- ...argv`. `stdin` adds
+ * `-i`, for a command that reads piped input. `pod` is a name a label lookup
+ * returned (getPostgresPod, the status snapshot): that argv names the pod and
+ * no container, so kubectl takes the pod's default one, as every caller holding
+ * a looked-up name always has. Each caller keeps its own command, psql flags and
+ * timeout (tests/unit/deploy/pod-exec-bound-census.test.ts follows it to them).
+ *
+ * @param {string[]} argv - the command to run in the container
+ * @param {{ stdin?: boolean, pod?: string }} [opts]
+ * @returns {string[]}
+ */
+export const dbExecArgv = (argv, { stdin = false, pod } = {}) => [
+  '-n',
+  'vibecarbon',
+  'exec',
+  ...(stdin ? ['-i'] : []),
+  ...(pod === undefined ? [DB_POD, '-c', DB_CONTAINER] : [pod]),
+  '--',
+  ...argv,
+];
+
+/**
  * Line 2 of db-guard.sh (both copies): the reseed protocol it speaks. The
  * live-pod guard greps it in the mounted wrapper (replication.js), and the
  * scaffold lockstep preflight requires it in the template's ConfigMap key.
@@ -68,7 +91,7 @@ export const DB_GUARD_PROTOCOL_MARKER = '# vc-reseed-protocol: 1';
 export const DB_GUARD_COMMAND = Object.freeze(['sh', '/usr/local/bin/db-guard.sh']);
 
 /** The docs/technical.md section that walks the rebuild below. */
-export const STANDBY_DB_REBUILD_DOC =
+const STANDBY_DB_REBUILD_DOC =
   'docs/technical.md, "Rebuilding a k8s-ha standby whose db cannot start"';
 
 /**

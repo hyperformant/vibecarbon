@@ -64,6 +64,24 @@ describe('failover-record TTL census', () => {
     ]);
   });
 
+  it('every declaring module writes its failover records at HA_TTL, never a literal', () => {
+    // upsertApexAndWildcard is the failover flip itself: a literal there would
+    // leave the census above pinning a constant the flip no longer reads.
+    for (const file of dnsModules()) {
+      const src = readFileSync(join(DNS_DIR, file), 'utf-8');
+      if (!/const HA_TTL = \d+;/.test(src)) continue;
+      const start = src.indexOf('export async function upsertApexAndWildcard(');
+      expect(start, `${file} exports upsertApexAndWildcard`).toBeGreaterThan(-1);
+      const rest = src.slice(start);
+      const end = rest.indexOf('\n}\n');
+      const body = end === -1 ? rest : rest.slice(0, end);
+      expect(body, `${file}: upsertApexAndWildcard passes a literal ttl`).not.toMatch(
+        /\bttl:\s*\d/,
+      );
+      expect(body.match(/\bttl:\s*HA_TTL\b/g), `${file}: both records at HA_TTL`).toHaveLength(2);
+    }
+  });
+
   it('the census walks real modules (not vacuously green)', () => {
     expect(dnsModules().length).toBeGreaterThanOrEqual(6);
   });

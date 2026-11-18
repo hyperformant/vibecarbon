@@ -16,10 +16,10 @@
  * process answering the request.
  */
 
-import type { AuthUser as User } from '@server/auth';
 import type { HonoVariables } from '@server/types';
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SUPER_ADMIN } from '../../../_helpers/factories';
 
 // These routes sit behind the aal2 gate; the MFA setting is not under test here.
 vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: async () => false }));
@@ -58,7 +58,6 @@ const DEV_STACK = ['app', 'traefik', 'db', 's3'].map((service) => ({
   service,
 }));
 
-const SUPER_ADMIN: Partial<User> = { id: 'admin-1', role: 'super_admin' };
 
 /** Load the routes fresh under `env` (the runtime is read at module load). */
 async function appWith(env: Record<string, string>) {

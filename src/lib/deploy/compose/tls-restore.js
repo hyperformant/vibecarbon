@@ -36,10 +36,10 @@ import {
 import { VC_COMPOSE, VC_COMPOSE_SCRIPT } from './command.js';
 
 /** The reason a restore leaves a live apex certificate alone. */
-export const LIVE_CERTIFICATE_PRESENT = 'live certificate present';
+const LIVE_CERTIFICATE_PRESENT = 'live certificate present';
 
 /** The reason a restore gave up on a piece that outlived its bound. */
-export const RESTORE_TIMED_OUT = 'restore timed out';
+const RESTORE_TIMED_OUT = 'restore timed out';
 
 /**
  * The failover bounds, per piece (never a race around the whole call: an
@@ -47,7 +47,7 @@ export const RESTORE_TIMED_OUT = 'restore timed out';
  * already runs Traefik, so its image is local and the check is quick; the
  * write bound covers the Traefik restart; the S3 read makes one attempt.
  */
-export const FAILOVER_TLS_BOUNDS = {
+const FAILOVER_TLS_BOUNDS = {
   checkTimeoutMs: 30_000,
   writeTimeoutMs: 60_000,
   s3ClientOptions: DR_S3_CLIENT_OPTIONS,

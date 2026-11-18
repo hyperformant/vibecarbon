@@ -62,14 +62,14 @@
  * no role suffix at all (its server is the bare `${project}-${env}`), which is
  * why the empty base is always part of the family.
  */
-export const HA_ROLE_SUFFIXES = ['primary', 'standby'];
+const HA_ROLE_SUFFIXES = ['primary', 'standby'];
 
 /**
  * scale.js's temporary blue-green name suffix. A server still carrying it is
  * BY DEFINITION mid-scale residue: the successful path renames it away before
  * scale returns.
  */
-export const SCALE_REPLACEMENT_SUFFIX = 'new';
+const SCALE_REPLACEMENT_SUFFIX = 'new';
 
 /** Role labels that are provider-name components, not config-only role fields. */
 function normalizeRoles(roles) {
@@ -108,7 +108,7 @@ export function environmentServerNames({ projectName, environment, roles } = {})
  * @param {object} args - same shape as environmentServerNames
  * @returns {boolean}
  */
-export function isEnvironmentServerName(name, args) {
+function isEnvironmentServerName(name, args) {
   return typeof name === 'string' && environmentServerNames(args).includes(name);
 }
 
@@ -129,7 +129,7 @@ export function isEnvironmentServerName(name, args) {
  * @param {string} [args.deployMode]
  * @returns {string[]}
  */
-export function environmentLabelValues({ environment, deployMode } = {}) {
+function environmentLabelValues({ environment, deployMode } = {}) {
   if (!environment) return [];
   if (deployMode === 'compose-ha') {
     return [environment, ...HA_ROLE_SUFFIXES.map((role) => `${environment}-${role}`)];

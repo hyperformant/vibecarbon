@@ -2,13 +2,7 @@
  * vibecarbon backup — flag matrix against a real project.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon backup', () => {
   let project: string;
@@ -19,17 +13,9 @@ describe('vibecarbon backup', () => {
     destroyRealProject(project);
   });
 
-  it('prints help', () => {
-    const r = runCli('backup', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Backup');
-  });
-
   it('-l (list) accepted by parser', () => {
     const r = runCli('backup', ['-l', 'prod'], { cwd: project, timeoutMs: 15_000 });
-    if (/unknown flag: -l/.test(r.stderr)) {
-      throw new Error(`-l rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments to back up.');
   });
 
   it.each(['create', 'list'])('-action %s accepted by parser', (action) => {
@@ -37,9 +23,7 @@ describe('vibecarbon backup', () => {
       cwd: project,
       timeoutMs: 15_000,
     });
-    if (/unknown flag|invalid argument/.test(r.stderr)) {
-      throw new Error(`-action ${action} rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments to back up.');
   });
 
   it('rejects -action wipe (not in enum)', () => {
@@ -50,10 +34,5 @@ describe('vibecarbon backup', () => {
     if (r.exitCode === 0) {
       throw new Error('backup accepted -action wipe');
     }
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('backup', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 });

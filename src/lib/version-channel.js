@@ -209,7 +209,7 @@ export function parseChannelFile(value, bundled) {
  * @param {string[]} ahead - keys as parseChannelFile names them
  * @returns {string}
  */
-export function aheadNote(ahead) {
+function aheadNote(ahead) {
   const names = [
     ...new Set(
       ahead.map((where) => {

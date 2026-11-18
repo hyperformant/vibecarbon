@@ -381,20 +381,30 @@ describe('census — every guided-setup credential entry point guards its prompt
     );
   });
 
+  // The token guide is printed by the shared getApiToken flow every provider
+  // module but Scaleway hands its guide to (resolveApiToken).
   it('MUTATION: catches a guard placed AFTER the guide', () => {
-    const file = 'hetzner-guided-setup.js';
-    const moved = withinFunction(disarmGuardIn(file, 'getApiToken'), 'getApiToken', (body) => {
-      if (!body.includes('displayApiTokenGuide(projectName);')) {
+    const file = SHARED_PROMPTS;
+    const fn = 'resolveApiToken';
+    const moved = withinFunction(disarmGuardIn(file, fn), fn, (body) => {
+      if (!body.includes('displayTokenGuide(projectName);')) {
         throw new Error('fixture drift: guide call anchor missing');
       }
       return body.replace(
-        'displayApiTokenGuide(projectName);',
-        "displayApiTokenGuide(projectName);\n  assertInteractiveStdin({ what: 'x', envVar: 'Y' });",
+        'displayTokenGuide(projectName);',
+        "displayTokenGuide(projectName);\n  assertInteractiveStdin({ what: 'x', envVar: 'Y' });",
       );
     });
     expect(guideGuardOffenders(new Map([[file, moved]]))).toEqual([
-      `${file}:getApiToken — guard AFTER the guide`,
+      `${file}:${fn} — guard AFTER the guide`,
     ]);
+  });
+
+  it('MUTATION: catches a shared storage-key guide whose guard is deleted', () => {
+    const fn = 'resolveS3KeyPair';
+    expect(
+      guideGuardOffenders(new Map([[SHARED_PROMPTS, disarmGuardIn(SHARED_PROMPTS, fn)]])),
+    ).toEqual([`${SHARED_PROMPTS}:${fn} — guide with no guard`]);
   });
 });
 

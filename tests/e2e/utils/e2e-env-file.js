@@ -49,3 +49,29 @@ export function loadE2EEnvFile(filePath, target = process.env) {
   }
   return applied;
 }
+
+/**
+ * The env an out-of-band e2e tool reads: the operator's token file with the
+ * real env laid over it. Unlike `loadE2EEnvFile` it changes nothing; it
+ * returns a new object.
+ *
+ * REAL ENV WINS, BUT A BLANK EXPORT COUNTS AS UNSET. CI passes every secret
+ * through the step env, and a secret the job does not have arrives as an
+ * empty string, not as a missing key. An empty real value must fall back to
+ * the file, never blank it out. (`loadE2EEnvFile` differs on purpose: there
+ * any key present in the target wins, even an empty one.)
+ *
+ * Three entry points wrote these four lines out: sweep-project.ts,
+ * sweep-stale-stacks-ci.ts and audit-residue.ts.
+ *
+ * @param {string} filePath - Absolute path to the env file (normally
+ *   `<repoRoot>/tests/.env.e2e`). A missing file reads as empty.
+ * @param {NodeJS.ProcessEnv} [realEnv] - Defaults to `process.env`.
+ * @returns {Record<string, string | undefined>}
+ */
+export function readE2EEnv(filePath, realEnv = process.env) {
+  /** @type {Record<string, string | undefined>} */
+  const env = existsSync(filePath) ? { ...parseDotenv(readFileSync(filePath, 'utf-8')) } : {};
+  for (const [key, value] of Object.entries(realEnv)) if (value) env[key] = value;
+  return env;
+}

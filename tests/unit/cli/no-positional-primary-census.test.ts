@@ -40,16 +40,8 @@ const ALLOWED: Record<string, string> = {
     'the resize menu offers primary and standby as labelled choices; it does not act on "the" primary',
   'src/lib/cloudflare-dns.js':
     'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
-  'src/lib/digitalocean-dns.js':
-    'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
-  'src/lib/hetzner-dns.js':
-    'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
-  'src/lib/linode-dns.js':
-    'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
-  'src/lib/scaleway-dns.js':
-    'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
-  'src/lib/vultr-dns.js':
-    'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
+  'src/lib/dns-backend-helpers.js':
+    'setupHaRecords (the setupHA of every backend but Cloudflare) receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
 };
 
 const isComment = (line: string) => /^\s*(\/\/|\*|\/\*)/.test(line);

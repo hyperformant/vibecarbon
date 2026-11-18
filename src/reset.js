@@ -5,16 +5,12 @@
  * Removes containers, volumes, and locally-built images. Run `vibecarbon up` afterward to restart.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { requireDevScript, runDevScript } from './lib/cli/dev-script.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
-import { runCommandThroughTaskLog } from './lib/command.js';
-import { localComposeEnv } from './lib/images.js';
-import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string }} */
@@ -49,12 +45,7 @@ export async function run(args = []) {
   introCommand('reset');
 
   const cwd = process.cwd();
-  const pkgPath = join(cwd, 'package.json');
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-  if (!pkg.scripts?.['dev:reset']) {
-    p.log.error('No "dev:reset" script found in package.json.');
-    process.exit(1);
-  }
+  requireDevScript(cwd, 'dev:reset');
 
   // Off a TTY without -y there is nobody to confirm: exit 1 with the
   // canonical message instead of the prompt library crashing (exit 70).
@@ -79,20 +70,9 @@ export async function run(args = []) {
     }
   }
 
-  const pm = detectPackageManager(cwd);
-  const spawnArgs = pm === 'npm' ? ['run', 'dev:reset'] : ['dev:reset'];
-  try {
-    await runCommandThroughTaskLog([pm, ...spawnArgs], {
-      cwd,
-      title: `Resetting dev environment with ${pm}`,
-      successMessage: 'Dev environment reset',
-      // dev:reset runs `docker compose down -v`, which interpolates the
-      // compose file: it needs the db image pair just as `up` does.
-      env: localComposeEnv(),
-      // See PM_RUN_CONTEXT_RE in lib/command.js.
-      cleanEnv: true,
-    });
-  } catch (err) {
-    process.exit(err?.status ?? 1);
-  }
+  // dev:reset runs `docker compose down -v`.
+  await runDevScript(cwd, 'dev:reset', {
+    title: (pm) => `Resetting dev environment with ${pm}`,
+    successMessage: 'Dev environment reset',
+  });
 }

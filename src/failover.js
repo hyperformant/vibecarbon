@@ -28,10 +28,10 @@ import {
   writeK8sBackupFence,
 } from './lib/deploy/backup-fence.js';
 import {
-  DB_CONTAINER,
   DB_POD,
   DB_POD_SELECTOR,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_PROBE_MS,
 } from './lib/deploy/db-workload.js';
 import { abortFailover } from './lib/deploy/failover-abort.js';
@@ -87,6 +87,7 @@ import {
 } from './lib/deploy/replication.js';
 import { slotDropSkippedNote } from './lib/deploy/replication-slot.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
+import { stateS3Fields } from './lib/deploy/s3-record.js';
 import { DB_LINEAGE_SQL, parseDbLineage } from './lib/deploy/standby-lineage.js';
 import { DR_S3_CLIENT_OPTIONS } from './lib/deploy/tls-snapshot.js';
 import {
@@ -323,7 +324,7 @@ async function isPrimaryPostgresReady(primaryIp, sshKeyPath) {
     const result = await sshKubectl(
       primaryIp,
       sshKeyPath,
-      ['exec', '-n', 'vibecarbon', pod, '--', 'pg_isready', '-U', 'postgres', '-t', '3'],
+      dbExecArgv(['pg_isready', '-U', 'postgres', '-t', '3'], { pod }),
       { timeout: POD_EXEC_PROBE_MS },
     );
     return result?.includes('accepting connections') ?? false;
@@ -1265,12 +1266,7 @@ function firstErrorLine(err) {
 function buildStateS3Config(envConfig, s3Creds) {
   if (!envConfig.s3?.bucket || !s3Creds) return undefined;
   return {
-    bucket: envConfig.s3.bucket,
-    region: envConfig.s3.region,
-    endpoint: envConfig.s3.endpoint,
-    stateBucket: envConfig.s3.stateBucket,
-    stateBucketRegion: envConfig.s3.stateBucketRegion,
-    stateEndpoint: envConfig.s3.stateEndpoint,
+    ...stateS3Fields(envConfig),
     accessKey: s3Creds.accessKey,
     secretKey: s3Creds.secretKey,
   };
@@ -2106,17 +2102,7 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
       try {
         const out = await kubectl(
           primary.ip,
-          [
-            ...ns,
-            'exec',
-            DB_POD,
-            '-c',
-            DB_CONTAINER,
-            '--',
-            'sh',
-            '-c',
-            walgRoleReadShell(WALG_ROLE_DIR),
-          ],
+          dbExecArgv(['sh', '-c', walgRoleReadShell(WALG_ROLE_DIR)]),
           { timeout: POD_EXEC_PROBE_MS },
         );
         live = parseWalgRoleReadBack(out);

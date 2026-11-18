@@ -1202,6 +1202,111 @@ on all five providers, through each real store class),
 `tests/unit/e2e/sweep-*.test.ts`, `tests/unit/iac/remove-stack-state.test.ts`
 and `tests/unit/e2e/bucket-gone-census.test.ts`.
 
+#### 2026-11-18: Copies shared across the CLI, the template and the e2e harness
+
+One pass removed code that was written more than once: per-provider methods
+moved to `BaseProvider` (catalog reads, `deleteServer`, `waitForServer`,
+`getServerSummary`, `listServers`, a bare authenticated request and a
+delete-if-gone); the DNS backends share their setup flows and record helpers
+(`src/lib/dns-backend-helpers.js`); every database-pod command is built by
+`dbExecArgv`; the five e2e sweeps share their context, bucket pass and banner
+(`tests/e2e/utils/sweep-core.ts`) and one page walker; the template shares its
+sidebar items, list controls, request validation and auth page shell. `pnpm
+dupes` (jscpd) went from 121 clones to 51, and `pnpm unused` (knip) reports
+unused exports.
+
+**Why:** copies had drifted into bugs. Each entry below dated 2026-11-18 is a
+bug that existed in one copy and not in its siblings.
+
+**Do not undo:**
+- The bare requests stay bare. `bareRequest` sends no JSON `Content-Type`,
+  which `apiRequest` adds; folding them together changes what every provider
+  receives.
+- The compose and k8s failover flows, the two SSH runners (one returns false,
+  one throws) and each DNS backend's `HA_TTL` and `deleteApexAndWildcard` stay
+  separate on purpose.
+- A k3s database node boots from the worker script with the `db` role
+  (`loadCloudInit(script, { role: 'db' })`). It does not include the host
+  reporter: the deploy installs that over SSH.
+
+**Guard:** `.jscpd.json` threshold; the censuses each refactor repointed
+(`pod-exec-bound-census`, `list-endpoint-pagination-sweep`,
+`bucket-gone-census`, `shared-helper-consumers`).
+
+#### 2026-11-18: Leak detection in the e2e sweeps no longer reads "could not look" as clean
+
+- A listing that runs out of its 20-page budget is incomplete, not complete.
+- The Hetzner sweep counts a delete only when the API accepted it; a refused
+  delete or a pass that throws fails the sweep and names the resource.
+- `scripts/sweep-hetzner.js` exits 1 when it has no keys, cannot list buckets
+  or a bucket delete fails.
+- The sweeps list load balancers and networks themselves, because the
+  provider methods answer `[]` on a failed call; a `false` from
+  `deleteLoadBalancer` is a failed delete.
+- The Vultr banner counts reserved IPs, the Hetzner sweep refuses a project
+  name under 4 characters, and preflight reads every page.
+
+**Why:** each of these let a sweep report success without having looked, and a
+leaked resource bills until someone finds it.
+
+**Do not undo:** `complete: true` means the provider said there is no next
+page. Do not route a sweep listing back through a provider method that
+swallows a failed call.
+
+**Guard:** `tests/unit/e2e/sweep-page-guard.test.ts`,
+`sweep-hetzner-compute.test.ts`, `sweep-load-balancers-networks.test.ts`,
+`sweep-reserved-ips.test.ts`, `preflight-project-clean.test.ts`,
+`tests/unit/scripts/sweep-hetzner-buckets.test.ts`.
+
+#### 2026-11-18: CLI fixes found where copies disagreed
+
+- `diagnose` on k8s checks host keys against the environment's own
+  `.vibecarbon/known_hosts_<env>`, not the operator's `~/.ssh/known_hosts`.
+- The compose-HA streaming check rejects a replication state it cannot
+  recognise, as the k8s check did, so an ssh banner is never recorded as a
+  state.
+- A provider refusal whose body is not JSON still names what failed (it used
+  to raise a SyntaxError), Hetzner's `renameServer` throws on a refusal, and
+  `getServer` on Vultr and Scaleway keeps the HTTP status.
+- Hetzner's failover upsert writes its own `HA_TTL`, not a literal 60.
+
+**Guard:** the test added with each fix.
+
+#### 2026-11-18: Template fixes
+
+- Deleting an account cancels the user's active subscriptions with whichever
+  billing provider the app uses. Before, only Stripe was cancelled, so a
+  Paddle or Polar customer kept being billed. The Paddle and Polar calls were
+  written from the providers' API references and not sent to a live API.
+- The contact notification sends its subject as plain text on one line: an
+  `&` no longer arrives as `&amp;`, and a line break cannot start a header.
+- The admin theme route answers malformed JSON with 400, not 500. The admin
+  organizations list pages in a stable order.
+- Admin lists show a failed load, not the empty state. The Billing notice
+  names the active provider's variables, sent by the server as `envVars`.
+- An endpoint read by more than one component goes through one hook in
+  `src/client/hooks/api/` (`useSubscription`, `useServicesStatus`,
+  `useAdminStats`).
+
+**Do not undo:** a page-local `useQuery` for an endpoint that already has a
+hook fetches twice. A provider-to-variable table in the client trips the
+no-session-token invariant, which is unbounded on purpose.
+
+**Guard:** `carbon/tests/integration/server/routes/` (`v1-me-delete-billing`,
+`contact`, `theme-validation`, `admin-list-order`, `billing-status`) and
+`carbon/tests/component/billing-page.test.tsx`.
+
+#### 2026-11-18: Template tests test the template
+
+Nine files under `tests/unit/template/` re-implemented template logic inside
+the test and tested that copy. Their cases now run against the real modules
+under `carbon/tests/`, and the copies are deleted. Several copies asserted
+behaviour the template does not have (plan names and prices, trust in a
+forwarded-IP header the real code refuses).
+
+**Do not undo:** a template test imports the module it tests. Three mirrors
+remain to port: `v1-routes`, `stripe-webhook`, `billing-routes`.
+
 #### 2026-11-17: Agent sessions cannot open an SSH password dialog
 
 `.claude/settings.json` sets `SSH_ASKPASS_REQUIRE=never` for every Claude Code
@@ -1277,6 +1382,9 @@ published or the advisory stops being reported.
 | The e2e scratch GitHub repository (`setup-repo`, `teardown-repo`, the stale-repo sweep) | 2026-11-16 (#505) | No scenario deploys in push mode, so nothing read it. Bring it back with a scenario that does |
 | The template's Stripe-only webhook route, `/api/webhooks/stripe` | 2026-11-16 (#510) | `/api/webhooks/billing` handles the same Stripe events, and `configure billing` has named only that URL since the first public commit. `npm run stripe:listen` now forwards there |
 | `backup -action download` and its `-source` flag | 2026-11-16 (#510) | It copied a dump file out of the database pod, and no released version wrote one: backups have been wal-g base backups since before the first public commit. `backup -l` lists them and `restore` reads them |
+| Template `k8s:apply` and `k8s:delete` scripts | 2026-11-18 | Defaulted to an overlay the template does not ship |
+| `carbon/src/shared/types.ts` | 2026-11-18 | Unused hand copy of the schema that had drifted |
+| Per-provider k3s `*db-init.sh` scripts | 2026-11-18 | The worker script with three flags; now rendered from it |
 
 ## Problems that keep coming back
 

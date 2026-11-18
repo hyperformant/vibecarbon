@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STEP_NAMES } from '../scenarios/types.js';
 import { summarizeVerifications } from '../scenarios/verification-summary.js';
+import { stripAnsi } from '../utils/strip-ansi.js';
 import type { RunRow, StepTrendRow } from './db.js';
 import { E2EDb } from './db.js';
 
@@ -77,19 +78,15 @@ export function formatDuration(ms: number): string {
 // Table drawing helpers
 // ---------------------------------------------------------------------------
 
-/** Regex to strip ANSI escape codes for visible-length measurement. */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI escape code stripping
-const ANSI_STRIP_RE = /\x1b\[[0-9;]*m/g;
-
 /** Pad a string to `width` characters, stripping ANSI codes for length calc. */
 function padRight(str: string, width: number): string {
-  const visible = str.replace(ANSI_STRIP_RE, '');
+  const visible = stripAnsi(str);
   const pad = Math.max(0, width - visible.length);
   return `${str}${' '.repeat(pad)}`;
 }
 
 function padLeft(str: string, width: number): string {
-  const visible = str.replace(ANSI_STRIP_RE, '');
+  const visible = stripAnsi(str);
   const pad = Math.max(0, width - visible.length);
   return `${' '.repeat(pad)}${str}`;
 }

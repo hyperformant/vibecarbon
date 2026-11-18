@@ -125,22 +125,32 @@ interface Site {
 }
 
 // A provider-API URL path: either appended to an API_BASE-style template /
-// literal host, or the path argument of the BaseProvider.apiRequest
-// transport (which prefixes API_BASE itself).
+// literal host, or the path argument of a BaseProvider transport that
+// prefixes API_BASE itself: apiRequest, and the bare bareRequest and
+// deleteGone. A new transport name must join TRANSPORT, or its call sites
+// drop out of this sweep.
 const URL_SITE_RE =
   /(?:API_BASE\}|API_BASE_URL\}|api\.hetzner\.cloud\/v1|api\.digitalocean\.com\/v2)(\/[^\s`'"]+)/g;
-const API_REQUEST_RE = /apiRequest\(\s*[`'"](\/[^`'"]+)/g;
+const TRANSPORT = '(?:apiRequest|bareRequest|deleteGone|_serverSummaryAt)\\(';
+const API_REQUEST_RE = new RegExp(`${TRANSPORT}\\s*[\`'"](\\/[^\`'"]+)`, 'g');
+// A call whose arguments the formatter wrapped: the path is on the next line.
+const WRAPPED_CALL_RE = new RegExp(`${TRANSPORT}$`);
+
+const HARNESS_WALKER_RE =
+  /walkProviderPages\s*(?:<[^>\n]*>)?\s*\(|\bdialect:\s*'(?:hetzner|digitalocean|linode|vultr|scaleway)/;
 
 /**
  * True when this call site cannot be a truncated listing:
  *  - id-addressed single resource (`/servers/${id}`) or action endpoint;
  *  - exact-name server-side filter (`?name=`);
  *  - explicit pagination (`page=` in the URL, a `&page=` continuation within
- *    the next few lines, or the shared listHetznerPages walker);
+ *    the next few lines, the shared listHetznerPages walker, or the e2e
+ *    harness walker walkProviderPages, whose call may open up to three lines
+ *    above the URL or sit in a table row that names its `dialect`);
  *  - a mutation (POST/DELETE/PUT/PATCH), which returns no listing;
  *  - a URL constant whose every use appends a page param.
  */
-function isSafe(token: string, window: string, line: string, source: string): boolean {
+function isSafe(token: string, window: string, line: string, source: string, before = ''): boolean {
   const [path] = token.split('?');
   const segments = path.split('/').filter(Boolean);
   const last = segments[segments.length - 1] ?? '';
@@ -165,12 +175,50 @@ function isSafe(token: string, window: string, line: string, source: string): bo
   // sweep rejected the exact fix it recommends.
   if (/links\??\.?\s*(?:\?\.)?pages\??\.?\s*(?:\?\.)?next/.test(window)) return true;
   if (/listHetznerPages\s*\(/.test(window)) return true;
+  // The e2e harness walker (tests/e2e/utils/provider-pages.ts): every page,
+  // in the provider's own dialect, with a `complete` flag. Its URL argument
+  // is formatted onto its own line, so the call opens above it (`before`);
+  // a listing kept in a table is recognised by the `dialect` it names.
+  if (HARNESS_WALKER_RE.test(`${before}\n${window}`)) return true;
   if (/method:\s*['"](?:POST|DELETE|PUT|PATCH)/.test(window)) return true;
   // `const HETZNER_SERVERS_URL = '.../servers?per_page=50'` is fine when the
   // fetch site appends `&page=` to it.
   const decl = line.match(/^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z0-9_]+)\s*=/);
   if (decl && new RegExp(`\\$\\{${decl[1]}\\}[^\\n]*[?&]page=`).test(source)) return true;
   return false;
+}
+
+/** Every provider-API call site in one file, and the unsafe ones among them. */
+function scanSource(file: string, source: string): { all: Site[]; unsafe: Site[] } {
+  const all: Site[] = [];
+  const unsafe: Site[] = [];
+  const lines = source.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) {
+      continue;
+    }
+    const window = lines.slice(i, i + 10).join('\n');
+    const before = lines.slice(Math.max(0, i - 3), i).join('\n');
+    const call = WRAPPED_CALL_RE.test(line.trimEnd())
+      ? `${line.trimEnd()}${lines[i + 1]?.trim() ?? ''}`
+      : line;
+    for (const [re, text] of [
+      [URL_SITE_RE, line],
+      [API_REQUEST_RE, call],
+    ] as const) {
+      re.lastIndex = 0;
+      for (const m of text.matchAll(re)) {
+        const token = m[1];
+        all.push({ file, line: i + 1, token });
+        if (!isSafe(token, window, line, source, before)) {
+          unsafe.push({ file, line: i + 1, token });
+        }
+      }
+    }
+  }
+  return { all, unsafe };
 }
 
 function collectSites(): { all: Site[]; unsafe: Site[] } {
@@ -183,26 +231,9 @@ function collectSites(): { all: Site[]; unsafe: Site[] } {
       skipDotDirs: true,
       relativeTo: ROOT,
     })) {
-      const source = readFileSync(join(ROOT, file), 'utf-8');
-      const lines = source.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const trimmed = line.trim();
-        if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) {
-          continue;
-        }
-        const window = lines.slice(i, i + 10).join('\n');
-        for (const re of [URL_SITE_RE, API_REQUEST_RE]) {
-          re.lastIndex = 0;
-          for (const m of line.matchAll(re)) {
-            const token = m[1];
-            all.push({ file, line: i + 1, token });
-            if (!isSafe(token, window, line, source)) {
-              unsafe.push({ file, line: i + 1, token });
-            }
-          }
-        }
-      }
+      const found = scanSource(file, readFileSync(join(ROOT, file), 'utf-8'));
+      all.push(...found.all);
+      unsafe.push(...found.unsafe);
     }
   }
   return { all, unsafe };
@@ -216,6 +247,30 @@ describe('provider list-endpoint pagination sweep', () => {
     // zero, the sweep has gone blind — update the patterns, don't delete the
     // floor. ~60 sites existed when this was written.
     expect(all.length).toBeGreaterThanOrEqual(40);
+  });
+
+  it('sees a bare transport call, on one line or wrapped by the formatter', () => {
+    // biome-ignore-start lint/suspicious/noTemplateCurlyInString: source text under scan, not a JS template
+    const source = [
+      'const a = await this.bareRequest(`/volumes`);',
+      'const b = await this.bareRequest(',
+      '  `/load_balancers`,',
+      ');',
+      'const c = await this.apiRequest(',
+      "  '/firewalls',",
+      ');',
+      'return this.deleteGone(`/volumes/${id}`);',
+    ].join('\n');
+    // biome-ignore-end lint/suspicious/noTemplateCurlyInString: end
+    const found = scanSource('probe.js', source);
+    expect(found.all.map((s) => s.token)).toEqual([
+      '/volumes',
+      '/load_balancers',
+      '/firewalls',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a scanned token
+      '/volumes/${id}',
+    ]);
+    expect(found.unsafe.map((s) => s.token)).toEqual(['/volumes', '/load_balancers', '/firewalls']);
   });
 
   it('every un-paginated collection GET is a documented exception', () => {
@@ -261,6 +316,24 @@ describe('classifier sanity (not vacuously permissive)', () => {
     expect(isSafe('/firewalls/${id}/actions/set_rules', '', '', src)).toBe(true);
     // biome-ignore-end lint/suspicious/noTemplateCurlyInString: end
     expect(isSafe('/ssh_keys', "method: 'POST',", '', src)).toBe(true);
+  });
+
+  it('accepts a harness-walker call that opens above the URL, and a table row that names its dialect', () => {
+    const call = "const walk = await walkProviderPages<Row>(\n  'digitalocean',";
+    expect(isSafe('/reserved_ips', "{ key: 'reserved_ips', perPage: 200 },", '', src, call)).toBe(
+      true,
+    );
+    expect(
+      isSafe(
+        '/servers',
+        "url: 'https://api.hetzner.cloud/v1/servers',",
+        '',
+        src,
+        "dialect: 'hetzner',",
+      ),
+    ).toBe(true);
+    // The same URL with no walker in sight is still a bare collection GET.
+    expect(isSafe('/reserved_ips', 'await fetchImpl(url);', '', src, 'const x = 1;')).toBe(false);
   });
 
   it('does NOT accept per_page alone as pagination (the [?&]page= anchor is load-bearing)', () => {

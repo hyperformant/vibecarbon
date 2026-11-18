@@ -39,7 +39,7 @@ export function renderFlagTable(spec) {
 }
 
 /** The shared `-h` / `-v` note for the top of cli.mdx. */
-export function renderGlobalFlags() {
+function renderGlobalFlags() {
   return [
     '| Flag | Description |',
     '|------|-------------|',

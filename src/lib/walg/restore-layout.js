@@ -48,7 +48,7 @@ export const RESTORE_LAYOUT = Object.freeze({
  * both; a restore drops both from the staged tree, since a restored database
  * does not share its source's gap.
  */
-export const WAL_GAP_RECORD = 'vibecarbon-wal-gap';
+const WAL_GAP_RECORD = 'vibecarbon-wal-gap';
 export const WAL_GAP_RECORDS = Object.freeze([WAL_GAP_RECORD, `${WAL_GAP_RECORD}.clearing`]);
 
 /** The previous cluster, removed once the restored one is proven. */
@@ -110,7 +110,7 @@ export const RESTORE_MARKER_KEYS = Object.freeze([
 export const LINEAGE_RE = /^[0-9]{1,20}$/;
 
 /** Who set a restore marker. */
-export const RESTORE_ORIGINS = Object.freeze(['deploy', 'restore']);
+const RESTORE_ORIGINS = Object.freeze(['deploy', 'restore']);
 
 /** A restore attempt id: one shell word, safe in the init's record. */
 export const RESTORE_ATTEMPT_RE = /^[A-Za-z0-9-]{8,64}$/;

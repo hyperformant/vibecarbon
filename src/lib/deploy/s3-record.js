@@ -35,6 +35,26 @@ export function envS3Record(s3Config, priorS3) {
 }
 
 /**
+ * The six fields of the env's persisted `s3` block a Pulumi state-backend read
+ * needs (the app bucket, and the dedicated state bucket where one exists), so
+ * a command that reaches the deploy's stack builds the backend the deploy
+ * used. The caller checks the block exists, adds the credentials, and keeps
+ * its own answer to a missing block or missing keys.
+ *
+ * @param {{ s3: { bucket: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string } }} envConfig
+ */
+export function stateS3Fields(envConfig) {
+  return {
+    bucket: envConfig.s3.bucket,
+    region: envConfig.s3.region,
+    endpoint: envConfig.s3.endpoint,
+    stateBucket: envConfig.s3.stateBucket,
+    stateBucketRegion: envConfig.s3.stateBucketRegion,
+    stateEndpoint: envConfig.s3.stateEndpoint,
+  };
+}
+
+/**
  * The `appKey` record (R9: `{ id, scoping, tier, bucket }`, never a secret)
  * for an env save. Once this deploy resolved the app credential,
  * `s3Config.appKey` is the truth (null: the shared tier, no record). Before

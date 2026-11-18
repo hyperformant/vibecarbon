@@ -78,9 +78,9 @@ export const ADDON_JOB_SCRIPT = 'addons-start.sh';
 /** Prints the compose services this node defers to the job (none on a standby). */
 export const ADDON_SERVICES_SCRIPT = 'addon-services.sh';
 /** Upper bound the job gives one add-on to become healthy (compose --wait). */
-export const ADDON_WAIT_TIMEOUT_S = 900;
+const ADDON_WAIT_TIMEOUT_S = 900;
 
-export const ADDON_STATES = ['starting', 'running', 'failed', 'stopped'];
+const ADDON_STATES = ['starting', 'running', 'failed', 'stopped'];
 
 /**
  * Reads compose's `config --format json` on stdin and prints, one per
@@ -102,7 +102,7 @@ const NON_APP_IMAGE_SERVICES_PY =
   'sys.stdout.write("".join(n+"\\n" for n,v in s.items() if a is None or v.get("image")!=a))';
 
 /** Shell filter: `config --format json` in, the services not on the app image out. */
-export const NON_APP_IMAGE_SERVICES_FILTER = `python3 -I -c '${NON_APP_IMAGE_SERVICES_PY}'`;
+const NON_APP_IMAGE_SERVICES_FILTER = `python3 -I -c '${NON_APP_IMAGE_SERVICES_PY}'`;
 
 /**
  * Shell that prints the services a pull may ask a registry for: every service

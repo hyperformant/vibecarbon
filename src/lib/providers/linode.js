@@ -15,15 +15,17 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
-import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
 import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  normalizePublicKey,
   replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
+import { deleteServerAt } from './delete-server.js';
+import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
 // HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
@@ -84,31 +86,9 @@ export function encodeLabels(labels = {}) {
   return Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
 }
 
-/**
- * See DigitalOcean's KNOWN_MANGLED_LABEL_KEYS — same single known collision
- * (`cluster-autoscaler/node` → `cluster-autoscaler-node` on the wire), same
- * unambiguity argument within this codebase's fixed tag-key set.
- * @type {Object<string,string>}
- */
-const KNOWN_MANGLED_LABEL_KEYS = { 'cluster-autoscaler-node': 'cluster-autoscaler/node' };
-
-/**
- * Decode a Linode tag array back into a flat label map — inverse of
- * encodeLabels for this codebase's known key set. Splits on the FIRST `:`;
- * tags without `:` (e.g. hand-added console tags) are skipped, not guessed.
- * @param {string[]|null} [tags]
- * @returns {Object<string,string>}
- */
-export function decodeLabels(tags = []) {
-  const out = {};
-  for (const tag of tags || []) {
-    const sep = tag.indexOf(':');
-    if (sep === -1) continue;
-    const wireKey = tag.slice(0, sep);
-    out[KNOWN_MANGLED_LABEL_KEYS[wireKey] ?? wireKey] = tag.slice(sep + 1);
-  }
-  return out;
-}
+// decodeLabels, the inverse of encodeLabels, is the same for the four
+// tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
+export { decodeLabels };
 
 /**
  * Linode caps FIREWALL labels at 32 chars (3-32; instance labels allow 64
@@ -571,8 +551,9 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Render the k3s database-node boot script: the worker script plus the
-   * dedicated=db label and taint, applied at join time.
+   * Render the k3s database-node boot script: the worker script loaded as
+   * the db role, which adds the dedicated=db label and taint at join time
+   * (AGENT_ROLES in cloud-init.js).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -582,7 +563,7 @@ export class LinodeProvider extends BaseProvider {
    */
   static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('linode-db-init.sh'), vars);
+    return renderScript(loadCloudInit('linode-worker-init.sh', { role: 'db' }), vars);
   }
 
   /**
@@ -694,34 +675,10 @@ export class LinodeProvider extends BaseProvider {
     return { SERVER_TYPES: catalog, _locationTypes: locationTypes, _prices: prices };
   }
 
-  /**
-   * Returns server types available in the given region — the full catalog
-   * (Linode types are global), live when fetched, fallback otherwise.
-   * `architecture: 'x86'` is constant: Linode sells no ARM instances
-   * (audit 2026-08-07), matching DigitalOcean's constant-field precedent.
-   * @param {string} region - Region slug
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = LinodeProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in LinodeProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...LinodeProvider.SERVER_TYPES[name],
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(LinodeProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): the full catalog in every region (Linode types are global),
+  // live when fetched, fallback otherwise, with `architecture: 'x86'`
+  // constant because Linode sells no ARM instances (audit 2026-08-07).
 
   /**
    * The static HA standby pair: a DIFFERENT region on the same continent
@@ -744,43 +701,12 @@ export class LinodeProvider extends BaseProvider {
       'sg-sin-2': 'jp-tyo-3',
       'jp-tyo-3': 'sg-sin-2',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = LinodeProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(LinodeProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && LinodeProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(LinodeProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      // Single-region continent (br-gru is alone in `sa`) → nearest-hub
+      // fallback, never the primary.
+      (primaryRegion === 'us-iad' ? 'us-ord' : 'us-iad')
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-
-    // Single-region continent (br-gru is alone in `sa`) → nearest-hub
-    // fallback, never the primary.
-    return primaryRegion === 'us-iad' ? 'us-ord' : 'us-iad';
-  }
-
-  /**
-   * Equivalent server type in a target region. Linode's global catalog
-   * means the requested type is available everywhere the live data says it
-   * exists; the role-pick fallback mirrors DO's shape for the (unlikely)
-   * case a future per-region axis appears in the live data.
-   * @param {string} serverType
-   * @param {string} targetRegion
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = LinodeProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(LinodeProvider, serverType, targetRegion, role);
-    }
-
-    return serverType;
   }
 
   /**
@@ -797,7 +723,8 @@ export class LinodeProvider extends BaseProvider {
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors hetzner.js/digitalocean.js method-for-method:
   // original CRUD surface through `this.apiRequest`; list/firewall/teardown
-  // methods through direct `fetchWithRetry`; getServerSummary a single raw
+  // methods through a bare `fetchWithRetry` (`this.bareRequest`, or the page
+  // walk); getServerSummary a single raw
   // `fetch` with a hard 5s abort.
 
   /**
@@ -1005,50 +932,10 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<void|boolean>}
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    if (!waitUntilGone) {
-      const response = await this.apiRequest(`/linode/instances/${serverId}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok && response.status !== 404) {
-        const error = await response.json().catch(() => ({}));
-        const reason = error.errors?.map((e) => e.reason).join('; ') || 'Unknown error';
-        throw new Error(`Failed to delete server: ${reason}`);
-      }
-      return;
-    }
-
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/linode/instances/${serverId}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      },
-    );
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json().catch(() => ({}));
-      const reason = error.errors?.map((e) => e.reason).join('; ') || 'Unknown error';
-      throw new Error(`Failed to delete server: ${reason}`);
-    }
-
-    if (response.status !== 404) {
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${LinodeProvider.API_BASE}/linode/instances/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 60_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
+    return deleteServerAt(this, `/linode/instances/${serverId}`, serverId, {
+      waitUntilGone,
+      reason: (error) => error.errors?.map((e) => e.reason).join('; '),
+    });
   }
 
   /**
@@ -1150,22 +1037,10 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${LinodeProvider.API_BASE}/linode/instances/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const instance = await response.json();
-      return {
-        status: instance.status,
-        serverType: instance.type || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/linode/instances/${serverId}`, (instance) => ({
+      status: instance.status,
+      serverType: instance.type || null,
+    }));
   }
 
   /**
@@ -1175,10 +1050,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{cores: number, memoryGb: number, architecture: string, disk: number}>}
    */
   async getServerType(name) {
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/linode/types/${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/linode/types/${encodeURIComponent(name)}`);
     if (response.status === 404) {
       throw new Error(`Server type "${name}" not found`);
     }
@@ -1210,17 +1082,13 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<number>} SSH key ID
    */
   async createSSHKey(name, publicKey) {
-    const normalize = (key) => {
-      const [type, body] = (key || '').trim().split(/\s+/);
-      return `${type || ''} ${body || ''}`.trim();
-    };
-    const targetMaterial = normalize(publicKey);
+    const targetMaterial = normalizePublicKey(publicKey);
 
     // A failed listing degrades to create-anyway rather than blocking the
     // caller — worst case is the pre-fix behavior (a duplicate key the
     // sweep reports), never a missing key.
     const { match } = await this._walkPages('/profile/sshkeys', {
-      find: (k) => normalize(k.ssh_key) === targetMaterial,
+      find: (k) => normalizePublicKey(k.ssh_key) === targetMaterial,
     });
     if (match) return match.id;
 
@@ -1268,17 +1136,13 @@ export class LinodeProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const { items: instances, complete, status } = await this._walkPages('/linode/instances');
 
-    const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
-    const items =
-      wantedTags.length === 0
-        ? instances
-        : instances.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
+    const items = withAllTags(instances, labels, encodeLabel);
 
     // VPC membership is read only for an UNFILTERED listing, which is the
     // destroy sweep's. The autoscaler always lists with a selector and never
     // reads membership, so it pays no extra request.
     let membershipError;
-    if (status === undefined && wantedTags.length === 0) {
+    if (status === undefined && Object.keys(labels).length === 0) {
       membershipError = await this._attachVpcMembership(items);
     }
     if (membershipError) return { items, complete: false, membershipError };
@@ -1463,10 +1327,7 @@ export class LinodeProvider extends BaseProvider {
       const fw = await this.findFirewallByName(name);
       if (!fw) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${LinodeProvider.API_BASE}/networking/firewalls/${fw.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/networking/firewalls/${fw.id}`, { method: 'DELETE' });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1485,11 +1346,7 @@ export class LinodeProvider extends BaseProvider {
     });
     if (!match) return false;
 
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/profile/sshkeys/${match.id}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/profile/sshkeys/${match.id}`);
   }
 
   /**
@@ -1519,10 +1376,7 @@ export class LinodeProvider extends BaseProvider {
       const vpc = vpcs.find((v) => v.name === name);
       if (!vpc) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${LinodeProvider.API_BASE}/vpcs/${vpc.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
       if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
       const body = await res.text().catch(() => '');
       return {
@@ -1549,10 +1403,9 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<import('./base.js').ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/networking/reserved/ips/${address}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/networking/reserved/ips/${address}`, {
+      method: 'DELETE',
+    });
     if (response.ok || response.status === 404) return { released: true };
     return {
       released: false,
@@ -1671,11 +1524,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${LinodeProvider.API_BASE}/volumes/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/volumes/${volumeId}`);
   }
 
   /**
@@ -1694,11 +1543,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(`${LinodeProvider.API_BASE}/nodebalancers/${lbId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/nodebalancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors ───────────────────────────────────────

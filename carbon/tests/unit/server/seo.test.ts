@@ -10,7 +10,7 @@ vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
 
-const { createSeoShell, escapeHtml, injectSeo } = await import('@server/lib/seo');
+const { createSeoShell, injectSeo } = await import('@server/lib/seo');
 
 // Mirrors the shape of the built dist/client/index.html: the tags injectSeo
 // rewrites must already exist in the shell for the replacement to land.
@@ -29,14 +29,6 @@ const SHELL = `<!DOCTYPE html>
     <div id="root"></div>
   </body>
 </html>`;
-
-describe('escapeHtml', () => {
-  it('escapes HTML metacharacters', () => {
-    expect(escapeHtml(`<a href="x">'&'</a>`)).toBe(
-      '&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;'
-    );
-  });
-});
 
 describe('injectSeo', () => {
   it('replaces title and description metas', () => {

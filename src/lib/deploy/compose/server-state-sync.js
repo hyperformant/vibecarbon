@@ -19,6 +19,7 @@ import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../../config.js';
 import { syncServerState } from '../../iac/server-state.js';
 import { providerIdFor } from '../../providers/index.js';
+import { stateS3Fields } from '../s3-record.js';
 import { COMPOSE_HA_INFRA_STEP, StateTracker } from '../state.js';
 import { composeHaStackOf } from './ha-role-swap.js';
 
@@ -55,12 +56,7 @@ export async function resolveServerStateOptions({ envConfig, projectName, Provid
   return {
     ...options,
     s3Config: {
-      bucket: envConfig.s3.bucket,
-      region: envConfig.s3.region,
-      endpoint: envConfig.s3.endpoint,
-      stateBucket: envConfig.s3.stateBucket,
-      stateBucketRegion: envConfig.s3.stateBucketRegion,
-      stateEndpoint: envConfig.s3.stateEndpoint,
+      ...stateS3Fields(envConfig),
       accessKey: creds.accessKey,
       secretKey: creds.secretKey,
     },
@@ -95,7 +91,7 @@ export function recordPendingServerState(environment, entry) {
 }
 
 /** Drop the pending sync for `stack`. A no-op when none is set. */
-export function clearPendingServerState(environment, stack) {
+function clearPendingServerState(environment, stack) {
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[environment];
     const pending = envConfig?.pendingServerState;

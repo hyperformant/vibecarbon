@@ -25,7 +25,7 @@ function startOfDay(d) {
  * @param {Date} [now]
  * @returns {string}
  */
-export function formatDate(date, now = new Date()) {
+function formatDate(date, now = new Date()) {
   const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
   let day;
   if (dayDiff === 0) day = 'Today';

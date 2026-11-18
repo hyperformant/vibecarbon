@@ -32,7 +32,7 @@ import {
 import { createClusterSnapshots, describeSshError, withTimeout } from './cluster-snapshot.js';
 import { classifyContainer, rowsFromDockerPs, SERVICE_DISPLAY_NAMES } from './container-rows.js';
 
-export const APP_NAMESPACE = 'vibecarbon';
+const APP_NAMESPACE = 'vibecarbon';
 
 /**
  * Pick the primary and standby entries of an HA `servers[]`.
@@ -203,9 +203,7 @@ export function nodeReadiness(nodesJson) {
   ).length;
   return { ready, total: items.length };
 }
-
 // re-exported so Task 3 can build compose rows without a second import site
-export { classifyContainer, rowsFromDockerPs };
 
 function dockerPsArgv(projectName) {
   return [

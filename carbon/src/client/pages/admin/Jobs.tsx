@@ -73,7 +73,7 @@ function StatusBadge({ status }: { status: string }) {
 export default function AdminJobs() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading } = useQuery<{ jobs: JobSummary[]; history: JobHistory[] }>({
+  const { data, isLoading, error } = useQuery<{ jobs: JobSummary[]; history: JobHistory[] }>({
     queryKey: jobsQueryKey,
     queryFn: () =>
       apiJson<{ jobs: JobSummary[]; history: JobHistory[] }>(
@@ -83,7 +83,7 @@ export default function AdminJobs() {
       ),
   });
 
-  const { data: historyData } = useQuery<{ history: JobHistory[] }>({
+  const { data: historyData, error: historyError } = useQuery<{ history: JobHistory[] }>({
     queryKey: [...jobsQueryKey, 'history'],
     queryFn: () =>
       apiJson<{ history: JobHistory[] }>(
@@ -137,6 +137,10 @@ export default function AdminJobs() {
               {isLoading ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : error ? (
+                <div className="py-8 text-center text-destructive">
+                  {error instanceof Error ? error.message : 'Failed to load jobs'}
                 </div>
               ) : jobs.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
@@ -192,7 +196,13 @@ export default function AdminJobs() {
               <CardDescription>Recent job executions (last 50)</CardDescription>
             </CardHeader>
             <CardContent>
-              {history.length === 0 ? (
+              {historyError ? (
+                <div className="py-8 text-center text-destructive">
+                  {historyError instanceof Error
+                    ? historyError.message
+                    : 'Failed to load job history'}
+                </div>
+              ) : history.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No execution history yet.</p>
               ) : (
                 <div className="space-y-2">

@@ -10,7 +10,8 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // wrapped, not cracked open, mirroring how the k8s DEPLOY plan wraps deployK3s.
 // The shared tail is decomposed into ordered steps so the load-bearing
 // buckets-last ordering (app bucket → state bucket → backup bucket, all AFTER
-// Pulumi teardown) is a first-class, snapshot-locked property of the plan.
+// Pulumi teardown) is a first-class property of the plan, pinned by the
+// sequence tests below.
 
 // compose / compose-ha: no GitHub environment delete, no summary note.
 // remove-stack-state sits between the teardown and the buckets: the compose

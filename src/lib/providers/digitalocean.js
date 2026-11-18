@@ -22,9 +22,16 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-unavailable.js';
 import { readOperatorVar } from '../operator-env.js';
-import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
-import { BaseProvider, deleteFailure, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  normalizePublicKey,
+  replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
+  waitUntilServerUp,
+} from './base.js';
+import { deleteServerAt } from './delete-server.js';
+import { decodeLabels } from './tag-labels.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
 // touches, mirroring Hetzner's set: SSH and the k8s API.
@@ -66,61 +73,9 @@ export function encodeLabels(labels = {}) {
   return Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
 }
 
-/**
- * The one key this codebase tags resources with whose canonical (pre-encode)
- * form contains a character `encodeLabel` mangles — `/` becomes `-`, so
- * `cluster-autoscaler/node` round-trips through the wire as
- * `cluster-autoscaler-node`. `encodeLabel`'s mangling is lossy IN GENERAL
- * (any `-` on the wire is ambiguous between "was always a dash" and "was
- * some other disallowed character"), but within this codebase's known,
- * fixed tag-key set (see serverLabels/volumeLabels' consumers — destroy.js's
- * cleanup* policy functions and carbon-autoscaler's node-group selector) no
- * OTHER key is spelled `cluster-autoscaler-node` before encoding, so
- * un-mangling this one prefix back to its slash form is unambiguous here. A
- * future key that introduces its own `/` (or any other mangled character)
- * needs its own entry, or decodeLabels silently returns the wire-mangled key
- * instead of the original.
- * @type {Object<string,string>}
- */
-const KNOWN_MANGLED_LABEL_KEYS = { 'cluster-autoscaler-node': 'cluster-autoscaler/node' };
-
-/**
- * Decode a DO tag array back into a flat label map — the inverse of
- * encodeLabels for this codebase's known key set (see
- * KNOWN_MANGLED_LABEL_KEYS's doc for the one collision this does NOT attempt
- * to resolve generically). Splits each tag on its FIRST `:` — safe because
- * every value this codebase encodes (cluster/environment/project names,
- * `vibecarbon`, `static`, `worker-pool`, ...) is itself colon-free. Tags
- * that don't contain `:` (e.g. a plain un-encoded tag from outside
- * vibecarbon) are skipped rather than guessed at.
- * @param {string[]|null} [tags]
- * @returns {Object<string,string>}
- */
-export function decodeLabels(tags = []) {
-  const out = {};
-  for (const tag of tags || []) {
-    const sep = tag.indexOf(':');
-    if (sep === -1) continue;
-    const wireKey = tag.slice(0, sep);
-    out[KNOWN_MANGLED_LABEL_KEYS[wireKey] ?? wireKey] = tag.slice(sep + 1);
-  }
-  return out;
-}
-
-/**
- * Normalize an OpenSSH public key to `${type} ${base64Body}` for MATERIAL
- * comparison. DigitalOcean dedupes SSH keys by fingerprint (the type+body
- * bytes) account-wide, regardless of name or trailing comment — see
- * createSSHKey's doc for why this matters. Collapses whitespace runs and
- * drops the optional trailing comment field, so two representations of the
- * same key (different comment, different spacing) normalize identically.
- * @param {string} [publicKey]
- * @returns {string}
- */
-export function normalizePublicKey(publicKey) {
-  const [type, body] = (publicKey || '').trim().split(/\s+/);
-  return `${type || ''} ${body || ''}`.trim();
-}
+// decodeLabels, the inverse of encodeLabels, is the same for the four
+// tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
+export { decodeLabels };
 
 /** @typedef {import('./base.js').ReservedIpRelease} ReservedIpRelease */
 
@@ -557,16 +512,14 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s database-node boot user-data — wraps the new
-   * `carbon/cloud-init/k3s/do-db-init.sh` template (M3 Task 5) via
-   * loadCloudInit/renderScript. do-db-init.sh is do-worker-init.sh
-   * plus boot-time `--node-label`/`--node-taint` k3s agent flags (dedicated
-   * Database node-pool isolation, applied at join time rather than a
-   * post-join `kubectl label`/`kubectl taint` step) and an async
-   * containerd image-prewarm block — see the template's own comments. Same
-   * var set as getK8sWorkerUserData (master_ip is a template var here too,
-   * since this node is always created after the master, unlike the master
-   * template).
+   * Render this provider's k3s database-node boot user-data: the worker
+   * template `carbon/cloud-init/k3s/do-worker-init.sh` loaded as the db role,
+   * which adds boot-time `--node-label`/`--node-taint` k3s agent flags
+   * (dedicated database node-pool isolation, applied at join time rather
+   * than a post-join `kubectl label`/`kubectl taint` step; AGENT_ROLES in
+   * cloud-init.js). Same var set as getK8sWorkerUserData (master_ip is a
+   * template var here too, since this node is always created after the
+   * master, unlike the master template).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -579,7 +532,7 @@ export class DigitalOceanProvider extends BaseProvider {
    */
   static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('do-db-init.sh'), vars);
+    return renderScript(loadCloudInit('do-worker-init.sh', { role: 'db' }), vars);
   }
 
   // ── Compose-tier replacement-server identity — see base.js's doc block ──
@@ -694,41 +647,13 @@ export class DigitalOceanProvider extends BaseProvider {
     return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
   }
 
-  /**
-   * Returns server types available in the given region. Uses live
-   * per-region data when available (populated by fetchServerTypes),
-   * otherwise falls back to the full FALLBACK_SERVER_TYPES catalog (no
-   * offline per-region rule; see FALLBACK_SERVER_TYPES).
-   *
-   * Entries carry `architecture: 'x86'` for parity with
-   * HetznerProvider.getServerTypesForRegion — the field the shared prompt
-   * builders filter on (lib/server-types.js `filterAmd64Types`). It is a
-   * constant here because DigitalOcean sells NO ARM instances at all: 31 size
-   * slugs across the s/c/g/gd/m/gpu families, none of them ARM, and DO's own
-   * CCM and CSI publish amd64-only images regardless.
-   * @param {string} region - Region slug
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = DigitalOceanProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in DigitalOceanProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...DigitalOceanProvider.SERVER_TYPES[name],
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(DigitalOceanProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): every entry `architecture: 'x86'`, the field the shared prompt
+  // builders filter on (lib/server-types.js `filterAmd64Types`), because
+  // DigitalOcean sells NO ARM instances at all (31 size slugs across the
+  // s/c/g/gd/m/gpu families, none of them ARM, and DO's own CCM and CSI
+  // publish amd64-only images regardless); and offline, DO's uniform Basic
+  // droplet line means a requested type is assumed stocked everywhere.
 
   /**
    * The static HA standby pair for a given primary: a DIFFERENT region on
@@ -747,46 +672,11 @@ export class DigitalOceanProvider extends BaseProvider {
       sgp1: 'syd1',
       syd1: 'sgp1',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = DigitalOceanProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(DigitalOceanProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && DigitalOceanProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(DigitalOceanProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      // No same-continent partner (e.g. a future single-region continent).
+      'sfo3'
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-
-    // No same-continent partner (e.g. a future single-region continent).
-    return 'sfo3';
-  }
-
-  /**
-   * Returns the equivalent server type available in a target region.
-   * Mirrors HetznerProvider.resolveServerTypeForRegion's walk: if live data
-   * shows the requested type isn't available in the target region, fall
-   * back to the role's cheapest stocked pick of at least its RAM; offline, DO's
-   * uniform Basic droplet line means the requested type is always assumed
-   * available (no architecture-split fallback to reconcile, unlike
-   * Hetzner's cax/cpx case).
-   * @param {string} serverType - Original server type slug
-   * @param {string} targetRegion - Region to resolve for
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = DigitalOceanProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(DigitalOceanProvider, serverType, targetRegion, role);
-    }
-
-    // Offline fallback — no architecture split to reconcile.
-    return serverType;
   }
 
   /**
@@ -802,8 +692,9 @@ export class DigitalOceanProvider extends BaseProvider {
   // Transport choice mirrors HetznerProvider method-for-method: the original
   // CRUD surface (createServer/deleteServer(no-wait)/getServer/waitForServer/
   // createSSHKey) goes through `this.apiRequest`; list/firewall/teardown
-  // methods (introduced alongside C9/C10a on Hetzner) use a direct
-  // `fetchWithRetry` with a bare Authorization header, matching hetzner.js's
+  // methods (introduced alongside C9/C10a on Hetzner) use a `fetchWithRetry`
+  // with a bare Authorization header (`this.bareRequest` where that is the
+  // only header), matching hetzner.js's
   // own split — getServerType (M3 Task 1) joins this group. getServerSummary
   // stays a single raw `fetch` with a hard 5s abort (never
   // fetchWithRetry/apiRequest) — see BaseProvider's doc.
@@ -1016,43 +907,10 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<void|boolean>}
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    if (!waitUntilGone) {
-      const response = await this.apiRequest(`/droplets/${serverId}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 404) {
-        const error = await response.json();
-        throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
-      }
-      return;
-    }
-
-    const response = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/droplets/${serverId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
+    return deleteServerAt(this, `/droplets/${serverId}`, serverId, {
+      waitUntilGone,
+      reason: (error) => error.message,
     });
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json();
-      throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
-    }
-
-    if (response.status !== 404) {
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${DigitalOceanProvider.API_BASE}/droplets/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 60_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
   }
 
   /**
@@ -1072,7 +930,7 @@ export class DigitalOceanProvider extends BaseProvider {
       body: JSON.stringify({ type: 'rename', name }),
     });
     if (!response.ok) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({}));
       throw new Error(`Failed to rename server: ${error.message || 'Unknown error'}`);
     }
   }
@@ -1105,27 +963,15 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
+    return waitUntilServerUp(
+      timeout,
+      async () => {
         const response = await this.apiRequest(`/droplets/${serverId}`);
         const { droplet } = await response.json();
-
-        if (droplet.status === 'active' && DigitalOceanProvider.getPublicIP(droplet)) {
-          return droplet;
-        }
-      } catch (error) {
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+        return droplet;
+      },
+      (droplet) => droplet.status === 'active' && DigitalOceanProvider.getPublicIP(droplet),
+    );
   }
 
   /**
@@ -1139,22 +985,10 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${DigitalOceanProvider.API_BASE}/droplets/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const { droplet } = await response.json();
-      return {
-        status: droplet.status,
-        serverType: droplet.size_slug || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/droplets/${serverId}`, ({ droplet }) => ({
+      status: droplet.status,
+      serverType: droplet.size_slug || null,
+    }));
   }
 
   /**
@@ -1221,7 +1055,7 @@ export class DigitalOceanProvider extends BaseProvider {
       return ssh_key.id;
     }
 
-    const error = await createResponse.json();
+    const error = await createResponse.json().catch(() => ({}));
     const message = error.message || 'Unknown error';
 
     if (createResponse.status === 422 && /already in use/i.test(message)) {
@@ -1256,29 +1090,6 @@ export class DigitalOceanProvider extends BaseProvider {
     }
 
     throw new Error(`Failed to create SSH key: ${message}`);
-  }
-
-  /**
-   * List ALL droplets, optionally filtered by labels, walking pagination
-   * (B0-4 semantics: non-ok first page → [], mid-walk → collected so far).
-   * DO's droplet list only supports filtering by a SINGLE `tag_name` per
-   * request (no AND-combination query param, and `tag_name` can't be
-   * combined with other filters) — this is a genuine behavior change from
-   * Hetzner's server-side `label_selector=k=v,k2=v2` AND, not a rename (M3
-   * dossier §7). The FIRST entry of `labels` (caller-ordered — put the most
-   * selective predicate first, e.g. groups.js's
-   * `{'cluster-autoscaler/node': groupId, cluster: clusterName}` already
-   * does) drives the single server-side `tag_name` query; any remaining
-   * entries are matched client-side against each returned droplet's
-   * `tags[]` array using the SAME `encodeLabel` encoding, so the wire tag
-   * string here is byte-identical to what createServer/the k8s Pulumi
-   * programs tag droplets with — this is the destroy-sweep + carbon-
-   * autoscaler correctness contract (M3 Task 1).
-   * @param {object} [labels]
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
   }
 
   /**
@@ -1350,10 +1161,7 @@ export class DigitalOceanProvider extends BaseProvider {
   async findOrCreateProject(name) {
     let page = 1;
     for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/projects?per_page=200&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
+      const response = await this.bareRequest(`/projects?per_page=200&page=${page}`);
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         throw new Error(
@@ -1584,10 +1392,7 @@ export class DigitalOceanProvider extends BaseProvider {
       const fw = await this.findFirewallByName(name);
       if (!fw) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/firewalls/${fw.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/firewalls/${fw.id}`, { method: 'DELETE' });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1678,10 +1483,7 @@ export class DigitalOceanProvider extends BaseProvider {
       const vpc = vpcs.find((v) => v.name === name);
       if (!vpc) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/vpcs/${vpc.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
       if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
       const body = await res.text().catch(() => '');
       return {
@@ -1710,11 +1512,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/volumes/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/volumes/${volumeId}`);
   }
 
   /**
@@ -1842,10 +1640,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @throws when the read fails
    */
   async reservedIpAssignment(address, labels) {
-    const response = await fetchWithRetry(
-      `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/reserved_ips/${address}`);
     if (response.status === 404) return { found: false };
     if (!response.ok) {
       throw new Error(`GET /reserved_ips/${address} failed: HTTP ${response.status}`);
@@ -1879,11 +1674,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(
-      `${DigitalOceanProvider.API_BASE}/load_balancers/${lbId}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/load_balancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors (Task 7) ───────────────────────────

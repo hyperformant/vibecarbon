@@ -27,10 +27,12 @@ import {
   DB_GUARD_PROTOCOL_MARKER,
   DB_POD,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_QUERY_MS,
   POD_EXEC_WRITE_MS,
 } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
+import { isComposeTier } from './tier-registry.js';
 import {
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
@@ -55,7 +57,7 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
 export const DB_STS_BOOT_TIMEOUT_S = 600;
 
 /** Staged restore fetches stream at least this fast; it sizes the rollout wait (M1). */
-export const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
+const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
 
 /**
  * The db rollout wait for a restore of `sizeBytes`: the boot floor, or the
@@ -657,7 +659,7 @@ export const STALE_ATTACH_EVENT_PATTERN =
  * slow to appear clears within the first few retries; two minutes of
  * `mkfs` on a device that still does not exist is the stale state itself.
  */
-export const STALE_ATTACH_PERSIST_MS = 120_000;
+const STALE_ATTACH_PERSIST_MS = 120_000;
 
 /**
  * The missing-device half of the signature. STALE_ATTACH_EVENT_PATTERN also
@@ -922,7 +924,7 @@ export async function verifyStreaming({
  * The primary's view of its standby: the best `state` in pg_stat_replication
  * (`streaming` sorts first), or no row when nothing is connected.
  */
-export const STREAMING_STATE_SQL =
+const STREAMING_STATE_SQL =
   "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1";
 
 /**
@@ -1057,21 +1059,10 @@ export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = RE
   await sshKubectl(
     primaryIp,
     sshKeyPath,
-    [
-      'exec',
-      '-i',
-      '-n',
-      'vibecarbon',
+    dbExecArgv(['psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
+      stdin: true,
       pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-d',
-      'postgres',
-      '-v',
-      'ON_ERROR_STOP=1',
-    ],
+    }),
     { input: sql, timeout: POD_EXEC_WRITE_MS },
   );
 }
@@ -1289,7 +1280,7 @@ export function inPlaceProbeBudgetS(probeAttempts, probeDelayS) {
  *
  * @param {{envName?: string, standbyIp: string, primaryIp?: string, envConfig?: object}} o
  */
-export function assertReseedTarget({ envName, standbyIp, primaryIp, envConfig }) {
+function assertReseedTarget({ envName, standbyIp, primaryIp, envConfig }) {
   if (!envName) {
     throw new Error('reseed refused: no envName; the reseed reads its target from the env config');
   }
@@ -1333,7 +1324,7 @@ const DB_ROLE_INTENT_READ = Object.freeze([
  * a reseed's or a proven restore's old cluster) so pg_basebackup never ships
  * it. Prints VC_DISCARD_GONE once it is gone; one sh -c token.
  */
-export const SOURCE_DISCARD_DROP = Object.freeze([
+const SOURCE_DISCARD_DROP = Object.freeze([
   'sh',
   '-c',
   `rm -rf ${PGDATA_DIR}/.vc-discard; if [ -e ${PGDATA_DIR}/.vc-discard ] || [ -L ${PGDATA_DIR}/.vc-discard ]; then echo VC_DISCARD_LEFT; exit 1; fi; echo VC_DISCARD_GONE`,
@@ -1514,7 +1505,7 @@ export async function reseedStandbyInPlace({
   try {
     stage = await runInPlaceStage(
       () =>
-        kubectl(['-n', 'vibecarbon', 'exec', '-i', DB_POD, '-c', DB_CONTAINER, '--', 'sh'], {
+        kubectl(dbExecArgv(['sh'], { stdin: true }), {
           input: script,
           timeout: clientS * 1000,
         }),
@@ -1634,7 +1625,7 @@ const RESEEDED_FROM_READ = Object.freeze([
  * @param {(ms: number) => Promise<void>} [o.sleep]
  * @param {() => number} [o.now]
  */
-export async function waitForStandbyRecovery({
+async function waitForStandbyRecovery({
   exec,
   deadlineMs = DB_STS_BOOT_TIMEOUT_S * 1000,
   pollMs = 4000,
@@ -1728,7 +1719,7 @@ const DB_IDENTITY_SQL =
  * @param {string} text
  * @returns {{systemIdentifier: string|null, timeline: number|null}}
  */
-export function parseDbIdentity(text) {
+function parseDbIdentity(text) {
   const [sysid = '', tli = ''] = String(text ?? '')
     .trim()
     .split('|')
@@ -1827,16 +1818,6 @@ export const DB_IN_PLACE_STOP_UNSEEDED = Object.freeze([
 export const DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S = 120;
 
 const DB_POD_GET_ARGV = ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'];
-const dbExecArgv = (argv) => [
-  '-n',
-  'vibecarbon',
-  'exec',
-  DB_POD,
-  '-c',
-  DB_CONTAINER,
-  '--',
-  ...argv,
-];
 
 /** The db container's spec and status from a parsed pod, or nulls. */
 function dbContainerOf(pod) {
@@ -2274,19 +2255,17 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
     const out = await sshKubectl(
       ip,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        sql,
-      ],
+      dbExecArgv(
+        [
+          ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+          'psql',
+          '-U',
+          'postgres',
+          '-tAc',
+          sql,
+        ],
+        { pod },
+      ),
       { timeout: POD_EXEC_QUERY_MS },
     );
     return typeof out === 'string' ? out : '';
@@ -2294,16 +2273,34 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
 }
 
 /**
+ * A psql runner factory for a tier's database, `(ip) => exec(sql)`: the
+ * compose tiers run psql in the db container over ssh (composePsqlRunner,
+ * imported here only when needed: compose/ha.js imports this module), the k8s
+ * tiers in the db pod (k8sPsqlRunner).
+ *
+ * @param {string} tier
+ * @param {{ sshKeyPath: string, projectName: string }} opts
+ * @returns {Promise<(ip: string) => (sql: string, opts?: { readWrite?: boolean }) => Promise<string>>}
+ */
+export async function tierPsqlFor(tier, { sshKeyPath, projectName }) {
+  if (isComposeTier(tier)) {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    return (ip) => composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`);
+  }
+  return (ip) => k8sPsqlRunner(ip, sshKeyPath);
+}
+
+/**
  * How long a planned failover waits for a streaming standby to replay the
  * fenced primary's final WAL. A deadline, not a poll count (R3): the poll
  * interval only paces the reads.
  */
-export const CATCH_UP_DEADLINE_MS = 60_000;
+const CATCH_UP_DEADLINE_MS = 60_000;
 
 const LSN_RE = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
 
 /** How long the write fence (or its removal) may take to read back applied. */
-export const WRITE_FENCE_DEADLINE_MS = 15_000;
+const WRITE_FENCE_DEADLINE_MS = 15_000;
 
 /**
  * The backends a write fence terminates: client sessions, plus pg_cron job
@@ -2676,25 +2673,11 @@ export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
  */
 export async function isStandbyStreaming(standbyIp, sshKeyPath) {
   try {
-    const pod = await getPostgresPod(standbyIp, sshKeyPath);
-    const out = await sshKubectl(
+    const out = await k8sPsqlRunner(
       standbyIp,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        'SELECT status FROM pg_stat_wal_receiver',
-      ],
-      { timeout: POD_EXEC_QUERY_MS },
-    );
-    return (typeof out === 'string' ? out : '').trim() === 'streaming';
+    )('SELECT status FROM pg_stat_wal_receiver');
+    return out.trim() === 'streaming';
   } catch {
     return false;
   }
@@ -2710,32 +2693,27 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
  * @returns {Promise<string>}
  */
 export async function readK8sReplicationState(primaryIp, sshKeyPath) {
-  const pod = await getPostgresPod(primaryIp, sshKeyPath);
-  const result = await sshKubectl(
-    primaryIp,
-    sshKeyPath,
-    [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
-    ],
-    { timeout: POD_EXEC_QUERY_MS },
-  );
-  const out = (typeof result === 'string' ? result : '').trim();
-  // `psql -tAc` yields exactly one token: a pg_stat_replication.state value, or
-  // '' when no replica is connected. Anything else means the read itself failed —
-  // an SSH/kubectl error banner (e.g. "banner exchange: Connection timed out")
-  // leaked through as stdout. Throw so verifyStreaming RETRIES rather than letting
-  // the error text masquerade as a replication state in the deploy-abort message.
-  const VALID_STATES = new Set(['', 'startup', 'catchup', 'streaming', 'backup', 'stopping']);
-  if (!VALID_STATES.has(out)) {
+  const out = await k8sPsqlRunner(primaryIp, sshKeyPath)(STREAMING_STATE_SQL);
+  return replicationStateOf(out.trim());
+}
+
+/** Every pg_stat_replication.state value, and '' for no replica connected. */
+const REPLICATION_STATES = new Set(['', 'startup', 'catchup', 'streaming', 'backup', 'stopping']);
+
+/**
+ * The state a STREAMING_STATE_SQL read printed (trimmed), checked. `psql -tAc`
+ * yields exactly one token: a pg_stat_replication.state value, or '' when no
+ * replica is connected. Anything else means the read itself failed: an
+ * SSH/kubectl/docker error banner (e.g. "banner exchange: Connection timed
+ * out") leaked through as stdout. Throw so verifyStreaming RETRIES rather than
+ * letting the error text masquerade as a replication state in the deploy-abort
+ * message. Both HA tiers' verify reads go through it.
+ *
+ * @param {string} out
+ * @returns {string}
+ */
+export function replicationStateOf(out) {
+  if (!REPLICATION_STATES.has(out)) {
     throw new Error(`could not read pg_stat_replication (unexpected output: ${out.slice(0, 120)})`);
   }
   return out;

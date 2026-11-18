@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lte, or, sql } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb, type UserDb, withUserDb } from '../../db/client';
 import {
@@ -16,6 +16,7 @@ import { isSuperAdmin } from '../../lib/auth';
 import { sendEmail } from '../../lib/email';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { parseJsonBody } from '../../lib/validation';
 import { assertAal2, requireAal2 } from '../../middleware/requireAal2';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
@@ -86,6 +87,32 @@ const adminPaginationSchema = z.object({
   page: z.coerce.number().int().min(1).max(1000).optional().default(1),
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
 });
+
+/**
+ * The admin lists' query string, validated against adminPaginationSchema:
+ * `{ data }`, or a 400 naming what is wrong as `{ response }`.
+ */
+function parseAdminListQuery(
+  c: Context<{ Variables: HonoVariables }>
+): { data: z.infer<typeof adminPaginationSchema> } | { response: Response } {
+  const result = adminPaginationSchema.safeParse({
+    search: c.req.query('search'),
+    sortBy: c.req.query('sortBy'),
+    sortOrder: c.req.query('sortOrder'),
+    page: c.req.query('page'),
+    limit: c.req.query('limit'),
+  });
+  if (!result.success) {
+    const errors = result.error.issues.map((e) => e.message).join(', ');
+    return { response: c.json({ error: errors }, 400) };
+  }
+  return { data: result.data };
+}
+
+/** The `pagination` block of an admin list response. */
+function paginationJson(page: number, limit: number, total: number) {
+  return { page, limit, total: total || 0, totalPages: Math.ceil((total || 0) / limit) };
+}
 
 type OrgRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
@@ -271,7 +298,9 @@ v1Routes.delete('/me', requireAal2, async (c) => {
     }
   }
 
-  // Cancel any active Stripe subscriptions
+  // Cancel the user's active subscriptions with the active billing provider
+  // (Stripe, Paddle or Polar), so a deleted account is not billed again.
+  // stripe_customer_id holds the customer id at whichever provider that is.
   const [customer] = await adminDb
     .select({ stripeCustomerId: customers.stripeCustomerId })
     .from(customers)
@@ -280,21 +309,15 @@ v1Routes.delete('/me', requireAal2, async (c) => {
 
   if (customer?.stripeCustomerId) {
     try {
-      const { isStripeConfigured, getStripe } = await import('../../lib/stripe');
-      if (isStripeConfigured()) {
-        const stripe = getStripe();
-        const subscriptions = await stripe.subscriptions.list({
-          customer: customer.stripeCustomerId,
-          status: 'active',
-        });
-        for (const sub of subscriptions.data) {
-          await stripe.subscriptions.cancel(sub.id);
-        }
+      const { getBillingProvider } = await import('../../billing');
+      const provider = getBillingProvider();
+      if (provider.isConfigured()) {
+        await provider.cancelActiveSubscriptions(customer.stripeCustomerId);
       }
-    } catch (stripeError) {
+    } catch (billingError) {
       logger.warn(
-        { error: stripeError },
-        'Failed to cancel Stripe subscriptions during account deletion'
+        { error: billingError },
+        'Failed to cancel billing subscriptions during account deletion'
       );
     }
   }
@@ -327,20 +350,9 @@ v1Routes.post('/organizations', async (c) => {
   }
 
   // Parse and validate request body
-  let body: z.infer<typeof createOrganizationSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = createOrganizationSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, createOrganizationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // The org row and the creator's OWNER membership go in through adminDb, in
   // one transaction: the creator is not a member until the membership exists,
@@ -487,20 +499,9 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
   }
 
   // Parse and validate request body
-  let body: z.infer<typeof addMemberSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = addMemberSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, addMemberSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Find the user by email (stored lowercase by the auth API).
   let targetUser: { id: string; email: string; name: string } | undefined;
@@ -597,20 +598,9 @@ v1Routes.patch('/organizations/:orgId/members/:userId', async (c) => {
   const targetUserId = c.req.param('userId')!;
 
   // Parse and validate request body
-  let body: z.infer<typeof updateMemberRoleSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = updateMemberRoleSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, updateMemberRoleSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Promoting/transferring a member to OWNER is a high-privilege action —
   // require an aal2 (MFA-validated) session. Checked here, before the authz
@@ -816,30 +806,12 @@ v1Routes.delete('/organizations/:orgId', requireAal2, async (c) => {
 
 // List all organizations (super admin)
 v1Routes.get('/admin/organizations', async (c) => {
-  const user = c.get('user');
-
-  if (!user) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  // Validate and parse query params
-  const queryResult = adminPaginationSchema.safeParse({
-    search: c.req.query('search'),
-    sortBy: c.req.query('sortBy'),
-    sortOrder: c.req.query('sortOrder'),
-    page: c.req.query('page'),
-    limit: c.req.query('limit'),
-  });
-
-  if (!queryResult.success) {
-    const errors = queryResult.error.issues.map((e) => e.message).join(', ');
-    return c.json({ error: errors }, 400);
-  }
-
-  const { search, sortBy, sortOrder, page, limit } = queryResult.data;
+  const parsed = parseAdminListQuery(c);
+  if ('response' in parsed) return parsed.response;
+  const { search, sortBy, sortOrder, page, limit } = parsed.data;
   const offset = (page - 1) * limit;
 
   // Search filter (input validated by the Zod schema and bound as a
@@ -849,15 +821,17 @@ v1Routes.get('/admin/organizations', async (c) => {
     ? or(ilike(organizations.name, pattern), ilike(organizations.slug, pattern))
     : undefined;
 
-  // Sorting (validated against allowed values; 'email' does not apply here)
-  const sortColumns = {
-    name: organizations.name,
-    slug: organizations.slug,
-    plan: organizations.plan,
-    created_at: organizations.createdAt,
-  } as const;
-  const sortColumn = sortBy in sortColumns ? sortColumns[sortBy as keyof typeof sortColumns] : null;
-  const orderBy = sortColumn ? [sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn)] : [];
+  // 'email' does not apply to organizations: it sorts by created_at. The id
+  // breaks ties, so a page boundary between equal values is stable.
+  const sortColumn =
+    sortBy === 'name'
+      ? organizations.name
+      : sortBy === 'slug'
+        ? organizations.slug
+        : sortBy === 'plan'
+          ? organizations.plan
+          : organizations.createdAt;
+  const direction = sortOrder === 'asc' ? asc : desc;
 
   let rows: Array<OrganizationRow & { memberCount: number }>;
   let total: number;
@@ -877,7 +851,7 @@ v1Routes.get('/admin/organizations', async (c) => {
       })
       .from(organizations)
       .where(where)
-      .orderBy(...orderBy)
+      .orderBy(direction(sortColumn), asc(organizations.id))
       .limit(limit)
       .offset(offset);
     [{ value: total }] = await adminDb.select({ value: count() }).from(organizations).where(where);
@@ -895,42 +869,18 @@ v1Routes.get('/admin/organizations', async (c) => {
       createdAt: isoTimestamp(org.createdAt),
       updatedAt: isoTimestamp(org.updatedAt),
     })),
-    pagination: {
-      page,
-      limit,
-      total: total || 0,
-      totalPages: Math.ceil((total || 0) / limit),
-    },
+    pagination: paginationJson(page, limit, total),
   });
 });
 
 // List all users (super admin)
 v1Routes.get('/admin/users', async (c) => {
-  const user = c.get('user');
-
-  if (!user) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  // Validate and parse query params
-  const queryResult = adminPaginationSchema.safeParse({
-    search: c.req.query('search'),
-    sortBy: c.req.query('sortBy'),
-    sortOrder: c.req.query('sortOrder'),
-    page: c.req.query('page'),
-    limit: c.req.query('limit'),
-  });
-
-  if (!queryResult.success) {
-    const errors = queryResult.error.issues.map((e) => e.message).join(', ');
-    return c.json({ error: errors }, 400);
-  }
-
-  const { search, sortBy, sortOrder, page, limit } = queryResult.data;
-
+  const parsed = parseAdminListQuery(c);
+  if ('response' in parsed) return parsed.response;
+  const { search, sortBy, sortOrder, page, limit } = parsed.data;
   const offset = (page - 1) * limit;
 
   // Search across every user (input validated by the Zod schema and bound as
@@ -940,7 +890,8 @@ v1Routes.get('/admin/users', async (c) => {
     ? or(ilike(userTable.email, pattern), ilike(userTable.name, pattern))
     : undefined;
 
-  // 'slug' and 'plan' do not apply to users: they sort by created_at.
+  // 'slug' and 'plan' do not apply to users: they sort by created_at. The id
+  // breaks ties, so a page boundary between equal values is stable.
   const sortColumn =
     sortBy === 'email' ? userTable.email : sortBy === 'name' ? userTable.name : userTable.createdAt;
   const direction = sortOrder === 'asc' ? asc : desc;
@@ -994,12 +945,7 @@ v1Routes.get('/admin/users', async (c) => {
       lastSignIn: u.lastSignInAt?.toISOString() ?? null,
       createdAt: u.createdAt.toISOString(),
     })),
-    pagination: {
-      page,
-      limit,
-      total: total || 0,
-      totalPages: Math.ceil((total || 0) / limit),
-    },
+    pagination: paginationJson(page, limit, total),
   });
 });
 
@@ -1115,12 +1061,6 @@ v1Routes.post('/notifications/:notificationId/dismiss', async (c) => {
 
 // List all notifications (including inactive) for admin management
 v1Routes.get('/admin/notifications', async (c) => {
-  const user = c.get('user');
-
-  if (!user) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
@@ -1154,20 +1094,9 @@ v1Routes.post('/admin/notifications', async (c) => {
   if (blocked) return blocked;
 
   // Parse and validate request body
-  let body: z.infer<typeof createNotificationSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = createNotificationSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, createNotificationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   let notification: NotificationRow;
   try {
@@ -1219,20 +1148,9 @@ v1Routes.patch('/admin/notifications/:notificationId', async (c) => {
   const notificationId = c.req.param('notificationId');
 
   // Parse and validate request body
-  let body: z.infer<typeof updateNotificationSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = updateNotificationSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, updateNotificationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Only the fields the request carried
   const updateData: Partial<typeof notifications.$inferInsert> = {};

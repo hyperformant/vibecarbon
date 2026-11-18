@@ -73,6 +73,15 @@ const CALL_SITE_EXCEPTIONS: Array<{ file: string; call: string; reason: string }
       "so the bucket's own region deletes a real one. A bucket it skipped that no region then " +
       'deleted fails the sweep (listedButDeletedNowhere).',
   },
+  {
+    file: 'scripts/sweep-hetzner.js',
+    call: 'const result = await store.emptyAndDeleteBucket(name);',
+    reason:
+      'The CI safety-net script decides nothing about a missing bucket: every error from the ' +
+      'delete, that one included, is recorded as a gap (sweepS3Buckets), and a gap fails the ' +
+      "script's verdict (sweepVerdict), so it can never read clean " +
+      '(behaviour: tests/unit/scripts/sweep-hetzner-buckets.test.ts).',
+  },
 ];
 
 /** Regex literals that name a missing-bucket spelling, sanctioned because their input is text. */
@@ -180,9 +189,18 @@ function textMatchSites(): Array<{ file: string; line: number; body: string }> {
 
 describe('bucket-already-gone census', () => {
   it('finds the call sites it is meant to police (the walk itself works)', () => {
+    // The five sweeps share one bucket pass, sweepBuckets in sweep-core.ts:
+    // its catch is the site rule (a) polices for all of them. Each sweep
+    // file must still route its buckets through it, or its buckets would be
+    // deleted somewhere this walk does not look. (Until 2026-11-17 each
+    // sweep carried its own copy of the loop and was a site itself.)
     const files = new Set(callSites().map((s) => s.file));
+    expect(files).toContain('tests/e2e/utils/sweep-core.ts');
     for (const sweep of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
-      expect(files).toContain(`tests/e2e/utils/sweep-${sweep}.ts`);
+      const source = readFileSync(join(ROOT, `tests/e2e/utils/sweep-${sweep}.ts`), 'utf-8');
+      expect(source, `sweep-${sweep}.ts no longer calls sweepBuckets`).toMatch(
+        /\bawait sweepBuckets\(/,
+      );
     }
   });
 

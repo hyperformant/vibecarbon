@@ -14,8 +14,6 @@ import { resolvePrimary } from './resolve-primary.js';
 import { selectEnvironment } from './select-environment.js';
 import { requireTTYOrFlags } from './tty-guard.js';
 
-export { AmbiguousPrimaryError, resolvePrimary } from './resolve-primary.js';
-
 /**
  * @param {object} opts
  * @param {string} opts.actionVerb - verb for the env picker prompt (e.g. 'back up')

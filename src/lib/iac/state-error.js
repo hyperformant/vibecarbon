@@ -38,7 +38,7 @@
  */
 
 /** What actually went wrong, at the storage layer. */
-export const STATE_CAUSE = {
+const STATE_CAUSE = {
   /** The store asked us to slow down. Real backpressure; retry is correct. */
   THROTTLE: 'throttle',
   /** A lock is held. Contention we generally caused ourselves. */
@@ -66,14 +66,14 @@ export const STATE_CAUSE = {
 };
 
 /** Did cloud resources change before this failed? */
-export const STATE_PHASE = {
+const STATE_PHASE = {
   PRE_MUTATION: 'pre-mutation',
   POST_MUTATION: 'post-mutation',
   UNKNOWN: 'unknown',
 };
 
 /** What the caller is permitted to do about it. */
-export const STATE_RECOVERY = {
+const STATE_RECOVERY = {
   /** Retry the same operation. Only for failures that are idempotent-safe. */
   RETRY_IN_PLACE: 'retry-in-place',
   /** The mutation landed; verify state read-only and continue. */
@@ -138,7 +138,7 @@ const LOCK_BLOB_MISSING_PATTERN =
 // Exported: iac/index.js's recovery machinery consumes these SAME objects, so
 // the classifier and the recoveries cannot drift apart (review finding,
 // 2026-08-15: index.js carried live duplicates of all three).
-export const CHECKPOINT_STALE_PATTERN =
+const CHECKPOINT_STALE_PATTERN =
   /failed to load checkpoint[^\n]*(?:NoSuchKey|NoSuchBucket|code=NotFound)/i;
 
 // LIST authorization answering 403 with credentials that work. Observed

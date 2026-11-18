@@ -15,6 +15,7 @@ import { backupsBucketHolders, backupsTargetOf } from './lib/backups-bucket.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { runCommand } from './lib/command.js';
+import { knownHostsPath } from './lib/host-keys.js';
 
 // Handle Ctrl+C — without this, SIGINT is swallowed during subprocess/fetch
 // calls and the process continues to the next cleanup step instead of exiting.
@@ -44,6 +45,7 @@ import { fenceInfoLines } from './lib/deploy/hetzner-app-key-fence.js';
 import { haSshKeyName as haSshKeyNameFor } from './lib/deploy/k8s/ha-ssh-key.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
+import { stateS3Fields } from './lib/deploy/s3-record.js';
 import {
   isComposeTier,
   isHATier,
@@ -586,9 +588,9 @@ function cleanupLocalEnvFiles(cwd, envName) {
   const cleanupPaths = [
     sshKeyPathFor(envName, cwd),
     `${sshKeyPathFor(envName, cwd)}.pub`,
-    join(cwd, '.vibecarbon', `known_hosts_${envName}`),
-    join(cwd, '.vibecarbon', `known_hosts_${envName}-primary`),
-    join(cwd, '.vibecarbon', `known_hosts_${envName}-standby`),
+    knownHostsPath(envName, cwd),
+    knownHostsPath(`${envName}-primary`, cwd),
+    knownHostsPath(`${envName}-standby`, cwd),
     localKubeconfigPath(cwd, envName),
     localKubeconfigPath(cwd, `${envName}-primary`),
     localKubeconfigPath(cwd, `${envName}-standby`),
@@ -2879,6 +2881,34 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
   }
 }
 
+/**
+ * The compose tiers' surviving-server backstop (sweepEnvironmentServers) under
+ * a spinner: the servers it deletes join `results.servers`, and the spinner
+ * stops on one of three lines: what it deleted, none left, or inconclusive
+ * (the sweep recorded why in the leak report).
+ *
+ * @param {{ start: (m: string) => void, message: (m: string) => void, stop: (m: string) => void }} spin
+ * @param {object} opts sweepEnvironmentServers' arguments, with `results` for
+ *   its leak ledger and `envConfig` for the persisted roles
+ */
+async function sweepSurvivingServers(spin, { results, envConfig, ...sweep }) {
+  spin.start('Checking for surviving environment servers');
+  const { deleted, scanned } = await sweepEnvironmentServers({
+    ...sweep,
+    leaks: results.leaks,
+    roles: (envConfig.servers || []).map((sv) => sv.role),
+    onProgress: (message) => spin.message(message),
+  });
+  results.servers.push(...deleted);
+  spin.stop(
+    deleted.length > 0
+      ? `Deleted ${deleted.length} surviving server(s): ${deleted.join(', ')}`
+      : scanned
+        ? 'No surviving environment servers'
+        : 'Surviving-server check inconclusive (see the leak report)',
+  );
+}
+
 async function destroyComposeHATier({
   envConfig,
   projectConfig,
@@ -2942,28 +2972,17 @@ async function destroyComposeHATier({
   // or UNVERIFIED line instead of silence.
   if (!providerToken) return;
   const provider = new Provider(providerToken);
-  const s3 = tracker.spinner();
-  s3.start('Checking for surviving environment servers');
-  const { deleted: sweptServers, scanned } = await sweepEnvironmentServers({
+  await sweepSurvivingServers(tracker.spinner(), {
     provider,
-    leaks: results.leaks,
+    results,
     projectName: projectConfig.projectName,
     environment,
     args,
     deployMode: 'compose-ha',
-    roles: (envConfig.servers || []).map((sv) => sv.role),
+    envConfig,
     alreadyHandledIds: handledServerIds,
     providerName: Provider.NAME,
-    onProgress: (message) => s3.message(message),
   });
-  results.servers.push(...sweptServers);
-  s3.stop(
-    sweptServers.length > 0
-      ? `Deleted ${sweptServers.length} surviving server(s): ${sweptServers.join(', ')}`
-      : scanned
-        ? 'No surviving environment servers'
-        : 'Surviving-server check inconclusive (see the leak report)',
-  );
 
   // A flexible IP either side's compose program made before its server
   // (Scaleway, COMPOSE_FLOATING_IP): each side is its own stack
@@ -3101,27 +3120,17 @@ async function destroyComposeTier({
   // by-name lookup here was ever asked for (see lib/destroy/server-sweep.js).
   // Runs BEFORE the firewall delete so a straggler isn't holding it attached.
   if (providerToken) {
-    s.start('Checking for surviving environment servers');
-    const { deleted: sweptServers, scanned } = await sweepEnvironmentServers({
+    await sweepSurvivingServers(s, {
       provider,
-      leaks: results.leaks,
+      results,
       projectName: projectConfig.projectName,
       environment,
       args,
       deployMode: envConfig.deployMode,
-      roles: (envConfig.servers || []).map((sv) => sv.role),
+      envConfig,
       alreadyHandledIds: (envConfig.servers || []).map((sv) => sv.id).filter(Boolean),
       providerName: Provider.NAME,
-      onProgress: (message) => s.message(message),
     });
-    results.servers.push(...sweptServers);
-    s.stop(
-      sweptServers.length > 0
-        ? `Deleted ${sweptServers.length} surviving server(s): ${sweptServers.join(', ')}`
-        : scanned
-          ? 'No surviving environment servers'
-          : 'Surviving-server check inconclusive (see the leak report)',
-    );
   }
 
   // A flexible IP the compose program made before its server (Scaleway,
@@ -4822,17 +4831,10 @@ async function destroyK8sTier({
     const destroyS3Config = await resolveDestroyS3Config(
       Provider,
       projectConfig.projectName,
-      envConfig.s3 && {
-        bucket: envConfig.s3.bucket,
-        region: envConfig.s3.region,
-        endpoint: envConfig.s3.endpoint,
-        // Resolve the Pulumi backend to the dedicated state bucket. Falls
-        // back (via resolveBackendUrl's `?? bucket`) to the app bucket for
-        // envs deployed before the state-bucket split.
-        stateBucket: envConfig.s3.stateBucket,
-        stateBucketRegion: envConfig.s3.stateBucketRegion,
-        stateEndpoint: envConfig.s3.stateEndpoint,
-      },
+      // The Pulumi backend is the dedicated state bucket. resolveBackendUrl
+      // falls back (`?? bucket`) to the app bucket for envs deployed before
+      // the state-bucket split.
+      envConfig.s3 && stateS3Fields(envConfig),
     );
     // Pre-Pulumi sweep: reap cluster-autoscaler-spawned workers BEFORE
     // Pulumi tries to destroy the cluster network/firewall. CA-spawned
@@ -5410,14 +5412,7 @@ async function removePulumiStackStateEffect(ctx) {
   const s3Config = await resolveDestroyS3Config(
     Provider,
     projectConfig.projectName,
-    envConfig.s3 && {
-      bucket: envConfig.s3.bucket,
-      region: envConfig.s3.region,
-      endpoint: envConfig.s3.endpoint,
-      stateBucket: envConfig.s3.stateBucket,
-      stateBucketRegion: envConfig.s3.stateBucketRegion,
-      stateEndpoint: envConfig.s3.stateEndpoint,
-    },
+    envConfig.s3 && stateS3Fields(envConfig),
   );
   if (envConfig.s3 && !s3Config) {
     const keys =

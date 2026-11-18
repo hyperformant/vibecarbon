@@ -38,6 +38,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { errorFirstLine } from '../../cli/error-line.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
 import { composeWriterServices } from '../../services/standby-policy.js';
 import {
@@ -78,18 +79,16 @@ import { setupComposeBackupCron, sshRunAsync } from './index.js';
  * file it cannot push in two minutes is a broken archive, which the scale must
  * not cut over on.
  */
-export const ARCHIVE_WAIT_DEADLINE_MS = 120_000;
+const ARCHIVE_WAIT_DEADLINE_MS = 120_000;
 
 /** Close the current WAL file and name it. */
-export const SWITCH_WAL_SQL = 'SELECT pg_walfile_name(pg_switch_wal())';
+const SWITCH_WAL_SQL = 'SELECT pg_walfile_name(pg_switch_wal())';
 
 /** The archiver's last pushed and last failed file, `last|failed`. */
-export const ARCHIVER_STATE_SQL =
+const ARCHIVER_STATE_SQL =
   "SELECT coalesce(last_archived_wal, '') || '|' || coalesce(last_failed_wal, '') FROM pg_stat_archiver";
 
 const WAL_FILE_RE = /^[0-9A-F]{24}$/;
-
-const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
  * Has the archiver pushed `switchWal` (or a later file)? WAL file names sort
@@ -102,7 +101,7 @@ const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
  * @param {string} switchWal
  * @returns {boolean}
  */
-export function walArchivedThrough(lastArchived, switchWal) {
+function walArchivedThrough(lastArchived, switchWal) {
   const segment = String(lastArchived ?? '')
     .slice(0, 24)
     .toUpperCase();
@@ -194,7 +193,7 @@ export async function fenceComposePrimary({
       deps,
     });
     throw new Error(
-      `write fence on ${ip}: ${firstLine(err)}; ` +
+      `write fence on ${ip}: ${errorFirstLine(err)}; ` +
         (back.ok ? 'writes resumed there' : back.problems.join('; ')),
     );
   }
@@ -208,7 +207,7 @@ export async function fenceComposePrimary({
  *
  * @returns {Promise<{ ok: boolean, problems: string[] }>}
  */
-export async function unfenceComposePrimary({
+async function unfenceComposePrimary({
   environment,
   ip,
   sshKeyPath,
@@ -313,7 +312,7 @@ export async function rollbackComposeCutover({
       await setupCron(ip, sshKeyPath, projectName, backupConfig, { domain });
     } catch (err) {
       problems.push(
-        `the backup cron on ${ip} is not back (${firstLine(err)}); run vibecarbon deploy to reinstall it`,
+        `the backup cron on ${ip} is not back (${errorFirstLine(err)}); run vibecarbon deploy to reinstall it`,
       );
     }
   }
@@ -446,7 +445,7 @@ export async function rejoinComposeStandby({
     markUnproven({ environment });
     warn(
       `The standby ${standby.ip} could not be proven streaming from the primary ${primary.ip}: ` +
-        `${firstLine(err)}. Replication is marked degraded. ${hint}`,
+        `${errorFirstLine(err)}. Replication is marked degraded. ${hint}`,
     );
     return 'degraded';
   }

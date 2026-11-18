@@ -37,7 +37,7 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 /** archive_timeout in the shipped db (compose and k8s both set 900). */
-export const ARCHIVE_TIMEOUT_SECONDS = 900;
+const ARCHIVE_TIMEOUT_SECONDS = 900;
 const NAMESPACE = 'vibecarbon';
 const PROBE_TIMEOUT_MS = 10_000;
 
@@ -296,7 +296,7 @@ const GAP_READ_OK = 'VC_OK';
  * The shell that prints the gap record (and its aside copy while a base push
  * clears it), then the read sentinel. Runs in the db container.
  */
-export const WAL_GAP_READ_SH = `cat ${WAL_GAP_RECORDS.map((n) => `${PGDATA_PATH}/${n}`).join(' ')} 2>/dev/null; echo ${GAP_READ_OK}`;
+const WAL_GAP_READ_SH = `cat ${WAL_GAP_RECORDS.map((n) => `${PGDATA_PATH}/${n}`).join(' ')} 2>/dev/null; echo ${GAP_READ_OK}`;
 
 /**
  * The gap record: `<segment> <UTC time>` lines. Null when it is empty or

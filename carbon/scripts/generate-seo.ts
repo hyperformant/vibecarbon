@@ -28,17 +28,17 @@ import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
 import remarkRehype from 'remark-rehype';
 import { unified } from 'unified';
-import { readEnvFiles } from './lib/dotenv.js';
-import { isDraft, parseFrontmatter, substituteMdxProps } from './lib/seo-content';
+import {
+  decodeHtmlEntities,
+  getEnvValue,
+  isDraft,
+  loadSiteName,
+  loadSiteUrl,
+  parseFrontmatter,
+  substituteMdxProps,
+} from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = resolve(__dirname, '..');
-// Shell env wins (a blank export falls through), then .env.local over .env
-// (readEnvFiles layers those two).
-// Production builds receive these as build args (no .env.local in the image);
-// locally this falls back to whatever the project's .env files hold.
-const fileEnv = readEnvFiles(rootDir);
-const getEnvValue = (key: string): string | null => process.env[key] || fileEnv[key] || null;
 
 function readIfPresent(relPath: string): string | null {
   try {
@@ -48,39 +48,13 @@ function readIfPresent(relPath: string): string | null {
   }
 }
 
-function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-    .trim();
-}
-
 // src/client/index.html is the create-time-substituted, owner-editable source
 // for the site's name and description. Reading it here (rather than
 // duplicating the copy) is what keeps the crawler-facing metadata and the
 // browser-facing metadata from drifting apart when someone rebrands.
 const indexHtml = readIfPresent('src/client/index.html');
 
-/**
- * Human-facing brand name. Files under scripts/ are upgrade-managed, so this
- * one must not hardcode a create-time display-name placeholder of its own — a
- * `vibecarbon upgrade` replaces the file wholesale. Resolve the name from the
- * places that do record it instead: the environment, .env.local, then the
- * <title> in index.html — the last of which is what survives into the Docker
- * build, where .env.local is absent by design.
- */
-function loadSiteName(): string {
-  const fromEnv = getEnvValue('VITE_PROJECT_DISPLAY_NAME') || getEnvValue('PROJECT_DISPLAY_NAME');
-  if (fromEnv) return fromEnv;
-  const title = indexHtml?.match(/<title>([^<]*)<\/title>/);
-  if (title?.[1]?.trim()) return decodeHtmlEntities(title[1]);
-  return 'My SaaS';
-}
-
-const SITE_NAME = loadSiteName();
+const SITE_NAME = loadSiteName(indexHtml);
 
 /** Site-wide description, from the same `<meta name="description">` the browser gets. */
 function loadSiteDescription(): string {
@@ -90,11 +64,6 @@ function loadSiteDescription(): string {
 }
 
 const SITE_DESCRIPTION = loadSiteDescription();
-
-function loadSiteUrl(): string {
-  const value = getEnvValue('VITE_PUBLIC_URL') || getEnvValue('SITE_URL');
-  return (value || 'http://localhost:5173').replace(/\/$/, '');
-}
 
 /**
  * Admin contact email for MDX prop substitution. Like loadSiteName, this

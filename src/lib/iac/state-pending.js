@@ -256,7 +256,7 @@ export async function untrackedServers(servers, deployment, types, client) {
 }
 
 /** The ledger step that records which unfinished creates of `stackName` the user was told about. */
-export function pendingReportStep(stackName) {
+function pendingReportStep(stackName) {
   return `state-seal-pending ${stackName}`;
 }
 

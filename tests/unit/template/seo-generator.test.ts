@@ -32,6 +32,7 @@ const read = (relPath: string) => readFileSync(join(CARBON, relPath), 'utf-8');
 const seoScript = read('scripts/generate-seo.ts');
 const sitemapScript = read('scripts/generate-sitemap.ts');
 const rssScript = read('scripts/generate-rss.ts');
+const seoContent = read('scripts/lib/seo-content.ts');
 const seoLib = read('src/server/lib/seo.ts');
 const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
 
@@ -89,25 +90,32 @@ describe('production build-arg parity across generators', () => {
   // out with localhost URLs and the package.json name as the channel title
   // while sitemap.xml and llms.txt were fine.
   it('every generator honors the VITE_PUBLIC_URL build arg', () => {
+    // The shared loadSiteUrl reads it via the layered helper (shell env, which
+    // is where a Docker build arg lands, wins over the .env files) rather than
+    // a direct process.env.VITE_PUBLIC_URL access...
+    expect(seoContent, 'loadSiteUrl must read VITE_PUBLIC_URL via getEnvValue').toMatch(
+      /export function loadSiteUrl\(\)[^}]*getEnvValue\('VITE_PUBLIC_URL'\)/,
+    );
+    // ...and every generator takes its site URL from it.
     for (const [name, src] of [
       ['generate-seo.ts', seoScript],
       ['generate-sitemap.ts', sitemapScript],
       ['generate-rss.ts', rssScript],
     ] as const) {
-      // Each generator reads it via the shared layered helper (shell env,
-      // which is where a Docker build arg lands, wins over the .env files)
-      // rather than a direct process.env.VITE_PUBLIC_URL access.
-      expect(src, `${name} must read VITE_PUBLIC_URL via getEnvValue`).toContain(
-        "getEnvValue('VITE_PUBLIC_URL')",
+      expect(src, `${name} must import loadSiteUrl from lib/seo-content`).toMatch(
+        /import \{[^}]*\bloadSiteUrl\b[^}]*\} from '\.\/lib\/seo-content'/,
       );
+      expect(src, `${name} must call loadSiteUrl()`).toContain('loadSiteUrl()');
     }
   });
 
   it('the RSS channel title uses the display-name resolution, not the package name', () => {
     // package.json `name` is the npm slug (kebab-case project id), never the
     // human-facing brand. The display name lives in PROJECT_DISPLAY_NAME /
-    // the index.html <title>, same chain generate-seo.ts resolves.
-    expect(rssScript).toContain('PROJECT_DISPLAY_NAME');
+    // the index.html <title>, the chain the shared loadSiteName resolves for
+    // generate-seo.ts too.
+    expect(rssScript).toContain('loadSiteName(');
+    expect(seoContent).toMatch(/export function loadSiteName\([\s\S]*?PROJECT_DISPLAY_NAME/);
   });
 });
 

@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MANIFEST_ACCEPT, MANIFEST_DIGEST_SH } from '../../../src/lib/deploy/k8s/image-delivery.js';
 import { deliverImage } from '../../../src/lib/deploy/layer-delta.js';
 import { acquireUplinkLock } from '../../../src/lib/deploy/uplink-lock.js';
+import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
 
 // The layer delta (src/lib/deploy/layer-delta.js + layer-delta-remote.sh) end
 // to end on every store a deploy target can have: docker:29-dind with the
@@ -55,20 +56,7 @@ const K3S_APP = `${REG}:5000/vcdelta/app`;
 const LONG = 900_000;
 let lockRoot: string;
 
-type Run = { status: number | null; stdout: string; stderr: string };
-const run = (cmd: string, args: string[]): Run => {
-  const r = spawnSync(cmd, args, { encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-};
-const must = (cmd: string, args: string[]): string => {
-  const r = run(cmd, args);
-  if (r.status !== 0) {
-    throw new Error(
-      `${cmd} ${args.join(' ')} exited ${r.status}: ${r.stderr.trim() || r.stdout.trim()}`,
-    );
-  }
-  return r.stdout;
-};
+const { run, must } = dockerRunner({ maxBuffer: 256 * 1024 * 1024 });
 const docker = (...args: string[]) => must('docker', args);
 const sh = (container: string, script: string) =>
   must('docker', ['exec', container, 'sh', '-c', script]);
@@ -76,15 +64,6 @@ const fact = (target: string, key: string, value: unknown) =>
   console.log(
     `[layer-delta:${target}] ${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`,
   );
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const waitFor = (what: string, probe: () => boolean, timeoutMs = 120_000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (probe()) return;
-    sleepSync(1000);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
 const rmContainers = (...names: string[]) => {
   for (const n of names) run('docker', ['rm', '-f', '-v', n]);
 };

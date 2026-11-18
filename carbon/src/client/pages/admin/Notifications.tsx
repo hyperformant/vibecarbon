@@ -48,11 +48,9 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import type { NotificationType, NotificationVisibility } from '@/hooks/useNotifications';
 import { apiJson } from '@/lib/api';
 import { ContentPanel } from '../../components/ContentPanel';
-
-type NotificationType = 'info' | 'warning' | 'error' | 'success';
-type NotificationVisibility = 'all' | 'authenticated' | 'public';
 
 type AdminNotification = {
   id: string;

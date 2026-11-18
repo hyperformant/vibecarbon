@@ -1,11 +1,8 @@
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-
-const REPO_ROOT = resolve(__dirname, '../../../..');
-const CLI = join(REPO_ROOT, 'src', 'cli.js');
+import { runCli } from '../../_harness/index.js';
 
 // Every CLI subcommand that mutates or reads a project's tree must emit
 // the same friendly "not in a project" message and exit non-zero when
@@ -27,19 +24,26 @@ const CLI = join(REPO_ROOT, 'src', 'cli.js');
 // that lists registered projects when run outside a project. `console`
 // is also excluded — it doesn't need a project (it operates on global
 // Hetzner state).
+//
+// This table is the only "outside a project" test: each command's own file
+// used to carry a copy. Each row's argv is the union of the flags this table
+// and that copy passed (`-y` in most), so every flag the copies got through
+// the parser still goes through it here. The guard runs straight after the
+// parser in every command, before any positional is read.
 const IN_PROJECT_COMMANDS: Array<{ name: string; argv: string[] }> = [
-  { name: 'add', argv: ['add', 'observability'] },
-  { name: 'remove', argv: ['remove', 'observability'] },
+  { name: 'add', argv: ['add', 'observability', '-y'] },
+  { name: 'remove', argv: ['remove', 'observability', '-y'] },
   { name: 'up', argv: ['up'] },
   { name: 'down', argv: ['down'] },
   { name: 'reset', argv: ['reset', '-y'] },
-  { name: 'deploy', argv: ['deploy', 'prod'] },
+  { name: 'deploy', argv: ['deploy', 'prod', '-y'] },
   { name: 'destroy', argv: ['destroy', 'prod', '-y'] },
-  { name: 'backup', argv: ['backup', 'prod', '-l'] },
-  { name: 'restore', argv: ['restore', 'prod', '-l'] },
-  { name: 'failover', argv: ['failover', 'prod'] },
-  { name: 'scale', argv: ['scale', 'prod'] },
-  { name: 'upgrade', argv: ['upgrade'] },
+  { name: 'backup', argv: ['backup', 'prod', '-l', '-y'] },
+  { name: 'restore', argv: ['restore', 'prod', '-l', '-y'] },
+  { name: 'failover', argv: ['failover', 'prod', '-y'] },
+  { name: 'scale', argv: ['scale', 'prod', '-y'] },
+  { name: 'update', argv: ['update', 'prod', '-y'] },
+  { name: 'upgrade', argv: ['upgrade', '-y'] },
   { name: 'configure', argv: ['configure'] },
   { name: 'configure cicd', argv: ['configure', 'cicd', 'prod'] },
   { name: 'access', argv: ['access', 'list'] },
@@ -67,22 +71,19 @@ describe('vibecarbon — outside a project directory: canonical refusal', () => 
   });
 
   for (const { name, argv } of IN_PROJECT_COMMANDS) {
-    it(`${name} → emits "Not in a Vibecarbon project directory." and exits non-zero`, () => {
-      const result = spawnSync(process.execPath, [CLI, ...argv], {
-        cwd: tmp,
-        encoding: 'utf-8',
-        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
-        // Hard ceiling: the guard should run synchronously and return
-        // immediately. Anything that hangs past 15s is a regression.
-        timeout: 15000,
-      });
+    it(`${name} → emits "Not in a Vibecarbon project directory." and exits 1`, () => {
+      // runCli gives the child a throwaway HOME and a closed API port, so a
+      // command that misses its guard cannot touch the developer's
+      // ~/.vibecarbon or report to production. Hard ceiling: the guard runs
+      // synchronously and returns at once; past 15 s is a regression.
+      const result = runCli(argv[0], argv.slice(1), { cwd: tmp, timeoutMs: 15_000 });
 
-      const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
+      const combined = `${result.stdout}\n${result.stderr}`;
 
       expect(
-        result.status,
-        `${name}: expected non-zero exit. status=${result.status} signal=${result.signal} output:\n${combined}`,
-      ).not.toBe(0);
+        result.exitCode,
+        `${name}: expected exit 1 (assertInProjectDir). exit=${result.exitCode} output:\n${combined}`,
+      ).toBe(1);
       expect(combined, `${name}: missing canonical error message`).toContain(
         'Not in a Vibecarbon project directory.',
       );
@@ -128,20 +129,15 @@ describe('vibecarbon — inside a project but below its root: refusal names the 
     { name: 'up', argv: ['up'] },
     { name: 'deploy', argv: ['deploy', 'prod'] },
   ]) {
-    it(`${name} → refuses, names the project root, and exits non-zero`, () => {
-      const result = spawnSync(process.execPath, [CLI, ...argv], {
-        cwd: sub,
-        encoding: 'utf-8',
-        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
-        timeout: 15000,
-      });
+    it(`${name} → refuses, names the project root, and exits 1`, () => {
+      const result = runCli(argv[0], argv.slice(1), { cwd: sub, timeoutMs: 15_000 });
 
-      const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
+      const combined = `${result.stdout}\n${result.stderr}`;
 
       expect(
-        result.status,
-        `${name}: expected non-zero exit. status=${result.status} output:\n${combined}`,
-      ).not.toBe(0);
+        result.exitCode,
+        `${name}: expected exit 1. exit=${result.exitCode} output:\n${combined}`,
+      ).toBe(1);
       expect(combined, `${name}: missing canonical error message`).toContain(
         'Not in a Vibecarbon project directory.',
       );

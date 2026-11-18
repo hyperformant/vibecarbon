@@ -52,7 +52,7 @@ import { sshRun } from '../ssh.js';
 export const BOOT_MARK_LOG = '/var/log/vcboot';
 
 /** Written beside the log once a node's boot has been reported. */
-export const BOOT_REPORTED_SENTINEL = '/var/log/vcboot.done';
+const BOOT_REPORTED_SENTINEL = '/var/log/vcboot.done';
 
 /**
  * The one-letter phase ids the cloud-init scripts write, and the stage names

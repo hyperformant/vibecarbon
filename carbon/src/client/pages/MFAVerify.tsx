@@ -1,10 +1,10 @@
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate, useSearchParams } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
+import { AuthCardLayout, AuthLinkButton } from '../components/auth/AuthCardLayout';
 import { syncAdminCookie, useAuth } from '../components/auth/AuthProvider';
 import { TwoFactorCodeForm } from '../components/auth/TwoFactorCodeForm';
-import { Wordmark } from '../components/Logo';
 import { Button } from '../components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { getSafeRedirect, leavesThisHost, performRedirect } from '../lib/safe-redirect';
 
 /**
@@ -34,52 +34,33 @@ export default function MFAVerify() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      <header className="h-20">
-        <div className="mx-auto max-w-7xl h-full px-6 flex items-center">
-          <Link to="/" className="group">
-            <Wordmark />
-          </Link>
-        </div>
-      </header>
-
-      <div className="flex-1 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md shadow-lg shadow-primary/5">
-          {pendingMfaChallenge ? (
-            <>
-              <CardHeader className="text-center">
-                <CardTitle className="text-2xl text-primary">{t('auth.mfa.title')}</CardTitle>
-                <CardDescription>{t('auth.mfa.description')}</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <TwoFactorCodeForm onSubmit={handleVerify}>
-                  <Button type="button" variant="ghost" onClick={handleCancel} className="w-full">
-                    {t('auth.mfa.cancel')}
-                  </Button>
-                </TwoFactorCodeForm>
-                <p className="text-center text-sm text-muted-foreground">{t('auth.mfa.help')}</p>
-              </CardContent>
-            </>
-          ) : (
-            <>
-              <CardHeader className="text-center">
-                <CardTitle className="text-2xl text-primary">
-                  {t('auth.mfa.expiredTitle')}
-                </CardTitle>
-                <CardDescription>{t('auth.mfa.expiredDescription')}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Link
-                  to="/login"
-                  className="inline-flex items-center justify-center w-full h-9 px-3 rounded-4xl bg-primary text-primary-foreground hover:bg-primary/80 text-sm font-medium transition-all"
-                >
-                  {t('auth.signIn')}
-                </Link>
-              </CardContent>
-            </>
-          )}
-        </Card>
-      </div>
-    </div>
+    <AuthCardLayout>
+      {pendingMfaChallenge ? (
+        <>
+          <CardHeader className="text-center">
+            <CardTitle className="text-2xl text-primary">{t('auth.mfa.title')}</CardTitle>
+            <CardDescription>{t('auth.mfa.description')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <TwoFactorCodeForm onSubmit={handleVerify}>
+              <Button type="button" variant="ghost" onClick={handleCancel} className="w-full">
+                {t('auth.mfa.cancel')}
+              </Button>
+            </TwoFactorCodeForm>
+            <p className="text-center text-sm text-muted-foreground">{t('auth.mfa.help')}</p>
+          </CardContent>
+        </>
+      ) : (
+        <>
+          <CardHeader className="text-center">
+            <CardTitle className="text-2xl text-primary">{t('auth.mfa.expiredTitle')}</CardTitle>
+            <CardDescription>{t('auth.mfa.expiredDescription')}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <AuthLinkButton to="/login">{t('auth.signIn')}</AuthLinkButton>
+          </CardContent>
+        </>
+      )}
+    </AuthCardLayout>
   );
 }

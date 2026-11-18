@@ -39,7 +39,7 @@ export const FENCE_PROBE_STREAK = 3;
 /** The whole verification budget for one bucket. */
 export const FENCE_PROBE_BUDGET_MS = 120_000;
 /** Time between probes. */
-export const FENCE_PROBE_INTERVAL_MS = 5_000;
+const FENCE_PROBE_INTERVAL_MS = 5_000;
 
 /**
  * The infra key's store, as the fence uses it. `forRegion` gives the same

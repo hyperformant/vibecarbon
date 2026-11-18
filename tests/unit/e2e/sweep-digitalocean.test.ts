@@ -33,7 +33,6 @@ function fakeProvider(
     deleteVolume: vi.fn().mockResolvedValue(undefined),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
     deleteSSHKeyById: vi.fn().mockResolvedValue('deleted'),
-    listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -167,13 +166,14 @@ describe('sweepOrphanedDigitalOceanResources', () => {
   });
 
   it('deletes prefix-matching firewalls via the provider name API and ssh-keys/vpcs/load-balancers by id', async () => {
-    const provider = fakeProvider({
-      listLoadBalancers: vi.fn().mockResolvedValue([
-        { id: 'lb1', name: 'testapp-d3-lb' },
-        { id: 'lb2', name: 'other' },
-      ]),
-    });
+    const provider = fakeProvider();
     const fetchImpl = fakeFetch({
+      '/load_balancers': {
+        load_balancers: [
+          { id: 'lb1', name: 'testapp-d3-lb' },
+          { id: 'lb2', name: 'other' },
+        ],
+      },
       '/firewalls': {
         firewalls: [
           { id: 'f1', name: 'testapp-d3-fw' },

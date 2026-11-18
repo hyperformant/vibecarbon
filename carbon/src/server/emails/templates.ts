@@ -7,18 +7,11 @@
  */
 
 import type { HostServer } from '../../shared/host-maintenance';
+// Every interpolated text value goes through escapeHtml, so a name or org
+// name cannot inject HTML into an email.
+import { escapeHtml } from '../lib/html';
 
 const PROJECT_DISPLAY_NAME = '{{PROJECT_DISPLAY_NAME}}';
-
-/** Escape HTML entities to prevent HTML injection in emails */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 function layout(content: string): string {
   return `<!DOCTYPE html>

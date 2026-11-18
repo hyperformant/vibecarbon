@@ -2,8 +2,9 @@ import * as vultr from '@ediri/vultr';
 import * as pulumi from '@pulumi/pulumi';
 import { cidrToVultrRuleFields, encodeLabels } from '../../providers/vultr.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
-import { SERVER_OWNER_LABELS, serverResourceOptions } from '../create-timeout.js';
+import { serverResourceOptions } from '../create-timeout.js';
 import { spliceDockerInstall } from '../docker-install.js';
+import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
 
 // The Docker install spliced into the user data is the one shared by every
 // compose provider: see ../docker-install.js.
@@ -46,21 +47,8 @@ export function loadVultrComposeUserData() {
  * @returns {() => Promise<Record<string, unknown>>}
  */
 export function buildVultrComposeProgram(config) {
-  const name = `${config.projectName}-${config.environment}`;
-  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
-  // caller has always passed it: the same keys in the same order.
-  const labels = {
-    project: config.projectName,
-    environment: config.environment,
-    ...SERVER_OWNER_LABELS,
-    ...(config.labels ?? {}),
-  };
-  // Operator-IP firewall lock (H-2 guard, all sibling programs).
-  if (!config.allowedSshIps?.length) {
-    throw new Error(
-      'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
+  const { name, labels } = stackIdentity(config);
+  requireOperatorCidrs(config);
   const allowedSshIps = config.allowedSshIps;
   const userData = loadVultrComposeUserData();
 
@@ -151,7 +139,7 @@ export function buildVultrComposeProgram(config) {
       serverIp: instance.mainIp,
       serverId: instance.id.apply((id) => String(id)),
       firewallId: firewall.id.apply((id) => String(id)),
-      sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
+      sshKeyId: sshKeyIdOutput(sshKeyId),
     };
   };
 }

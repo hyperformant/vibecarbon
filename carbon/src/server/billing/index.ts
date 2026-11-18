@@ -7,6 +7,7 @@
  */
 
 import { env } from '../lib/env';
+import { priceIdsFor } from './price-ids';
 import type { BillingProvider, BillingProviderType } from './provider';
 import { PaddleProvider } from './providers/paddle';
 import { PolarProvider } from './providers/polar';
@@ -80,25 +81,5 @@ export function isBillingConfigured(): boolean {
  * back to plan names.
  */
 export function getProviderPriceIds(): { starter?: string; pro?: string } {
-  const providerType = env.BILLING_PROVIDER;
-
-  switch (providerType) {
-    case 'stripe':
-      return {
-        starter: env.STRIPE_PRICE_STARTER,
-        pro: env.STRIPE_PRICE_PRO,
-      };
-    case 'paddle':
-      return {
-        starter: env.PADDLE_PRICE_STARTER,
-        pro: env.PADDLE_PRICE_PRO,
-      };
-    case 'polar':
-      return {
-        starter: env.POLAR_PRICE_STARTER,
-        pro: env.POLAR_PRICE_PRO,
-      };
-    default:
-      return {};
-  }
+  return priceIdsFor(env.BILLING_PROVIDER);
 }

@@ -523,6 +523,9 @@ export function seedLockfileFromTemplate(templateDir, projectDir) {
   return writeTemplateLockfile(templateDir, projectDir, pkg.name, { version: pkg.version });
 }
 
+/** How many npm installs ensureLockfile runs before `npm ci` must accept the lock. */
+export const MAX_LOCKFILE_PASSES = 5;
+
 /**
  * Guarantee the project has the lockfile its Dockerfile is about to COPY.
  *
@@ -537,18 +540,25 @@ export function seedLockfileFromTemplate(templateDir, projectDir) {
  * lockfile already committed. This covers the paths where it doesn't — a
  * `create -skip-lockfile`, a clone that gitignored it, a hand-rolled project.
  *
- * npm gets the same convergence loop `create` uses: npm's optional-peer
- * subtrees can need more than one pass before `npm ci` accepts the result, and
- * a lockfile npm itself rejects would fail the Docker build and the scaffolded
- * CI workflow (both install with a strict `npm ci`). Validating here means the
- * operator learns about it while they can still act.
+ * `create` generates its lockfile through this too. npm gets a convergence
+ * loop: npm's optional-peer subtrees can need more than one pass before
+ * `npm ci` accepts the result, and a lockfile npm itself rejects would fail the
+ * Docker build and the scaffolded CI workflow (both install with a strict
+ * `npm ci`). Validating here means the operator learns about it while they can
+ * still act.
  *
  * @param {string} projectDir
  * @param {'npm'|'pnpm'|'bun'} packageManager
- * @param {{ onStep?: (message: string) => void }} [options]
- * @returns {{ lockfile: string, generated: boolean, accepted: boolean }}
+ * @param {{ onStep?: (message: string) => void, startMessage?: string, tick?: () => Promise<void> }} [options]
+ *   `startMessage` replaces the first step's line. `tick` is awaited before
+ *   the first install and after every install, where create repaints its spinner.
+ * @returns {Promise<{ lockfile: string, generated: boolean, accepted: boolean }>}
  */
-export function ensureLockfile(projectDir, packageManager, { onStep } = {}) {
+export async function ensureLockfile(
+  projectDir,
+  packageManager,
+  { onStep, startMessage, tick } = {},
+) {
   const lockfile = LOCKFILE_NAMES[packageManager];
 
   // bun wrote a binary bun.lockb before 1.2; either satisfies the build.
@@ -565,8 +575,10 @@ export function ensureLockfile(projectDir, packageManager, { onStep } = {}) {
     bun: ['bun', 'install'],
   }[packageManager];
 
-  onStep?.(`Generating ${lockfile} (required by the Docker build)`);
+  onStep?.(startMessage ?? `Generating ${lockfile} (required by the Docker build)`);
+  await tick?.();
   runCommand(generateCmd, { cwd: projectDir, cleanEnv: true, ignoreError: true });
+  await tick?.();
 
   if (packageManager !== 'npm') {
     return {
@@ -576,9 +588,10 @@ export function ensureLockfile(projectDir, packageManager, { onStep } = {}) {
     };
   }
 
-  const MAX_LOCKFILE_PASSES = 5;
   let accepted = false;
   for (let pass = 1; pass <= MAX_LOCKFILE_PASSES; pass++) {
+    // `ignoreError` makes a non-zero exit return null; success returns the
+    // captured stdout. `silent` keeps npm's output off the spinner.
     const valid = runCommand(['npm', 'ci', '--dry-run', '--no-audit', '--no-fund'], {
       cwd: projectDir,
       cleanEnv: true,
@@ -592,6 +605,7 @@ export function ensureLockfile(projectDir, packageManager, { onStep } = {}) {
     if (pass === MAX_LOCKFILE_PASSES) break;
     onStep?.(`Reconciling ${lockfile} (pass ${pass + 1}/${MAX_LOCKFILE_PASSES})`);
     runCommand(generateCmd, { cwd: projectDir, cleanEnv: true, ignoreError: true });
+    await tick?.();
   }
 
   return { lockfile, generated: existsSync(join(projectDir, lockfile)), accepted };

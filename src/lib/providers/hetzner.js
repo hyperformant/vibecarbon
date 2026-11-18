@@ -15,8 +15,11 @@ import {
   deleteFailure,
   deleteRefused,
   replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
   sweepLabels,
+  waitUntilServerUp,
 } from './base.js';
+import { deleteServerAt } from './delete-server.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
 // C9 — operator firewall access. Verbatim value-move of operator-ip.js's old
@@ -203,18 +206,14 @@ export class HetznerProvider extends BaseProvider {
    * @returns {string} the static pair, before prices
    */
   static conventionalStandbyRegion(primaryRegion) {
-    const continent = HetznerProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(HetznerProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && HetznerProvider.REGION_CONTINENT[r] === continent,
+    return (
+      // Keep the conventional nbg1 -> fsn1 EU pairing; every other region
+      // takes its first same-continent neighbour.
+      standbyPairOrNeighbour(HetznerProvider.REGION_CONTINENT, primaryRegion, { nbg1: 'fsn1' }) ??
+      // No same-continent partner (e.g. a future single-region continent) —
+      // fall back to the robust EU default, but never to the primary itself.
+      (primaryRegion === 'nbg1' ? 'fsn1' : 'nbg1')
     );
-    if (sameContinent.length > 0) {
-      // Keep the conventional nbg1<->fsn1 EU pairing where it applies.
-      if (primaryRegion === 'nbg1') return 'fsn1';
-      return sameContinent[0];
-    }
-    // No same-continent partner (e.g. a future single-region continent) —
-    // fall back to the robust EU default, but never to the primary itself.
-    return primaryRegion === 'nbg1' ? 'fsn1' : 'nbg1';
   }
 
   // Offline fallback catalog — used when the API is unreachable or no token is available.
@@ -526,9 +525,11 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s database-node boot user-data from
-   * `carbon/cloud-init/k3s/db-init.sh` via loadCloudInit/renderScript.
-   * hetzner-k8s.js's Pulumi program calls this for its db server.
+   * Render this provider's k3s database-node boot user-data: the worker
+   * template `carbon/cloud-init/k3s/worker-init.sh` loaded as the db role
+   * (the dedicated=db label and taint at join time; AGENT_ROLES in
+   * cloud-init.js). hetzner-k8s.js's Pulumi program calls this for its db
+   * server.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -538,7 +539,7 @@ export class HetznerProvider extends BaseProvider {
    */
   static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('db-init.sh'), vars);
+    return renderScript(loadCloudInit('worker-init.sh', { role: 'db' }), vars);
   }
 
   /**
@@ -1052,22 +1053,10 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${HetznerProvider.API_BASE}/servers/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const { server } = await response.json();
-      return {
-        status: server.status,
-        serverType: server.server_type?.name || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/servers/${serverId}`, ({ server }) => ({
+      status: server.status,
+      serverType: server.server_type?.name || null,
+    }));
   }
 
   /**
@@ -1082,10 +1071,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<{cores: number, memoryGb: number, architecture: string, disk: number}>}
    */
   async getServerType(name) {
-    const response = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/server_types?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/server_types?name=${encodeURIComponent(name)}`);
     if (!response.ok) {
       throw new Error(`Failed to fetch server type "${name}": ${response.status}`);
     }
@@ -1132,70 +1118,36 @@ export class HetznerProvider extends BaseProvider {
    *   `false` if it was already gone.
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    if (!waitUntilGone) {
-      const response = await this.apiRequest(`/servers/${serverId}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok && response.status !== 404) {
-        const error = await response.json();
-        throw new Error(`Failed to delete server: ${error.error?.message || 'Unknown error'}`);
-      }
-      return;
-    }
-
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/servers/${serverId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json();
-      throw new Error(`Failed to delete server: ${error.error?.message || 'Unknown error'}`);
-    }
-
     // Hetzner's DELETE is async — it returns 202 and the actual VM teardown
-    // continues for several seconds. Poll GET /servers/{id} until it returns
-    // 404, with a 90s deadline (empirical delete time on cx23 is well under
-    // that). Observed during compose restore. The same delete-then-poll fix is
-    // applied in destroyComposeHA.
-    if (response.status !== 404) {
-      // A throwing probe (transient) is treated as falsy and retried; on budget
-      // exhaustion we simply stop waiting — the return value below is unaffected.
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${HetznerProvider.API_BASE}/servers/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 90_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
+    // continues for several seconds, hence the poll (90s: empirical delete
+    // time on cx23 is well under that; observed during compose restore). The
+    // same delete-then-poll fix is applied in destroyComposeHA.
+    return deleteServerAt(this, `/servers/${serverId}`, serverId, {
+      waitUntilGone,
+      budgetMs: 90_000,
+      reason: (error) => error.error?.message,
+    });
   }
 
   /**
-   * Rename a server. Verbatim move of scale.js's old inline
-   * `PUT /servers/{id}` call (C10a-style primitive move onto the provider) —
-   * doesn't check response.ok: the caller (scale's rename-to-permanent-name
-   * step) wraps this in its own non-critical try/catch, since the new
-   * server works fine under its temporary name if the rename fails.
+   * Rename a server: `PUT /servers/{id}` with the new name. A refusal throws
+   * the Hetzner `{error: {message}}` shape, as every other provider's rename
+   * does; the caller (scale's rename-to-permanent-name step) wraps this in
+   * its own non-critical try/catch, since the new server works fine under
+   * its temporary name if the rename fails.
    * @param {number|string} serverId - Server ID
    * @param {string} name - New server name
    * @returns {Promise<void>}
    */
   async renameServer(serverId, name) {
-    await this.apiRequest(`/servers/${serverId}`, {
+    const response = await this.apiRequest(`/servers/${serverId}`, {
       method: 'PUT',
       body: JSON.stringify({ name }),
     });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(`Failed to rename server: ${error.error?.message || 'Unknown error'}`);
+    }
   }
 
   /**
@@ -1227,28 +1179,15 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
+    return waitUntilServerUp(
+      timeout,
+      async () => {
         const response = await this.apiRequest(`/servers/${serverId}`);
         const { server } = await response.json();
-
-        if (server.status === 'running') {
-          return server;
-        }
-      } catch (error) {
-        // Network errors - continue retrying
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+        return server;
+      },
+      (server) => server.status === 'running',
+    );
   }
 
   /**
@@ -1261,18 +1200,11 @@ export class HetznerProvider extends BaseProvider {
     // Hetzner paginates /ssh_keys at 25 entries/page by default. Long-lived
     // Hetzner projects accumulate dozens of keys; with the default pagination
     // the dedup scan below would silently miss keys on pages 2+, and we'd hit
-    // the very 409/"not unique" error the dedup is meant to prevent. Ask for
-    // the max allowed page size (50) and still walk pagination defensively.
-    const ssh_keys = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const resp = await this.apiRequest(`/ssh_keys?per_page=50&page=${page}`);
-      const body = await resp.json();
-      if (Array.isArray(body.ssh_keys)) ssh_keys.push(...body.ssh_keys);
-      const next = body.meta?.pagination?.next_page;
-      if (!next) break;
-      page = next;
-    }
+    // the very 409/"not unique" error the dedup is meant to prevent. The
+    // shared walk asks for the max page size (50) and follows every page. It
+    // is best effort: a refused page ends it with what it has, and the create
+    // below then says whether the key is new.
+    const ssh_keys = await this.#listAllPages('/ssh_keys', 'ssh_keys');
 
     const newKeyPart = publicKey.split(' ').slice(0, 2).join(' ');
 
@@ -1313,27 +1245,12 @@ export class HetznerProvider extends BaseProvider {
     });
 
     if (!createResponse.ok) {
-      const error = await createResponse.json();
+      const error = await createResponse.json().catch(() => ({}));
       throw new Error(`Failed to create SSH key: ${error.error?.message || 'Unknown error'}`);
     }
 
     const { ssh_key } = await createResponse.json();
     return ssh_key.id;
-  }
-
-  /**
-   * List ALL servers, optionally filtered by labels, walking pagination
-   * (B0-4). Long-lived projects exceed one 50-entry page, and the destroy
-   * sweeps that filter this list client-side would silently miss servers on
-   * pages 2+. Keeps the C10a destroy semantics otherwise: direct
-   * `fetchWithRetry` (NOT apiRequest — no Content-Type on a GET) and `[]` on
-   * a non-ok first page; a non-ok mid-walk returns the pages already
-   * collected.
-   * @param {object} [labels] - Labels to filter by
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
   }
 
   /**
@@ -1376,10 +1293,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async findServersByName(name, { strict = false } = {}) {
-    const response = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/servers?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/servers?name=${encodeURIComponent(name)}`);
     if (!response.ok) {
       if (strict) throw this.serverLookupError(name, response.status);
       return [];
@@ -1401,10 +1315,7 @@ export class HetznerProvider extends BaseProvider {
    *   applyOperatorCidrs's "skip silently for a not-yet-deployed env" case).
    */
   async findFirewallByName(name) {
-    const res = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/firewalls?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const res = await this.bareRequest(`/firewalls?name=${encodeURIComponent(name)}`);
     if (!res.ok) return null;
     const { firewalls } = await res.json();
     return firewalls?.[0] ?? null;
@@ -1523,7 +1434,8 @@ export class HetznerProvider extends BaseProvider {
   // with MECHANICAL substitutions only: the `apiToken` param became
   // `this.apiToken`, and each `https://api.hetzner.cloud/v1` URL literal became
   // the `${HetznerProvider.API_BASE}` template (byte-identical string). Every
-  // one keeps its direct `fetchWithRetry` (NOT this.apiRequest — apiRequest
+  // one keeps a bare `fetchWithRetry`, spelled `this.bareRequest` where the
+  // auth header is the only one (NOT this.apiRequest — apiRequest
   // adds a JSON Content-Type header and re-prefixes API_BASE, changing the wire
   // bytes) and, where present, its deliberately-un-retried raw-`fetch` poll
   // probe. The load-bearing teardown semantics (202-then-poll, `?name=`
@@ -1617,22 +1529,14 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<boolean>} true if a key was found and deleted (or 404)
    */
   async deleteSSHKeyByName(name) {
-    const listResponse = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/ssh_keys?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const listResponse = await this.bareRequest(`/ssh_keys?name=${encodeURIComponent(name)}`);
 
     const { ssh_keys } = await listResponse.json();
     const sshKey = ssh_keys?.[0];
 
     if (!sshKey) return false;
 
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/ssh_keys/${sshKey.id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/ssh_keys/${sshKey.id}`);
   }
 
   /**
@@ -1686,10 +1590,7 @@ export class HetznerProvider extends BaseProvider {
         });
         continue;
       }
-      const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/floating_ips/${ip.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const response = await this.bareRequest(`/floating_ips/${ip.id}`, { method: 'DELETE' });
       if (response.ok || response.status === 404) deleted.push(ip.ip);
       else {
         failed.push({
@@ -1761,12 +1662,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or 404
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/volumes/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/volumes/${volumeId}`);
   }
 
   /**
@@ -1784,12 +1680,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or 404
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/load_balancers/${lbId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/load_balancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors (Task 7) ───────────────────────────

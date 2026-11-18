@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { AuthUser } from '../../src/server/auth';
 import type { HonoVariables } from '../../src/server/types';
 
 /**
@@ -17,6 +18,28 @@ import type { HonoVariables } from '../../src/server/types';
  */
 export function mountRoute(prefix: string, routes: Hono<{ Variables: HonoVariables }>): Hono {
   const app = new Hono();
+  app.route(prefix, routes);
+  return app;
+}
+
+/**
+ * Like mountRoute, behind a stand-in for the session middleware that sets
+ * `c.get('user')` to `user` (null: an anonymous request).
+ *
+ * Example:
+ *   const res = await appWithUser({ id: 'u1' }, '/api/v1/files', filesRoutes).request(...);
+ */
+export function appWithUser(
+  user: Partial<AuthUser> | null,
+  prefix: string,
+  routes: Hono<{ Variables: HonoVariables }>
+): Hono<{ Variables: HonoVariables }> {
+  const app = new Hono<{ Variables: HonoVariables }>();
+  app.use('*', async (c, next) => {
+    // biome-ignore lint/suspicious/noExplicitAny: a partial user stands in for the session's
+    c.set('user', user as any);
+    await next();
+  });
   app.route(prefix, routes);
   return app;
 }

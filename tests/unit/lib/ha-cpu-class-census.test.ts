@@ -252,7 +252,8 @@ describe('HA sizes census: no price-only standby resolution outside the pickers'
     expect(users).toEqual(
       expect.arrayContaining([
         'src/lib/sizing.js',
-        'src/lib/providers/digitalocean.js',
+        // The base resolveServerTypeForRegion that four providers inherit.
+        'src/lib/providers/base.js',
         'src/lib/providers/hetzner.js',
       ]),
     );

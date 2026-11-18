@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — plain JS ops script, no types
 import {
@@ -8,6 +6,7 @@ import {
   delWithRetry,
   recheckResidue,
 } from '../../../scripts/sweep-hetzner.js';
+import { PROJECT_CLEAN } from '../../e2e/utils/preflight.js';
 
 describe('delWithRetry', () => {
   it('returns true without retrying when the first DELETE succeeds', async () => {
@@ -61,22 +60,14 @@ describe('sweep recheck coverage', () => {
   // (exactly how the 2026-07-16 floating-IP leak played out — deletes
   // FAILED, recheck only covered servers). Pin sweep ⊇ preflight.
   it('CLOUD_KINDS covers every resource kind preflight scans', () => {
-    const preflightSrc = readFileSync(join(__dirname, '../../e2e/utils/preflight.ts'), 'utf-8');
-    // Scoped to `checkHetznerProjectClean` specifically — `sweep-hetzner.js`
-    // only ever cleans Hetzner resources, so this invariant only makes
-    // sense against Hetzner's endpoint table. `checkDigitalOceanProjectClean`
-    // (added alongside the d1/d2 e2e reference scenarios) has its own
-    // endpoint table with no corresponding sweep script yet — that's a
-    // real, tracked gap (DO scenarios are opt-in/non-release-gating and
-    // don't run for real until Phase B), not something this invariant
-    // should silently swallow or falsely flag.
-    const hetznerFnMatch = preflightSrc.match(
-      /async function checkHetznerProjectClean[\s\S]*?\n}\n/,
-    );
-    expect(hetznerFnMatch, 'checkHetznerProjectClean not found in preflight.ts').toBeTruthy();
-    const preflightKinds = [
-      ...(hetznerFnMatch as RegExpMatchArray)[0].matchAll(/url: '([a-z_]+)\?per_page=\d+'/g),
-    ].map((m) => m[1]);
+    // Read from preflight's own table (PROJECT_CLEAN.hetzner), not from its
+    // source text: the kinds are the last path segment of each listing URL.
+    // Scoped to Hetzner because `sweep-hetzner.js` only ever cleans Hetzner
+    // resources; the other providers' rows have no sweep script of this
+    // kind (their safety net is tests/e2e/sweep-<provider>-ci.ts).
+    const preflightKinds = PROJECT_CLEAN.hetzner
+      .listings('testapp-')
+      .map((listing) => listing.url.replace('https://api.hetzner.cloud/v1/', ''));
     expect(preflightKinds.length).toBeGreaterThanOrEqual(7); // servers … volumes today
     const sweepKinds = new Set(CLOUD_KINDS.map(([type]: [string]) => type));
     for (const kind of preflightKinds) {

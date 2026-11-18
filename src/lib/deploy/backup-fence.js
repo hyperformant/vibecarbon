@@ -49,7 +49,7 @@ import { sshKubectl } from '../ssh.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { VC_COMPOSE } from './compose/command.js';
 import { sshRun } from './compose/index.js';
-import { DB_CONTAINER, DB_POD } from './db-workload.js';
+import { dbExecArgv } from './db-workload.js';
 import { k8sPsqlRunner } from './replication.js';
 
 /** The fence object, at the root of WALG_S3_PREFIX (the lineage folder). */
@@ -303,13 +303,6 @@ export function writeK8sBackupFence({ ip, sshKeyPath, primaryNode, deps = {} }) 
   return writeBackupFence({
     primaryNode: primaryNode ?? ip,
     exec: psql(ip),
-    runInDb: (script) =>
-      kubectl(
-        ip,
-        ['-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', script],
-        {
-          timeout: 60_000,
-        },
-      ),
+    runInDb: (script) => kubectl(ip, dbExecArgv(['sh', '-c', script]), { timeout: 60_000 }),
   });
 }

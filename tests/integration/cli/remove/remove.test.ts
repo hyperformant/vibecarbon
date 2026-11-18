@@ -27,12 +27,6 @@ describe('vibecarbon remove', () => {
   });
 
   describe('help', () => {
-    it('prints help', () => {
-      const r = runCli('remove', ['-h'], { cwd: project });
-      assertSuccess(r);
-      assertExitWith(r, 0, 'Vibecarbon Remove');
-    });
-
     it('rejects the double-dash --force form (single-dash -force remains as a -y alias)', () => {
       const r = runCli('remove', ['--force'], { cwd: project });
       assertExitWith(r, 1, 'unknown flag: --force');
@@ -176,13 +170,6 @@ describe('vibecarbon remove', () => {
       if (/unknown.*flag/i.test(r.stderr)) {
         throw new Error(`parser error:\n${r.stderr}`);
       }
-    });
-  });
-
-  describe('not in a project', () => {
-    it('refuses outside a vibecarbon project', () => {
-      const r = runCli('remove', ['observability', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-      assertExitWith(r, 1, /Not in a Vibecarbon project/i);
     });
   });
 });

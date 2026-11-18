@@ -9,17 +9,9 @@
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readEnvFiles } from './lib/dotenv.js';
-import { isDraft } from './lib/seo-content';
+import { isDraft, loadSiteName, loadSiteUrl, parseFrontmatter } from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = resolve(__dirname, '..');
-// Shell env wins (a blank export falls through), then .env.local over .env
-// (readEnvFiles layers those two).
-// Production builds receive VITE_PUBLIC_URL as a build arg (no .env.local in
-// the image); locally this falls back to whatever the project's .env files hold.
-const fileEnv = readEnvFiles(rootDir);
-const getEnvValue = (key: string): string | null => process.env[key] || fileEnv[key] || null;
 
 interface PostMeta {
   slug: string;
@@ -29,49 +21,18 @@ interface PostMeta {
   author?: string;
 }
 
-function loadSiteUrl(): string {
-  const value = getEnvValue('VITE_PUBLIC_URL') || getEnvValue('SITE_URL');
-  return (value || 'http://localhost:5173').replace(/\/$/, '');
-}
-
 /**
- * Human-facing brand name for the RSS channel — package.json `name` is the
- * npm slug, never the brand. Same resolution chain as generate-seo.ts:
- * environment, .env.local, then the <title> in index.html (which survives
- * into the Docker build, where .env.local is absent by design).
+ * Human-facing brand name for the RSS channel (PROJECT_DISPLAY_NAME, then the
+ * <title> in index.html; see loadSiteName), never the package.json name.
  */
 function loadProjectName(): string {
-  const fromEnv = getEnvValue('VITE_PROJECT_DISPLAY_NAME') || getEnvValue('PROJECT_DISPLAY_NAME');
-  if (fromEnv) return fromEnv;
+  let indexHtml: string | null = null;
   try {
-    const indexHtml = readFileSync(resolve(__dirname, '../src/client/index.html'), 'utf-8');
-    const title = indexHtml.match(/<title>([^<]*)<\/title>/);
-    if (title?.[1]?.trim()) {
-      return title[1]
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&')
-        .trim();
-    }
+    indexHtml = readFileSync(resolve(__dirname, '../src/client/index.html'), 'utf-8');
   } catch {
-    // index.html missing — fall through
+    // index.html missing: loadSiteName falls back to its default.
   }
-  return 'My SaaS';
-}
-
-function parseFrontmatter(content: string): Record<string, string> {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return {};
-  const fm: Record<string, string> = {};
-  for (const line of match[1].split('\n')) {
-    const [key, ...rest] = line.split(':');
-    if (key && rest.length) {
-      fm[key.trim()] = rest.join(':').trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  return fm;
+  return loadSiteName(indexHtml);
 }
 
 function loadPosts(): PostMeta[] {
@@ -81,7 +42,7 @@ function loadPosts(): PostMeta[] {
   return files
     .map((file): PostMeta | null => {
       const content = readFileSync(resolve(blogDir, file), 'utf-8');
-      const fm = parseFrontmatter(content);
+      const { fm } = parseFrontmatter(content);
       if (isDraft(fm)) return null;
       return {
         slug: file.replace('.mdx', ''),

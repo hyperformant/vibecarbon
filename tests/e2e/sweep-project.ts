@@ -12,10 +12,10 @@
  * tests/.env.e2e (same lookup the runner uses). A provider without one is
  * skipped, and at least one must be set.
  */
-import { existsSync, readFileSync } from 'node:fs';
+
 import { join } from 'node:path';
-import { parseDotenv } from '../../src/lib/dotenv.js';
 import { testConfig } from '../config.js';
+import { readE2EEnv } from './utils/e2e-env-file.js';
 import { sweepProjectOrphans } from './utils/sweep-provider.ts';
 
 const names = process.argv.slice(2).filter((n) => n.startsWith('testapp-'));
@@ -28,10 +28,7 @@ if (names.length === 0) {
 // bucket half can enumerate too: with only a compute token a sweep skips its
 // storage half and a leaked bucket survives. Real env wins: a blank export
 // counts as unset and falls back to this file, never the other way around.
-const envFile = join(import.meta.dirname, '..', '.env.e2e');
-const fileEnv = existsSync(envFile) ? parseDotenv(readFileSync(envFile, 'utf-8')) : {};
-const env: Record<string, string | undefined> = { ...fileEnv };
-for (const [k, v] of Object.entries(process.env)) if (v) env[k] = v;
+const env = readE2EEnv(join(import.meta.dirname, '..', '.env.e2e'));
 
 const providers = Object.entries(testConfig.e2e.providers)
   .map(([id, p]) => ({ id, token: env[p.computeTokenEnv] }))

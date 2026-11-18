@@ -150,8 +150,8 @@ describe('M3 Task 3 — do-worker-init.sh shape', () => {
   });
 });
 
-describe('M3 Task 5 — do-db-init.sh shape', () => {
-  const dbInit = loadCloudInit('do-db-init.sh');
+describe('M3 Task 5 — the db node shape (do-worker-init.sh as the db role)', () => {
+  const dbInit = loadCloudInit('do-worker-init.sh', { role: 'db' });
 
   it('pre-seeds the provider-id kubelet arg and cloud-provider=external', () => {
     expect(dbInit).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');

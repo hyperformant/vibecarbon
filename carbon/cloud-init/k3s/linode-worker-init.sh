@@ -147,6 +147,9 @@ fi
 # cloud controller keeps the preset providerID and clears the uninitialized
 # taint. --flannel-iface=eth1 pins pod-to-pod (VXLAN) traffic to the VPC
 # interface; no --flannel-backend flag (vxlan default).
+# The database node runs this same install: loadCloudInit fills the role
+# slots on the lines below with its labels and taint and its name in the
+# log lines (AGENT_ROLES in src/lib/iac/cloud-init.js).
 _m k
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
@@ -155,19 +158,21 @@ for attempt in 1 2 3 4 5; do
       --node-ip "$PRIVATE_IP" \
       --node-external-ip "$PUBLIC_IP" \
       --flannel-iface "eth1" \
-      --kubelet-arg="provider-id=linode://$NODE_ID"; then
+      --kubelet-arg="provider-id=linode://$NODE_ID"@{role_flags}; then
     K3S_INSTALL_OK=true
     break
   fi
-  echo "k3s worker install attempt $attempt failed (likely transient GitHub/CDN issue), retrying in 20s..."
+  echo "k3s @{role_label} install attempt $attempt failed (likely transient GitHub/CDN issue), retrying in 20s..."
   sleep 20
 done
 if [ "$K3S_INSTALL_OK" != "true" ]; then
-  echo "k3s worker install failed after 5 attempts -- check GitHub CDN status" >&2
+  echo "k3s @{role_label} install failed after 5 attempts -- check GitHub CDN status" >&2
   exit 1
 fi
 
+# The database node's user data leaves this include out: the deploy
+# installs the reporter there over SSH (AGENT_ROLES, cloud-init.js).
 # @include _host-reporter.sh
 
-echo "k3s worker installation complete!"
+echo "k3s @{role_name} installation complete!"
 _m e

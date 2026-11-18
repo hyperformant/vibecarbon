@@ -1,4 +1,5 @@
 import { scratchNamePrefix } from './namespace.js';
+import { describeIncomplete, type PageDialect, walkProviderPages } from './provider-pages.js';
 
 export type PreflightStatus = 'ok' | 'slow' | 'failed';
 
@@ -110,32 +111,34 @@ export async function runPreflight(args: {
       : checkCloudflare(args.cloudflareToken),
     needsHetzner ? checkS3() : skippedHetzner('s3'),
     checkDockerHub(),
-    needsHetzner ? checkHetznerProjectClean(args.hetznerToken) : skippedHetzner('hetzner-clean'),
+    needsHetzner
+      ? checkProjectClean('hetzner', args.hetznerToken)
+      : skippedHetzner('hetzner-clean'),
     ...(args.needsDigitalOcean
       ? [
           checkDigitalOcean(args.digitaloceanToken),
-          checkDigitalOceanProjectClean(args.digitaloceanToken),
+          checkProjectClean('digitalocean', args.digitaloceanToken),
           checkDigitalOceanSpaces(),
         ]
       : []),
     ...(args.needsLinode
       ? [
           checkLinode(args.linodeToken),
-          checkLinodeProjectClean(args.linodeToken),
+          checkProjectClean('linode', args.linodeToken),
           checkLinodeObjectStorage(),
         ]
       : []),
     ...(args.needsVultr
       ? [
           checkVultr(args.vultrToken),
-          checkVultrProjectClean(args.vultrToken),
+          checkProjectClean('vultr', args.vultrToken),
           checkVultrObjectStorage(),
         ]
       : []),
     ...(args.needsScaleway
       ? [
           checkScaleway(args.scalewayToken),
-          checkScalewayProjectClean(args.scalewayToken),
+          checkProjectClean('scaleway', args.scalewayToken),
           checkScalewayObjectStorage(),
         ]
       : []),
@@ -311,73 +314,6 @@ async function checkDigitalOceanSpaces(): Promise<PreflightCheck> {
 }
 
 /**
- * DigitalOcean project quota state — count residual `testapp-*` resources
- * (droplets/firewalls/ssh-keys/volumes) so a leaked prior d1/d2 run aborts
- * the matrix before provisioning rather than tripping a mid-run `422` or
- * silently reusing stale infra. Mirrors `checkHetznerProjectClean`'s
- * contract exactly (same prefix, same 5s-per-endpoint budget, same
- * non-fatal partial-failure handling) against DO's droplet/firewall/
- * account-keys/volumes endpoints.
- */
-async function checkDigitalOceanProjectClean(token?: string): Promise<PreflightCheck> {
-  if (!token) {
-    return { service: 'digitalocean-clean', status: 'failed', latencyMs: 0, detail: 'no token' };
-  }
-  const t0 = Date.now();
-  const prefix = scratchNamePrefix();
-  const endpoints: Array<{ url: string; key: string; label: string }> = [
-    { url: 'droplets?per_page=50', key: 'droplets', label: 'droplet' },
-    { url: 'firewalls?per_page=50', key: 'firewalls', label: 'firewall' },
-    { url: 'account/keys?per_page=50', key: 'ssh_keys', label: 'ssh_key' },
-    { url: 'volumes?per_page=50', key: 'volumes', label: 'volume' },
-  ];
-  const counts: Record<string, number> = {};
-  const errors: string[] = [];
-  await Promise.all(
-    endpoints.map(async ({ url, key, label }) => {
-      try {
-        const res = await fetch(`https://api.digitalocean.com/v2/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as Record<string, Array<{ name?: string }>>;
-        const items = body[key] ?? [];
-        const matching = items.filter((i) => i.name?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
-    }),
-  );
-  const latencyMs = Date.now() - t0;
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (total > 0) {
-    const breakdown = Object.entries(counts)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    return {
-      service: 'digitalocean-clean',
-      status: 'failed',
-      latencyMs,
-      detail: `${total} ${prefix}* resource(s) leaked from prior run (${breakdown}) — run sweep before matrix`,
-    };
-  }
-  if (errors.length > 0) {
-    return {
-      service: 'digitalocean-clean',
-      status: 'slow',
-      latencyMs,
-      detail: `partial: ${errors.slice(0, 2).join('; ')}`,
-    };
-  }
-  return { service: 'digitalocean-clean', status: 'ok', latencyMs };
-}
-
-/**
  * Linode API — `/v4/profile` is the canonical token-health check (mirrors
  * `checkDigitalOcean`'s `/v2/account` probe; same `failOn401` opt-in — a
  * 401 here means LINODE_API_TOKEN is genuinely bad).
@@ -423,71 +359,6 @@ async function checkLinodeObjectStorage(): Promise<PreflightCheck> {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     }),
   );
-}
-
-/**
- * Linode project quota state — count residual `testapp-*` resources
- * (instances/firewalls/volumes; Linode's label field is `label`, not
- * `name`, and its list envelope is `{data}` for every endpoint). Mirrors
- * `checkDigitalOceanProjectClean`'s contract exactly. Profile SSH keys are
- * deliberately not counted: unlike DO's account keys they never gate a
- * quota, and the sweep reaps them by label anyway.
- */
-async function checkLinodeProjectClean(token?: string): Promise<PreflightCheck> {
-  if (!token) {
-    return { service: 'linode-clean', status: 'failed', latencyMs: 0, detail: 'no token' };
-  }
-  const t0 = Date.now();
-  const prefix = scratchNamePrefix();
-  const endpoints: Array<{ url: string; label: string }> = [
-    { url: 'linode/instances?page_size=100', label: 'instance' },
-    { url: 'networking/firewalls?page_size=100', label: 'firewall' },
-    { url: 'volumes?page_size=100', label: 'volume' },
-  ];
-  const counts: Record<string, number> = {};
-  const errors: string[] = [];
-  await Promise.all(
-    endpoints.map(async ({ url, label }) => {
-      try {
-        const res = await fetch(`https://api.linode.com/v4/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as { data?: Array<{ label?: string }> };
-        const items = body.data ?? [];
-        const matching = items.filter((i) => i.label?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
-    }),
-  );
-  const latencyMs = Date.now() - t0;
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (total > 0) {
-    const breakdown = Object.entries(counts)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    return {
-      service: 'linode-clean',
-      status: 'failed',
-      latencyMs,
-      detail: `${total} ${prefix}* resource(s) leaked from prior run (${breakdown}) — run sweep before matrix`,
-    };
-  }
-  if (errors.length > 0) {
-    return {
-      service: 'linode-clean',
-      status: 'slow',
-      latencyMs,
-      detail: `partial: ${errors.slice(0, 2).join('; ')}`,
-    };
-  }
-  return { service: 'linode-clean', status: 'ok', latencyMs };
 }
 
 /**
@@ -543,77 +414,6 @@ async function checkVultrObjectStorage(): Promise<PreflightCheck> {
 }
 
 /**
- * Vultr project quota state — count residual `testapp-*` resources
- * (instances/firewall groups/ssh keys). Mirrors
- * `checkLinodeProjectClean`'s contract exactly (same prefix, same
- * 5s-per-endpoint budget, same non-fatal partial-failure handling), but
- * every endpoint names its identity field differently: instances carry
- * `label`, firewall GROUPS carry `description` (not `label`), ssh keys
- * carry `name`. Reading the wrong one would silently count zero forever.
- */
-async function checkVultrProjectClean(token?: string): Promise<PreflightCheck> {
-  if (!token) {
-    return { service: 'vultr-clean', status: 'failed', latencyMs: 0, detail: 'no token' };
-  }
-  const t0 = Date.now();
-  const prefix = scratchNamePrefix();
-  const endpoints: Array<{ url: string; key: string; field: string; label: string }> = [
-    { url: 'instances?per_page=100', key: 'instances', field: 'label', label: 'instance' },
-    {
-      url: 'firewalls?per_page=100',
-      key: 'firewall_groups',
-      field: 'description',
-      label: 'firewall',
-    },
-    { url: 'ssh-keys?per_page=100', key: 'ssh_keys', field: 'name', label: 'ssh_key' },
-  ];
-  const counts: Record<string, number> = {};
-  const errors: string[] = [];
-  await Promise.all(
-    endpoints.map(async ({ url, key, field, label }) => {
-      try {
-        const res = await fetch(`https://api.vultr.com/v2/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as Record<string, Array<Record<string, string>>>;
-        const items = body[key] ?? [];
-        const matching = items.filter((i) => i[field]?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
-    }),
-  );
-  const latencyMs = Date.now() - t0;
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (total > 0) {
-    const breakdown = Object.entries(counts)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    return {
-      service: 'vultr-clean',
-      status: 'failed',
-      latencyMs,
-      detail: `${total} ${prefix}* resource(s) leaked from prior run (${breakdown}) — run sweep before matrix`,
-    };
-  }
-  if (errors.length > 0) {
-    return {
-      service: 'vultr-clean',
-      status: 'slow',
-      latencyMs,
-      detail: `partial: ${errors.slice(0, 2).join('; ')}`,
-    };
-  }
-  return { service: 'vultr-clean', status: 'ok', latencyMs };
-}
-
-/**
  * Scaleway API — a one-row instance listing in the default zone is the
  * canonical token-health check (Scaleway auth is `X-Auth-Token: <secret
  * key>`, not Bearer; there is no unauthenticated /account analog). Same
@@ -658,147 +458,6 @@ async function checkScalewayObjectStorage(): Promise<PreflightCheck> {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     }),
   );
-}
-
-/**
- * Scaleway project quota state — count residual `testapp-*` resources
- * (instances/security groups/SBS volumes/flexible IPs). Mirrors
- * `checkVultrProjectClean`'s contract (same prefix, same 5s-per-endpoint
- * budget, same non-fatal partial-failure handling) with two Scaleway
- * twists: every endpoint is ZONE-scoped, so each resource family is
- * checked across the audited zone set; and SBS volumes live in the Block
- * Storage API, not the Instance API — and flexible IPs have no name, so
- * the IP arm scopes by the `project:<name>` ownership TAG the compose
- * program stamps (an unattached tagged IP bills €0.005/hr and is residue
- * by definition; untagged unattached IPs are ignored — they may belong to
- * a concurrent run in another namespace).
- */
-async function checkScalewayProjectClean(token?: string): Promise<PreflightCheck> {
-  if (!token) {
-    return { service: 'scaleway-clean', status: 'failed', latencyMs: 0, detail: 'no token' };
-  }
-  const t0 = Date.now();
-  const prefix = scratchNamePrefix();
-  const zones = ['fr-par-1', 'fr-par-2', 'nl-ams-1', 'nl-ams-2'];
-  const counts: Record<string, number> = {};
-  const errors: string[] = [];
-  const bump = (label: string, n: number) => {
-    if (n > 0) counts[label] = (counts[label] ?? 0) + n;
-  };
-  await Promise.all(
-    zones.flatMap((zone) => [
-      (async () => {
-        try {
-          const res = await fetch(
-            `https://api.scaleway.com/instance/v1/zones/${zone}/servers?per_page=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`server(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as { servers?: Array<{ name?: string }> };
-          bump('server', (body.servers ?? []).filter((s) => s.name?.startsWith(prefix)).length);
-        } catch (err) {
-          errors.push(
-            `server(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-      (async () => {
-        try {
-          const res = await fetch(
-            `https://api.scaleway.com/instance/v1/zones/${zone}/security_groups?per_page=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`security_group(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as { security_groups?: Array<{ name?: string }> };
-          bump(
-            'security_group',
-            (body.security_groups ?? []).filter((g) => g.name?.startsWith(prefix)).length,
-          );
-        } catch (err) {
-          errors.push(
-            `security_group(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-      (async () => {
-        try {
-          // Block Storage API — where every SBS root volume lives
-          // (terminate only DETACHES sbs_volume, the audited leak class).
-          const res = await fetch(
-            `https://api.scaleway.com/block/v1/zones/${zone}/volumes?page_size=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`volume(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as { volumes?: Array<{ name?: string }> };
-          bump('volume', (body.volumes ?? []).filter((v) => v.name?.startsWith(prefix)).length);
-        } catch (err) {
-          errors.push(
-            `volume(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-      (async () => {
-        try {
-          const res = await fetch(
-            `https://api.scaleway.com/instance/v1/zones/${zone}/ips?per_page=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`flexible_ip(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as {
-            ips?: Array<{ server?: { id?: string } | null; tags?: string[] }>;
-          };
-          // IPs have no name — ownership is the `project:<name>` tag the
-          // compose program stamps. Namespace-scoped like every other arm:
-          // only UNATTACHED IPs tagged with this namespace's prefix count
-          // (a concurrent laptop run's rigs must never abort a CI matrix).
-          bump(
-            'flexible_ip',
-            (body.ips ?? []).filter(
-              (ip) => !ip.server && (ip.tags ?? []).some((t) => t.startsWith(`project:${prefix}`)),
-            ).length,
-          );
-        } catch (err) {
-          errors.push(
-            `flexible_ip(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-    ]),
-  );
-  const latencyMs = Date.now() - t0;
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (total > 0) {
-    const breakdown = Object.entries(counts)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    return {
-      service: 'scaleway-clean',
-      status: 'failed',
-      latencyMs,
-      detail: `${total} residual resource(s) from prior run (${breakdown}) — run sweep before matrix`,
-    };
-  }
-  if (errors.length > 0) {
-    return {
-      service: 'scaleway-clean',
-      status: 'slow',
-      latencyMs,
-      detail: `partial: ${errors.slice(0, 2).join('; ')}`,
-    };
-  }
-  return { service: 'scaleway-clean', status: 'ok', latencyMs };
 }
 
 /**
@@ -1004,57 +663,257 @@ async function checkDnsZone(target: {
 }
 
 /**
- * Hetzner project quota state — count residual `testapp-*` resources and
- * fail-fast if any are present. The 2026-04-27 morning matrix-bumped run
- * lost 3 of 4 scenarios to `server limit reached` because 6 servers had
- * silently leaked from the previous matrix's k8s-ha (PR 1BR root-caused
- * the leak). Without this check, the matrix burned ~30 min before any
- * scenario discovered the cap. This check runs the same Hetzner API calls
- * the post-matrix sweep uses, with a 5-second budget; if it finds residue
- * we abort the matrix immediately and the operator runs a manual sweep.
- *
- * Skipped if no token is available (handled upstream by checkHetzner).
+ * One listing a project-clean check reads, and which of its rows are
+ * leftovers of an earlier run.
  */
-async function checkHetznerProjectClean(token?: string): Promise<PreflightCheck> {
-  if (!token) {
-    return { service: 'hetzner-clean', status: 'failed', latencyMs: 0, detail: 'no token' };
-  }
+interface CleanListing {
+  /** The resource kind in the detail line (`firewall=2`). */
+  label: string;
+  /** How a failed read is named; `label` unless given (Scaleway adds the zone). */
+  errorLabel?: string;
+  dialect: PageDialect;
+  /** The collection URL, without pagination parameters. */
+  url: string;
+  /** Response key holding the rows (not needed for Linode's `data`). */
+  key?: string;
+  perPage: number;
+  // biome-ignore lint/suspicious/noExplicitAny: rows are provider JSON, one shape per listing
+  isLeftover: (row: any) => boolean | undefined;
+}
+
+interface CleanSpec {
+  service: string;
+  headers: (token: string) => Record<string, string>;
+  listings: (prefix: string) => CleanListing[];
+  /** The opening words of the detail line when leftovers were found. */
+  leaked: (total: number, prefix: string) => string;
+}
+
+const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
+const leakedByPrefix = (total: number, prefix: string) =>
+  `${total} ${prefix}* resource(s) leaked from prior run`;
+/** Rows whose `field` starts with the scratch prefix. */
+const startsWithPrefix =
+  (field: string, prefix: string) =>
+  (row: Record<string, string | undefined>): boolean | undefined =>
+    row[field]?.startsWith(prefix);
+
+// Lockstep with ScalewayProvider.REGIONS (the audited zone set).
+const SCALEWAY_CLEAN_ZONES = ['fr-par-1', 'fr-par-2', 'nl-ams-1', 'nl-ams-2'];
+
+/**
+ * Project quota state, per provider: count the scratch-prefixed leftovers of
+ * an earlier run and fail fast if any are present. The 2026-04-27 morning
+ * matrix lost 3 of 4 scenarios to `server limit reached` because 6 servers
+ * had silently leaked from the previous matrix's k8s-ha; without this check
+ * the matrix burned ~30 min before any scenario discovered the cap.
+ *
+ * One row per provider. What differs is all here: the listings, each one's
+ * pagination dialect and row key, and the field that carries a resource's
+ * name. Reading the wrong field counts zero forever, which is why every row
+ * says which one it reads.
+ *
+ * The prefix is the active namespace's (E2E_NAMESPACE): a CI run must only
+ * abort on CI residue, never on a concurrent laptop run's rigs.
+ *
+ * Exported for sweep-recheck.test.ts, which pins that scripts/sweep-hetzner.js
+ * cleans every kind the Hetzner row scans.
+ */
+export const PROJECT_CLEAN: Record<
+  'hetzner' | 'digitalocean' | 'linode' | 'vultr' | 'scaleway',
+  CleanSpec
+> = {
+  hetzner: {
+    service: 'hetzner-clean',
+    headers: bearer,
+    leaked: leakedByPrefix,
+    // The Cloud API names each collection's row key after its path.
+    listings: (prefix) =>
+      (
+        [
+          ['servers', 'server'],
+          ['placement_groups', 'placement_group'],
+          ['firewalls', 'firewall'],
+          ['floating_ips', 'floating_ip'],
+          ['networks', 'network'],
+          ['ssh_keys', 'ssh_key'],
+          ['volumes', 'volume'],
+        ] as const
+      ).map(([path, label]) => ({
+        label,
+        dialect: 'hetzner',
+        url: `https://api.hetzner.cloud/v1/${path}`,
+        key: path,
+        perPage: 50,
+        isLeftover: startsWithPrefix('name', prefix),
+      })),
+  },
+  digitalocean: {
+    service: 'digitalocean-clean',
+    headers: bearer,
+    leaked: leakedByPrefix,
+    listings: (prefix) =>
+      (
+        [
+          ['droplets', 'droplets', 'droplet'],
+          ['firewalls', 'firewalls', 'firewall'],
+          ['account/keys', 'ssh_keys', 'ssh_key'],
+          ['volumes', 'volumes', 'volume'],
+        ] as const
+      ).map(([path, key, label]) => ({
+        label,
+        dialect: 'digitalocean',
+        url: `https://api.digitalocean.com/v2/${path}`,
+        key,
+        perPage: 50,
+        isLeftover: startsWithPrefix('name', prefix),
+      })),
+  },
+  linode: {
+    service: 'linode-clean',
+    headers: bearer,
+    leaked: leakedByPrefix,
+    // Linode's name field is `label`, and every list envelope is `{data}`.
+    // Profile SSH keys are deliberately not counted: unlike DO's account
+    // keys they never gate a quota, and the sweep reaps them by label anyway.
+    listings: (prefix) =>
+      (
+        [
+          ['linode/instances', 'instance'],
+          ['networking/firewalls', 'firewall'],
+          ['volumes', 'volume'],
+        ] as const
+      ).map(([path, label]) => ({
+        label,
+        dialect: 'linode',
+        url: `https://api.linode.com/v4/${path}`,
+        perPage: 100,
+        isLeftover: startsWithPrefix('label', prefix),
+      })),
+  },
+  vultr: {
+    service: 'vultr-clean',
+    headers: bearer,
+    leaked: leakedByPrefix,
+    // Every endpoint names its identity field differently: instances carry
+    // `label`, firewall GROUPS carry `description` (not `label`), ssh keys
+    // carry `name`.
+    listings: (prefix) =>
+      (
+        [
+          ['instances', 'instances', 'label', 'instance'],
+          ['firewalls', 'firewall_groups', 'description', 'firewall'],
+          ['ssh-keys', 'ssh_keys', 'name', 'ssh_key'],
+        ] as const
+      ).map(([path, key, field, label]) => ({
+        label,
+        dialect: 'vultr',
+        url: `https://api.vultr.com/v2/${path}`,
+        key,
+        perPage: 100,
+        isLeftover: startsWithPrefix(field, prefix),
+      })),
+  },
+  scaleway: {
+    service: 'scaleway-clean',
+    headers: (token) => ({ 'X-Auth-Token': token }),
+    // Scaleway's wording differs from the other four and is kept as it was.
+    leaked: (total) => `${total} residual resource(s) from prior run`,
+    // Every endpoint is ZONE-scoped, so each family is read in each audited
+    // zone, and a failed read names its zone.
+    listings: (prefix) =>
+      SCALEWAY_CLEAN_ZONES.flatMap((zone): CleanListing[] => {
+        const instance = `https://api.scaleway.com/instance/v1/zones/${zone}`;
+        const named = startsWithPrefix('name', prefix);
+        return [
+          {
+            label: 'server',
+            errorLabel: `server(${zone})`,
+            dialect: 'scaleway',
+            url: `${instance}/servers`,
+            key: 'servers',
+            perPage: 100,
+            isLeftover: named,
+          },
+          {
+            label: 'security_group',
+            errorLabel: `security_group(${zone})`,
+            dialect: 'scaleway',
+            url: `${instance}/security_groups`,
+            key: 'security_groups',
+            perPage: 100,
+            isLeftover: named,
+          },
+          {
+            // Block Storage API — where every SBS root volume lives
+            // (terminate only DETACHES sbs_volume, the audited leak class).
+            // It pages with `page_size`, not the Instance API's `per_page`.
+            label: 'volume',
+            errorLabel: `volume(${zone})`,
+            dialect: 'scaleway-page-size',
+            url: `https://api.scaleway.com/block/v1/zones/${zone}/volumes`,
+            key: 'volumes',
+            perPage: 100,
+            isLeftover: named,
+          },
+          {
+            // Flexible IPs have no name — ownership is the `project:<name>`
+            // tag the compose program stamps. Only UNATTACHED IPs tagged
+            // with this namespace's prefix count: one bills €0.005/hr and is
+            // residue by definition, while an untagged one may belong to a
+            // concurrent run in another namespace.
+            label: 'flexible_ip',
+            errorLabel: `flexible_ip(${zone})`,
+            dialect: 'scaleway',
+            url: `${instance}/ips`,
+            key: 'ips',
+            perPage: 100,
+            isLeftover: (ip: { server?: unknown; tags?: string[] }) =>
+              !ip.server && (ip.tags ?? []).some((t) => t.startsWith(`project:${prefix}`)),
+          },
+        ];
+      }),
+  },
+};
+
+/**
+ * Run one provider's project-clean check (see PROJECT_CLEAN).
+ *
+ * Every listing is walked to its END. Until 2026-11-17 each check read one
+ * page per resource kind (50 or 100 rows) and matched the scratch prefix
+ * client-side, so a leftover past the first page was never seen and the
+ * check said clean on an account with more rows than one page holds. These
+ * accounts are shared by every run, so that is the normal case for ssh keys
+ * and volumes, not a corner.
+ *
+ * A hard 5 s timeout per request keeps the check short. A listing that
+ * could not be read to its end (a failed page, a throw, the page guard) is
+ * non-fatal: a single 5xx should not block the matrix, so it is reported as
+ * 'slow' with a `partial:` detail (a real outage is caught by the provider's
+ * health check). The rows read before the stop still count.
+ */
+async function checkProjectClean(
+  provider: keyof typeof PROJECT_CLEAN,
+  token?: string,
+): Promise<PreflightCheck> {
+  const { service, headers, listings, leaked } = PROJECT_CLEAN[provider];
+  if (!token) return { service, status: 'failed', latencyMs: 0, detail: 'no token' };
   const t0 = Date.now();
-  // Scope to the active namespace's prefix (E2E_NAMESPACE) — a CI run must
-  // only abort on CI residue, never on a concurrent laptop run's rigs.
   const prefix = scratchNamePrefix();
-  // Each endpoint's count of `${prefix}*` matches contributes to the total.
-  // A hard 5s timeout per endpoint keeps the whole check under ~10s in the
-  // worst case. Per-endpoint failures are non-fatal — a single 5xx shouldn't
-  // block the matrix, but we surface them in the detail.
-  const endpoints: Array<{ url: string; key: string; label: string }> = [
-    { url: 'servers?per_page=50', key: 'servers', label: 'server' },
-    { url: 'placement_groups?per_page=50', key: 'placement_groups', label: 'placement_group' },
-    { url: 'firewalls?per_page=50', key: 'firewalls', label: 'firewall' },
-    { url: 'floating_ips?per_page=50', key: 'floating_ips', label: 'floating_ip' },
-    { url: 'networks?per_page=50', key: 'networks', label: 'network' },
-    { url: 'ssh_keys?per_page=50', key: 'ssh_keys', label: 'ssh_key' },
-    { url: 'volumes?per_page=50', key: 'volumes', label: 'volume' },
-  ];
   const counts: Record<string, number> = {};
   const errors: string[] = [];
   await Promise.all(
-    endpoints.map(async ({ url, key, label }) => {
-      try {
-        const res = await fetch(`https://api.hetzner.cloud/v1/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as Record<string, Array<{ name?: string }>>;
-        const items = body[key] ?? [];
-        const matching = items.filter((i) => i.name?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
+    listings(prefix).map(async (listing) => {
+      const walk = await walkProviderPages(listing.dialect, listing.url, {
+        key: listing.key,
+        perPage: listing.perPage,
+        headers: headers(token),
+        timeoutMs: 5_000,
+      });
+      const count = walk.items.filter((row) => listing.isLeftover(row)).length;
+      if (count > 0) counts[listing.label] = (counts[listing.label] ?? 0) + count;
+      if (!walk.complete) {
+        errors.push(`${listing.errorLabel ?? listing.label}: ${describeIncomplete(walk)}`);
       }
     }),
   );
@@ -1065,24 +924,21 @@ async function checkHetznerProjectClean(token?: string): Promise<PreflightCheck>
       .map(([k, v]) => `${k}=${v}`)
       .join(', ');
     return {
-      service: 'hetzner-clean',
+      service,
       status: 'failed',
       latencyMs,
-      detail: `${total} ${prefix}* resource(s) leaked from prior run (${breakdown}) — run sweep before matrix`,
+      detail: `${leaked(total, prefix)} (${breakdown}) — run sweep before matrix`,
     };
   }
   if (errors.length > 0) {
-    // Couldn't enumerate at least one resource type — surface as 'slow' so
-    // the matrix proceeds with a warning rather than aborting on a Hetzner
-    // 5xx blip. (A real outage will be caught by the checkHetzner above.)
     return {
-      service: 'hetzner-clean',
+      service,
       status: 'slow',
       latencyMs,
       detail: `partial: ${errors.slice(0, 2).join('; ')}`,
     };
   }
-  return { service: 'hetzner-clean', status: 'ok', latencyMs };
+  return { service, status: 'ok', latencyMs };
 }
 
 /**

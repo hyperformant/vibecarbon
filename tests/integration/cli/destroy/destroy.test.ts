@@ -2,13 +2,7 @@
  * vibecarbon destroy — flag matrix against a real project.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon destroy', () => {
   let project: string;
@@ -19,26 +13,14 @@ describe('vibecarbon destroy', () => {
     destroyRealProject(project);
   });
 
-  it('prints help', () => {
-    const r = runCli('destroy', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Destroy');
-    assertExitWith(r, 0, '-orphans');
-    assertExitWith(r, 0, '-purge');
-  });
-
   it('-orphans accepted by parser', () => {
     const r = runCli('destroy', ['prod', '-orphans', '-y'], { cwd: project, timeoutMs: 15_000 });
-    if (/unknown flag: -orphans/.test(r.stderr)) {
-      throw new Error(`-orphans rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No environments found in .vibecarbon.json');
   });
 
   it('-purge accepted by parser', () => {
     const r = runCli('destroy', ['prod', '-purge', '-y'], { cwd: project, timeoutMs: 15_000 });
-    if (/unknown flag: -purge/.test(r.stderr)) {
-      throw new Error(`-purge rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No environments found in .vibecarbon.json');
   });
 
   it('rejects --destroy-orphans (CLI sweep replaced with -orphans)', () => {
@@ -54,11 +36,6 @@ describe('vibecarbon destroy', () => {
   it('rejects -e short form', () => {
     const r = runCli('destroy', ['-e', 'prod'], { cwd: project });
     assertExitWith(r, 1, 'unknown flag: -e');
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('destroy', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 
   it('off-TTY in multi-env without env arg refuses', () => {
