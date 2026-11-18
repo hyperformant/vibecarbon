@@ -486,111 +486,34 @@ if (process.argv[1]?.endsWith('sweep-hetzner.js')) {
 }
 
 /**
- * One store per Object Storage location, hand-rolled on the S3 SDK: the
- * shape sweepS3Buckets reads (and tests fake).
+ * One store per Object Storage location, on the product's HetznerS3Provider:
+ * the shape sweepS3Buckets reads (and tests fake).
  *   listBuckets(): names this location lists; throws when the listing fails.
- *   emptyAndDeleteBucket(name): { deleted, shellDeferred, objectsRemoved };
- *     throws when the bucket could not be emptied or deleted.
+ *   emptyAndDeleteBucket(name): the product's own method
+ *     (S3CompatibleProvider.emptyAndDeleteBucket): objects, versions, delete
+ *     markers and multipart uploads, then the bucket. `deleted: false` means
+ *     the bucket is empty but its shell could not be removed yet.
+ *
+ * Until 2026-11-17 this was a second, hand-rolled emptier on the raw S3 SDK
+ * with its own endpoint list. It swallowed every version and multipart
+ * error, so a bucket it could not really empty failed later as an opaque
+ * BucketNotEmpty. The locations now come from HetznerS3Provider.ENDPOINTS,
+ * the same table the harness sweep reads (tests/e2e/utils/sweep-hetzner.ts).
+ *
+ * Imported here, not at the top: the Cloud API passes above must run on a
+ * machine where the S3 SDK cannot load.
  */
-function defaultS3Stores(sdk, accessKey, secretKey) {
-  const {
-    S3Client,
-    ListBucketsCommand,
-    ListObjectsV2Command,
-    ListObjectVersionsCommand,
-    ListMultipartUploadsCommand,
-    AbortMultipartUploadCommand,
-    DeleteObjectsCommand,
-    DeleteBucketCommand,
-  } = sdk;
-  const REGIONS = ['nbg1', 'fsn1', 'hel1'];
+async function defaultS3Stores(accessKey, secretKey) {
+  const { HetznerS3Provider } = await import('../src/lib/providers/hetzner-s3.js');
   const stores = {};
-  for (const region of REGIONS) {
-    const client = new S3Client({
-      endpoint: `https://${region}.your-objectstorage.com`,
-      region,
-      credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
-      forcePathStyle: true,
-    });
+  for (const region of Object.keys(HetznerS3Provider.ENDPOINTS)) {
+    const provider = new HetznerS3Provider(accessKey, secretKey, region);
     stores[region] = {
       async listBuckets() {
-        const resp = await client.send(new ListBucketsCommand({}));
-        return (resp.Buckets ?? []).map((b) => b.Name).filter(Boolean);
+        return (await provider.listBuckets()).map((b) => b.name).filter(Boolean);
       },
       async emptyAndDeleteBucket(name) {
-        let objectsRemoved = 0;
-        // Empty current objects
-        let cont;
-        do {
-          const list = await client.send(
-            new ListObjectsV2Command({ Bucket: name, ContinuationToken: cont, MaxKeys: 1000 }),
-          );
-          const objs = (list.Contents ?? []).filter((o) => o.Key).map((o) => ({ Key: o.Key }));
-          if (objs.length > 0) {
-            await client.send(
-              new DeleteObjectsCommand({ Bucket: name, Delete: { Objects: objs, Quiet: true } }),
-            );
-            objectsRemoved += objs.length;
-          }
-          cont = list.NextContinuationToken;
-        } while (cont);
-
-        // Empty versions + delete markers (versioned buckets)
-        try {
-          let keyMarker;
-          let versionIdMarker;
-          do {
-            const versions = await client.send(
-              new ListObjectVersionsCommand({
-                Bucket: name,
-                KeyMarker: keyMarker,
-                VersionIdMarker: versionIdMarker,
-              }),
-            );
-            const toDelete = [
-              ...(versions.Versions ?? []).map((v) => ({ Key: v.Key, VersionId: v.VersionId })),
-              ...(versions.DeleteMarkers ?? []).map((d) => ({
-                Key: d.Key,
-                VersionId: d.VersionId,
-              })),
-            ];
-            if (toDelete.length > 0) {
-              await client.send(
-                new DeleteObjectsCommand({
-                  Bucket: name,
-                  Delete: { Objects: toDelete, Quiet: true },
-                }),
-              );
-            }
-            keyMarker = versions.IsTruncated ? versions.NextKeyMarker : undefined;
-            versionIdMarker = versions.IsTruncated ? versions.NextVersionIdMarker : undefined;
-          } while (keyMarker);
-        } catch {
-          // ListObjectVersions not supported — non-fatal
-        }
-
-        // Abort any stuck multipart uploads
-        try {
-          const uploads = await client.send(new ListMultipartUploadsCommand({ Bucket: name }));
-          for (const u of uploads.Uploads ?? []) {
-            await client.send(
-              new AbortMultipartUploadCommand({ Bucket: name, Key: u.Key, UploadId: u.UploadId }),
-            );
-          }
-        } catch {
-          // Non-fatal
-        }
-
-        try {
-          await client.send(new DeleteBucketCommand({ Bucket: name }));
-        } catch (err) {
-          // Everything above was removed, so BucketNotEmpty here is Ceph's
-          // eventual consistency on the empty shell, not data: a later sweep
-          // collects it (the same call the product's emptyAndDeleteBucket makes).
-          if (err?.name !== 'BucketNotEmpty' && err?.Code !== 'BucketNotEmpty') throw err;
-          return { deleted: false, shellDeferred: true, objectsRemoved };
-        }
-        return { deleted: true, shellDeferred: false, objectsRemoved };
+        return provider.emptyAndDeleteBucket(name);
       },
     };
   }
@@ -637,14 +560,14 @@ export async function sweepS3Buckets({
       return { deleted: 0, gaps: [gap] };
     }
 
-    // Dynamically import so this script still runs on systems without the SDK:
-    // the Cloud API passes do not need it. The bucket pass does, so without
-    // it the buckets go unchecked and that is a gap like any other.
+    // The Cloud API passes do not need the S3 SDK and have already run. The
+    // bucket pass does, so if the store cannot be built the buckets go
+    // unchecked and that is a gap like any other.
     try {
-      stores = defaultS3Stores(await import('@aws-sdk/client-s3'), accessKey, secretKey);
+      stores = await defaultS3Stores(accessKey, secretKey);
     } catch (err) {
-      console.warn(`[sweep] S3 buckets not checked: @aws-sdk/client-s3 could not be loaded (${err.message})`);
-      return { deleted: 0, gaps: ['@aws-sdk/client-s3 could not be loaded'] };
+      console.warn(`[sweep] S3 buckets not checked: the object-storage client could not be loaded (${err.message})`);
+      return { deleted: 0, gaps: ['the object-storage client could not be loaded'] };
     }
   }
 
