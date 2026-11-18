@@ -336,4 +336,55 @@ describe('HetznerProvider destroy primitives — exact wire URLs (C10a)', () => 
       );
     });
   });
+
+  describe('createSSHKey key listing', () => {
+    it('walks every page of /ssh_keys at 50 a page before it creates', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ ssh_keys: [], meta: { pagination: { next_page: 2 } } }))
+        .mockResolvedValueOnce(resp({ ssh_keys: [], meta: { pagination: { next_page: null } } }))
+        .mockResolvedValueOnce(resp({ ssh_key: { id: 77 } }, 201));
+
+      await expect(provider.createSSHKey('k', 'ssh-ed25519 AAAA me')).resolves.toBe(77);
+      expect(calls()).toEqual([
+        ['GET', `${BASE}/ssh_keys?per_page=50&page=1`],
+        ['GET', `${BASE}/ssh_keys?per_page=50&page=2`],
+        ['POST', `${BASE}/ssh_keys`],
+      ]);
+      // A listing like every other Hetzner listing: no JSON Content-Type on a GET.
+      expect((fetchWithRetryMock.mock.calls[0][1] as RequestInit).headers).toEqual({
+        Authorization: `Bearer ${TOKEN}`,
+      });
+    });
+
+    it('reuses a key it finds on a later page', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ ssh_keys: [], meta: { pagination: { next_page: 2 } } }))
+        .mockResolvedValueOnce(
+          resp({ ssh_keys: [{ id: 9, name: 'k', public_key: 'ssh-ed25519 AAAA other' }] }),
+        );
+
+      await expect(provider.createSSHKey('k', 'ssh-ed25519 AAAA me')).resolves.toBe(9);
+      expect(calls()).toHaveLength(2);
+    });
+
+    // The listing is best effort: a refused page ends the walk, and the
+    // create says whether the key is new. A page whose body is not JSON used
+    // to escape as a SyntaxError before the create was tried.
+    it('a refused page with a body that is not JSON ends the walk and the create goes ahead', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          json: async () => JSON.parse('<html>busy</html>'),
+          text: async () => '<html>busy</html>',
+        })
+        .mockResolvedValueOnce(resp({ ssh_key: { id: 78 } }, 201));
+
+      await expect(provider.createSSHKey('k', 'ssh-ed25519 AAAA me')).resolves.toBe(78);
+      expect(calls()).toEqual([
+        ['GET', `${BASE}/ssh_keys?per_page=50&page=1`],
+        ['POST', `${BASE}/ssh_keys`],
+      ]);
+    });
+  });
 });

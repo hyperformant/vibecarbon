@@ -1265,18 +1265,11 @@ export class HetznerProvider extends BaseProvider {
     // Hetzner paginates /ssh_keys at 25 entries/page by default. Long-lived
     // Hetzner projects accumulate dozens of keys; with the default pagination
     // the dedup scan below would silently miss keys on pages 2+, and we'd hit
-    // the very 409/"not unique" error the dedup is meant to prevent. Ask for
-    // the max allowed page size (50) and still walk pagination defensively.
-    const ssh_keys = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const resp = await this.apiRequest(`/ssh_keys?per_page=50&page=${page}`);
-      const body = await resp.json();
-      if (Array.isArray(body.ssh_keys)) ssh_keys.push(...body.ssh_keys);
-      const next = body.meta?.pagination?.next_page;
-      if (!next) break;
-      page = next;
-    }
+    // the very 409/"not unique" error the dedup is meant to prevent. The
+    // shared walk asks for the max page size (50) and follows every page. It
+    // is best effort: a refused page ends it with what it has, and the create
+    // below then says whether the key is new.
+    const ssh_keys = await this.#listAllPages('/ssh_keys', 'ssh_keys');
 
     const newKeyPart = publicKey.split(' ').slice(0, 2).join(' ');
 
