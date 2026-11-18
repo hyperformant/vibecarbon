@@ -201,6 +201,22 @@ export async function waitUntilServerUp(timeout, read, isUp) {
   throw new Error('Server creation timed out');
 }
 
+/**
+ * Normalize an OpenSSH public key to `${type} ${base64Body}` for MATERIAL
+ * comparison: the createSSHKey of DigitalOcean, Linode, Vultr and Scaleway
+ * finds an existing key by it. DigitalOcean dedupes SSH keys by fingerprint
+ * (the type+body bytes) account-wide, regardless of name or trailing comment
+ * (see its createSSHKey). Collapses whitespace runs and drops the optional
+ * trailing comment field, so two representations of the same key (different
+ * comment, different spacing) normalize identically.
+ * @param {string} [publicKey]
+ * @returns {string}
+ */
+export function normalizePublicKey(publicKey) {
+  const [type, body] = (publicKey || '').trim().split(/\s+/);
+  return `${type || ''} ${body || ''}`.trim();
+}
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")

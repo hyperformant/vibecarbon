@@ -25,6 +25,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import {
   BaseProvider,
+  normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
   waitUntilServerUp,
@@ -717,14 +718,10 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<string>} SSH key UUID
    */
   async createSSHKey(name, publicKey) {
-    const normalize = (key) => {
-      const [type, body] = (key || '').trim().split(/\s+/);
-      return `${type || ''} ${body || ''}`.trim();
-    };
-    const targetMaterial = normalize(publicKey);
+    const targetMaterial = normalizePublicKey(publicKey);
 
     const { items } = await this._walkCursor('/ssh-keys', 'ssh_keys');
-    const match = items.find((k) => normalize(k.ssh_key) === targetMaterial);
+    const match = items.find((k) => normalizePublicKey(k.ssh_key) === targetMaterial);
     if (match) return match.id;
 
     const response = await this.apiRequest('/ssh-keys', {

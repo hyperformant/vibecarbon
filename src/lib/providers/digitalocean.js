@@ -25,6 +25,7 @@ import { readOperatorVar } from '../operator-env.js';
 import {
   BaseProvider,
   deleteFailure,
+  normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
   waitUntilServerUp,
@@ -75,21 +76,6 @@ export function encodeLabels(labels = {}) {
 // decodeLabels, the inverse of encodeLabels, is the same for the four
 // tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
 export { decodeLabels };
-
-/**
- * Normalize an OpenSSH public key to `${type} ${base64Body}` for MATERIAL
- * comparison. DigitalOcean dedupes SSH keys by fingerprint (the type+body
- * bytes) account-wide, regardless of name or trailing comment — see
- * createSSHKey's doc for why this matters. Collapses whitespace runs and
- * drops the optional trailing comment field, so two representations of the
- * same key (different comment, different spacing) normalize identically.
- * @param {string} [publicKey]
- * @returns {string}
- */
-export function normalizePublicKey(publicKey) {
-  const [type, body] = (publicKey || '').trim().split(/\s+/);
-  return `${type || ''} ${body || ''}`.trim();
-}
 
 /** @typedef {import('./base.js').ReservedIpRelease} ReservedIpRelease */
 

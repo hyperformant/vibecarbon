@@ -19,6 +19,7 @@ import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
   sweepLabels,
@@ -1094,17 +1095,13 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<number>} SSH key ID
    */
   async createSSHKey(name, publicKey) {
-    const normalize = (key) => {
-      const [type, body] = (key || '').trim().split(/\s+/);
-      return `${type || ''} ${body || ''}`.trim();
-    };
-    const targetMaterial = normalize(publicKey);
+    const targetMaterial = normalizePublicKey(publicKey);
 
     // A failed listing degrades to create-anyway rather than blocking the
     // caller — worst case is the pre-fix behavior (a duplicate key the
     // sweep reports), never a missing key.
     const { match } = await this._walkPages('/profile/sshkeys', {
-      find: (k) => normalize(k.ssh_key) === targetMaterial,
+      find: (k) => normalizePublicKey(k.ssh_key) === targetMaterial,
     });
     if (match) return match.id;
 

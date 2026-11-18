@@ -59,6 +59,7 @@ import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
   sweepLabels,
@@ -1300,18 +1301,14 @@ export class ScalewayProvider extends BaseProvider {
    */
   async createSSHKey(name, publicKey) {
     const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
-    const normalize = (key) => {
-      const [type, body] = (key || '').trim().split(/\s+/);
-      return `${type || ''} ${body || ''}`.trim();
-    };
-    const targetMaterial = normalize(publicKey);
+    const targetMaterial = normalizePublicKey(publicKey);
 
     const { items: existingKeys } = await this._walkPageSize(
       '/iam/v1alpha1/ssh-keys',
       'ssh_keys',
       projectId ? `project_id=${projectId}` : '',
     );
-    const match = existingKeys.find((k) => normalize(k.public_key) === targetMaterial);
+    const match = existingKeys.find((k) => normalizePublicKey(k.public_key) === targetMaterial);
     if (match) return match.id;
 
     const body = { name, public_key: publicKey.trim() };
