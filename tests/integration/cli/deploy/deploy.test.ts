@@ -38,9 +38,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -allow-degraded/.test(r.stderr)) {
-      throw new Error(`-allow-degraded rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'])('-mode %s accepted by parser', (mode) => {
@@ -48,9 +46,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -mode|invalid.*mode/i.test(r.stderr)) {
-      throw new Error(`-mode ${mode} rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it('rejects -mode kubernetes (not in enum)', () => {
@@ -68,9 +64,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -region/.test(r.stderr)) {
-      throw new Error(`-region ${region} rejected`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it('rejects -region atlantis (unknown for Hetzner Cloud)', () => {
@@ -94,9 +88,7 @@ describe('vibecarbon deploy', () => {
       cwd: project,
       timeoutMs: 10_000,
     });
-    if (/unknown flag: -full/.test(r.stderr)) {
-      throw new Error(`-full rejected`);
-    }
+    assertExitWith(r, 1, 'New environments require an explicit provider in non-interactive mode');
   });
 
   it('rejects --k8s (CLI sweep collapsed mode flags)', () => {

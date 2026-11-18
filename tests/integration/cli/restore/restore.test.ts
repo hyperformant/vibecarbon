@@ -2,7 +2,7 @@
  * vibecarbon restore — flag matrix against a real project.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import { destroyRealProject, realProject, runCli } from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon restore', () => {
   let project: string;
@@ -15,9 +15,7 @@ describe('vibecarbon restore', () => {
 
   it('-l (list) accepted by parser', () => {
     const r = runCli('restore', ['-l', 'prod'], { cwd: project, timeoutMs: 15_000 });
-    if (/unknown flag: -l/.test(r.stderr)) {
-      throw new Error(`-l rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments to restore.');
   });
 
   it('-source latest accepted by parser', () => {
@@ -25,8 +23,6 @@ describe('vibecarbon restore', () => {
       cwd: project,
       timeoutMs: 15_000,
     });
-    if (/unknown flag: -source/.test(r.stderr)) {
-      throw new Error(`-source rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments to restore.');
   });
 });

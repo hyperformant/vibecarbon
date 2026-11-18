@@ -15,16 +15,12 @@ describe('vibecarbon destroy', () => {
 
   it('-orphans accepted by parser', () => {
     const r = runCli('destroy', ['prod', '-orphans', '-y'], { cwd: project, timeoutMs: 15_000 });
-    if (/unknown flag: -orphans/.test(r.stderr)) {
-      throw new Error(`-orphans rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No environments found in .vibecarbon.json');
   });
 
   it('-purge accepted by parser', () => {
     const r = runCli('destroy', ['prod', '-purge', '-y'], { cwd: project, timeoutMs: 15_000 });
-    if (/unknown flag: -purge/.test(r.stderr)) {
-      throw new Error(`-purge rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No environments found in .vibecarbon.json');
   });
 
   it('rejects --destroy-orphans (CLI sweep replaced with -orphans)', () => {

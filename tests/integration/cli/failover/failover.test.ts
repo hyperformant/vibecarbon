@@ -3,6 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  assertExitWith,
   destroyRealProject,
   type ExecStubs,
   installExecStubs,
@@ -35,9 +36,7 @@ describe('vibecarbon failover', () => {
       execStubs: stubs,
       timeoutMs: 15_000,
     });
-    if (/unknown flag: -dry/.test(r.stderr)) {
-      throw new Error(`-dry rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments to fail over.');
     expect(stubs.callsTo('ssh').length).toBe(0);
   });
 

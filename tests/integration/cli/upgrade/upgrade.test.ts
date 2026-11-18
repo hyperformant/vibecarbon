@@ -18,6 +18,7 @@ import { staleObservabilityTlsProblem } from '../../../../src/lib/deploy/k8s/one
 import { gitScrubbedEnv } from '../../../_shared/git-env.js';
 import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
+  assertExitWith,
   assertSuccess,
   destroyRealProject,
   type ExecStubs,
@@ -45,9 +46,7 @@ describe('vibecarbon upgrade', () => {
 
   it('-force accepted by parser', () => {
     const r = runCli('upgrade', ['-force', '-y'], { cwd: project, timeoutMs: 60_000 });
-    if (/unknown flag: -force/.test(r.stderr)) {
-      throw new Error(`-force rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 0, 'Upgrade complete');
   });
 
   it('on a fresh project, upgrade is idempotent (no diff to apply)', () => {

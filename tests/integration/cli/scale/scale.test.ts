@@ -2,7 +2,7 @@
  * vibecarbon scale — flag matrix.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import { destroyRealProject, realProject, runCli } from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon scale', () => {
   let project: string;
@@ -18,8 +18,6 @@ describe('vibecarbon scale', () => {
       cwd: project,
       timeoutMs: 15_000,
     });
-    if (/unknown flag: -type/.test(r.stderr)) {
-      throw new Error(`-type rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments found. Run `vibecarbon deploy` first.');
   });
 });
