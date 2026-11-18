@@ -1051,22 +1051,10 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${HetznerProvider.API_BASE}/servers/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const { server } = await response.json();
-      return {
-        status: server.status,
-        serverType: server.server_type?.name || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/servers/${serverId}`, ({ server }) => ({
+      status: server.status,
+      serverType: server.server_type?.name || null,
+    }));
   }
 
   /**

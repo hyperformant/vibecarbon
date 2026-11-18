@@ -1819,6 +1819,31 @@ export class BaseProvider {
     const response = await this.bareRequest(endpoint, { method: 'DELETE' });
     return response.ok || response.status === 404;
   }
+
+  /**
+   * The body of getServerSummary on a provider with one server resource
+   * (Hetzner, DigitalOcean, Linode, Vultr): a single raw fetch with a hard
+   * 5 s abort, never retried (see getServerSummary), and null for any
+   * failure, a refusal, a network error or a body without the server.
+   * @param {string} endpoint - the server's path under API_BASE
+   * @param {(body: any) => {status: string, serverType: string|null}} pick -
+   *   the summary from the response body
+   * @returns {Promise<{status: string, serverType: string|null}|null>}
+   */
+  async _serverSummaryAt(endpoint, pick) {
+    try {
+      const response = await fetch(`${this.constructor.API_BASE}${endpoint}`, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) return null;
+
+      return pick(await response.json());
+    } catch {
+      return null;
+    }
+  }
 }
 
 /**

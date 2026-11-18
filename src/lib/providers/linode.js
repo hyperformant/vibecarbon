@@ -1036,22 +1036,10 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${LinodeProvider.API_BASE}/linode/instances/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const instance = await response.json();
-      return {
-        status: instance.status,
-        serverType: instance.type || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/linode/instances/${serverId}`, (instance) => ({
+      status: instance.status,
+      serverType: instance.type || null,
+    }));
   }
 
   /**

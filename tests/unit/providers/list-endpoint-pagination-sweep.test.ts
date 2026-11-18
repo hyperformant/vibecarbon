@@ -131,7 +131,7 @@ interface Site {
 // drop out of this sweep.
 const URL_SITE_RE =
   /(?:API_BASE\}|API_BASE_URL\}|api\.hetzner\.cloud\/v1|api\.digitalocean\.com\/v2)(\/[^\s`'"]+)/g;
-const TRANSPORT = '(?:apiRequest|bareRequest|deleteGone)\\(';
+const TRANSPORT = '(?:apiRequest|bareRequest|deleteGone|_serverSummaryAt)\\(';
 const API_REQUEST_RE = new RegExp(`${TRANSPORT}\\s*[\`'"](\\/[^\`'"]+)`, 'g');
 // A call whose arguments the formatter wrapped: the path is on the next line.
 const WRAPPED_CALL_RE = new RegExp(`${TRANSPORT}$`);

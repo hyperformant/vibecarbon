@@ -987,22 +987,10 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${DigitalOceanProvider.API_BASE}/droplets/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const { droplet } = await response.json();
-      return {
-        status: droplet.status,
-        serverType: droplet.size_slug || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/droplets/${serverId}`, ({ droplet }) => ({
+      status: droplet.status,
+      serverType: droplet.size_slug || null,
+    }));
   }
 
   /**
