@@ -10,6 +10,7 @@ import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
+import { parseJsonBody } from '../../lib/validation';
 import type { HonoVariables } from '../../types';
 
 const newsletterRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -27,17 +28,9 @@ const subscribeSchema = z.object({
  * Uses double opt-in: sends confirmation email with token.
  */
 newsletterRoutes.post('/subscribe', async (c) => {
-  let body: z.infer<typeof subscribeSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = subscribeSchema.safeParse(rawBody);
-    if (!result.success) {
-      return c.json({ error: result.error.issues.map((e) => e.message).join(', ') }, 400);
-    }
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, subscribeSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     // Check if already subscribed

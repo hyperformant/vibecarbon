@@ -16,6 +16,7 @@ import { isSuperAdmin } from '../../lib/auth';
 import { sendEmail } from '../../lib/email';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { parseJsonBody } from '../../lib/validation';
 import { assertAal2, requireAal2 } from '../../middleware/requireAal2';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
@@ -323,20 +324,9 @@ v1Routes.post('/organizations', async (c) => {
   }
 
   // Parse and validate request body
-  let body: z.infer<typeof createOrganizationSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = createOrganizationSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, createOrganizationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // The org row and the creator's OWNER membership go in through adminDb, in
   // one transaction: the creator is not a member until the membership exists,
@@ -483,20 +473,9 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
   }
 
   // Parse and validate request body
-  let body: z.infer<typeof addMemberSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = addMemberSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, addMemberSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Find the user by email (stored lowercase by the auth API).
   let targetUser: { id: string; email: string; name: string } | undefined;
@@ -593,20 +572,9 @@ v1Routes.patch('/organizations/:orgId/members/:userId', async (c) => {
   const targetUserId = c.req.param('userId')!;
 
   // Parse and validate request body
-  let body: z.infer<typeof updateMemberRoleSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = updateMemberRoleSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, updateMemberRoleSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Promoting/transferring a member to OWNER is a high-privilege action —
   // require an aal2 (MFA-validated) session. Checked here, before the authz
@@ -1150,20 +1118,9 @@ v1Routes.post('/admin/notifications', async (c) => {
   if (blocked) return blocked;
 
   // Parse and validate request body
-  let body: z.infer<typeof createNotificationSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = createNotificationSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, createNotificationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   let notification: NotificationRow;
   try {
@@ -1215,20 +1172,9 @@ v1Routes.patch('/admin/notifications/:notificationId', async (c) => {
   const notificationId = c.req.param('notificationId');
 
   // Parse and validate request body
-  let body: z.infer<typeof updateNotificationSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = updateNotificationSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, updateNotificationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Only the fields the request carried
   const updateData: Partial<typeof notifications.$inferInsert> = {};

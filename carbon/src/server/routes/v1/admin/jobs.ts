@@ -14,6 +14,7 @@ import {
 import { isoTimestamp } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
 import { logger } from '../../../lib/logger';
+import { parseJsonBody } from '../../../lib/validation';
 import { requireSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
@@ -125,17 +126,9 @@ const triggerSchema = z.object({
 });
 
 jobsRoutes.post('/trigger', async (c) => {
-  let body: z.infer<typeof triggerSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = triggerSchema.safeParse(rawBody);
-    if (!result.success) {
-      return c.json({ error: result.error.issues.map((e) => e.message).join(', ') }, 400);
-    }
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, triggerSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     // Only allow triggering known safe jobs

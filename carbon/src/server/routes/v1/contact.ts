@@ -9,6 +9,7 @@ import { sanitizeError } from '../../lib/errors';
 import { escapeHtml } from '../../lib/html';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
+import { parseJsonBody } from '../../lib/validation';
 import type { HonoVariables } from '../../types';
 
 const contactRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -29,18 +30,9 @@ const contactSchema = z.object({
  * Submit a contact form (public, rate-limited)
  */
 contactRoutes.post('/submit', async (c) => {
-  let body: z.infer<typeof contactSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = contactSchema.safeParse(rawBody);
-    if (!result.success) {
-      const errors = result.error.issues.map((e) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, contactSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Honeypot check - if website field is filled, it's likely a bot
   if (body.website) {
