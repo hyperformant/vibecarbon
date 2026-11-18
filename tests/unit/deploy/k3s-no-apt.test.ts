@@ -31,13 +31,12 @@ const inits = scripts.filter((s) => s.name.endsWith('-init.sh'));
 const code = (lines: string[]) => lines.filter((l) => !l.trim().startsWith('#'));
 
 describe('k3s cloud-init scripts', () => {
-  it('walk finds all nine init scripts, so the assertions below are not vacuous', () => {
+  it('walk finds all six init scripts, so the assertions below are not vacuous', () => {
+    // A master and a worker script per provider; each provider's db node
+    // boots its worker script as the db role.
     expect(inits.map((s) => s.name).sort()).toEqual([
-      'db-init.sh',
-      'do-db-init.sh',
       'do-master-init.sh',
       'do-worker-init.sh',
-      'linode-db-init.sh',
       'linode-master-init.sh',
       'linode-worker-init.sh',
       'master-init.sh',
@@ -73,7 +72,7 @@ describe('k3s cloud-init scripts', () => {
 });
 
 /**
- * The private-NIC wait loop of the three Hetzner scripts, actually run under
+ * The private-NIC wait loop of the two Hetzner scripts, actually run under
  * bash with shimmed ip / dhcpcd / sleep. The loop asks dhcpcd for a lease from
  * about 5 s in, when the NIC can exist while the attachment is still settling,
  * so it must keep asking until a lease lands instead of latching after one
@@ -82,7 +81,8 @@ describe('k3s cloud-init scripts', () => {
 describe('Hetzner private-NIC wait loop (executed)', () => {
   const START = 'echo "Waiting for private network interface..."';
   const END = 'echo "Private interface: $PRIVATE_IFACE"';
-  const hetzner = ['master-init.sh', 'worker-init.sh', 'db-init.sh'];
+  // The database node boots worker-init.sh as the db role.
+  const hetzner = ['master-init.sh', 'worker-init.sh'];
   let tmp = '';
 
   afterEach(() => {

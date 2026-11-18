@@ -571,8 +571,9 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Render the k3s database-node boot script: the worker script plus the
-   * dedicated=db label and taint, applied at join time.
+   * Render the k3s database-node boot script: the worker script loaded as
+   * the db role, which adds the dedicated=db label and taint at join time
+   * (AGENT_ROLES in cloud-init.js).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -582,7 +583,7 @@ export class LinodeProvider extends BaseProvider {
    */
   static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('linode-db-init.sh'), vars);
+    return renderScript(loadCloudInit('linode-worker-init.sh', { role: 'db' }), vars);
   }
 
   /**

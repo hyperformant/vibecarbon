@@ -3,7 +3,8 @@
  * DigitalOceanProvider.getK8s{Master,Worker,Db}UserData.
  *
  * Covers the render-level contract for the
- * carbon/cloud-init/k3s/do-{master,worker,db}-init.sh templates: zero
+ * carbon/cloud-init/k3s/do-{master,worker}-init.sh templates (the db node
+ * loads do-worker-init.sh as the db role): zero
  * `${...}` residue with the documented (complete) vars set, DO metadata
  * paths present, provider-id kubelet arg present, and zero cross-provider
  * token leakage. Template-shape assertions that don't depend on rendering
@@ -130,13 +131,13 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
   });
 
   describe('getK8sDbUserData', () => {
-    it('renders carbon/cloud-init/k3s/do-db-init.sh with no unrendered placeholders given the full vars set', async () => {
+    it('renders do-worker-init.sh as the db role with no unrendered placeholders given the full vars set', async () => {
       const rendered = await DigitalOceanProvider.getK8sDbUserData(dbVars);
       expect(rendered).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     });
 
-    it('template var contract: do-db-init.sh placeholder set is EXACTLY {k3s_version, k3s_token, master_ip}', () => {
-      const raw = loadCloudInit('do-db-init.sh');
+    it('template var contract: the db role placeholder set is EXACTLY {k3s_version, k3s_token, master_ip}', () => {
+      const raw = loadCloudInit('do-worker-init.sh', { role: 'db' });
       expect(templatePlaceholders(raw)).toEqual(new Set(Object.keys(dbVars)));
     });
 
@@ -168,10 +169,10 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
     });
   });
 
-  it('do-{master,worker,db}-init.sh ship in carbon/cloud-init/k3s/', () => {
+  it('do-{master,worker}-init.sh ship in carbon/cloud-init/k3s/, and the worker loads as the db node', () => {
     expect(() => loadCloudInit('do-master-init.sh')).not.toThrow();
     expect(() => loadCloudInit('do-worker-init.sh')).not.toThrow();
-    expect(() => loadCloudInit('do-db-init.sh')).not.toThrow();
+    expect(() => loadCloudInit('do-worker-init.sh', { role: 'db' })).not.toThrow();
   });
 
   // Mirrors transliterateToAscii's own codePoint check (digitalocean-compose.js)
@@ -184,12 +185,11 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
     return true;
   }
 
-  it('all three templates are pure ASCII (DO user-data wire contract — see digitalocean-compose.js ASCII_TRANSLITERATION_MAP RCA)', () => {
+  it('both templates and the db render are pure ASCII (DO user-data wire contract — see digitalocean-compose.js ASCII_TRANSLITERATION_MAP RCA)', async () => {
     const masterPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-master-init.sh');
     const workerPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-worker-init.sh');
-    const dbPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-db-init.sh');
     expect(isPureAscii(readFileSync(masterPath, 'utf-8'))).toBe(true);
     expect(isPureAscii(readFileSync(workerPath, 'utf-8'))).toBe(true);
-    expect(isPureAscii(readFileSync(dbPath, 'utf-8'))).toBe(true);
+    expect(isPureAscii(await DigitalOceanProvider.getK8sDbUserData(dbVars))).toBe(true);
   });
 });

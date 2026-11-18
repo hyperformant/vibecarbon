@@ -62,6 +62,10 @@
  * RE-CAPTURED 2026-11-15 (reporter bounds): the embedded reporter gained
  * --request-timeout=30s on both kubectl calls and TimeoutStartSec=120;
  * `cloudInit` is the only field that changed.
+ * RE-CAPTURED 2026-11-17 (db node from the worker script): db-init.sh went,
+ * the database node loads worker-init.sh as the db role, and the embedded
+ * worker script's comments say so. Comment lines are the whole diff; every
+ * line that runs is unchanged.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

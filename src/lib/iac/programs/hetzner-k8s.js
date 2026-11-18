@@ -11,7 +11,7 @@
  *   - Firewall
  *   - Floating IP
  *   - Master server (cloud-init: master-init.sh)
- *   - Database server (cloud-init: db-init.sh)
+ *   - Database server (cloud-init: worker-init.sh as the db role)
  *   - Worker servers × N (cloud-init: worker-init.sh)
  *   - Placement group for workers (spread)
  *
@@ -317,7 +317,7 @@ export function buildHetznerK8sProgram(config) {
     });
     // NOTE: previously `dependsOn: [master]` — we dropped that so Hetzner
     // provisions master + database in parallel, saving ~30-60s on the
-    // critical path. The database node's cloud-init (db-init.sh) already
+    // critical path. The database node's cloud-init (worker-init.sh) already
     // polls the master k3s API with a 120-attempt retry loop, so it
     // tolerates master coming up slightly later.
     const dbServer = new hcloud.Server(

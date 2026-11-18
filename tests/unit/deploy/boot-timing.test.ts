@@ -347,15 +347,14 @@ describe('cloud-init phase marks', () => {
   it.each([
     ['master-init.sh', ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done']],
     ['do-master-init.sh', ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done']],
-    ['db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['do-db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    // Each provider's db node boots its worker script, so the worker rows
+    // cover it.
     ['worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
     ['do-worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
     [
       'linode-master-init.sh',
       ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
     ],
-    ['linode-db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
     ['linode-worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
   ])('%s marks its phases in order, into the log the collector reads', (file, phases) => {
     const text = readFileSync(join(k3sDir, file), 'utf-8');

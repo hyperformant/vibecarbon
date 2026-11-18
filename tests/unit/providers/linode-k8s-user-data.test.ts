@@ -37,7 +37,11 @@ const roles = [
 
 describe('LinodeProvider k8s user-data statics', () => {
   it.each(roles)('%s: placeholder set is exactly the documented vars', (role, vars) => {
-    const raw = loadCloudInit(`linode-${role}-init.sh`);
+    // The db node loads the worker script as the db role.
+    const raw =
+      role === 'db'
+        ? loadCloudInit('linode-worker-init.sh', { role: 'db' })
+        : loadCloudInit(`linode-${role}-init.sh`);
     expect(templatePlaceholders(raw)).toEqual(Object.keys(vars).sort());
   });
 
@@ -167,12 +171,15 @@ describe('LinodeProvider k8s user-data statics', () => {
     expect(rendered).toContain('--node-taint="dedicated=db:NoSchedule"');
   });
 
-  it('the three templates are pure ASCII', () => {
-    for (const role of ['master', 'worker', 'db']) {
-      const text = readFileSync(
+  it('both templates and the db render are pure ASCII', async () => {
+    const texts = ['master', 'worker'].map((role) =>
+      readFileSync(
         join(__dirname, `../../../carbon/cloud-init/k3s/linode-${role}-init.sh`),
         'utf-8',
-      );
+      ),
+    );
+    texts.push(await LinodeProvider.getK8sDbUserData(agentVars));
+    for (const text of texts) {
       expect([...text].every((ch) => (ch.codePointAt(0) ?? 0) <= 0x7f)).toBe(true);
     }
   });

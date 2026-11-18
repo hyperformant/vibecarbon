@@ -526,9 +526,11 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s database-node boot user-data from
-   * `carbon/cloud-init/k3s/db-init.sh` via loadCloudInit/renderScript.
-   * hetzner-k8s.js's Pulumi program calls this for its db server.
+   * Render this provider's k3s database-node boot user-data: the worker
+   * template `carbon/cloud-init/k3s/worker-init.sh` loaded as the db role
+   * (the dedicated=db label and taint at join time; AGENT_ROLES in
+   * cloud-init.js). hetzner-k8s.js's Pulumi program calls this for its db
+   * server.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -538,7 +540,7 @@ export class HetznerProvider extends BaseProvider {
    */
   static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('db-init.sh'), vars);
+    return renderScript(loadCloudInit('worker-init.sh', { role: 'db' }), vars);
   }
 
   /**

@@ -81,16 +81,65 @@ describe('loadCloudInit include directive', () => {
   it('every shipped k3s template loads with all directives resolved', () => {
     for (const name of [
       'master-init.sh',
-      'db-init.sh',
       'worker-init.sh',
       'do-master-init.sh',
-      'do-db-init.sh',
       'do-worker-init.sh',
       'linode-master-init.sh',
-      'linode-db-init.sh',
       'linode-worker-init.sh',
     ]) {
       expect(loadCloudInit(name), name).not.toMatch(/^#\s*@include\b/m);
     }
+    for (const name of ['worker-init.sh', 'do-worker-init.sh', 'linode-worker-init.sh']) {
+      expect(loadCloudInit(name, { role: 'db' }), name).not.toMatch(/^#\s*@include\b/m);
+    }
+  });
+
+  it('omit drops a directive and the blank line after it, and refuses one that is not there', () => {
+    const dir = scratch();
+    writeFileSync(join(dir, 'role.sh'), 'a\n# @include skip.sh\n\nb\n# @include keep.sh\n');
+    writeFileSync(join(dir, 'skip.sh'), 'SKIPPED\n');
+    writeFileSync(join(dir, 'keep.sh'), 'kept\n');
+    expect(resolveIncludes('role.sh', dir, { omit: ['skip.sh'] })).toBe('a\nb\nkept\n');
+    expect(() => resolveIncludes('role.sh', dir, { omit: ['gone.sh'] })).toThrow(
+      /no @include gone\.sh/,
+    );
+  });
+});
+
+describe('loadCloudInit roles', () => {
+  const DB_FLAGS = [
+    '--node-label="dedicated=db"',
+    '--node-label="node-pool=db-pool"',
+    '--node-taint="dedicated=db:NoSchedule"',
+  ];
+
+  it.each(['worker-init.sh', 'do-worker-init.sh', 'linode-worker-init.sh'])(
+    '%s: the worker load fills every role slot with the worker, the db load with the db node',
+    (name) => {
+      const worker = loadCloudInit(name);
+      const db = loadCloudInit(name, { role: 'db' });
+      for (const text of [worker, db]) expect(text).not.toMatch(/@\{/);
+      for (const flag of DB_FLAGS) {
+        expect(worker).not.toContain(flag);
+        expect(db).toContain(flag);
+      }
+      // The db flags end the k3s agent's argument list.
+      expect(db).toMatch(/--node-taint="dedicated=db:NoSchedule"; then\n/);
+      expect(worker).toContain('echo "k3s worker installation complete!"');
+      expect(db).toContain('echo "k3s database node installation complete!"');
+      // The host reporter reaches the db node over SSH (prePullImages), so
+      // its user data leaves the snippet out, and only that.
+      expect(worker).toContain('vibecarbon-host-reporter.path');
+      expect(db).not.toContain('vibecarbon-host-reporter.path');
+    },
+  );
+
+  it('refuses a template without role slots as the db node, and an unknown role', () => {
+    // A master script has neither the slots nor the reporter include the db
+    // role drops; whichever check runs first names the script.
+    expect(() => loadCloudInit('master-init.sh', { role: 'db' })).toThrow(/"master-init\.sh"/);
+    expect(() => loadCloudInit('worker-init.sh', { role: 'nope' as 'db' })).toThrow(
+      /unknown role "nope"/,
+    );
   });
 });

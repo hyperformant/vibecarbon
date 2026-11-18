@@ -356,17 +356,13 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
     ],
   };
   const SNIPPET = 'carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml';
-  const ROLE_SCRIPTS = [
-    'master-init.sh',
-    'worker-init.sh',
-    'db-init.sh',
-    'do-master-init.sh',
-    'do-worker-init.sh',
-    'do-db-init.sh',
-    'linode-master-init.sh',
-    'linode-worker-init.sh',
-    'linode-db-init.sh',
-  ];
+  // [label, script] for every provider's master, worker and db node. The db
+  // node boots its provider's worker script loaded as the db role.
+  const ROLE_SCRIPTS = ['', 'do-', 'linode-'].flatMap((p) => [
+    [`${p}master-init.sh`, loadCloudInit(`${p}master-init.sh`)],
+    [`${p}worker-init.sh`, loadCloudInit(`${p}worker-init.sh`)],
+    [`${p}worker-init.sh as the db node`, loadCloudInit(`${p}worker-init.sh`, { role: 'db' })],
+  ]);
   const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh', 'linode-master-init.sh'];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
@@ -446,8 +442,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
 
   it.each(ROLE_SCRIPTS)(
     '%s writes the alias mirror into registries.yaml before k3s starts',
-    (name) => {
-      const script = loadCloudInit(name);
+    (name, script) => {
       const heredoc = script.match(
         /cat > \/etc\/rancher\/k3s\/registries\.yaml (<< '?REGEOF'?\n[\s\S]*?\nREGEOF)\n/,
       )?.[1];

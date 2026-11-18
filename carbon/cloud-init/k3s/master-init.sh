@@ -29,8 +29,9 @@ echo "Installing k3s version: $K3S_TARGET_VERSION"
 # @include _container-signals.sh
 # @include _stable-flowlabel.sh
 
-# IDENTICAL block in master-init.sh / worker-init.sh / db-init.sh - keep in sync.
-# (Three-way duplication is acceptable here because the cloud-init scripts are
+# IDENTICAL block in master-init.sh / worker-init.sh (which the database node
+# boots too) - keep in sync.
+# (Two-way duplication is acceptable here because the cloud-init scripts are
 # rendered independently per role; extracting a shared snippet would require
 # restructuring the renderScript() pipeline. Out of scope for Phase 1.)
 # Configure containerd to mirror pulls for 10.0.1.1:5000 to the local registry
@@ -153,8 +154,8 @@ echo "Private interface: $PRIVATE_IFACE"
 PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' || echo "")
 
 # The loop above only guards BOOT. Install the lifetime guard now that we have
-# a working private NIC to record. Shared with db-init.sh/worker-init.sh
-# via loadCloudInit's @include, so the three copies cannot drift.
+# a working private NIC to record. Shared with worker-init.sh (and so the
+# database node) via loadCloudInit's @include, so the copies cannot drift.
 # @include _private-net-guard.sh
 
 # Install the k3s master.
@@ -168,8 +169,8 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 # and remove the node.cloudprovider.kubernetes.io/uninitialized taint.
 # --flannel-iface routes pod-to-pod traffic over the private network.
 # --advertise-address must be the PRIVATE IP (statically 10.0.1.1 - assigned by
-# the Pulumi program's master ServerNetwork, same constant db-init.sh and
-# worker-init.sh join through). It steers BOTH (a) the in-cluster `kubernetes`
+# the Pulumi program's master ServerNetwork, same constant the database
+# node and worker-init.sh join through). It steers BOTH (a) the in-cluster `kubernetes`
 # Endpoints every pod's 10.43.0.1 DNATs to, and (b) the supervisor endpoint
 # k3s agents dial for the apiserver→kubelet reverse tunnel (remotedialer).
 # With the public IP here, both paths dial master-public:6443 - which the
