@@ -1154,6 +1154,25 @@ cannot be told apart from an outage.
 
 **Guard:** `tests/unit/providers/bucket-sustained-visibility.test.ts`.
 
+#### 2026-11-18: The lockfile audit reports an advisory nobody can fix yet
+
+The template job's audit step is now `scripts/audit-shipped-lockfile.mjs`. It
+fails on every high or critical advisory, as before, except one listed in its
+`NO_FIX_YET` table, which it prints and passes.
+
+**Why:** on 2026-11-17 an advisory against every published picomatch
+(GHSA-fc5q-39xc-vjpf, no patched version) reached the audit database. picomatch
+comes in through vite and vitest, so every pull request failed a required
+check with no lockfile to refresh to. The maintainer chose to set it aside
+until upstream ships a fix.
+
+**Do not undo:** do not turn the table into a general ignore list. An entry is
+only for an advisory with no fixed release, it names the newest release of the
+package when it was written, and the gate fails again the day a newer one is
+published or the advisory stops being reported.
+
+**Guard:** `tests/unit/scripts/audit-shipped-lockfile.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
