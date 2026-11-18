@@ -503,7 +503,16 @@ export async function sweepOrphanedLinodeResources(
       markIncomplete('Object Storage (no credentials)');
       objectStorage = undefined;
     } else {
-      objectStorage = await defaultObjectStorage(key, secret, token, fetchImpl);
+      // Inside a try, like the Vultr and Scaleway sweeps: this function
+      // promises never to throw, and a store that cannot be built (a module
+      // that fails to load) leaves the buckets unchecked.
+      try {
+        objectStorage = await defaultObjectStorage(key, secret, token, fetchImpl);
+      } catch (err) {
+        markIncomplete(
+          `Object Storage (store unusable: ${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
     }
   }
   if (objectStorage) {
