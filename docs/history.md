@@ -1304,6 +1304,13 @@ swallows a failed call.
   organizations list pages in a stable order.
 - Admin lists show a failed load, not the empty state. The Billing notice
   names the active provider's variables, sent by the server as `envVars`.
+- Stripe: the billing period is read from the subscription item and a failed
+  invoice's subscription from `parent.subscription_details`, where Stripe has
+  reported them since API version 2025-03-31. Before, the period end was
+  stored empty and a failed payment never marked the subscription past due.
+  The older locations are still read, since a webhook endpoint keeps the API
+  version it was created with. Proven against the SDK's types and signed test
+  events, not a live Stripe account.
 - An endpoint read by more than one component goes through one hook in
   `src/client/hooks/api/` (`useSubscription`, `useServicesStatus`,
   `useAdminStats`).

@@ -12,6 +12,25 @@ import { getStripe, isStripeConfigured, verifyWebhookSignature } from '../../lib
 import { priceIdsFor } from '../price-ids';
 import type { BillingProvider, CheckoutResult, PortalResult, SubscriptionInfo } from '../provider';
 
+/**
+ * A subscription's current billing period, in Unix seconds.
+ *
+ * From API version 2025-03-31 Stripe reports it on each subscription item;
+ * before that it was on the subscription. A webhook endpoint keeps the API
+ * version it was created with, so an event can arrive in either shape.
+ */
+function billingPeriod(subscription: Stripe.Subscription): { start?: number; end?: number } {
+  const item = subscription.items.data[0];
+  const legacy = subscription as unknown as {
+    current_period_start?: number;
+    current_period_end?: number;
+  };
+  return {
+    start: item?.current_period_start ?? legacy.current_period_start,
+    end: item?.current_period_end ?? legacy.current_period_end,
+  };
+}
+
 export class StripeProvider implements BillingProvider {
   readonly type = 'stripe' as const;
 
@@ -80,8 +99,7 @@ export class StripeProvider implements BillingProvider {
       const price = item.price;
       const product = price.product as Stripe.Product;
 
-      const currentPeriodEnd = (subscription as unknown as { current_period_end?: number })
-        .current_period_end;
+      const currentPeriodEnd = billingPeriod(subscription).end;
 
       return {
         id: subscription.id,
@@ -194,9 +212,7 @@ export class StripeProvider implements BillingProvider {
       case 'customer.subscription.updated': {
         const sub = event.data.object as Stripe.Subscription;
         const priceId = sub.items.data[0]?.price.id;
-        const periodStart = (sub as unknown as { current_period_start?: number })
-          .current_period_start;
-        const periodEnd = (sub as unknown as { current_period_end?: number }).current_period_end;
+        const { start: periodStart, end: periodEnd } = billingPeriod(sub);
         return {
           provider: 'stripe',
           subscriptionId: sub.id,
@@ -222,13 +238,10 @@ export class StripeProvider implements BillingProvider {
 
       case 'invoice.payment_failed': {
         const invoice = event.data.object as Stripe.Invoice;
-        const invoiceWithSub = invoice as unknown as {
-          subscription?: string | { id: string } | null;
-        };
-        const subscriptionId =
-          typeof invoiceWithSub.subscription === 'string'
-            ? invoiceWithSub.subscription
-            : invoiceWithSub.subscription?.id;
+        const named =
+          invoice.parent?.subscription_details?.subscription ??
+          (invoice as unknown as { subscription?: string | { id: string } | null }).subscription;
+        const subscriptionId = typeof named === 'string' ? named : named?.id;
         return {
           provider: 'stripe',
           subscriptionId: subscriptionId ?? null,
