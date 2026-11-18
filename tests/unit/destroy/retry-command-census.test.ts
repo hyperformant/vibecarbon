@@ -18,20 +18,18 @@
  * Allowed by hand: retry-command.js, which is the one spelling; and the
  * `-h` examples in destroy.js's SPEC, which are help, not a rerun.
  */
-import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { retryDestroyCommand } from '../../../src/lib/destroy/retry-command.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { lex, STRING } from '../helpers/js-call-scan.js';
 
-const ROOT = join(__dirname, '../../..');
 const ONE_SPELLING = 'src/lib/destroy/retry-command.js';
 
 function destroySources(): string[] {
-  const dir = join(ROOT, 'src/lib/destroy');
-  return [join(ROOT, 'src/destroy.js'), ...sourceFiles(dir, { exts: ['.js'] })].map((f) =>
-    relative(ROOT, f),
+  const dir = join(REPO_ROOT, 'src/lib/destroy');
+  return [join(REPO_ROOT, 'src/destroy.js'), ...sourceFiles(dir, { exts: ['.js'] })].map((f) =>
+    relative(REPO_ROOT, f),
   );
 }
 
@@ -71,9 +69,7 @@ describe('destroy names every rerun through retryDestroyCommand', () => {
     expect(files).toContain('src/destroy.js');
     expect(files).toContain('src/lib/destroy/server-sweep.js');
     expect(files).toContain('src/lib/destroy/s3-credential-check.js');
-    const offenders = files.flatMap((rel) =>
-      handSpelledReruns(rel, readFileSync(join(ROOT, rel), 'utf-8')),
-    );
+    const offenders = files.flatMap((rel) => handSpelledReruns(rel, readRepoFile(rel)));
     expect(offenders).toEqual([]);
   });
 

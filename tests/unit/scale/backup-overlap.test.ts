@@ -57,21 +57,17 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
   };
 });
 
-vi.mock('../../../src/lib/config.js', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, loadProjectConfig: () => null, updateProjectConfig: () => ({}) };
-});
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubProjectConfig(await orig()),
+);
 
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return {
-    ...actual,
-    spinner: () => ({ start() {}, stop() {}, message() {} }),
-    log: { info() {}, warn() {}, error() {}, step() {}, success() {}, message() {} },
-    note() {},
-    outro() {},
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['info', 'warn', 'error', 'step', 'success', 'message'],
+    spinner: true,
+    fns: ['note', 'outro'],
+  }),
+);
 
 // server-floors.test.ts covers the check; here it would open a real SSH session.
 vi.mock('../../../src/lib/deploy/compose/server-floors.js', async (orig) => ({

@@ -14,9 +14,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { assertTierSupported, PROVIDERS, VultrProvider } from '../../../src/lib/providers/index.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // User-facing surfaces — the "living docs" inventory, minus the
 // deliberate exemptions below.
@@ -47,8 +45,6 @@ const SURFACES = [
   'carbon/README.md',
 ];
 
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
 // Recursively collect every .ts/.tsx file under a directory, for the
 // carbon/src class-sweep (Task 8K). Excludes test/spec files (this repo's
 // carbon tests live under carbon/tests/, not carbon/src/, but the filter is
@@ -69,10 +65,10 @@ function walkTsFiles(dir: string): string[] {
 
 // Every SURFACES doc plus every locale JSON, labelled for failure messages —
 // shared by the bans that must hold across both (Task 8 A/B/C/E).
-const LOCALE_DIR = join(ROOT, 'carbon', 'src', 'client', 'locales');
+const LOCALE_DIR = join(REPO_ROOT, 'carbon', 'src', 'client', 'locales');
 const LOCALE_FILES = readdirSync(LOCALE_DIR).filter((f) => f.endsWith('.json'));
 function surfacesAndLocales(): Array<[string, string]> {
-  const entries: Array<[string, string]> = SURFACES.map((rel) => [rel, read(rel)]);
+  const entries: Array<[string, string]> = SURFACES.map((rel) => [rel, readRepoFile(rel)]);
   for (const f of LOCALE_FILES) {
     entries.push([`locales/${f}`, readFileSync(join(LOCALE_DIR, f), 'utf-8')]);
   }
@@ -152,13 +148,13 @@ function _extractLaunchAssetsGrid(text: string): Record<string, Set<string>> {
 describe('terminology census', () => {
   it('never mentions the retired Diamond tier', () => {
     for (const rel of SURFACES) {
-      expect(read(rel)).not.toMatch(/\bDiamond\b/);
+      expect(readRepoFile(rel)).not.toMatch(/\bDiamond\b/);
     }
   });
 
   it('never calls DigitalOcean a "reference provider" in user-facing text', () => {
     for (const rel of SURFACES) {
-      expect(read(rel)).not.toMatch(/reference[- ]provider/i);
+      expect(readRepoFile(rel)).not.toMatch(/reference[- ]provider/i);
     }
   });
 
@@ -171,7 +167,7 @@ describe('terminology census', () => {
     // stale "Diamond tier" or "reference provider" note a source that
     // reintroduces the exact vocabulary the surfaces above ban. This bites on
     // dev machines via the pre-push gate.
-    const memoryDir = join(ROOT, 'carbon', '.claude', 'agent-memory');
+    const memoryDir = join(REPO_ROOT, 'carbon', '.claude', 'agent-memory');
     if (!existsSync(memoryDir)) return;
     const offenders: string[] = [];
     for (const file of sourceFiles(memoryDir, { exts: ['.md'] })) {
@@ -182,7 +178,7 @@ describe('terminology census', () => {
       ] as Array<[string, RegExp]>) {
         const hits = contextHits(text, pattern);
         if (hits.length) {
-          offenders.push(`${file.slice(ROOT.length + 1)} [${label}]: ${hits.join(' | ')}`);
+          offenders.push(`${file.slice(REPO_ROOT.length + 1)} [${label}]: ${hits.join(' | ')}`);
         }
       }
     }
@@ -203,14 +199,14 @@ describe('terminology census', () => {
     // comments may still name it when they record the move away from the
     // mechanism, and must not trip this.
     const codeFiles = [
-      ...sourceFiles(join(ROOT, 'src'), { exts: ['.js'] }),
-      ...sourceFiles(join(ROOT, 'carbon', 'src'), { exts: ['.js'] }),
-      ...walkTsFiles(join(ROOT, 'carbon', 'src')),
+      ...sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] }),
+      ...sourceFiles(join(REPO_ROOT, 'carbon', 'src'), { exts: ['.js'] }),
+      ...walkTsFiles(join(REPO_ROOT, 'carbon', 'src')),
     ];
     expect(codeFiles.length, 'the premise walk found no code files').toBeGreaterThan(100);
     const codeHits = codeFiles
       .filter((f) => readFileSync(f, 'utf-8').includes('VITE_ENABLED_LANGUAGES'))
-      .map((f) => f.slice(ROOT.length + 1));
+      .map((f) => f.slice(REPO_ROOT.length + 1));
     expect(
       codeHits,
       `VITE_ENABLED_LANGUAGES is back in code (${codeHits.join(', ')}) — this ban assumed the ` +
@@ -219,11 +215,11 @@ describe('terminology census', () => {
 
     const docs = [
       ...SURFACES,
-      ...readdirSync(join(ROOT, 'carbon', 'content', 'docs'))
+      ...readdirSync(join(REPO_ROOT, 'carbon', 'content', 'docs'))
         .filter((f) => f.endsWith('.mdx'))
         .map((f) => join('carbon', 'content', 'docs', f)),
     ];
-    const offenders = docs.filter((rel) => read(rel).includes('VITE_ENABLED_LANGUAGES'));
+    const offenders = docs.filter((rel) => readRepoFile(rel).includes('VITE_ENABLED_LANGUAGES'));
     expect(
       offenders,
       `These docs still describe VITE_ENABLED_LANGUAGES: ${offenders.join(', ')}. ` +
@@ -236,7 +232,7 @@ describe('terminology census', () => {
     // "k8s-ha ... Hetzner-only" caveat wherever DO mode support was
     // enumerated; a stale survivor now under-advertises DO and contradicts
     // SUPPORTED_TIERS, so the same walk bans the phrase everywhere.
-    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxDir = join(REPO_ROOT, 'carbon', 'content', 'docs');
     const mdxFiles = readdirSync(mdxDir)
       .filter((f) => f.endsWith('.mdx'))
       .map((f) => join('carbon', 'content', 'docs', f));
@@ -248,13 +244,13 @@ describe('terminology census', () => {
       'carbon/README.md',
       ...mdxFiles,
     ]) {
-      expect(read(rel), rel).not.toMatch(/k8s-ha[^.\n]*Hetzner-only/i);
+      expect(readRepoFile(rel), rel).not.toMatch(/k8s-ha[^.\n]*Hetzner-only/i);
     }
   });
 
   it('never mentions the retired Diamond or Agency tiers', () => {
     for (const rel of SURFACES) {
-      expect(read(rel), `${rel}: Agency`).not.toMatch(/\bAgency\b/);
+      expect(readRepoFile(rel), `${rel}: Agency`).not.toMatch(/\bAgency\b/);
     }
     for (const f of LOCALE_FILES) {
       const text = readFileSync(join(LOCALE_DIR, f), 'utf-8');
@@ -268,13 +264,13 @@ describe('terminology census', () => {
     // clear of the retired model. (The app's own billing strings in the
     // locale describe the user's customers, so the price pattern is scoped
     // to the `landing` object.)
-    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxDir = join(REPO_ROOT, 'carbon', 'content', 'docs');
     const mdxFiles = readdirSync(mdxDir)
       .filter((f) => f.endsWith('.mdx'))
       .map((f) => join('carbon', 'content', 'docs', f));
     const retired = /graphite|graphene|fullerene|\bFSL\b|fair[ -]source/gi;
     for (const rel of [...SURFACES, ...mdxFiles]) {
-      const hits = contextHits(read(rel), retired);
+      const hits = contextHits(readRepoFile(rel), retired);
       expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
     }
     const price = /per-project subscription|per project per (month|year)|\$\d/gi;
@@ -289,13 +285,13 @@ describe('terminology census', () => {
   });
 
   it('never promises the license lasts: no "free forever", "forever free" or "always free"', () => {
-    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxDir = join(REPO_ROOT, 'carbon', 'content', 'docs');
     const mdxFiles = readdirSync(mdxDir)
       .filter((f) => f.endsWith('.mdx'))
       .map((f) => join('carbon', 'content', 'docs', f));
     const pattern = /free\s+forever|forever\s+free|always\s+free/gi;
     for (const rel of [...SURFACES, ...mdxFiles]) {
-      const hits = contextHits(read(rel), pattern);
+      const hits = contextHits(readRepoFile(rel), pattern);
       expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
     }
     for (const f of LOCALE_FILES) {
@@ -312,7 +308,7 @@ describe('terminology census', () => {
     ];
     for (const rel of SURFACES) {
       for (const [label, pattern] of patterns) {
-        expect(read(rel), `${rel}: ${label}`).not.toMatch(pattern);
+        expect(readRepoFile(rel), `${rel}: ${label}`).not.toMatch(pattern);
       }
     }
   });
@@ -325,7 +321,7 @@ describe('terminology census', () => {
   // a self-repo raw URL is stale and still fails.
   it('self-repo raw.githubusercontent.com asset URLs name the current org, never a stale one', () => {
     for (const rel of SURFACES) {
-      expect(read(rel), rel).not.toMatch(
+      expect(readRepoFile(rel), rel).not.toMatch(
         /raw\.githubusercontent\.com\/(?!hyperformant\/)[^/]+\/vibecarbon/i,
       );
     }
@@ -333,7 +329,7 @@ describe('terminology census', () => {
 
   it('never uses pivot-banned framings ("servers you own", "two cloud providers", "two clouds")', () => {
     for (const rel of SURFACES) {
-      const text = read(rel);
+      const text = readRepoFile(rel);
       expect(text, `${rel}: servers you own`).not.toMatch(/servers? you own/i);
       expect(text, `${rel}: two cloud providers`).not.toMatch(/two cloud providers/i);
       expect(text, `${rel}: two clouds`).not.toMatch(/\btwo clouds\b/i);
@@ -341,7 +337,7 @@ describe('terminology census', () => {
   });
 
   it('locale files carry no banned terms (Diamond, reference provider, pivot literals)', () => {
-    const localeDir = join(ROOT, 'carbon', 'src', 'client', 'locales');
+    const localeDir = join(REPO_ROOT, 'carbon', 'src', 'client', 'locales');
     for (const f of readdirSync(localeDir).filter((f) => f.endsWith('.json'))) {
       const text = readFileSync(join(localeDir, f), 'utf-8');
       expect(text, `${f}: Diamond`).not.toMatch(/\bDiamond\b/);
@@ -355,11 +351,11 @@ describe('terminology census', () => {
   });
 
   it('never calls DigitalOcean a "reference provider" anywhere in src/ (strings or comments)', () => {
-    const srcDir = join(ROOT, 'src');
+    const srcDir = join(REPO_ROOT, 'src');
     const offenders: string[] = [];
     for (const file of sourceFiles(srcDir, { exts: ['.js'] })) {
       const text = readFileSync(file, 'utf-8');
-      if (/reference[- ]provider/i.test(text)) offenders.push(file.slice(ROOT.length + 1));
+      if (/reference[- ]provider/i.test(text)) offenders.push(file.slice(REPO_ROOT.length + 1));
     }
     expect(offenders).toEqual([]);
   });
@@ -433,7 +429,7 @@ describe('terminology census', () => {
     // tool. The named-framework ban (family E) applies regardless: the
     // analytics doc states the mechanism — no cookies, no cross-site
     // tracking — and leaves the legal conclusion to the reader.
-    const text = read('carbon/content/docs/analytics.mdx');
+    const text = readRepoFile('carbon/content/docs/analytics.mdx');
     const hits = contextHits(text, /GDPR|SOC ?2|HIPAA|PCI[- ]DSS|ISO ?27001|CCPA/gi);
     expect(hits, `carbon/content/docs/analytics.mdx: ${hits.join(' | ')}`).toEqual([]);
   });
@@ -450,7 +446,7 @@ describe('terminology census', () => {
     );
     const wordRe = new RegExp(PILLAR_WORD, 'gi');
     for (const rel of SURFACES) {
-      const text = read(rel);
+      const text = readRepoFile(rel);
       for (const m of text.matchAll(enumRe)) {
         const found = [...m[0].matchAll(wordRe)].map((w) => w[0].toLowerCase());
         const expected = REGISTRY_ORDER.filter((p) => found.includes(p));
@@ -477,7 +473,7 @@ describe('terminology census', () => {
     expect(providers.length, 'PROVIDERS is empty — the registry import broke').toBeGreaterThan(3);
     const offenders: string[] = [];
     for (const rel of enumerations) {
-      const text = read(rel);
+      const text = readRepoFile(rel);
       for (const name of providers) {
         // Word-anchored, and the name is escaped before it becomes a pattern:
         // a bare substring test is satisfied by an incidental mention like
@@ -499,7 +495,7 @@ describe('terminology census', () => {
   });
 
   it("banner-generator.py's COPY block names no provider and no banned framing; README's banner alt matches the script's ALT string", () => {
-    const bannerText = readFileSync(join(ROOT, 'scripts', 'banner-generator.py'), 'utf-8');
+    const bannerText = readRepoFile('scripts', 'banner-generator.py');
     const start = bannerText.indexOf(
       '# ---------------------------------------------------------------- copy',
     );
@@ -523,7 +519,9 @@ describe('terminology census', () => {
     const scriptAlt = [...(altAssignment as RegExpMatchArray)[1].matchAll(/"([^"]*)"/g)]
       .map((m) => m[1])
       .join('');
-    const readmeAltMatch = read('README.md').match(/src="[^"]*banner-light\.svg" alt="([^"]*)"/);
+    const readmeAltMatch = readRepoFile('README.md').match(
+      /src="[^"]*banner-light\.svg" alt="([^"]*)"/,
+    );
     expect(readmeAltMatch).not.toBeNull();
     expect((readmeAltMatch as RegExpMatchArray)[1]).toBe(scriptAlt);
   });
@@ -556,11 +554,11 @@ describe('terminology census', () => {
       message = (err as Error).message;
     }
     expect(message).not.toBe('');
-    expect(read('FEATURES.md')).toContain(message);
+    expect(readRepoFile('FEATURES.md')).toContain(message);
   });
 
   it('carbon/src file text never carries the Diamond/reference-provider/pivot/metal-ownership/composed-claim/named-framework banned terms', () => {
-    const carbonSrcRoot = join(ROOT, 'carbon', 'src');
+    const carbonSrcRoot = join(REPO_ROOT, 'carbon', 'src');
     const files = walkTsFiles(carbonSrcRoot);
     expect(files.length).toBeGreaterThan(100); // sanity: the walk actually found the tree
 
@@ -583,7 +581,7 @@ describe('terminology census', () => {
       for (const [label, pattern] of patterns) {
         const hits = contextHits(text, pattern);
         if (hits.length) {
-          offenders.push(`${file.slice(ROOT.length + 1)} [${label}]: ${hits.join(' | ')}`);
+          offenders.push(`${file.slice(REPO_ROOT.length + 1)} [${label}]: ${hits.join(' | ')}`);
         }
       }
     }
@@ -592,16 +590,16 @@ describe('terminology census', () => {
 
   it('the template homepage never talks "SaaS" (Brandon\'s directive: not on the stock homepage copy)', () => {
     const files = [
-      ...readdirSync(join(ROOT, 'carbon', 'src', 'client', 'components', 'sections'))
+      ...readdirSync(join(REPO_ROOT, 'carbon', 'src', 'client', 'components', 'sections'))
         .filter((f) => f.endsWith('.tsx'))
-        .map((f) => join(ROOT, 'carbon', 'src', 'client', 'components', 'sections', f)),
-      join(ROOT, 'carbon', 'src', 'client', 'pages', 'HomePreview.tsx'),
+        .map((f) => join(REPO_ROOT, 'carbon', 'src', 'client', 'components', 'sections', f)),
+      join(REPO_ROOT, 'carbon', 'src', 'client', 'pages', 'HomePreview.tsx'),
     ];
     const offenders: string[] = [];
     for (const file of files) {
       const text = readFileSync(file, 'utf-8');
       const hits = contextHits(text, /\bSaaS\b/gi);
-      if (hits.length) offenders.push(`${file.slice(ROOT.length + 1)}: ${hits.join(' | ')}`);
+      if (hits.length) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${hits.join(' | ')}`);
     }
     expect(offenders).toEqual([]);
   });

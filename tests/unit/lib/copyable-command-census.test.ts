@@ -12,14 +12,12 @@
  *      of the JS string.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { KNOWN_COMMANDS } from '../../../src/cli.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const files = execFileSync('git', ['ls-files', 'src/*.js', 'src/**/*.js'], {
-  cwd: ROOT,
+  cwd: REPO_ROOT,
   encoding: 'utf-8',
 })
   .split('\n')
@@ -79,7 +77,7 @@ describe('copyable commands are never followed by punctuation', () => {
   });
 
   it('no message in src/ glues punctuation to a command', () => {
-    const found = files.flatMap((f) => offenders(readFileSync(join(ROOT, f), 'utf-8'), f));
+    const found = files.flatMap((f) => offenders(readRepoFile(f), f));
     expect(found).toEqual([]);
   });
 

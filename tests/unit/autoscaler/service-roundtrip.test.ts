@@ -15,8 +15,7 @@
  * 'hetzner'/'hcloud' literals in autoscaler code or tests, per the
  * no-hardcoded-provider-dispatch structural pin — see structure.test.ts).
  */
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
@@ -29,6 +28,7 @@ import {
 } from '../../../src/autoscaler/proto.js';
 // @ts-expect-error — JS module without types
 import { startServer } from '../../../src/autoscaler/server.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const decodeNode = (bytes: Buffer) => {
   const Node = loadNodeType();
@@ -137,7 +137,7 @@ async function withServer(
   opts: { config?: Record<string, unknown>; provider?: ProviderMock },
   testFn: (ctx: Ctx) => Promise<void>,
 ) {
-  const dir = mkdtempSync(join(tmpdir(), 'carbon-autoscaler-roundtrip-'));
+  const dir = createTempDir('carbon-autoscaler-roundtrip-');
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
 
   const configPath = join(dir, 'config.json');

@@ -9,6 +9,7 @@ import {
   parseDotenv,
   readEnvFiles,
 } from '../../../src/lib/dotenv.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('encodeDotenvValue grammar', () => {
@@ -116,10 +117,6 @@ describe('parseDotenv / readEnvFiles', () => {
 
 describe('template copy is byte-identical', () => {
   it('carbon/scripts/lib/dotenv.js === src/lib/dotenv.js', async () => {
-    const { readFileSync } = await import('node:fs');
-    const root = join(import.meta.dirname, '..', '..', '..');
-    expect(readFileSync(join(root, 'carbon/scripts/lib/dotenv.js'), 'utf-8')).toBe(
-      readFileSync(join(root, 'src/lib/dotenv.js'), 'utf-8'),
-    );
+    expect(readRepoFile('carbon/scripts/lib/dotenv.js')).toBe(readRepoFile('src/lib/dotenv.js'));
   });
 });

@@ -18,16 +18,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const clackMock = vi.hoisted(() => ({
-  password: vi.fn(),
-  text: vi.fn(),
-  confirm: vi.fn(),
-  select: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  note: vi.fn(),
-  log: { info: vi.fn(), warn: vi.fn(), success: vi.fn(), error: vi.fn(), step: vi.fn() },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['password', 'text', 'confirm', 'select', 'cancel', 'note'],
+    log: ['info', 'warn', 'success', 'error', 'step'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));
 

@@ -17,16 +17,13 @@ import { type Config as ConfigJson, projectConfigStore } from '../helpers/projec
 //      currently playing, not a suffix sniff over the (possibly swapped)
 //      stack name.
 
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return {
-    ...actual,
-    spinner: () => ({ start() {}, stop() {}, message() {} }),
-    log: { info() {}, warn() {}, error() {}, step() {}, success() {} },
-    note() {},
-    outro() {},
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['info', 'warn', 'error', 'step', 'success'],
+    spinner: true,
+    fns: ['note', 'outro'],
+  }),
+);
 
 vi.mock('node:fs', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;

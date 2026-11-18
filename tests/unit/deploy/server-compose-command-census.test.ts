@@ -25,11 +25,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /** The single source: the only file that spells `docker compose` for a server. */
 const SINGLE_SOURCE = 'src/lib/deploy/compose/command.js';
@@ -71,10 +68,10 @@ function walk(dir: string, keep: (f: string) => boolean): string[] {
 }
 
 const read = (files: string[]) =>
-  files.map((f) => ({ file: relative(ROOT, f), text: readFileSync(f, 'utf-8') }));
+  files.map((f) => ({ file: relative(REPO_ROOT, f), text: readFileSync(f, 'utf-8') }));
 
-const SRC = read(walk(join(ROOT, 'src'), (f) => /\.(m?js)$/.test(f)));
-const SERVER_SCRIPTS = read(walk(join(ROOT, 'carbon', 'backup'), (f) => f.endsWith('.sh')));
+const SRC = read(walk(join(REPO_ROOT, 'src'), (f) => /\.(m?js)$/.test(f)));
+const SERVER_SCRIPTS = read(walk(join(REPO_ROOT, 'carbon', 'backup'), (f) => f.endsWith('.sh')));
 
 /** JS comment lines, and shell comment lines (also inside rendered scripts). */
 const isComment = (line: string) => /^\s*(\/\/|\*(\s|\/|$)|\/\*|#)/.test(line);

@@ -22,8 +22,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 /** Every template compose file that can reach a deployed server. */
 function templateComposeFiles(): string[] {
@@ -51,7 +50,7 @@ function templateComposeFiles(): string[] {
 
 describe('compose network IP partition', () => {
   it('base network defines subnet + .128/25 dynamic ip_range from DEV_SUBNET_PREFIX', () => {
-    const base = readFileSync(join(REPO_ROOT, 'carbon', 'docker-compose.yml'), 'utf-8');
+    const base = readRepoFile('carbon', 'docker-compose.yml');
     expect(base).toMatch(/subnet:\s*\$\{DEV_SUBNET_PREFIX:-172\.30\.0\}\.0\/24/);
     expect(base).toMatch(/ip_range:\s*\$\{DEV_SUBNET_PREFIX:-172\.30\.0\}\.128\/25/);
   });

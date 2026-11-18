@@ -17,8 +17,7 @@
  * Deployments, verbatim, in tests/fixtures.
  */
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -31,13 +30,15 @@ import {
   renderCertManagerKustomization,
   writeCertManagerKustomization,
 } from '../../../carbon/scripts/render-cert-manager.mjs';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
 
 const FIXTURE = join(
-  __dirname,
-  `../../fixtures/cert-manager-${CERT_MANAGER_VERSION}-deployments.upstream.txt`,
+  REPO_ROOT,
+  `tests/fixtures/cert-manager-${CERT_MANAGER_VERSION}-deployments.upstream.txt`,
 );
 const UPSTREAM_ARGS = [
   '--v=2',
@@ -55,7 +56,7 @@ afterEach(() => {
 
 /** A kustomization dir over a local copy of `manifest` (kustomize refuses files outside its root). */
 function renderDir(manifest = FIXTURE): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-cert-manager-'));
+  const dir = createTempDir('vc-cert-manager-');
   dirs.push(dir);
   copyFileSync(manifest, join(dir, 'cert-manager.yaml'));
   writeCertManagerKustomization(dir, { resource: 'cert-manager.yaml' });
@@ -157,7 +158,7 @@ describe('the rendered cert-manager manifest', () => {
   });
 
   it('refuses a manifest whose first container is not the controller', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-cert-manager-'));
+    const dir = createTempDir('vc-cert-manager-');
     dirs.push(dir);
     const moved = readFileSync(FIXTURE, 'utf-8').replace(
       '- name: cert-manager-controller',
@@ -171,11 +172,11 @@ describe('the rendered cert-manager manifest', () => {
 
 describe('the script form (GitOps workflow)', () => {
   it('writes the same kustomization the CLI applies', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-cert-manager-'));
+    const dir = createTempDir('vc-cert-manager-');
     dirs.push(dir);
     const res = spawnSync(
       process.execPath,
-      [join(__dirname, '../../../carbon/scripts/render-cert-manager.mjs'), join(dir, 'k')],
+      [join(REPO_ROOT, 'carbon/scripts/render-cert-manager.mjs'), join(dir, 'k')],
       { encoding: 'utf-8' },
     );
     expect(res.status).toBe(0);
@@ -187,7 +188,7 @@ describe('the script form (GitOps workflow)', () => {
   it('refuses without a target directory', () => {
     const res = spawnSync(
       process.execPath,
-      [join(__dirname, '../../../carbon/scripts/render-cert-manager.mjs')],
+      [join(REPO_ROOT, 'carbon/scripts/render-cert-manager.mjs')],
       { encoding: 'utf-8' },
     );
     expect(res.status).toBe(1);
@@ -197,7 +198,7 @@ describe('the script form (GitOps workflow)', () => {
 
 describe('the kubectl floor (lib/runtime-floors.js)', () => {
   it('the k8s deploy preflight checks it right after the tool lookup', () => {
-    const k3s = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const tools = k3s.indexOf("for (const tool of ['docker', 'ssh', 'kubectl'])");
     const floor = k3s.indexOf('kubectlFloorProblem(');
     const ok = k3s.indexOf("s.stop('Preflight OK')");

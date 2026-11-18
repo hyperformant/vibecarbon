@@ -31,9 +31,9 @@ import {
   queueBootTiming,
   summarizeBootTiming,
 } from '../../../src/lib/deploy/boot-timing.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const fx = (name: string) =>
-  readFileSync(join(__dirname, '../../fixtures/cloud-init-analyze', name), 'utf-8');
+const fx = (name: string) => readRepoFile('tests/fixtures/cloud-init-analyze', name);
 
 /** The report the remote script prints: one `==> <section> <==` per source. */
 function report(parts: {
@@ -336,7 +336,7 @@ describe('BOOT_TIMING_SCRIPT', () => {
 });
 
 describe('cloud-init phase marks', () => {
-  const k3sDir = join(__dirname, '../../../carbon/cloud-init/k3s');
+  const k3sDir = join(REPO_ROOT, 'carbon/cloud-init/k3s');
   const name = (id: string) => {
     // Every id a script writes must be one the parser names.
     expect(Object.keys(PHASE_IDS), `unknown phase id ${id}`).toContain(id);
@@ -372,10 +372,7 @@ describe('cloud-init phase marks', () => {
   });
 
   it('the compose cloud-config marks its runcmd phases and brackets the boot pull', () => {
-    const text = readFileSync(
-      join(__dirname, '../../../carbon/cloud-init/docker-ce-setup.yaml'),
-      'utf-8',
-    );
+    const text = readRepoFile('carbon/cloud-init/docker-ce-setup.yaml');
     const runcmdMarks = [
       ...text.matchAll(/^ {2}- \[sh, -c, 'echo "(\S+) \$\(date \+%s\.%N\)">>(\S+)\|\|true'\]$/gm),
     ];

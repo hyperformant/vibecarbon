@@ -12,12 +12,11 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { capTail, DIAGNOSTIC_SECTION_MAX_CHARS } from '../../e2e/utils/diagnostic-cap.js';
 
-const E2E_DIR = fileURLToPath(new URL('../../e2e/', import.meta.url));
+const E2E_DIR = join(REPO_ROOT, 'tests/e2e');
 const LIFECYCLE = join(E2E_DIR, 'scenarios/_run-lifecycle.ts');
 
 /** One Traefik access-log line, about the width the real ones run. */
@@ -49,8 +48,7 @@ describe('the failure bundle keeps a line-bounded section whole', () => {
   it('fits four pods x 60 access-log lines under the default section cap', () => {
     const pods = ['traefik-a', 'traefik-b', 'app-a', 'app-b'];
     const section = pods
-      .map((p) => [`=== ${p} ===`, ...Array.from({ length: 60 }, (_, i) => accessLine(p, i))])
-      .flat()
+      .flatMap((p) => [`=== ${p} ===`, ...Array.from({ length: 60 }, (_, i) => accessLine(p, i))])
       .join('\n');
     expect(capTail(section, DIAGNOSTIC_SECTION_MAX_CHARS)).toBe(section);
   });

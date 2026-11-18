@@ -5,8 +5,6 @@
  * post-mortems, so the recording semantics get pinned.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,6 +18,7 @@ const clackMock = vi.hoisted(() => ({
 vi.mock('@clack/prompts', () => clackMock);
 
 import { createPrefixedTracker, createTracker } from '../../../src/lib/tracker.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,14 +42,13 @@ describe('createTracker', () => {
   const originalCwd = process.cwd();
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-tracker-'));
+    dir = createTempDir('vc-tracker-');
     process.chdir(dir);
     clackMock.note.mockClear();
   });
 
   afterEach(() => {
     process.chdir(originalCwd);
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('shows a raw multi-line error as one readable line, in the spinner and the Stats box, with the full text in the log', async () => {

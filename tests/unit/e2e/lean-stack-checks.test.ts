@@ -5,9 +5,8 @@
  * app's own HTML 404 rather than a gateway or a Traefik no-router 404.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   CORE_TABLES,
   CRON_JOBS,
@@ -232,10 +231,7 @@ describe('runDbRuntimeChecks (migrations, cron, server config)', () => {
   });
 
   it('CRON_JOBS matches the cron.schedule() calls in the template baseline', () => {
-    const post = readFileSync(
-      join(process.cwd(), 'carbon/db/migrations/0002_baseline_post.sql'),
-      'utf-8',
-    );
+    const post = readRepoFile('carbon/db/migrations/0002_baseline_post.sql');
     const scheduled = [...post.matchAll(/cron\.schedule\(\s*'([^']+)'/g)].map((m) => m[1]).sort();
     expect(scheduled).toEqual([...CRON_JOBS]);
   });
@@ -281,7 +277,7 @@ describe('checkUnknownPathNotFound', () => {
   });
 
   it('the shell marker is the one in the template index.html', () => {
-    const html = readFileSync(join(process.cwd(), 'carbon/src/client/index.html'), 'utf-8');
+    const html = readRepoFile('carbon/src/client/index.html');
     expect(html).toContain(APP_SHELL_MARKER);
   });
 

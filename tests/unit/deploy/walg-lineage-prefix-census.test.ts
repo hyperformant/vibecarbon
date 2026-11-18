@@ -29,9 +29,6 @@
  * The walks list files, not sites, so a new wal-g caller is caught.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
@@ -43,11 +40,10 @@ import { buildDbManifestValues } from '../../../src/lib/deploy/k8s/k3s.js';
 import { buildWalgAuditProbe, VERIFY_HINTS } from '../../../src/lib/deploy/walg-audit.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 import { WALG_ENV_PATH, WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
 const tracked = (dir: string) =>
-  spawnSync('git', ['ls-files', dir], { cwd: ROOT, encoding: 'utf-8' })
+  spawnSync('git', ['ls-files', dir], { cwd: REPO_ROOT, encoding: 'utf-8' })
     .stdout.split('\n')
     .filter(Boolean);
 
@@ -80,7 +76,7 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   const carbonCallers = tracked('carbon')
     .filter((f) => /\.(sh|ya?ml)$/.test(f))
     .filter((f) =>
-      read(f)
+      readRepoFile(f)
         .split('\n')
         .some((l) => !isComment(l) && WALG_CALL.test(l)),
     );
@@ -101,7 +97,7 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   it.each(carbonCallers.filter((f) => f !== TLS_SNAPSHOT_SH))(
     '%s sources walg-env.sh before its first wal-g call',
     (file) => {
-      const lines = read(file).split('\n');
+      const lines = readRepoFile(file).split('\n');
       const source = firstIndex(lines, SOURCES_WALG_ENV);
       const call = firstIndex(lines, WALG_CALL);
       expect(source, `${file} never sources walg-env.sh`).toBeGreaterThan(-1);
@@ -112,7 +108,7 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   // The TLS snapshot writes beside the lineage folders, never inside one:
   // sourcing walg-env.sh would put the certificate in this database's lineage.
   it('tls-snapshot.sh never sources walg-env.sh, and its one wal-g call is the snapshot st put', () => {
-    const code = read(TLS_SNAPSHOT_SH)
+    const code = readRepoFile(TLS_SNAPSHOT_SH)
       .split('\n')
       .filter((l) => !isComment(l));
     expect(firstIndex(code, SOURCES_WALG_ENV)).toBe(-1);
@@ -122,7 +118,7 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   });
 
   it('the walg-restore init sources it only on a restore, with RESTORE_LINEAGE required (C15)', () => {
-    const sts = read('carbon/k8s/base/db/statefulset.yaml');
+    const sts = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
     const normalBoot = sts.indexOf('walg-restore: no restore requested, normal boot.');
     const lineageRequired = sts.indexOf('RESTORE_BACKUP is set without RESTORE_LINEAGE');
     const source = sts.indexOf(`. ${WALG_ENV_PATH}`);
@@ -136,13 +132,13 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   });
 
   it('walg-env.sh is mounted wherever a wal-g caller runs (compose db, k8s db and init)', () => {
-    const compose = loadYaml(read('carbon/docker-compose.yml')) as {
+    const compose = loadYaml(readRepoFile('carbon/docker-compose.yml')) as {
       services: { db: { volumes: string[] } };
     };
     expect(compose.services.db.volumes).toContain(
       './volumes/db/walg-env.sh:/etc/postgresql/walg-env.sh:ro,Z',
     );
-    const sts = loadYaml(read('carbon/k8s/base/db/statefulset.yaml')) as {
+    const sts = loadYaml(readRepoFile('carbon/k8s/base/db/statefulset.yaml')) as {
       spec: {
         template: {
           spec: {
@@ -170,7 +166,7 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   const srcCallers = tracked('src')
     .filter((f) => f.endsWith('.js'))
     .filter((f) =>
-      read(f)
+      readRepoFile(f)
         .split('\n')
         .some((l) => !isComment(l) && WALG_CALL.test(l)),
     );
@@ -238,14 +234,14 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
 
 describe('(b) WALG_PREVENT_WAL_OVERWRITE is on wherever WAL is pushed', () => {
   it('compose db env', () => {
-    const compose = loadYaml(read('carbon/docker-compose.yml')) as {
+    const compose = loadYaml(readRepoFile('carbon/docker-compose.yml')) as {
       services: { db: { environment: Record<string, string> } };
     };
     expect(compose.services.db.environment.WALG_PREVENT_WAL_OVERWRITE).toBe('true');
   });
 
   it('k8s db container and walg-restore init', () => {
-    const sts = loadYaml(read('carbon/k8s/base/db/statefulset.yaml')) as {
+    const sts = loadYaml(readRepoFile('carbon/k8s/base/db/statefulset.yaml')) as {
       spec: {
         template: {
           spec: {
@@ -267,7 +263,7 @@ describe('(b) WALG_PREVENT_WAL_OVERWRITE is on wherever WAL is pushed', () => {
   });
 
   it('the backup CronJob exec script', () => {
-    const cron = read('carbon/k8s/base/backup/cronjob.yaml');
+    const cron = readRepoFile('carbon/k8s/base/backup/cronjob.yaml');
     const lines = cron.split('\n');
     const set = lines.findIndex((l) => l.trim() === 'export WALG_PREVENT_WAL_OVERWRITE=true');
     expect(set).toBeGreaterThan(-1);
@@ -310,7 +306,7 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
   it('the TLS exemption covers only the bare snapshot upload, with nothing appended', () => {
     // The real upload lines, as the census reads them (trimmed).
     const putLine = (f: string) => {
-      const lines = read(f)
+      const lines = readRepoFile(f)
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => !isComment(l) && /wal-g st put/.test(l));
@@ -340,25 +336,25 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
   });
 
   it('walg-env.sh sets it (the patterns are live)', () => {
-    expect(read(WALG_ENV_FILE).split('\n').filter(sets).length).toBeGreaterThanOrEqual(3);
+    expect(readRepoFile(WALG_ENV_FILE).split('\n').filter(sets).length).toBeGreaterThanOrEqual(3);
   });
 
   it('no other file under carbon/ or src/ does, except the ConfigMap parity copy', () => {
     const offenders: string[] = [];
     for (const f of files) {
       if (f === WALG_ENV_FILE) continue;
-      for (const [i, line] of read(f).split('\n').entries()) {
+      for (const [i, line] of readRepoFile(f).split('\n').entries()) {
         if (sets(line)) offenders.push(`${f}:${i + 1}: ${line.trim()}`);
       }
     }
     // The ConfigMap's sets are exactly the walg-env.sh key's (C16).
-    const copy = (loadYaml(read(CONFIGMAP)) as { data: Record<string, string> }).data[
+    const copy = (loadYaml(readRepoFile(CONFIGMAP)) as { data: Record<string, string> }).data[
       'walg-env.sh'
     ];
     const inCopy = copy.split('\n').filter(sets).length;
     const cmOffenders = offenders.filter((o) => o.startsWith(`${CONFIGMAP}:`));
     expect(cmOffenders).toHaveLength(inCopy);
-    expect(copy).toBe(read(WALG_ENV_FILE));
+    expect(copy).toBe(readRepoFile(WALG_ENV_FILE));
     // The TLS snapshot uploads, one per writer, each to the snapshot folder.
     const tlsPuts = offenders.filter((o) => TLS_SNAPSHOT_PUT.test(o));
     expect(tlsPuts.map((o) => o.slice(0, o.indexOf(':'))).sort()).toEqual(
@@ -380,7 +376,7 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
     });
     expect(values.WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
     expect(values).not.toHaveProperty('WALG_S3_PREFIX');
-    expect(read('carbon/k8s/base/db/statefulset.yaml')).not.toContain('{{WALG_S3_PREFIX}}');
+    expect(readRepoFile('carbon/k8s/base/db/statefulset.yaml')).not.toContain('{{WALG_S3_PREFIX}}');
   });
 });
 
@@ -395,7 +391,7 @@ describe('(d) every WALG_S3_PREFIX_BASE construction has an env segment', () => 
     const seen: string[] = [];
     const offenders: string[] = [];
     for (const f of files) {
-      for (const [i, line] of read(f).split('\n').entries()) {
+      for (const [i, line] of readRepoFile(f).split('\n').entries()) {
         const m = assignment.exec(line);
         if (!m || line.trimStart().startsWith('#')) continue;
         const value = m[1].trim();

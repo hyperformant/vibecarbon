@@ -16,14 +16,13 @@
  *      pulls the local `.env` into the bundle).
  * Fixture values only.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv, readEnvFiles } from '../../../src/lib/dotenv.js';
 import { loadEnvVariables, repairLegacyEnvQuoting } from '../../../src/lib/project.js';
-
-const ROOT = join(import.meta.dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('deploy/scale entry heal — the hook the commands call', () => {
   const dirs: string[] = [];
@@ -32,7 +31,7 @@ describe('deploy/scale entry heal — the hook the commands call', () => {
   });
 
   it('after the entry heal, every reader deploy uses sees the decoded value', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'vc-deploy-heal-'));
+    const cwd = createTempDir('vc-deploy-heal-');
     dirs.push(cwd);
     writeFileSync(join(cwd, '.env'), "JWT_SECRET=abc\nSMTP_PASS='pa'\\''ss'\n");
     writeFileSync(join(cwd, '.env.local'), "SMTP_PASS='pa'\\''ss'\nHETZNER_API_TOKEN=t\n");
@@ -72,7 +71,7 @@ describe('deploy/scale entry heal — call order pinned in source', () => {
   };
 
   it('deploy.js main() heals before the 0d env preflight and the operator gate', () => {
-    const src = readFileSync(join(ROOT, 'src/deploy.js'), 'utf-8');
+    const src = readRepoFile('src/deploy.js');
     expect(src).toMatch(
       /import \{[^}]*\brepairLegacyEnvQuoting\b[^}]*\} from '\.\/lib\/project\.js'/,
     );
@@ -87,7 +86,7 @@ describe('deploy/scale entry heal — call order pinned in source', () => {
   });
 
   it('scale.js run() heals after the project guard and before the strategy that bundles the local .env', () => {
-    const src = readFileSync(join(ROOT, 'src/scale.js'), 'utf-8');
+    const src = readRepoFile('src/scale.js');
     expect(src).toMatch(
       /import \{[^}]*\brepairLegacyEnvQuoting\b[^}]*\} from '\.\/lib\/project\.js'/,
     );

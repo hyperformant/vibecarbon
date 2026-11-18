@@ -24,7 +24,7 @@ import { basename, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -32,8 +32,6 @@ const TEST_TLS = {
   issuerName: 'letsencrypt-prod',
   effectiveIssuer: 'letsencrypt-prod',
 };
-
-const ROOT = join(__dirname, '../../..');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML / patch objects
 type Node = any;
@@ -73,7 +71,7 @@ const isPlaceholder = (v: string) => /^__[A-Z0-9_]+__$/.test(v.trim());
  */
 function fluxStripped(): Set<string> {
   const perCluster = ['primary', 'standby'].map((cluster) => {
-    const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
+    const file = join(REPO_ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
     const ks = (loadAll(readFileSync(file, 'utf-8')) as Node[]).find(
       (d) => d?.kind === 'Kustomization' && d.metadata?.name === 'vibecarbon-base',
     );
@@ -99,9 +97,9 @@ function unboundHostPorts(bindings: Binding[], stripped: Set<string>): Binding[]
 
 function manifestBindings(): Binding[] {
   const files = [
-    ...walkFiles(join(ROOT, 'carbon/k8s'), /\.ya?ml$/),
-    ...readdirSync(join(ROOT, 'services')).flatMap((svc) => {
-      const dir = join(ROOT, 'services', svc, 'k8s');
+    ...walkFiles(join(REPO_ROOT, 'carbon/k8s'), /\.ya?ml$/),
+    ...readdirSync(join(REPO_ROOT, 'services')).flatMap((svc) => {
+      const dir = join(REPO_ROOT, 'services', svc, 'k8s');
       try {
         return walkFiles(dir, /\.ya?ml$/);
       } catch {
@@ -114,13 +112,13 @@ function manifestBindings(): Binding[] {
     const text = readFileSync(file, 'utf-8').replace(/\{\{([A-Z0-9_]+)\}\}/g, '__$1__');
     const docs = (loadAll(text) as Node[]).filter(Boolean);
     return docs.flatMap((doc) =>
-      collectHostPorts(doc, relative(ROOT, file), `${doc?.kind}/${doc?.metadata?.name}`),
+      collectHostPorts(doc, relative(REPO_ROOT, file), `${doc?.kind}/${doc?.metadata?.name}`),
     );
   });
 }
 
 async function patchBuilderBindings(): Promise<Binding[]> {
-  const modules = walkFiles(join(ROOT, 'src/lib/deploy/k8s'), /\.js$/);
+  const modules = walkFiles(join(REPO_ROOT, 'src/lib/deploy/k8s'), /\.js$/);
   const out: Binding[] = [];
   for (const file of modules) {
     const mod = await import(pathToFileURL(file).href);
@@ -129,7 +127,7 @@ async function patchBuilderBindings(): Promise<Binding[]> {
       // A builder that needs arguments throws here: give the census a fixture
       // for it rather than skipping it.
       const patch = (fn as () => unknown)();
-      out.push(...collectHostPorts(patch, `${relative(ROOT, file)}#${name}`, name));
+      out.push(...collectHostPorts(patch, `${relative(REPO_ROOT, file)}#${name}`, name));
     }
   }
   return out;
@@ -209,7 +207,7 @@ describe("the rendered registry binds the deploy's master private IP", () => {
   const renderedRegistryHostIps = async (masterPrivateIp: string) => {
     const { renderK8sBase } = await import('../../../src/lib/deploy/k8s/k3s.js');
     const out = renderK8sBase(
-      join(ROOT, 'carbon/k8s/base'),
+      join(REPO_ROOT, 'carbon/k8s/base'),
       await values(masterPrivateIp),
       undefined,
       TEST_TLS,
@@ -237,7 +235,7 @@ describe("the rendered registry binds the deploy's master private IP", () => {
     for (const bad of [undefined, '', 'not-an-ip']) {
       const v = await values(bad);
       expect(
-        () => renderK8sBase(join(ROOT, 'carbon/k8s/base'), v, undefined, TEST_TLS),
+        () => renderK8sBase(join(REPO_ROOT, 'carbon/k8s/base'), v, undefined, TEST_TLS),
         String(bad),
       ).toThrow(/MASTER_PRIVATE_IP/);
     }

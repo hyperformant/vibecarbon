@@ -8,13 +8,13 @@
  * CLI writes a role file nobody reads. Deploy refuses that project before
  * anything is provisioned and names `vibecarbon upgrade`.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { DB_GUARD_PROTOCOL_MARKER } from '../../../src/lib/deploy/db-workload.js';
 import { assertScaffoldSupportsRoleFile } from '../../../src/lib/deploy/preflight.js';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { copyTemplate } from '../helpers/copy-template.js';
 
 const dirs: string[] = [];
@@ -24,7 +24,7 @@ afterAll(() => {
 
 /** A fresh copy of the shipped scaffold. */
 function scaffold() {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-scaffold-'));
+  const dir = createTempDir('vc-scaffold-');
   dirs.push(dir);
   copyTemplate(dir);
   return dir;

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ciAvailable } from '../../../src/lib/ci-setup.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -21,8 +21,7 @@ import { createTempDir } from '../../_shared/temp-dir.js';
  * so this bans the duplicate rather than policing its correctness.
  */
 
-const ROOT = process.cwd();
-const SRC = join(ROOT, 'src');
+const SRC = join(REPO_ROOT, 'src');
 
 /** `lib/config.js` owns the path (lib/project.js reads the manifest half through it). */
 const CONFIG_OWNERS = [join('lib', 'config.js')];

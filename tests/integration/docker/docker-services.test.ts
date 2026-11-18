@@ -11,6 +11,7 @@ import {
   waitForHttpHealth,
   waitForPostgres,
 } from '../../_shared/docker-utils.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 import { testConfig } from '../../config.js';
 
@@ -65,7 +66,7 @@ describeDocker('Docker Services Smoke Test', () => {
 
     // Create project
     execSync(
-      `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -install -admin-email test@smoke.local -admin-password smoketest123`,
+      `node ${join(REPO_ROOT, 'src/cli.js')} create ${projectName} -y -install -admin-email test@smoke.local -admin-password smoketest123`,
       {
         // -install: the Migrations cases run the project's own
         // `npm run db:migrate`, which needs its dependencies.

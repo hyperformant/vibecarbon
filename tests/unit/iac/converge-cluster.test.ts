@@ -25,9 +25,8 @@
  *
  * Sentinels only: the passphrase and tokens here are never real.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const upStackMock = vi.fn();
 const getStackOutputsMock = vi.fn();
@@ -519,8 +518,7 @@ describe('convergeClusterInfra', () => {
  * moved yet (failover/server-identification.test.ts).
  */
 describe('scale and failover converge through this seam', () => {
-  const read = (rel: string) =>
-    readFileSync(fileURLToPath(new URL(`../../../src/${rel}`, import.meta.url)), 'utf8');
+  const read = (rel: string) => readRepoFile(`src/${rel}`);
 
   it("failover: provisionStandbyCapacity's default converge is convergeClusterInfra", () => {
     const src = read('failover.js');

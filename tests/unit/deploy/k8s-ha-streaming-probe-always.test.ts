@@ -20,9 +20,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC = join(__dirname, '../../../src');
+const SRC = join(REPO_ROOT, 'src');
 
 describe('the k8s-ha streaming probe always runs', () => {
   it('setupReplication assigns the probe result unconditionally, before the reseed', () => {

@@ -13,12 +13,12 @@
  * tests read back is what those scripts actually did.
  */
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { load } from 'js-yaml';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { findCalls } from '../helpers/js-call-scan.js';
 
 vi.mock('node:child_process', async () => {
@@ -40,8 +40,7 @@ const {
   writeComposeWalgRole,
 } = await import('../../../src/lib/deploy/walg-role.js');
 
-const ROOT = join(__dirname, '../../..');
-const GUARD = join(ROOT, 'carbon/volumes/db/db-guard.sh');
+const GUARD = join(REPO_ROOT, 'carbon/volumes/db/db-guard.sh');
 
 type Kubectl = (ip: unknown, argv: string[], o?: { input?: string }) => Promise<string>;
 
@@ -51,7 +50,7 @@ let binDir: string;
 let pgdata: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-role-record-'));
+  dir = createTempDir('vc-role-record-');
   roleDir = join(dir, 'role');
   binDir = join(dir, 'bin');
   pgdata = join(dir, 'data');
@@ -59,10 +58,6 @@ beforeEach(() => {
   const stub = join(binDir, 'db-entrypoint.sh');
   writeFileSync(stub, '#!/bin/sh\nexit 0\n');
   chmodSync(stub, 0o755);
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 const fileOf = () => {
@@ -354,7 +349,7 @@ describe('a db pod that restarts', () => {
   });
 
   it('the proof rests on the template: db-guard.sh is the command, the intent key is the env', () => {
-    const sts = readFileSync(join(ROOT, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8');
+    const sts = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
     expect(sts).toContain('command: ["sh", "/usr/local/bin/db-guard.sh"]');
     expect(sts).toMatch(
       new RegExp(
@@ -500,7 +495,7 @@ function recordClaims(root: string): string[] {
 
 describe('census: only a read-back claims the role file is proven', () => {
   it('the one site that records, and the one that asks it to', () => {
-    expect(recordClaims(ROOT).sort()).toEqual([
+    expect(recordClaims(REPO_ROOT).sort()).toEqual([
       'src/lib/deploy/k8s/k3s.js:writeDeployWalgRole',
       'src/lib/deploy/walg-role.js:setK8sWalgRole',
     ]);

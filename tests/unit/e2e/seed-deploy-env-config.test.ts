@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { seedDeployEnvConfig } from '../../../tests/e2e/utils/cli-runner.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Regression coverage for a d1 (DigitalOcean) restore-after-destroy failure:
@@ -19,11 +19,7 @@ describe('seedDeployEnvConfig', () => {
   let projectDir: string;
 
   beforeEach(() => {
-    projectDir = mkdtempSync(join(tmpdir(), 'seed-env-config-test-'));
-  });
-
-  afterEach(() => {
-    rmSync(projectDir, { recursive: true, force: true });
+    projectDir = createTempDir('seed-env-config-test-');
   });
 
   function readEnvConfig(envName: string): Record<string, unknown> {

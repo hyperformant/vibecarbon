@@ -5,8 +5,9 @@
  */
 import { cpSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const TEMPLATE = join(import.meta.dirname, '..', '..', '..', 'carbon');
+const TEMPLATE = join(REPO_ROOT, 'carbon');
 
 export function copyTemplate(dest: string): void {
   cpSync(TEMPLATE, dest, {

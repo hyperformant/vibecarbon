@@ -1,15 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Mirrors bundle-env-overrides.test.ts's fixture helper: renderBundle runs
 // against process.cwd(), so each test gets its own throwaway project dir
 // containing a project-shaped `.env`.
 function makeProjectDir(envContent: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-bundle-strip-test-'));
+  const dir = createTempDir('vc-bundle-strip-test-');
   writeFileSync(join(dir, '.env'), envContent);
   return dir;
 }

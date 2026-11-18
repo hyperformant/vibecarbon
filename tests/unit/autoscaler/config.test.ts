@@ -9,12 +9,12 @@
  * the mistakes.
  */
 
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
 import { ConfigWatcher, loadConfig } from '../../../src/autoscaler/config.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 function validConfig() {
   return {
@@ -50,12 +50,8 @@ let dir: string;
 let configPath: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-autoscaler-config-test-'));
+  dir = createTempDir('vc-autoscaler-config-test-');
   configPath = join(dir, 'config.json');
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 function write(config: unknown) {

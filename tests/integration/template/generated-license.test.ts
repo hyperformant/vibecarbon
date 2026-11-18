@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { destroyRealProject, realProject } from '../_harness/real-project';
 
 describe('create ships the template license', () => {
@@ -18,8 +19,6 @@ describe('create ships the template license', () => {
 
   it('copies LICENSE unchanged into the project', () => {
     dir = realProject();
-    expect(readFileSync(join(dir, 'LICENSE'), 'utf8')).toBe(
-      readFileSync(join(process.cwd(), 'carbon/LICENSE'), 'utf8'),
-    );
+    expect(readFileSync(join(dir, 'LICENSE'), 'utf8')).toBe(readRepoFile('carbon/LICENSE'));
   });
 });

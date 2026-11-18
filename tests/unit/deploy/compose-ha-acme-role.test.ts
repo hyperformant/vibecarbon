@@ -21,8 +21,7 @@
  * ACME_CA_SERVER value or the prod default.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +37,8 @@ import {
   restoreComposeTls,
   restoreFailoverTls,
 } from '../../../src/lib/deploy/compose/tls-restore.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { acmeJson } from './_tls-fixtures.ts';
 
@@ -55,7 +56,7 @@ describe('every Traefik caserver line honors the disarm var (census over carbon 
   // ACME_CA_SERVER, then the prod default. Any compose file that restates the
   // Traefik command (Compose replaces sequences) must keep that order; a
   // future file that adds a caserver line is drafted automatically.
-  const carbonDir = join(process.cwd(), 'carbon');
+  const carbonDir = join(REPO_ROOT, 'carbon');
   const composeFiles = readdirSync(carbonDir).filter((f) => /^docker-compose.*\.ya?ml$/.test(f));
 
   it('finds the one caserver site (the base prod file)', () => {
@@ -93,28 +94,24 @@ describe('composeTraefikRecreateShell', () => {
     // A bare `up` resolves docker-compose.yml alone and would recreate
     // Traefik WITHOUT the prod file and the add-on overlays the node runs.
     // vc-compose carries the deploy's own set.
-    const dir = mkdtempSync(join(tmpdir(), 'vc-acme-role-'));
-    try {
-      writeVcCompose(dir, composeFileFlags({ observability: true }));
-      writeFileSync(
-        join(dir, 'docker'),
-        `#!/bin/sh\necho "$*" >> "${dir}/calls"\ncase "$*" in *" ps -q traefik") echo cid ;; esac\nexit 0\n`,
-      );
-      chmodSync(join(dir, 'docker'), 0o755);
-      const r = spawnSync('bash', ['-c', composeTraefikRecreateShell(dir)], {
-        encoding: 'utf-8',
-        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
-      });
-      expect(r.status, r.stderr).toBe(0);
-      const up = readFileSync(join(dir, 'calls'), 'utf-8')
-        .split('\n')
-        .find((l) => l.endsWith(' up -d --no-deps traefik'));
-      expect(up).toBe(
-        'compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.yml -f docker-compose.observability.prod.yml up -d --no-deps traefik',
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = createTempDir('vc-acme-role-');
+    writeVcCompose(dir, composeFileFlags({ observability: true }));
+    writeFileSync(
+      join(dir, 'docker'),
+      `#!/bin/sh\necho "$*" >> "${dir}/calls"\ncase "$*" in *" ps -q traefik") echo cid ;; esac\nexit 0\n`,
+    );
+    chmodSync(join(dir, 'docker'), 0o755);
+    const r = spawnSync('bash', ['-c', composeTraefikRecreateShell(dir)], {
+      encoding: 'utf-8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const up = readFileSync(join(dir, 'calls'), 'utf-8')
+      .split('\n')
+      .find((l) => l.endsWith(' up -d --no-deps traefik'));
+    expect(up).toBe(
+      'compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.yml -f docker-compose.observability.prod.yml up -d --no-deps traefik',
+    );
   });
 
   it('refuses to recreate blind when no traefik container is running', () => {

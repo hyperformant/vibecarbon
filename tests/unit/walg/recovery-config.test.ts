@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /** The database lineage (system identifier) whose folder holds the backup. */
 const LINEAGE = '7699032860122738725';
@@ -98,7 +97,7 @@ describe('byte parity between the tiers (M2)', () => {
       backup: BACKUP,
       recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE })),
     });
-    const sts = readFileSync(join(process.cwd(), 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8');
+    const sts = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
     const loop = (text: string) => {
       const m = text.match(
         /while IFS= read -r vc_line; do[\s\S]*?done < "\$VC_RECOVERY_CONF_FILE"/,

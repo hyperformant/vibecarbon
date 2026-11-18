@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateDomain } from '../../../src/lib/validators.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('C-5: --domain validation rejects shell-injection payloads', () => {
   it.each([
@@ -27,9 +28,7 @@ describe('C-5: --domain validation rejects shell-injection payloads', () => {
 
 describe('C-5: deploy.js uses safe env merge, not remote sed', () => {
   it('deploy.js no longer calls sed -i for .env overrides', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src', 'deploy.js'), 'utf-8');
+    const src = readRepoFile('src', 'deploy.js');
     // The legacy inject pattern used grep + sed + echo in a single ssh cmd.
     expect(src).not.toMatch(/grep -q.*sed -i.*\$\{key\}=.*\$\{value\}/);
   });

@@ -1,13 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getUpdateNotice,
   printUpdateNotice,
   refreshUpdateCache,
   resetUpdateNoticeForTests,
 } from '../../../src/lib/telemetry/update-check.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 const cachePath = () => join(dir, 'update-check.json');
@@ -18,10 +18,7 @@ const writeCache = (latestVersion: string, ageMs: number) =>
   );
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-update-'));
-});
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  dir = createTempDir('vc-update-');
 });
 
 describe('getUpdateNotice', () => {

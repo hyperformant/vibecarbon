@@ -13,14 +13,10 @@
  * address onto a NIC during an outage — strictly worse than doing nothing.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const snippet = readFileSync(
-  join(__dirname, '../../../carbon/cloud-init/k3s/_private-net-guard.sh'),
-  'utf-8',
-);
+const snippet = readRepoFile('carbon/cloud-init/k3s/_private-net-guard.sh');
 
 /**
  * The guard body, minus its trailing `while true` supervision loop, so it can

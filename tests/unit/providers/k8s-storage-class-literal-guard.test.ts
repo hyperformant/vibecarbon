@@ -35,11 +35,11 @@ import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const CARBON_K8S_ROOT = join(process.cwd(), 'carbon', 'k8s');
-const SERVICES_ROOT = join(process.cwd(), 'services');
-const SRC_ROOT = join(process.cwd(), 'src');
+const CARBON_K8S_ROOT = join(REPO_ROOT, 'carbon', 'k8s');
+const SERVICES_ROOT = join(REPO_ROOT, 'services');
+const SRC_ROOT = join(REPO_ROOT, 'src');
 
 // One row per registered provider: its sanctioned StorageClass literal and
 // the ONE file allowed to carry it. Derived from the registry (2026-08-07

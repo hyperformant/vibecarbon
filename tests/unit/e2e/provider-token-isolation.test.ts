@@ -6,10 +6,9 @@
  * the DO DNS API (401 "Unable to authenticate you"). The lifecycle now takes
  * the scenario's own provider-neutral `computeToken`.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { readARecord, getDnsProvider } = vi.hoisted(() => {
   const readARecord = vi.fn(async (_token: string, _zone: string, _name: string) => [
@@ -23,6 +22,8 @@ vi.mock('../../../src/lib/dns-provider.js', async (importOriginal) => {
   return { ...actual, getDnsProvider };
 });
 
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { verifyDnsFlip } from '../../e2e/checks/ha-integrity.js';
 import { hcloudChildEnv } from '../../e2e/utils/compute-token.js';
 
@@ -32,7 +33,7 @@ const DO_SENTINEL = 'sentinel-do-token';
 describe('verifyDnsFlip token routing', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dnsflip-'));
+    dir = createTempDir('dnsflip-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -46,7 +47,6 @@ describe('verifyDnsFlip token routing', () => {
     );
     readARecord.mockClear();
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('a DigitalOcean scenario reads the DNS zone with the DO token, never the Hetzner one', async () => {
     const result = await verifyDnsFlip({
@@ -75,7 +75,7 @@ describe('hcloudChildEnv', () => {
 });
 
 describe('census: no Hetzner-named token on provider-neutral paths', () => {
-  const root = join(__dirname, '../../e2e');
+  const root = join(REPO_ROOT, 'tests/e2e');
   const lifecycle = readFileSync(join(root, 'scenarios/_run-lifecycle.ts'), 'utf-8');
   const runner = readFileSync(join(root, 'runner.ts'), 'utf-8');
   const collector = readFileSync(join(root, 'metrics/collector.ts'), 'utf-8');

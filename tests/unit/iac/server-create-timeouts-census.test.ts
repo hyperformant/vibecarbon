@@ -9,6 +9,7 @@ import {
 } from '../../../src/lib/iac/create-timeout.js';
 import { OWNERSHIP_KEYS, recordedOwnership } from '../../../src/lib/iac/state-pending.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Census: every server-class resource in every provider IaC program carries
@@ -134,7 +135,7 @@ async function runProgram(file: string, configOverride?: Record<string, unknown>
 
 describe('server-class create timeouts (census)', () => {
   it('every program in src/lib/iac/programs has a row in this census', () => {
-    const dir = join(process.cwd(), 'src/lib/iac/programs');
+    const dir = join(REPO_ROOT, 'src/lib/iac/programs');
     const files = readdirSync(dir).filter((f) => f.endsWith('.js'));
     expect(files.sort()).toEqual(Object.keys(PROGRAMS).sort());
   });

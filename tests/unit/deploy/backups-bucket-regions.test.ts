@@ -16,10 +16,9 @@
  * `<project>-<salt>-<region>-backups` (src/lib/backups-bucket.js), and an
  * environment that already has a record keeps it.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const s3 = await vi.hoisted(async () =>
@@ -35,26 +34,15 @@ const run = vi.hoisted(() => ({
   started: [] as string[],
 }));
 
-const clackMock = vi.hoisted(() => ({
-  select: vi.fn(),
-  isCancel: vi.fn(() => false),
-  cancel: vi.fn(),
-  text: vi.fn(),
-  confirm: vi.fn(async () => true),
-  password: vi.fn(),
-  note: vi.fn(),
-  intro: vi.fn(),
-  outro: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  log: {
-    step: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    message: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['select', 'cancel', 'text', 'password', 'note', 'intro', 'outro'],
+    log: ['step', 'info', 'warn', 'error', 'success', 'message'],
+    spinner: true,
+    with: { isCancel: vi.fn(() => false), confirm: vi.fn(async () => true) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 
 // Every bundle the deploy stages, removed after its case, and its server
@@ -290,7 +278,7 @@ describe('a second storage region never moves another bucket region', () => {
   // deploy staged, whether it reached the plan or died first.
   let scratch = '';
   beforeEach(() => {
-    scratch = mkdtempSync(join(tmpdir(), 'vc-backups-regions-'));
+    scratch = createTempDir('vc-backups-regions-');
     vi.spyOn(process, 'cwd').mockReturnValue(scratch);
     s3.reset();
     run.ctx = null;

@@ -18,13 +18,12 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { summarizeVerifications } from '../../e2e/scenarios/verification-summary.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CHECKS_DIR = join(__dirname, '..', '..', 'e2e', 'checks');
+const CHECKS_DIR = join(REPO_ROOT, 'tests', 'e2e', 'checks');
 
 function checkFiles(): { name: string; src: string }[] {
   return readdirSync(CHECKS_DIR)

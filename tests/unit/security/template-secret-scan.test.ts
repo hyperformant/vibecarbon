@@ -13,9 +13,9 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { scanContent } from '../../../src/lib/secret-scan.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const CARBON = join(__dirname, '..', '..', '..', 'carbon');
+const CARBON = join(REPO_ROOT, 'carbon');
 const TEXT_EXTS = new Set([
   '.ts',
   '.tsx',

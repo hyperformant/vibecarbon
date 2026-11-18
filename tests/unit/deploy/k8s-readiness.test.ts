@@ -430,11 +430,9 @@ describe('awaitPostgresAccepting', () => {
  * a db with existing PGDATA (no init flow) are recorded here with their
  * reason rather than left to memory.
  */
-import { readFileSync as readSrc } from 'node:fs';
-import { join as joinPath } from 'node:path';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('pg_isready TCP census (k8s path)', () => {
-  const root = joinPath(__dirname, '../../..');
   it('every kubectl-exec pg_isready in the k8s deploy path carries -h (TCP)', () => {
     const files = [
       'src/lib/deploy/k8s/readiness.js',
@@ -446,7 +444,7 @@ describe('pg_isready TCP census (k8s path)', () => {
       'src/lib/deploy/walg-role.js',
     ];
     for (const rel of files) {
-      const src = readSrc(joinPath(root, rel), 'utf8');
+      const src = readRepoFile(rel);
       // Every pg_isready occurrence in CODE must be followed by a -h flag
       // before the argv/command ends. Walk occurrences, not files.
       const lines = src.split('\n');
@@ -468,7 +466,7 @@ describe('pg_isready TCP census (k8s path)', () => {
     // This test documents the disposition; if either file grows a first-boot
     // window, move it into the census above.
     for (const rel of ['src/restore.js', 'src/failover.js']) {
-      expect(readSrc(joinPath(root, rel), 'utf8')).toContain('pg_isready');
+      expect(readRepoFile(rel)).toContain('pg_isready');
     }
   });
 });

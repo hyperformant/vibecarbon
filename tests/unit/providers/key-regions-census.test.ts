@@ -22,6 +22,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /** What each endpoint host answers to HeadBucket, and every host asked. */
 const world = vi.hoisted(() => ({
@@ -79,7 +80,7 @@ type S3Class = {
   };
 };
 
-const providersDir = join(import.meta.dirname, '../../../src/lib/providers');
+const providersDir = join(REPO_ROOT, 'src/lib/providers');
 
 async function classesFromFiles(): Promise<S3Class[]> {
   const out: S3Class[] = [];

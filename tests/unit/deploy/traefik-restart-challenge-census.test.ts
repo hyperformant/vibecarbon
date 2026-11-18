@@ -26,9 +26,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const ROOTS = ['src', 'carbon/scripts', 'carbon/.github/workflows', 'carbon/cloud-init'];
 const SKIP = new Set(['node_modules', 'dist', 'coverage']);
 const EXTS = ['.js', '.mjs', '.sh', '.yaml', '.yml'];
@@ -89,11 +88,11 @@ function guarded(source: string, site: number): boolean {
   return lines.slice(start, site).some((l) => l.includes(WAIT));
 }
 
-const files = ROOTS.flatMap((r) => walk(join(ROOT, r)));
+const files = ROOTS.flatMap((r) => walk(join(REPO_ROOT, r)));
 const found = files.flatMap((f) => {
   const src = readFileSync(f, 'utf-8');
   return traefikRestartSites(src).map((line) => ({
-    file: relative(ROOT, f),
+    file: relative(REPO_ROOT, f),
     line: line + 1,
     ok: guarded(src, line),
   }));

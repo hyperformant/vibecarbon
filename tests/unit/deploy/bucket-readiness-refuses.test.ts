@@ -7,11 +7,10 @@
  * NoSuchBucket. The bucket never appeared at all.
  */
 import { execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { assertBucketReady } from '../../../src/lib/deploy/orchestrator.js';
 import { HetznerS3Provider } from '../../../src/lib/providers/hetzner-s3.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 function providerWithProbe(ready: boolean) {
   const p = new HetznerS3Provider('ak', 'sk', 'fsn1') as unknown as {
@@ -77,10 +76,7 @@ describe('assertBucketReady', () => {
 
 describe('census: every createBucket call site is gated', () => {
   it('each `await s3Provider[.forRegion(…)].createBucket(` in the orchestrator is followed by assertBucketReady on its result', () => {
-    const src = readFileSync(
-      join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
-      'utf-8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     // A bucket in another region is created through its own client
     // (s3Provider.forRegion), so the chain may break across lines.
     const calls = [

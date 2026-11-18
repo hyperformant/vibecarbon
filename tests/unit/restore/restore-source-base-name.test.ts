@@ -16,6 +16,7 @@ vi.mock('@clack/prompts', () => ({
 
 import { NoRestorePointError } from '../../../src/lib/walg/restore-base.js';
 import { pickRestoreBase, resolveRestoreTarget } from '../../../src/restore.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const A = 'base_000000010000000000000004';
 const B = 'base_000000010000000000000009';
@@ -64,13 +65,9 @@ describe('restore -source <base name>', () => {
   });
 
   it("the e2e restore step passes the backup step's name", async () => {
-    const { readFileSync } = await import('node:fs');
-    const runner = readFileSync(new URL('../../e2e/utils/cli-runner.ts', import.meta.url), 'utf-8');
+    const runner = readRepoFile('tests/e2e/utils/cli-runner.ts');
     expect(runner).toMatch(/restore \$\{env\} -y -source \$\{source\}/);
-    const life = readFileSync(
-      new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url),
-      'utf-8',
-    );
+    const life = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(life).toMatch(/runRestore\(config\.envPrefix, pushedBackupName/);
   });
 });

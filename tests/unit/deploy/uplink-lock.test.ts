@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { progressLog } from '../../../src/lib/cli/progress.js';
@@ -7,6 +6,7 @@ import {
   acquireUplinkLock,
   // @ts-expect-error — JS module without types
 } from '../../../src/lib/deploy/uplink-lock.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({ progressLog: vi.fn() }));
 
@@ -27,7 +27,7 @@ vi.mock('../../../src/lib/cli/progress.js', () => ({ progressLog: vi.fn() }));
 
 const dirs: string[] = [];
 const makeDir = () => {
-  const d = mkdtempSync(join(tmpdir(), 'uplink-lock-'));
+  const d = createTempDir('uplink-lock-');
   dirs.push(d);
   return d;
 };

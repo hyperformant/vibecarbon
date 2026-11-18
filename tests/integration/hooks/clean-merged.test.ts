@@ -1,8 +1,8 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   addBranchWorktree,
   branches,
@@ -175,7 +175,7 @@ describe('.claude/hooks/clean-merged.sh', () => {
     expect(out.stdout).toBe('');
     expect(branches(r.repo)).toEqual(before);
 
-    const plain = realpathSync(mkdtempSync(join(tmpdir(), 'vc-hooks-plain-')));
+    const plain = realpathSync(createTempDir('vc-hooks-plain-'));
     extraDirs.push(plain);
     const outside = runHook('clean-merged.sh', { cwd: plain });
     expect(outside.status).toBe(0);

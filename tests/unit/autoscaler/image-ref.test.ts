@@ -33,14 +33,12 @@ import {
   clusterAutoscalerUpstreamRef,
   manifestImageValues,
 } from '../../../src/lib/images.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const DOCKERFILE_PATH = join(ROOT, 'docker', 'carbon-autoscaler', 'Dockerfile');
-const WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'publish-images.yml');
-const MIRROR_WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'mirror-images.yml');
-const PACKAGE_JSON_PATH = join(ROOT, 'package.json');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
+const DOCKERFILE_PATH = join(REPO_ROOT, 'docker', 'carbon-autoscaler', 'Dockerfile');
+const WORKFLOW_PATH = join(REPO_ROOT, '.github', 'workflows', 'publish-images.yml');
+const MIRROR_WORKFLOW_PATH = join(REPO_ROOT, '.github', 'workflows', 'mirror-images.yml');
+const PACKAGE_JSON_PATH = join(REPO_ROOT, 'package.json');
 
 describe('carbon-autoscaler image ref', () => {
   it('is the pre-published amd64 tag (no project/sha/timestamp)', () => {
@@ -161,7 +159,7 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
 
 describe('every cluster-autoscaler reference site is pinned to the constant', () => {
   it('the shipped Deployment runs the mirrored image', () => {
-    const deployment = read('carbon/k8s/base/cluster-autoscaler/deployment.yaml');
+    const deployment = readRepoFile('carbon/k8s/base/cluster-autoscaler/deployment.yaml');
     // A token the deploy fills from its version set, so a patch reaches a
     // deploy with no CLI release. The manifest is applied by the deploy, never
     // directly, and a leftover token fails loud before the apply.
@@ -175,7 +173,7 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
     // and `vibecarbon deploy` applies from the PROJECT dir, not from carbon/.
     // The set-image makes src/lib/images.js authoritative at deploy time
     // regardless of what the project's manifest says.
-    const k3s = read('src/lib/deploy/k8s/k3s.js');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const setImage = k3s.match(/'set',\s*\n\s*'image',[\s\S]{0,400}?\]/)?.[0];
     expect(setImage, 'kubectl set image call not found in k3s.js').toBeDefined();
     expect(setImage).toMatch(/`cluster-autoscaler=\$\{clusterAutoscalerImageRef\(\)\}`/);
@@ -195,7 +193,7 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
     const offenders: string[] = [];
     for (const rel of sweepFiles()) {
       if (rel === join('src', 'lib', 'images.js')) continue;
-      read(rel)
+      readRepoFile(rel)
         .split('\n')
         .forEach((line, i) => {
           if (!line.includes('autoscaling/cluster-autoscaler')) return;
@@ -334,11 +332,11 @@ describe('mirror job copies the manifest — never rebuilds, never multi-arch', 
 function sweepFiles(): string[] {
   const dirs = ['src', join('carbon', 'k8s'), join('.github', 'workflows')];
   return sourceFiles(
-    dirs.map((dir) => join(ROOT, dir)),
+    dirs.map((dir) => join(REPO_ROOT, dir)),
     {
       exts: ['.js', '.ts', '.yaml', '.yml', '.json', '.sh'],
       skip: ['node_modules'],
-      relativeTo: ROOT,
+      relativeTo: REPO_ROOT,
     },
   );
 }

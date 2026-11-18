@@ -11,8 +11,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderSystemdUnit } from '../../../src/lib/deploy/bundle.js';
@@ -20,6 +19,7 @@ import {
   COMPOSE_REPLICATION_OVERLAY,
   VC_COMPOSE,
 } from '../../../src/lib/deploy/compose/command.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { SERVER_BASE_FLAGS, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const dirs: string[] = [];
@@ -36,7 +36,7 @@ function execLine(unit: string, key: 'ExecStart' | 'ExecStop'): string {
 
 /** Run an Exec line in a stand-in project dir; returns the docker argv. */
 function runExec(command: string, { overlay }: { overlay: boolean }): string[] {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-unit-'));
+  const dir = createTempDir('vc-unit-');
   dirs.push(dir);
   writeVcCompose(dir);
   if (overlay) writeFileSync(join(dir, COMPOSE_REPLICATION_OVERLAY), 'services: {}\n');

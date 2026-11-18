@@ -15,6 +15,7 @@ import {
   resolveRestoreBase,
 } from '../../../src/lib/walg/restore-base.js';
 import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/restore-layout.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 /**
@@ -58,7 +59,6 @@ import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
-const ROOT = process.cwd();
 const NAME = `vcrestore${process.pid}`;
 const NET = NAME;
 const S3_CT = `${NAME}-s3`;
@@ -76,9 +76,9 @@ const SECRET_KEY = '6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d7072
 const BUCKET = NAME;
 const PREFIX = 'backups/proj/prod/walg';
 const PGDATA = '/var/lib/postgresql/data';
-const GUARD = join(ROOT, 'carbon/volumes/db/db-guard.sh');
-const WALG_ENV_SH = join(ROOT, 'carbon/volumes/db/walg-env.sh');
-const WAL_ARCHIVE_SH = join(ROOT, 'carbon/volumes/db/wal-archive.sh');
+const GUARD = join(REPO_ROOT, 'carbon/volumes/db/db-guard.sh');
+const WALG_ENV_SH = join(REPO_ROOT, 'carbon/volumes/db/walg-env.sh');
+const WAL_ARCHIVE_SH = join(REPO_ROOT, 'carbon/volumes/db/wal-archive.sh');
 /**
  * The wal-g role directory, bound read-only where docker-compose.prod.yml binds
  * the host's .vibecarbon-role: every database here archives as the primary.
@@ -278,7 +278,7 @@ function runComposeBackupScript(dir: string, ct = DB_CT) {
   mkdirSync(bin, { recursive: true });
   writeFileSync(
     join(project, 'backup/compose-backup.sh'),
-    readFileSync(join(ROOT, 'carbon/backup/compose-backup.sh')),
+    readFileSync(join(REPO_ROOT, 'carbon/backup/compose-backup.sh')),
   );
   writeVcCompose(project);
   const realDocker = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf-8' }).trim();
@@ -340,7 +340,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
       '-e',
       `GARAGE_DEFAULT_BUCKET=${BUCKET}`,
       '-v',
-      `${join(ROOT, 'carbon/volumes/s3/garage.toml')}:/etc/garage.toml:ro`,
+      `${join(REPO_ROOT, 'carbon/volumes/s3/garage.toml')}:/etc/garage.toml:ro`,
       GARAGE_IMAGE,
       '/garage',
       'server',
@@ -423,7 +423,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
       if (!body) throw new Error(`no stop sentinel for ${base.name}`);
       const sentinel = JSON.parse(body);
       writeFileSync(
-        join(ROOT, 'tests/fixtures/walg/sentinel-3.0.9.json'),
+        join(REPO_ROOT, 'tests/fixtures/walg/sentinel-3.0.9.json'),
         `${JSON.stringify({ name: base.name, sentinel }, null, 2)}\n`,
       );
     }
@@ -652,7 +652,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
 
     // The script's own target pipeline, on the real backup-list output under
     // the real busybox, for a cutoff of our choosing.
-    const pipeline = readFileSync(join(ROOT, 'carbon/backup/compose-backup.sh'), 'utf-8').match(
+    const pipeline = readRepoFile('carbon/backup/compose-backup.sh').match(
       /target="\$\((.*?)\)" && \{ if/s,
     )?.[1];
     expect(pipeline).toBeTruthy();

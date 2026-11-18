@@ -21,10 +21,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { renderK8sStorageClassPlaceholder } from '../../../src/lib/deploy/k8s/k3s.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { adoptTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
-const ROOT = join(__dirname, '../../..');
-const REAL_GRAFANA_PVC = join(ROOT, 'services/observability/k8s/grafana-pvc.yaml');
+const REAL_GRAFANA_PVC = join(REPO_ROOT, 'services/observability/k8s/grafana-pvc.yaml');
 
 /** A control file that never carries the placeholder — proves untouched
  * files pass through the render byte-identical. */

@@ -18,11 +18,11 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 
 type DeployMode = 'compose' | 'compose-ha' | 'k8s' | 'k8s-ha';

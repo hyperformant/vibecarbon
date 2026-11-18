@@ -1,15 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -52,12 +42,11 @@ describe('seedKnownHosts', () => {
   let khPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'vb-seed-'));
+    tmp = createTempDir('vb-seed-');
     khPath = join(tmp, '.vibecarbon', 'known_hosts_prod');
   });
 
   afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 

@@ -23,17 +23,16 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = process.cwd();
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const composeFiles = [
-  ...readdirSync(join(ROOT, 'carbon'))
+  ...readdirSync(join(REPO_ROOT, 'carbon'))
     .filter((f) => /^docker-compose.*\.ya?ml$/.test(f))
     .map((f) => join('carbon', f)),
-  ...readdirSync(join(ROOT, 'services'), { withFileTypes: true })
-    .filter((e) => e.isDirectory() && existsSync(join(ROOT, 'services', e.name, 'compose')))
+  ...readdirSync(join(REPO_ROOT, 'services'), { withFileTypes: true })
+    .filter((e) => e.isDirectory() && existsSync(join(REPO_ROOT, 'services', e.name, 'compose')))
     .flatMap((e) =>
-      readdirSync(join(ROOT, 'services', e.name, 'compose'))
+      readdirSync(join(REPO_ROOT, 'services', e.name, 'compose'))
         .filter((f) => /^docker-compose.*\.ya?ml$/.test(f))
         .map((f) => join('services', e.name, 'compose', f)),
     ),
@@ -51,7 +50,7 @@ const readYamlText = (path: string) =>
 function routers(): Router[] {
   const out: Router[] = [];
   for (const file of composeFiles) {
-    const doc = load(readYamlText(join(ROOT, file))) as {
+    const doc = load(readYamlText(join(REPO_ROOT, file))) as {
       services?: Record<string, { labels?: string[] | Record<string, string> }>;
     };
     for (const [service, def] of Object.entries(doc?.services ?? {})) {

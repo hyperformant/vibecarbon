@@ -21,29 +21,25 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sourceFiles } from '../../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../../_shared/source-files.js';
 
-const clackMock = vi.hoisted(() => ({
-  password: vi.fn(),
-  text: vi.fn(),
-  select: vi.fn(),
-  confirm: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  note: vi.fn(),
-  log: { info: vi.fn(), warn: vi.fn(), success: vi.fn(), error: vi.fn() },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['password', 'text', 'select', 'confirm', 'cancel', 'note'],
+    log: ['info', 'warn', 'success', 'error'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../../src/lib/project.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../src/lib/project.js')>()),
   setEnvVar: vi.fn(),
 }));
 
-const SRC_LIB = fileURLToPath(new URL('../../../../src/lib/', import.meta.url));
-const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+const SRC_LIB = join(REPO_ROOT, 'src/lib');
 
 /**
  * The prompts the guided setups share (token paste, key pair, "save keys?")
@@ -429,7 +425,7 @@ describe('census — cancelled prompts never exit 0', () => {
   function cancelEscapeOffenders(overrides: Map<string, string> = new Map()): string[] {
     const offenders: string[] = [];
     for (const file of srcJsFiles()) {
-      const rel = file.replace(REPO_ROOT, '');
+      const rel = relative(REPO_ROOT, file);
       const lines = (overrides.get(rel) ?? readFileSync(file, 'utf-8')).split('\n');
       for (let i = 0; i < lines.length; i++) {
         // Skip prose: only a real call, not a mention inside a comment.
@@ -485,9 +481,7 @@ describe('census — an explicit "no" never routes to 130 or 0', () => {
         const lineStart = src.lastIndexOf('\n', m.index) + 1;
         if (/^\s*[*/]/.test(src.slice(lineStart, m.index))) continue;
         if (!/exitCancelled\(|exitDeclined\(|process\.exit\(/.test(m[3])) continue;
-        offenders.push(
-          `${file.replace(REPO_ROOT, '')}:${src.slice(0, m.index).split('\n').length}`,
-        );
+        offenders.push(`${relative(REPO_ROOT, file)}:${src.slice(0, m.index).split('\n').length}`);
       }
     }
     expect(offenders).toEqual([]);

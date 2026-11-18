@@ -16,11 +16,8 @@
  * fallthrough, and each guided setup is pinned to that function: a validator
  * that reads `res.status` itself is a second copy that can miss the branch.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = process.cwd();
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const SHARED = 'src/lib/guided-setup-shared.js';
 
@@ -33,7 +30,7 @@ const VALIDATORS = [
 ];
 
 describe(`${SHARED} checkApiToken`, () => {
-  const src = readFileSync(join(ROOT, SHARED), 'utf-8');
+  const src = readRepoFile(SHARED);
 
   it('treats a 5xx as provider outage (unreachable), before the invalid fallthrough', () => {
     const fiveHundred = src.indexOf('res.status >= 500) return { valid: true, unreachable: true }');
@@ -49,7 +46,7 @@ describe(`${SHARED} checkApiToken`, () => {
 });
 
 describe.each(VALIDATORS)('%s token validator', (rel) => {
-  const src = readFileSync(join(ROOT, rel), 'utf-8');
+  const src = readRepoFile(rel);
 
   it('reads the provider answer through checkApiToken, never on its own', () => {
     expect(src).toMatch(/return checkApiToken\(/);

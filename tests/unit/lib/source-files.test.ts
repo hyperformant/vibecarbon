@@ -6,10 +6,10 @@
  * These pins are what the registry row in shared-helper-consumers.test.ts
  * points at as deep coverage.
  */
-import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 let root: string;
@@ -146,5 +146,38 @@ describe('sourceFiles', () => {
     } finally {
       chmodSync(join(root, '.env.e2e'), 0o600);
     }
+  });
+});
+
+describe('REPO_ROOT and readRepoFile', () => {
+  it('REPO_ROOT is the directory holding this package, with no trailing separator', () => {
+    expect(JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8')).name).toBe(
+      'vibecarbon',
+    );
+    expect(REPO_ROOT).toBe(join(import.meta.dirname, '..', '..', '..'));
+    expect(REPO_ROOT.endsWith('/')).toBe(false);
+  });
+
+  it('does not come from the working directory', async () => {
+    const elsewhere = createTempDir('source-files-cwd-');
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(elsewhere);
+    try {
+      vi.resetModules();
+      const fresh = await import('../../_shared/source-files.js');
+      expect(fresh.REPO_ROOT).toBe(REPO_ROOT);
+      expect(fresh.readRepoFile('package.json')).toContain('"name": "vibecarbon"');
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it('readRepoFile reads the text at a path from the root, whole or in parts', () => {
+    const text = readFileSync(join(REPO_ROOT, 'tests', '_shared', 'source-files.ts'), 'utf-8');
+    expect(readRepoFile('tests/_shared/source-files.ts')).toBe(text);
+    expect(readRepoFile('tests', '_shared', 'source-files.ts')).toBe(text);
+  });
+
+  it('readRepoFile throws on a file that is not there', () => {
+    expect(() => readRepoFile('no-such-file.txt')).toThrow(/ENOENT/);
   });
 });

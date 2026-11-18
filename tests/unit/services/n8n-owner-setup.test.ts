@@ -14,14 +14,13 @@
  * "changeme" hash, written with compose's `$$` escaping.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const REPO = join(__dirname, '../../..');
-const read = (file: string) => readFileSync(join(REPO, file), 'utf-8');
 const SCRIPT = 'services/n8n/scripts/setup.sh';
 const OVERRIDE = 'services/n8n/compose/docker-compose.override.yml';
 const NOT_DEV = [
@@ -32,12 +31,12 @@ const CHANGEME_HASH = '$2a$10$HuKPNCaZ0UnhGFhLC1wMZ.e.1dpHzQ4eY84AWxGVTINMGnzDx8
 
 type Service = { environment?: string[] };
 const setupEnv = (file: string) =>
-  (loadYaml(read(file)) as { services: Record<string, Service> }).services['n8n-setup']
+  (loadYaml(readRepoFile(file)) as { services: Record<string, Service> }).services['n8n-setup']
     ?.environment ?? [];
 
 describe('n8n owner setup, the shipped script', () => {
   it('updates the skeleton owner by roleSlug and stops on the first SQL error', () => {
-    const script = read(SCRIPT);
+    const script = readRepoFile(SCRIPT);
     expect(script).toContain('"roleSlug"');
     expect(script).not.toMatch(/\brole\b\)/);
     expect(script).toContain('ON_ERROR_STOP=1');
@@ -53,7 +52,7 @@ describe('n8n owner setup, the shipped script', () => {
       CHANGEME_HASH,
     );
     for (const file of NOT_DEV) {
-      expect(read(file), file).not.toContain('N8N_ADMIN_PASSWORD_HASH');
+      expect(readRepoFile(file), file).not.toContain('N8N_ADMIN_PASSWORD_HASH');
     }
   });
 });
@@ -66,7 +65,7 @@ describe('n8n owner setup, run against a fake psql', () => {
 
   /** A psql that sees the user table at once, then fails or records the hash it was given. */
   function run(env: Record<string, string>, failSetup: boolean) {
-    const dir = mkdtempSync(join(tmpdir(), 'vctest-n8n-setup-'));
+    const dir = createTempDir('vctest-n8n-setup-');
     dirs.push(dir);
     const seen = join(dir, 'seen');
     writeFileSync(
@@ -80,7 +79,7 @@ ${failSetup ? 'echo "ERROR: boom" >&2; exit 3' : `for a in "$@"; do case "$a" in
 `,
     );
     chmodSync(join(dir, 'psql'), 0o755);
-    const result = spawnSync('bash', [join(REPO, SCRIPT)], {
+    const result = spawnSync('bash', [join(REPO_ROOT, SCRIPT)], {
       encoding: 'utf-8',
       env: {
         PATH: `${dir}:${process.env.PATH}`,

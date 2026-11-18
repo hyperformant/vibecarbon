@@ -1,20 +1,17 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   getTelemetryState,
   isAnalyticsDisabled,
   markNoticeShown,
   setTelemetryDisabled,
 } from '../../../src/lib/telemetry/state.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-telemetry-'));
-});
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  dir = createTempDir('vc-telemetry-');
 });
 
 describe('getTelemetryState', () => {

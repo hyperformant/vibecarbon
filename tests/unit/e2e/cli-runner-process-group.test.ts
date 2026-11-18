@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { spawnAndCapture } from '../../../tests/e2e/utils/cli-runner.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Regression coverage for the orphan-grandchild hang observed on
 // e2e compose-ha 2026-05-12: vibecarbon create spawned pnpm install,
@@ -20,11 +20,7 @@ describe('spawnAndCapture', () => {
   let workDir: string;
 
   beforeEach(() => {
-    workDir = mkdtempSync(join(tmpdir(), 'cli-runner-test-'));
-  });
-
-  afterEach(() => {
-    rmSync(workDir, { recursive: true, force: true });
+    workDir = createTempDir('cli-runner-test-');
   });
 
   it('resolves on process exit even when an orphan grandchild keeps stdio open', async () => {

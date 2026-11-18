@@ -24,6 +24,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 vi.mock('@pulumi/pulumi', () => {
   throw new Error('@pulumi/pulumi must not load eagerly');
@@ -51,7 +52,7 @@ describe('server.js never loads @pulumi/* eagerly', () => {
   });
 });
 
-const AUTOSCALER_DIR = join(process.cwd(), 'src', 'autoscaler');
+const AUTOSCALER_DIR = join(REPO_ROOT, 'src', 'autoscaler');
 const FORBIDDEN_PROVIDER_TOKEN = /\bhetzner\b|\bhcloud\b/i;
 
 // Strips block comments and line comments so matches inside explanatory

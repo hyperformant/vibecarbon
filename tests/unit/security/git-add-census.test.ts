@@ -14,9 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /** 'add' followed by an argument that stages more than named paths. */
 const BROAD_ARGV = /['"]add['"]\s*,\s*['"](?:-A|--all|-u|--update|\.|\*|:\/)['"]/g;
@@ -25,9 +23,9 @@ const STRING_COMMAND =
   /\b(?:runCommand|runCommandAsync|exec|execSync|execFile|execFileSync|spawn|spawnSync)\(\s*['"`]git\s+add\b/g;
 
 function hits(pattern: RegExp): string[] {
-  return sourceFiles(join(ROOT, 'src'), { exts: ['.js'] }).flatMap((path) => {
+  return sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] }).flatMap((path) => {
     const count = [...readFileSync(path, 'utf-8').matchAll(pattern)].length;
-    return Array(count).fill(relative(ROOT, path).split(sep).join('/'));
+    return Array(count).fill(relative(REPO_ROOT, path).split(sep).join('/'));
   });
 }
 
@@ -71,7 +69,7 @@ describe('git add census', () => {
   it('create checks the .gitignore it wrote before the repository exists', () => {
     // What makes the one broad add safe: the ignore patterns are verified
     // (the CLI exits if one is missing) before `git init`, and so before the add.
-    const create = readFileSync(join(ROOT, 'src', 'create.js'), 'utf-8');
+    const create = readRepoFile('src', 'create.js');
     const validated = create.indexOf("validateGitignore(join(projectDir, '.gitignore'))");
     const init = create.indexOf("runCommand('git init'");
     const add = create.search(BROAD_ARGV);

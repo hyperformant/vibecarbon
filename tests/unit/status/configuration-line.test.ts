@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { computeConfigurationCheck, formatConfigurationLines } from '../../../src/status.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -79,9 +79,8 @@ describe('computeConfigurationCheck', () => {
   // cwd-less call would depend on whatever sits at process.cwd().
   let emptyCwd: string;
   beforeEach(() => {
-    emptyCwd = mkdtempSync(join(tmpdir(), 'vc-status-empty-'));
+    emptyCwd = createTempDir('vc-status-empty-');
   });
-  afterEach(() => rmSync(emptyCwd, { recursive: true, force: true }));
   it('a fresh project (no environments, no config) checks only the always-known scopes and reports no problems', () => {
     const { problems, checked } = computeConfigurationCheck({}, {}, { env: {}, cwd: emptyCwd });
     expect(problems).toEqual([]);
@@ -158,7 +157,7 @@ describe('computeConfigurationCheck', () => {
 describe('computeConfigurationCheck — configure-family pass over .env/.env.local', () => {
   const dirs: string[] = [];
   function projectDir(files: Record<string, string>): string {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-status-config-'));
+    const dir = createTempDir('vc-status-config-');
     for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
     dirs.push(dir);
     return dir;
@@ -223,7 +222,7 @@ describe('computeConfigurationCheck — configure-family pass over .env/.env.loc
 describe('computeConfigurationCheck — legacy-quoted lines are advised, not shape-checked', () => {
   const dirs: string[] = [];
   function projectDir(files: Record<string, string>): string {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-status-quoting-'));
+    const dir = createTempDir('vc-status-quoting-');
     for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
     dirs.push(dir);
     return dir;
@@ -280,7 +279,7 @@ describe('computeConfigurationCheck — legacy-quoted lines are advised, not sha
 describe('computeConfigurationCheck — base pass reads access/tls/state from the project files too', () => {
   const dirs: string[] = [];
   function projectDir(files: Record<string, string>): string {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-status-fileaware-'));
+    const dir = createTempDir('vc-status-fileaware-');
     for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
     dirs.push(dir);
     return dir;

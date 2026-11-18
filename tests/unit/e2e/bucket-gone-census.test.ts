@@ -32,12 +32,10 @@
  * exception is added HERE with a reason, and the exact-match assertions
  * prune a row whose site has gone.
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
 const SWEEP_ROOTS = ['src', 'scripts', join('tests', 'e2e')];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage', 'results']);
 const EXTENSIONS = ['.js', '.ts', '.mjs'];
@@ -123,15 +121,15 @@ const isComment = (trimmed: string) =>
   trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*');
 
 const sources = SWEEP_ROOTS.flatMap((root) =>
-  sourceFiles(join(ROOT, root), {
+  sourceFiles(join(REPO_ROOT, root), {
     exts: EXTENSIONS,
     skip: SKIP_DIRS,
     skipDotDirs: true,
-    relativeTo: ROOT,
+    relativeTo: REPO_ROOT,
   }),
 ).map((file) => ({
   file,
-  lines: readFileSync(join(ROOT, file), 'utf-8').split('\n'),
+  lines: readRepoFile(file).split('\n'),
 }));
 
 interface CallSite {
@@ -197,7 +195,7 @@ describe('bucket-already-gone census', () => {
     const files = new Set(callSites().map((s) => s.file));
     expect(files).toContain('tests/e2e/utils/sweep-core.ts');
     for (const sweep of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
-      const source = readFileSync(join(ROOT, `tests/e2e/utils/sweep-${sweep}.ts`), 'utf-8');
+      const source = readRepoFile(`tests/e2e/utils/sweep-${sweep}.ts`);
       expect(source, `sweep-${sweep}.ts no longer calls sweepBuckets`).toMatch(
         /\bawait sweepBuckets\(/,
       );
@@ -253,7 +251,7 @@ describe('bucket-already-gone census', () => {
   });
 
   it('the classifier needs the locate search and the second listing: its signature takes both', () => {
-    const helper = readFileSync(join(ROOT, 'tests/e2e/utils/bucket-already-gone.ts'), 'utf-8');
+    const helper = readRepoFile('tests/e2e/utils/bucket-already-gone.ts');
     expect(helper).toMatch(
       /export async function classifyBucketDeleteError\(\s*err: unknown,\s*bucket: string,\s*locate: LocateBucket,\s*relist: RelistBuckets,/,
     );

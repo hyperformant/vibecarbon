@@ -14,6 +14,7 @@ import {
   registryEntry,
   stripOperatorSecretLines,
 } from '../../src/lib/config-registry.js';
+import { REPO_ROOT } from '../_shared/source-files.js';
 
 describe('config-registry', () => {
   it('every entry has a valid class', () => {
@@ -417,7 +418,7 @@ describe('config-registry', () => {
  * goes there with the reason, rather than being silently skipped.
  */
 describe('config-registry ↔ carbon env.ts — registry is never looser than env.ts', () => {
-  const ENV_TS_PATH = join(process.cwd(), 'carbon/src/server/lib/env.ts');
+  const ENV_TS_PATH = join(REPO_ROOT, 'carbon/src/server/lib/env.ts');
   const CONFIGURE_FEATURES = new Set(['billing', 'oauth', 'smtp']);
 
   const NOT_IN_ENV_SCHEMA: Record<string, string> = {};

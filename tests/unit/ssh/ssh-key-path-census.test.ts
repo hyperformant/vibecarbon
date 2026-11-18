@@ -9,12 +9,10 @@
  * tests/e2e that joins a key name under `.vibecarbon`.
  */
 import { readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const OWNER = 'src/lib/ssh.js';
 
 /** A key filename built from a template: deploy_key_${...} or ssh-${...}. */
@@ -36,11 +34,11 @@ describe('ssh key path census', () => {
   it('no file in src/ or tests/e2e builds a .vibecarbon key path by hand', () => {
     const files: Record<string, string> = {};
     for (const dir of ['src', 'tests/e2e']) {
-      for (const f of sourceFiles(join(root, dir), {
+      for (const f of sourceFiles(join(REPO_ROOT, dir), {
         exts: ['.js', '.ts'],
         skip: ['node_modules'],
       })) {
-        files[relative(root, f)] = readFileSync(f, 'utf8');
+        files[relative(REPO_ROOT, f)] = readFileSync(f, 'utf8');
       }
     }
     expect(handBuiltKeyPaths(files)).toEqual([]);
@@ -58,10 +56,8 @@ describe('ssh key path census', () => {
 
   it('shell and diagnose resolve deploy_key_<env> through the helper', () => {
     for (const f of ['src/shell.js', 'src/diagnose.js']) {
-      expect(readFileSync(join(root, f), 'utf8')).toMatch(/sshKeyPathFor\(envName, cwd\)/);
+      expect(readRepoFile(f)).toMatch(/sshKeyPathFor\(envName, cwd\)/);
     }
-    expect(readFileSync(join(root, 'src/shell.js'), 'utf8')).toContain(
-      '<cwd>/.vibecarbon/deploy_key_<env>',
-    );
+    expect(readRepoFile('src/shell.js')).toContain('<cwd>/.vibecarbon/deploy_key_<env>');
   });
 });

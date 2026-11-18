@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   HOST_STATE_ANNOTATION,
@@ -9,9 +7,9 @@ import {
   parseHostState,
   REBOOT_TRIGGER_PATTERNS,
 } from '../../../src/lib/host-state.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const read = (name: string) =>
-  readFileSync(join(__dirname, '../../../carbon/tests/fixtures/host-state', name), 'utf-8');
+const read = (name: string) => readRepoFile('carbon/tests/fixtures/host-state', name);
 
 describe('parseHostState', () => {
   it('reads a due state', () => {

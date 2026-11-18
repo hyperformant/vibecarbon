@@ -5,18 +5,17 @@
  * Certificate is a spec mismatch that cert-manager acts on, and it would also
  * make a Secret restored from a snapshot look wrong for the Certificate.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
 import { PROMOTE_ISSUER_ANNOTATION } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 import { buildDbManifestValues, renderK8sBase } from '../../../src/lib/deploy/k8s/k3s.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const ROOT = join(__dirname, '../../..');
-const BASE = join(ROOT, 'carbon/k8s/base');
+const BASE = join(REPO_ROOT, 'carbon/k8s/base');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
@@ -92,20 +91,16 @@ describe('renderK8sBase renders the Certificate', () => {
   });
 
   it('renders the Certificate into a base whose tree has no traefik directory yet', () => {
-    const src = mkdtempSync(join(tmpdir(), 'vc-cert-base-'));
+    const src = createTempDir('vc-cert-base-');
+    mkdirSync(join(src, 'db'), { recursive: true });
+    const sts = readFileSync(join(BASE, 'db', 'statefulset.yaml'), 'utf-8');
+    writeFileSync(join(src, 'db', 'statefulset.yaml'), sts);
+    const out = renderK8sBase(src, values(), undefined, TLS);
     try {
-      mkdirSync(join(src, 'db'), { recursive: true });
-      const sts = readFileSync(join(BASE, 'db', 'statefulset.yaml'), 'utf-8');
-      writeFileSync(join(src, 'db', 'statefulset.yaml'), sts);
-      const out = renderK8sBase(src, values(), undefined, TLS);
-      try {
-        const doc = load(readFileSync(join(out, 'traefik', 'certificate.yaml'), 'utf-8')) as Doc;
-        expect(doc.spec.dnsNames).toEqual(TLS.dnsNames);
-      } finally {
-        rmSync(out, { recursive: true, force: true });
-      }
+      const doc = load(readFileSync(join(out, 'traefik', 'certificate.yaml'), 'utf-8')) as Doc;
+      expect(doc.spec.dnsNames).toEqual(TLS.dnsNames);
     } finally {
-      rmSync(src, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
     }
   });
 

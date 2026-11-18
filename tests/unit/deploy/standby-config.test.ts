@@ -9,19 +9,17 @@
  * is already running and never belongs in the list.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   deriveScaleUpList,
   failoverAddonManifests,
 } from '../../../src/lib/deploy/k8s/standby-config.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const appManifestText = readFileSync(
-  join(__dirname, '../../../carbon/k8s/base/app/deployment.yaml'),
-  'utf-8',
-);
+const appManifestText = readRepoFile('carbon/k8s/base/app/deployment.yaml');
 
 describe('deriveScaleUpList', () => {
   it('brings up the app at its manifest replica count, then the autoscaler', () => {
@@ -50,8 +48,7 @@ describe('deriveScaleUpList', () => {
   });
 
   it('lists each add-on after the app at its manifest replica count, the autoscaler last', () => {
-    const manifest = (name: string) =>
-      readFileSync(join(__dirname, `../../../services/${name}/k8s/deployment.yaml`), 'utf-8');
+    const manifest = (name: string) => readRepoFile(`services/${name}/k8s/deployment.yaml`);
     const list = deriveScaleUpList({
       appManifestText,
       addons: [
@@ -77,19 +74,15 @@ describe('deriveScaleUpList', () => {
 
 describe('failoverAddonManifests', () => {
   const withProject = (addons: Record<string, string | null>, fn: (dir: string) => void) => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-scaleup-'));
-    try {
-      for (const [name, deployment] of Object.entries(addons)) {
-        mkdirSync(join(dir, 'k8s', 'base', name), { recursive: true });
-        writeFileSync(join(dir, 'k8s', 'base', name, 'kustomization.yaml'), 'kind: x\n');
-        if (deployment !== null) {
-          writeFileSync(join(dir, 'k8s', 'base', name, 'deployment.yaml'), deployment);
-        }
+    const dir = createTempDir('vc-scaleup-');
+    for (const [name, deployment] of Object.entries(addons)) {
+      mkdirSync(join(dir, 'k8s', 'base', name), { recursive: true });
+      writeFileSync(join(dir, 'k8s', 'base', name, 'kustomization.yaml'), 'kind: x\n');
+      if (deployment !== null) {
+        writeFileSync(join(dir, 'k8s', 'base', name, 'deployment.yaml'), deployment);
       }
-      fn(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
     }
+    fn(dir);
   };
 
   it('one entry per app-namespace add-on Deployment, observability left out', () => {

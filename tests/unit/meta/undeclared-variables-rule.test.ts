@@ -18,12 +18,11 @@
  * cost nothing to turn on: zero violations across all of src/ and tests/ at
  * the time it was enabled.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const config = () => {
-  const raw = readFileSync(fileURLToPath(new URL('../../../biome.json', import.meta.url)), 'utf8');
+  const raw = readRepoFile('biome.json');
   return JSON.parse(raw) as {
     linter?: { rules?: { correctness?: Record<string, unknown> } };
   };

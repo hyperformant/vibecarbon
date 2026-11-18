@@ -21,10 +21,11 @@
  *      step and leave the cluster on the wrong class forever.
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -37,10 +38,7 @@ const { buildDbManifestValues, buildK3sApplyInputs, renderK8sBase } = await impo
 const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
-const K3S_SRC = readFileSync(
-  join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'),
-  'utf-8',
-) as string;
+const K3S_SRC = readRepoFile('src/lib/deploy/k8s/k3s.js') as string;
 
 let cmdCalls: string[][] = [];
 
@@ -69,13 +67,13 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
 
   beforeEach(() => {
     cmdCalls = [];
-    dir = mkdtempSync(join(tmpdir(), 'vc-resume-sc-'));
+    dir = createTempDir('vc-resume-sc-');
     mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });
     writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
     // The real StatefulSet, as `create` lays it down.
     writeFileSync(
       join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
-      readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+      readRepoFile('carbon/k8s/base/db/statefulset.yaml'),
     );
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
     vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
@@ -93,7 +91,6 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
 
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const applyArgs = () => ({

@@ -17,29 +17,25 @@
  * the original d1 RCA that added DO's override. This census enumerates every
  * consumer so the next call site is drafted into the audited set.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = process.cwd();
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('every setupServer call site passes the provider-owned cloud-init budget', () => {
   it('compose-ha passes timeoutMs for BOTH servers, resolved from the env provider', () => {
-    const src = read('src/lib/deploy/effects/compose-ha.js');
+    const src = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     expect(src).toMatch(/providerFor\(envConfig\)\.CLOUD_INIT_READY_TIMEOUT_MS/);
     expect(src).toMatch(/setupServer\(primary\.ip,\s*sshKeyPath,\s*timeoutMs\)/);
     expect(src).toMatch(/setupServer\(standby\.ip,\s*sshKeyPath,\s*timeoutMs\)/);
   });
 
   it('the single-server effects path resolves the budget from the env provider', () => {
-    const src = read('src/lib/deploy/effects/index.js');
+    const src = readRepoFile('src/lib/deploy/effects/index.js');
     expect(src).toMatch(/Provider\.CLOUD_INIT_READY_TIMEOUT_MS/);
     expect(src).toMatch(/setupServerRemote\(serverIp,\s*sshKeyPath,\s*timeoutMs\)/);
   });
 
   it('scale passes the budget when provisioning replacement servers', () => {
-    const src = read('src/scale.js');
+    const src = readRepoFile('src/scale.js');
     expect(src).toMatch(
       /setupServer\(newIp,\s*sshKeyPath,\s*Provider\.CLOUD_INIT_READY_TIMEOUT_MS\)/,
     );
@@ -57,7 +53,9 @@ describe('every setupServer call site passes the provider-owned cloud-init budge
     ];
     for (const rel of surfaces) {
       const bare = [
-        ...read(rel).matchAll(/setupServer(?:Remote)?\(\s*[\w.]+(?:Ip|\.ip),\s*\w*[Kk]ey\w*\s*\)/g),
+        ...readRepoFile(rel).matchAll(
+          /setupServer(?:Remote)?\(\s*[\w.]+(?:Ip|\.ip),\s*\w*[Kk]ey\w*\s*\)/g,
+        ),
       ];
       expect(bare.map((m) => `${rel}: ${m[0]}`)).toEqual([]);
     }
@@ -82,7 +80,7 @@ describe('waitForServer budgets are provider-owned (sibling family of the cloud-
   ];
 
   it.each(PROVIDERS)('%s defaults waitForServer to the class static, never a literal', (rel) => {
-    const src = read(rel);
+    const src = readRepoFile(rel);
     expect(src).toMatch(
       /async waitForServer\(serverId,\s*timeout = (this\.constructor|\w+Provider)\.WAIT_FOR_SERVER_TIMEOUT_MS\)/,
     );

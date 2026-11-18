@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import { runCli } from '../../_harness/index.js';
 
 // Every CLI subcommand that mutates or reads a project's tree must emit
@@ -55,7 +55,7 @@ describe('vibecarbon — outside a project directory: canonical refusal', () => 
   let tmp: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'vc-noproj-'));
+    tmp = createTempDir('vc-noproj-');
     // Plant a value the secret-scanner WOULD flag if it ran. If any of
     // the assertions below find "Refusing to" or "secrets detected" in
     // the output, that means the command let a secret-scan walk the
@@ -64,10 +64,6 @@ describe('vibecarbon — outside a project directory: canonical refusal', () => 
       join(tmp, 'leaky.env'),
       'CLOUDFLARE_API_TOKEN="rMPctubolw3N83LIYdSUiISpQmMI_ZCgiwY8sD6U"\n',
     );
-  });
-
-  afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
   });
 
   for (const { name, argv } of IN_PROJECT_COMMANDS) {
@@ -114,15 +110,11 @@ describe('vibecarbon — inside a project but below its root: refusal names the 
   let sub: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'vc-subdir-'));
+    root = createTempDir('vc-subdir-');
     writeFileSync(join(root, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(root, 'docker-compose.yml'), 'services: {}\n');
     sub = join(root, 'src', 'client');
     mkdirSync(sub, { recursive: true });
-  });
-
-  afterEach(() => {
-    rmSync(root, { recursive: true, force: true });
   });
 
   for (const { name, argv } of [

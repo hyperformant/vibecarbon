@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * RCA 2026-07-17 e4 run 4: the post-failover reconverge deploy REPLACED all
@@ -254,7 +253,7 @@ describe('deployK3s wires the replayed token into the real program', () => {
     // node-ip guards): the helper is only load-bearing if the k3s-infra
     // block actually consumes it before building the program, and it always
     // does: a program built without a token refuses (k3s-token-census).
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(src).toMatch(/const stackToken = await resolveStackK3sToken\(programConfig, \{/);
     expect(src).toMatch(/getK8sProgram\(\{ \.\.\.programConfig, \.\.\.stackToken \}\)/);
   });
@@ -268,7 +267,7 @@ describe('deployK3s wires the replayed token into the real program', () => {
   // resolved two lines above) — a caller that forgets it turns every
   // DigitalOcean k8s deploy into an immediate throw instead of a live 401.
   it('threads provider explicitly into both k3s-infra IaC calls', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(src).toMatch(
       /resolveStackK3sToken\(programConfig, \{\s*provider: providerIdFor\(options\),/,
     );

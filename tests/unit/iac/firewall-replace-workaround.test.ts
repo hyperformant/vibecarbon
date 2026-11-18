@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Drift guard for the Hetzner firewall replace-instead-of-update workaround.
@@ -20,8 +19,7 @@ import { describe, expect, it } from 'vitest';
  * total-rule-loss bug. These assertions make removal a deliberate act.
  */
 
-const src = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../../src/lib/iac/${rel}`, import.meta.url)), 'utf8');
+const src = (rel: string) => readRepoFile(`src/lib/iac/${rel}`);
 
 /**
  * Source with comments stripped.

@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ADDON_JOB_SCRIPT } from '../../../src/lib/services/addon-start.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * M-A6: the scale cutover's whole-stack `up -d --force-recreate` must not run
@@ -9,7 +8,7 @@ import { ADDON_JOB_SCRIPT } from '../../../src/lib/services/addon-start.js';
  * compose operation. It stops the job first, as reconcile.sh does.
  */
 describe('scale cutover recreate stops the add-on job first', () => {
-  const src = readFileSync(join(import.meta.dirname, '../../../src/scale.js'), 'utf8');
+  const src = readRepoFile('src/scale.js');
 
   it('runs `addons-start.sh stop` before its force-recreate up', () => {
     const up = src.indexOf('up -d --force-recreate');
@@ -29,7 +28,7 @@ describe('scale cutover recreate stops the add-on job first', () => {
  * file the next reader takes for current.
  */
 describe('the scale restore stops the add-on job first', () => {
-  const src = readFileSync(join(import.meta.dirname, '../../../src/scale.js'), 'utf8');
+  const src = readRepoFile('src/scale.js');
   it('runs `addons-start.sh stop` on the new server before restoreCompose', () => {
     const restore = src.indexOf('restoreCompose(newIp, sshKeyPath, projectName, {');
     expect(restore).toBeGreaterThan(-1);

@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * deployK3s cannot be driven in a unit test (it provisions a cluster), so this
@@ -10,7 +9,7 @@ import { describe, expect, it } from 'vitest';
  * duration to the deploy; the up alone took 78 s, longer than a cold build.
  * startAppImageBuild / deliverAppImage behaviour: k3s-standby-image-delivery.test.ts.
  */
-const SRC = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+const SRC = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
 function functionBody(name: string) {
   const start = SRC.indexOf(`export async function ${name}(`);

@@ -37,23 +37,22 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const MODULE = 'src/lib/kubeconfig.js';
 const K3S = 'src/lib/deploy/k8s/k3s.js';
 
 /** Names kubectl as data in the floors table. It judges version text and spawns nothing. */
 const NOT_A_SPAWNER = new Set(['src/lib/runtime-floors.js']);
 
-const SRC = sourceFiles(join(ROOT, 'src'), { exts: ['.js', '.mjs'], skip: ['node_modules'] }).map(
-  (f) => ({
-    file: relative(ROOT, f),
-    text: readFileSync(f, 'utf-8'),
-  }),
-);
+const SRC = sourceFiles(join(REPO_ROOT, 'src'), {
+  exts: ['.js', '.mjs'],
+  skip: ['node_modules'],
+}).map((f) => ({
+  file: relative(REPO_ROOT, f),
+  text: readFileSync(f, 'utf-8'),
+}));
 
 /** Source text containing template placeholders, written as `#{...}`. */
 const tpl = (s: string) => s.replaceAll('#{', '$' + '{');
@@ -288,7 +287,7 @@ describe('kubectl/helm read a kubeconfig with compression off', () => {
   });
 
   it('(d) every GitOps job that decodes the kubeconfig secret sets the field', () => {
-    const wf = readFileSync(join(ROOT, 'carbon/.github/workflows/deploy.yml'), 'utf-8');
+    const wf = readRepoFile('carbon/.github/workflows/deploy.yml');
     expect(wf.match(/base64 -d > "\$KUBECONFIG"/g)?.length).toBeGreaterThanOrEqual(3);
     expect(workflowGaps(wf)).toEqual([]);
   });

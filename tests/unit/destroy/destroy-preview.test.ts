@@ -9,12 +9,12 @@
  * prints unconditionally) and the storage bucket as things that "will be
  * permanently deleted"; neither existed.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from '../../../src/lib/destroy/preview.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The teardown the preview must agree with (handleBackupBucket), over a fake
 // object store that records what it was asked to delete.
@@ -324,10 +324,9 @@ describe('destroyPreviewBody pinned app bucket', () => {
 
 describe('readS3SetupCompleted', () => {
   let dir: string;
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('reads the deploy-state record of the S3 step', () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-preview-'));
+    dir = createTempDir('vc-preview-');
     expect(readS3SetupCompleted(dir, 'prod')).toBe(false);
     mkdirSync(join(dir, '.vibecarbon'));
     writeFileSync(

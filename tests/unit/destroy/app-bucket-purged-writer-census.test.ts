@@ -20,11 +20,9 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const DESTROY = 'src/destroy.js';
 
 /** Block comments and whole-line comments blanked, offsets kept. */
@@ -50,7 +48,7 @@ function writesIn(file: string) {
       const lineStart = text.lastIndexOf('\n', m.index) + 1;
       const lineEnd = text.indexOf('\n', m.index);
       hits.push({
-        file: relative(ROOT, file),
+        file: relative(REPO_ROOT, file),
         at: m.index ?? 0,
         text: text.slice(lineStart, lineEnd).trim(),
       });
@@ -68,9 +66,10 @@ function functionSlice(source: string, name: string): [number, number] {
 }
 
 describe('appBucketPurged writer census', () => {
-  const all = sourceFiles(join(ROOT, 'src'), { exts: ['.js'], skip: ['node_modules'] }).flatMap(
-    writesIn,
-  );
+  const all = sourceFiles(join(REPO_ROOT, 'src'), {
+    exts: ['.js'],
+    skip: ['node_modules'],
+  }).flatMap(writesIn);
 
   it('(a) only destroy.js writes it, in exactly two places', () => {
     expect(all.map((h) => `${h.file}: ${h.text}`)).toEqual([
@@ -80,7 +79,7 @@ describe('appBucketPurged writer census', () => {
   });
 
   it("(b) the flag is set only in deleteAppBucketEffect's confirmed-delete branch", () => {
-    const source = code(readFileSync(join(ROOT, DESTROY), 'utf-8'));
+    const source = code(readRepoFile(DESTROY));
     const [start, end] = functionSlice(source, 'deleteAppBucketEffect');
     const body = source.slice(start, end);
     const deleted = body.indexOf('if (result.deleted) {');

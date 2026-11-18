@@ -22,8 +22,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
 const BASE_CERTIFICATE = 'vibecarbon-tls';
 
 type Doc = {
@@ -64,7 +64,7 @@ function renderKustomization(dir: string, parentNamespace?: string): Rendered[] 
       if (doc && typeof doc === 'object') {
         out.push({
           doc,
-          file: path.slice(ROOT.length + 1),
+          file: path.slice(REPO_ROOT.length + 1),
           namespace: namespace ?? doc.metadata?.namespace ?? 'default',
         });
       }
@@ -74,10 +74,10 @@ function renderKustomization(dir: string, parentNamespace?: string): Rendered[] 
 }
 
 const roots = [
-  join(ROOT, 'carbon', 'k8s', 'base'),
-  ...readdirSync(join(ROOT, 'services'), { withFileTypes: true })
+  join(REPO_ROOT, 'carbon', 'k8s', 'base'),
+  ...readdirSync(join(REPO_ROOT, 'services'), { withFileTypes: true })
     .filter((e) => e.isDirectory())
-    .map((e) => join(ROOT, 'services', e.name, 'k8s'))
+    .map((e) => join(REPO_ROOT, 'services', e.name, 'k8s'))
     .filter((dir) => existsSync(join(dir, 'kustomization.yaml'))),
 ];
 const rendered = roots.flatMap((dir) => renderKustomization(dir));

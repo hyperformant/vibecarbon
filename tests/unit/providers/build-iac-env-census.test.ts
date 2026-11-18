@@ -22,9 +22,9 @@
 import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC_ROOT = join(process.cwd(), 'src');
+const SRC_ROOT = join(REPO_ROOT, 'src');
 const EXEMPT_FILE = join(SRC_ROOT, 'lib', 'providers', 'base.js');
 
 // The env-construction idiom: a computed member access used as an object

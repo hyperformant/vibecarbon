@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ciAvailable, resolveBuildMode } from '../../../src/lib/ci-setup.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // getGitHubRepo shells out to `gh repo view`, which we don't want to execute
 // in unit tests. Mock it so we can simulate "remote configured / not configured"
@@ -23,7 +23,7 @@ describe('resolveBuildMode (post-PR-5: collapsed flag soup)', () => {
   let cwdWithoutWorkflow: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'vc-build-mode-'));
+    tmpDir = createTempDir('vc-build-mode-');
     cwdWithWorkflow = join(tmpDir, 'with-wf');
     cwdWithoutWorkflow = join(tmpDir, 'without-wf');
     mkdirSync(join(cwdWithWorkflow, '.github', 'workflows'), { recursive: true });
@@ -38,10 +38,6 @@ describe('resolveBuildMode (post-PR-5: collapsed flag soup)', () => {
     // name. The test agreed with the code instead of with the file `create`
     // actually writes, so neither noticed.
     writeFileSync(join(cwdWithWorkflow, '.vibecarbon.json'), JSON.stringify({ cicdEnabled: true }));
-  });
-
-  afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   describe('k8s mode is always local-first', () => {
@@ -106,11 +102,7 @@ describe('ciAvailable', () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'vc-ci-available-'));
-  });
-
-  afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = createTempDir('vc-ci-available-');
   });
 
   it('returns false when the workflow file is missing', () => {

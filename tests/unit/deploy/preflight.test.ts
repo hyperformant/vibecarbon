@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { checkDeployPrerequisites } from '../../../src/lib/deploy/preflight.js';
 import { readSshVersion } from '../../../src/lib/runtime-floors.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // A stub PATH-lookup: present unless listed in `absent`.
 const has = (absent: string[]) => (bin: string) => !absent.includes(bin);
@@ -95,12 +94,12 @@ describe('the OpenSSH floor at deploy preflight', () => {
   });
 
   it('the deploy path passes the reader in', () => {
-    const text = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf8');
+    const text = readRepoFile('src/lib/deploy/orchestrator.js');
     expect(text).toMatch(/checkDeployPrerequisites\(tier, \{[^}]*sshVersion: readSshVersion/);
   });
 
   it('a deploy never reads the local Compose: only `up` runs it', () => {
-    const text = readFileSync(join(process.cwd(), 'src/lib/deploy/preflight.js'), 'utf8');
+    const text = readRepoFile('src/lib/deploy/preflight.js');
     expect(text).not.toMatch(/'compose', 'version'/);
   });
 });

@@ -25,13 +25,9 @@
  * under one tag. No workflow sets up QEMU, and no build step leans on the
  * runner's preinstalled binfmt to execute a foreign-arch binary.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = process.cwd();
-const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 type Step = {
   id?: string;
@@ -48,7 +44,7 @@ type Job = {
   steps?: Step[];
 };
 const jobsOf = (workflow: string) =>
-  (loadYaml(read(workflow)) as { jobs: Record<string, Job> }).jobs;
+  (loadYaml(readRepoFile(workflow)) as { jobs: Record<string, Job> }).jobs;
 /** A literal GitHub expression, without tripping the template-string lint. */
 const expr = (inner: string) => `$${'{{'} ${inner} }}`;
 const isBuildPush = (step: Step) => /docker\/build-push-action@/.test(step.uses ?? '');
@@ -125,7 +121,7 @@ describe.each(WORKFLOWS)('$workflow publishes its intended platforms', ({ workfl
   const jobs = jobsOf(workflow);
   // Comments are ALLOWED to name setup-qemu-action — that is where the
   // reasoning for its absence lives. Only executable YAML is checked.
-  const code = read(workflow)
+  const code = readRepoFile(workflow)
     .split('\n')
     .filter((line) => !/^\s*#/.test(line))
     .join('\n');
@@ -168,7 +164,7 @@ describe.each(WORKFLOWS)('$workflow publishes its intended platforms', ({ workfl
 
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
 type CallerJob = Job & { uses?: string; with?: Record<string, string>; if?: string };
-const workflowOf = (file: string) => loadYaml(read(file)) as Workflow;
+const workflowOf = (file: string) => loadYaml(readRepoFile(file)) as Workflow;
 const REUSABLE = './.github/workflows/native-multiarch-image.yml';
 const SMOKE = '.github/scripts/smoke-db-image.sh';
 /** A job's run: scripts, joined, for regex checks. */
@@ -271,7 +267,7 @@ describe('the db image builds natively per arch and merges into one tag', () => 
   });
 
   it('the smoke script really starts postgres and loads pg_cron', () => {
-    const smoke = read(SMOKE);
+    const smoke = readRepoFile(SMOKE);
     expect(smoke).toMatch(/--entrypoint postgres "\$IMAGE" --version/);
     expect(smoke).toMatch(/--entrypoint wal-g "\$IMAGE" --version/);
     expect(smoke).toMatch(/initdb -D \/tmp\//);
@@ -328,7 +324,7 @@ describe('wal-g builds natively per arch in both channels (arch audit F6)', () =
           false,
         );
       }
-      const code = read(file)
+      const code = readRepoFile(file)
         .split('\n')
         .filter((line) => !/^\s*#/.test(line))
         .join('\n');
@@ -340,7 +336,9 @@ describe('wal-g builds natively per arch in both channels (arch audit F6)', () =
   );
 
   it('the smoke script executes wal-g', () => {
-    expect(read(WALG_SMOKE)).toMatch(/--entrypoint \/usr\/local\/bin\/wal-g "\$IMAGE" --version/);
+    expect(readRepoFile(WALG_SMOKE)).toMatch(
+      /--entrypoint \/usr\/local\/bin\/wal-g "\$IMAGE" --version/,
+    );
   });
 
   it('release: publish-walg is the shared workflow, gated on a wal-g change, never feeding the db build', () => {
@@ -463,7 +461,9 @@ describe('the release db publish is unchanged by the dev channel', () => {
     const ref = runsOf(wf.jobs['db-ref']);
     expect(ref).toMatch(/image-const\.mjs DB_IMAGE\)/);
     expect(ref).toMatch(/image-const\.mjs DB_IMAGE_TAG\)/);
-    expect(read('.github/workflows/publish-db-image.yml')).not.toMatch(/postgres-dev|DEV_DB_IMAGE/);
+    expect(readRepoFile('.github/workflows/publish-db-image.yml')).not.toMatch(
+      /postgres-dev|DEV_DB_IMAGE/,
+    );
   });
 
   it('never re-mints an existing release tag (a wal-g-only push builds no db image)', () => {
@@ -527,7 +527,7 @@ describe('the node runtime base publishes on merge, once per revision tag', () =
   });
 
   it('the smoke script runs node, checks the hono user, and refuses npm', () => {
-    const smoke = read('.github/scripts/smoke-node-runtime-image.sh');
+    const smoke = readRepoFile('.github/scripts/smoke-node-runtime-image.sh');
     expect(smoke).toMatch(/node --version|node -e/);
     expect(smoke).toMatch(/id -u hono/);
     expect(smoke).toMatch(/command -v npm/);
@@ -670,7 +670,7 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
     expect(push.paths).toEqual(
       expect.arrayContaining(['docker/postgres-walg/**', 'docker/wal-g/**']),
     );
-    expect(read(FILE)).not.toMatch(/^\s*pull_request/m);
+    expect(readRepoFile(FILE)).not.toMatch(/^\s*pull_request/m);
   });
 
   it('publishes only to postgres-dev, refusing any other name', () => {
@@ -680,7 +680,7 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
     expect(build.with?.image).toBe(expr('needs.plan.outputs.image'));
     expect((wf.jobs['build-walg'] as CallerJob).with?.image).toBe(expr('needs.plan.outputs.image'));
     // Nothing names the release package as a push target.
-    const code = read(FILE)
+    const code = readRepoFile(FILE)
       .split('\n')
       .filter((line) => !/^\s*#/.test(line))
       .join('\n');
@@ -752,7 +752,7 @@ describe('the dev channel cleanup (cleanup-db-image-dev.yml)', () => {
     });
     // With no ids the action deletes the oldest version regardless of age.
     expect((del[0] as Step & { if?: string }).if).toBe("steps.old.outputs.ids != ''");
-    expect(read(FILE)).not.toMatch(/package-name:\s*postgres\s*$/m);
+    expect(readRepoFile(FILE)).not.toMatch(/package-name:\s*postgres\s*$/m);
   });
 });
 
@@ -762,7 +762,7 @@ describe('arm64 build support survives in the db image delivery chain', () => {
   // PUBLISHED_IMAGES entries above; these pin the Dockerfile half. (Deeper
   // build-shape guards live in tests/unit/deploy/walg-dockerfile-arch.test.ts.)
   it('docker/wal-g/Dockerfile cross-compiles from TARGETARCH', () => {
-    const dockerfile = read('docker/wal-g/Dockerfile');
+    const dockerfile = readRepoFile('docker/wal-g/Dockerfile');
     expect(dockerfile).toMatch(/ARG TARGETARCH/);
     expect(dockerfile).toMatch(/GOARCH=\$\{?TARGETARCH\}?/);
   });
@@ -771,7 +771,7 @@ describe('arm64 build support survives in the db image delivery chain', () => {
     // Executing the binary during the build (natively on each arch) is the only
     // place a wrong-arch wal-g fails loudly instead of shipping a database
     // with silently dead backups behind green health checks.
-    expect(read('docker/postgres-walg/Dockerfile')).toMatch(/wal-g --version/);
+    expect(readRepoFile('docker/postgres-walg/Dockerfile')).toMatch(/wal-g --version/);
   });
 });
 
@@ -780,7 +780,7 @@ describe('compose pulls the published db image rather than building one', () => 
   // local dev on Apple Silicon pulls it.
   // Slice the `db:` service body: from its key to the next top-level key.
   const dbServiceOf = (file: string) => {
-    const compose = read(file);
+    const compose = readRepoFile(file);
     const start = compose.indexOf('\n  db:');
     if (start === -1) return '';
     const next = compose.slice(start + 1).search(/\n {2}[a-z_-]+:|\n[a-z]/);

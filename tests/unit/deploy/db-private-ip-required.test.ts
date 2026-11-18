@@ -18,8 +18,6 @@
  * Pulumi-assigned address) and must be THREADED, never assumed. Absent value
  * = incomplete infra step result = throw.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   prepareReplicationTransport,
@@ -27,8 +25,7 @@ import {
   setupReplication,
 } from '../../../src/lib/deploy/k8s/ha/index.js';
 import { reseedStandbyFromPrimary } from '../../../src/lib/deploy/replication.js';
-
-const ROOT = join(__dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const baseTransportArgs = {
   primaryIp: '203.0.113.10',
@@ -105,13 +102,13 @@ function codeWithoutComments(source: string): string {
 describe('10.0.1.2 census — provider-generic files carry no db-IP literal', () => {
   for (const rel of GENERIC_FILES) {
     it(`${rel} has no quoted 10.0.1.2 literal in code`, () => {
-      const code = codeWithoutComments(readFileSync(join(ROOT, rel), 'utf8'));
+      const code = codeWithoutComments(readRepoFile(rel));
       expect(code).not.toMatch(/['"`]10\.0\.1\.2['"`]/);
     });
   }
 
   it('k3s.js has no quoted 10.0.1.2 literal in code', () => {
-    const code = codeWithoutComments(readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf8'));
+    const code = codeWithoutComments(readRepoFile('src/lib/deploy/k8s/k3s.js'));
     expect(code).not.toMatch(/['"`]10\.0\.1\.2['"`]/);
   });
 
@@ -124,13 +121,13 @@ describe('10.0.1.2 census — provider-generic files carry no db-IP literal', ()
     // delivery. The live deployK3s path destructures the k3s-infra step result
     // WITHOUT a default and validates instead. A 2nd occurrence means the class
     // is growing again — remove the new default, don't bump this.
-    const code = codeWithoutComments(readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf8'));
+    const code = codeWithoutComments(readRepoFile('src/lib/deploy/k8s/k3s.js'));
     const occurrences = code.match(/masterPrivateIp\s*=\s*'10\.0\.1\.1'/g) ?? [];
     expect(occurrences).toHaveLength(1);
   });
 
   it("positive control: hetzner-k8s.js still pins the statics ('10.0.1.1'/'10.0.1.2')", () => {
-    const src = readFileSync(join(ROOT, 'src/lib/iac/programs/hetzner-k8s.js'), 'utf8');
+    const src = readRepoFile('src/lib/iac/programs/hetzner-k8s.js');
     expect(src).toMatch(/'10\.0\.1\.1'/);
     expect(src).toMatch(/'10\.0\.1\.2'/);
   });

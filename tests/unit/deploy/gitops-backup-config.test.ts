@@ -7,16 +7,16 @@
  * origin/main.
  */
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { gitSafeEnv } from '../../../src/lib/command.js';
 import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
   seedEnvironmentSecrets: vi.fn(async () => {}),
@@ -29,8 +29,7 @@ const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environ
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
-const work = mkdtempSync(join(tmpdir(), 'vc-gitops-backup-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-gitops-backup-');
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, env: gitSafeEnv(), encoding: 'utf-8' }).trim();

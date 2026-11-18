@@ -23,14 +23,12 @@
 
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
 import { primaryReplicationSql } from '../../../src/lib/deploy/replication-slot.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const DIRS = ['src/lib/deploy/compose', 'src/lib/deploy/k8s/ha'];
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst / parsed YAML.
@@ -76,13 +74,13 @@ function restartsIn(file: string, source: string): string[] {
 
 describe('census (a): no deploy-side db restart', () => {
   it('scans the deploy sources', () => {
-    const files = DIRS.flatMap((d) => sourceFiles(join(REPO, d), { exts: ['.js'] }));
+    const files = DIRS.flatMap((d) => sourceFiles(join(REPO_ROOT, d), { exts: ['.js'] }));
     expect(files.length).toBeGreaterThan(5);
   });
 
   it('nothing under compose/ or k8s/ha/ restarts the db or deletes its pod', () => {
-    const found = DIRS.flatMap((d) => sourceFiles(join(REPO, d), { exts: ['.js'] })).flatMap((f) =>
-      restartsIn(relative(REPO, f), readFileSync(f, 'utf-8')),
+    const found = DIRS.flatMap((d) => sourceFiles(join(REPO_ROOT, d), { exts: ['.js'] })).flatMap(
+      (f) => restartsIn(relative(REPO_ROOT, f), readFileSync(f, 'utf-8')),
     );
     expect(found).toEqual([]);
   });
@@ -111,12 +109,11 @@ function argvSettings(argv: string[]): Record<string, string> {
 }
 
 const composeArgv = (): string[] =>
-  (loadAll(readFileSync(join(REPO, 'carbon/docker-compose.yml'), 'utf-8')) as Node[])[0].services.db
-    .command;
+  (loadAll(readRepoFile('carbon/docker-compose.yml')) as Node[])[0].services.db.command;
 const k8sArgv = (): string[] => {
-  const sts = (
-    loadAll(readFileSync(join(REPO, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8')) as Node[]
-  ).find((d) => d?.kind === 'StatefulSet');
+  const sts = (loadAll(readRepoFile('carbon/k8s/base/db/statefulset.yaml')) as Node[]).find(
+    (d) => d?.kind === 'StatefulSet',
+  );
   return sts.spec.template.spec.containers.find((c: Node) => c.name === 'db').args;
 };
 

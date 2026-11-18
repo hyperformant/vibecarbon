@@ -13,16 +13,13 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertReplicationStreamingOrDegraded,
@@ -35,6 +32,8 @@ import {
   reseedDisarmArgv,
   verifyStreaming,
 } from '../../../src/lib/deploy/replication.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // buildReplicationFirewallRules coverage lives solely in
 // replication-firewall-rules.test.ts (add/no-op/drop-stale/replace-stale-peer)
@@ -563,7 +562,7 @@ describe('buildStagedBasebackupScript in-place mode', () => {
  * any of them can fail (FAIL_AT=name:N): a stage cut short at that point.
  */
 const hasFlock = spawnSync('sh', ['-c', 'command -v flock']).status === 0;
-const GUARD = fileURLToPath(new URL('../../../carbon/volumes/db/db-guard.sh', import.meta.url));
+const GUARD = join(REPO_ROOT, 'carbon/volumes/db/db-guard.sh');
 const WRAPPED = ['rm', 'mkdir', 'touch', 'sed', 'find', 'sync', 'mv', 'cat'];
 
 // Real processes: every test spawns sh with wrapped coreutils, the stage and
@@ -583,7 +582,7 @@ describe.skipIf(!hasFlock)(
     const dirs: string[] = [];
 
     function setup() {
-      dir = mkdtempSync(join(tmpdir(), 'vc-inplace-stage-'));
+      dir = createTempDir('vc-inplace-stage-');
       dirs.push(dir);
       pgdata = join(dir, 'data');
       bin = join(dir, 'bin');

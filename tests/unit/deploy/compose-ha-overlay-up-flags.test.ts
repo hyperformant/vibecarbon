@@ -22,14 +22,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
-const EFFECTS_SRC = readFileSync(
-  join(REPO_ROOT, 'src', 'lib', 'deploy', 'effects', 'compose-ha.js'),
-  'utf-8',
-);
-const SCALE_SRC = readFileSync(join(REPO_ROOT, 'src', 'scale.js'), 'utf-8');
+const EFFECTS_SRC = readRepoFile('src', 'lib', 'deploy', 'effects', 'compose-ha.js');
+const SCALE_SRC = readRepoFile('src', 'scale.js');
 
 const fnStart = EFFECTS_SRC.indexOf('async function haWriteReplicationOverlay');
 const fnBody = EFFECTS_SRC.slice(fnStart, EFFECTS_SRC.indexOf('\n}\n', fnStart));

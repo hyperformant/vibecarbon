@@ -70,6 +70,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const H = vi.hoisted(() => ({
   lastBuildLocalImageOptions: null as Record<string, unknown> | null,
@@ -99,7 +100,7 @@ const { renderCarbonAutoscalerConfig, buildAppImage } = await import(
 );
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
-const fixturePath = join(__dirname, '../../fixtures/k3s-hetzner-ca-config.json');
+const fixturePath = join(REPO_ROOT, 'tests/fixtures/k3s-hetzner-ca-config.json');
 
 describe('M3 Task 2 — Hetzner byte-identical pin', () => {
   beforeEach(() => {

@@ -17,7 +17,7 @@
  * network or volume is created.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -28,10 +28,10 @@ import {
 } from '../../../src/lib/deploy/compose/command.js';
 import { buildReplicationOverlay } from '../../../src/lib/deploy/compose/ha.js';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
 
-const ROOT = process.cwd();
 const PROJECT = `vctest-vccompose-${process.pid}`;
 const APP_IMAGE = `${PROJECT}-app:local`;
 
@@ -44,7 +44,7 @@ describeDocker('vc-compose renders the server stack, app-migrate included', () =
     project = mkdtempSync(join(tmpdir(), 'vctest-vccompose-project-'));
     // As `vibecarbon create` writes them: the generation-time placeholders filled.
     for (const f of ['docker-compose.yml', 'docker-compose.prod.yml']) {
-      const text = readFileSync(join(ROOT, 'carbon', f), 'utf-8')
+      const text = readRepoFile('carbon', f)
         .replaceAll('{{PROJECT_NAME}}', PROJECT)
         .replaceAll('{{GITHUB_OWNER}}', 'vctest-owner')
         .replaceAll('{{ADMIN_EMAIL}}', 'admin@example.com');

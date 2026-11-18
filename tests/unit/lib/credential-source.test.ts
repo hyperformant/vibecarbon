@@ -4,12 +4,13 @@
  * The old line said "environment variables" for keys that came from the
  * project's .env.local (excitingai, 2026-10-16).
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { bootstrapOperatorEnv, describeCredentialSource } from '../../../src/lib/project.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const KEYS = ['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY'];
 let dir: string;
@@ -22,7 +23,7 @@ afterEach(() => {
 
 describe('describeCredentialSource', () => {
   it("says .env.local when the project's file supplied the pair", () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-credsrc-'));
+    dir = createTempDir('vc-credsrc-');
     writeFileSync(
       join(dir, '.env.local'),
       [
@@ -40,7 +41,7 @@ describe('describeCredentialSource', () => {
   });
 
   it('says shell environment, naming the variables, when an export supplied them', () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-credsrc-'));
+    dir = createTempDir('vc-credsrc-');
     process.env.HETZNER_ACCESS_KEY = 'ABCDEFGHIJ0123456789';
     process.env.HETZNER_SECRET_KEY = 'x'.repeat(40);
     bootstrapOperatorEnv(dir);

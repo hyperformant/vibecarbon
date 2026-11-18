@@ -5,14 +5,13 @@
  * the command's own total is recorded, so the collection never competes with
  * the work it measures and never counts toward `cli.<command>.total`.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /** Source text containing template placeholders, written as `#{...}`. */
 const tpl = (s: string) => s.replaceAll('#{', '$' + '{');
 
-const src = (p: string) => readFileSync(join(__dirname, '../../../src', p), 'utf-8');
+const src = (p: string) => readRepoFile('src', p);
 
 /** The source between two anchors, both required to exist. */
 function between(text: string, from: string, to: string): string {

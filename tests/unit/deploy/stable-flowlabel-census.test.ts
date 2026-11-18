@@ -39,8 +39,9 @@ import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const K3S_DIR = join(process.cwd(), 'carbon', 'cloud-init', 'k3s');
+const K3S_DIR = join(REPO_ROOT, 'carbon', 'cloud-init', 'k3s');
 const SNIPPET = readFileSync(join(K3S_DIR, '_stable-flowlabel.sh'), 'utf-8');
 const SYSCTL_WRITE = 'sysctl -q -w net.core.txrehash=0';
 const SYSCTL_FILE = '/etc/sysctl.d/99-vibecarbon-stable-flowlabel.conf';

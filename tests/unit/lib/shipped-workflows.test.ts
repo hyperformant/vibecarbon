@@ -7,17 +7,15 @@
  * new version's hash, and every version git history holds stays listed.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { hashContent } from '../../../src/lib/checksum.js';
 import { CICD_WORKFLOW_FILES } from '../../../src/lib/ci-setup.js';
 import { gitSafeEnv } from '../../../src/lib/command.js';
 import { isShippedWorkflow, SHIPPED_WORKFLOWS } from '../../../src/lib/shipped-workflows.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
 const git = (...args: string[]) =>
-  execFileSync('git', args, { cwd: ROOT, env: gitSafeEnv(), encoding: 'utf-8' });
+  execFileSync('git', args, { cwd: REPO_ROOT, env: gitSafeEnv(), encoding: 'utf-8' });
 
 const shallow = (() => {
   try {
@@ -34,7 +32,7 @@ describe('SHIPPED_WORKFLOWS', () => {
 
   for (const rel of CICD_WORKFLOW_FILES) {
     it(`${rel}: lists the copy this CLI ships`, () => {
-      const hash = hashContent(readFileSync(join(ROOT, 'carbon', rel), 'utf-8'));
+      const hash = hashContent(readRepoFile('carbon', rel));
       expect(
         SHIPPED_WORKFLOWS[rel],
         `carbon/${rel} changed: add '${hash}' to SHIPPED_WORKFLOWS['${rel}'] in src/lib/shipped-workflows.js`,
@@ -73,7 +71,7 @@ describe('SHIPPED_WORKFLOWS', () => {
 
   it('isShippedWorkflow: byte for byte only, and only for its own path', () => {
     const rel = '.github/workflows/deploy.yml';
-    const text = readFileSync(join(ROOT, 'carbon', rel), 'utf-8');
+    const text = readRepoFile('carbon', rel);
     expect(isShippedWorkflow(rel, text)).toBe(true);
     expect(isShippedWorkflow(rel, `${text}\n`)).toBe(false);
     expect(isShippedWorkflow('.github/workflows/vibecarbon-build.yml', text)).toBe(false);

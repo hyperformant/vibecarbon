@@ -14,16 +14,11 @@
  * Rule: the standby's replacement never touches apex DNS. The primary's
  * replacement (or the single server on non-HA compose) does.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { shouldUpdateApexDns } from '../../../src/scale.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const SCALE_SRC = readFileSync(
-  join(fileURLToPath(new URL('../../..', import.meta.url)), 'src', 'scale.js'),
-  'utf-8',
-);
+const SCALE_SRC = readRepoFile('src', 'scale.js');
 
 describe('shouldUpdateApexDns', () => {
   it('the standby arm never writes apex DNS', () => {

@@ -10,12 +10,11 @@
  * skip block.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { requiresProdTypeToConfirm } from '../../../src/lib/prod-confirm.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const failoverSrc = readFileSync(join(__dirname, '../../../src/failover.js'), 'utf-8');
+const failoverSrc = readRepoFile('src/failover.js');
 
 describe('failover prod confirm', () => {
   it.each(['prod', 'Prod', 'PROD', 'production', 'Production'])(

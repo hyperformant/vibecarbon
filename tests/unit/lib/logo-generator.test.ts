@@ -1,7 +1,6 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   generateLogoSvgs,
   ICON_BASELINE,
@@ -12,11 +11,10 @@ import {
   resolveSingleStoryA,
   writeLogoSvgs,
 } from '../../../src/lib/logo-generator.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const ICON_SVG = readFileSync(
-  join(process.cwd(), 'carbon/src/client/assets/logo-icon.svg'),
-  'utf8',
-);
+const ICON_SVG = readRepoFile('carbon/src/client/assets/logo-icon.svg');
 const viewBoxWidth = (svg: string) => Number(svg.match(/viewBox="0 0 ([\d.]+) /)?.[1]);
 const viewBoxHeight = (svg: string) => Number(svg.match(/viewBox="0 0 [\d.]+ ([\d.]+)"/)?.[1]);
 
@@ -95,10 +93,9 @@ describe('generateLogoSvgs', () => {
 describe('writeLogoSvgs', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-logo-'));
+    dir = createTempDir('vc-logo-');
     writeFileSync(join(dir, 'logo-icon.svg'), ICON_SVG);
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('writes the four generated logo files into the assets dir', () => {
     writeLogoSvgs('CarbonApp', dir);

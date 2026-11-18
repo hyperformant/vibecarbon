@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Census: the User Docs CLI reference must describe the CLI that exists.
@@ -11,8 +12,7 @@ import { describe, expect, it } from 'vitest';
  * for a command that was removed.
  */
 
-const ROOT = process.cwd();
-const CLI_DOC = join(ROOT, 'carbon', 'content', 'docs', 'cli.mdx');
+const CLI_DOC = join(REPO_ROOT, 'carbon', 'content', 'docs', 'cli.mdx');
 const doc = readFileSync(CLI_DOC, 'utf-8');
 
 /**
@@ -21,9 +21,7 @@ const doc = readFileSync(CLI_DOC, 'utf-8');
  * reporting; see src/lib/telemetry/), so its cases are nested one level
  * deeper than a bare top-level switch would be.
  */
-const dispatched = [
-  ...readFileSync(join(ROOT, 'src', 'cli.js'), 'utf-8').matchAll(/^\s+case '([a-z-]+)':/gm),
-]
+const dispatched = [...readRepoFile('src', 'cli.js').matchAll(/^\s+case '([a-z-]+)':/gm)]
   .map((m) => m[1])
   .sort();
 

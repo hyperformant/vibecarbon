@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
 import { observabilityGitopsWarning } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // H-9: observability is isolated OUT of k8s/base, and the gitops/Flux path
 // reconciles only k8s/base with no Flux wiring for it yet — so a gitops deploy
@@ -15,10 +15,7 @@ describe('observabilityGitopsWarning', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-obs-gitops-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-obs-gitops-');
   });
 
   it('returns null when observability is not installed', () => {

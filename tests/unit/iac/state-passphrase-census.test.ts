@@ -14,10 +14,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importingWorkspace } from '../../_shared/fake-stack-import.js';
 import { fakeHetznerStateStore } from '../../_shared/fake-state-store.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
+const SRC = join(REPO_ROOT, 'src');
 const PASSPHRASE = 'Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5';
 
 const srcFiles = sourceFiles(SRC, { exts: ['.js'] });

@@ -23,11 +23,10 @@ import {
   writeGitHubRefs,
 } from '../../../src/lib/template-edits.js';
 import { projectPathFor, templatePathFor } from '../../../src/lib/template-paths.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const ROOT = process.cwd();
-const CARBON = join(ROOT, 'carbon');
+const CARBON = join(REPO_ROOT, 'carbon');
 const PROJECT = 'test-app';
 const REFS = { projectName: PROJECT, owner: 'acme', repo: 'shop' };
 

@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * DigitalOcean k8s destroy: vibecarbon detaches the cluster's CSI volumes
@@ -401,10 +400,7 @@ describe('destroyK8sTier wiring', () => {
   // destroyK8sTier is not exported (it needs the whole destroy context); the
   // step's behaviour is covered above, this pins where it runs.
   it('detaches after the CSI release and before pulumi destroy', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/destroy.js', import.meta.url)),
-      'utf8',
-    );
+    const src = readRepoFile('src/destroy.js');
     const body = src.slice(src.indexOf('async function destroyK8sTier('));
     const release = body.indexOf('await cleanupClusterPVCs(');
     const detach = body.indexOf('runCsiDetachStep(');
@@ -415,10 +411,7 @@ describe('destroyK8sTier wiring', () => {
   });
 
   it('computes the fallback before the CSI release, while the volumes still exist', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/destroy.js', import.meta.url)),
-      'utf8',
-    );
+    const src = readRepoFile('src/destroy.js');
     const body = src.slice(src.indexOf('async function destroyK8sTier('));
     const fallback = body.indexOf('fallbackCsiVolumeIds(');
     const release = body.indexOf('await cleanupClusterPVCs(');

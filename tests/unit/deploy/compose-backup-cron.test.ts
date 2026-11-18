@@ -1,14 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
 import { withHostReporter } from '../../../src/lib/host-reporter.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // ---------------------------------------------------------------------------
 // setupComposeBackupCron() — builds + installs the scheduled wal-g backup cron.
@@ -132,8 +132,7 @@ describe('setupComposeBackupCron', () => {
   });
 
   describe('run against a stub crontab', () => {
-    const scratch = mkdtempSync(join(tmpdir(), 'backup-cron-'));
-    afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+    const scratch = createTempDir('backup-cron-');
 
     /** Run the install script with /opt/myapp moved into scratch and `crontab` stubbed. */
     function install(state: string, remote: string) {

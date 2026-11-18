@@ -7,10 +7,9 @@
  * The probe script runs here for real against a fake `docker` on PATH.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   composeDbMountsWalgRoleDir,
   composeRoleBindProbeShell,
@@ -18,9 +17,9 @@ import {
 } from '../../../src/lib/deploy/walg-role.js';
 import { shEscape } from '../../../src/lib/shell.js';
 import { sshArgv } from '../../../src/lib/ssh.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const work = mkdtempSync(join(tmpdir(), 'vc-role-bind-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-role-bind-');
 
 const FORMAT = '{{range .Mounts}}{{println .Destination}}{{end}}';
 

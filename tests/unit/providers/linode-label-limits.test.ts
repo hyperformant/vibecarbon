@@ -1,6 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 /**
@@ -42,6 +41,7 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../../src/lib/providers/linode.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const LONG_NAME = 'testapp-compose-1786199806402-g444o5-l1-firewall'; // 48 chars, the live failure
 
@@ -166,7 +166,7 @@ describe('every linode.Instance site squeezes its label', () => {
   // its own branch, and a copy that ships `label: name` fails the create the
   // moment a realistic project name is used.
   it('no program passes an unsqueezed label to linode.Instance', () => {
-    const dir = fileURLToPath(new URL('../../../src/lib/iac/programs', import.meta.url));
+    const dir = join(REPO_ROOT, 'src/lib/iac/programs');
     const files = readdirSync(dir).filter((f) => f.startsWith('linode-') && f.endsWith('.js'));
     expect(files.length).toBeGreaterThanOrEqual(1);
     for (const f of files) {

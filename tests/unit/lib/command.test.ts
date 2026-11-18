@@ -19,6 +19,7 @@ import {
   runShellScript,
   writeSecretFile,
 } from '../../../src/lib/command.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('checkDependency', () => {
   beforeEach(() => {
@@ -148,34 +149,24 @@ describe('stdio override protection', () => {
 
 describe('writeSecretFile', () => {
   it('writes with 0o600 (owner-only) permissions', async () => {
-    const { mkdtempSync, statSync, readFileSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { statSync, readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const dir = mkdtempSync(join(tmpdir(), 'vb-secret-'));
+    const dir = createTempDir('vb-secret-');
     const f = join(dir, 'values.yaml');
-    try {
-      writeSecretFile(f, 'ADMIN_PASSWORD: hunter2\n');
-      expect(readFileSync(f, 'utf-8')).toBe('ADMIN_PASSWORD: hunter2\n');
-      expect(statSync(f).mode & 0o077).toBe(0);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    writeSecretFile(f, 'ADMIN_PASSWORD: hunter2\n');
+    expect(readFileSync(f, 'utf-8')).toBe('ADMIN_PASSWORD: hunter2\n');
+    expect(statSync(f).mode & 0o077).toBe(0);
   });
 
   it('enforces 0o600 even when overwriting a pre-existing world-readable file', async () => {
-    const { mkdtempSync, statSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { statSync, writeFileSync, chmodSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const dir = mkdtempSync(join(tmpdir(), 'vb-secret-'));
+    const dir = createTempDir('vb-secret-');
     const f = join(dir, 'values.yaml');
-    try {
-      writeFileSync(f, 'old');
-      chmodSync(f, 0o644);
-      writeSecretFile(f, 'new-secret');
-      expect(statSync(f).mode & 0o077).toBe(0);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    writeFileSync(f, 'old');
+    chmodSync(f, 0o644);
+    writeSecretFile(f, 'new-secret');
+    expect(statSync(f).mode & 0o077).toBe(0);
   });
 });
 

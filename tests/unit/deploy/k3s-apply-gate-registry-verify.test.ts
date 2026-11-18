@@ -1,7 +1,7 @@
-import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { primaryRegistryHasImage, shouldSkipK3sApply } from '../../../src/lib/deploy/k8s/k3s.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -122,8 +122,7 @@ describe('primaryRegistryHasImage', () => {
 
 describe('deployK3s wiring', () => {
   it('the k3s-apply gate goes through shouldSkipK3sApply', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     expect(body).toContain('await shouldSkipK3sApply({');
     expect(body).toContain('if (!skipApply) {');

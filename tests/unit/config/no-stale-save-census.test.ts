@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: every write to .vibecarbon.json is one locked read-modify-write
@@ -17,7 +17,7 @@ import { sourceFiles } from '../../_shared/source-files.js';
  * catches the shapes it exists for.
  */
 
-const SRC = join(process.cwd(), 'src');
+const SRC = join(REPO_ROOT, 'src');
 const CONFIG = join('lib', 'config.js');
 
 type Source = { rel: string; text: string };

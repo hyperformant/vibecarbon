@@ -22,16 +22,14 @@
 import { stripVTControlCharacters } from 'node:util';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const clackMock = vi.hoisted(() => ({
-  password: vi.fn(),
-  text: vi.fn(),
-  select: vi.fn(),
-  confirm: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  note: vi.fn(),
-  log: { info: vi.fn(), warn: vi.fn(), success: vi.fn(), error: vi.fn() },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['password', 'text', 'select', 'confirm', 'cancel', 'note'],
+    log: ['info', 'warn', 'success', 'error'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 // This suite drives the INTERACTIVE flow, so it declares an interactive
 // terminal. The off-TTY behaviour (prompts throw rather than hang into a

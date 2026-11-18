@@ -27,13 +27,11 @@
 
 import { readFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error: untyped JS module
 import { RUNTIME_FLOORS } from '../../../src/lib/runtime-floors.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const ROOTS = ['src', 'carbon', 'services'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', '.next', 'build']);
 const EXTS = /\.(?:js|mjs|sh|ya?ml)$|(?:^|\/)Dockerfile[^/]*$/;
@@ -85,8 +83,8 @@ function walk(dir: string): string[] {
 function realTree(): Tree {
   const tree: Tree = {};
   for (const root of ROOTS) {
-    for (const file of walk(join(ROOT, root))) {
-      const rel = relative(ROOT, file);
+    for (const file of walk(join(REPO_ROOT, root))) {
+      const rel = relative(REPO_ROOT, file);
       if (rel !== THE_TABLE) tree[rel] = code(readFileSync(file, 'utf8'), rel);
     }
   }

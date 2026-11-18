@@ -13,6 +13,7 @@ import {
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { symlinkedComponent, writeSidecar } from '../../../src/lib/project-write-guard.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 function project() {
@@ -92,7 +93,7 @@ describe('writeSidecar', () => {
 
 describe('upgrade.js writes every sidecar through writeSidecar', () => {
   it('no .upgrade-backup or .upgrade-new is written any other way', () => {
-    const src = readFileSync(join(process.cwd(), 'src', 'upgrade.js'), 'utf8');
+    const src = readRepoFile('src', 'upgrade.js');
     const direct = src
       .split('\n')
       .filter((l) => /writeFileSync\([^)]*\.upgrade-(backup|new)/.test(l));

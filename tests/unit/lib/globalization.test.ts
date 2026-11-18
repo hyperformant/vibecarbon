@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   addLocale,
   BASE_LOCALE,
@@ -10,6 +9,7 @@ import {
   removeLocale,
   status,
 } from '../../../src/lib/globalization.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The locale files on disk are the language set, so these are the operations
@@ -25,13 +25,9 @@ const EN = {
 let dir: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-global-'));
+  dir = createTempDir('vc-global-');
   mkdirSync(join(dir, LOCALES_SUBDIR), { recursive: true });
   writeFileSync(join(dir, LOCALES_SUBDIR, 'en.json'), JSON.stringify(EN, null, 2));
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 const read = (code: string) =>
@@ -50,7 +46,7 @@ describe('installedLocales', () => {
   });
 
   it('returns empty rather than throwing when the directory is absent', () => {
-    const bare = mkdtempSync(join(tmpdir(), 'vc-bare-'));
+    const bare = createTempDir('vc-bare-');
     expect(installedLocales(bare)).toEqual([]);
     rmSync(bare, { recursive: true, force: true });
   });
@@ -79,7 +75,7 @@ describe('addLocale', () => {
   });
 
   it('refuses when there is no en.json to seed from', () => {
-    const bare = mkdtempSync(join(tmpdir(), 'vc-bare-'));
+    const bare = createTempDir('vc-bare-');
     expect(() => addLocale(bare, 'es')).toThrow(/nothing to seed from/);
     rmSync(bare, { recursive: true, force: true });
   });

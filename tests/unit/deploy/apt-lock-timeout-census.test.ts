@@ -21,7 +21,6 @@
 
 import { readFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   APT_LOCK_OPT,
@@ -30,12 +29,10 @@ import {
   aptGet,
   aptQuietUpdate,
 } from '../../../src/lib/deploy/apt.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /** Roots that can ship an apt-get onto a node we provision. */
-const ROOTS = [join(ROOT, 'src'), join(ROOT, 'carbon')];
+const ROOTS = [join(REPO_ROOT, 'src'), join(REPO_ROOT, 'carbon')];
 const EXTS = ['.js', '.sh', '.yaml', '.yml'];
 const EXTRA_FILES = ['Dockerfile'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', '.next', 'build']);
@@ -82,7 +79,7 @@ function aptSites() {
   const sites: { rel: string; line: number; text: string }[] = [];
   for (const root of ROOTS) {
     for (const file of walk(root)) {
-      const rel = relative(ROOT, file);
+      const rel = relative(REPO_ROOT, file);
       readFileSync(file, 'utf-8')
         .split('\n')
         .forEach((line, i) => {
@@ -159,7 +156,7 @@ describe('apt lock-timeout census', () => {
     for (const root of ROOTS) {
       for (const file of walk(root)) {
         const text = readFileSync(file, 'utf-8');
-        if (/fuser\s+\/var\/lib\/dpkg\/lock/.test(text)) offenders.push(relative(ROOT, file));
+        if (/fuser\s+\/var\/lib\/dpkg\/lock/.test(text)) offenders.push(relative(REPO_ROOT, file));
       }
     }
     expect(offenders, 'dpkg lock poll loop reintroduced').toEqual([]);
@@ -202,7 +199,7 @@ describe('outer ssh timeouts outlast the inner apt lock budget', () => {
   it('every file mixing sshRun with aptGet passes a timeout derived from the budget', () => {
     const files = execFileSyncLike();
     for (const rel of files) {
-      const src = readFileSync(join(ROOT, rel), 'utf-8');
+      const src = readRepoFile(rel);
       expect(
         src.includes('APT_LOCK_TIMEOUT_SECONDS +'),
         `${rel} runs aptGet over sshRun without an APT_LOCK_TIMEOUT_SECONDS-derived outer timeout ` +
@@ -213,12 +210,12 @@ describe('outer ssh timeouts outlast the inner apt lock budget', () => {
 
   /** Every src file that both calls sshRun and builds an aptGet command. */
   function execFileSyncLike(): string[] {
-    return sourceFiles(join(ROOT, 'src'), {
+    return sourceFiles(join(REPO_ROOT, 'src'), {
       exts: ['.js'],
       skip: ['node_modules', 'dist', '.git', 'coverage'],
-      relativeTo: ROOT,
+      relativeTo: REPO_ROOT,
     }).filter((rel) => {
-      const src = readFileSync(join(ROOT, rel), 'utf-8');
+      const src = readRepoFile(rel);
       return /\bsshRun\(/.test(src) && /\baptGet\(/.test(src);
     });
   }

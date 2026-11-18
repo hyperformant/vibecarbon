@@ -27,8 +27,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { NODE_RUNTIME_IMAGE, NODE_RUNTIME_INPUTS_SHA256 } from '../../../src/lib/images.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const DIR = join(process.cwd(), 'docker', 'node-runtime');
+const DIR = join(REPO_ROOT, 'docker', 'node-runtime');
 const NOT_INPUTS = new Set(['README.md']);
 
 function inputFiles(): string[] {

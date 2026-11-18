@@ -13,11 +13,9 @@
  * value resolves to one (n8n's setup.sh connects as its own `n8n` role).
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
 const FILES = execFileSync(
   'git',
   [
@@ -37,7 +35,7 @@ const FILES = execFileSync(
     'services/*/scripts/*.sh',
     'tests/e2e/*.ts',
   ],
-  { cwd: ROOT, encoding: 'utf8' },
+  { cwd: REPO_ROOT, encoding: 'utf8' },
 )
   .split('\n')
   .filter(Boolean);
@@ -107,7 +105,7 @@ function sitesIn(rel: string, file: string) {
   return out;
 }
 
-const sites = () => FILES.flatMap((rel) => sitesIn(rel, readFileSync(join(ROOT, rel), 'utf8')));
+const sites = () => FILES.flatMap((rel) => sitesIn(rel, readRepoFile(rel)));
 
 describe('db client role census', () => {
   const found = sites();

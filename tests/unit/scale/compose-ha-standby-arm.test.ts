@@ -43,10 +43,9 @@ vi.mock('@clack/prompts', async (orig) => {
   };
 });
 
-vi.mock('../../../src/lib/config.js', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, loadProjectConfig: () => null, updateProjectConfig: () => ({}) };
-});
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubProjectConfig(await orig()),
+);
 
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
   const actual = await orig<typeof import('../../../src/lib/walg/restore-base.js')>();

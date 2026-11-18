@@ -1,14 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
@@ -17,6 +8,7 @@ import {
   ADDON_SERVICES_SCRIPT,
   renderAddonServicesScript,
 } from '../../../src/lib/services/addon-start.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 /**
@@ -43,7 +35,7 @@ function reconcile({
   isFast?: boolean;
   status?: string;
 }) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-reconcile-addons-'));
+  const dir = createTempDir('vc-reconcile-addons-');
   dirs.push(dir);
   writeFileSync(join(dir, 'reconcile.sh'), renderReconcileScript('demo', isFast));
   writeVcCompose(dir, '-f a.yml');

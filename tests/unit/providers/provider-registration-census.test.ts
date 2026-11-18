@@ -23,8 +23,9 @@ import { describe, expect, it } from 'vitest';
 import { BaseProvider } from '../../../src/lib/providers/base.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { S3CompatibleProvider } from '../../../src/lib/providers/s3-base.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const PROVIDERS_DIR = join(process.cwd(), 'src', 'lib', 'providers');
+const PROVIDERS_DIR = join(REPO_ROOT, 'src', 'lib', 'providers');
 
 const moduleEntries: Array<[string, Record<string, unknown>]> = await Promise.all(
   readdirSync(PROVIDERS_DIR)

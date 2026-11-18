@@ -37,15 +37,15 @@
  * `engines.node` by the last describe block in this file.
  */
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), 'utf-8');
+const read = (...parts: string[]) => readRepoFile(...parts);
 
 /** The source of truth, as a bare major (e.g. "24"). */
 const NODE_MAJOR = read('.nvmrc').trim();
@@ -182,8 +182,9 @@ function walk(dir: string, visit: (full: string, name: string) => void): void {
 /** Every Dockerfile in the repo, as ROOT-relative paths. */
 function findDockerfiles(): string[] {
   const out: string[] = [];
-  walk(ROOT, (full, name) => {
-    if (name === 'Dockerfile' || name.startsWith('Dockerfile.')) out.push(relative(ROOT, full));
+  walk(REPO_ROOT, (full, name) => {
+    if (name === 'Dockerfile' || name.startsWith('Dockerfile.'))
+      out.push(relative(REPO_ROOT, full));
   });
   return out;
 }
@@ -197,11 +198,11 @@ function findDockerfiles(): string[] {
 function findWorkflows(): string[] {
   const out: string[] = [];
   const workflowsDir = join('.github', 'workflows');
-  walk(ROOT, (full, name) => {
+  walk(REPO_ROOT, (full, name) => {
     if (!/\.ya?ml$/.test(name)) return;
-    const isWorkflow = relative(ROOT, full).includes(workflowsDir);
+    const isWorkflow = relative(REPO_ROOT, full).includes(workflowsDir);
     const isCompositeAction = name === 'action.yml' || name === 'action.yaml';
-    if (isWorkflow || isCompositeAction) out.push(relative(ROOT, full));
+    if (isWorkflow || isCompositeAction) out.push(relative(REPO_ROOT, full));
   });
   return out;
 }
@@ -748,7 +749,7 @@ describe('the advertised requirement matches the enforced one', () => {
     // in docs/history.md records what was true when written and is
     // deliberately not rewritten.
     const tracked = execFileSync('git', ['ls-files', '--', '*.md', '*.mdx'], {
-      cwd: ROOT,
+      cwd: REPO_ROOT,
       encoding: 'utf-8',
     })
       .split('\n')
@@ -760,9 +761,7 @@ describe('the advertised requirement matches the enforced one', () => {
     expect(tracked.length).toBeGreaterThan(0);
 
     const offenders = tracked.flatMap((relPath) => {
-      const found = [...readFileSync(join(ROOT, relPath), 'utf-8').matchAll(PROSE_PIN)].map(
-        (m) => m[1],
-      );
+      const found = [...readRepoFile(relPath).matchAll(PROSE_PIN)].map((m) => m[1]);
       return found.filter((v) => v !== expected).map((v) => `${relPath}: ${v}`);
     });
 

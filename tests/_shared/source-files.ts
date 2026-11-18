@@ -1,5 +1,17 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+
+/**
+ * The repository root, found from where this file sits and never from the
+ * working directory, so a test reads the same files wherever it is run from.
+ * No trailing separator.
+ */
+export const REPO_ROOT = join(import.meta.dirname, '..', '..');
+
+/** The text of a file in the repository, by its path from the root (`'src/scale.js'`, or in parts). */
+export function readRepoFile(...parts: string[]): string {
+  return readFileSync(join(REPO_ROOT, ...parts), 'utf-8');
+}
 
 /**
  * The one recursive file walk for source censuses: tests that list the files

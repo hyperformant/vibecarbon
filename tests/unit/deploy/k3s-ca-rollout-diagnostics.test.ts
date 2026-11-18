@@ -19,6 +19,7 @@
  * `process.stdout.write`, never inherited.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const spawnMock = vi.fn();
 vi.mock('node:child_process', async () => {
@@ -294,8 +295,7 @@ describe('runDeployDiagnostic', () => {
 
 describe('k3s.js diagnostics wiring (structural pin)', () => {
   const src = async () => {
-    const { readFileSync } = await import('node:fs');
-    return readFileSync(new URL('../../../src/lib/deploy/k8s/k3s.js', import.meta.url), 'utf8');
+    return readRepoFile('src/lib/deploy/k8s/k3s.js');
   };
 
   it('routes the rollout-failure handler through captureClusterAutoscalerDiagnostics', async () => {

@@ -8,11 +8,11 @@
  * deployResult; and the final save spreads `haSeedRecord(deployResult)` into
  * the persisted `ha` block.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/deploy/compose/index.js')>()),
@@ -36,7 +36,6 @@ const { haSeedRecord } = await import('../../../src/lib/deploy/failover-guard.js
 const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const SYSID = '7412345678901234567';
 
 describe('haSeedRecord', () => {
@@ -105,7 +104,7 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
   const RECORD = { ip: '2.2.2.1', systemIdentifier: SYSID, timeline: 3, at: 'x' };
   let dir: string;
   const seed = () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-discard-'));
+    dir = createTempDir('vc-discard-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -127,7 +126,6 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
     }) as Record<string, unknown>;
   afterEach(() => {
     vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('hands the record on disk to the reseed, and clears it once the reseed swapped', async () => {
@@ -173,7 +171,7 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
 });
 
 describe('orchestrator persistence', () => {
-  const src = readFileSync(join(REPO, 'src/lib/deploy/orchestrator.js'), 'utf-8');
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
   it('the k8s-ha deployResult carries the replication status and the identifier', () => {
     const after = src.slice(src.indexOf('const k8sHaCtx = {'));

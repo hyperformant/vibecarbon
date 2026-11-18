@@ -28,9 +28,9 @@
 import { readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC_ROOT = join(process.cwd(), 'src');
+const SRC_ROOT = join(REPO_ROOT, 'src');
 const EXEMPT_DIR = join(SRC_ROOT, 'lib', 'providers') + sep;
 
 const HARDCODE_PATTERN =

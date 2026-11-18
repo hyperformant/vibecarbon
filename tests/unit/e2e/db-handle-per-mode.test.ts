@@ -19,11 +19,9 @@
  * resolveSshCheckMasterIp → buildDbHandle.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/command.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/lib/command.js')>();
@@ -42,6 +40,8 @@ vi.mock('../../../src/lib/command.js', async (importOriginal) => {
 });
 
 import { ensureSshKey } from '../../../src/lib/deploy/k8s/k3s.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { buildDbHandle, resolveSshCheckMasterIp } from '../../e2e/checks/app-functional.js';
 import type { ReplTarget } from '../../e2e/checks/replication.js';
 import type { DeployMode, StepName } from '../../e2e/scenarios/types.js';
@@ -56,8 +56,7 @@ const STANDBY = '10.0.0.11';
 const STANDBY_DB = '10.0.0.12';
 const WORKER = '10.0.0.3';
 
-const srcFile = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../../src/${rel}`, import.meta.url)), 'utf8');
+const srcFile = (rel: string) => readRepoFile(`src/${rel}`);
 
 /** Write `.vibecarbon/deploy_key_<env>` the way generateSSHKeyPair leaves it. */
 function writeDeployKey(dir: string): void {
@@ -212,14 +211,10 @@ describe('the deploy writes each mode key where the harness looks', () => {
   });
 
   it('the k8s single-cluster deploy writes .vibecarbon/deploy_key_<env>', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'db-handle-k8s-key-'));
-    try {
-      const { privateKeyPath } = await ensureSshKey(dir, ENV);
-      expect(privateKeyPath).toBe(join(dir, '.vibecarbon', `deploy_key_${ENV}`));
-      expect(getSshKeyPath(dir, ENV)).toBe(privateKeyPath);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = createTempDir('db-handle-k8s-key-');
+    const { privateKeyPath } = await ensureSshKey(dir, ENV);
+    expect(privateKeyPath).toBe(join(dir, '.vibecarbon', `deploy_key_${ENV}`));
+    expect(getSshKeyPath(dir, ENV)).toBe(privateKeyPath);
   });
 });
 
@@ -227,11 +222,7 @@ describe.each(PROVIDERS)('db handle per mode on %s', (provider) => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), `db-handle-${provider}-`));
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir(`db-handle-${provider}-`);
   });
 
   describe.each(MODES)('$mode', (fixture) => {
@@ -283,12 +274,8 @@ describe('getSshKeyPath', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'db-handle-keypath-'));
+    dir = createTempDir('db-handle-keypath-');
     mkdirSync(join(dir, '.vibecarbon'), { recursive: true });
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('finds deploy_key_<env>', () => {

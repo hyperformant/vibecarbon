@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { composeStartAddonJobCmd, swapComposeHaRoles } from '../../../src/lib/deploy/compose/ha.js';
 import { reconcileCommand } from '../../../src/lib/deploy/compose/index.js';
 import { attemptEnv, mintAttemptId } from '../../../src/lib/services/addon-start.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -71,10 +72,7 @@ describe('a failover passes its own id to the job and saves the same id', () => 
 });
 
 describe('the deploy mints and wires its id (structural)', () => {
-  const src = readFileSync(
-    join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
-    'utf8',
-  );
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
   it('the skeleton save persists it, and the tier ctx carries it', () => {
     expect(src).toMatch(/const attemptId = mintAttemptId\(\);/);
     expect(src).toMatch(/lastAttemptId: attemptId,/);
@@ -83,17 +81,11 @@ describe('the deploy mints and wires its id (structural)', () => {
   });
 
   it('every reconcile caller passes ctx.attemptId (compose, compose-ha)', () => {
-    const effects = readFileSync(
-      join(import.meta.dirname, '../../../src/lib/deploy/effects/index.js'),
-      'utf8',
-    );
+    const effects = readRepoFile('src/lib/deploy/effects/index.js');
     expect(effects).toMatch(
       /startComposeStackRemote\(serverIp, sshKeyPath, projectConfig\.projectName, \{\s*\.\.\.services,\s*attemptId: ctx\.attemptId,/,
     );
-    const ha = readFileSync(
-      join(import.meta.dirname, '../../../src/lib/deploy/effects/compose-ha.js'),
-      'utf8',
-    );
+    const ha = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     expect(ha).toMatch(/const haServiceOpts = \(ctx\) => \{[\s\S]*?attemptId: ctx\.attemptId/);
   });
 });

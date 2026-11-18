@@ -22,7 +22,6 @@ import {
   chmodSync,
   cpSync,
   existsSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -39,14 +38,14 @@ import {
   VC_COMPOSE,
   VC_COMPOSE_SCRIPT,
 } from '../../../src/lib/deploy/compose/command.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const REPO = join(import.meta.dirname, '..', '..', '..');
 const BASE_FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';
 
 const dirs: string[] = [];
 function tempDir(prefix = 'vc-compose-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = createTempDir(prefix);
   dirs.push(dir);
   return dir;
 }
@@ -185,17 +184,17 @@ describe('renderComposeCommand: the script every server-side Compose call runs',
  */
 function project(): string {
   const dir = tempDir('vc-compose-project-');
-  for (const f of readdirSync(join(REPO, 'carbon'))) {
-    if (/^docker-compose\..*ya?ml$/.test(f)) cpSync(join(REPO, 'carbon', f), join(dir, f));
+  for (const f of readdirSync(join(REPO_ROOT, 'carbon'))) {
+    if (/^docker-compose\..*ya?ml$/.test(f)) cpSync(join(REPO_ROOT, 'carbon', f), join(dir, f));
   }
-  cpSync(join(REPO, 'carbon', 'backup'), join(dir, 'backup'), { recursive: true });
+  cpSync(join(REPO_ROOT, 'carbon', 'backup'), join(dir, 'backup'), { recursive: true });
   for (const addon of ['observability', 'redis', 'n8n', 'metabase']) {
     cpSync(
-      join(REPO, 'services', addon, 'compose', 'docker-compose.yml'),
+      join(REPO_ROOT, 'services', addon, 'compose', 'docker-compose.yml'),
       join(dir, `docker-compose.${addon}.yml`),
     );
     cpSync(
-      join(REPO, 'services', addon, 'compose', 'docker-compose.prod.yml'),
+      join(REPO_ROOT, 'services', addon, 'compose', 'docker-compose.prod.yml'),
       join(dir, `docker-compose.${addon}.prod.yml`),
     );
   }

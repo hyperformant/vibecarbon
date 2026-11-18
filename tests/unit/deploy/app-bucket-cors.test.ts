@@ -4,13 +4,12 @@
  * rule already equals them. The work runs beside the IaC step (R7) and is
  * awaited before the outro.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   applyAppBucketCors,
   startAppBucketFinalize,
 } from '../../../src/lib/deploy/orchestrator.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const LOCALHOST = ['http://localhost:3000', 'http://localhost:5173'];
 
@@ -220,10 +219,7 @@ describe('startAppBucketFinalize (R7: beside IaC, awaited before the outro)', ()
 });
 
 describe('orchestrator call site', () => {
-  const src = readFileSync(
-    join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
-    'utf-8',
-  );
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
   it('starts the finalize after s3-setup without awaiting it, before any IaC dispatch', () => {
     // `= startAppBucketFinalize({` cannot match `= await startAppBucketFinalize({`.

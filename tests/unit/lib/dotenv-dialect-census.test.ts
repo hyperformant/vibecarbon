@@ -37,11 +37,11 @@
  * out of the strict check because k3s.js applies it to kubectl output while
  * also reading `.env.local` through the module).
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const root = join(import.meta.dirname, '..', '..', '..');
 const ROOTS = ['src', 'carbon/scripts', 'carbon/vite.config.ts', 'scripts', 'tests'];
 const PRODUCTION_ROOTS = ['src/', 'carbon/scripts/'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'results', 'fixtures']);
@@ -82,8 +82,7 @@ function walk(p: string, out: string[] = []) {
   return out;
 }
 
-const files = ROOTS.flatMap((r) => walk(join(root, r))).map((f) => relative(root, f));
-const read = (f: string) => readFileSync(join(root, f), 'utf-8');
+const files = ROOTS.flatMap((r) => walk(join(REPO_ROOT, r))).map((f) => relative(REPO_ROOT, f));
 const isProduction = (f: string) => PRODUCTION_ROOTS.some((r) => f.startsWith(r));
 
 /** `.env`, `.env.local`, `.env.e2e` or `.env.example`, quoted, in argument or array position. */
@@ -284,14 +283,14 @@ describe('dotenv dialect census', () => {
   it('only the two dotenv modules call util.parseEnv or a dotenv library', () => {
     for (const f of files) {
       if (MODULES.has(f) || f === SELF || f === ORACLE) continue;
-      expect(read(f), f).not.toMatch(DOTENV_LIBRARY);
+      expect(readRepoFile(f), f).not.toMatch(DOTENV_LIBRARY);
     }
   });
 
   it('parseDotenv and readEnvFiles are imported from a dotenv.js, never re-exported', () => {
     const offenders = files.filter((f) => {
       if (MODULES.has(f) || f === SELF) return false;
-      const src = read(f);
+      const src = readRepoFile(f);
       const imports = [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*'([^']+)'/g)];
       return imports.some(
         ([, names, spec]) =>
@@ -303,14 +302,14 @@ describe('dotenv dialect census', () => {
     expect(offenders).toEqual([]);
     for (const f of files) {
       if (MODULES.has(f)) continue;
-      expect(read(f), f).not.toMatch(/export\s*\{[^}]*\b(?:parseDotenv|readEnvFiles)\b/);
+      expect(readRepoFile(f), f).not.toMatch(/export\s*\{[^}]*\b(?:parseDotenv|readEnvFiles)\b/);
     }
   });
 
   it('every file that reads and parses a .env* path imports the dotenv module', () => {
     const offenders = files.filter((f) => {
       if (MODULES.has(f) || f === SELF) return false;
-      const src = read(f);
+      const src = readRepoFile(f);
       return readsEnvFile(src) && PARSES_ENV_TEXT(src) && !importsModule(src);
     });
     expect(offenders).toEqual([]);
@@ -319,7 +318,7 @@ describe('dotenv dialect census', () => {
   it('no file that reads a .env* path captures a value out of the text, even alongside the module', () => {
     const offenders = files.filter((f) => {
       if (MODULES.has(f) || f === SELF || f === HEALER) return false;
-      const src = read(f);
+      const src = readRepoFile(f);
       return readsEnvFile(src) && VALUE_CAPTURE.test(src);
     });
     expect(offenders).toEqual([]);
@@ -328,7 +327,7 @@ describe('dotenv dialect census', () => {
   it("no file that reads a .env* path splits a line at '=' by hand, even alongside the module", () => {
     const offenders = files.filter((f) => {
       if (MODULES.has(f) || f === SELF) return false;
-      const src = read(f);
+      const src = readRepoFile(f);
       return readsEnvFile(src) && SPLITS_AT_EQUALS_STRICT.test(src);
     });
     expect(offenders).toEqual([]);
@@ -337,7 +336,7 @@ describe('dotenv dialect census', () => {
   it('no file matches KEY= against env text except the modules, the healer and the rewriters', () => {
     const offenders = files.filter((f) => {
       if (MODULES.has(f) || f === SELF || f === HEALER || REWRITERS.has(f)) return false;
-      const src = read(f);
+      const src = readRepoFile(f);
       return HAND_ROLLED_QUOTING.test(src) || (readsEnvFile(src) && KEY_LOCATOR.test(src));
     });
     expect(offenders).toEqual([]);
@@ -345,7 +344,7 @@ describe('dotenv dialect census', () => {
 
   it('every production .env* writer imports the module and builds no line by hand', () => {
     const writers = files.filter(
-      (f) => isProduction(f) && !MODULES.has(f) && writesEnvFile(read(f)),
+      (f) => isProduction(f) && !MODULES.has(f) && writesEnvFile(readRepoFile(f)),
     );
     // Sanity: the writer predicate must see the writers we know about.
     for (const known of [
@@ -356,14 +355,14 @@ describe('dotenv dialect census', () => {
     ]) {
       expect(writers, `writer predicate lost ${known}`).toContain(known);
     }
-    const noImport = writers.filter((f) => !importsModule(read(f)));
+    const noImport = writers.filter((f) => !importsModule(readRepoFile(f)));
     expect(noImport).toEqual([]);
-    const handBuilt = writers.filter((f) => HAND_BUILT_ENV_LINE.test(read(f)));
+    const handBuilt = writers.filter((f) => HAND_BUILT_ENV_LINE.test(readRepoFile(f)));
     expect(handBuilt).toEqual([]);
   });
 
   it('bundle.js writes app.env only through formatDotenvLine', () => {
-    const src = read('src/lib/deploy/bundle.js');
+    const src = readRepoFile('src/lib/deploy/bundle.js');
     const write = src.match(
       /writeFileSync\(\s*join\(stageDir, 'app\.env'\),[\s\S]*?\n {2}\);/,
     )?.[0];
@@ -373,7 +372,7 @@ describe('dotenv dialect census', () => {
 
   for (const rewriter of REWRITERS) {
     it(`${rewriter} emits changed lines with formatDotenvLine and reads no value`, () => {
-      const src = read(rewriter);
+      const src = readRepoFile(rewriter);
       expect(src).toContain('formatDotenvLine(');
       expect(src).toContain('tests/unit/lib/dotenv-dialect-census.test.ts');
       // Every KEY= locator in the file is followed by an emission through the encoder.
@@ -407,11 +406,11 @@ describe('dotenv dialect census', () => {
   it('the retired identifiers are gone', () => {
     for (const f of files) {
       if (f === SELF) continue;
-      expect(read(f), f).not.toMatch(/\b(escapeDotenv|decodeDotenvValue|unescapeDotenv)\b/);
+      expect(readRepoFile(f), f).not.toMatch(/\b(escapeDotenv|decodeDotenvValue|unescapeDotenv)\b/);
     }
   });
 
   it('the CLI and template modules are byte-identical', () => {
-    expect(read('carbon/scripts/lib/dotenv.js')).toBe(read('src/lib/dotenv.js'));
+    expect(readRepoFile('carbon/scripts/lib/dotenv.js')).toBe(readRepoFile('src/lib/dotenv.js'));
   });
 });

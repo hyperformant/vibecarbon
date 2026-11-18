@@ -32,10 +32,9 @@
  * not just this helper) is additionally covered end-to-end in
  * tests/unit/deploy/compose-ha-destroy-teardown.test.ts.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deleteApexAndWildcard } from '../../../src/lib/cloudflare-dns.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const fetchMock = vi.fn();
 
@@ -150,16 +149,13 @@ describe('deleteApexAndWildcard wiring (registry-driven destroy call sites)', ()
   // M3 Task 9i wildcard-orphan class) now holds per-backend: every
   // DNS_PROVIDERS module must export deleteApexAndWildcard built on exactly
   // two ownership-filtered deleteDNSRecord calls (root + wildcard).
-  const destroySrc = readFileSync(join(__dirname, '../../../src/destroy.js'), 'utf-8');
-  const haSrc = readFileSync(join(__dirname, '../../../src/lib/deploy/compose/ha.js'), 'utf-8');
+  const destroySrc = readRepoFile('src/destroy.js');
+  const haSrc = readRepoFile('src/lib/deploy/compose/ha.js');
 
   it('EVERY registered backend module addresses BOTH records in deleteApexAndWildcard', async () => {
     const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
     for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
-      const src = readFileSync(
-        join(__dirname, '../../../src/lib', row.modulePath.replace(/^\.\//, '')),
-        'utf-8',
-      );
+      const src = readRepoFile('src/lib', row.modulePath.replace(/^\.\//, ''));
       // Extract the helper's body (up to the next top-level declaration) and
       // assert it targets the wildcard alongside the apex — deleting only the
       // root is exactly the orphan bug this file exists to prevent. Internal

@@ -1,15 +1,15 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MANIFEST_ACCEPT, MANIFEST_DIGEST_SH } from '../../../src/lib/deploy/k8s/image-delivery.js';
 import { deliverImage } from '../../../src/lib/deploy/layer-delta.js';
 import { acquireUplinkLock } from '../../../src/lib/deploy/uplink-lock.js';
 import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 // The layer delta (src/lib/deploy/layer-delta.js + layer-delta-remote.sh) end
 // to end on every store a deploy target can have: docker:29-dind with the
@@ -38,8 +38,6 @@ import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(HERE, '../../..');
 // .github/workflows/docker-newest.yml sets this to the newest Docker.
 const DIND_IMAGE = process.env.VC_DIND_IMAGE || 'docker:29-dind';
 const K3S_IMAGE = 'rancher/k3s:v1.37.2-k3s1';
@@ -134,7 +132,7 @@ describeDocker('layer delta delivery (deliverImage) on every target store', () =
 
   beforeAll(() => {
     // The k3s pin must track the one deploys install.
-    expect(readFileSync(join(REPO_ROOT, 'src/lib/images.js'), 'utf-8')).toContain(
+    expect(readRepoFile('src/lib/images.js')).toContain(
       `K3S_VERSION = '${K3S_IMAGE.split(':')[1].replace(/-k3s/, '+k3s')}'`,
     );
     work = mkdtempSync(join(tmpdir(), 'vcdelta-'));

@@ -10,11 +10,8 @@
  * system-wide known_hosts, it does not disable verification.)
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = join(__dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // SSH-bearing files remediated in this change.
 const OWNED_SSH_FILES = [
@@ -48,13 +45,13 @@ function stripComments(src: string): string {
 
 describe('H-1: no ssh/scp path disables host-key verification', () => {
   it.each(OWNED_SSH_FILES)('%s never uses the /dev/null + no bypass in code', (rel) => {
-    const code = stripComments(readFileSync(join(ROOT, rel), 'utf-8'));
+    const code = stripComments(readRepoFile(rel));
     expect(code).not.toContain('UserKnownHostsFile=/dev/null');
     expect(code).not.toContain('StrictHostKeyChecking=no');
   });
 
   it.each(OWNED_SSH_FILES)('%s references per-env known_hosts pinning', (rel) => {
-    const code = readFileSync(join(ROOT, rel), 'utf-8');
+    const code = readRepoFile(rel);
     // Each file either derives the per-env known_hosts path or references it
     // by env, and pins host keys — either with a literal accept-new option or
     // by building its ssh options via the shared host-keys.js builders (the

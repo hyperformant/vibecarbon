@@ -22,7 +22,7 @@ import {
   StaleVolumeAttachmentError,
   watchDbAttach,
 } from '../../../src/lib/deploy/replication.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 const VOL = 'pvc-a769b72d-05d6-451d-adbe-c05698766f80';
 const MKFS_MISSING =
@@ -270,7 +270,6 @@ describe('k8sDbRolloutWait: a remote db roll runs under the watch', () => {
 });
 
 describe('db-rollout-wait census: no db roll waited on outside the watch', () => {
-  const ROOT = join(__dirname, '../../..');
   // Both spellings of a db rollout wait: one remote command string, or an
   // argv array ('rollout', 'status', `statefulset/${DB_STATEFULSET}`), with
   // any quote style and whitespace between the tokens.
@@ -298,7 +297,7 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
 
   it('k8sDbRolloutStatusArgv is only spent inside k8sDbRolloutWait', () => {
     let sites = 0;
-    for (const f of sourceFiles(join(ROOT, 'src'), { exts: ['.js'] })) {
+    for (const f of sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] })) {
       const src = readFileSync(f, 'utf-8');
       for (const m of src.matchAll(/k8sDbRolloutStatusArgv\(/g)) {
         // The site of the match's END, so the definition itself reads as
@@ -349,7 +348,7 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
   it('every db rollout wait in src runs inside watchDbAttach (or is an explained exception)', () => {
     let seen = 0;
     const offenders: string[] = [];
-    for (const f of sourceFiles(join(ROOT, 'src'), { exts: ['.js'] })) {
+    for (const f of sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] })) {
       const src = readFileSync(f, 'utf-8');
       seen += [...src.matchAll(DB_ROLLOUT_WAIT)].length;
       offenders.push(...unwatched(f, src));

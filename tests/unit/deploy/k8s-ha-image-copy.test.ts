@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { progressLog } from '../../../src/lib/cli/progress.js';
@@ -10,6 +9,7 @@ import {
   firstCauseLine,
 } from '../../../src/lib/deploy/k8s/ha/image-copy.js';
 import { MANIFEST_ACCEPT } from '../../../src/lib/deploy/k8s/image-delivery.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({ progressLog: vi.fn() }));
 
@@ -199,7 +199,7 @@ describe('the copy script runs', () => {
     reach?: number;
     fail?: 'pull' | 'push';
   }) {
-    dir = mkdtempSync(join(tmpdir(), 'imgcopy-stub-'));
+    dir = createTempDir('imgcopy-stub-');
     const log = join(dir, 'log');
     const pushed = join(dir, 'pushed');
     const hdr = (d: string) =>

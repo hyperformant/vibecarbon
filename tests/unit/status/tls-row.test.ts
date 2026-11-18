@@ -8,9 +8,6 @@
  * record (backups/tls-retry.state and .count on the primary), so a retry
  * that gave up says so and names the command that re-arms it.
  */
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   checkTls,
@@ -18,8 +15,8 @@ import {
   parseTlsRetryState,
   TLS_RETRY_MAX,
 } from '../../../src/lib/status/tls-row.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
 const D = 'app.example.com';
@@ -231,10 +228,7 @@ describe('parseTlsRetryState', () => {
 });
 
 describe('lockstep with carbon/backup/tls-retry.sh', () => {
-  const script = readFileSync(
-    join(__dirname, '..', '..', '..', 'carbon', 'backup', 'tls-retry.sh'),
-    'utf-8',
-  );
+  const script = readRepoFile('carbon', 'backup', 'tls-retry.sh');
 
   it('the retry ceiling matches the script', () => {
     expect(script).toContain(`MAX_RESTARTS=${TLS_RETRY_MAX}`);

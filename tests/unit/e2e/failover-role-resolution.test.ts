@@ -27,12 +27,12 @@
  * These tests pin the property on every member of the class: given a config in
  * the exact shape failoverComposeHA persists, the promoted node is the primary.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { identifyServers } from '../../../src/failover.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { resolveHaDbIps } from '../../e2e/checks/replication.js';
 import { getServerIps } from '../../e2e/utils/ssh.js';
 
@@ -78,10 +78,7 @@ describe('post-failover role resolution (compose-HA)', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'failover-roles-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('failover-roles-');
   });
 
   const write = (env: unknown) =>
@@ -200,7 +197,7 @@ describe('post-failover role resolution (compose-HA)', () => {
  * NEW command cannot join the family with the wrong selector unnoticed.
  */
 describe('resolveEnvContext serverIp selectors (CLI call-site census)', () => {
-  const srcDir = join(import.meta.dirname, '../../../src');
+  const srcDir = join(REPO_ROOT, 'src');
 
   /**
    * Every `serverIp:` key in a file that calls resolveEnvContext.

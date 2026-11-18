@@ -9,12 +9,11 @@
  * inside the `if (!values.y)` block, so a future edit can't silently re-bury it.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { requiresProdTypeToConfirm } from '../../../src/lib/prod-confirm.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const restoreSrc = readFileSync(join(__dirname, '../../../src/restore.js'), 'utf-8');
+const restoreSrc = readRepoFile('src/restore.js');
 
 describe('restore prod confirm', () => {
   it.each(['prod', 'Prod', 'PROD', 'production', 'Production'])(

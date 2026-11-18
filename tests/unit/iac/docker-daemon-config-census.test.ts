@@ -33,14 +33,14 @@
  * programs are out of scope here; (a) still fails if one of them grows a
  * Docker daemon config.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
 import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { resolveOutputs } from '../../_shared/pulumi-secrets.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 const { created } = vi.hoisted(() => ({
   created: [] as Array<{ type: string; name: string; args: unknown; opts?: unknown }>,
@@ -62,7 +62,6 @@ vi.mock('@pulumiverse/scaleway', async () =>
   (await import('../../_shared/pulumi-recorder.js')).recorderModule('scaleway', created),
 );
 
-const ROOT = join(import.meta.dirname, '..', '..', '..');
 const DAEMON_JSON = '/etc/docker/daemon.json';
 
 // ---------------------------------------------------------------------------
@@ -93,16 +92,15 @@ function writeForms(text: string): string[] {
   return WRITE_FORMS.filter(([, re]) => re.test(text)).map(([label]) => label);
 }
 
-const PRODUCTION_FILES = WALK_ROOTS.flatMap((r) => sourceFiles(join(ROOT, r), { skip: SKIP_DIRS }))
-  .map((f) => relative(ROOT, f))
+const PRODUCTION_FILES = WALK_ROOTS.flatMap((r) =>
+  sourceFiles(join(REPO_ROOT, r), { skip: SKIP_DIRS }),
+)
+  .map((f) => relative(REPO_ROOT, f))
   .filter((rel) => TEXT_FILE.test(rel) || basename(rel) === 'daemon.json');
 
 const WRITERS = PRODUCTION_FILES.map((rel) => ({
   rel,
-  forms:
-    basename(rel) === 'daemon.json'
-      ? ['a daemon.json file']
-      : writeForms(readFileSync(join(ROOT, rel), 'utf-8')),
+  forms: basename(rel) === 'daemon.json' ? ['a daemon.json file'] : writeForms(readRepoFile(rel)),
 })).filter((w) => w.forms.length > 0);
 
 type CloudConfig = {
@@ -139,7 +137,7 @@ const LOCATION: Record<string, string> = {
   scaleway: 'fr-par-1',
 };
 
-const PROGRAM_DIR = join(ROOT, 'src/lib/iac/programs');
+const PROGRAM_DIR = join(REPO_ROOT, 'src/lib/iac/programs');
 const PROGRAM_FILES = readdirSync(PROGRAM_DIR).filter((f) => f.endsWith('.js'));
 const COMPOSE_PROGRAMS = PROGRAM_FILES.filter((f) => f.endsWith('-compose.js')).sort();
 
@@ -267,7 +265,7 @@ describe('(a) every Docker daemon config writer is the compose servers’ one', 
     const carried = new Set(rendered.flatMap((t) => daemonWrites(t).map((w) => w.content)));
     expect(carried.size, 'every compose server carries the same daemon.json').toBe(1);
     for (const { rel, forms } of WRITERS) {
-      const text = readFileSync(join(ROOT, rel), 'utf-8');
+      const text = readRepoFile(rel);
       const isCloudConfig = /\.ya?ml$/.test(rel) && forms.includes('cloud-init write_files entry');
       expect(
         isCloudConfig,

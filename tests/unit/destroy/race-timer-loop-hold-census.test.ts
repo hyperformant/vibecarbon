@@ -19,9 +19,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC = join(process.cwd(), 'src');
+const SRC = join(REPO_ROOT, 'src');
 
 interface RaceSite {
   file: string;

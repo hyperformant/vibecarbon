@@ -1,15 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
 import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
 import { activateImageSet, bundledImageSet } from '../../../src/lib/images.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // renderBundle runs against `process.cwd()`, so each test gets its own
 // throwaway directory containing a project-shaped `.env`.
 function makeProjectDir(envContent: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-bundle-test-'));
+  const dir = createTempDir('vc-bundle-test-');
   writeFileSync(join(dir, '.env'), envContent);
   return dir;
 }

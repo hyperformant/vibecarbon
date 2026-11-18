@@ -14,8 +14,7 @@
  * (never spawns the CLI), so these tests exercise the real wire call
  * without process-spawn overhead.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import grpc from '@grpc/grpc-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +24,7 @@ import { probe } from '../../../src/autoscaler/healthcheck.js';
 import { loadExternalGrpcDefinition } from '../../../src/autoscaler/proto.js';
 // @ts-expect-error — JS module without types
 import { startServer } from '../../../src/autoscaler/server.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: grpc-js client stubs are untyped in JS
 function call(client: any, method: string, request: unknown): Promise<any> {
@@ -47,7 +47,7 @@ afterEach(async () => {
 
 // biome-ignore lint/suspicious/noExplicitAny: grpc-js client stubs are untyped in JS
 async function withServer(testFn: (ctx: { bind: string; client: any }) => Promise<void>) {
-  const dir = mkdtempSync(join(tmpdir(), 'carbon-autoscaler-healthcheck-'));
+  const dir = createTempDir('carbon-autoscaler-healthcheck-');
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
 
   const configPath = join(dir, 'config.json');

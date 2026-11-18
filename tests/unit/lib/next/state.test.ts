@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { operatorSecretKeys } from '../../../../src/lib/config-registry.js';
 import { detectProjectState } from '../../../../src/lib/next/state.js';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 
 /** No-op stand-ins so a test never shells out to docker or loads configure.js. */
 const noComposePs = () => ({ available: false, running: [] });
@@ -31,27 +31,27 @@ describe('detectProjectState', () => {
   });
 
   it('reports no-project for an empty directory', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     const result = await detectProjectState(dir, baseDeps());
     expect(result).toEqual({ kind: 'no-project', cwd: dir });
   });
 
   it('reports no-project when only package.json is present', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'my-app' }));
     const result = await detectProjectState(dir, baseDeps());
     expect(result).toEqual({ kind: 'no-project', cwd: dir });
   });
 
   it('reports no-project when the manifest exists but docker-compose.yml does not', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     const result = await detectProjectState(dir, baseDeps());
     expect(result).toEqual({ kind: 'no-project', cwd: dir });
   });
 
   it('resolves the project root from a subdirectory and records where the user is', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const sub = join(dir, 'src', 'client');
@@ -67,7 +67,7 @@ describe('detectProjectState', () => {
   });
 
   it('does not adopt an ancestor that only satisfies the package.json fallback', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'some-monorepo' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const sub = join(dir, 'packages', 'api');
@@ -81,7 +81,7 @@ describe('detectProjectState', () => {
   });
 
   it('reports a project with project.name from projectName when manifest and compose file are present', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const result = await detectProjectState(dir, baseDeps());
@@ -90,7 +90,7 @@ describe('detectProjectState', () => {
   });
 
   it('maps composePs({available:false, running:[]}) to localDev.dockerAvailable === false', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const result = await detectProjectState(
@@ -103,7 +103,7 @@ describe('detectProjectState', () => {
   });
 
   it('passes the running services list through unchanged', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const result = await detectProjectState(
@@ -117,7 +117,7 @@ describe('detectProjectState', () => {
   });
 
   it('includes a feature label when isConfigured returns true', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const result = await detectProjectState(
@@ -132,7 +132,7 @@ describe('detectProjectState', () => {
   });
 
   it('excludes the providers feature even when its predicate returns true', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const result = await detectProjectState(
@@ -145,7 +145,7 @@ describe('detectProjectState', () => {
   });
 
   it('does not count a throwing predicate as configured', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     const result = await detectProjectState(
@@ -166,7 +166,7 @@ describe('detectProjectState', () => {
   });
 
   it('reports providers: true when an operator key has a non-blank value in .env.local', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     writeFileSync(join(dir, '.env.local'), 'HETZNER_API_TOKEN=x\n');
@@ -178,7 +178,7 @@ describe('detectProjectState', () => {
   });
 
   it('reports providers: false when the operator key value is blank', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     writeFileSync(join(dir, '.env.local'), 'HETZNER_API_TOKEN=\n');
@@ -194,7 +194,7 @@ describe('detectProjectState', () => {
   // credentials the user saved: counted, a fresh project skipped `up` and
   // `configure` in the guide.
   it('reports providers: false when the only operator key set is the state passphrase create made', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
     writeFileSync(
@@ -206,7 +206,7 @@ describe('detectProjectState', () => {
   });
 
   it('includes only live environments, ignoring destroyedEnvironments, preserving order', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -234,7 +234,7 @@ describe('detectProjectState', () => {
   });
 
   it('lists two environments in manifest insertion order', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -254,7 +254,7 @@ describe('detectProjectState', () => {
   });
 
   it('returns a deploying status as-is, leaving step decisions to the caller', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    dir = createTempDir('next-state-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -280,7 +280,7 @@ describe('detectProjectState', () => {
 
   describe('configured.any truth table', () => {
     it('is false when there are no configured features and no providers', async () => {
-      dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+      dir = createTempDir('next-state-');
       writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
       writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
       const result = await detectProjectState(dir, baseDeps());
@@ -288,7 +288,7 @@ describe('detectProjectState', () => {
     });
 
     it('is true when a feature is configured but no providers', async () => {
-      dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+      dir = createTempDir('next-state-');
       writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
       writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
       const result = await detectProjectState(
@@ -299,7 +299,7 @@ describe('detectProjectState', () => {
     });
 
     it('is true when providers are configured but no features', async () => {
-      dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+      dir = createTempDir('next-state-');
       writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
       writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
       writeFileSync(join(dir, '.env.local'), 'HETZNER_API_TOKEN=x\n');
@@ -311,7 +311,7 @@ describe('detectProjectState', () => {
     });
 
     it('is true when both features and providers are configured', async () => {
-      dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+      dir = createTempDir('next-state-');
       writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
       writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
       writeFileSync(join(dir, '.env.local'), 'HETZNER_API_TOKEN=x\n');

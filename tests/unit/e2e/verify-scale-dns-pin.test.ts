@@ -19,13 +19,11 @@
  *      proves the record actually moved to the new IP.
  */
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { runDnsFailoverFlipCheck } from '../../e2e/checks/dns-flip.js';
 
-const read = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../../${rel}`, import.meta.url)), 'utf8');
+const read = (rel: string) => readRepoFile(`${rel}`);
 
 /** Drop line and block comments so source censuses match CODE, not prose. */
 function stripComments(src: string): string {

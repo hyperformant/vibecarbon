@@ -9,26 +9,22 @@
  * `<binding>.result`, and the marker is parsed in exactly one place.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const srcFiles = spawnSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
   {
-    cwd: ROOT,
+    cwd: REPO_ROOT,
     encoding: 'utf-8',
   },
 )
   .stdout.split('\n')
   .filter((f) => f.endsWith('.js'));
-const read = (f: string) => readFileSync(join(ROOT, f), 'utf-8');
 /** Code lines only: a doc comment naming the marker is not a parser. */
 const code = (f: string) =>
-  read(f)
+  readRepoFile(f)
     .split('\n')
     .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
     .join('\n');
@@ -103,7 +99,7 @@ function unconsumedCalls(text: string, callees: string[]) {
 
 describe('backup results are consumed', () => {
   const perFile = srcFiles.map((file) => {
-    const text = read(file);
+    const text = readRepoFile(file);
     const aliases = ALIAS_ALLOW.filter((a) => a.file === file && a.alias).map(
       (a) => a.alias as string,
     );
@@ -173,7 +169,7 @@ describe('backup results are consumed', () => {
   });
 
   it('parseBackupResult has one definition, and only it reads the marker', () => {
-    const defs = srcFiles.filter((f) => /function parseBackupResult\(/.test(read(f)));
+    const defs = srcFiles.filter((f) => /function parseBackupResult\(/.test(readRepoFile(f)));
     expect(defs).toEqual(['src/lib/walg/backup-result.js']);
     const markerReaders = srcFiles.filter((f) => code(f).includes('BACKUP_RESULT'));
     expect(markerReaders).toEqual(['src/lib/walg/backup-result.js']);

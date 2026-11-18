@@ -1,11 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { gunzipSync } from 'node:zlib';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildDelta,
   deliverImage,
@@ -14,6 +13,7 @@ import {
   normalizeImageRef,
 } from '../../../src/lib/deploy/layer-delta.js';
 import { SSH_CONNECTION_OPTS } from '../../../src/lib/host-keys.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Every perf line a delivery emits, in order, as `name` or `name=ms`.
 const perfLines = vi.hoisted(() => [] as string[]);
@@ -71,12 +71,11 @@ const isLayerBlob = (p: string) => p.startsWith('blobs/') && p !== CONFIG_BLOB;
 let fixture: string;
 let scratch: string;
 beforeEach(() => {
-  scratch = mkdtempSync(join(tmpdir(), 'vc-layer-delta-test-'));
+  scratch = createTempDir('vc-layer-delta-test-');
   fixture = join(scratch, 'save');
   mkdirSync(fixture);
   writeFixture(fixture);
 });
-afterEach(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('buildDelta', () => {
   it('sends only the app layers when the target holds the base', () => {

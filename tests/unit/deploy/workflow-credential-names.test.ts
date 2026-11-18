@@ -20,8 +20,9 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const WORKFLOWS = join(process.cwd(), '.github', 'workflows');
+const WORKFLOWS = join(REPO_ROOT, '.github', 'workflows');
 
 /** Credential env vars this rule covers — the object-storage + registry families. */
 const COVERED =

@@ -14,13 +14,10 @@
  * `args:`), so the census parses both and requires all three settings, with
  * equal values, in each.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { SLOT_WAL_SETTINGS } from '../../../src/lib/deploy/replication-slot.js';
-
-const ROOT = join(__dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
@@ -43,14 +40,12 @@ function slotWalProblems(settings: Record<string, string>): string[] {
     .map(([key, value]) => `${key}: want ${value}, got ${settings[key] ?? 'nothing'}`);
 }
 
-function composeDbArgv(text = readFileSync(join(ROOT, 'carbon/docker-compose.yml'), 'utf-8')) {
+function composeDbArgv(text = readRepoFile('carbon/docker-compose.yml')) {
   const [doc] = loadAll(text) as Doc[];
   return doc.services.db.command as string[];
 }
 
-function k8sDbArgv(
-  text = readFileSync(join(ROOT, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
-) {
+function k8sDbArgv(text = readRepoFile('carbon/k8s/base/db/statefulset.yaml')) {
   const sts = (loadAll(text) as Doc[]).find((d) => d?.kind === 'StatefulSet');
   const db = sts.spec.template.spec.containers.find((ct: Doc) => ct.name === 'db');
   return db.args as string[];
@@ -80,7 +75,7 @@ describe('census: the slot WAL cap is in both db argv lists, with equal values',
   });
 
   it('bites: a file that drops one setting is reported', () => {
-    const text = readFileSync(join(ROOT, 'carbon/docker-compose.yml'), 'utf-8').replace(
+    const text = readRepoFile('carbon/docker-compose.yml').replace(
       /^\s*- max_slot_wal_keep_size=4GB\n/m,
       '',
     );

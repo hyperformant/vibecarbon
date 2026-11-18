@@ -13,24 +13,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const clackMock = vi.hoisted(() => ({
-  select: vi.fn(),
-  confirm: vi.fn(),
-  password: vi.fn(),
-  text: vi.fn(),
-  multiselect: vi.fn(),
-  note: vi.fn(),
-  outro: vi.fn(),
-  cancel: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  log: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    step: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['select', 'confirm', 'password', 'text', 'multiselect', 'note', 'outro', 'cancel'],
+    log: ['info', 'warn', 'error', 'success', 'step'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 
 // Project/env/config side-effects are stubbed — these tests exercise routing,

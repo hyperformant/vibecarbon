@@ -11,12 +11,10 @@
  * The checks self-skipping is correct behaviour; the diagnostic being
  * unactionable is what cost the cycle.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const read = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../e2e/${rel}`, import.meta.url)), 'utf8');
+const read = (rel: string) => readRepoFile(`tests/e2e/${rel}`);
 
 const SITES = ['checks/config-canary.ts', 'checks/backup-evidence.ts'];
 

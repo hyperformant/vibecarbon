@@ -9,19 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // credentials-file leg entirely (env-only lookup) and saveIfWanted now
 // persists via setEnvVar({localOnly:true}) instead of saveCredentials — see
 // the describe blocks below the guide tests.
-const clackMock = vi.hoisted(() => ({
-  password: vi.fn(),
-  text: vi.fn(),
-  confirm: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  note: vi.fn(),
-  log: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    success: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['password', 'text', 'confirm', 'cancel', 'note'],
+    log: ['info', 'warn', 'success'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 // This suite drives the INTERACTIVE prompt flow, so it declares an interactive
 // terminal. The off-TTY behaviour (prompts must throw, never hang into a silent

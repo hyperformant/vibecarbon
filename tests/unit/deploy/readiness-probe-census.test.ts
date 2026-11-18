@@ -14,12 +14,10 @@
  * relies on its Ready.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const WORKLOADS = new Set(['Pod', 'Deployment', 'StatefulSet', 'DaemonSet']);
 
 /** `<file>:<workload>/<container>` → why its Ready is not relied on. */
@@ -35,7 +33,7 @@ const EXEMPT: Record<string, string> = {
 const files = execFileSync(
   'git',
   ['ls-files', 'carbon/k8s/base/**/*.yaml', 'services/*/k8s/*.yaml'],
-  { cwd: ROOT, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .split('\n')
   .filter(Boolean);
@@ -48,7 +46,7 @@ interface Container {
 function containersIn(file: string): Array<{ key: string; container: Container }> {
   // `{{TOKEN}}` placeholders are rendered at deploy time; an unquoted one is
   // a YAML flow mapping, so drop the braces before parsing the raw template.
-  const text = readFileSync(join(ROOT, file), 'utf-8').replace(/\{\{([A-Z0-9_]+)\}\}/g, '$1');
+  const text = readRepoFile(file).replace(/\{\{([A-Z0-9_]+)\}\}/g, '$1');
   const out: Array<{ key: string; container: Container }> = [];
   // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
   for (const doc of loadAll(text) as any[]) {

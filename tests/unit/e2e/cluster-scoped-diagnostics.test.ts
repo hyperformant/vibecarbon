@@ -13,6 +13,7 @@
  *    and plain slow-start were indistinguishable after the fact.
  */
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import type { StepName } from '../../e2e/scenarios/types.js';
 import {
   buildClusterScopedDiagnostics,
@@ -145,11 +146,7 @@ describe('buildClusterScopedDiagnostics', () => {
 
 describe('lifecycle wiring', () => {
   it('_run-lifecycle gates the cluster-scoped bundle on isClusterScopedStep', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(
-      new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url),
-      'utf8',
-    );
+    const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(src).toContain('buildClusterScopedDiagnostics');
     expect(src).toContain('isClusterScopedStep(stepName)');
   });

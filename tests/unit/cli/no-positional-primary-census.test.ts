@@ -11,9 +11,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * The ways to pick "the primary" out of a servers list by hand:
@@ -55,7 +53,7 @@ function hits(file: string): number[] {
 }
 
 describe('no positional servers[0] primary under src/', () => {
-  const files = sourceFiles(join(ROOT, 'src'), { exts: ['.js'] });
+  const files = sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] });
 
   it('walks a real tree', () => {
     expect(files.length).toBeGreaterThan(100);
@@ -63,7 +61,7 @@ describe('no positional servers[0] primary under src/', () => {
 
   it('every servers[0] read is on the allowlist', () => {
     const offenders = files.flatMap((f) => {
-      const rel = relative(ROOT, f);
+      const rel = relative(REPO_ROOT, f);
       return ALLOWED[rel] ? [] : hits(f).map((n) => `${rel}:${n}`);
     });
     expect(offenders, 'ask resolvePrimary(envConfig) instead of servers[0]').toEqual([]);
@@ -71,8 +69,8 @@ describe('no positional servers[0] primary under src/', () => {
 
   it('the allowlist does not rot: every entry exists and still reads servers[0]', () => {
     for (const rel of Object.keys(ALLOWED)) {
-      expect(existsSync(join(ROOT, rel)), `${rel} exists`).toBe(true);
-      expect(hits(join(ROOT, rel)).length, `${rel} still needs its entry`).toBeGreaterThan(0);
+      expect(existsSync(join(REPO_ROOT, rel)), `${rel} exists`).toBe(true);
+      expect(hits(join(REPO_ROOT, rel)).length, `${rel} still needs its entry`).toBeGreaterThan(0);
     }
   });
 });

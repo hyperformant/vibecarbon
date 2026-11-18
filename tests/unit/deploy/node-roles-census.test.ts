@@ -15,8 +15,6 @@
  * is a template with the segment inside it, and is not flagged.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   countReadyNodes,
@@ -30,11 +28,11 @@ import {
   MASTER_LABELS,
   matchesSelector,
 } from '../../_shared/fake-nodes.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { findWorkerNodeNames } from '../../e2e/checks/pilot-light.js';
 
-const ROOT = join(__dirname, '../../..');
 const files = execFileSync('git', ['ls-files', 'src/*.js', 'src/**/*.js', 'tests/e2e/**/*.ts'], {
-  cwd: ROOT,
+  cwd: REPO_ROOT,
   encoding: 'utf-8',
 })
   .split('\n')
@@ -50,7 +48,7 @@ function code(text: string): string {
 function offenders(): string[] {
   const out: string[] = [];
   for (const f of files) {
-    code(readFileSync(join(ROOT, f), 'utf-8'))
+    code(readRepoFile(f))
       .split('\n')
       .forEach((line, i) => {
         if (ROLE_SEGMENT_LITERAL.test(line)) out.push(`${f}:${i + 1}: ${line.trim()}`);
@@ -118,7 +116,7 @@ describe('worker nodes are picked by label', () => {
   it('never selects the node the database runs on', () => {
     // The db StatefulSet's nodeSelector is dedicated=db, so the node running
     // it always carries the label the selector excludes.
-    const sts = readFileSync(join(ROOT, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8');
+    const sts = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
     expect(sts).toMatch(/nodeSelector:\s*\n\s+dedicated: db/);
     // Every provider's db node: its worker script loaded as the db role.
     for (const script of ['worker-init.sh', 'do-worker-init.sh', 'linode-worker-init.sh']) {

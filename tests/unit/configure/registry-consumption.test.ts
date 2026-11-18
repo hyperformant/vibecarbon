@@ -1,14 +1,13 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { featureSecretKeys } from '../../../src/lib/config-registry.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // Guards that the configure wizard derives its secret-masking set from the
 // config-registry rather than carrying a parallel hand-maintained list. If a
 // new feature secret is added to the registry but configure stops deriving
 // from it, a secret could be echoed unmasked — this test fails first.
 describe('configure ↔ config-registry', () => {
-  const src = readFileSync(join(process.cwd(), 'src/configure.js'), 'utf-8');
+  const src = readRepoFile('src/configure.js');
 
   it('masking set is derived from featureSecretKeys() union operatorSecretKeys()', () => {
     expect(src).toMatch(

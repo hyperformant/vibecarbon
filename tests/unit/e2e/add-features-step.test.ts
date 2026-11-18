@@ -4,11 +4,11 @@
  * empty feature list before writing it, so a stock compose scenario (the e2e
  * baseline) would have issued from Let's Encrypt production.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { runAddFeaturesStep } from '../../e2e/scenarios/add-features-step.js';
 import type { CliResult } from '../../e2e/scenarios/types.js';
 
@@ -21,7 +21,7 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 function project(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'add-features-'));
+  const dir = createTempDir('add-features-');
   dirs.push(dir);
   writeFileSync(join(dir, '.env'), 'DOMAIN=example.test\n');
   return dir;

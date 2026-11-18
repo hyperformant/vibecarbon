@@ -12,8 +12,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,9 +38,8 @@ import {
   clusterAutoscalerImageRef,
   dbImageRef,
 } from '../../../src/lib/images.js';
-
-const ROOT = join(__dirname, '../../..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Incident 2026-07-31 (e3 k8s e2e): the cluster-autoscaler rollout wait spent
@@ -136,7 +134,7 @@ describe('prePullImages', () => {
 });
 
 describe('deployK3s wiring', () => {
-  const k3s = read('src/lib/deploy/k8s/k3s.js');
+  const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
   it('fires the pre-pull opportunistically after k3s is ready (never awaited into the critical path)', () => {
     expect(k3s).toMatch(/prePullImages\(/);
@@ -169,7 +167,7 @@ describe('pullK3sRuntimeBase', () => {
     pullExit = 0,
     pullErr = 'ctr: failed to resolve reference "x": unauthorized',
   ) {
-    dir = mkdtempSync(join(tmpdir(), 'k3s-base-'));
+    dir = createTempDir('k3s-base-');
     const log = join(dir, 'calls');
     writeFileSync(
       join(dir, 'k3s'),

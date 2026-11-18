@@ -2,15 +2,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const REPO = join(__dirname, '..', '..', '..');
-const ROOT = join(REPO, 'carbon', 'k8s');
+const ROOT = join(REPO_ROOT, 'carbon', 'k8s');
 const SCANNED = [
-  join(REPO, 'src'),
-  join(REPO, 'carbon', 'k8s'),
-  join(REPO, 'carbon', '.github'),
-  join(REPO, 'carbon', 'scripts'),
+  join(REPO_ROOT, 'src'),
+  join(REPO_ROOT, 'carbon', 'k8s'),
+  join(REPO_ROOT, 'carbon', '.github'),
+  join(REPO_ROOT, 'carbon', 'scripts'),
 ];
 
 // Template placeholders ({{X}}) are not always valid YAML; a file that does

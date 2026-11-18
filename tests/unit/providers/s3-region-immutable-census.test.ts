@@ -19,15 +19,13 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const S3_BASE = 'src/lib/providers/s3-base.js';
 
-const rel = (f: string) => relative(ROOT, f);
-const srcFiles = sourceFiles(join(ROOT, 'src'), { exts: ['.js'], skip: ['node_modules'] });
+const rel = (f: string) => relative(REPO_ROOT, f);
+const srcFiles = sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'], skip: ['node_modules'] });
 
 /** [start, end) of the `constructor(` body of the S3CompatibleProvider class. */
 function constructorBody(source: string): [number, number] {
@@ -49,7 +47,7 @@ function constructorBody(source: string): [number, number] {
 
 describe('S3 client region immutability census', () => {
   it('(a) region, endpoint and the client are set once, in the constructor', () => {
-    const source = readFileSync(join(ROOT, S3_BASE), 'utf-8');
+    const source = readRepoFile(S3_BASE);
     const [start, end] = constructorBody(source);
     const patterns: Array<[string, RegExp]> = [
       ['this.region =', /this\.region\s*=(?!=)/g],

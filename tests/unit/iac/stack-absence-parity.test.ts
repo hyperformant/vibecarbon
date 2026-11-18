@@ -43,7 +43,7 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
 // The store's answer to "which region holds this bucket?", swapped per case.
 let locateBucket: (bucket: string) => Promise<string | null> = async () => null;
 // The region whose ListBuckets still shows the bucket, or null: read after the search.
-let bucketListedIn: (bucket: string) => Promise<string | null> = async () => null;
+const bucketListedIn: (bucket: string) => Promise<string | null> = async () => null;
 const locatedBuckets: string[] = [];
 vi.mock('../../../src/lib/providers/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/providers/index.js')>()),

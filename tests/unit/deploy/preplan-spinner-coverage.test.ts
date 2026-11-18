@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Regression guard for the dead-silence window right after the credential
@@ -68,10 +69,7 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
     fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
     'utf8',
   );
-  const effects = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/effects/index.js', import.meta.url)),
-    'utf8',
-  );
+  const effects = readRepoFile('src/lib/deploy/effects/index.js');
 
   it('the background DNS warm-up suppresses setupSimple’s internal spinner', () => {
     // The 0.0.0.0 warm-up write must pass onProgress so no spinner animates
@@ -88,18 +86,12 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
   });
 
   it('the k8s early A-record write (under deployK3s’s spinner) suppresses setupSimple’s spinner', () => {
-    const k8sDns = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/deploy/k8s/dns-record.js', import.meta.url)),
-      'utf8',
-    );
+    const k8sDns = readRepoFile('src/lib/deploy/k8s/dns-record.js');
     expect(k8sDns).toMatch(/early = write\(infra, \{ onProgress: /);
   });
 
   it('the compose-ha early HA write (under the boot spinner) suppresses setupHA’s spinner', () => {
-    const composeHa = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/deploy/effects/compose-ha.js', import.meta.url)),
-      'utf8',
-    );
+    const composeHa = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     expect(composeHa).toMatch(/ctx\.dnsUpdatePromise = writeHaDnsRecords\(ctx, \{ onProgress: /);
     expect(composeHa).toMatch(
       /setupHA\(\s*dnsToken,\s*dnsZoneId,\s*domain,\s*\[[\s\S]*?\],\s*\{ onProgress \}/,
@@ -109,10 +101,7 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
   // A backend's setup function either guards its own spinner or hands the
   // whole flow to the shared one in dns-backend-helpers.js, whose guard is
   // then the one that runs.
-  const helpers = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/dns-backend-helpers.js', import.meta.url)),
-    'utf8',
-  );
+  const helpers = readRepoFile('src/lib/dns-backend-helpers.js');
   const bodyOf = (source: string, fn: string) => {
     const start = source.indexOf(`export async function ${fn}(`);
     if (start === -1) return '';

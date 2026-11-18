@@ -21,6 +21,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const PROMOTED_IP = '203.0.113.20'; // stack <env>-standby, role primary after the failover
@@ -46,14 +47,11 @@ const h = vi.hoisted(() => ({
 }));
 
 // Quiet clack: the effects narrate every step; the assertions read state.
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  const quiet = () => {};
-  return {
-    ...actual,
-    log: { info: quiet, warn: quiet, success: quiet, message: quiet, error: quiet, step: quiet },
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['info', 'warn', 'success', 'message', 'error', 'step'],
+  }),
+);
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -832,8 +830,7 @@ describe('reconverge effects', () => {
 
 describe('the deploy wires the managed-DNS repoint into the reconverge check (I3)', () => {
   it('passes repointDns only with a managed provider, token and zone, and keeps the answer', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const call = src.slice(src.indexOf('const ready = await assertComposeHaReconvergeReady({'));
     expect(src).toMatch(
       /const managedDns = !!\(domain && hasAutomatedDns\(dnsProvider\) && dnsToken && dnsZoneId\);/,
@@ -893,11 +890,7 @@ describe('the standby role is on the node before its stack starts (add-ons held 
   });
 
   it('both standby start paths go through startComposeStack, which runs reconcile.sh', async () => {
-    const { readFileSync } = await import('node:fs');
-    const effects = readFileSync(
-      join(__dirname, '../../../src/lib/deploy/effects/compose-ha.js'),
-      'utf-8',
-    );
+    const effects = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     const body = (fn: string) => {
       const at = effects.indexOf(`async function ${fn}(`);
       expect(at, fn).toBeGreaterThan(-1);
@@ -905,10 +898,7 @@ describe('the standby role is on the node before its stack starts (add-ons held 
     };
     expect(body('reconvergeStandbyStack')).toMatch(/startComposeStack\(standby\.ip/);
     expect(body('reconcileRebuiltStandby')).toMatch(/startComposeStack\(standby\.ip/);
-    const compose = readFileSync(
-      join(__dirname, '../../../src/lib/deploy/compose/index.js'),
-      'utf-8',
-    );
+    const compose = readRepoFile('src/lib/deploy/compose/index.js');
     const start = compose.slice(compose.indexOf('export async function startComposeStack('));
     expect(start.slice(0, 2000)).toContain('reconcileCommand(remoteDir');
     const cmd = compose.slice(compose.indexOf('export function reconcileCommand('));

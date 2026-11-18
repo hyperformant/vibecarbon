@@ -17,9 +17,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const TRAEFIK_NAMESPACE = 'vibecarbon';
 const TRAEFIK_LABELS = { app: 'vibecarbon-traefik' };
 
@@ -48,10 +47,10 @@ function kustomizeNamespace(dir: string): string | undefined {
   return undefined;
 }
 
-const manifestRoots = [join(ROOT, 'carbon/k8s'), join(ROOT, 'services')];
+const manifestRoots = [join(REPO_ROOT, 'carbon/k8s'), join(REPO_ROOT, 'services')];
 const files = manifestRoots
   .flatMap((r) => sourceFiles(r, { exts: ['.yaml', '.yml'] }))
-  .filter((f) => f.includes('/k8s/') || f.startsWith(join(ROOT, 'carbon/k8s')));
+  .filter((f) => f.includes('/k8s/') || f.startsWith(join(REPO_ROOT, 'carbon/k8s')));
 const all = files.flatMap((file) =>
   docsIn(file).map((doc) => ({
     file,
@@ -75,7 +74,7 @@ const crossNamespaceBackends = all
   .flatMap((m) =>
     (m.doc.spec?.routes ?? []).flatMap((route: Doc) =>
       (route.services ?? []).map((s: Doc) => ({
-        route: `${relative(ROOT, m.file)} ${route.match}`,
+        route: `${relative(REPO_ROOT, m.file)} ${route.match}`,
         namespace: m.namespace,
         port: targetPort(s.name, m.namespace, s.port),
       })),

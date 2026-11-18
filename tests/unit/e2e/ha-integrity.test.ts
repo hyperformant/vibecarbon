@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { walgRoleReadShell } from '../../../src/lib/deploy/walg-role.js';
 import { shEscape } from '../../../src/lib/shell.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   buildDbIncarnationCommand,
@@ -699,7 +700,7 @@ describe('zero-transition reseed checks', () => {
   });
 
   it('the failover reseed skip lines are the ones src/failover.js prints', () => {
-    const src = readFileSync(join(process.cwd(), 'src/failover.js'), 'utf8');
+    const src = readRepoFile('src/failover.js');
     expect(FAILOVER_RESEED_SKIP_LINES.length).toBeGreaterThanOrEqual(3);
     for (const line of FAILOVER_RESEED_SKIP_LINES) expect(src).toContain(line);
     expect(
@@ -1259,11 +1260,7 @@ describe('checkPromotionHistoryArchived', () => {
 // ---------------------------------------------------------------------------
 
 describe('_run-lifecycle.ts wires the HA integrity steps', async () => {
-  const { fileURLToPath } = await import('node:url');
-  const src = readFileSync(
-    fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
   const at = (needle: string) => {
     const i = src.indexOf(needle);
     expect(i, `${needle} not found`).toBeGreaterThan(-1);

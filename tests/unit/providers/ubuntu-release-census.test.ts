@@ -6,6 +6,7 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * All five providers boot the same Ubuntu release, or none do: the shell we run
@@ -14,7 +15,7 @@ import { VultrProvider } from '../../../src/lib/providers/vultr.js';
  * spells the release its own way, and the compose program repeats that
  * spelling, so the census names all of them in one place.
  */
-const PROGRAMS = join(process.cwd(), 'src/lib/iac/programs');
+const PROGRAMS = join(REPO_ROOT, 'src/lib/iac/programs');
 const program = (file: string) => readFileSync(join(PROGRAMS, file), 'utf-8');
 
 const FIVE = [

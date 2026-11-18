@@ -10,12 +10,9 @@
  * the ConfigMap already proves the role it does not exec at all
  * (k8s-walg-role-record.test.ts).
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { writeDeployWalgRole } from '../../../src/lib/deploy/k8s/k3s.js';
-
-const ROOT = join(__dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /** `kubectl get pod db-0 -o json` for a pod whose db container mounts the role dir. */
 function podWithRoleMount() {
@@ -100,7 +97,7 @@ describe('writeDeployWalgRole', () => {
   });
 
   it('deployK3s runs it on EVERY deploy: outside the k3s-apply skip gate, before the wal-g audit', () => {
-    const src = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const deploy = src.slice(src.indexOf('async function deployK3sSteps('));
     const gate = deploy.indexOf('if (!skipApply) {');
     // The gate's else branch closes it; the call sits after the whole if/else.

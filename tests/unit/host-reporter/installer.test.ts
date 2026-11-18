@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -8,6 +7,7 @@ import {
   hostReporterScript,
   withHostReporter,
 } from '../../../src/lib/host-reporter.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const shOk = (input: string) => spawnSync('sh', ['-n'], { input }).status;
 
@@ -96,22 +96,18 @@ describe('host reporter installer as a non-root user', () => {
   ];
   it.skipIf(process.getuid?.() === 0)('does nothing and exits 0', () => {
     const before = targets.map((t) => existsSync(t));
-    const dir = mkdtempSync(join(tmpdir(), 'vc-installer-'));
-    try {
-      const log = join(dir, 'calls');
-      writeFileSync(join(dir, 'systemctl'), `#!/bin/sh\necho "$@" >> ${log}\n`);
-      chmodSync(join(dir, 'systemctl'), 0o755);
-      const r = spawnSync('sh', ['-s'], {
-        input: hostReporterInstaller(),
-        encoding: 'utf-8',
-        env: { PATH: `${dir}:/usr/bin:/bin` },
-      });
-      expect(r.status, r.stderr).toBe(0);
-      expect(existsSync(log) ? readFileSync(log, 'utf-8') : '').toBe('');
-      expect(targets.map((t) => existsSync(t))).toEqual(before);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = createTempDir('vc-installer-');
+    const log = join(dir, 'calls');
+    writeFileSync(join(dir, 'systemctl'), `#!/bin/sh\necho "$@" >> ${log}\n`);
+    chmodSync(join(dir, 'systemctl'), 0o755);
+    const r = spawnSync('sh', ['-s'], {
+      input: hostReporterInstaller(),
+      encoding: 'utf-8',
+      env: { PATH: `${dir}:/usr/bin:/bin` },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(log) ? readFileSync(log, 'utf-8') : '').toBe('');
+    expect(targets.map((t) => existsSync(t))).toEqual(before);
   });
   it('guards with an if-block, not an exit, so a cloud-init include keeps running', () => {
     expect(hostReporterInstaller()).toMatch(/^if \[ "\$\(id -u\)" = 0 \]; then$/m);

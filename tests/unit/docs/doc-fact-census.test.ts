@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Census: countable and versioned FACTS in the docs must equal the facts on
@@ -17,8 +18,6 @@ import { describe, expect, it } from 'vitest';
  * tests/unit/lib/node-version-pins.test.ts, which knows about the engines
  * fields, Dockerfiles and CI matrices this file has no opinion on.
  */
-
-const ROOT = process.cwd();
 
 // Mirrors the SURFACES list in the sibling terminology-census.test.ts (that
 // file does not export it — it is a test file, and importing one test module
@@ -41,10 +40,8 @@ const SURFACES = [
   'carbon/README.md',
 ];
 
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
 /** Major version of a carbon/package.json dependency, `^`/`~`/`>=` stripped. */
-const carbonPkg = JSON.parse(read(join('carbon', 'package.json'))) as {
+const carbonPkg = JSON.parse(readRepoFile(join('carbon', 'package.json'))) as {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
 };
@@ -68,7 +65,7 @@ function carbonMajor(pkgName: string): number {
  * the k8s values only name the published tag, so the version lives there.
  */
 function postgresMajor(): number {
-  const dockerfile = read(join('docker', 'postgres-walg', 'Dockerfile'));
+  const dockerfile = readRepoFile(join('docker', 'postgres-walg', 'Dockerfile'));
   const match = dockerfile.match(/^FROM\s+postgres:(\d+)\./m);
   if (!match) {
     throw new Error(
@@ -81,7 +78,7 @@ function postgresMajor(): number {
 
 describe('doc fact census: counted things', () => {
   it('FEATURES.md UI component count equals the number of components on disk', () => {
-    const uiDir = join(ROOT, 'carbon', 'src', 'client', 'components', 'ui');
+    const uiDir = join(REPO_ROOT, 'carbon', 'src', 'client', 'components', 'ui');
     const actual = readdirSync(uiDir).filter((f) => f.endsWith('.tsx')).length;
     // Sanity: a walk that found nothing would make any claim "match" a
     // rewritten doc, so fail loudly on an empty directory instead.
@@ -89,7 +86,7 @@ describe('doc fact census: counted things', () => {
       10,
     );
 
-    const claimed = read('FEATURES.md').match(/^## UI Components \((\d+)\)/m);
+    const claimed = readRepoFile('FEATURES.md').match(/^## UI Components \((\d+)\)/m);
     expect(
       claimed,
       'FEATURES.md: no "## UI Components (N)" heading found. ' +
@@ -108,7 +105,7 @@ describe('doc fact census: framework version claims', () => {
   it('the SURFACES list is identical to the terminology census sibling', () => {
     // Both files sweep "the user-facing docs". If one list grows a doc the
     // other does not, the newer doc is swept by half the guards it should be.
-    const sibling = readFileSync(join(ROOT, 'tests/unit/docs/terminology-census.test.ts'), 'utf-8');
+    const sibling = readRepoFile('tests/unit/docs/terminology-census.test.ts');
     const block = sibling.match(/const SURFACES = \[([\s\S]*?)\];/);
     expect(
       block,
@@ -143,7 +140,7 @@ describe('doc fact census: framework version claims', () => {
     const realPostgresMajor = postgresMajor();
     const offenders: string[] = [];
     for (const rel of SURFACES) {
-      const text = read(rel);
+      const text = readRepoFile(rel);
       for (const pattern of CLAIM_PATTERNS) {
         for (const m of text.matchAll(pattern)) {
           const pkg = PKG_BY_SPELLING[m[1].toLowerCase()];
@@ -171,7 +168,7 @@ describe('doc fact census: framework version claims', () => {
     // still being found.
     let hits = 0;
     for (const rel of SURFACES) {
-      const text = read(rel);
+      const text = readRepoFile(rel);
       hits += [...text.matchAll(/\b(React|Vite|TypeScript|Hono)\s+v?(\d+)\b/g)].length;
       hits += [...text.matchAll(/\b(Tailwind)(?: CSS)? v(\d+)\b/g)].length;
       hits += [...text.matchAll(/\bPostgreSQL (\d+)\b/g)].length;

@@ -24,12 +24,11 @@
  *     because the conversion had to thread each wrapper's message through a
  *     new helper without flattening it.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
 
 /**
@@ -71,13 +70,13 @@ interface Site {
 function collectSites(): { spawns: Site[]; consumers: Set<string> } {
   const spawns: Site[] = [];
   const consumers = new Set<string>();
-  for (const file of sourceFiles(join(ROOT, 'src'), {
+  for (const file of sourceFiles(join(REPO_ROOT, 'src'), {
     exts: ['.js'],
     skip: SKIP_DIRS,
     skipDotDirs: true,
-    relativeTo: ROOT,
+    relativeTo: REPO_ROOT,
   })) {
-    const lines = readFileSync(join(ROOT, file), 'utf-8').split('\n');
+    const lines = readRepoFile(file).split('\n');
     lines.forEach((line, i) => {
       if (isCommentLine(line)) return;
       if (detectScpSpawn(line)) spawns.push({ file, line: i + 1, text: line.trim() });
@@ -123,14 +122,14 @@ describe('scp call-site census', () => {
     const missing = [...consumers].filter(
       (file) =>
         !/import\s*\{[^}]*\bscpWithRetry\b[^}]*\}\s*from\s*['"][^'"]*ssh\.js['"]/s.test(
-          readFileSync(join(ROOT, file), 'utf-8'),
+          readRepoFile(file),
         ),
     );
     expect(missing, 'scpWithRetry used without importing it from lib/ssh.js').toEqual([]);
   });
 
   it('the wrapper actually wraps: retry ladder + the shared classifier', () => {
-    const src = readFileSync(join(ROOT, WRAPPER_MODULE), 'utf-8');
+    const src = readRepoFile(WRAPPER_MODULE);
     expect(src).toMatch(/export async function scpWithRetry/);
     // A wrapper that stopped retrying would satisfy every other assertion
     // here while restoring the exact bug.
@@ -139,12 +138,12 @@ describe('scp call-site census', () => {
   });
 
   it('the behavioral ladder tests it defers to still exist', () => {
-    for (const t of DEEP_TESTS) expect(existsSync(join(ROOT, t)), `missing: ${t}`).toBe(true);
+    for (const t of DEEP_TESTS) expect(existsSync(join(REPO_ROOT, t)), `missing: ${t}`).toBe(true);
   });
 });
 
 describe('per-site error framing survived the conversion', () => {
-  const utils = readFileSync(join(ROOT, 'src/lib/deploy/utils.js'), 'utf-8');
+  const utils = readRepoFile('src/lib/deploy/utils.js');
 
   it('mergeRemoteDotenv still distinguishes a failed pull from a failed push', () => {
     // The push message is the operationally load-bearing one: it tells the

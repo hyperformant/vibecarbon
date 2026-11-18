@@ -14,16 +14,17 @@
  * tests/unit/deploy/workflow-platforms.test.ts.)
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 type Step = { name?: string; run?: string };
-const wf = loadYaml(
-  readFileSync(join(process.cwd(), '.github/workflows/native-multiarch-image.yml'), 'utf8'),
-) as { jobs: { build: { steps: Step[] } } };
+const wf = loadYaml(readRepoFile('.github/workflows/native-multiarch-image.yml')) as {
+  jobs: { build: { steps: Step[] } };
+};
 const script = wf.jobs.build.steps.find(
   (s) => s.name === 'Check the pushed image is the smoke-tested one',
 )?.run;
@@ -64,7 +65,7 @@ const manifest = (config: string) => ({
   layers: [],
 });
 
-const dir = mkdtempSync(join(tmpdir(), 'config-digest-check-'));
+const dir = createTempDir('config-digest-check-');
 const registry = join(dir, 'registry');
 mkdirSync(registry);
 const put = (digest: string, body: unknown) =>
@@ -100,8 +101,6 @@ cat "$f"
 `,
 );
 chmodSync(join(bin, 'docker'), 0o755);
-
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function check(SMOKED: string, DIGEST: string, PLATFORM = 'linux/arm64') {
   return spawnSync('bash', ['-c', script ?? 'exit 99'], {

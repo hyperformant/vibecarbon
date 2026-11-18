@@ -1,10 +1,9 @@
-import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /** The database lineage (system identifier) whose folder holds the backup. */
 const LINEAGE = '7699032860122738725';
@@ -32,7 +31,6 @@ const LINEAGE = '7699032860122738725';
  *   - `backup-fetch` never names LATEST.
  */
 
-const ROOT = process.cwd();
 const BACKUP = 'base_000000010000000000000002';
 
 function composeScript(): string {
@@ -44,7 +42,7 @@ function composeScript(): string {
 }
 
 function k8sInitScript(): string {
-  const docs = readFileSync(join(ROOT, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8');
+  const docs = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
   // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
   const sts = load(docs) as any;
   const init = sts.spec.template.spec.initContainers.find(
@@ -250,13 +248,11 @@ describe('no wal-g backup-list under src/', () => {
   const ALLOW = new Set(['src/lib/deploy/walg-audit.js']);
 
   it('only walg-audit.js names it', () => {
-    const offenders = sourceFiles(join(ROOT, 'src'))
+    const offenders = sourceFiles(join(REPO_ROOT, 'src'))
       .filter((f) => /\.(js|ts|mjs|sh)$/.test(f))
-      .map((f) => relative(ROOT, f))
+      .map((f) => relative(REPO_ROOT, f))
       .filter((f) => !ALLOW.has(f))
-      .filter((f) =>
-        /wal-g['"\s,]+backup-list|wal-g backup-list/.test(readFileSync(join(ROOT, f), 'utf-8')),
-      );
+      .filter((f) => /wal-g['"\s,]+backup-list|wal-g backup-list/.test(readRepoFile(f)));
     expect(offenders).toEqual([]);
   });
 });

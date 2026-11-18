@@ -6,10 +6,10 @@
  * current primary (the k8s tier has always probed first). The probe is the
  * shared one: pg_stat_replication on the primary.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SYSID = '7412345678901234567';
 /** The lineage read's answer (readComposeDbLineage): ready, then the row. */
@@ -24,14 +24,11 @@ const h = vi.hoisted(() => ({
   primary: vi.fn(async () => {}),
 }));
 
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  const quiet = () => {};
-  return {
-    ...actual,
-    log: { info: quiet, warn: quiet, success: quiet, message: quiet, error: quiet, step: quiet },
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['info', 'warn', 'success', 'message', 'error', 'step'],
+  }),
+);
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -120,7 +117,7 @@ describe('compose-HA deploy: the lineage check before the reseed (final review I
   let dir: string;
   const RECORD = { ip: '203.0.113.20', systemIdentifier: SYSID, timeline: 3, at: 't' };
   const seed = (ha: Record<string, unknown>) => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-lineage-'));
+    dir = createTempDir('vc-lineage-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({ projectName: 'myapp', environments: { prod: { ha } } }),
@@ -143,7 +140,6 @@ describe('compose-HA deploy: the lineage check before the reseed (final review I
   });
   afterEach(() => {
     vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('abort then deploy: the copy the abort recorded is reseeded, and the record is cleared', async () => {

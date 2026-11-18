@@ -15,15 +15,7 @@
  * only resolves the files with `config`. Values are sentinels.
  */
 import { execFileSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -33,24 +25,24 @@ import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { DOCKER_SOCKET_PROXY_MIRROR, TRAEFIK_MIRROR } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { upstreamRef } from '../../_shared/local-images.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 // Skipped by default like the other docker tests; run explicitly via
 // `DOCKER_INTEGRATION=true pnpm test:docker` (the script sets the variable).
 const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
 
-const ROOT = process.cwd();
 // Every add-on that ships a compose overlay, found on disk so a new one is
 // covered with no edit here.
-const ADDONS = readdirSync(join(ROOT, 'services'), { withFileTypes: true })
+const ADDONS = readdirSync(join(REPO_ROOT, 'services'), { withFileTypes: true })
   .filter((d) => d.isDirectory())
   .map((d) => d.name)
-  .filter((name) => existsSync(join(ROOT, 'services', name, 'compose', 'docker-compose.yml')))
+  .filter((name) => existsSync(join(REPO_ROOT, 'services', name, 'compose', 'docker-compose.yml')))
   .sort();
 // Each add-on's base overlay, then its prod overlay when it has one, in the
 // same order the bundle's -f set uses (base before prod).
 const ADDON_FILES = ADDONS.flatMap((name) =>
   ['docker-compose.yml', 'docker-compose.prod.yml']
-    .filter((f) => existsSync(join(ROOT, 'services', name, 'compose', f)))
+    .filter((f) => existsSync(join(REPO_ROOT, 'services', name, 'compose', f)))
     .map((f) => ({
       from: `services/${name}/compose/${f}`,
       to:
@@ -93,10 +85,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     const stage = (from: string, to: string) =>
       writeFileSync(
         join(dir, to),
-        readFileSync(join(ROOT, from), 'utf-8').replace(
-          /\{\{([A-Z_]+)\}\}/g,
-          (_m, k: string) => fill[k] ?? 'x',
-        ),
+        readRepoFile(from).replace(/\{\{([A-Z_]+)\}\}/g, (_m, k: string) => fill[k] ?? 'x'),
       );
     stage('carbon/docker-compose.yml', 'docker-compose.yml');
     stage('carbon/docker-compose.prod.yml', 'docker-compose.prod.yml');

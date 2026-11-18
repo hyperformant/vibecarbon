@@ -15,11 +15,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 const SEED = /\bawait seedKnownHosts\(/;
 const LOOP = /^\s*for\s*\(.*\)\s*\{?\s*$/;
@@ -41,10 +38,10 @@ function serialSeeds(file: string, text: string): string[] {
 
 describe('host-key seeds of several servers run together', () => {
   it('no serial seedKnownHosts in src/', () => {
-    const files = sourceFiles(join(ROOT, 'src'), { exts: ['.js'] });
+    const files = sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] });
     expect(files.length).toBeGreaterThan(100);
     const offenders = files.flatMap((f) =>
-      serialSeeds(relative(ROOT, f), readFileSync(f, 'utf-8')),
+      serialSeeds(relative(REPO_ROOT, f), readFileSync(f, 'utf-8')),
     );
     expect(
       offenders,
@@ -53,7 +50,7 @@ describe('host-key seeds of several servers run together', () => {
   });
 
   it('the k3s deploy seeds master, db and every worker together', () => {
-    const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(
       /Promise\.all\(\s*\[masterIp, dbIp, \.\.\.\(workerIps \?\? \[\]\)\]\s*\.filter\(Boolean\)\s*\.map\(\(ip\) => seedKnownHosts\(khPath, ip\)\),?\s*\)/,
     );

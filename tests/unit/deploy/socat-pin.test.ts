@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildReplicationOverlay } from '../../../src/lib/deploy/compose/ha.js';
 import { renderManifestImages, socatImageRef } from '../../../src/lib/images.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * socat pin guard for the replication gateway.
@@ -18,9 +19,7 @@ import { renderManifestImages, socatImageRef } from '../../../src/lib/images.js'
  * version set on both tiers, so two nodes of a pair cannot disagree.
  */
 
-const K8S_MANIFEST = fileURLToPath(
-  new URL('../../../carbon/k8s/base/repl-gateway/repl-gateway.yaml', import.meta.url),
-);
+const K8S_MANIFEST = join(REPO_ROOT, 'carbon/k8s/base/repl-gateway/repl-gateway.yaml');
 
 function k8sSocatRef(): string {
   const m = renderManifestImages(readFileSync(K8S_MANIFEST, 'utf8')).match(

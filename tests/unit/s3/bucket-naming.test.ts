@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { sanitizeBucketName } from '../../../src/lib/providers/hetzner-s3.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
@@ -10,6 +8,7 @@ import {
   deriveRegionBackupsBucketName,
 } from '../../../src/lib/providers/s3-base.js';
 import { generateBucketSalt } from '../../../src/lib/secrets.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('deriveProjectBucketName (per-project salt)', () => {
   // Two customers deploying identically-named projects share a provider's
@@ -57,10 +56,7 @@ describe('deriveProjectBucketName ignores storageBucketGeneration', () => {
   });
 
   it('create no longer seeds storageBucketGeneration', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/create.js', import.meta.url)),
-      'utf8',
-    );
+    const src = readRepoFile('src/create.js');
     expect(src).not.toMatch(/storageBucketGeneration/);
   });
 });

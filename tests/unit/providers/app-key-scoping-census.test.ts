@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { S3CompatibleProvider } from '../../../src/lib/providers/s3-base.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /** Measured 2026-10-20 (docs/research/2026-10-object-storage-key-scoping.md). */
 const EXPECTED: Record<string, string> = {
@@ -31,9 +32,8 @@ const APP_KEY_EVIDENCE: Record<string, string> = {
   digitalocean: '## DigitalOcean Spaces: mint via API, verified',
 };
 
-const ROOT = join(import.meta.dirname, '../../..');
-const providersDir = join(ROOT, 'src/lib/providers');
-const RESEARCH = join(ROOT, 'docs/research/2026-10-object-storage-key-scoping.md');
+const providersDir = join(REPO_ROOT, 'src/lib/providers');
+const RESEARCH = join(REPO_ROOT, 'docs/research/2026-10-object-storage-key-scoping.md');
 
 type S3Class = {
   name: string;

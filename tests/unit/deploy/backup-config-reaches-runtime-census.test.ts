@@ -26,11 +26,10 @@
  *   GitOps deploy seeds, and Flux cannot revert the CLI's values.
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll, load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
@@ -41,6 +40,7 @@ import {
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
 import { resolveBackupConfig } from '../../../src/lib/deploy/prompts.js';
 import { alpineK8sImageRef } from '../../../src/lib/images.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   formatReachSites,
   loadSourceTree,
@@ -88,8 +88,7 @@ describe('every collected backup setting reaches the runtime', () => {
   }
 });
 
-const tmp = mkdtempSync(join(tmpdir(), 'vc-backup-cfg-'));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+const tmp = createTempDir('vc-backup-cfg-');
 
 describe('the configured backup renders into both runtimes, per environment', () => {
   it('compose: the crontab line carries the schedule and the days', async () => {

@@ -1,9 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { templatePathFor } from '../../../src/lib/template-paths.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * The published tarball must carry EVERY template file `create` and
@@ -24,8 +22,6 @@ import { templatePathFor } from '../../../src/lib/template-paths.js';
  * instead of in a customer's terminal.
  */
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-
 /** Files under carbon/ that npm consumes at pack time and must NOT ship. */
 const PACK_TIME_ONLY = new Set(['carbon/.npmignore']);
 
@@ -37,7 +33,7 @@ const OPTIONAL_TEMPLATE_READS = new Set<string>([]);
 
 function packedFiles(): Set<string> {
   const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
   });
@@ -57,7 +53,7 @@ function packedFiles(): Set<string> {
 
 function trackedTemplateFiles(): string[] {
   const out = execFileSync('git', ['ls-files', '-z', 'carbon'], {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     encoding: 'utf8',
   });
   const files = out.split('\0').filter(Boolean);
@@ -86,7 +82,7 @@ describe('npm tarball ships the whole template', () => {
 
   it('packs every template file src/create.js copies by name', () => {
     const packed = packedFiles();
-    const source = readFileSync(join(repoRoot, 'src', 'create.js'), 'utf8');
+    const source = readRepoFile('src', 'create.js');
     // copyTemplate('<template path>', ...) — string-literal first argument only.
     const named = [...source.matchAll(/copyTemplate\(\s*'([^']+)'/g)].map((m) => m[1]);
     expect(

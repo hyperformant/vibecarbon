@@ -21,14 +21,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  const noop = () => {};
-  return {
-    ...actual,
-    log: { warn: noop, error: noop, info: noop, success: noop, message: noop, step: noop },
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['warn', 'error', 'info', 'success', 'message', 'step'],
+  }),
+);
 
 type Server = { id: number; name: string; labels: Record<string, string> };
 

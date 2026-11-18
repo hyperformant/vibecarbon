@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Escape-class guard: every FILE the core compose files bind-mount from
@@ -17,12 +16,9 @@ import { escapeRegExp } from '../../_shared/regexp.js';
  * tier.
  */
 
-const ROOT = join(__dirname, '..', '..', '..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
 const composeSources = [
-  ...read('carbon/docker-compose.yml').matchAll(/\.\/(volumes\/[A-Za-z0-9._/-]+)/g),
-  ...read('carbon/docker-compose.prod.yml').matchAll(/\.\/(volumes\/[A-Za-z0-9._/-]+)/g),
+  ...readRepoFile('carbon/docker-compose.yml').matchAll(/\.\/(volumes\/[A-Za-z0-9._/-]+)/g),
+  ...readRepoFile('carbon/docker-compose.prod.yml').matchAll(/\.\/(volumes\/[A-Za-z0-9._/-]+)/g),
 ].map((m) => m[1]);
 
 // FILE mounts only (last path segment carries an extension). Directory
@@ -54,7 +50,7 @@ describe('compose file bind-mount sources', () => {
   });
 
   it.each(fileMounts)('%s is scaffolded by create.js', (rel) => {
-    const createSrc = read('src/create.js');
+    const createSrc = readRepoFile('src/create.js');
     // Must match the SOURCE argument position — `join(projectDir, '<rel>')`
     // destination args also contain the literal and must not satisfy this.
     const asCopySource = new RegExp(`copyTemplate\\(\\s*'${escapeRegExp(rel)}'`);
@@ -68,7 +64,7 @@ describe('compose file bind-mount sources', () => {
   it.each([...new Set(fileMounts.map((p) => p.split('/').slice(0, 2).join('/')))])(
     '%s is shipped to the server by the deploy bundle',
     (dir) => {
-      const bundleSrc = read('src/lib/deploy/bundle.js');
+      const bundleSrc = readRepoFile('src/lib/deploy/bundle.js');
       expect(
         bundleSrc.includes(`'${dir}'`),
         `${dir} holds bind-mount sources but bundle.js never ships it — ` +
@@ -79,7 +75,7 @@ describe('compose file bind-mount sources', () => {
 
   it('template files exist for every file mount', () => {
     for (const rel of fileMounts) {
-      expect(() => read(`carbon/${rel}`), `carbon/${rel} missing`).not.toThrow();
+      expect(() => readRepoFile(`carbon/${rel}`), `carbon/${rel} missing`).not.toThrow();
     }
   });
 });
@@ -100,9 +96,9 @@ describe('compose file bind-mount sources', () => {
  *    source may be excluded by carbon/.npmignore.
  */
 
-const copyTemplateSources = [...read('src/create.js').matchAll(/copyTemplate\(\s*'([^']+)'/g)].map(
-  (m) => m[1],
-);
+const copyTemplateSources = [
+  ...readRepoFile('src/create.js').matchAll(/copyTemplate\(\s*'([^']+)'/g),
+].map((m) => m[1]);
 
 describe('compose files scaffolded by create.js', () => {
   const composeSources = copyTemplateSources.filter((p) => /^docker-compose[^/]*\.yml$/.test(p));
@@ -115,7 +111,7 @@ describe('compose files scaffolded by create.js', () => {
   it.each(composeSources)('every ./volumes file mount in %s is scaffolded', (compose) => {
     let content: string;
     try {
-      content = read(`carbon/${compose}`);
+      content = readRepoFile(`carbon/${compose}`);
     } catch {
       // Not present in this checkout (e.g. a gitignored generated file in
       // CI) — the .npmignore guard below still rejects scaffolding it.
@@ -137,7 +133,7 @@ describe('compose files scaffolded by create.js', () => {
 describe('create.js copy sources vs the npm tarball', () => {
   // Literal paths plus simple `*.ext`-style globs — the only pattern shapes
   // carbon/.npmignore currently uses for files.
-  const npmignore = read('carbon/.npmignore')
+  const npmignore = readRepoFile('carbon/.npmignore')
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'));

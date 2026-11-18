@@ -6,32 +6,20 @@
  * standby lists for those tiers omit the two regions. Harness as in
  * gather-scaffold-lockstep.test.ts.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 import { copyTemplate } from '../helpers/copy-template.js';
 
-const clackMock = vi.hoisted(() => ({
-  select: vi.fn(),
-  isCancel: vi.fn(() => false),
-  cancel: vi.fn(),
-  text: vi.fn(),
-  confirm: vi.fn(async () => true),
-  password: vi.fn(),
-  note: vi.fn(),
-  intro: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  log: {
-    step: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    message: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['select', 'cancel', 'text', 'password', 'note', 'intro'],
+    log: ['step', 'info', 'warn', 'error', 'success', 'message'],
+    spinner: true,
+    with: { isCancel: vi.fn(() => false), confirm: vi.fn(async () => true) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/config.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
@@ -54,13 +42,14 @@ vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
 
 import { gatherDeploymentConfig } from '../../../src/lib/deploy/prompts.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const dirs: string[] = [];
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 function project() {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-gather-linode-region-'));
+  const dir = createTempDir('vc-gather-linode-region-');
   dirs.push(dir);
   copyTemplate(dir);
   vi.spyOn(process, 'cwd').mockReturnValue(dir);

@@ -1,10 +1,9 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { parse as dotenvParse } from 'dotenv';
 import { expand } from 'dotenv-expand';
 import { describe, expect, it } from 'vitest';
 import { dotenvValueProblem, formatDotenvLine } from '../../../src/lib/dotenv.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { ORACLE_VALUES, REFUSED_VALUES } from '../../fixtures/dotenv-oracle-values.js';
 
 // Synthetic values only. Every accepted value must read back identically from
@@ -40,10 +39,7 @@ describe('dotenv oracle: Node, dotenv, dotenv-expand read the writer identically
     // The header tells users to single-quote "$" — exactly what is refused for
     // VITE_* keys (dotenv-expand expands "$" inside single quotes too), so
     // the exception has to be stated beside the rule.
-    const header = readFileSync(
-      join(import.meta.dirname, '../../../carbon/.env.example'),
-      'utf-8',
-    ).slice(0, 800);
+    const header = readRepoFile('carbon/.env.example').slice(0, 800);
     expect(header).toMatch(
       /Never put \$ in a VITE_\* value: Vite expands it in the browser build\./,
     );

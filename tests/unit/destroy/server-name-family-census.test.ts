@@ -15,13 +15,14 @@
  * somebody says whether it names a SERVER (in which case the destroy family must
  * cover it) or something else.
  */
+
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { environmentServerNames } from '../../../src/lib/destroy/server-naming.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC_DIR = fileURLToPath(new URL('../../../src', import.meta.url));
+const SRC_DIR = join(REPO_ROOT, 'src');
 
 /** The name head every environment-scoped resource literal starts with. */
 const HEADS = [

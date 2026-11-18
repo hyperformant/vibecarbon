@@ -9,16 +9,15 @@
  * the retired grafana-tls Certificate now; the scaling comes from the
  * declaration.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   settleObservabilityOnStandby,
   zeroWorkloadsOnStandby,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { k8sStandbyZeroedWorkloads } from '../../../src/lib/services/standby-policy.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const K3S_SRC = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+const K3S_SRC = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
 /** A kubectl stand-in: the named objects exist, every call is recorded. */
 function fakeKubectl(existing: string[]) {

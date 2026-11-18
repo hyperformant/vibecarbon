@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK, findMissingRequiredEnv } from '../../../src/lib/project.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // vibecarbon-web prod move, 2026-09-15: the deploy ran from a fresh worktree
 // with no `.env` (gitignored). Step 0d WARNED that the required secrets were
@@ -13,7 +14,7 @@ import { COMPOSE_REQUIRED_ENV_FALLBACK, findMissingRequiredEnv } from '../../../
 // preflight that turns that warning into a stop at second zero: it reads
 // the same `${KEY:?}` markers compose itself enforces.
 function makeProjectDir(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-env-required-test-'));
+  const dir = createTempDir('vc-env-required-test-');
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(dir, name), content);
   }
@@ -42,10 +43,7 @@ const LEAN_REQUIRED = [
   'BETTER_AUTH_SECRET',
   'POSTGRES_PASSWORD',
 ];
-const TEMPLATE_PROD_COMPOSE = readFileSync(
-  join(process.cwd(), 'carbon', 'docker-compose.prod.yml'),
-  'utf8',
-);
+const TEMPLATE_PROD_COMPOSE = readRepoFile('carbon', 'docker-compose.prod.yml');
 // Secrets an older project's .env still carries after the services that read
 // them were removed.
 const DELETED_SECRETS = {
@@ -153,7 +151,7 @@ describe('deploy.js wires the preflight before any provisioning', () => {
   // whole point is ordering — the stop must come before gatherDeploymentConfig
   // (prompts, then S3/servers). A runtime harness for the deploy entrypoint
   // would need the full orchestrator mocked; the source order is the contract.
-  const src = readFileSync(join(process.cwd(), 'src', 'deploy.js'), 'utf8');
+  const src = readRepoFile('src', 'deploy.js');
 
   it('calls findMissingRequiredEnv and exits 1 ahead of gatherDeploymentConfig', () => {
     const preflight = src.indexOf('findMissingRequiredEnv(');

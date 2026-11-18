@@ -2,16 +2,16 @@
  * Allowlist changes apply to the list on disk now, not to the copy a command
  * loaded when it started: an entry another terminal added meanwhile is kept.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   addCidr,
   pruneCidrs,
   removeCidr,
   updateOperatorCidrs,
 } from '../../../src/lib/operator-ip.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 const entry = (cidr: string, lastUsedAt = new Date().toISOString()) => ({
@@ -25,9 +25,8 @@ const onDisk = () =>
   );
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-cidrs-'));
+  dir = createTempDir('vc-cidrs-');
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('updateOperatorCidrs', () => {
   it('adds onto the list as it is on disk, and returns it for the firewall push', () => {

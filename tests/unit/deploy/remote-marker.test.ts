@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { runCommandAsync } from '../../../src/lib/command.js';
 import { markerWaitScript, waitForRemoteMarker } from '../../../src/lib/deploy/remote-marker.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 function runScript(script: string): Promise<{ out: string; code: number | null; ms: number }> {
   const t0 = Date.now();
@@ -23,9 +23,8 @@ const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 describe('markerWaitScript', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'marker dir '));
+    dir = createTempDir('marker dir ');
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('returns READY at once when the marker exists, leaving no tail behind', async () => {
     const marker = join(dir, 'ready');

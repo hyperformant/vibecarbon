@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: the carbon/ docs must only tell a reader to run commands that exist,
@@ -21,8 +21,7 @@ import { sourceFiles } from '../../_shared/source-files.js';
  * never another doc.
  */
 
-const ROOT = process.cwd();
-const CARBON = join(ROOT, 'carbon');
+const CARBON = join(REPO_ROOT, 'carbon');
 
 /** Every markdown/MDX doc that ships inside the template. */
 function templateDocs(): string[] {
@@ -30,11 +29,11 @@ function templateDocs(): string[] {
   const pushMd = (dir: string, ext: RegExp) => {
     for (const entry of readdirSync(dir)) {
       const full = join(dir, entry);
-      if (statSync(full).isFile() && ext.test(entry)) out.push(relative(ROOT, full));
+      if (statSync(full).isFile() && ext.test(entry)) out.push(relative(REPO_ROOT, full));
     }
   };
   pushMd(CARBON, /\.md$/);
-  out.push(...sourceFiles(join(CARBON, 'k8s'), { exts: ['.md'], relativeTo: ROOT }));
+  out.push(...sourceFiles(join(CARBON, 'k8s'), { exts: ['.md'], relativeTo: REPO_ROOT }));
   pushMd(join(CARBON, 'content', 'docs'), /\.mdx$/);
   return out.sort();
 }
@@ -62,7 +61,7 @@ describe('carbon template docs run real commands', () => {
     const offenders: string[] = [];
     let tokens = 0;
     for (const rel of DOCS) {
-      const text = readFileSync(join(ROOT, rel), 'utf-8');
+      const text = readRepoFile(rel);
       for (const m of text.matchAll(/npm run ([A-Za-z0-9:_-]+)/g)) {
         tokens++;
         if (!SCRIPTS.has(m[1])) offenders.push(`${rel}: \`npm run ${m[1]}\` is not a script`);
@@ -86,21 +85,23 @@ describe('carbon template docs link inside the template', () => {
   it('every relative markdown link resolves to a real path inside carbon/', () => {
     const offenders: string[] = [];
     for (const rel of DOCS) {
-      const text = readFileSync(join(ROOT, rel), 'utf-8');
+      const text = readRepoFile(rel);
       // Relative targets only: http(s)/mailto are external, and `/docs/...`
       // style targets are app routes served by the template's own router,
       // not files on disk.
       for (const m of text.matchAll(/\]\((\.\.?\/[^)\s]+)\)/g)) {
         const target = m[1].split('#')[0];
         if (!target) continue; // pure `#fragment` after a `./` prefix
-        const abs = resolve(join(ROOT, dirname(rel)), target);
+        const abs = resolve(join(REPO_ROOT, dirname(rel)), target);
         if (abs !== CARBON && !abs.startsWith(CARBON + sep)) {
           offenders.push(
-            `${rel}: \`${m[1]}\` escapes carbon/ (resolves to ${relative(ROOT, abs)}). ` +
+            `${rel}: \`${m[1]}\` escapes carbon/ (resolves to ${relative(REPO_ROOT, abs)}). ` +
               'That path does not exist in a generated project — link inside the template or drop the link.',
           );
         } else if (!existsSync(abs)) {
-          offenders.push(`${rel}: \`${m[1]}\` does not exist (resolves to ${relative(ROOT, abs)})`);
+          offenders.push(
+            `${rel}: \`${m[1]}\` does not exist (resolves to ${relative(REPO_ROOT, abs)})`,
+          );
         }
       }
     }
@@ -110,8 +111,7 @@ describe('carbon template docs link inside the template', () => {
   it('the link scan actually found links (guards against a regex that stopped matching)', () => {
     let links = 0;
     for (const rel of DOCS) {
-      links += [...readFileSync(join(ROOT, rel), 'utf-8').matchAll(/\]\((\.\.?\/[^)\s]+)\)/g)]
-        .length;
+      links += [...readRepoFile(rel).matchAll(/\]\((\.\.?\/[^)\s]+)\)/g)].length;
     }
     expect(links).toBeGreaterThan(3);
   });

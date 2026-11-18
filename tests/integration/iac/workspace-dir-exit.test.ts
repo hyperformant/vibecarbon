@@ -13,9 +13,10 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { statePassphraseFingerprint } from '../../../src/lib/state-passphrase.js';
 import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
+const SRC = join(REPO_ROOT, 'src');
 const WORKSPACE_DIR = pathToFileURL(join(SRC, 'lib/iac/workspace-dir.js')).href;
 const IAC = pathToFileURL(join(SRC, 'lib/iac/index.js')).href;
 const PASSPHRASE = 'd29ya3NwYWNld29ya3NwYWNld29ya3NwYWNld29ya3Nw';

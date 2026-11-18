@@ -6,10 +6,9 @@
  * under `set -e`.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   APT_LOCK_OPT,
@@ -19,6 +18,7 @@ import {
   aptQuietUpdate,
   aptWaitForDailyUnits,
 } from '../../../src/lib/deploy/apt.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const CLEARS = [
   'APT::Update::Post-Invoke-Success',
@@ -32,11 +32,10 @@ let conf: string;
 let log: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'apt-quiet-'));
+  dir = createTempDir('apt-quiet-');
   conf = join(dir, '99zz-vibecarbon-boot');
   log = join(dir, 'calls.log');
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 /** Fake apt-get: logs each call, records whether the conf existed (and its body), exits per FAKE_RC. */
 function fakeApt(rcs: number[]) {

@@ -12,11 +12,10 @@
  * the env's buckets because of the "leak". Had it detached inside the wait,
  * destroy would have deleted another cluster's database disk.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { cleanupOrphanedVolumes } from '../../../src/destroy.js';
 import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /** The server names a k8s env records (envConfig.servers[].name). */
 const ROLE_NAMES = ['master', 'db', 'worker-1', 'worker-2', 'primary', 'standby'];
@@ -113,7 +112,7 @@ describe('destroy never claims a volume for a role word in its name', () => {
   });
 
   it("destroy's call passes nothing built from the env's servers", () => {
-    const src = readFileSync(join(__dirname, '../../../src/destroy.js'), 'utf-8');
+    const src = readRepoFile('src/destroy.js');
     const calls = [...src.matchAll(/await cleanupOrphanedVolumes\(([\s\S]*?)\);/g)];
     expect(calls).toHaveLength(1);
     expect(calls[0][1]).not.toMatch(/server/i);

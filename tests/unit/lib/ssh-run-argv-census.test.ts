@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: src/lib/ssh.js's `sshRun` takes an argv ARRAY and throws on anything
@@ -16,7 +16,7 @@ import { sourceFiles } from '../../_shared/source-files.js';
  * concatenation. (compose/index.js exports its own string-taking `sshRun`;
  * modules importing that one are not walked.)
  */
-const SRC = join(import.meta.dirname, '../../../src');
+const SRC = join(REPO_ROOT, 'src');
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
 type Node = any;

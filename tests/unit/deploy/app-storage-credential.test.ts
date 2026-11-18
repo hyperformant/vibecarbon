@@ -3,8 +3,7 @@
  * can scope one (security plan 2026-10-20, Task 4: R2, R4, R9). Sentinel
  * values only, never a real secret.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { S3Client } from '@aws-sdk/client-s3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +26,8 @@ import { buildEnv } from '../../../src/lib/iac/index.js';
 import { findEnvDrift } from '../../../src/lib/project.js';
 import { DigitalOceanSpacesProvider } from '../../../src/lib/providers/digitalocean-spaces.js';
 import { LinodeObjectStorageProvider } from '../../../src/lib/providers/linode-objectstorage.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const INFRA = {
   accessKey: 'SENTINEL_INFRA_AK',
@@ -176,7 +177,7 @@ describe('R9 lifecycle on a mint provider', () => {
   });
 
   it('a failed deploy never revokes the old key: rotation runs only after finish() and before the final save', async () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const finish = src.indexOf('appBucketFinalize.finish(p.log)');
     const exit = src.indexOf('process.exit(1);', finish);
     const rotate = src.indexOf('await finishAppKeyRotation(', finish);
@@ -257,10 +258,9 @@ describe('R9 lifecycle on a mint provider', () => {
 describe('the local secret store (.env.local, through formatDotenvLine)', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-app-key-'));
+    dir = createTempDir('vc-app-key-');
     writeFileSync(join(dir, '.env'), 'BETTER_AUTH_SECRET=SENTINEL_AUTH\n');
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('writes each env pair to .env.local only, keyed per env, and drift ignores them', () => {
     const secrets = localAppStorageSecrets(dir);
@@ -322,37 +322,33 @@ describe('revoke on destroy', () => {
           names.indexOf('delete-app-bucket'),
         );
       }
-      const dir = mkdtempSync(join(tmpdir(), 'vc-revoke-'));
-      try {
-        const spies = mintSpies(LinodeObjectStorageProvider);
-        const ctx = (leaks: ReturnType<typeof createLeakLedger>) => ({
-          envConfig: { provider: 'linode', s3: { bucket: 'proj-abc-prod', appKey: record } },
-          projectConfig: { projectName: 'proj', environments: {} },
-          environment: 'prod',
-          args: { purgeBackups: purge },
-          results: { leaks },
-          providerToken: 'SENTINEL_LI_TOKEN',
-          cwd: dir,
-          spinner: { start: vi.fn(), stop: vi.fn() },
-        });
-        const ok = createLeakLedger();
-        await DESTROY_EFFECTS.revokeAppStorageKey(ctx(ok));
-        expect(spies.revoke).toHaveBeenCalledTimes(1);
-        expect(ok.entries).toEqual([]);
+      const dir = createTempDir('vc-revoke-');
+      const spies = mintSpies(LinodeObjectStorageProvider);
+      const ctx = (leaks: ReturnType<typeof createLeakLedger>) => ({
+        envConfig: { provider: 'linode', s3: { bucket: 'proj-abc-prod', appKey: record } },
+        projectConfig: { projectName: 'proj', environments: {} },
+        environment: 'prod',
+        args: { purgeBackups: purge },
+        results: { leaks },
+        providerToken: 'SENTINEL_LI_TOKEN',
+        cwd: dir,
+        spinner: { start: vi.fn(), stop: vi.fn() },
+      });
+      const ok = createLeakLedger();
+      await DESTROY_EFFECTS.revokeAppStorageKey(ctx(ok));
+      expect(spies.revoke).toHaveBeenCalledTimes(1);
+      expect(ok.entries).toEqual([]);
 
-        spies.revoke.mockRejectedValue(new Error('HTTP 500'));
-        const bad = createLeakLedger();
-        await DESTROY_EFFECTS.revokeAppStorageKey(ctx(bad));
-        expect(bad.entries).toEqual([
-          expect.objectContaining({
-            severity: 'leak',
-            resourceClass: 'storage-key',
-            resource: 'SENTINEL_KEY_0',
-          }),
-        ]);
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+      spies.revoke.mockRejectedValue(new Error('HTTP 500'));
+      const bad = createLeakLedger();
+      await DESTROY_EFFECTS.revokeAppStorageKey(ctx(bad));
+      expect(bad.entries).toEqual([
+        expect.objectContaining({
+          severity: 'leak',
+          resourceClass: 'storage-key',
+          resource: 'SENTINEL_KEY_0',
+        }),
+      ]);
     },
   );
 
@@ -363,7 +359,7 @@ describe('revoke on destroy', () => {
     const prompts = await import('@clack/prompts');
     vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue(null);
     const warn = vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
-    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-'));
+    const dir = createTempDir('vc-retire-');
     const cwd = process.cwd();
     try {
       process.chdir(dir);
@@ -396,7 +392,6 @@ describe('revoke on destroy', () => {
       expect(leaks.entries).toEqual([]);
     } finally {
       process.chdir(cwd);
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -418,7 +413,7 @@ describe('revoke on destroy', () => {
     const locate = vi.spyOn(S3CompatibleProvider.prototype, 'locateBucket').mockResolvedValue(null);
     const info = vi.spyOn(prompts.log, 'info').mockImplementation(() => {});
     vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
-    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-gone-'));
+    const dir = createTempDir('vc-retire-gone-');
     const cwd = process.cwd();
     try {
       process.chdir(dir);
@@ -466,7 +461,6 @@ describe('revoke on destroy', () => {
       expect(saved.environments).not.toHaveProperty('staging');
     } finally {
       process.chdir(cwd);
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -489,7 +483,7 @@ describe('revoke on destroy', () => {
       .mockResolvedValue(undefined as never);
     const info = vi.spyOn(prompts.log, 'info').mockImplementation(() => {});
     vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
-    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-back-'));
+    const dir = createTempDir('vc-retire-back-');
     const cwd = process.cwd();
     try {
       process.chdir(dir);
@@ -534,7 +528,6 @@ describe('revoke on destroy', () => {
       expect(saved.destroyedEnvironments.old).not.toHaveProperty('appBucketPurged');
     } finally {
       process.chdir(cwd);
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -562,7 +555,7 @@ describe('revoke on destroy', () => {
       .mockResolvedValue(undefined as never);
     const info = vi.spyOn(prompts.log, 'info').mockImplementation(() => {});
     vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
-    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-moved-'));
+    const dir = createTempDir('vc-retire-moved-');
     const cwd = process.cwd();
     try {
       process.chdir(dir);
@@ -613,7 +606,6 @@ describe('revoke on destroy', () => {
       });
     } finally {
       process.chdir(cwd);
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -634,13 +626,12 @@ describe('the separation invariant: the app pair is never the WAL-G or Pulumi pa
   let stage: string | undefined;
   beforeEach(() => {
     cwdBackup = process.cwd();
-    dir = mkdtempSync(join(tmpdir(), 'vc-app-sep-'));
+    dir = createTempDir('vc-app-sep-');
     writeFileSync(join(dir, '.env'), 'BETTER_AUTH_SECRET=SENTINEL_AUTH\n');
     process.chdir(dir);
   });
   afterEach(() => {
     process.chdir(cwdBackup);
-    rmSync(dir, { recursive: true, force: true });
     if (stage) rmSync(stage, { recursive: true, force: true });
     stage = undefined;
   });
@@ -746,7 +737,7 @@ describe('readiness: the app key HeadBucket runs inside the concurrent finalize'
   });
 
   it('the orchestrator never awaits the readiness check serially before IaC', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const uses = [...src.matchAll(/waitForAppKeyReady\(/g)];
     // Exactly one call, inside startAppBucketFinalize, and not awaited there.
     expect(uses).toHaveLength(1);
@@ -861,7 +852,7 @@ describe('GitOps gets the app pair, never the infra pair on a scoping provider',
   });
 
   it('no repo-level S3 pair is seeded; the per-env secrets carry the app pair', async () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/github-environments.js'), 'utf-8');
+    const src = readRepoFile('src/lib/github-environments.js');
     expect(src).not.toMatch(/setSecretFromBodyFile\('S3_(ACCESS|SECRET)_KEY'/);
     const { buildPerEnvSecrets } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
     const perEnv = buildPerEnvSecrets(

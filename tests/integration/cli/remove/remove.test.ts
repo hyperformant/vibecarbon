@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../../_shared/source-files.js';
 import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
@@ -127,12 +128,9 @@ describe('vibecarbon remove', () => {
         'docker-compose.n8n.prod.yml': 'compose/docker-compose.prod.yml',
       };
       for (const [rel, src] of Object.entries(mapped)) {
-        expect(existsSync(join(process.cwd(), 'carbon', rel)), rel).toBe(false);
+        expect(existsSync(join(REPO_ROOT, 'carbon', rel)), rel).toBe(false);
         mkdirSync(dirname(join(project, rel)), { recursive: true });
-        writeFileSync(
-          join(project, rel),
-          readFileSync(join(process.cwd(), 'services', 'n8n', src)),
-        );
+        writeFileSync(join(project, rel), readFileSync(join(REPO_ROOT, 'services', 'n8n', src)));
       }
       const manifestPath = join(project, '.vibecarbon.json');
       const seeded = JSON.parse(readFileSync(manifestPath, 'utf-8'));

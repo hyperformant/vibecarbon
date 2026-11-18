@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   WARM_REDEPLOY_APP_FILE,
   WARM_REDEPLOY_MANIFEST_FILE,
@@ -21,10 +20,7 @@ import {
  * costly, silent mis-wiring, so it gets a tripwire.
  */
 describe('_run-lifecycle.ts: warm-redeploy-change wiring', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../tests/e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
 
   it('is filtered out for every mode except k8s', () => {
     // k8s-single only: compose/compose-ha have no k3s-apply gate to guard, and
@@ -78,10 +74,7 @@ describe('_run-lifecycle.ts: warm-redeploy-change wiring', () => {
 });
 
 describe('backup-evidence check wiring', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../tests/e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
 
   it('runs at BOTH specced hook points — after deploy and again after scale', () => {
     const calls = [...src.matchAll(/runBackupEvidenceChecks\(/g)];

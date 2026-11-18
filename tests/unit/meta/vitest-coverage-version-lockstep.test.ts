@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * `vitest` and `@vitest/coverage-v8` must be declared AND resolved at the same
@@ -36,8 +35,6 @@ import { describe, expect, it } from 'vitest';
  * an exact pin and the resolved versions are what matter.
  */
 
-const REPO_ROOT = resolve(__dirname, '../../..');
-
 /** The vitest monorepo publishes every `@vitest/*` package at one version. */
 const PAIR = ['vitest', '@vitest/coverage-v8'] as const;
 
@@ -47,7 +44,7 @@ function baseVersion(version: string): string {
 }
 
 function readJson(...segments: string[]): Record<string, never> {
-  return JSON.parse(readFileSync(join(REPO_ROOT, ...segments), 'utf-8'));
+  return JSON.parse(readRepoFile(...segments));
 }
 
 /**
@@ -87,7 +84,7 @@ describe('vitest and @vitest/coverage-v8 declare one version', () => {
  */
 describe('the shipped lockfiles resolve the pair to one version', () => {
   it('root pnpm-lock.yaml', () => {
-    const lock = load(readFileSync(join(REPO_ROOT, 'pnpm-lock.yaml'), 'utf-8')) as {
+    const lock = load(readRepoFile('pnpm-lock.yaml')) as {
       importers?: Record<string, { devDependencies?: Record<string, { version?: string }> }>;
     };
     const dev = lock.importers?.['.']?.devDependencies;

@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Source-level guard: _run-lifecycle.ts has no unit harness (it's a giant
@@ -25,10 +24,7 @@ import { describe, expect, it } from 'vitest';
  * it.
  */
 describe('_run-lifecycle.ts: every deploy re-seed carries the scenario settings', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../tests/e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
 
   /** The `deployScenario` helper's source, up to the end of its runDeploy call. */
   const helper = (() => {

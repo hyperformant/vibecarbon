@@ -6,10 +6,10 @@
  * stack). After a failover the record follows the role: the new standby is
  * the old primary, with the old primary's types.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -94,7 +94,7 @@ describe('after swapHaRoles the record follows the role', () => {
   });
 
   it('the new standby carries the old primary types', () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-standby-record-'));
+    dir = createTempDir('vc-standby-record-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({

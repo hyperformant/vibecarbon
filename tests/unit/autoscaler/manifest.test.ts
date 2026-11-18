@@ -11,8 +11,9 @@ import { join } from 'node:path';
 import { load as loadYaml, loadAll as loadYamlAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { clusterAutoscalerImageRef } from '../../../src/lib/images.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const DIR = join(process.cwd(), 'carbon', 'k8s', 'base', 'cluster-autoscaler');
+const DIR = join(REPO_ROOT, 'carbon', 'k8s', 'base', 'cluster-autoscaler');
 const DEPLOYMENT_PATH = join(DIR, 'deployment.yaml');
 const CLOUD_CONFIG_PATH = join(DIR, 'cloud-config.yaml');
 const KUSTOMIZATION_PATH = join(DIR, 'kustomization.yaml');

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   assertStorageDns,
   checkStorageDns,
@@ -106,8 +107,7 @@ describe('checkStorageDns', () => {
 
 describe('runner wiring', () => {
   it('runs the gate after capacity resolution and before the db is opened', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(new URL('../../e2e/runner.ts', import.meta.url), 'utf8');
+    const src = readRepoFile('tests/e2e/runner.ts');
     const gate = src.indexOf('await assertStorageDns(');
     expect(gate).toBeGreaterThan(src.indexOf('Resolving capacity'));
     expect(gate).toBeLessThan(src.indexOf('const db = new E2EDb();'));

@@ -8,8 +8,9 @@ import {
   transliterateToAscii,
 } from '../../../src/lib/iac/programs/digitalocean-compose.js';
 import { namesHost } from '../../_shared/hosts.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const CLOUD_INIT_PATH = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
+const CLOUD_INIT_PATH = join(REPO_ROOT, 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
 const sharedCloudInit = readFileSync(CLOUD_INIT_PATH, 'utf-8');
 
 // Step 1 (blocking) parity check: the shared cloud-init's `systemctl enable

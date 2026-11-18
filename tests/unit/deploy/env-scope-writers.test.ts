@@ -6,12 +6,9 @@
  * even the environment's name. Each env has its own app bucket, so no writer
  * carries an object key prefix (S3_KEY_PREFIX was removed by design).
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildAppSecretData, buildInfraSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
-
-const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('k8s app and infra Secrets', () => {
   it('carry the bucket, and neither VC_ENV nor S3_KEY_PREFIX', () => {
@@ -61,7 +58,7 @@ describe('k8s app and infra Secrets', () => {
   });
 
   it('applyK3sManifests hands the Secret the environment only as VIBECARBON_ENV, never VC_ENV', () => {
-    const k3s = src('src/lib/deploy/k8s/k3s.js');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(
       // `restore` is the deploy -restore marker (a backup name and recovery
       // settings), not an environment; nor is `walgRole` (the db's wal-g role
@@ -80,13 +77,13 @@ describe('no writer knows S3_KEY_PREFIX', () => {
     'src/lib/deploy/k8s/k3s.js',
     'src/lib/deploy/app-runtime-env.js',
   ])('%s', (rel) => {
-    expect(src(rel).match(/S3_KEY_PREFIX|keyPrefix/g) ?? []).toEqual([]);
+    expect(readRepoFile(rel).match(/S3_KEY_PREFIX|keyPrefix/g) ?? []).toEqual([]);
   });
 });
 
 describe('compose and compose-ha server .env', () => {
   it('the orchestrator renders the bundle with the environment and its s3Config', () => {
-    const orch = src('src/lib/deploy/orchestrator.js');
+    const orch = readRepoFile('src/lib/deploy/orchestrator.js');
     const options = orch.slice(orch.indexOf('const bundleOptions = {'));
     const body = options.slice(0, options.indexOf('\n  };'));
     expect(body).toMatch(/\benvironment,/);
@@ -95,9 +92,9 @@ describe('compose and compose-ha server .env', () => {
   });
 
   it('compose-ha ships that same rendered bundle, not a second .env writer', () => {
-    const ha = src('src/lib/deploy/effects/compose-ha.js');
+    const ha = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     expect(ha).toContain('bundlePath: ctx.bundlePath,');
     expect(ha).not.toMatch(/renderBundle\(/);
-    expect(src('src/lib/deploy/compose/ha.js')).not.toMatch(/renderBundle\(|S3_BUCKET/);
+    expect(readRepoFile('src/lib/deploy/compose/ha.js')).not.toMatch(/renderBundle\(|S3_BUCKET/);
   });
 });

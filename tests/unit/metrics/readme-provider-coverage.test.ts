@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { testConfig } from '../../config.js';
 import {
   loadPerfData,
@@ -31,11 +32,10 @@ import {
  * supported five. The marketing component had the same gap for Scaleway.
  */
 
-const ROOT = process.cwd();
-const README_PATH = join(ROOT, 'README.md');
-const DATA_PATH = join(ROOT, 'docs', 'perf-data.json');
+const README_PATH = join(REPO_ROOT, 'README.md');
+const DATA_PATH = join(REPO_ROOT, 'docs', 'perf-data.json');
 const CARBON_DATA_PATH = join(
-  ROOT,
+  REPO_ROOT,
   'carbon',
   'src',
   'client',
@@ -44,7 +44,7 @@ const CARBON_DATA_PATH = join(
   'vendor-matrix-data.json',
 );
 const COMPONENT_PATH = join(
-  ROOT,
+  REPO_ROOT,
   'carbon',
   'src',
   'client',
@@ -160,7 +160,7 @@ describe('marketing component data (carbon vendor-matrix)', () => {
     const ALL_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
     for (const id of PROVIDER_IDS) {
-      const providerJs = readFileSync(join(ROOT, 'src', 'lib', 'providers', `${id}.js`), 'utf8');
+      const providerJs = readRepoFile('src', 'lib', 'providers', `${id}.js`);
       const tiersMatch = /static SUPPORTED_TIERS = \[([^\]]*)\]/.exec(providerJs);
       expect(tiersMatch, `${id}.js: no SUPPORTED_TIERS literal`).not.toBeNull();
       const supported = (tiersMatch as RegExpExecArray)[1]

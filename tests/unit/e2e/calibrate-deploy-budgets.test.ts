@@ -1,9 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   addSeeds,
   budgetFromSamples,
@@ -14,6 +13,7 @@ import {
   renderReport,
   seededRow,
 } from '../../../scripts/calibrate-deploy-budgets.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const s = (ownedS: number, tlsS = 5) => ({ ownedS, tlsS });
 
@@ -59,8 +59,7 @@ describe('the budget rule', () => {
 });
 
 describe('reading the results db', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'calibrate-'));
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = createTempDir('calibrate-');
   const dbPath = path.join(dir, 'e2e.db');
   const db = new Database(dbPath);
   db.exec(`

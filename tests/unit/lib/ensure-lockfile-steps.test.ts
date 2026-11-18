@@ -5,10 +5,7 @@
  * after every install, npm's `npm ci --dry-run` check between passes, and the
  * exact install argv and options create ran before it shared this loop.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { runCommand } = vi.hoisted(() => ({ runCommand: vi.fn() }));
 vi.mock('../../../src/lib/command.js', async (importOriginal) => ({
@@ -17,6 +14,7 @@ vi.mock('../../../src/lib/command.js', async (importOriginal) => ({
 }));
 
 import { ensureLockfile, MAX_LOCKFILE_PASSES } from '../../../src/lib/package-manager.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const NPM_INSTALL = 'npm install --no-audit --no-fund';
 const NPM_CHECK = 'npm ci --dry-run --no-audit --no-fund';
@@ -27,7 +25,7 @@ let events: string[];
 let checks: (string | null)[];
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-ensure-lockfile-'));
+  dir = createTempDir('vc-ensure-lockfile-');
   events = [];
   checks = [];
   runCommand.mockReset();
@@ -36,7 +34,6 @@ beforeEach(() => {
     return argv[1] === 'ci' ? (checks.shift() ?? null) : '';
   });
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const opts = (startMessage?: string) => ({
   onStep: (m: string) => events.push(`step ${m}`),

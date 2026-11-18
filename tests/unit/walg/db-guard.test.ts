@@ -3,7 +3,6 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -11,10 +10,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * carbon/volumes/db/db-guard.sh is the compose db container's entrypoint. A
@@ -24,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
  * it refuses and says what to do. Otherwise it hands over to the image's own
  * db-entrypoint.sh unchanged.
  */
-const GUARD = fileURLToPath(new URL('../../../carbon/volumes/db/db-guard.sh', import.meta.url));
+const GUARD = join(REPO_ROOT, 'carbon/volumes/db/db-guard.sh');
 
 let dir: string;
 let pgdata: string;
@@ -39,7 +38,7 @@ function runGuard(env: Record<string, string> = {}) {
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-db-guard-'));
+  dir = createTempDir('vc-db-guard-');
   pgdata = join(dir, 'data');
   bin = join(dir, 'bin');
   mkdirSync(pgdata);
@@ -49,10 +48,6 @@ beforeEach(() => {
   const stub = join(bin, 'db-entrypoint.sh');
   writeFileSync(stub, '#!/bin/sh\necho "STUB-ENTRYPOINT $*"\n');
   chmodSync(stub, 0o755);
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 describe('db-guard.sh', () => {

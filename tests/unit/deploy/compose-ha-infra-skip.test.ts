@@ -7,10 +7,10 @@
  * the real upStack does once its seal and history cleanup finish
  * (fake.sealFinishes false: they didn't).
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const fake = vi.hoisted(() => ({
   upStack: vi.fn(),
@@ -99,7 +99,7 @@ function warmCtx(first: Record<string, any>, over: Record<string, unknown> = {})
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'ha-infra-skip-'));
+  dir = createTempDir('ha-infra-skip-');
   cwd = process.cwd();
   process.chdir(dir);
   mkdirSync(join(dir, '.vibecarbon'));
@@ -132,7 +132,6 @@ beforeEach(() => {
 
 afterEach(() => {
   process.chdir(cwd);
-  rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 

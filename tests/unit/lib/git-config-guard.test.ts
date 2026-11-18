@@ -1,11 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertConfigUnchanged,
   diffConfigSnapshots,
   parseConfigList,
 } from '../../_shared/git-config-guard.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createGuard as guardSetup } from '../../setup/git-config-guard.js';
 
 const list = (...records: string[]) => `${records.join('\0')}\0`;
@@ -163,7 +162,7 @@ describe('the global setup teardown', () => {
 });
 
 describe('every vitest project runs the guard', () => {
-  const config = readFileSync(join(process.cwd(), 'vitest.config.ts'), 'utf-8');
+  const config = readRepoFile('vitest.config.ts');
 
   it('the root config lists it and every project extends the root', () => {
     expect(config).toMatch(/^ {4}globalSetup: \['tests\/setup\/git-config-guard\.ts'\]/m);

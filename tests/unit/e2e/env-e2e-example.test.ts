@@ -15,10 +15,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 describe('root .gitignore covers tests/.env.e2e', () => {
   it('contains the tests/.env.e2e pattern', () => {
-    const gitignore = readFileSync(join(process.cwd(), '.gitignore'), 'utf-8');
+    const gitignore = readRepoFile('.gitignore');
     const lines = gitignore
       .split('\n')
       .map((l) => l.trim())
@@ -28,7 +29,7 @@ describe('root .gitignore covers tests/.env.e2e', () => {
 });
 
 describe('tests/.env.e2e.example is value-free', () => {
-  const examplePath = join(process.cwd(), 'tests', '.env.e2e.example');
+  const examplePath = join(REPO_ROOT, 'tests', '.env.e2e.example');
   const parsed = parseDotenv(readFileSync(examplePath, 'utf-8'));
 
   it('defines at least one key (sanity: the parse actually found something)', () => {

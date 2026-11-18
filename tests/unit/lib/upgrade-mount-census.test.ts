@@ -20,8 +20,9 @@ import { describe, expect, it } from 'vitest';
 import { projectPathFor } from '../../../src/lib/template-paths.js';
 import { getFilePolicy } from '../../../src/lib/upgrade-policy.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const CARBON = join(__dirname, '../../../carbon');
+const CARBON = join(REPO_ROOT, 'carbon');
 
 /**
  * The template's files, as git sees them. A walk of the disk also finds a

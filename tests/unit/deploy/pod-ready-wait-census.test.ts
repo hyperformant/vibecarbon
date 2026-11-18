@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Every `kubectl wait --for=condition=Ready pods --all` in src/ must exclude
@@ -19,7 +19,7 @@ import { sourceFiles } from '../../_shared/source-files.js';
  */
 describe('pod-Ready wait census', () => {
   it('every `wait --for=condition=Ready pods --all` excludes terminal phases', () => {
-    const srcRoot = join(new URL('../../..', import.meta.url).pathname, 'src');
+    const srcRoot = join(REPO_ROOT, 'src');
     const files = sourceFiles(srcRoot, { exts: ['.js'] });
     let members = 0;
     const misses: string[] = [];

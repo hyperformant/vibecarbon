@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Regression guard for a frontend bundle built without its VITE_* values after
@@ -15,10 +14,7 @@ import { describe, expect, it } from 'vitest';
  * did not verify the frontend after scaling).
  */
 describe('scale wires VITE build args into the remote app build', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../src/scale.js', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('src/scale.js');
 
   it('imports collectComposeBuildArgs', () => {
     expect(src).toMatch(/import\s*\{\s*collectComposeBuildArgs\s*\}/);

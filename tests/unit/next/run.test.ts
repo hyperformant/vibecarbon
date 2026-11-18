@@ -11,17 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * which exit code a child's result becomes.
  */
 
-const clack = vi.hoisted(() => ({
-  intro: vi.fn(),
-  outro: vi.fn(),
-  note: vi.fn(),
-  confirm: vi.fn(),
-  select: vi.fn(),
-  text: vi.fn(),
-  cancel: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), success: vi.fn() },
-}));
+const clack = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['intro', 'outro', 'note', 'confirm', 'select', 'text', 'cancel'],
+    log: ['info', 'warn', 'error', 'success'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clack);
 
 const detectProjectState = vi.hoisted(() => vi.fn());

@@ -9,24 +9,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const setEnvVarMock = vi.hoisted(() => vi.fn());
-const clackMock = vi.hoisted(() => ({
-  text: vi.fn(),
-  password: vi.fn(),
-  confirm: vi.fn(),
-  select: vi.fn(),
-  note: vi.fn(),
-  isCancel: vi.fn(() => false),
-  cancel: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  log: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    step: vi.fn(),
-    message: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['text', 'password', 'confirm', 'select', 'note', 'cancel'],
+    log: ['info', 'warn', 'error', 'success', 'step', 'message'],
+    spinner: true,
+    with: { isCancel: vi.fn(() => false) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/project.js', () => ({
   setEnvVar: setEnvVarMock,

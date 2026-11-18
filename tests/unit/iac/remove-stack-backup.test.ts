@@ -12,7 +12,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import * as progress from '../../../src/lib/cli/progress.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const { removeStackBackup } = await import('../../../src/lib/iac/state-history.js');
@@ -165,7 +165,7 @@ describe('removeStackBackup', () => {
 // A source census passes on dead code when it greps the whole file. This one
 // slices the body of the function around each `removeStack` call, and the
 // calls it looks for are real code lines, not comments.
-const SRC = join(__dirname, '../../../src');
+const SRC = join(REPO_ROOT, 'src');
 
 const codeOnly = (text: string) =>
   text

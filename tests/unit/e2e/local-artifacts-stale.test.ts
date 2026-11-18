@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   parseScratchProject,
   reapStaleLocalArtifacts,
@@ -62,13 +62,12 @@ describe('reapStaleLocalArtifacts', () => {
   let tmpRoot: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'stale-reap-'));
+    root = createTempDir('stale-reap-');
     rigDir = join(root, 'results');
     tmpRoot = join(root, 'tmp');
     mkdirSync(rigDir);
     mkdirSync(tmpRoot);
   });
-  afterEach(() => rmSync(root, { recursive: true, force: true }));
 
   it("reaps a 13-hour-old run's images and volumes", async () => {
     const { docker, calls } = fakeDocker(

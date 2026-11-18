@@ -11,6 +11,7 @@ import {
   MASTER_LABELS,
 } from '../../_shared/fake-nodes.js';
 import { namesHost } from '../../_shared/hosts.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
@@ -522,30 +523,24 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
   writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
-    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+    readRepoFile('carbon/k8s/base/db/statefulset.yaml'),
   );
   // The Traefik CRDs apply from a rendered copy of this directory.
   mkdirSync(join(dir, 'k8s', 'infra', 'traefik-crds'), { recursive: true });
   writeFileSync(
     join(dir, 'k8s', 'infra', 'traefik-crds', 'kustomization.yaml'),
-    readFileSync(
-      join(__dirname, '../../../carbon/k8s/infra/traefik-crds/kustomization.yaml'),
-      'utf-8',
-    ),
+    readRepoFile('carbon/k8s/infra/traefik-crds/kustomization.yaml'),
   );
   // A k8s-ha role renders its replication hostPort into db/ as a kustomize patch.
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'kustomization.yaml'),
-    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/kustomization.yaml'), 'utf-8'),
+    readRepoFile('carbon/k8s/base/db/kustomization.yaml'),
   );
   if (withRegistry) {
     mkdirSync(join(dir, 'k8s', 'base', 'registry'), { recursive: true });
     writeFileSync(
       join(dir, 'k8s', 'base', 'registry', 'local-registry.yaml'),
-      readFileSync(
-        join(__dirname, '../../../carbon/k8s/base/registry/local-registry.yaml'),
-        'utf-8',
-      ),
+      readRepoFile('carbon/k8s/base/registry/local-registry.yaml'),
     );
   }
   if (withObservability) {

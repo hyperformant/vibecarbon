@@ -1,7 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock runCommand BEFORE the destroy module loads so the real one
 // (which would actually shell out to kubectl) never runs.
@@ -16,6 +15,7 @@ vi.mock('../../../src/lib/command.js', async (orig) => {
 });
 
 import { cleanupClusterPVCs } from '../../../src/destroy.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('cleanupClusterPVCs', () => {
   let tmpDir: string;
@@ -23,12 +23,8 @@ describe('cleanupClusterPVCs', () => {
 
   beforeEach(() => {
     runCommandMock.mockReset();
-    tmpDir = mkdtempSync(join(tmpdir(), 'vc-csi-pvc-cleanup-'));
+    tmpDir = createTempDir('vc-csi-pvc-cleanup-');
     kubeconfigPath = join(tmpDir, 'kubeconfig-prod');
-  });
-
-  afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it('no-ops when kubeconfig file does not exist (cluster never came up)', async () => {

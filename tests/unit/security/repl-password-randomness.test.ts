@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateReplPassword } from '../../../src/lib/secrets.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('C-1: replication password', () => {
   it('generates a fresh password per call', () => {
@@ -29,10 +30,8 @@ describe('C-1: replication password', () => {
 
 describe('C-1: legacy hardcoded password removed from deploy code', () => {
   it('compose/ha.js and k8s/ha/index.js no longer contain the literal "repl_password"', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
     for (const rel of ['src/lib/deploy/compose/ha.js', 'src/lib/deploy/k8s/ha/index.js']) {
-      const content = readFileSync(join(process.cwd(), rel), 'utf-8');
+      const content = readRepoFile(rel);
       expect(content).not.toMatch(/repl_password/);
     }
   });

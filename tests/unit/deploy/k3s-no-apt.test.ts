@@ -10,18 +10,17 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const DIR = join(fileURLToPath(new URL('../../..', import.meta.url)), 'carbon/cloud-init/k3s');
+const DIR = join(REPO_ROOT, 'carbon/cloud-init/k3s');
 const scripts = readdirSync(DIR)
   .filter((f) => f.endsWith('.sh'))
   .map((f) => ({ name: f, lines: readFileSync(join(DIR, f), 'utf8').split('\n') }));
@@ -98,7 +97,7 @@ describe('Hetzner private-NIC wait loop (executed)', () => {
     expect(to, `${file}: loop end marker`).toBeGreaterThan(from);
     const loop = text.slice(from, to + END.length);
 
-    tmp = mkdtempSync(join(tmpdir(), 'nicwait-'));
+    tmp = createTempDir('nicwait-');
     const bin = join(tmp, 'bin');
     mkdirSync(bin);
     const shim = (name: string, body: string) => {

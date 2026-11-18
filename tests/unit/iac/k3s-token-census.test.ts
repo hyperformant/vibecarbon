@@ -2,6 +2,7 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Census: every k8s program refuses to build without a k3s token. The CLI
@@ -60,7 +61,7 @@ const k8sProviders = Object.entries(PROVIDERS).filter(([, P]) =>
 
 describe('no k8s program makes its own k3s token (census)', () => {
   it('walks every k8s program on disk', () => {
-    const files = readdirSync(join(process.cwd(), 'src/lib/iac/programs')).filter((f) =>
+    const files = readdirSync(join(REPO_ROOT, 'src/lib/iac/programs')).filter((f) =>
       f.endsWith('-k8s.js'),
     );
     expect(files.length).toBeGreaterThanOrEqual(3);

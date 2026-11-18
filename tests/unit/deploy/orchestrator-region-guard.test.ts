@@ -3,12 +3,11 @@
  * before any provider or Pulumi work: the guard function throws, and in the
  * entry function it is called ahead of the first provider-touching step.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { assertDeployRegion } from '../../../src/lib/deploy/orchestrator.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('assertDeployRegion', () => {
   it('refuses a Linode k8s deploy to a VPC-less region', () => {
@@ -40,10 +39,7 @@ describe('assertDeployRegion', () => {
   });
 
   it('is called in the entry function before the first provider-touching step', () => {
-    const src = readFileSync(
-      join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
-      'utf8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const guard = src.indexOf('assertDeployRegion(providerFor(config)');
     const firstProviderWork = src.indexOf('ensureOperatorIpAccess({');
     expect(guard).toBeGreaterThan(0);

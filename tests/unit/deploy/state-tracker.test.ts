@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
 import { STATE_VERSION, StateTracker } from '../../../src/lib/deploy/state.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Finding 2: shouldSkip must not skip a step whose remote resource was deleted
 // out-of-band, and an incompatible persisted state (post-upgrade) must not be
@@ -15,13 +15,12 @@ describe('StateTracker', () => {
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-state-'));
+    dir = createTempDir('vc-state-');
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
 
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const stateFile = () => join(dir, '.vibecarbon', 'deploy-state-prod.json');

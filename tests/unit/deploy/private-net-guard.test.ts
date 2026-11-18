@@ -22,8 +22,9 @@ import { describe, expect, it } from 'vitest';
 import { renderCarbonAutoscalerConfig } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const SNIPPET_PATH = join(__dirname, '../../../carbon/cloud-init/k3s/_private-net-guard.sh');
+const SNIPPET_PATH = join(REPO_ROOT, 'carbon/cloud-init/k3s/_private-net-guard.sh');
 const snippet = readFileSync(SNIPPET_PATH, 'utf-8');
 
 /** Body of the guard's `repair()` shell function, for order-sensitive checks. */
@@ -272,12 +273,9 @@ describe('provider + tier scoping (deliberate — do not widen without evidence)
     // hetzner-compose.js provisions NO hcloud.Network; compose-ha replicates
     // over WireGuard with hardcoded 10.99.0.x tunnel addresses
     // (src/lib/deploy/wireguard.js). No DHCP lease anywhere on that path.
-    const composeProgram = readFileSync(
-      join(__dirname, '../../../src/lib/iac/programs/hetzner-compose.js'),
-      'utf-8',
-    );
+    const composeProgram = readRepoFile('src/lib/iac/programs/hetzner-compose.js');
     expect(composeProgram).not.toMatch(/new hcloud\.Network\b/);
-    const wg = readFileSync(join(__dirname, '../../../src/lib/deploy/wireguard.js'), 'utf-8');
+    const wg = readRepoFile('src/lib/deploy/wireguard.js');
     expect(wg).toMatch(/WG_PRIMARY_IP = '10\.99\.0\.1'/);
   });
 });

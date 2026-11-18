@@ -7,9 +7,8 @@
  * retries those signatures so a single transient doesn't kill the entire
  * deploy.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // vi.useFakeTimers() does not fake `node:timers/promises` (sinon limitation),
 // so route runWithRetry's sleep through the faked global setTimeout — mirrors
@@ -354,7 +353,7 @@ describe('applyKustomization', () => {
   });
 
   it('census: no kustomization is applied from the operator machine', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(src).not.toMatch(/\['apply', '-k'/);
   });
 });
@@ -364,10 +363,7 @@ describe('census: every psql-over-kubectl call site opts into the lifecycle ladd
   // missing regex, it was two call sites that never opted in — so the durable
   // guard walks the call sites rather than testing the regex again. A new
   // `kubectl exec ... psql` added without transientExtra fails here.
-  const source = readFileSync(
-    join(import.meta.dirname, '../../../src/lib/deploy/k8s/k3s.js'),
-    'utf-8',
-  );
+  const source = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
   /** Span of each runKubectlWithRetry(...) call, by paren depth. */
   function callSites(src: string): { line: number; text: string }[] {
@@ -450,7 +446,7 @@ describe('rollout-status transient coverage census (d4 run 4, 2026-08-28)', () =
   // transient-classified ladder, like rolloutApp's streaming variant, or be
   // explicitly non-fatal via ignoreError).
   it('k3s.js has no bare runCommandAsync rollout-status gate', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const lines = src.split('\n');
     lines.forEach((line, i) => {
       if (!line.includes('runCommandAsync(')) return;

@@ -22,10 +22,10 @@ import {
   staleClusterIssuersProblem,
   staleObservabilityTlsProblem,
 } from '../../../src/lib/deploy/k8s/one-certificate.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const ROOT = process.cwd();
-const SHIPPED = join(ROOT, 'services', 'observability', 'k8s');
+const SHIPPED = join(REPO_ROOT, 'services', 'observability', 'k8s');
 
 function projectWith(files: Record<string, string>): string {
   const dir = createTempDir('vc-one-cert-');
@@ -104,7 +104,7 @@ describe('staleObservabilityTlsProblem', () => {
   });
 });
 
-const TEMPLATE_ISSUERS = join(ROOT, 'carbon', 'k8s', 'infra', 'cert-manager-resources');
+const TEMPLATE_ISSUERS = join(REPO_ROOT, 'carbon', 'k8s', 'infra', 'cert-manager-resources');
 const ISSUERS_REFUSAL =
   "This project's cluster issuers predate HTTP-01 certificates. Run `vibecarbon upgrade`, then deploy again. Nothing was provisioned.";
 
@@ -164,7 +164,7 @@ describe('staleClusterIssuersProblem', () => {
   });
 
   it('is called in the k8s-only branch of the deploy preflight, before the operator-IP step', () => {
-    const orch = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'orchestrator.js'), 'utf8');
+    const orch = readRepoFile('src', 'lib', 'deploy', 'orchestrator.js');
     const tierGate = orch.indexOf('assertTierSupported(providerFor(config), tier);');
     const call = orch.indexOf('staleClusterIssuersProblem(process.cwd())');
     const operatorIp = orch.indexOf('// Operator-IP access:');
@@ -254,8 +254,8 @@ describe('retireObservabilityCertificateIfPresent', () => {
 });
 
 describe('a k8s deploy refuses a stale add-on copy before anything is provisioned', () => {
-  const k3s = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'k8s', 'k3s.js'), 'utf8');
-  const orch = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'orchestrator.js'), 'utf8');
+  const k3s = readRepoFile('src', 'lib', 'deploy', 'k8s', 'k3s.js');
+  const orch = readRepoFile('src', 'lib', 'deploy', 'orchestrator.js');
 
   it('checks the project in the preflight, k8s tiers only, before the operator-IP step', () => {
     const tierGate = orch.indexOf('assertTierSupported(providerFor(config), tier);');

@@ -11,6 +11,7 @@ import {
   waitForPostgres,
   waitWithBackoff,
 } from '../../_shared/docker-utils.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 import { testConfig } from '../../config.js';
 
@@ -52,7 +53,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     // its compose overlay + volume configs are present before we compose
     // them up.
     execSync(
-      `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -admin-email test@smoke.local -admin-password smoketest123 && (cd ${projectName} && node ${join(process.cwd(), 'src/cli.js')} add observability -y)`,
+      `node ${join(REPO_ROOT, 'src/cli.js')} create ${projectName} -y -admin-email test@smoke.local -admin-password smoketest123 && (cd ${projectName} && node ${join(REPO_ROOT, 'src/cli.js')} add observability -y)`,
       {
         cwd: tempDir,
         encoding: 'utf-8',

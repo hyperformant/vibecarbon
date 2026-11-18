@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { testConfig } from '../../config.js';
 import {
   resolveCapacity,
@@ -32,7 +33,7 @@ import {
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
 const EU_LOCATIONS = ['nbg1', 'hel1', 'fsn1'] as const;
-const WORKFLOW_PATH = join(process.cwd(), '.github', 'workflows', 'e2e-us-perf.yml');
+const WORKFLOW_PATH = join(REPO_ROOT, '.github', 'workflows', 'e2e-us-perf.yml');
 
 describe('capacityPreferences.hetzner (cost guard)', () => {
   it('lists only EU locations — no ash/hil (US) and no sin (CPX/CCX-only, price uplift)', () => {

@@ -24,9 +24,8 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const ROOTS = [
   'src',
   'carbon/scripts',
@@ -85,17 +84,17 @@ describe('cert-manager Deployments are never changed after their apply', () => {
   it('no code path patches, sets, restarts or scales a cert-manager Deployment', () => {
     const hits: string[] = [];
     for (const root of ROOTS) {
-      for (const path of files(join(ROOT, root))) {
+      for (const path of files(join(REPO_ROOT, root))) {
         const text = readFileSync(path, 'utf-8');
         const found = /\.(m?js|ts)$/.test(path) ? jsOffenders(text) : shellOffenders(text);
-        for (const hit of found) hits.push(`${relative(ROOT, path)}: ${hit}`);
+        for (const hit of found) hits.push(`${relative(REPO_ROOT, path)}: ${hit}`);
       }
     }
     expect(hits).toEqual([]);
   });
 
   it('the retired test-and-set is gone by name', () => {
-    const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(k3s).not.toMatch(/ensureCertManagerControllerFlags/);
   });
 });
@@ -124,8 +123,8 @@ describe('the upstream cert-manager manifest is named only by the renderer', () 
   it('no deploy surface outside render-cert-manager.mjs names releases/download/.../cert-manager.yaml', () => {
     const hits: string[] = [];
     for (const root of URL_ROOTS) {
-      for (const path of everyFile(join(ROOT, root))) {
-        const rel = relative(ROOT, path);
+      for (const path of everyFile(join(REPO_ROOT, root))) {
+        const rel = relative(REPO_ROOT, path);
         if (rel === RENDERER) continue;
         for (const line of upstreamManifestLines(readFileSync(path, 'utf-8'))) {
           hits.push(`${rel}: ${line}`);
@@ -136,7 +135,7 @@ describe('the upstream cert-manager manifest is named only by the renderer', () 
   });
 
   it('the renderer does name it (the exemption is live)', () => {
-    expect(upstreamManifestLines(readFileSync(join(ROOT, RENDERER), 'utf-8'))).not.toEqual([]);
+    expect(upstreamManifestLines(readRepoFile(RENDERER))).not.toEqual([]);
   });
 
   it('bites: the retired workflow line and the retired JS constant', () => {

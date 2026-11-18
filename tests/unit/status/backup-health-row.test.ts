@@ -11,8 +11,7 @@
  * give a segment up.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -28,7 +27,9 @@ import {
   parseWalName,
 } from '../../../src/lib/status/backup-health.js';
 import { attachBackups } from '../../../src/status.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { withSshContract } from '../../_shared/ssh-contract.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const NOW = Date.parse('2026-10-21T12:00:00.000Z');
 const HOUR = 3_600_000;
@@ -575,15 +576,13 @@ describe('--json', () => {
       walSegmentsDropped24h: 0,
       walGap: null,
     });
-    expect(readFileSync(join(__dirname, '../../../src/status.js'), 'utf8')).toContain(
-      'writeJson(allData)',
-    );
+    expect(readRepoFile('src/status.js')).toContain('writeJson(allData)');
   });
 });
 
 describe('census: backup reads take their target from the recorded primary/lineage', () => {
-  const src = readFileSync(join(__dirname, '../../../src/lib/status/backup-health.js'), 'utf8');
-  const status = readFileSync(join(__dirname, '../../../src/status.js'), 'utf8');
+  const src = readRepoFile('src/lib/status/backup-health.js');
+  const status = readRepoFile('src/status.js');
 
   it('every ssh/kubectl/psql call in backup-health.js targets the resolvePrimary ip', () => {
     expect(src).toContain('resolvePrimary(');
@@ -627,32 +626,28 @@ describe('composeRunningProbe reads the backup lock without taking it', () => {
     spawnSync('sh', ['-c', composeRunningProbe(lock)], { encoding: 'utf-8' }).stdout.trim();
 
   it('absent file: 0; unlocked file: 0; flock held: 1; and the probe never locks', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'running-probe-'));
+    const dir = createTempDir('running-probe-');
     const lock = join(dir, 'backup.lock');
+    expect(probe(lock)).toBe('0');
+    writeFileSync(lock, '');
+    expect(probe(lock)).toBe('0');
+    const holder = spawn('flock', [lock, 'sleep', '1'], { stdio: 'ignore' });
     try {
-      expect(probe(lock)).toBe('0');
-      writeFileSync(lock, '');
-      expect(probe(lock)).toBe('0');
-      const holder = spawn('flock', [lock, 'sleep', '1'], { stdio: 'ignore' });
-      try {
-        let seen = '0';
-        for (let i = 0; i < 100 && seen !== '1'; i++) {
-          await new Promise((r) => setTimeout(r, 20));
-          seen = probe(lock);
-        }
-        expect(seen).toBe('1');
-        // Still held by the sleeper alone: the probe left no lock of its own.
-        expect(probe(lock)).toBe('1');
-      } finally {
-        holder.kill('SIGKILL');
-      }
-      // The holder's sleep ends on its own; the probe then reads 0 again.
-      for (let i = 0; i < 200 && probe(lock) !== '0'; i++) {
+      let seen = '0';
+      for (let i = 0; i < 100 && seen !== '1'; i++) {
         await new Promise((r) => setTimeout(r, 20));
+        seen = probe(lock);
       }
-      expect(probe(lock)).toBe('0');
+      expect(seen).toBe('1');
+      // Still held by the sleeper alone: the probe left no lock of its own.
+      expect(probe(lock)).toBe('1');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      holder.kill('SIGKILL');
     }
+    // The holder's sleep ends on its own; the probe then reads 0 again.
+    for (let i = 0; i < 200 && probe(lock) !== '0'; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(probe(lock)).toBe('0');
   });
 });

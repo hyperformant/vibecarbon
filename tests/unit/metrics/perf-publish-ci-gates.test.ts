@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * CI-only gates on the published performance surfaces — the two guards that
@@ -17,12 +16,9 @@ import { sourceFiles } from '../../_shared/source-files.js';
  * execute end-to-end.
  */
 
-const ROOT = join(__dirname, '..', '..', '..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
 describe('local e2e runs never publish performance surfaces', () => {
   it('runner.ts gates the whole perf-surface pass on GITHUB_ACTIONS', () => {
-    const runner = read('tests/e2e/runner.ts');
+    const runner = readRepoFile('tests/e2e/runner.ts');
     const gate = runner.indexOf('if (!process.env.GITHUB_ACTIONS)');
     expect(gate, 'the CI-only gate is gone from runner.ts').toBeGreaterThan(-1);
     // The surface writes must sit AFTER the gate (inside its else branch) —
@@ -40,12 +36,12 @@ describe('local e2e runs never publish performance surfaces', () => {
   });
 
   it('runner.ts never shells a PR into existence itself', () => {
-    const runner = read('tests/e2e/runner.ts');
+    const runner = readRepoFile('tests/e2e/runner.ts');
     expect(runner).not.toMatch(/gh pr create|publishPr\(/);
   });
 
   it('publish-perf-pr.ts refuses to publish off any ref that is not main (local = unset = not main)', () => {
-    const publisher = read('tests/e2e/metrics/publish-perf-pr.ts');
+    const publisher = readRepoFile('tests/e2e/metrics/publish-perf-pr.ts');
     const guard = publisher.indexOf("if (ref !== 'main')");
     expect(guard, 'the GITHUB_REF_NAME main-gate is gone').toBeGreaterThan(-1);
     const publish = publisher.indexOf('publishPr(result.changedFiles)');
@@ -56,18 +52,18 @@ describe('local e2e runs never publish performance surfaces', () => {
   it('nothing local invokes publish-perf-pr — the CI workflow is its only caller', () => {
     // Census over every locally-runnable entry surface: npm scripts and the
     // scripts/ helpers. The workflow file is the one allowed caller.
-    const pkg = read('package.json');
+    const pkg = readRepoFile('package.json');
     expect(pkg).not.toContain('publish-perf-pr');
     // Recursive: scripts/ may have subdirectories — a
     // helper nested one level down is exactly as locally-runnable as a
     // top-level one, so the census walks files at every depth.
-    const offenders = sourceFiles(join(ROOT, 'scripts'), { relativeTo: ROOT }).filter((rel) =>
-      read(rel).includes('publish-perf-pr'),
+    const offenders = sourceFiles(join(REPO_ROOT, 'scripts'), { relativeTo: REPO_ROOT }).filter(
+      (rel) => readRepoFile(rel).includes('publish-perf-pr'),
     );
     expect(offenders, 'local scripts must not invoke the stat-PR publisher').toEqual([]);
     // Sanity: the allowed CI call site still exists (otherwise this census
     // is guarding a publisher nothing runs).
-    expect(read('.github/workflows/e2e-us-perf.yml')).toContain(
+    expect(readRepoFile('.github/workflows/e2e-us-perf.yml')).toContain(
       'tsx tests/e2e/metrics/publish-perf-pr.ts',
     );
   });

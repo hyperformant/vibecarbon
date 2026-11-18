@@ -23,9 +23,9 @@ import {
   PLATFORM_BUILD_FLAG,
   TARGET_PLATFORM,
 } from '../../../src/lib/deploy/platform.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC_ROOT = join(process.cwd(), 'src');
+const SRC_ROOT = join(REPO_ROOT, 'src');
 
 const SRC_FILES = sourceFiles(SRC_ROOT, { exts: ['.js'] }).map((path) => ({
   path,

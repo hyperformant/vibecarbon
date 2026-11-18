@@ -18,8 +18,9 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const LIB = join(__dirname, '../../../src/lib');
+const LIB = join(REPO_ROOT, 'src/lib');
 const BACKENDS = readdirSync(LIB).filter((f) => f.endsWith('-dns.js'));
 
 interface Fn {

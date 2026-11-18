@@ -17,7 +17,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -35,6 +35,7 @@ import {
   setupE2EEnv,
   trustLetsEncryptStagingRoots,
 } from '../../../tests/e2e/utils/e2e-env.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The four roots letsencrypt.org/docs/staging-environment/ listed as current
@@ -158,7 +159,7 @@ describe('trustLetsEncryptStagingRoots', () => {
   it('merges rather than clobbers an operator-supplied NODE_EXTRA_CA_CERTS', () => {
     // Node honours exactly one path in that variable, so a naive assignment
     // would silently drop a corporate/proxy CA the operator needs.
-    const dir = mkdtempSync(join(tmpdir(), 'e2e-ca-merge-'));
+    const dir = createTempDir('e2e-ca-merge-');
     const operatorBundle = join(dir, 'corp-root.pem');
     const someRoot = readStagingRootPems()[0];
     writeFileSync(operatorBundle, someRoot);
@@ -400,7 +401,7 @@ describe.skipIf(handshakeSkipReason)(handshakeSuite, () => {
   };
 
   beforeAll(() => {
-    dir = mkdtempSync(join(tmpdir(), 'e2e-tls-proof-'));
+    dir = createTempDir('e2e-tls-proof-');
     openssl([
       'req',
       '-x509',
@@ -432,7 +433,6 @@ describe.skipIf(handshakeSkipReason)(handshakeSuite, () => {
 
   afterAll(() => {
     if (originalDefaults) tls.setDefaultCACertificates(originalDefaults);
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('rejects a certificate from an untrusted CA (verification is ON)', async () => {

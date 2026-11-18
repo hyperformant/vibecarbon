@@ -11,11 +11,10 @@
  * Parallel to the backup CronJob census (backup-config-reaches-runtime-census).
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   renderTlsCertificateManifest,
   tlsCertificateFromVars,
@@ -26,6 +25,7 @@ import {
   PROMOTE_ISSUER_ANNOTATION,
   STANDBY_SELFSIGNED_ISSUER,
 } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
   seedEnvironmentSecrets: vi.fn(async () => {}),
@@ -52,8 +52,7 @@ const TLS = {
   effectiveIssuer: 'letsencrypt-prod',
 };
 
-const work = mkdtempSync(join(tmpdir(), 'vc-gitops-tls-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-gitops-tls-');
 
 describe('the shared Certificate renderer', () => {
   it('uses the same annotation and standby issuer names as the CLI', () => {

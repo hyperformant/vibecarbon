@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -9,6 +8,7 @@ import {
   getPackageManagerVersion,
   RECOMMENDED_VERSIONS,
 } from '../../../src/create.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('detectPackageManager', () => {
   const originalEnv = { ...process.env };
@@ -19,11 +19,10 @@ describe('detectPackageManager', () => {
 
   beforeEach(() => {
     delete process.env.npm_config_user_agent;
-    scratch = mkdtempSync(join(tmpdir(), 'vc-detect-pm-'));
+    scratch = createTempDir('vc-detect-pm-');
   });
 
   afterEach(() => {
-    rmSync(scratch, { recursive: true, force: true });
     process.env = { ...originalEnv };
   });
 

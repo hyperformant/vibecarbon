@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 // Config guard: the shipped compose bootstrap must bound Docker's json-file
 // logs at the DAEMON level. Without a global cap, every container on a
@@ -10,8 +10,7 @@ import { describe, expect, it } from 'vitest';
 // and the whole stack wedges (slow disk-fill outage). Setting log-opts in
 // /etc/docker/daemon.json makes the cap the default for every container the
 // deploy later starts — no per-service logging block required.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const cloudInitPath = join(repoRoot, 'carbon/cloud-init/docker-ce-setup.yaml');
+const cloudInitPath = join(REPO_ROOT, 'carbon/cloud-init/docker-ce-setup.yaml');
 
 type CloudConfig = {
   write_files?: Array<{ path?: string; content?: string; permissions?: string }>;

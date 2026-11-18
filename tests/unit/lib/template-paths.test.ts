@@ -7,8 +7,9 @@ import {
   templatePathFor,
 } from '../../../src/lib/template-paths.js';
 import { getFilePolicy, getUpgradeableFiles } from '../../../src/lib/upgrade-policy.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const TEMPLATE_DIR = join(process.cwd(), 'carbon');
+const TEMPLATE_DIR = join(REPO_ROOT, 'carbon');
 
 describe('template-paths: names npm refuses to pack', () => {
   it('maps the project .gitignore to a template name npm keeps, and back', () => {

@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { armDeadAirGuard, disarmDeadAirGuard, spinner } from '../../../../src/lib/cli/progress.js';
+import { readRepoFile } from '../../../_shared/source-files.js';
 
 /**
  * Dead-air guard: if nothing renders for >2s during a deploy — no
@@ -126,10 +125,7 @@ describe('armDeadAirGuard', () => {
 });
 
 describe('withDeployLog wires the guard (source-level)', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../../src/lib/deploy-logger.js', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('src/lib/deploy-logger.js');
 
   it('arms after installing the tee and disarms first in restore', () => {
     const tee = src.indexOf('process.stdout.write = tee(');

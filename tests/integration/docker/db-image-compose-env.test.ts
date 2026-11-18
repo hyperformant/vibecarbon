@@ -8,17 +8,18 @@
  * decide which db image runs locally.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DB_IMAGE, DB_IMAGE_TAG, DEV_DB_IMAGE, localComposeEnv } from '../../../src/lib/images.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // Skipped by default like the other docker tests; run explicitly via
 // `DOCKER_INTEGRATION=true pnpm test:docker` (the script sets the variable).
 const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
 
-const IMAGE_LINE = readFileSync(join(process.cwd(), 'carbon', 'docker-compose.yml'), 'utf-8')
+const IMAGE_LINE = readRepoFile('carbon', 'docker-compose.yml')
   .split('\n')
   .find((line) => /^\s+image: \$\{DB_IMAGE:\?/.test(line));
 

@@ -1,10 +1,10 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateGitignore } from '../../../src/lib/project.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Runs `vibecarbon create` from a freshly PACKED tarball — the artifact
@@ -28,18 +28,16 @@ import { validateGitignore } from '../../../src/lib/project.js';
  * network install. -skip-lockfile keeps the generated project offline.
  */
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-
 let scratch: string;
 let packageDir: string;
 
 beforeAll(() => {
-  scratch = mkdtempSync(join(tmpdir(), 'vc-create-from-tarball-'));
+  scratch = createTempDir('vc-create-from-tarball-');
   const packDest = join(scratch, 'pack');
   mkdirSync(packDest);
 
   execFileSync('npm', ['pack', '--pack-destination', packDest], {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 32 * 1024 * 1024,
@@ -54,7 +52,7 @@ beforeAll(() => {
   if (!existsSync(join(packageDir, 'src', 'cli.js'))) {
     throw new Error(`extracted tarball has no src/cli.js under ${packageDir}`);
   }
-  symlinkSync(join(repoRoot, 'node_modules'), join(packageDir, 'node_modules'), 'dir');
+  symlinkSync(join(REPO_ROOT, 'node_modules'), join(packageDir, 'node_modules'), 'dir');
 });
 
 afterAll(() => {

@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   OBSERVABILITY_CHECK_NAMES,
   observabilityPlanForStep,
@@ -168,10 +169,7 @@ describe('runPostReconvergeObservability', () => {
 });
 
 describe('lifecycle wiring', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-    'utf-8',
-  );
+  const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
 
   it('runVerificationChecks gates runObservabilityChecks on the step plan', () => {
     const planAt = src.indexOf('observabilityPlanForStep(stepName, config.mode, config.features)');

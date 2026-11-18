@@ -13,17 +13,16 @@ import { spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /** Test seam: make the next rename throw, simulating a crash after the tmp write. */
 const crash = vi.hoisted(() => ({ onRename: false }));
@@ -122,13 +121,12 @@ const haEnv = () => ({
 });
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-update-config-'));
+  dir = createTempDir('vc-update-config-');
   crash.onRename = false;
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-  rmSync(dir, { recursive: true, force: true });
 });
 
 describe('updateProjectConfig', () => {

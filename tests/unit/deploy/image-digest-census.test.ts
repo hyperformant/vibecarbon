@@ -27,7 +27,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -51,14 +51,13 @@ import {
   socatImageRef,
 } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const gitFiles = (...pathspecs: string[]) =>
   execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...pathspecs],
-    { cwd: ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8' },
   )
     .split('\n')
     .filter(Boolean);
@@ -131,7 +130,7 @@ const unquote = (v: string) => v.trim().replace(/^(['"])(.*)\1$/, '$2');
 function yamlImageSites(rel: string): Site[] {
   const out: Site[] = [];
   let repo: { value: string; indent: number; line: number } | null = null;
-  read(rel)
+  readRepoFile(rel)
     .split('\n')
     .forEach((line, i) => {
       if (isComment(line)) return;
@@ -159,7 +158,7 @@ function yamlImageSites(rel: string): Site[] {
 
 /** Every file in the checkout (tracked or new, never ignored or vendored). */
 const ALL_FILES = gitFiles().filter(
-  (f) => !f.split('/').includes('node_modules') && existsSync(join(ROOT, f)),
+  (f) => !f.split('/').includes('node_modules') && existsSync(join(REPO_ROOT, f)),
 );
 const isYaml = (f: string) => /\.ya?ml$/i.test(f);
 const base = (f: string) => f.slice(f.lastIndexOf('/') + 1);
@@ -184,7 +183,7 @@ const OTHER_YAML = ALL_FILES.filter((f) => isYaml(f) && !KNOWN_YAML.has(f));
 function dockerfileSites(rel: string): Site[] {
   const out: Site[] = [];
   const stages = new Set<string>();
-  read(rel)
+  readRepoFile(rel)
     .split('\n')
     .forEach((line, i) => {
       const from = line.match(/^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?/i);
@@ -202,7 +201,7 @@ function dockerfileSites(rel: string): Site[] {
 
 function cloudInitSites(rel: string): Site[] {
   const out = yamlImageSites(rel);
-  read(rel)
+  readRepoFile(rel)
     .split('\n')
     .forEach((line, i) => {
       if (isComment(line)) return;
@@ -216,7 +215,7 @@ function cloudInitSites(rel: string): Site[] {
 
 /** Job containers, service containers and `docker://` step actions. */
 function workflowSites(rel: string): Site[] {
-  const doc = loadYaml(read(rel)) as {
+  const doc = loadYaml(readRepoFile(rel)) as {
     jobs?: Record<
       string,
       {
@@ -284,7 +283,7 @@ const IMAGE_TOKEN =
 function pullLiteralSites(
   sources: Array<{ rel: string; text: string }> = ALL_FILES.filter((f) =>
     /^(src|scripts)\/.*\.(m?js|ts|sh)$/.test(f),
-  ).map((rel) => ({ rel, text: read(rel) })),
+  ).map((rel) => ({ rel, text: readRepoFile(rel) })),
 ): Site[] {
   const out: Site[] = [];
   const FLAGS_WITH_VALUE = new Set([
@@ -338,7 +337,7 @@ function srcSweepSites(): Site[] {
   // git pathspec `*` crosses `/`, so this is recursive; `src/**/*.js` would
   // skip the top-level src/*.js commands.
   for (const rel of gitFiles('src/*.js', 'src/*.mjs')) {
-    read(rel)
+    readRepoFile(rel)
       .split('\n')
       .forEach((line, i) => {
         // YAML inside a template literal: no quotes and no trailing comma,
@@ -483,7 +482,7 @@ describe('every shipped image ref is pinned by digest', () => {
     // the deploy reads to pre-pull the base). The runner adds only the app's
     // own layers: anything the base provides (libstdc++, the hono user, the
     // node binary) re-added here would ride in every deploy's delta.
-    const df = read('carbon/Dockerfile');
+    const df = readRepoFile('carbon/Dockerfile');
     expect(df).toMatch(new RegExp(`^ARG RUNTIME_IMAGE=${escapeRegExp(NODE_RUNTIME_IMAGE)}$`, 'm'));
     expect(df).toMatch(/^FROM \$\{RUNTIME_IMAGE\} AS runner$/m);
     const runner = df.slice(df.indexOf('AS runner'));
@@ -498,7 +497,7 @@ describe('every shipped image ref is pinned by digest', () => {
     // NODE_IMAGE; the runner executes the result on the node binary
     // docker/node-runtime copied out of ITS NODE_IMAGE. Same index digest,
     // so build and run are one Node release on one alpine.
-    const nodeImage = (rel: string) => read(rel).match(/^ARG NODE_IMAGE=(\S+)$/m)?.[1];
+    const nodeImage = (rel: string) => readRepoFile(rel).match(/^ARG NODE_IMAGE=(\S+)$/m)?.[1];
     expect(nodeImage('carbon/Dockerfile')).toMatch(PINNED);
     expect(nodeImage('carbon/Dockerfile')).toBe(nodeImage('docker/node-runtime/Dockerfile'));
   });
@@ -564,7 +563,7 @@ describe('every shipped image ref is pinned by digest', () => {
 
 describe('Dependabot can bump every pinned location', () => {
   const PINS_DOCKERFILE = '.github/image-pins/Dockerfile';
-  const dependabot = loadYaml(read('.github/dependabot.yml')) as {
+  const dependabot = loadYaml(readRepoFile('.github/dependabot.yml')) as {
     updates: Array<{ 'package-ecosystem': string; directory?: string; directories?: string[] }>;
   };
   const dirsFor = (ecosystem: string) =>
@@ -622,7 +621,7 @@ describe('Dependabot can bump every pinned location', () => {
     // silently skipped.
     const skipped = K8S_FILES.filter((f) => {
       if (!yamlImageSites(f).some(({ ref }) => PINNED.test(ref))) return false;
-      const text = read(f);
+      const text = readRepoFile(f);
       return !(/^apiVersion:/m.test(text) && /^kind:/m.test(text));
     });
     expect(skipped).toEqual([]);

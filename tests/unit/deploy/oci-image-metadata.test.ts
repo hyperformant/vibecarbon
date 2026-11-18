@@ -26,15 +26,12 @@
  *       source, so an annotation flag there would look like documentation and
  *       do nothing.
  */
-import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CARBON_AUTOSCALER_IMAGE, DB_IMAGE, NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
-const packageJson = JSON.parse(read('package.json'));
+const packageJson = JSON.parse(readRepoFile('package.json'));
 
 /** package.json's canonical repo URL, in the form ghcr matches on: npm's
  * normalized `git+https://...git` with the `git+` scheme prefix and `.git`
@@ -115,7 +112,7 @@ function labels(dockerfile: string): Record<string, string> {
 describe.each(OWNED_IMAGES)(
   'ghcr.io/hyperformant/$packageName package page metadata',
   ({ dockerfile, packageName: pkg, declaresLicense }) => {
-    const contents = read(dockerfile);
+    const contents = readRepoFile(dockerfile);
     const label = labels(contents);
     const why =
       `\n\n${dockerfile} publishes ghcr.io/hyperformant/${pkg}. ` +
@@ -196,7 +193,7 @@ describe('the two descriptions are independently written', () => {
     // Two packages, two purposes. A shared string means one of the pages is
     // lying about what you are about to pull.
     const descriptions = OWNED_IMAGES.map(
-      ({ dockerfile }) => labels(read(dockerfile))['org.opencontainers.image.description'],
+      ({ dockerfile }) => labels(readRepoFile(dockerfile))['org.opencontainers.image.description'],
     );
     expect(new Set(descriptions).size).toBe(descriptions.length);
   });
@@ -207,7 +204,7 @@ describe('docker/ holds no undocumented publishable image', () => {
     // docker/ is exactly "images this repo publishes to our own ghcr org", so a
     // new subdirectory here is a new package page. Triage it into OWNED_IMAGES
     // rather than letting it ship blank.
-    const found = sourceFiles(join(ROOT, 'docker'), { relativeTo: ROOT })
+    const found = sourceFiles(join(REPO_ROOT, 'docker'), { relativeTo: REPO_ROOT })
       .filter((rel) => basename(rel) === 'Dockerfile')
       .sort();
     expect(found).toEqual(OWNED_IMAGES.map((i) => i.dockerfile).sort());
@@ -216,7 +213,7 @@ describe('docker/ holds no undocumented publishable image', () => {
 
 describe('the upstream-image mirror stays annotation-free', () => {
   const WORKFLOW = join('.github', 'workflows', 'mirror-images.yml');
-  const workflow = read(WORKFLOW);
+  const workflow = readRepoFile(WORKFLOW);
   // The MIRROR job's body only. The publish job in publish-images.yml builds
   // our own image and is free to use whatever metadata mechanism it likes; this
   // guard is about the one job that must not touch the bits it copies.

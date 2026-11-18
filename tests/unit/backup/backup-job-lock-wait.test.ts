@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 vi.mock('../../../src/lib/cli/progress.js', async () => {
   const actual = await vi.importActual<typeof import('../../../src/lib/cli/progress.js')>(
@@ -25,7 +26,7 @@ const { BACKUP_JOB_ACTIVE_DEADLINE_S, buildBackupJobWaitScript, triggerBackupJob
   '../../../src/backup.js'
 );
 
-const CRONJOB = join(__dirname, '../../../carbon/k8s/base/backup/cronjob.yaml');
+const CRONJOB = join(REPO_ROOT, 'carbon/k8s/base/backup/cronjob.yaml');
 
 const jobFromCron = (name: string) => {
   const cron = loadYaml(readFileSync(CRONJOB, 'utf-8')) as {

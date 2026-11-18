@@ -17,7 +17,7 @@
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 const sshCalls: Array<{ command: string; input?: string }> = [];
 
@@ -51,8 +51,6 @@ const { configurePrimaryReplication, configureStandbyReplication } = await impor
   '../../../src/lib/deploy/compose/ha.js'
 );
 const { WG_PRIMARY_IP } = await import('../../../src/lib/deploy/wireguard.js');
-
-const ROOT = join(__dirname, '../../..');
 
 /** Every SQL a call carried: stdin, and any `echo <b64> | base64 -d` in the command. */
 const sqlOf = (c: { command: string; input?: string }) => [
@@ -120,9 +118,9 @@ describe('census: every slot creation goes through ensureReplicationSlotSql', ()
       .map(({ path }) => path);
   }
 
-  const sources = sourceFiles(join(ROOT, 'src'))
+  const sources = sourceFiles(join(REPO_ROOT, 'src'))
     .filter((p) => /\.(js|sql)$/.test(p))
-    .map((p) => ({ path: relative(ROOT, p), text: readFileSync(p, 'utf-8') }));
+    .map((p) => ({ path: relative(REPO_ROOT, p), text: readFileSync(p, 'utf-8') }));
 
   it('no site creates a slot by hand', () => {
     expect(offenders(sources)).toEqual([]);

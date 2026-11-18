@@ -4,7 +4,6 @@
  * to hold: a version we cannot read never blocks anyone, and a floor set too
  * high would stop deploys that work, so the numbers here are the verified ones.
  */
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   compareVersions,
@@ -19,6 +18,7 @@ import {
   tooOldMessage,
   unreadableMessage,
 } from '../../../src/lib/runtime-floors.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('parseVersion: only what a tool really prints', () => {
   it.each([
@@ -98,7 +98,7 @@ describe('the floors', () => {
   });
 
   it('Node: read from package.json, with no second copy', () => {
-    const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'));
+    const pkg = JSON.parse(readRepoFile('package.json'));
     expect(pkg.engines.node).toContain(floorFor('node', 'laptop')?.min);
   });
 

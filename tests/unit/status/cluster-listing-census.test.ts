@@ -14,17 +14,17 @@
  * pods, nodes or jobs; a shell string `kubectl ... get pods|nodes|jobs`; a
  * call to ssh.js's getPostgresPod (a `get pods -l` by another name).
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const HELPER = 'src/lib/status/cluster-snapshot.js';
 
 /** Every module `vibecarbon status` owns. */
 const STATUS_FILES = [
   'src/status.js',
-  ...readdirSync(join(ROOT, 'src/lib/status'))
+  ...readdirSync(join(REPO_ROOT, 'src/lib/status'))
     .filter((f) => f.endsWith('.js'))
     .map((f) => `src/lib/status/${f}`),
 ];
@@ -108,13 +108,11 @@ describe('census: status lists pods, nodes and jobs only through the snapshot he
   });
 
   it('the helper itself is the one listing (positive control)', () => {
-    expect(findClusterListings(readFileSync(join(ROOT, HELPER), 'utf8'))).toEqual([
-      'argv: get nodes,pods,jobs',
-    ]);
+    expect(findClusterListings(readRepoFile(HELPER))).toEqual(['argv: get nodes,pods,jobs']);
   });
 
   it.each(STATUS_FILES.filter((f) => f !== HELPER))('%s lists nothing itself', (file) => {
-    expect(findClusterListings(readFileSync(join(ROOT, file), 'utf8'))).toEqual([]);
+    expect(findClusterListings(readRepoFile(file))).toEqual([]);
   });
 });
 

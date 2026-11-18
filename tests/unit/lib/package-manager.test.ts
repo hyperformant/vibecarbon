@@ -16,18 +16,17 @@
  * `-pm pnpm` / `-pm bun` project.
  */
 
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   adaptDockerfileForPackageManager,
   ensureLockfile,
   LOCKFILE_NAMES,
   TEMPLATE_INSTALL_BLOCK,
 } from '../../../src/lib/package-manager.js';
-
-const REPO_ROOT = resolve(__dirname, '../../..');
+import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const TEMPLATE = `# syntax=docker/dockerfile:1
 ARG BASE_IMAGE=node:22-alpine3.23
@@ -47,12 +46,8 @@ RUN npm run build:server
 let projectDir: string;
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'vc-pkgmgr-test-'));
+  projectDir = createTempDir('vc-pkgmgr-test-');
   writeFileSync(join(projectDir, 'Dockerfile'), TEMPLATE);
-});
-
-afterEach(() => {
-  rmSync(projectDir, { recursive: true, force: true });
 });
 
 function read() {

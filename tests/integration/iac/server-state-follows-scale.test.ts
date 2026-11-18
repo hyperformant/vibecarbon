@@ -18,25 +18,24 @@
  * integration job installs the CLI pinned to the SDK version, and a missing
  * CLI there fails this test instead of skipping it.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { importStackState } from '../../../src/lib/iac/index.js';
 import { retargetServerResource } from '../../../src/lib/iac/server-state.js';
 import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const hasPulumi = pulumiOnPath();
 
-const dir = mkdtempSync(join(tmpdir(), 'vc-server-state-'));
+const dir = createTempDir('vc-server-state-');
 const cloudFile = join(dir, 'cloud.json');
 const backend = join(dir, 'state');
 mkdirSync(backend);
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 type Cloud = { next: number; servers: Record<string, { size: string; ip: string }> };
 const readCloud = (): Cloud => JSON.parse(readFileSync(cloudFile, 'utf-8'));

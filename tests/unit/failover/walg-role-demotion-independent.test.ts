@@ -13,9 +13,11 @@
  * the demotion call unless it is inside the `finally`, and the demotion call
  * itself is inside a `finally` block.
  */
+
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 // The first base backup on the new timeline has its own tests
@@ -295,7 +297,7 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
 // Census: the demotion can never again be skipped by an early return.
 // ---------------------------------------------------------------------------
 
-const SRC = fileURLToPath(new URL('../../../src/failover.js', import.meta.url));
+const SRC = join(REPO_ROOT, 'src/failover.js');
 
 /** Blank out comments and string/template literal text, keeping offsets. */
 function stripCommentsAndStrings(src: string): string {

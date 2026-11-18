@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Behavioural tests for carbon/scripts/dev.js port pre-flight + lifecycle.
@@ -23,7 +24,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
  * rather than mocking; the goal is to verify the actual port-check logic.
  */
 
-const REPO_ROOT = join(__dirname, '..', '..', '..');
 const DEV_JS = join(REPO_ROOT, 'carbon', 'scripts', 'dev.js');
 
 /** Bind a TCP port so the next test sees it as "in use". */

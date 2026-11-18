@@ -6,10 +6,10 @@
  * file, and checks each one refuses with the one line naming
  * `vibecarbon upgrade`, before its first remote or cloud call.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { copyTemplate } from '../helpers/copy-template.js';
 
 const errors: string[] = [];
@@ -83,7 +83,7 @@ afterAll(() => {
 /** A copy of the shipped scaffold whose walg-env.sh lacks the role parser. */
 async function staleProject() {
   const { WALG_ROLE_PARSE_SH } = await import('../../../src/lib/deploy/walg-role.js');
-  const dir = mkdtempSync(join(tmpdir(), 'vc-stale-scaffold-'));
+  const dir = createTempDir('vc-stale-scaffold-');
   dirs.push(dir);
   copyTemplate(dir);
   const env = join(dir, 'volumes/db/walg-env.sh');

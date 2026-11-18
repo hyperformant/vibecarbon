@@ -23,11 +23,11 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import { repairVultrFirewallRuleInputs } from '../../../src/lib/iac/index.js';
 import { importingWorkspace } from '../../_shared/fake-stack-import.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const RULE = 'vultr:index/firewallRule:FirewallRule';
 
@@ -175,10 +175,7 @@ describe('repairVultrFirewallRuleInputs', () => {
 });
 
 describe('the repair is actually wired into the pre-up path', () => {
-  const iac = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/iac/index.js', import.meta.url)),
-    'utf8',
-  );
+  const iac = readRepoFile('src/lib/iac/index.js');
   const code = iac.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
   it('runs after the pre-up refresh, not somewhere else', () => {
@@ -207,7 +204,7 @@ describe('no program tries to fix this itself', () => {
   // inherits the guard instead of the bug. The central repair covers every
   // Vultr firewall rule automatically, so a program only breaks things by
   // reaching for one of the two local "fixes" that were disproven live.
-  const dir = fileURLToPath(new URL('../../../src/lib/iac/programs', import.meta.url));
+  const dir = join(REPO_ROOT, 'src/lib/iac/programs');
   const programs = readdirSync(dir)
     .filter((f) => f.endsWith('.js'))
     .filter((f) => readFileSync(join(dir, f), 'utf8').includes('new vultr.FirewallRule'));

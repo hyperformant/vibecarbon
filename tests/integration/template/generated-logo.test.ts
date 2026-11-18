@@ -7,10 +7,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { destroyRealProject, realProject } from '../_harness/real-project';
 
-const templateAsset = (name: string) =>
-  readFileSync(join(process.cwd(), 'carbon/src/client/assets', name), 'utf8');
+const templateAsset = (name: string) => readRepoFile('carbon/src/client/assets', name);
 
 describe('create generates a name-specific logo', () => {
   let dir: string | undefined;

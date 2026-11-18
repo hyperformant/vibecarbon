@@ -10,14 +10,14 @@
  * Driven here with a fake `kubectl` on PATH that answers from the fixture.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const ROOT = join(__dirname, '../../..');
-const SCRIPT = join(ROOT, 'carbon/scripts/await-cert-manager-leader.sh');
-const WF = readFileSync(join(ROOT, 'carbon/.github/workflows/deploy.yml'), 'utf-8');
+const SCRIPT = join(REPO_ROOT, 'carbon/scripts/await-cert-manager-leader.sh');
+const WF = readRepoFile('carbon/.github/workflows/deploy.yml');
 
 const RS = 'cert-manager-7c9f8d6b5 2\ncert-manager-5d4b8c7f9 3\n';
 const NEW_HOLDER = 'cert-manager-5d4b8c7f9-x7k2p-external-cert-manager-controller';
@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 function runScript(env: Record<string, string>) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-cm-leader-'));
+  const dir = createTempDir('vc-cm-leader-');
   dirs.push(dir);
   writeFileSync(join(dir, 'kubectl'), FAKE_KUBECTL);
   chmodSync(join(dir, 'kubectl'), 0o755);

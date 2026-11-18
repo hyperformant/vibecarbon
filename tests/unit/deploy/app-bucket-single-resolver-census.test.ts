@@ -18,18 +18,15 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 function walk(dir: string, accept: (file: string) => boolean): string[] {
   return sourceFiles(dir, { skip: ['node_modules'] }).filter(accept);
 }
 
-const rel = (f: string) => relative(ROOT, f);
-const srcFiles = walk(join(ROOT, 'src'), (f) => f.endsWith('.js'));
+const rel = (f: string) => relative(REPO_ROOT, f);
+const srcFiles = walk(join(REPO_ROOT, 'src'), (f) => f.endsWith('.js'));
 
 describe('app bucket single resolver census', () => {
   it('(a) deriveEnvAppBucketName( is called only from s3-base.js, prompts.js and destroy.js', () => {
@@ -61,7 +58,7 @@ describe('app bucket single resolver census', () => {
     ).toEqual([]);
     // backups-bucket.js may derive only the backups bucket; the app bucket
     // never comes from the per-project derivation.
-    const chooser = readFileSync(join(ROOT, 'src/lib/backups-bucket.js'), 'utf-8');
+    const chooser = readRepoFile('src/lib/backups-bucket.js');
     const calls = [...chooser.matchAll(/deriveProjectBucketName\(([^)]*)\)/g)].map((m) => m[1]);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.filter((c) => !/'backups'/.test(c))).toEqual([]);
@@ -80,14 +77,14 @@ describe('app bucket single resolver census', () => {
       'src/lib/deploy/app-runtime-env.js',
       'src/lib/deploy/bundle.js',
     ]);
-    const read = (r: string) => readFileSync(join(ROOT, r), 'utf-8');
+    const read = (r: string) => readRepoFile(r);
     // compose's WALG_S3_PREFIX_BASE reads ${VC_ENV}.
     expect(read('src/lib/deploy/bundle.js')).toMatch(assignsEnv);
     // k8s renders its WAL-G prefix from walgPrefix and nothing there reads
     // VC_ENV, so the Secret must not carry a dead (in k8s-ha, wrong) value.
     expect(read('src/lib/deploy/k8s/k3s.js')).not.toMatch(assignsEnv);
     expect(read('src/lib/deploy/app-runtime-env.js')).not.toMatch(assignsEnv);
-    const k8sReaders = walk(join(ROOT, 'carbon/k8s'), () => true)
+    const k8sReaders = walk(join(REPO_ROOT, 'carbon/k8s'), () => true)
       .filter((f) => readFileSync(f, 'utf-8').includes('VC_ENV'))
       .map(rel);
     expect(k8sReaders, `carbon/k8s now reads VC_ENV: ${k8sReaders.join(', ')}`).toEqual([]);
@@ -96,9 +93,9 @@ describe('app bucket single resolver census', () => {
   it('(b) no object key prefix survives in src/, the template app or the e2e checks', () => {
     const files = [
       ...srcFiles,
-      ...walk(join(ROOT, 'carbon/src'), (f) => /\.tsx?$/.test(f)),
-      join(ROOT, 'carbon/.env.example'),
-      ...walk(join(ROOT, 'tests/e2e'), (f) => f.endsWith('.ts')),
+      ...walk(join(REPO_ROOT, 'carbon/src'), (f) => /\.tsx?$/.test(f)),
+      join(REPO_ROOT, 'carbon/.env.example'),
+      ...walk(join(REPO_ROOT, 'tests/e2e'), (f) => f.endsWith('.ts')),
     ];
     const offenders = files
       .filter((f) => /S3_KEY_PREFIX|keyPrefix/.test(readFileSync(f, 'utf-8')))

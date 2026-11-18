@@ -9,6 +9,7 @@
  * reports `skipped` stops the destroy unless -force.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const { preDestroyBackup } = await import('../../../src/destroy.js');
 
@@ -291,8 +292,7 @@ describe('destroy refreshes the operator-IP allowlist before any remote step', (
   });
 
   it('in main: the token, then the allowlist, then the pre-destroy backup', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(new URL('../../../src/destroy.js', import.meta.url), 'utf-8');
+    const src = readRepoFile('src/destroy.js');
     const main = src.slice(src.indexOf('async function main('));
     const token = main.indexOf('Provider.promptApiToken(');
     const access = main.indexOf('await ensureDestroyOperatorAccess(');

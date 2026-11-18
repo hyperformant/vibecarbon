@@ -16,24 +16,19 @@ const sourceMock = vi.hoisted(() => ({
     where: "your project's .env.local",
   },
 }));
-const clackMock = vi.hoisted(() => ({
-  text: vi.fn(async () => Symbol.for('cancel')),
-  password: vi.fn(async () => Symbol.for('cancel')),
-  confirm: vi.fn(),
-  select: vi.fn(),
-  note: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  log: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    step: vi.fn(),
-    message: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['confirm', 'select', 'note', 'cancel'],
+    log: ['info', 'warn', 'error', 'success', 'step', 'message'],
+    spinner: true,
+    with: {
+      text: vi.fn(async () => Symbol.for('cancel')),
+      password: vi.fn(async () => Symbol.for('cancel')),
+      isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
+    },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/project.js', () => ({
   setEnvVar: vi.fn(),

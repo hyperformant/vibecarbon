@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   APP_RUNTIME_EXTRA_KEYS,
@@ -8,13 +6,14 @@ import {
 import { INFRA_SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // Guards that the deploy workflow's apply-secrets step stays self-syncing —
 // i.e. it materializes the Secret from toJSON(secrets) rather than re-listing
 // keys. A regression to an enumerated --from-literal list would silently drop
 // any new `vibecarbon configure` secret the CLI begins seeding.
 describe('deploy.yml apply-secrets is self-syncing', () => {
-  const wf = readFileSync(join(process.cwd(), 'carbon/.github/workflows/deploy.yml'), 'utf-8');
+  const wf = readRepoFile('carbon/.github/workflows/deploy.yml');
 
   it('builds the Secret from toJSON(secrets)', () => {
     expect(wf).toContain('toJSON(secrets)');
@@ -40,7 +39,7 @@ describe('deploy.yml apply-secrets is self-syncing', () => {
 // CLI can seed, per the registries) and INFRA_KEYS (k3s.js INFRA_SECRET_KEYS,
 // routed only to vibecarbon-infra-secrets).
 describe('deploy.yml splits the app Secret from the infra Secret', () => {
-  const wf = readFileSync(join(process.cwd(), 'carbon/.github/workflows/deploy.yml'), 'utf-8');
+  const wf = readRepoFile('carbon/.github/workflows/deploy.yml');
   // The jq del( … ) block, not the comment that names it.
   const delList = wf.match(/del\(\n([\s\S]*?)\n\s*\)/)?.[1] ?? '';
 

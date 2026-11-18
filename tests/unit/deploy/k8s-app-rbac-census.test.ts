@@ -22,22 +22,22 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const APP_SA = 'vibecarbon-app';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
 
 function kustomize(path: string): Doc[] {
-  const res = spawnSync('kubectl', ['kustomize', path], { cwd: ROOT, encoding: 'utf-8' });
+  const res = spawnSync('kubectl', ['kustomize', path], { cwd: REPO_ROOT, encoding: 'utf-8' });
   if (res.status !== 0) throw new Error(`kustomize build failed:\n${res.stderr}`);
   return (loadAll(res.stdout) as Doc[]).filter(Boolean);
 }
 
 function addonDocs(): Doc[] {
   const docs: Doc[] = [];
-  const services = join(ROOT, 'services');
+  const services = join(REPO_ROOT, 'services');
   for (const name of readdirSync(services)) {
     const dir = join(services, name, 'k8s');
     if (!existsSync(dir)) continue;

@@ -22,9 +22,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DR_S3_CLIENT_OPTIONS } from '../../../src/lib/deploy/tls-snapshot.js';
 import { S3_HTTP_TIMEOUTS } from '../../../src/lib/s3-timeouts.js';
 import { createS3Client } from '../../../src/lib/walg/restore-base.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC = join(import.meta.dirname, '../../../src');
+const SRC = join(REPO_ROOT, 'src');
 const CFG = {
   region: 'sfo3',
   endpoint: 'https://sfo3.digitaloceanspaces.com',

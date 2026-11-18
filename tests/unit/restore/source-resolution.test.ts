@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,6 +9,7 @@ vi.mock('@clack/prompts', () => ({
 
 import * as p from '@clack/prompts';
 import { resolveRestoreTarget } from '../../../src/restore.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * `-source` is a wal-g restore POINT — `latest` or an ISO-8601 timestamp —
@@ -52,7 +52,7 @@ describe('resolveRestoreTarget', () => {
   });
 
   it('a local file path exits 1 up front, naming the two accepted forms', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-restore-src-'));
+    const dir = createTempDir('vc-restore-src-');
     dirs.push(dir);
     const file = join(dir, 'backup.tar.gz');
     writeFileSync(file, 'x');

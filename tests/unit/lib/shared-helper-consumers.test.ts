@@ -34,11 +34,10 @@
  * greppable wire signature (see list-endpoint-pagination-sweep.test.ts
  * for the pattern).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const REGISTRY = [
   {
@@ -374,6 +373,25 @@ const REGISTRY = [
     ],
   },
   {
+    // Reading a repository file by its path from the root. Tests used to find
+    // the root each their own way (process.cwd(), three levels up from
+    // __dirname, a URL), and the ones that asked the working directory read
+    // nothing when run from anywhere else. REPO_ROOT, beside it in the same
+    // file, is that root. About 260 files read through it; the ones listed
+    // are the harnesses other tests build on and the first of each kind.
+    helper: 'readRepoFile',
+    definition: 'tests/_shared/source-files.ts',
+    consumers: [
+      'tests/integration/cli/upgrade/upgrade.test.ts',
+      'tests/integration/docker/db-restore-staged.test.ts',
+      'tests/unit/deploy/env-scope-writers.test.ts',
+      'tests/unit/deploy/retired-fence-entrypoints-census.test.ts',
+      'tests/unit/deploy/walg-archive-script-parity.test.ts',
+      'tests/unit/lib/shared-helper-consumers.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/source-files.test.ts'],
+  },
+  {
     // The recursive file walk under every source census. Each census had its
     // own copy (a local walk, files(), a recursive readdirSync), and each
     // copy chose for itself what to skip and whether to follow a link, so no
@@ -503,6 +521,76 @@ const REGISTRY = [
     deepTests: ['tests/unit/lib/source-files.test.ts'],
   },
   {
+    // The whole of @clack/prompts as mocks, for a test that drives prompts
+    // and asserts on them. Each file had its own bag of vi.fn() (seventeen
+    // spellings across thirty files). The fake holds only what its test
+    // names, so a prompt the test did not expect still throws.
+    helper: 'clackFake',
+    definition: 'tests/_shared/clack-fake.ts',
+    consumers: [
+      'tests/unit/configure/feature-subcommands.test.ts',
+      'tests/unit/configure/keep-current-heals.test.ts',
+      'tests/unit/configure/providers-menu.test.ts',
+      'tests/unit/deploy/backups-bucket-regions.test.ts',
+      'tests/unit/deploy/compose-default-size.test.ts',
+      'tests/unit/deploy/deploy-bundle-lifetime.test.ts',
+      'tests/unit/deploy/gather-scaffold-lockstep.test.ts',
+      'tests/unit/deploy/k8s-ha-dns-single-writer.test.ts',
+      'tests/unit/deploy/linode-k8s-region-gate.test.ts',
+      'tests/unit/deploy/open-state-backend-wiring.test.ts',
+      'tests/unit/deploy/persisted-state-bucket-carry.test.ts',
+      'tests/unit/deploy/prompt-credential-order.test.ts',
+      'tests/unit/deploy/prompt-env-and-dns-reask.test.ts',
+      'tests/unit/deploy/prompt-provider-select.test.ts',
+      'tests/unit/deploy/region-default-by-price.test.ts',
+      'tests/unit/deploy/resolve-deploy-mode.test.ts',
+      'tests/unit/deploy/skeleton-env-persists-types.test.ts',
+      'tests/unit/deploy/standby-default-prompts.test.ts',
+      'tests/unit/lib/cli/interactive-prompt-guard.test.ts',
+      'tests/unit/lib/cloudflare-guided-setup.test.ts',
+      'tests/unit/lib/digitalocean-guided-setup.test.ts',
+      'tests/unit/lib/dotenv-prompt-refusal.test.ts',
+      'tests/unit/lib/guided-setup-paste-normalization.test.ts',
+      'tests/unit/lib/hetzner-guided-setup.test.ts',
+      'tests/unit/lib/s3-deferred-save.test.ts',
+      'tests/unit/lib/scaleway-domain-onboarding.test.ts',
+      'tests/unit/lib/token-source-message.test.ts',
+      'tests/unit/lib/vultr-guided-setup.test.ts',
+      'tests/unit/next/run.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/clack-fake.test.ts'],
+  },
+  {
+    // The real @clack/prompts with its output silenced, for a test that only
+    // wants a quiet terminal. Five spellings of the same factory, differing
+    // in which log methods and which of spinner, note, outro they silenced;
+    // each call now says its own list.
+    helper: 'quietClack',
+    definition: 'tests/_shared/clack-fake.ts',
+    consumers: [
+      'tests/unit/deploy/compose-ha-bundle-readers.test.ts',
+      'tests/unit/deploy/compose-ha-early-tunnel.test.ts',
+      'tests/unit/deploy/compose-ha-reconverge.test.ts',
+      'tests/unit/deploy/compose-ha-streaming-fastpath.test.ts',
+      'tests/unit/destroy/failed-stack-second-pass.test.ts',
+      'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
+      'tests/unit/destroy/unreadable-stack-purge-buckets.test.ts',
+      'tests/unit/scale/apply-ca-bounds-to-config.test.ts',
+      'tests/unit/scale/backup-overlap.test.ts',
+      'tests/unit/scale/cloud-init-readiness-timeout.test.ts',
+      'tests/unit/scale/compose-scale-image-delta.test.ts',
+      'tests/unit/scale/compose-scale-tls-restore.test.ts',
+      'tests/unit/scale/old-app-env-replay.test.ts',
+      'tests/unit/scale/old-env-portability.test.ts',
+      'tests/unit/scale/reestablish-ha-tunnel.test.ts',
+      'tests/unit/scale/replacement-server-args.test.ts',
+      'tests/unit/scale/replacement-server-ip-resolution.test.ts',
+      'tests/unit/scale/role-aware-sizing.test.ts',
+      'tests/unit/scale/scale-under-lineage-mark.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/clack-fake.test.ts'],
+  },
+  {
     // The Docker tier's synchronous spawn wrappers. Eight files each had
     // their own run, seven their own must, with two error-message forms and
     // two ways of passing stdin and env, so a fix to one (stderr empty, a
@@ -579,16 +667,14 @@ const REGISTRY = [
   },
 ] as const;
 
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {
   it(`is exported from ${definition}`, () => {
-    expect(read(definition)).toMatch(new RegExp(`export (?:async )?function ${helper}\\b`));
+    expect(readRepoFile(definition)).toMatch(new RegExp(`export (?:async )?function ${helper}\\b`));
   });
 
   it.each([...consumers])('%s routes through it', (consumer) => {
     expect(
-      read(consumer),
+      readRepoFile(consumer),
       `${consumer} no longer references ${helper}. If it grew its own copy, that is ` +
         'de-convergence — the first step of every sibling-parity drift. Route it back through ' +
         `${definition}, or update this registry WITH a parity argument for why the surfaces ` +
@@ -597,6 +683,6 @@ describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers
   });
 
   it.each([...deepTests])('deep test %s still exists', (deepTest) => {
-    expect(existsSync(join(ROOT, deepTest))).toBe(true);
+    expect(existsSync(join(REPO_ROOT, deepTest))).toBe(true);
   });
 });

@@ -24,10 +24,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { DOCKER_SOCKET_PROXY_MIRROR, TRAEFIK_MIRROR } from '../../../src/lib/images.js';
 import { upstreamRef } from '../../_shared/local-images.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
 
-const ROOT = process.cwd();
 const PROJECT = `vctest-traefik-${process.pid}`;
 const HOST = 'vctest.example.com';
 const ANSWER = 'reached-through-the-socket-proxy';
@@ -55,7 +55,7 @@ describeDocker('Traefik through the docker-socket-proxy, on the Docker under tes
         k === 'PROJECT_NAME' ? PROJECT : k === 'ADMIN_EMAIL' ? 'admin@example.com' : 'x',
       );
     for (const file of ['docker-compose.yml', 'docker-compose.prod.yml']) {
-      writeFileSync(join(dir, file), fill(readFileSync(join(ROOT, 'carbon', file), 'utf-8')));
+      writeFileSync(join(dir, file), fill(readRepoFile('carbon', file)));
     }
     const dummy: Record<string, string> = {
       PROJECT_NAME: PROJECT,

@@ -21,7 +21,7 @@ import {
   runPastStaleLock,
   StackHeldError,
 } from '../../../src/lib/iac/stack-lock.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /** A pid that has exited. */
 const deadPid = () => spawnSync('true').pid;
@@ -176,7 +176,7 @@ describe('runPastStaleLock', () => {
 
 describe('census', () => {
   it('leaves stack-lock.js the only code that can clear a lock', () => {
-    const dir = join(process.cwd(), 'src/lib/iac');
+    const dir = join(REPO_ROOT, 'src/lib/iac');
     const callers = sourceFiles(dir, { exts: ['.js'], relativeTo: dir }).filter((f) =>
       /\.cancel\(/.test(readFileSync(join(dir, f), 'utf-8')),
     );

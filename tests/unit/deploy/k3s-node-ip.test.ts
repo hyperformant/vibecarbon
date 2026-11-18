@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Regression guard for the ash/US k8s-ha failure (RCA 2026-06-23): the k3s init
@@ -13,7 +14,7 @@ import { describe, expect, it } from 'vitest';
  * fallback) and FAIL the provision rather than install k3s with an empty
  * --node-ip.
  */
-const K3S_DIR = join(process.cwd(), 'carbon', 'cloud-init', 'k3s');
+const K3S_DIR = join(REPO_ROOT, 'carbon', 'cloud-init', 'k3s');
 // The database node boots worker-init.sh as the db role.
 const SCRIPTS = ['master-init.sh', 'worker-init.sh'];
 

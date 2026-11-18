@@ -13,11 +13,10 @@
  * reads its body. The spans inside applyK3sManifests are proven by running it
  * (k3s-apply-manifests-ordering.test.ts, "perf markers").
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const K3S = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+const K3S = readRepoFile('src/lib/deploy/k8s/k3s.js');
 const BODY = K3S.slice(K3S.indexOf('async function deployK3sSteps('));
 
 /** Source text containing template placeholders, written as `#{...}`. */

@@ -16,16 +16,13 @@
  * new, with its reason.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const srcFiles = spawnSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
-  { cwd: ROOT, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .stdout.split('\n')
   .filter((f) => f.endsWith('.js'));
@@ -197,7 +194,7 @@ function census(files: Array<{ file: string; text: string }>) {
 describe('every promotion ends with a base backup on the new timeline (census)', () => {
   const files = srcFiles.map((file) => ({
     file,
-    text: readFileSync(join(ROOT, file), 'utf-8'),
+    text: readRepoFile(file),
   }));
   const result = census(files);
 

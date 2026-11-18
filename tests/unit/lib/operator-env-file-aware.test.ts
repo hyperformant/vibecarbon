@@ -24,12 +24,12 @@
  * (deploy/preflight.js) builds the canonical triple
  * `[fileEnv (.env keys), effectiveEnv (.env.local keys), shellEnv]`.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { assertOperatorConfig, operatorCheckEnvs } from '../../../src/lib/deploy/preflight.js';
 import { checkOperatorConfig } from '../../../src/lib/operator-env.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const GOOD_HETZNER_TOKEN = 'a'.repeat(64);
 const FILE_WHERE = ['.env', '.env.local'] as const;
@@ -170,7 +170,7 @@ describe('checkOperatorConfig — an array of envs', () => {
 describe('operatorCheckEnvs + assertOperatorConfig — the project files are checked too', () => {
   const dirs: string[] = [];
   function projectDir(files: Record<string, string>): string {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-file-aware-'));
+    const dir = createTempDir('vc-file-aware-');
     for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
     dirs.push(dir);
     return dir;

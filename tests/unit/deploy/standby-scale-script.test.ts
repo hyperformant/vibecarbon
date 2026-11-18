@@ -11,8 +11,7 @@
  * renders: reconcile.sh, the systemd ExecStart and the post-restore recreate.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -26,13 +25,14 @@ import {
 } from '../../../src/lib/deploy/bundle.js';
 import { WALG_ROLE_PARSE_SH, walgRoleWriteShell } from '../../../src/lib/deploy/walg-role.js';
 import { composeStandbyScaledServices } from '../../../src/lib/services/standby-policy.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const REPO = join(import.meta.dirname, '..', '..', '..');
 const N8N_SCALED = composeStandbyScaledServices(['n8n']);
 
 const dirs: string[] = [];
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-standby-scale-'));
+  const dir = createTempDir('vc-standby-scale-');
   dirs.push(dir);
   return dir;
 }
@@ -136,7 +136,7 @@ describe('the fragment rides every whole-stack up', () => {
   it('every compose up -d in bundle.js and scale.js carries the fragment', () => {
     const offenders: string[] = [];
     for (const file of ['src/lib/deploy/bundle.js', 'src/scale.js']) {
-      const lines = readFileSync(join(REPO, file), 'utf-8').split('\n');
+      const lines = readRepoFile(file).split('\n');
       lines.forEach((line, i) => {
         if (/^\s*(\/\/|\*|\/\*|#)/.test(line)) return;
         if (!/\$\{VC_COMPOSE\} .*\bup -d\b/.test(line)) return;
@@ -147,7 +147,7 @@ describe('the fragment rides every whole-stack up', () => {
   });
 
   it('the census sees the invocations it guards (positive control)', () => {
-    const scaleSrc = readFileSync(join(REPO, 'src/scale.js'), 'utf-8');
+    const scaleSrc = readRepoFile('src/scale.js');
     expect(scaleSrc).toMatch(/\$\{VC_COMPOSE\} up -d --force-recreate/);
   });
 });

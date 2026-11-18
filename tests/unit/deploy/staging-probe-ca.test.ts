@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import https from 'node:https';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import tls from 'node:tls';
 import { afterAll, describe, expect, it } from 'vitest';
 import { stagingProbeCa, stagingRootsPem } from '../../../src/lib/deploy/staging-ca.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The deploy CLI's public health probe used to disable TLS verification
@@ -29,10 +30,7 @@ describe('stagingProbeCa', () => {
     // NODE_EXTRA_CA_CERTS, src/lib/deploy/certs/ ships in the npm package
     // for the CLI probe. Refresh both together (see the PEM header for the
     // procedure) — this test fails if they ever drift.
-    const e2eCopy = readFileSync(
-      join(__dirname, '..', '..', 'e2e', 'certs', 'letsencrypt-staging-roots.pem'),
-      'utf8',
-    );
+    const e2eCopy = readRepoFile('tests', 'e2e', 'certs', 'letsencrypt-staging-roots.pem');
     expect(stagingRootsPem()).toBe(e2eCopy);
   });
 
@@ -43,10 +41,7 @@ describe('stagingProbeCa', () => {
     // verdict is the TLS phase's (k8s-tls-phase.test.ts). The probe's socket
     // options live in public-domain-probe.js, shared by every probe of the
     // app's domain.
-    const src = readFileSync(
-      join(__dirname, '..', '..', '..', 'src', 'lib', 'deploy', 'public-domain-probe.js'),
-      'utf8',
-    );
+    const src = readRepoFile('src', 'lib', 'deploy', 'public-domain-probe.js');
     expect(src.match(/rejectUnauthorized/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/if \(verifyTls === false\) \{[^}]*rejectUnauthorized = false/);
   });
@@ -74,7 +69,7 @@ afterAll(() => {
 });
 
 function mintSelfSignedLocalhost() {
-  const dir = mkdtempSync(join(tmpdir(), 'vibecarbon-staging-probe-ca-'));
+  const dir = createTempDir('vibecarbon-staging-probe-ca-');
   tempDirs.push(dir);
   execFileSync(
     'openssl',

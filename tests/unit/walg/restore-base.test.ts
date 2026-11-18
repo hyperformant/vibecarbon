@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +10,8 @@ import {
   resolveRestoreBase,
   resolveS3Config,
 } from '../../../src/lib/walg/restore-base.js';
+import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Restore resolves its exact base backup in the CLI, from the wal-g stop
@@ -105,10 +106,7 @@ function fakeS3(objects: Record<string, string>, opts: { missingBucket?: boolean
 }
 
 describe('listBaseBackups', () => {
-  const sentinel = readFileSync(
-    join(process.cwd(), 'tests/fixtures/walg/sentinel-3.0.9.json'),
-    'utf-8',
-  );
+  const sentinel = readRepoFile('tests/fixtures/walg/sentinel-3.0.9.json');
   const fixture = JSON.parse(sentinel);
   const NAME = fixture.name as string;
   const prefix = 'backups/myapp/prod/walg';
@@ -177,9 +175,7 @@ describe('listBaseBackups', () => {
 });
 
 describe('resolveDeployRestorePoint reads the backups bucket at its own endpoint', () => {
-  const fixture = JSON.parse(
-    readFileSync(join(process.cwd(), 'tests/fixtures/walg/sentinel-3.0.9.json'), 'utf-8'),
-  );
+  const fixture = JSON.parse(readRepoFile('tests/fixtures/walg/sentinel-3.0.9.json'));
   const NAME = fixture.name as string;
   const LINEAGE = '7699032860122738725';
   const prefix = 'backups/myapp/prod/walg';
@@ -259,7 +255,7 @@ describe('resolveS3Config reads the backups bucket through its one resolver', ()
   };
   let dir = '';
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-resolve-s3-'));
+    dir = createTempDir('vc-resolve-s3-');
     vi.spyOn(process, 'cwd').mockReturnValue(dir);
     vi.spyOn(p.log, 'info').mockImplementation(() => {});
     vi.stubEnv('HETZNER_ACCESS_KEY', 'ABCDEFGHIJ0123456789');

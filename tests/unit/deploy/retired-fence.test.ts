@@ -22,12 +22,10 @@
  * costs no writes.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import {
   clearRetiredFence,
@@ -45,9 +43,9 @@ import {
   settleK8sDb,
 } from '../../../src/lib/deploy/retired-fence.js';
 import { liftStrandedWriteFence } from '../../../src/lib/deploy/write-fence.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { SERVER_BASE_FLAGS, writeVcCompose } from '../../_shared/vc-compose-stub.js';
-
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 const RETIRED_IP = '10.0.0.1';
 const PROMOTED_IP = '10.0.0.9';
@@ -964,8 +962,7 @@ describe('the stranded-fence lifter never lifts a retired node', () => {
 // record whether they were invoked.
 // ---------------------------------------------------------------------------
 
-const scratch = mkdtempSync(join(tmpdir(), 'retired-fence-'));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = createTempDir('retired-fence-');
 
 function stubBin(dir: string, names: string[]) {
   mkdirSync(dir, { recursive: true });
@@ -980,7 +977,7 @@ function stubBin(dir: string, names: string[]) {
 }
 
 describe('wal-archive.sh refuses on a retired node', () => {
-  const script = join(repoRoot, 'carbon/volumes/db/wal-archive.sh');
+  const script = join(REPO_ROOT, 'carbon/volumes/db/wal-archive.sh');
   const runArchive = (marker: boolean) => {
     const base = mkdtempSync(join(scratch, 'wal-'));
     const pgdata = join(base, 'pgdata');
@@ -1002,7 +999,7 @@ describe('wal-archive.sh refuses on a retired node', () => {
         // The base; walg-env.sh (the real file, with a stub pg_controldata)
         // appends the lineage folder.
         WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
-        WALG_ENV_SH: join(repoRoot, 'carbon/volumes/db/walg-env.sh'),
+        WALG_ENV_SH: join(REPO_ROOT, 'carbon/volumes/db/walg-env.sh'),
         VC_WALG_ROLE_FILE: join(base, 'walg-role'),
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
@@ -1029,7 +1026,7 @@ describe('wal-archive.sh refuses on a retired node', () => {
 });
 
 describe('compose-backup.sh refuses on a retired node', () => {
-  const script = join(repoRoot, 'carbon/backup/compose-backup.sh');
+  const script = join(REPO_ROOT, 'carbon/backup/compose-backup.sh');
   const runBackup = (marker: boolean) => {
     const base = mkdtempSync(join(scratch, 'cb-'));
     if (marker) writeFileSync(join(base, RETIRED_HOST_MARKER), '');
@@ -1063,9 +1060,7 @@ describe('compose-backup.sh refuses on a retired node', () => {
 });
 
 describe('the k8s backup CronJob refuses on a retired cluster', () => {
-  const cron = loadYaml(
-    readFileSync(join(repoRoot, 'carbon/k8s/base/backup/cronjob.yaml'), 'utf-8'),
-  ) as {
+  const cron = loadYaml(readRepoFile('carbon/k8s/base/backup/cronjob.yaml')) as {
     spec: {
       jobTemplate: {
         spec: {

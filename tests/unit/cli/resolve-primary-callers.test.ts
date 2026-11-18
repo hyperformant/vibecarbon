@@ -3,10 +3,9 @@
  * fix round 1): destroy stays an escape hatch, diagnose follows the roles,
  * compose failover refuses two primaries, status names a failed check.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { AmbiguousPrimaryError, resolvePrimary } from '../../../src/lib/cli/resolve-primary.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const { backupOfferIp } = await import('../../../src/destroy.js');
 const { controlplaneIpOf } = await import('../../../src/diagnose.js');
@@ -147,7 +146,7 @@ describe('status surfaces a rejected check', () => {
 
 describe('deploy cannot be blocked by the error it recommends', () => {
   it('the write-fence lift resolves the primary inside its try', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const at = src.indexOf('const rolePrimary = rolePrimaryOf(envConfig, environment)');
     const gate = src.lastIndexOf('envConfig?.ha?.writeFence', at);
     const tryAt = src.lastIndexOf('try {', at);

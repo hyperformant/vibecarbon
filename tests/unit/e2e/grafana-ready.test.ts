@@ -12,9 +12,11 @@
  * 1/1 Running. The manifest's startup probe allows 2 s x 150 = 300 s, so the
  * check gave Grafana a fifth of the time the product does.
  */
+
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import {
   GRAFANA_NAMESPACE,
   grafanaStartupAllowanceSeconds,
@@ -23,9 +25,7 @@ import {
 import { runPostReconvergeObservability } from '../../e2e/scenarios/observability-step-plan.js';
 import type { VerificationResult } from '../../e2e/scenarios/types.js';
 
-const MANIFEST = fileURLToPath(
-  new URL('../../../services/observability/k8s/grafana-deployment.yaml', import.meta.url),
-);
+const MANIFEST = join(REPO_ROOT, 'services/observability/k8s/grafana-deployment.yaml');
 
 describe("Grafana's startup allowance comes from its manifest", () => {
   it('is the startup probe budget plus one readiness period', () => {
@@ -130,10 +130,7 @@ describe('runPostReconvergeObservability waits for Grafana first', () => {
 
 describe('lifecycle wiring', () => {
   it('reconverge-deploy passes the Grafana wait on the reconverged primary', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-      'utf-8',
-    );
+    const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     const at = src.indexOf('runPostReconvergeObservability(');
     expect(at).toBeGreaterThan(-1);
     const call = src.slice(at, at + 1500);

@@ -7,24 +7,15 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-const clackMock = vi.hoisted(() => ({
-  select: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  text: vi.fn(),
-  confirm: vi.fn(),
-  password: vi.fn(),
-  note: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  log: {
-    step: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    message: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['select', 'cancel', 'text', 'confirm', 'password', 'note'],
+    log: ['step', 'info', 'warn', 'error', 'success', 'message'],
+    spinner: true,
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 
 import { resolveDeployMode } from '../../../src/lib/deploy/prompts.js';

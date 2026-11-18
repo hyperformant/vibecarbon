@@ -12,8 +12,7 @@
  * before, line for line: the db container's config does not change, so
  * nothing restarts. The pins below are the lines main rendered.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -36,6 +35,7 @@ vi.mock('node:fs', async (orig) => {
 const { renderBundle } = await import('../../../src/lib/deploy/bundle.js');
 
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const EP = (region: string) => `https://${region}.your-objectstorage.com`;
 const INFRA = { accessKey: 'ABCDEFGHIJ0123456789', secretKey: 'x'.repeat(40) };
@@ -57,7 +57,7 @@ describe('renderBundle: the backups target', () => {
 
   beforeEach(() => {
     cwd = process.cwd();
-    projectDir = mkdtempSync(join(tmpdir(), 'vc-bundle-backup-target-'));
+    projectDir = createTempDir('vc-bundle-backup-target-');
     process.chdir(projectDir);
   });
   afterEach(() => {

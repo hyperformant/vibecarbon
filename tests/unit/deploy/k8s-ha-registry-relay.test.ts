@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
@@ -7,12 +5,9 @@ import {
   renderRegistryRelayManifest,
   withRegistryRelay,
 } from '../../../src/lib/deploy/k8s/ha/index.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const TEMPLATE = readFileSync(
-  join(ROOT, 'carbon/k8s/base/repl-gateway/registry-relay.yaml'),
-  'utf-8',
-);
+const TEMPLATE = readRepoFile('carbon/k8s/base/repl-gateway/registry-relay.yaml');
 
 describe('registry relay manifest', () => {
   it('binds the tunnel IP, admits only the standby, targets the primary registry', () => {
@@ -59,7 +54,7 @@ describe('registry relay manifest', () => {
       'carbon/k8s/base/kustomization.yaml',
       'carbon/k8s/base/repl-gateway/kustomization.yaml',
     ]) {
-      expect(readFileSync(join(ROOT, k), 'utf-8')).not.toContain('registry-relay');
+      expect(readRepoFile(k)).not.toContain('registry-relay');
     }
   });
 });
@@ -68,7 +63,7 @@ describe('relay hardening', () => {
   it.each(['registry-relay.yaml', 'repl-gateway.yaml'])(
     '%s drops to an unprivileged read-only socat',
     (file) => {
-      const text = readFileSync(join(ROOT, 'carbon/k8s/base/repl-gateway', file), 'utf-8');
+      const text = readRepoFile('carbon/k8s/base/repl-gateway', file);
       // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
       const docs = (text.split(/^---$/m).map((d) => load(d)) as any[]).filter(Boolean);
       const workload = docs.find((d) => d.kind === 'Pod' || d.kind === 'Deployment');
