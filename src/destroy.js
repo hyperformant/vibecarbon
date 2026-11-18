@@ -15,6 +15,7 @@ import { backupsBucketHolders, backupsTargetOf } from './lib/backups-bucket.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { runCommand } from './lib/command.js';
+import { knownHostsPath } from './lib/host-keys.js';
 
 // Handle Ctrl+C — without this, SIGINT is swallowed during subprocess/fetch
 // calls and the process continues to the next cleanup step instead of exiting.
@@ -587,9 +588,9 @@ function cleanupLocalEnvFiles(cwd, envName) {
   const cleanupPaths = [
     sshKeyPathFor(envName, cwd),
     `${sshKeyPathFor(envName, cwd)}.pub`,
-    join(cwd, '.vibecarbon', `known_hosts_${envName}`),
-    join(cwd, '.vibecarbon', `known_hosts_${envName}-primary`),
-    join(cwd, '.vibecarbon', `known_hosts_${envName}-standby`),
+    knownHostsPath(envName, cwd),
+    knownHostsPath(`${envName}-primary`, cwd),
+    knownHostsPath(`${envName}-standby`, cwd),
     localKubeconfigPath(cwd, envName),
     localKubeconfigPath(cwd, `${envName}-primary`),
     localKubeconfigPath(cwd, `${envName}-standby`),
