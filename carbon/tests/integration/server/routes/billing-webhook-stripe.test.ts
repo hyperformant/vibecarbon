@@ -125,8 +125,8 @@ const iso = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
 
 /**
  * A Stripe subscription with the fields the provider reads; `extra` overrides
- * or adds fields. The period and cancellation times are read from the
- * subscription itself, as the provider does today.
+ * or adds fields. The period is on the subscription itself here, as Stripe
+ * sent it before API version 2025-03-31; see `subscriptionWithItemPeriod`.
  */
 function subscription(extra: Record<string, unknown> = {}) {
   return {
@@ -149,6 +149,19 @@ function subscription(extra: Record<string, unknown> = {}) {
     cancel_at_period_end: false,
     canceled_at: null,
     ...extra,
+  };
+}
+
+/**
+ * The same subscription as Stripe sends it from API version 2025-03-31 on:
+ * the billing period is on the subscription item, not on the subscription.
+ */
+function subscriptionWithItemPeriod() {
+  const sub = subscription();
+  const [item] = sub.items.data;
+  return {
+    ...sub,
+    items: { data: [{ ...item, current_period_start: START, current_period_end: END }] },
   };
 }
 
@@ -277,6 +290,15 @@ describe('checkout.session.completed', () => {
     });
   });
 
+  it('stores the period end Stripe now reports on the subscription item', async () => {
+    db.selects = [CUSTOMER_ROW];
+    // biome-ignore lint/suspicious/noExplicitAny: a subscription with only the fields the provider reads
+    retrieve.mockResolvedValue(subscriptionWithItemPeriod() as any);
+    const res = await post('checkout.session.completed', session());
+    expect(res.status).toBe(200);
+    expect(db.writes[0]).toMatchObject({ values: { currentPeriodEnd: iso(END) } });
+  });
+
   it('answers 500 for a customer we do not know, and stores nothing', async () => {
     const res = await post('checkout.session.completed', session({ customer: 'cus_nonexistent' }));
     await expectHandlerFailed(res);
@@ -325,6 +347,15 @@ describe.each(['customer.subscription.created', 'customer.subscription.updated']
         params: [],
       },
     ]);
+  });
+
+  it('stores the period Stripe now reports on the subscription item', async () => {
+    db.selects = [CUSTOMER_ROW];
+    const res = await post(type, subscriptionWithItemPeriod());
+    expect(res.status).toBe(200);
+    expect(db.writes[0]).toMatchObject({
+      values: { currentPeriodStart: iso(START), currentPeriodEnd: iso(END) },
+    });
   });
 
   it('answers 500 for a customer we do not know, without naming the customer', async () => {
@@ -417,6 +448,19 @@ describe('invoice.payment_failed', () => {
     ['an object', { id: 'sub_456' }, 'sub_456'],
   ])('marks the subscription past due when the invoice names it as %s', async (_name, sub, id) => {
     const res = await post('invoice.payment_failed', { id: 'in_123', subscription: sub });
+    expect(res.status).toBe(200);
+    expect(db.writes).toEqual([
+      { op: 'update', table: 'subscriptions', values: { status: 'past_due' }, params: [id] },
+    ]);
+  });
+
+  it.each([
+    ['an id', 'sub_123', 'sub_123'],
+    ['an object', { id: 'sub_456' }, 'sub_456'],
+  ])('marks the subscription past due when the invoice names it under its parent as %s', async (_name, sub, id) => {
+    // Where Stripe puts it from API version 2025-03-31 on.
+    const invoice = { id: 'in_123', parent: { type: 'subscription_details', subscription_details: { subscription: sub } } };
+    const res = await post('invoice.payment_failed', invoice);
     expect(res.status).toBe(200);
     expect(db.writes).toEqual([
       { op: 'update', table: 'subscriptions', values: { status: 'past_due' }, params: [id] },
