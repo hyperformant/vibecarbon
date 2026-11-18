@@ -813,15 +813,17 @@ v1Routes.get('/admin/organizations', async (c) => {
     ? or(ilike(organizations.name, pattern), ilike(organizations.slug, pattern))
     : undefined;
 
-  // Sorting (validated against allowed values; 'email' does not apply here)
-  const sortColumns = {
-    name: organizations.name,
-    slug: organizations.slug,
-    plan: organizations.plan,
-    created_at: organizations.createdAt,
-  } as const;
-  const sortColumn = sortBy in sortColumns ? sortColumns[sortBy as keyof typeof sortColumns] : null;
-  const orderBy = sortColumn ? [sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn)] : [];
+  // 'email' does not apply to organizations: it sorts by created_at. The id
+  // breaks ties, so a page boundary between equal values is stable.
+  const sortColumn =
+    sortBy === 'name'
+      ? organizations.name
+      : sortBy === 'slug'
+        ? organizations.slug
+        : sortBy === 'plan'
+          ? organizations.plan
+          : organizations.createdAt;
+  const direction = sortOrder === 'asc' ? asc : desc;
 
   let rows: Array<OrganizationRow & { memberCount: number }>;
   let total: number;
@@ -841,7 +843,7 @@ v1Routes.get('/admin/organizations', async (c) => {
       })
       .from(organizations)
       .where(where)
-      .orderBy(...orderBy)
+      .orderBy(direction(sortColumn), asc(organizations.id))
       .limit(limit)
       .offset(offset);
     [{ value: total }] = await adminDb.select({ value: count() }).from(organizations).where(where);
@@ -904,7 +906,8 @@ v1Routes.get('/admin/users', async (c) => {
     ? or(ilike(userTable.email, pattern), ilike(userTable.name, pattern))
     : undefined;
 
-  // 'slug' and 'plan' do not apply to users: they sort by created_at.
+  // 'slug' and 'plan' do not apply to users: they sort by created_at. The id
+  // breaks ties, so a page boundary between equal values is stable.
   const sortColumn =
     sortBy === 'email' ? userTable.email : sortBy === 'name' ? userTable.name : userTable.createdAt;
   const direction = sortOrder === 'asc' ? asc : desc;
