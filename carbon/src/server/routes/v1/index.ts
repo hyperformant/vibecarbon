@@ -49,6 +49,15 @@ const createOrganizationSchema = z.object({
     .trim(),
 });
 
+// Trimmed before the length checks, so a name of spaces only is refused.
+const updateOrganizationSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, 'Name is required')
+    .max(100, 'Name must be 100 characters or less'),
+});
+
 const addMemberSchema = z.object({
   email: z.string().email('Valid email is required'),
   role: z.enum(['ADMIN', 'MEMBER']).default('MEMBER'),
@@ -403,6 +412,56 @@ v1Routes.get('/organizations', async (c) => {
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch organizations') }, 500);
   }
+});
+
+// Rename an organization (OWNER or ADMIN)
+v1Routes.patch('/organizations/:orgId', async (c) => {
+  const user = c.get('user');
+
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  // biome-ignore lint/style/noNonNullAssertion: orgId is always defined when this route matches
+  const orgId = c.req.param('orgId')!;
+
+  // Parse and validate request body. The schema carries the name alone, so a
+  // slug, plan or id in the body never reaches the update.
+  const parsed = await parseJsonBody(c, updateOrganizationSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
+
+  // The caller's role, read as the caller under RLS: null for an organization
+  // they do not belong to, so another tenant's id reads as "not found".
+  const role = await withUserDb(user.id, (tx) => getUserOrgRole(tx, user.id, orgId));
+
+  if (!role) {
+    return c.json({ error: 'Organization not found or access denied' }, 404);
+  }
+
+  if (role !== 'OWNER' && role !== 'ADMIN') {
+    return c.json({ error: 'You must be an admin to rename the organization' }, 403);
+  }
+
+  let org: OrganizationRow | undefined;
+  try {
+    [org] = await adminDb
+      .update(organizations)
+      .set({ name: body.name })
+      .where(eq(organizations.id, orgId))
+      .returning();
+  } catch (error) {
+    return c.json({ error: sanitizeError(error, 'Failed to update organization') }, 500);
+  }
+
+  // Deleted between the role read and the write
+  if (!org) {
+    return c.json({ error: 'Organization not found or access denied' }, 404);
+  }
+
+  logger.info({ orgId, renamedBy: user.id }, 'Organization renamed');
+
+  return c.json({ organization: organizationJson(org) });
 });
 
 // ============================================================================

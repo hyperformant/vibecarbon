@@ -23,6 +23,15 @@ describe('plans catalog', () => {
     }
   });
 
+  it('a plan is priced by the month only, and carries no trial', () => {
+    // Yearly prices and trials were deferred from the product: checkout and
+    // the /prices route have no logic for either.
+    for (const plan of plans) {
+      expect(Object.keys(plan.price)).toEqual(['monthly']);
+      expect(Object.keys(plan).filter((key) => /trial|yearly/i.test(key))).toEqual([]);
+    }
+  });
+
   it('higher tiers strictly include all features of lower tiers', () => {
     // Encodes the product invariant: upgrading never removes a feature.
     const tierOrder = ['free', 'starter', 'pro'] as const;

@@ -1307,25 +1307,29 @@ swallows a failed call.
 - An endpoint read by more than one component goes through one hook in
   `src/client/hooks/api/` (`useSubscription`, `useServicesStatus`,
   `useAdminStats`).
+- "Save Changes" on the organization page saves the name, through the new
+  `PATCH /api/v1/organizations/:orgId` (owner or admin; the name alone is
+  written). Before, it only closed edit mode and the typed name was dropped.
+  A member who is not an admin no longer gets the edit button.
 
 **Do not undo:** a page-local `useQuery` for an endpoint that already has a
 hook fetches twice. A provider-to-variable table in the client trips the
 no-session-token invariant, which is unbounded on purpose.
 
 **Guard:** `carbon/tests/integration/server/routes/` (`v1-me-delete-billing`,
-`contact`, `theme-validation`, `admin-list-order`, `billing-status`) and
-`carbon/tests/component/billing-page.test.tsx`.
+`contact`, `theme-validation`, `admin-list-order`, `billing-status`,
+`v1-routes`) and `carbon/tests/component/` (`billing-page`,
+`organization-rename`).
 
 #### 2026-11-18: Template tests test the template
 
-Nine files under `tests/unit/template/` re-implemented template logic inside
+Twelve files under `tests/unit/template/` re-implemented template logic inside
 the test and tested that copy. Their cases now run against the real modules
 under `carbon/tests/`, and the copies are deleted. Several copies asserted
 behaviour the template does not have (plan names and prices, trust in a
 forwarded-IP header the real code refuses).
 
-**Do not undo:** a template test imports the module it tests. Three mirrors
-remain to port: `v1-routes`, `stripe-webhook`, `billing-routes`.
+**Do not undo:** a template test imports the module it tests.
 
 #### 2026-11-17: Agent sessions cannot open an SSH password dialog
 

@@ -1,6 +1,6 @@
 # Plan: remove duplicated code and the drift it caused
 
-Status: first wave merged on 2026-11-18 (Phase 1 mostly, Phase 2, and the first clusters of every area in Phase 3). Still open: the three largest template mirror tests, the shared test scaffolding in `tests/unit`, the per-class sweep skeleton and its CI entry points, the SSH helpers in the e2e checks, an organisation rename endpoint for the template, and turning `pnpm dupes` and `pnpm unused` into pull request gates. This is a working document: when
+Status: first wave merged on 2026-11-18 (Phase 1 mostly, Phase 2, and the first clusters of every area in Phase 3). Still open: the shared test scaffolding in `tests/unit`, the per-class sweep skeleton and its CI entry points, the SSH helpers in the e2e checks, and turning `pnpm dupes` and `pnpm unused` into pull request gates. This is a working document: when
 the work ships, its decisions go into `docs/history.md` and this file is
 deleted.
 

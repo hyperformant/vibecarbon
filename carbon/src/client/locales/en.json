@@ -53,6 +53,11 @@
     "nameLabel": "Organization Name",
     "namePlaceholder": "Enter organization name"
   },
+  "orgSettings": {
+    "editName": "Edit organization name",
+    "renamed": "Organization renamed",
+    "renameError": "Failed to rename organization"
+  },
   "auth": {
     "checkYourEmail": "Check your email",
     "createAccount": "Create account",
