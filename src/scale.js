@@ -2572,6 +2572,9 @@ export function applyCaBoundsToConfig(configJson, { newMin, newMax, newType }) {
   return JSON.stringify(config, null, 2);
 }
 
+/** kubectl argv through one cluster's operator-side kubeconfig. */
+const kubectlArgv = (kubeconfigPath, args) => ['kubectl', '--kubeconfig', kubeconfigPath, ...args];
+
 /**
  * Poll the cluster's /healthz until the API server answers (5 min budget).
  * Shared by the autoscaler re-patch and the post-resize Ready wait.
@@ -2606,7 +2609,7 @@ async function waitForApiServer(kubeconfigPath, label) {
   try {
     await pollUntil(
       () => {
-        runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'get', '--raw=/healthz'], {
+        runCommand(kubectlArgv(kubeconfigPath, ['get', '--raw=/healthz']), {
           silent: true,
           timeout: 10_000,
         });
@@ -2674,36 +2677,21 @@ async function repatchClusterAutoscaler({
     // stores stringData as base64 under the hood too) — decode both
     // keys before treating them as plain text/JSON. runCommand returns
     // the captured stdout string when `silent: true`.
-    const configB64Raw = runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
-        '-n',
-        'kube-system',
-        'get',
-        'secret',
-        'carbon-autoscaler-config',
-        '-o',
-        'jsonpath={.data.config\\.json}',
-      ],
-      { silent: true },
-    );
-    const tokenB64Raw = runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
-        '-n',
-        'kube-system',
-        'get',
-        'secret',
-        'carbon-autoscaler-config',
-        '-o',
-        'jsonpath={.data.token}',
-      ],
-      { silent: true },
-    );
+    const readSecretKey = (key) =>
+      runCommand(
+        kubectlArgv(kubeconfigPath, [
+          '-n',
+          'kube-system',
+          'get',
+          'secret',
+          'carbon-autoscaler-config',
+          '-o',
+          `jsonpath={.data.${key}}`,
+        ]),
+        { silent: true },
+      );
+    const configB64Raw = readSecretKey('config\\.json');
+    const tokenB64Raw = readSecretKey('token');
     const configJson = Buffer.from(
       typeof configB64Raw === 'string' ? configB64Raw.trim() : '',
       'base64',
@@ -2728,21 +2716,18 @@ async function repatchClusterAutoscaler({
       `  config.json: ${JSON.stringify(mutatedConfigJson)}`,
       '',
     ].join('\n');
-    runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'apply', '-f', '-'], {
+    runCommand(kubectlArgv(kubeconfigPath, ['apply', '-f', '-']), {
       silent: true,
       input: caSecretYaml,
     });
     runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
+      kubectlArgv(kubeconfigPath, [
         '-n',
         'kube-system',
         'rollout',
         'restart',
         'deploy/cluster-autoscaler',
-      ],
+      ]),
       { silent: true },
     );
     const maxSize = Math.max(0, newMax - newMin);
@@ -3115,17 +3100,7 @@ async function scaleVerifyK8sReady(ctx) {
         waitForKubeletsRenewing({
           readLeases: () =>
             runCommand(
-              [
-                'kubectl',
-                '--kubeconfig',
-                kubeconfigPath,
-                '-n',
-                'kube-node-lease',
-                'get',
-                'leases',
-                '-o',
-                'json',
-              ],
+              kubectlArgv(kubeconfigPath, ['-n', 'kube-node-lease', 'get', 'leases', '-o', 'json']),
               { silent: true, timeout: 10_000 },
             ),
         }),
@@ -3160,17 +3135,14 @@ async function scaleVerifyK8sReady(ctx) {
     try {
       await perfAsync('scale.waitForCsiNode', async () =>
         runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
+          kubectlArgv(kubeconfigPath, [
             '-n',
             'kube-system',
             'rollout',
             'status',
             Provider.K8S_ASSETS.csiNodeDaemonSet,
             '--timeout=300s',
-          ],
+          ]),
           { silent: true },
         ),
       );
@@ -3230,10 +3202,7 @@ async function scaleVerifyK8sReady(ctx) {
     try {
       await perfAsync('scale.waitForPodsReady', async () =>
         runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
+          kubectlArgv(kubeconfigPath, [
             '-n',
             'vibecarbon',
             'wait',
@@ -3250,7 +3219,7 @@ async function scaleVerifyK8sReady(ctx) {
             // pods still coming up are correctly waited on.
             '--field-selector=status.phase!=Succeeded,status.phase!=Failed',
             `--timeout=${WAIT_TIMEOUT_SEC}s`,
-          ],
+          ]),
           { silent: true },
         ),
       );
@@ -3266,31 +3235,18 @@ async function scaleVerifyK8sReady(ctx) {
       // just "kubectl wait timed out" with no signal as to which
       // controller is wedged.
       try {
+        runCommand(kubectlArgv(kubeconfigPath, ['-n', 'vibecarbon', 'get', 'pods', '-o', 'wide']), {
+          silent: false,
+          ignoreError: true,
+        });
         runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
-            '-n',
-            'vibecarbon',
-            'get',
-            'pods',
-            '-o',
-            'wide',
-          ],
-          { silent: false, ignoreError: true },
-        );
-        runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
+          kubectlArgv(kubeconfigPath, [
             '-n',
             'vibecarbon',
             'get',
             'events',
             '--sort-by=.lastTimestamp',
-          ],
+          ]),
           { silent: false, ignoreError: true },
         );
         // Per-non-Ready-pod describe + previous-container logs. We

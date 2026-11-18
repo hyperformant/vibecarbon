@@ -2637,32 +2637,31 @@ export async function executeDeployment(args, gatheredConfig) {
           };
           const dig = await safeRun('dig', ['+short', domain, '@1.1.1.1']);
           const kcExists = existsSync(kubeconfig);
+          // One kubectl read through the deploy's kubeconfig, or the line the
+          // dump shows in its place when there is none.
+          const kube = (argv, skipped = '(skipped: no kubeconfig)') =>
+            kcExists ? safeRun('kubectl', ['--kubeconfig', kubeconfig, ...argv]) : skipped;
           // ALL namespaces, not just `vibecarbon`: a vibecarbon-only dump
           // cannot show a Certificate elsewhere (a leftover or a user's own)
           // racing ours for the same ACME order, exactly the ambiguity that
           // made the 2026-08-11 e3 post-mortem harder than it needed to be.
-          const certs = kcExists
-            ? await safeRun('kubectl', [
-                '--kubeconfig',
-                kubeconfig,
-                'get',
-                'certificate,certificaterequest,order,challenge',
-                '--all-namespaces',
-                '-o',
-                'wide',
-              ])
-            : `(kubeconfig not present at ${kubeconfig} — checked ${kubeconfigCandidates.join(', ')})`;
-          const events = kcExists
-            ? await safeRun('kubectl', [
-                '--kubeconfig',
-                kubeconfig,
-                'get',
-                'events',
-                '-n',
-                'vibecarbon',
-                '--sort-by=.lastTimestamp',
-              ])
-            : '(skipped: no kubeconfig)';
+          const certs = await kube(
+            [
+              'get',
+              'certificate,certificaterequest,order,challenge',
+              '--all-namespaces',
+              '-o',
+              'wide',
+            ],
+            `(kubeconfig not present at ${kubeconfig} — checked ${kubeconfigCandidates.join(', ')})`,
+          );
+          const events = await kube([
+            'get',
+            'events',
+            '-n',
+            'vibecarbon',
+            '--sort-by=.lastTimestamp',
+          ]);
           // Trim events to the most recent 30 lines.
           const recentEvents = events.split('\n').slice(-30).join('\n');
           // Direct curl probes — surface the actual TLS/HTTP error from the
@@ -2697,42 +2696,18 @@ export async function executeDeployment(args, gatheredConfig) {
           // failure logs live — `Readiness check failed: { error: ... }`)
           // turns "deploy probe got 404" from a riddle into a directly
           // actionable error.
-          const pods = kcExists
-            ? await safeRun('kubectl', [
-                '--kubeconfig',
-                kubeconfig,
-                'get',
-                'pods',
-                '-n',
-                'vibecarbon',
-                '-o',
-                'wide',
-              ])
-            : '(skipped: no kubeconfig)';
-          const endpoints = kcExists
-            ? await safeRun('kubectl', [
-                '--kubeconfig',
-                kubeconfig,
-                'get',
-                'endpoints',
-                '-n',
-                'vibecarbon',
-              ])
-            : '(skipped: no kubeconfig)';
+          const pods = await kube(['get', 'pods', '-n', 'vibecarbon', '-o', 'wide']);
+          const endpoints = await kube(['get', 'endpoints', '-n', 'vibecarbon']);
           // App pod logs (last 100 lines). If multiple replicas, this picks
           // by deployment selector — same as `kubectl logs deploy/app`.
-          const appLogs = kcExists
-            ? await safeRun('kubectl', [
-                '--kubeconfig',
-                kubeconfig,
-                'logs',
-                'deployment/app',
-                '-n',
-                'vibecarbon',
-                '--tail=100',
-                '--all-containers',
-              ])
-            : '(skipped: no kubeconfig)';
+          const appLogs = await kube([
+            'logs',
+            'deployment/app',
+            '-n',
+            'vibecarbon',
+            '--tail=100',
+            '--all-containers',
+          ]);
           p.log.error(
             `Deploy completed but the app is not serving traffic.\n` +
               `\n--- DNS (dig +short ${domain}) ---\n${dig || '(empty)'}\n` +

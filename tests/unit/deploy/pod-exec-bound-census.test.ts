@@ -67,8 +67,8 @@ const ARGV_BUILDERS = [
 
 /** A runner that binds what it runs: the census cannot see this from the call. */
 const BOUND_BY_RUNNER: Record<string, string> = {
-  'src/lib/deploy/orchestrator.js:safeRun':
-    'the post-deploy diagnostics helper: its one runCommandAsync passes timeout: 30_000',
+  'src/lib/deploy/orchestrator.js:kube':
+    "the post-deploy diagnostics' kubectl reads: each runs through safeRun, whose one runCommandAsync passes timeout: 30_000",
   'src/lib/deploy/k8s/k3s.js:clusterAutoscalerDiagnosticCommands':
     'returns argvs that only runDeployDiagnostic runs, at DIAGNOSTIC_TIMEOUT_MS',
   'src/lib/deploy/k8s/acme-challenges.js:runKubectl':
@@ -281,6 +281,9 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
   it('the runners it trusts really do bind what they run', () => {
     const orchestrator = readFileSync(join(ROOT, 'src/lib/deploy/orchestrator.js'), 'utf-8');
     expect(orchestrator).toMatch(/const safeRun = async[\s\S]{0,160}timeout: 30_000/);
+    expect(orchestrator).toMatch(
+      /const kube = \([\s\S]{0,80}?\) =>\s*kcExists \? safeRun\('kubectl', \['--kubeconfig', kubeconfig, \.\.\.argv\]\)/,
+    );
     const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
     const runner = k3s.slice(k3s.indexOf('export async function runDeployDiagnostic('));
     expect(runner.slice(0, runner.indexOf('catch (err)'))).toContain(
