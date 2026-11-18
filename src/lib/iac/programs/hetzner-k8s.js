@@ -22,12 +22,9 @@
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { HetznerProvider } from '../../providers/hetzner.js';
-import {
-  SERVER_OWNER_LABELS,
-  serverResourceOptions,
-  workerResourceOptions,
-} from '../create-timeout.js';
+import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
+import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
 
 // Hetzner location → private-network zone. Single source of truth: this is
 // the ONLY place that derives a networkZone, and it's derived here — inside
@@ -100,29 +97,8 @@ export function networkZoneFor(location) {
  * @returns {() => Promise<Record<string, unknown>>}
  */
 export function buildHetznerK8sProgram(config) {
-  const clusterName = `${config.projectName}-${config.environment}`;
-  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
-  // caller has always passed it: the same keys in the same order.
-  const labels = {
-    project: config.projectName,
-    environment: config.environment,
-    ...SERVER_OWNER_LABELS,
-    ...config.labels,
-  };
-  // Operator-IP firewall lock (H-2). The deploy flow populates these from
-  // projectConfig.operatorCidrs; an empty list = nothing can SSH in or hit
-  // the k8s API. We refuse to build a program that would do that — far
-  // better to fail loudly than to silently apply an open `0.0.0.0/0`.
-  if (!config.allowedSshIps?.length) {
-    throw new Error(
-      'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
-  if (!config.allowedK8sApiIps?.length) {
-    throw new Error(
-      'allowedK8sApiIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
+  const { name: clusterName, labels } = stackIdentity(config);
+  requireOperatorCidrs(config, { k8sApi: true });
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
   // Always the CLI's: the stack's recorded token or the one derived from the
@@ -407,7 +383,7 @@ export function buildHetznerK8sProgram(config) {
       workerIps: workers.map((w) => w.ipv4Address),
       floatingIp: floatingIp.ipAddress,
       networkId: network.id,
-      sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
+      sshKeyId: sshKeyIdOutput(sshKeyId),
       k3sToken: pulumi.secret(k3sToken),
       clusterName,
     };
