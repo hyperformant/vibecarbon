@@ -1,11 +1,14 @@
 /**
  * What the per-provider orphan sweeps (sweep-<provider>.ts) share: the
- * project-name guard, the counts and the "incomplete" flag, the bucket pass,
+ * project-name guard, the counts and the "incomplete" flag, the outline of a
+ * pass over one resource class, the volume ownership rule, the bucket pass,
  * and the closing banner.
  *
  * Each provider file keeps what is its own: which resource classes exist,
- * how each is listed and owned, the order of the passes, and its protected
- * bucket set. Nothing here knows a provider.
+ * how each is listed, owned and deleted, the order of the passes, and its
+ * protected bucket set. Nothing here knows a provider. The Hetzner sweep
+ * uses the guard, the bucket pass and the banner only; its compute passes
+ * are its own.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { classifyBucketDeleteError } from './bucket-already-gone.js';
@@ -83,6 +86,110 @@ export function createSweep(
     },
     result: () => ({ counts, enumFailed }),
   };
+}
+
+/** One resource class of a sweep: its listing, which rows are this run's, how one is deleted. */
+export interface SweepPass<T> {
+  /** The listing's name in the "enumeration incomplete" line, e.g. `firewall list`. */
+  listing: string;
+  /** Opens the line printed when the pass ends on a throw, e.g. `Firewall cleanup failed`. */
+  cleanupFailed: string;
+  /** The class a delete is counted under. */
+  count: keyof SweepBreakdown;
+  /** Every row of the class, and whether the listing was read to its end. */
+  list(): Promise<{ items: T[]; complete: boolean }>;
+  /** True for a resource of this run. It may print why a near miss is left alone. */
+  owned(item: T): boolean;
+  /** The line that announces the delete, after the `[sweep]` marker. */
+  announce(item: T): string;
+  /**
+   * Delete one resource and say what happened:
+   *   - `true`: deleted (or the API says it is already gone), and counted;
+   *   - a string: not deleted. The sweep fails and prints that line;
+   *   - `null`: nothing was left to delete. Not counted, not a failure
+   *     (the pass prints its own line).
+   */
+  remove(item: T): Promise<true | string | null>;
+  /**
+   * What a throw from `remove` means, which differs by class and is kept
+   * as each sweep had it.
+   *
+   * Given: the throw stops at that one resource. The sweep fails, prints
+   * `<thrown(item)>: <message>`, and the pass goes on to the next row.
+   *
+   * Left out: the throw ends the pass, as a throw from the listing does.
+   * The listing is marked incomplete and the rows after it are not tried.
+   */
+  thrown?(item: T): string;
+}
+
+/**
+ * One pass: list the class, delete this run's resources, count each delete
+ * or fail the sweep, and mark the sweep incomplete when the listing stopped
+ * early or the pass threw. What was read before a listing stopped is still
+ * swept. Nothing escapes: teardown must complete.
+ */
+export async function sweepClass<T>(
+  sweep: Pick<Sweep, 'tag' | 'counts' | 'markIncomplete' | 'fail'>,
+  pass: SweepPass<T>,
+): Promise<void> {
+  const { tag, counts } = sweep;
+  try {
+    const { items, complete } = await pass.list();
+    if (!complete) sweep.markIncomplete(pass.listing);
+    for (const item of items) {
+      if (!pass.owned(item)) continue;
+      console.log(`${tag} [sweep] ${pass.announce(item)}`);
+      let outcome: true | string | null;
+      try {
+        outcome = await pass.remove(item);
+      } catch (err) {
+        if (!pass.thrown) throw err;
+        outcome = `${pass.thrown(item)}: ${err instanceof Error ? err.message : err}`;
+      }
+      if (outcome === true) counts[pass.count] = (counts[pass.count] ?? 0) + 1;
+      else if (outcome !== null) {
+        sweep.fail();
+        console.warn(`${tag} [sweep] ${outcome}`);
+      }
+    }
+  } catch (e) {
+    sweep.markIncomplete(pass.listing);
+    console.warn(`${tag} [sweep] ${pass.cleanupFailed}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+/**
+ * The volume rule of the four non-Hetzner sweeps. An attached volume is
+ * never this pass's. An unattached one is the run's when its name starts
+ * with the project name, or when it is a CSI volume whose project tag is
+ * the run's. A CSI volume without that tag is reported and left: an
+ * unscoped pvc sweep from a concurrent run deleted a live rig's data
+ * volumes on Hetzner (2026-07-18).
+ *
+ * `pvcPrefix` is what each sweep reads as a CSI volume name, kept as each
+ * had it: `pvc-` on DigitalOcean, `pvc` on the other three. `project` is
+ * the tag value to match when the provider stores it changed (Linode
+ * squeezes a tag past 50 characters); the project name otherwise.
+ */
+export function sweepOwnsVolume(
+  sweep: Pick<Sweep, 'tag' | 'projectName'>,
+  volume: { name: string; attached: boolean; projectTag: () => string | undefined },
+  rule: { pvcPrefix: 'pvc-' | 'pvc'; project?: string },
+): boolean {
+  const { tag, projectName } = sweep;
+  if (volume.attached) return false;
+  const ownedByName = volume.name.startsWith(projectName);
+  const isPvc = volume.name.startsWith(rule.pvcPrefix);
+  const ownedByTag = isPvc && volume.projectTag() === (rule.project ?? projectName);
+  if (ownedByName || ownedByTag) return true;
+  if (isPvc) {
+    console.warn(
+      `${tag} [sweep] Unattached CSI volume ${volume.name} carries no project=${projectName} tag — ` +
+        'NOT deleting (could belong to a concurrent run); review manually if it persists.',
+    );
+  }
+  return false;
 }
 
 /** A bucket store as most sweeps already shape it (one region or cluster). */

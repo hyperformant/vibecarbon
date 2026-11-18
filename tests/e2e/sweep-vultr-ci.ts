@@ -12,21 +12,21 @@
  * inert until the e2e-infra environment carries the Vultr secrets. Exits 1
  * when the sweep could not fully enumerate (an unverifiable sweep must not
  * pose as a clean one) — including when VULTR_STORAGE_REGION is
- * unset, since per-subscription keys cannot reach any other cluster.
+ * unset, since per-subscription keys cannot reach any other cluster. The
+ * skip and the exit code are runCiSweep's (utils/sweep-ci.ts).
  */
 
-import { scratchNamePrefix } from './utils/namespace.ts';
+import { runCiSweep } from './utils/sweep-ci.ts';
 import { sweepOrphanedVultrResources } from './utils/sweep-vultr.ts';
 
-if (!process.env.VULTR_API_TOKEN) {
-  console.log('[sweep-vultr-ci] VULTR_API_TOKEN not set — skipping (no Vultr secrets configured).');
-  process.exit(0);
-}
-
-const prefix = scratchNamePrefix();
-const { counts, enumFailed } = await sweepOrphanedVultrResources('[sweep-vultr-ci]', prefix, {
-  token: process.env.VULTR_API_TOKEN,
-  storageRegion: process.env.VULTR_STORAGE_REGION,
+const tag = '[sweep-vultr-ci]';
+await runCiSweep({
+  tag,
+  tokenEnv: 'VULTR_API_TOKEN',
+  cloud: 'Vultr',
+  sweep: (prefix, token) =>
+    sweepOrphanedVultrResources(tag, prefix, {
+      token,
+      storageRegion: process.env.VULTR_STORAGE_REGION,
+    }),
 });
-console.log(`[sweep-vultr-ci] ${prefix}*: ${JSON.stringify(counts)}`);
-if (enumFailed) process.exit(1);

@@ -101,6 +101,39 @@ const REGISTRY = [
     ],
   },
   {
+    // The outline of a pass over one resource class: list, keep this run's,
+    // delete, count or fail, and mark the sweep incomplete on a listing that
+    // stopped early or threw. Each of the four sweeps wrote it out once per
+    // class, and the copies are where "an unreadable list is not reported"
+    // kept coming back. Hetzner's compute passes stay their own.
+    helper: 'sweepClass',
+    definition: 'tests/e2e/utils/sweep-core.ts',
+    consumers: [
+      'tests/e2e/utils/sweep-digitalocean.ts',
+      'tests/e2e/utils/sweep-linode.ts',
+      'tests/e2e/utils/sweep-vultr.ts',
+      'tests/e2e/utils/sweep-scaleway.ts',
+    ],
+    deepTests: [
+      'tests/unit/e2e/sweep-pass-transcript.test.ts',
+      'tests/unit/e2e/sweep-load-balancers-networks.test.ts',
+    ],
+  },
+  {
+    // The volume rule of those four sweeps: never an attached volume, and a
+    // CSI volume only with this run's project tag. A sweep with its own copy
+    // can lose the tag check, which is how a live rig's volumes were deleted.
+    helper: 'sweepOwnsVolume',
+    definition: 'tests/e2e/utils/sweep-core.ts',
+    consumers: [
+      'tests/e2e/utils/sweep-digitalocean.ts',
+      'tests/e2e/utils/sweep-linode.ts',
+      'tests/e2e/utils/sweep-vultr.ts',
+      'tests/e2e/utils/sweep-scaleway.ts',
+    ],
+    deepTests: ['tests/unit/e2e/sweep-pass-transcript.test.ts'],
+  },
+  {
     // One page walker for the harness, in each provider's pagination
     // dialect, that never says `complete` unless the provider said there is
     // no next page. The sweeps, preflight and verify-scale each had their
@@ -118,6 +151,45 @@ const REGISTRY = [
       'tests/e2e/utils/server-types.ts', // verify-scale's server-type snapshot
     ],
     deepTests: ['tests/unit/e2e/provider-pages.test.ts', 'tests/unit/e2e/sweep-page-guard.test.ts'],
+  },
+  {
+    // One ssh attempt for a check, as data: the options, the time limit and
+    // what a failed exit carries. replication.ts and pilot-light.ts each had
+    // a copy under their own retry, and grafana-ready.ts a third. The retries
+    // stay in those files (registered sites in docs/mitigations.yml).
+    helper: 'sshExecOnce',
+    definition: 'tests/e2e/utils/ssh.ts',
+    consumers: [
+      'tests/e2e/checks/replication.ts', // under sshExecWithRetry, with the unreachable-host latch
+      'tests/e2e/checks/pilot-light.ts', // under its own retry, no latch
+      'tests/e2e/checks/grafana-ready.ts', // one attempt, the rollout's own time limit
+    ],
+    deepTests: ['tests/unit/e2e/checks-ssh-exec.test.ts'],
+  },
+  {
+    // The same call for a check that wants the output or the thrown error.
+    helper: 'sshOutput',
+    definition: 'tests/e2e/utils/ssh.ts',
+    consumers: [
+      'tests/e2e/checks/config-canary.ts', // 30 s; the poll reads the thrown message
+      'tests/e2e/checks/backup-evidence.ts', // 60 s; sshFailureReason reads the thrown error
+    ],
+    deepTests: ['tests/unit/e2e/checks-ssh-exec.test.ts'],
+  },
+  {
+    // The verdict of a CI safety-net sweep step: exit 0 without a token,
+    // exit 1 when the sweep could not look at everything. An entry point
+    // with its own copy can lose the exit 1, and residue the sweep never saw
+    // then bills under a green run.
+    helper: 'runCiSweep',
+    definition: 'tests/e2e/utils/sweep-ci.ts',
+    consumers: [
+      'tests/e2e/sweep-digitalocean-ci.ts',
+      'tests/e2e/sweep-linode-ci.ts',
+      'tests/e2e/sweep-vultr-ci.ts',
+      'tests/e2e/sweep-scaleway-ci.ts',
+    ],
+    deepTests: ['tests/unit/e2e/sweep-ci.test.ts', 'tests/unit/e2e/sweep-ci-entry-points.test.ts'],
   },
   {
     helper: 'e2eCliEnv',

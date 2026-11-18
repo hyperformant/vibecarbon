@@ -16,12 +16,12 @@
  * GitHub run 43694492910 (digitalocean/k8s-ha reconverge-deploy) is why this
  * exists: the outside checks gave Grafana 60 s, the manifest gives it 300 s.
  */
-import { execFileSync } from 'node:child_process';
+
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import type { VerificationResult } from '../scenarios/types.js';
-import { e2eSshOpts } from '../utils/ssh.js';
+import { sshExecOnce } from '../utils/ssh.js';
 
 export const GRAFANA_NAMESPACE = 'vibecarbon-observability';
 
@@ -29,7 +29,7 @@ const MANIFEST = fileURLToPath(
   new URL('../../../services/observability/k8s/grafana-deployment.yaml', import.meta.url),
 );
 const KUBECTL_ENV = 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml';
-const SSH_OPTS = e2eSshOpts(10);
+
 /** What the SSH call adds on top of kubectl's own timeout (connect, setup). */
 const SSH_SLACK_MS = 60_000;
 
@@ -70,25 +70,15 @@ export interface SshRun {
   output: string;
 }
 
-/** One SSH command on the master. Never throws. */
+/**
+ * One SSH command on the master (a fixed kubectl command; the only
+ * interpolated value is a number). Never throws. A failure reports what the
+ * command printed, stdout then stderr, or the error's own message.
+ */
 function sshRun(ip: string, sshKeyPath: string, remote: string, timeoutMs: number): SshRun {
-  try {
-    // SECURITY: execFileSync runs ssh directly (no local shell). `remote` is
-    // a fixed kubectl command; the only interpolated value is a number.
-    const out = execFileSync('ssh', [...SSH_OPTS, '-i', sshKeyPath, `root@${ip}`, remote], {
-      encoding: 'utf-8',
-      timeout: timeoutMs,
-      stdio: 'pipe',
-    });
-    return { ok: true, output: out.trim() };
-  } catch (err) {
-    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
-    const output = [e.stdout, e.stderr]
-      .map((s) => (s ? s.toString().trim() : ''))
-      .filter(Boolean)
-      .join('\n');
-    return { ok: false, output: output || (e.message ?? 'ssh failed') };
-  }
+  const res = sshExecOnce(ip, sshKeyPath, remote, timeoutMs);
+  if (res.ok) return { ok: true, output: res.stdout };
+  return { ok: false, output: [res.stdout, res.stderr].filter(Boolean).join('\n') || res.message };
 }
 
 /**

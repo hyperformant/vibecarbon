@@ -12,24 +12,21 @@
  * Self-skips with exit 0 when SCALEWAY_SECRET_KEY is absent, so the CI step is
  * inert until the e2e-infra environment carries the Scaleway secrets.
  * Exits 1 when the sweep could not fully enumerate (an unverifiable sweep
- * must not pose as a clean one).
+ * must not pose as a clean one). Both are runCiSweep's (utils/sweep-ci.ts).
  */
 
-import { scratchNamePrefix } from './utils/namespace.ts';
+import { runCiSweep } from './utils/sweep-ci.ts';
 import { sweepOrphanedScalewayResources } from './utils/sweep-scaleway.ts';
 
-if (!process.env.SCALEWAY_SECRET_KEY) {
-  console.log(
-    '[sweep-scaleway-ci] SCALEWAY_SECRET_KEY not set — skipping (no Scaleway secrets configured).',
-  );
-  process.exit(0);
-}
-
-const prefix = scratchNamePrefix();
-const { counts, enumFailed } = await sweepOrphanedScalewayResources('[sweep-scaleway-ci]', prefix, {
-  token: process.env.SCALEWAY_SECRET_KEY,
-  storageKey: process.env.SCALEWAY_ACCESS_KEY,
-  projectId: process.env.SCALEWAY_DEFAULT_PROJECT_ID,
+const tag = '[sweep-scaleway-ci]';
+await runCiSweep({
+  tag,
+  tokenEnv: 'SCALEWAY_SECRET_KEY',
+  cloud: 'Scaleway',
+  sweep: (prefix, token) =>
+    sweepOrphanedScalewayResources(tag, prefix, {
+      token,
+      storageKey: process.env.SCALEWAY_ACCESS_KEY,
+      projectId: process.env.SCALEWAY_DEFAULT_PROJECT_ID,
+    }),
 });
-console.log(`[sweep-scaleway-ci] ${prefix}*: ${JSON.stringify(counts)}`);
-if (enumFailed) process.exit(1);

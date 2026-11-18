@@ -37,10 +37,9 @@
  * the check reports fail with a diagnostic, it never throws.
  */
 
-import { execFileSync } from 'node:child_process';
 import { isWorkerNode } from '../../../src/lib/deploy/k8s/node-roles.js';
 import type { VerificationResult } from '../scenarios/types.js';
-import { e2eSshOpts } from '../utils/ssh.js';
+import { sshExecOnce } from '../utils/ssh.js';
 import { classifySshExecFailure, type SshExecFailureKind } from './replication.js';
 
 const NAMESPACE = 'vibecarbon';
@@ -48,8 +47,6 @@ const DB_STATEFULSET = 'db';
 const AUTOSCALER_NAMESPACE = 'kube-system';
 const AUTOSCALER_DEPLOYMENT = 'cluster-autoscaler';
 const KUBECTL_ENV = 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml';
-
-const SSH_OPTS = e2eSshOpts(10);
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-testable — no SSH round-trips)
@@ -157,49 +154,13 @@ export function findWorkerNodeNames(json: string | null | undefined): string[] |
 }
 
 // ---------------------------------------------------------------------------
-// SSH exec — retried, transport-vs-remote classified (mirrors
-// checks/replication.ts's sshExecOnce/sshExecWithRetry; kubectl-only here so
-// there's no ReplTarget/mode/projectName to thread).
+// SSH exec — retried, transport-vs-remote classified. The retry mirrors
+// checks/replication.ts's sshExecWithRetry without its unreachable-host
+// latch; kubectl-only here, so there is no ReplTarget, mode or project name
+// to thread. One attempt is sshExecOnce (utils/ssh.ts), which both share.
 // ---------------------------------------------------------------------------
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-interface SshExecOnceResult {
-  ok: boolean;
-  status: number | null;
-  stdout: string;
-  stderr: string;
-  message: string;
-}
-
-/** Single ssh exec attempt. Never throws. */
-function sshExecOnce(ip: string, sshKeyPath: string, remote: string): SshExecOnceResult {
-  try {
-    // SECURITY: execFileSync invokes ssh directly (no shell). ip/key come
-    // from our own config; `remote` is always a fixed kubectl command string
-    // with no interpolated marker ids or user input.
-    const out = execFileSync('ssh', [...SSH_OPTS, '-i', sshKeyPath, `root@${ip}`, remote], {
-      encoding: 'utf-8',
-      timeout: 30_000,
-      stdio: 'pipe',
-    });
-    return { ok: true, status: 0, stdout: out.trim(), stderr: '', message: '' };
-  } catch (err) {
-    const e = err as {
-      status?: number | null;
-      stdout?: Buffer | string;
-      stderr?: Buffer | string;
-      message?: string;
-    };
-    return {
-      ok: false,
-      status: typeof e.status === 'number' ? e.status : null,
-      stdout: e.stdout ? e.stdout.toString().trim() : '',
-      stderr: e.stderr ? e.stderr.toString().trim() : '',
-      message: e.message ?? 'ssh exec failed',
-    };
-  }
-}
 
 // Same budget as checks/replication.ts: 3 attempts, 5s apart. Rides out an
 // sshd MaxStartups penalty window from the verify-step's SSH fan-out without

@@ -46,7 +46,14 @@
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { walkProviderPages } from './provider-pages.js';
-import { bucketSource, createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
+import {
+  bucketSource,
+  createSweep,
+  reportSweep,
+  sweepBuckets,
+  sweepClass,
+  sweepOwnsVolume,
+} from './sweep-core.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately
@@ -168,17 +175,14 @@ export async function sweepOrphanedScalewayResources(
   // The guard, the opening line, the counts and the incomplete flag
   // (sweep-core.ts). Placement groups are never provisioned by our Scaleway paths; `firewalls` counts security groups, `floatingIps` flexible IPs (real here: €0.005/hr survivors) and `networks` Private Networks.
   const sweep = createSweep(tag, 'Scaleway', projectName, { loadBalancers: 0 });
-  const { counts, markIncomplete } = sweep;
+  const { markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.SCALEWAY_SECRET_KEY;
   const projectId = deps.projectId ?? process.env.SCALEWAY_DEFAULT_PROJECT_ID;
-  let provider = deps.provider;
+  const provider = deps.provider ?? (token ? await defaultProvider(token) : null);
   if (!provider) {
-    if (!token) {
-      markIncomplete('Scaleway (no SCALEWAY_SECRET_KEY)');
-      return sweep.result();
-    }
-    provider = await defaultProvider(token);
+    markIncomplete('Scaleway (no SCALEWAY_SECRET_KEY)');
+    return sweep.result();
   }
   const fetchImpl =
     deps.fetchImpl ??
@@ -208,150 +212,120 @@ export async function sweepOrphanedScalewayResources(
       fetchImpl,
     });
 
+  // Each pass below is sweepClass's outline (sweep-core.ts): list, keep this
+  // run's, delete, count or fail, and mark the sweep incomplete when the
+  // listing cannot be read. A pass with `thrown` stops a throwing delete at
+  // that resource; one without ends on it, as it always did.
+
   // 1. Instances. deleteServer is the full billing-leak-safe chain
   // (terminate → wait gone → delete detached SBS volumes → release IPs),
   // so the arms below only see what a FAILED destroy left behind.
-  try {
-    const { items, complete } = await provider.listServersDetailed();
-    if (!complete) markIncomplete('instance list');
-    for (const server of items) {
-      if (!server.name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned instance ${server.id} (${server.name})`);
-      try {
-        await provider.deleteServer(server.id, { waitUntilGone: true });
-        counts.servers++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Instance ${server.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('instance list');
-    console.warn(`${tag} [sweep] Instance cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'instance list',
+    cleanupFailed: 'Instance cleanup failed',
+    count: 'servers',
+    list: () => provider.listServersDetailed(),
+    owned: (server) => server.name.startsWith(projectName),
+    announce: (server) => `Deleting orphaned instance ${server.id} (${server.name})`,
+    remove: async (server) => {
+      await provider.deleteServer(server.id, { waitUntilGone: true });
+      return true;
+    },
+    thrown: (server) => `Instance ${server.id} delete failed`,
+  });
 
   // 2. Volumes — the merged Instance+Block listing (every SBS root volume
   // lives in /block/v1; reading only the Instance API would report clean
   // over a dead-certain leak). Project-named volumes delete on prefix;
   // pvc-* CSI volumes delete ONLY with a matching project tag (header).
-  try {
-    const { items, complete } = await provider.listVolumesDetailed();
-    if (!complete) markIncomplete('volume list');
-    for (const volume of items) {
-      if (provider.volumeAttachedServerIds(volume).length > 0) continue;
-      const volName = volume.name ?? '';
-      const ownedByName = volName.startsWith(projectName);
-      const isPvc = volName.startsWith('pvc');
-      const ownedByTag = isPvc && provider.volumeLabels(volume).project === projectName;
-      if (!ownedByName && !ownedByTag) {
-        if (isPvc) {
-          console.warn(
-            `${tag} [sweep] Unattached CSI volume ${volName} carries no project=${projectName} tag — ` +
-              'NOT deleting (could belong to a concurrent run); review manually if it persists.',
-          );
-        }
-        continue;
-      }
-      console.log(`${tag} [sweep] Deleting orphaned volume ${volume.id} (${volName})`);
-      try {
-        await provider.deleteVolume(volume.id);
-        counts.volumes++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('volume list');
-    console.warn(`${tag} [sweep] Volume cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'volume list',
+    cleanupFailed: 'Volume cleanup failed',
+    count: 'volumes',
+    list: () => provider.listVolumesDetailed(),
+    owned: (volume) =>
+      sweepOwnsVolume(
+        sweep,
+        {
+          name: volume.name ?? '',
+          attached: provider.volumeAttachedServerIds(volume).length > 0,
+          projectTag: () => provider.volumeLabels(volume).project,
+        },
+        { pvcPrefix: 'pvc' },
+      ),
+    announce: (volume) => `Deleting orphaned volume ${volume.id} (${volume.name ?? ''})`,
+    remove: async (volume) => {
+      await provider.deleteVolume(volume.id);
+      return true;
+    },
+    thrown: (volume) => `Volume ${volume.id} delete failed`,
+  });
 
   // 3. Security groups — per-zone enumeration (zone-scoped resources);
   // deletion routes through the provider's name-based method. The per-AZ
   // auto-created default group can never be prefix-matched (Scaleway names
   // it itself) and is explicitly guarded regardless.
   for (const zone of SWEEP_ZONES) {
-    try {
-      const { items, complete } = await walkZonePages<{
-        id: string;
-        name?: string;
-        project_default?: boolean;
-      }>(zone, '/security_groups', 'security_groups');
-      if (!complete) markIncomplete(`security-group list (${zone})`);
-      for (const sg of items) {
-        if (sg.project_default) continue; // never touch the default group
-        if (!sg.name?.startsWith(projectName)) continue;
-        console.log(`${tag} [sweep] Deleting orphaned security group ${sg.name} (${zone})`);
-        const { deleted } = await provider.deleteFirewallByName(sg.name);
-        if (deleted) counts.firewalls++;
-        else {
-          sweep.fail();
-          console.warn(`${tag} [sweep] Security group ${sg.name} delete failed`);
-        }
-      }
-    } catch (e) {
-      markIncomplete(`security-group list (${zone})`);
-      console.warn(
-        `${tag} [sweep] Security-group cleanup failed (${zone}): ${e instanceof Error ? e.message : e}`,
-      );
-    }
+    await sweepClass(sweep, {
+      listing: `security-group list (${zone})`,
+      cleanupFailed: `Security-group cleanup failed (${zone})`,
+      count: 'firewalls',
+      list: () =>
+        walkZonePages<{ id: string; name?: string; project_default?: boolean }>(
+          zone,
+          '/security_groups',
+          'security_groups',
+        ),
+      // Never touch the default group.
+      owned: (sg) => !sg.project_default && !!sg.name?.startsWith(projectName),
+      announce: (sg) => `Deleting orphaned security group ${sg.name} (${zone})`,
+      remove: async (sg) =>
+        (await provider.deleteFirewallByName(sg.name ?? '')).deleted ||
+        `Security group ${sg.name} delete failed`,
+    });
   }
 
   // 4. IAM ssh keys — Project-scoped, global API (page/page_size walk).
-  try {
-    const { items: keys, complete } = await walkProviderPages<{ id: string; name?: string }>(
-      'scaleway-page-size',
-      `${API_BASE}/iam/v1alpha1/ssh-keys${projectId ? `?project_id=${projectId}` : ''}`,
-      // A fetch error goes to the catch below, which names it.
-      { key: 'ssh_keys', perPage: 100, fetchImpl, onThrow: 'throw' },
-    );
-    if (!complete) markIncomplete('ssh-key list');
-    for (const sshKey of keys) {
-      if (!sshKey.name?.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.name}`);
-      if (await provider.deleteSSHKeyByName(sshKey.name)) counts.sshKeys++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('ssh-key list');
-    console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'ssh-key list',
+    cleanupFailed: 'SSH-key cleanup failed',
+    count: 'sshKeys',
+    list: () =>
+      walkProviderPages<{ id: string; name?: string }>(
+        'scaleway-page-size',
+        `${API_BASE}/iam/v1alpha1/ssh-keys${projectId ? `?project_id=${projectId}` : ''}`,
+        // A fetch error ends the pass, which names it.
+        { key: 'ssh_keys', perPage: 100, fetchImpl, onThrow: 'throw' },
+      ),
+    owned: (sshKey) => !!sshKey.name?.startsWith(projectName),
+    announce: (sshKey) => `Deleting orphaned ssh key ${sshKey.name}`,
+    remove: async (sshKey) =>
+      (await provider.deleteSSHKeyByName(sshKey.name ?? '')) ||
+      `SSH key ${sshKey.name} delete failed`,
+  });
 
   // 5. Flexible IPs — the €0.005/hr survivors (audit design flag 5).
   // Ownership is by project tag (the compose program tags the Ip resource;
   // IPs have no name field). Only UNATTACHED IPs are released — an
   // attached one belongs to a server the instance arm handles.
-  try {
-    const { items, complete } = await provider.listFlexibleIPsDetailed();
-    if (!complete) markIncomplete('flexible-IP list');
-    const { decodeLabels } = (await import('../../../src/lib/providers/scaleway.js')) as {
-      decodeLabels: (tags?: string[] | null) => Record<string, string>;
-    };
-    for (const ip of items) {
-      if (ip.server?.id) continue;
-      if (decodeLabels(ip.tags).project !== projectName) continue;
-      console.log(
-        `${tag} [sweep] Releasing orphaned flexible IP ${ip.id}${ip.address ? ` (${ip.address})` : ''}`,
-      );
-      if (await provider.releaseFlexibleIP(ip.id, ip.zone)) counts.floatingIps++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] Flexible IP ${ip.id} release failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('flexible-IP list');
-    console.warn(
-      `${tag} [sweep] Flexible-IP cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+  let decodeLabels: (tags?: string[] | null) => Record<string, string>;
+  await sweepClass(sweep, {
+    listing: 'flexible-IP list',
+    cleanupFailed: 'Flexible-IP cleanup failed',
+    count: 'floatingIps',
+    list: async () => {
+      const listed = await provider.listFlexibleIPsDetailed();
+      ({ decodeLabels } = (await import('../../../src/lib/providers/scaleway.js')) as {
+        decodeLabels: typeof decodeLabels;
+      });
+      return listed;
+    },
+    owned: (ip) => !ip.server?.id && decodeLabels(ip.tags).project === projectName,
+    announce: (ip) =>
+      `Releasing orphaned flexible IP ${ip.id}${ip.address ? ` (${ip.address})` : ''}`,
+    remove: async (ip) =>
+      (await provider.releaseFlexibleIP(ip.id, ip.zone)) || `Flexible IP ${ip.id} release failed`,
+  });
 
   // 6. Load balancers + Private Networks — never provisioned by the
   // compose tier, enumerated so a future tier's leak can't hide behind a
@@ -362,34 +336,22 @@ export async function sweepOrphanedScalewayResources(
   // unchecked under a clean banner.
   // Load balancers are zone-scoped, like the provider's own walk.
   for (const zone of SWEEP_ZONES) {
-    try {
-      const { items: lbs, complete } = await walkPageSize<{ id: string; name?: string }>(
-        `/lb/v1/zones/${zone}/lbs`,
-        'lbs',
-      );
-      if (!complete) markIncomplete(`load-balancer list (${zone})`);
-      for (const lb of lbs) {
-        if (!lb.name?.startsWith(projectName)) continue;
-        console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.name})`);
-        try {
-          // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
-          if ((await provider.deleteLoadBalancer(lb.id)) === false) {
-            throw new Error('the API refused the delete');
-          }
-          counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
-        } catch (err) {
-          sweep.fail();
-          console.warn(
-            `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
-          );
+    await sweepClass(sweep, {
+      listing: `load-balancer list (${zone})`,
+      cleanupFailed: `Load-balancer cleanup failed (${zone})`,
+      count: 'loadBalancers',
+      list: () => walkPageSize<{ id: string; name?: string }>(`/lb/v1/zones/${zone}/lbs`, 'lbs'),
+      owned: (lb) => !!lb.name?.startsWith(projectName),
+      announce: (lb) => `Deleting orphaned load balancer ${lb.id} (${lb.name})`,
+      remove: async (lb) => {
+        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+          throw new Error('the API refused the delete');
         }
-      }
-    } catch (e) {
-      markIncomplete(`load-balancer list (${zone})`);
-      console.warn(
-        `${tag} [sweep] Load-balancer cleanup failed (${zone}): ${e instanceof Error ? e.message : e}`,
-      );
-    }
+        return true;
+      },
+      thrown: (lb) => `Load balancer ${lb.id} delete failed`,
+    });
   }
 
   // Listed by this sweep's own walk, not provider.listNetworks(), for the
@@ -397,50 +359,32 @@ export async function sweepOrphanedScalewayResources(
   // partial list) when the API call fails.
   // Private Networks are region-scoped, like the provider's own walk.
   for (const region of SWEEP_S3_REGIONS) {
-    try {
-      const { items: networks, complete } = await walkPageSize<{ id: string; name?: string }>(
-        `/vpc/v2/regions/${region}/private-networks`,
-        'private_networks',
-      );
-      if (!complete) markIncomplete(`private-network list (${region})`);
-      for (const net of networks) {
-        const netName = net.name ?? '';
-        if (!netName.startsWith(projectName)) continue;
-        console.log(`${tag} [sweep] Orphaned Private Network ${net.id} (${netName}) — deleting`);
-        try {
-          // Private Networks are region-scoped; try both regions — a 404 in
-          // the wrong one is benign.
-          let deleted = false;
-          for (const r of SWEEP_S3_REGIONS) {
-            const res = await fetchImpl(
-              `${API_BASE}/vpc/v2/regions/${r}/private-networks/${net.id}`,
-              {
-                method: 'DELETE',
-              },
-            );
-            if (res.ok) {
-              deleted = true;
-              break;
-            }
-          }
-          if (deleted) counts.networks++;
-          else {
-            sweep.fail();
-            console.warn(`${tag} [sweep] Private Network ${net.id} delete failed`);
-          }
-        } catch (err) {
-          sweep.fail();
-          console.warn(
-            `${tag} [sweep] Private Network ${net.id} delete failed: ${err instanceof Error ? err.message : err}`,
+    await sweepClass(sweep, {
+      listing: `private-network list (${region})`,
+      cleanupFailed: `Private-Network cleanup failed (${region})`,
+      count: 'networks',
+      list: () =>
+        walkPageSize<{ id: string; name?: string }>(
+          `/vpc/v2/regions/${region}/private-networks`,
+          'private_networks',
+        ),
+      owned: (net) => (net.name ?? '').startsWith(projectName),
+      announce: (net) => `Orphaned Private Network ${net.id} (${net.name ?? ''}) — deleting`,
+      remove: async (net) => {
+        // Private Networks are region-scoped; try both regions — a 404 in
+        // the wrong one is benign. Only a 2xx counts: a network that
+        // answers 404 in both regions is reported as a failed delete.
+        for (const r of SWEEP_S3_REGIONS) {
+          const res = await fetchImpl(
+            `${API_BASE}/vpc/v2/regions/${r}/private-networks/${net.id}`,
+            { method: 'DELETE' },
           );
+          if (res.ok) return true;
         }
-      }
-    } catch (e) {
-      markIncomplete(`private-network list (${region})`);
-      console.warn(
-        `${tag} [sweep] Private-Network cleanup failed (${region}): ${e instanceof Error ? e.message : e}`,
-      );
-    }
+        return `Private Network ${net.id} delete failed`;
+      },
+      thrown: (net) => `Private Network ${net.id} delete failed`,
+    });
   }
 
   // 7. Object Storage buckets — the SAME IAM pair as compute signs S3;

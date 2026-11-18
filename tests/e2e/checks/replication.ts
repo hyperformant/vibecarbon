@@ -32,12 +32,11 @@
  * an SSH/exec error — the check reports fail with a diagnostic, it never throws.
  */
 
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
-import { e2eSshOpts } from '../utils/ssh.js';
+import { sshExecOnce } from '../utils/ssh.js';
 import {
   isSshConnectTimeout,
   noteSshConnectTimeout,
@@ -95,8 +94,6 @@ export function buildCreateMarkerSql(markerId: string): string {
 export function buildDropProbeTableSql(): string {
   return `DROP TABLE IF EXISTS ${QUALIFIED_PROBE_TABLE};`;
 }
-
-const SSH_OPTS = e2eSshOpts(10);
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested — no SSH round-trips)
@@ -362,39 +359,6 @@ export interface PsqlResult {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Single ssh exec attempt. Never throws. */
-function sshExecOnce(
-  target: ReplTarget,
-  remote: string,
-): { ok: boolean; status: number | null; stdout: string; stderr: string; message: string } {
-  try {
-    // SECURITY: execFileSync invokes ssh directly (no shell). ip/key come from
-    // our own config; `remote` embeds only fixed SQL + a sanitized marker id.
-    const out = execFileSync(
-      'ssh',
-      [...SSH_OPTS, '-i', target.sshKeyPath, `root@${target.ip}`, remote],
-      { encoding: 'utf-8', timeout: 30_000, stdio: 'pipe' },
-    );
-    return { ok: true, status: 0, stdout: out.trim(), stderr: '', message: '' };
-  } catch (err) {
-    // execFileSync throws on non-zero exit / timeout; stdout/stderr still
-    // carry the remote command's own error text, which is the useful part.
-    const e = err as {
-      status?: number | null;
-      stdout?: Buffer | string;
-      stderr?: Buffer | string;
-      message?: string;
-    };
-    return {
-      ok: false,
-      status: typeof e.status === 'number' ? e.status : null,
-      stdout: e.stdout ? e.stdout.toString().trim() : '',
-      stderr: e.stderr ? e.stderr.toString().trim() : '',
-      message: e.message ?? 'ssh exec failed',
-    };
-  }
-}
-
 // 3 attempts, 5s apart — matches the deploy CLI's sshRunAsync budget. Small
 // enough that a real outage still surfaces fast, big enough to ride out an
 // sshd MaxStartups penalty window (the verify-step check fan-out opens many
@@ -430,13 +394,13 @@ async function sshExecWithRetry(
     };
   }
 
-  let last = sshExecOnce(target, remote);
+  let last = sshExecOnce(target.ip, target.sshKeyPath, remote);
   let attempts = 1;
   while (!last.ok && attempts < SSH_ATTEMPTS) {
     const cls = classifySshExecFailure(last.status, `${last.stderr}\n${last.message}`);
     if (!cls.transient) break;
     await sleep(SSH_RETRY_DELAY_MS);
-    last = sshExecOnce(target, remote);
+    last = sshExecOnce(target.ip, target.sshKeyPath, remote);
     attempts++;
   }
   if (last.ok) {

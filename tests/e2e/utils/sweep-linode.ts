@@ -18,7 +18,13 @@
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { walkProviderPages } from './provider-pages.js';
-import { createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
+import {
+  createSweep,
+  reportSweep,
+  sweepBuckets,
+  sweepClass,
+  sweepOwnsVolume,
+} from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
@@ -139,16 +145,13 @@ export async function sweepOrphanedLinodeResources(
   // The guard, the opening line, the counts and the incomplete flag
   // (sweep-core.ts). Linode placement groups are never provisioned by our paths; `networks` counts VPCs and `loadBalancers` NodeBalancers.
   const sweep = createSweep(tag, 'Linode', projectName, { loadBalancers: 0, storageKeys: 0 });
-  const { counts, markIncomplete } = sweep;
+  const { markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.LINODE_API_TOKEN;
-  let provider = deps.provider;
+  const provider = deps.provider ?? (token ? await defaultProvider(token) : null);
   if (!provider) {
-    if (!token) {
-      markIncomplete('Linode (no API token)');
-      return sweep.result();
-    }
-    provider = await defaultProvider(token);
+    markIncomplete('Linode (no API token)');
+    return sweep.result();
   }
   const fetchImpl =
     deps.fetchImpl ??
@@ -158,66 +161,54 @@ export async function sweepOrphanedLinodeResources(
         headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
       })) as typeof fetch);
 
+  // Each pass below is sweepClass's outline (sweep-core.ts): list, keep this
+  // run's, delete, count or fail, and mark the sweep incomplete when the
+  // listing cannot be read. A pass with `thrown` stops a throwing delete at
+  // that resource; one without ends on it, as it always did.
+
   // 1. Instances. deleteServer(waitUntilGone) polls until 404 so dependent
   // sweeps below never race Linode's async teardown.
-  try {
-    const { items, complete } = await provider.listServersDetailed();
-    if (!complete) markIncomplete('instance list');
-    for (const instance of items) {
-      if (!instance.label.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned instance ${instance.id} (${instance.label})`);
-      try {
-        await provider.deleteServer(instance.id, { waitUntilGone: true });
-        counts.servers++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Instance ${instance.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('instance list');
-    console.warn(`${tag} [sweep] Instance cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'instance list',
+    cleanupFailed: 'Instance cleanup failed',
+    count: 'servers',
+    list: () => provider.listServersDetailed(),
+    owned: (instance) => instance.label.startsWith(projectName),
+    announce: (instance) => `Deleting orphaned instance ${instance.id} (${instance.label})`,
+    remove: async (instance) => {
+      await provider.deleteServer(instance.id, { waitUntilGone: true });
+      return true;
+    },
+    thrown: (instance) => `Instance ${instance.id} delete failed`,
+  });
 
   // 2. Volumes. Project-labeled volumes delete on prefix; pvc-* CSI volumes
   // delete ONLY with a matching project tag (see header — cross-run safety).
   // Linode squeezes a tag past 50 characters, so the decoded tag is compared
   // to labelValue, not the raw project name.
   const ownProject = provider.labelValue('project', projectName);
-  try {
-    const { items, complete } = await provider.listVolumesDetailed();
-    if (!complete) markIncomplete('volume list');
-    for (const volume of items) {
-      if (provider.volumeAttachedServerIds(volume).length > 0) continue;
-      const ownedByName = volume.label.startsWith(projectName);
-      const isPvc = volume.label.startsWith('pvc');
-      const ownedByTag = isPvc && provider.volumeLabels(volume).project === ownProject;
-      if (!ownedByName && !ownedByTag) {
-        if (isPvc) {
-          console.warn(
-            `${tag} [sweep] Unattached CSI volume ${volume.label} carries no project=${projectName} tag — ` +
-              'NOT deleting (could belong to a concurrent run); review manually if it persists.',
-          );
-        }
-        continue;
-      }
-      console.log(`${tag} [sweep] Deleting orphaned volume ${volume.id} (${volume.label})`);
-      try {
-        await provider.deleteVolume(volume.id);
-        counts.volumes++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('volume list');
-    console.warn(`${tag} [sweep] Volume cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'volume list',
+    cleanupFailed: 'Volume cleanup failed',
+    count: 'volumes',
+    list: () => provider.listVolumesDetailed(),
+    owned: (volume) =>
+      sweepOwnsVolume(
+        sweep,
+        {
+          name: volume.label,
+          attached: provider.volumeAttachedServerIds(volume).length > 0,
+          projectTag: () => provider.volumeLabels(volume).project,
+        },
+        { pvcPrefix: 'pvc', project: ownProject },
+      ),
+    announce: (volume) => `Deleting orphaned volume ${volume.id} (${volume.label})`,
+    remove: async (volume) => {
+      await provider.deleteVolume(volume.id);
+      return true;
+    },
+    thrown: (volume) => `Volume ${volume.id} delete failed`,
+  });
 
   // 3. Firewalls / profile SSH keys. The provider exposes only exact-label
   // lookups for these, so enumeration walks the API directly (the
@@ -226,51 +217,45 @@ export async function sweepOrphanedLinodeResources(
   const walkPages = <T>(path: string) =>
     walkProviderPages<T>('linode', `${API_BASE}${path}`, { perPage: 100, fetchImpl });
 
-  try {
-    const { items, complete } = await walkPages<{ id: number; label: string; tags?: string[] }>(
-      '/networking/firewalls',
-    );
-    if (!complete) markIncomplete('firewall list');
-    const { decodeLabels } = (await import('../../../src/lib/providers/linode.js')) as {
-      decodeLabels: (tags?: string[] | null) => Record<string, string>;
-    };
-    for (const fw of items) {
+  let decodeLabels: (tags?: string[] | null) => Record<string, string>;
+  await sweepClass(sweep, {
+    listing: 'firewall list',
+    cleanupFailed: 'Firewall cleanup failed',
+    count: 'firewalls',
+    list: async () => {
+      const walk = await walkPages<{ id: number; label: string; tags?: string[] }>(
+        '/networking/firewalls',
+      );
+      ({ decodeLabels } = (await import('../../../src/lib/providers/linode.js')) as {
+        decodeLabels: typeof decodeLabels;
+      });
+      return walk;
+    },
+    owned: (fw) => {
       // Firewall labels can be SQUEEZED into Linode's 32-char cap (see
       // squeezeLinodeLabel), so a long project name is no longer a label
       // prefix — ownership falls back to the `project:` tag the compose
       // program stamps on every firewall it creates.
       const ownedByLabel = fw.label.startsWith(projectName);
       const ownedByTag = decodeLabels(fw.tags).project === ownProject;
-      if (!ownedByLabel && !ownedByTag) continue;
-      console.log(`${tag} [sweep] Deleting orphaned firewall ${fw.label}`);
-      const { deleted } = await provider.deleteFirewallByName(fw.label);
-      if (deleted) counts.firewalls++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] Firewall ${fw.label} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('firewall list');
-    console.warn(`${tag} [sweep] Firewall cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+      return ownedByLabel || ownedByTag;
+    },
+    announce: (fw) => `Deleting orphaned firewall ${fw.label}`,
+    remove: async (fw) =>
+      (await provider.deleteFirewallByName(fw.label)).deleted ||
+      `Firewall ${fw.label} delete failed`,
+  });
 
-  try {
-    const { items, complete } = await walkPages<{ id: number; label: string }>('/profile/sshkeys');
-    if (!complete) markIncomplete('ssh-key list');
-    for (const sshKey of items) {
-      if (!sshKey.label.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.label}`);
-      if (await provider.deleteSSHKeyByName(sshKey.label)) counts.sshKeys++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] SSH key ${sshKey.label} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('ssh-key list');
-    console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'ssh-key list',
+    cleanupFailed: 'SSH-key cleanup failed',
+    count: 'sshKeys',
+    list: () => walkPages<{ id: number; label: string }>('/profile/sshkeys'),
+    owned: (sshKey) => sshKey.label.startsWith(projectName),
+    announce: (sshKey) => `Deleting orphaned ssh key ${sshKey.label}`,
+    remove: async (sshKey) =>
+      (await provider.deleteSSHKeyByName(sshKey.label)) || `SSH key ${sshKey.label} delete failed`,
+  });
 
   // Reserved IPs. linode-k8s.js mints one per cluster via `linode.ReservedIp`.
   // Linode bills a reserved IP by the hour whether it is assigned or not
@@ -326,103 +311,69 @@ export async function sweepOrphanedLinodeResources(
   // method answers [] when the API call fails (its contract for destroy), so
   // an unreadable listing read as "no load balancers" and the class went
   // unchecked under a clean banner.
-  try {
-    const { items: lbs, complete } = await walkPages<{ id: number | string; label: string }>(
-      '/nodebalancers',
-    );
-    if (!complete) markIncomplete('NodeBalancer list');
-    for (const lb of lbs) {
-      if (!lb.label.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned NodeBalancer ${lb.id} (${lb.label})`);
-      try {
-        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
-        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
-          throw new Error('the API refused the delete');
-        }
-        counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] NodeBalancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
+  await sweepClass(sweep, {
+    listing: 'NodeBalancer list',
+    cleanupFailed: 'NodeBalancer cleanup failed',
+    count: 'loadBalancers',
+    list: () => walkPages<{ id: number | string; label: string }>('/nodebalancers'),
+    owned: (lb) => lb.label.startsWith(projectName),
+    announce: (lb) => `Deleting orphaned NodeBalancer ${lb.id} (${lb.label})`,
+    remove: async (lb) => {
+      // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+      if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+        throw new Error('the API refused the delete');
       }
-    }
-  } catch (e) {
-    markIncomplete('NodeBalancer list');
-    console.warn(
-      `${tag} [sweep] NodeBalancer cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+      return true;
+    },
+    thrown: (lb) => `NodeBalancer ${lb.id} delete failed`,
+  });
 
   // Listed by this sweep's own walk, not provider.listNetworks(), for the
   // same reason as the load balancers above: that method answers [] (or a
   // partial list) when the API call fails.
-  try {
-    const { items: vpcs, complete } = await walkPages<{ id: number | string; label: string }>(
-      '/vpcs',
-    );
-    if (!complete) markIncomplete('vpc list');
-    for (const vpc of vpcs) {
-      if (!vpc.label.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned VPC ${vpc.id} (${vpc.label})`);
-      try {
-        const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
-        if (res.ok || res.status === 404) counts.networks++;
-        else {
-          sweep.fail();
-          console.warn(`${tag} [sweep] VPC ${vpc.id} delete returned ${res.status}`);
-        }
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] VPC ${vpc.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('vpc list');
-    console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'vpc list',
+    cleanupFailed: 'VPC cleanup failed',
+    count: 'networks',
+    list: () => walkPages<{ id: number | string; label: string }>('/vpcs'),
+    owned: (vpc) => vpc.label.startsWith(projectName),
+    announce: (vpc) => `Deleting orphaned VPC ${vpc.id} (${vpc.label})`,
+    remove: async (vpc) => {
+      const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
+      return res.ok || res.status === 404 || `VPC ${vpc.id} delete returned ${res.status}`;
+    },
+    thrown: (vpc) => `VPC ${vpc.id} delete failed`,
+  });
 
   // 3c. App storage keys (security plan R9). Every deploy mints the env app a
   // key labelled `vc-app-<env bucket>`, and env buckets start with the project
   // name, so a key whose label starts with `vc-app-<project>` is this run's.
   // Destroy revokes them; one left here is a destroy leak, or a deploy that
   // crashed between the mint and the record (no destroy can see that one).
-  try {
-    const { appKeyLabel } = (await import('../../../src/lib/providers/app-key-api.js')) as {
-      appKeyLabel: (bucket: string, max: number) => string;
-    };
-    const labelPrefix = appKeyLabel(projectName, 50);
-    const { items, complete } = await walkPages<{ id: number; label: string }>(
-      '/object-storage/keys',
-    );
-    if (!complete) markIncomplete('app storage key list');
-    for (const key of items) {
-      if (!String(key.label ?? '').startsWith(labelPrefix)) continue;
-      console.log(`${tag} [sweep] Revoking orphaned app storage key (${key.label})`);
-      try {
-        const res = await fetchImpl(`${API_BASE}/object-storage/keys/${key.id}`, {
-          method: 'DELETE',
-        });
-        if (res.ok || res.status === 404) counts.storageKeys = (counts.storageKeys ?? 0) + 1;
-        else {
-          sweep.fail();
-          console.warn(`${tag} [sweep] app storage key ${key.label} revoke returned ${res.status}`);
-        }
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] app storage key ${key.label} revoke failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('app storage key list');
-    console.warn(
-      `${tag} [sweep] App storage key cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+  let labelPrefix = '';
+  await sweepClass(sweep, {
+    listing: 'app storage key list',
+    cleanupFailed: 'App storage key cleanup failed',
+    count: 'storageKeys',
+    list: async () => {
+      const { appKeyLabel } = (await import('../../../src/lib/providers/app-key-api.js')) as {
+        appKeyLabel: (bucket: string, max: number) => string;
+      };
+      labelPrefix = appKeyLabel(projectName, 50);
+      return walkPages<{ id: number; label: string }>('/object-storage/keys');
+    },
+    owned: (key) => String(key.label ?? '').startsWith(labelPrefix),
+    announce: (key) => `Revoking orphaned app storage key (${key.label})`,
+    remove: async (key) => {
+      const res = await fetchImpl(`${API_BASE}/object-storage/keys/${key.id}`, {
+        method: 'DELETE',
+      });
+      return (
+        res.ok || res.status === 404 || `app storage key ${key.label} revoke returned ${res.status}`
+      );
+    },
+    thrown: (key) => `app storage key ${key.label} revoke failed`,
+  });
 
   // 5. Object Storage buckets — enumerated account-wide via the Linode
   // management API (each row carries its assigned cluster), emptied and
