@@ -14,6 +14,7 @@ import {
   ChartTooltipContent,
 } from '@/components/ui/chart';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useAdminStats } from '@/hooks/api/useAdminStats';
 import { apiFetch } from '@/lib/api';
 
 interface PerformanceData {
@@ -33,12 +34,6 @@ interface PerformanceData {
       latencyMs: number;
       status: 'healthy' | 'unhealthy' | 'unknown';
     }>;
-  };
-}
-
-interface StatsResponse {
-  users: {
-    weeklySignups: Array<{ week: string; count: number }>;
   };
 }
 
@@ -74,15 +69,7 @@ export function PerformanceMetrics() {
     refetchInterval: 30_000,
   });
 
-  const { data: statsData, isLoading: statsLoading } = useQuery<StatsResponse>({
-    queryKey: ['admin', 'stats'],
-    queryFn: async () => {
-      const res = await apiFetch('/api/v1/admin/stats');
-      if (!res.ok) throw new Error('Failed to fetch stats');
-      return res.json();
-    },
-    refetchInterval: 30_000,
-  });
+  const { data: statsData, isLoading: statsLoading } = useAdminStats({ refetchInterval: 30_000 });
 
   // Only services with a measured round trip: an unhealthy probe's number is
   // its timeout, not a latency.

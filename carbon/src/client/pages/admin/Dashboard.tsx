@@ -6,7 +6,6 @@ import {
   IconUserPlus as UserPlus,
   IconUsers as Users,
 } from '@tabler/icons-react';
-import { useQuery } from '@tanstack/react-query';
 import { useId } from 'react';
 import { Area, AreaChart } from 'recharts';
 import { PerformanceMetrics } from '@/components/admin/PerformanceMetrics';
@@ -16,25 +15,9 @@ import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card';
 import { ChartContainer } from '@/components/ui/chart';
 import { Skeleton } from '@/components/ui/skeleton';
-import { apiFetch } from '@/lib/api';
+import { useAdminStats } from '@/hooks/api/useAdminStats';
 import { cn } from '@/lib/utils';
 import { ContentPanel } from '../../components/ContentPanel';
-
-interface StatsResponse {
-  users: {
-    total: number;
-    newThisMonth: number;
-    newLastMonth: number;
-    activeThisMonth: number;
-    activeLastMonth: number;
-    weeklySignups: Array<{ week: string; count: number }>;
-  };
-  orgs: {
-    total: number;
-    newThisMonth: number;
-    newLastMonth: number;
-  };
-}
 
 function MiniSparkline({ data }: { data: Array<{ week: string; count: number }> }) {
   const gradientId = useId();
@@ -130,14 +113,7 @@ function pctChange(now: number, prev: number): string {
 }
 
 export default function AdminDashboard() {
-  const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ['admin', 'stats'],
-    queryFn: async () => {
-      const res = await apiFetch('/api/v1/admin/stats');
-      if (!res.ok) return null;
-      return res.json() as Promise<StatsResponse>;
-    },
-  });
+  const { data: stats, isLoading: statsLoading } = useAdminStats();
 
   const dash = '—';
 
