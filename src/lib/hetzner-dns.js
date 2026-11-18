@@ -454,7 +454,7 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
 
 /**
  * Create/update the apex + wildcard A records for a domain, both pointed at
- * the same IP (ttl:60). Shared by scale.js's post-scale DNS update and
+ * the same IP (HA_TTL). Shared by scale.js's post-scale DNS update and
  * failover.js's `HA_DNS_STRATEGIES.hetzner.updateDns` — both flows repoint
  * every subdomain (api, registry, ...) at whichever server IP is currently
  * primary. Extracted in C6b; behavior is unchanged from the two call
@@ -469,17 +469,12 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
  */
 export async function upsertApexAndWildcard(auth, domain, ip) {
   const { token, zoneId } = auth;
-  await createDNSRecord(token, zoneId, {
-    type: 'A',
-    name: domain,
-    value: ip,
-    ttl: 60,
-  });
+  await createDNSRecord(token, zoneId, { type: 'A', name: domain, value: ip, ttl: HA_TTL });
   await createDNSRecord(token, zoneId, {
     type: 'A',
     name: `*.${domain}`,
     value: ip,
-    ttl: 60,
+    ttl: HA_TTL,
   });
 }
 
