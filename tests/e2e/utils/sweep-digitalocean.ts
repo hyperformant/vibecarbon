@@ -25,7 +25,13 @@
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { walkProviderPages } from './provider-pages.js';
-import { createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
+import {
+  createSweep,
+  reportSweep,
+  sweepBuckets,
+  sweepClass,
+  sweepOwnsVolume,
+} from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
@@ -127,16 +133,13 @@ export async function sweepOrphanedDigitalOceanResources(
   // The guard, the opening line, the counts and the incomplete flag
   // (sweep-core.ts). DigitalOcean has no placement groups; `networks` counts VPCs.
   const sweep = createSweep(tag, 'DigitalOcean', projectName, { loadBalancers: 0, storageKeys: 0 });
-  const { counts, markIncomplete } = sweep;
+  const { markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.DIGITALOCEAN_API_TOKEN;
-  let provider = deps.provider;
+  const provider = deps.provider ?? (token ? await defaultProvider(token) : null);
   if (!provider) {
-    if (!token) {
-      markIncomplete('DigitalOcean (no API token)');
-      return sweep.result();
-    }
-    provider = await defaultProvider(token);
+    markIncomplete('DigitalOcean (no API token)');
+    return sweep.result();
   }
   const fetchImpl =
     deps.fetchImpl ??
@@ -146,64 +149,52 @@ export async function sweepOrphanedDigitalOceanResources(
         headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
       })) as typeof fetch);
 
+  // Each pass below is sweepClass's outline (sweep-core.ts): list, keep this
+  // run's, delete, count or fail, and mark the sweep incomplete when the
+  // listing cannot be read. A pass with `thrown` stops a throwing delete at
+  // that resource; one without ends on it, as it always did.
+
   // 1. Droplets. deleteServer(waitUntilGone) polls until 404 so the
   // dependent sweeps below never race DO's async teardown (the DO analogue
   // of the Hetzner sweep's 1b settle-wait).
-  try {
-    const { items, complete } = await provider.listServersDetailed();
-    if (!complete) markIncomplete('droplet list');
-    for (const droplet of items) {
-      if (!droplet.name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned droplet ${droplet.id} (${droplet.name})`);
-      try {
-        await provider.deleteServer(droplet.id, { waitUntilGone: true });
-        counts.servers++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Droplet ${droplet.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('droplet list');
-    console.warn(`${tag} [sweep] Droplet cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'droplet list',
+    cleanupFailed: 'Droplet cleanup failed',
+    count: 'servers',
+    list: () => provider.listServersDetailed(),
+    owned: (droplet) => droplet.name.startsWith(projectName),
+    announce: (droplet) => `Deleting orphaned droplet ${droplet.id} (${droplet.name})`,
+    remove: async (droplet) => {
+      await provider.deleteServer(droplet.id, { waitUntilGone: true });
+      return true;
+    },
+    thrown: (droplet) => `Droplet ${droplet.id} delete failed`,
+  });
 
   // 2. Volumes. Project-named volumes delete on prefix; pvc-* CSI volumes
   // delete ONLY with a matching project tag (see header — cross-run safety).
-  try {
-    const { items, complete } = await provider.listVolumesDetailed();
-    if (!complete) markIncomplete('volume list');
-    for (const volume of items) {
-      if (provider.volumeAttachedServerIds(volume).length > 0) continue;
-      const ownedByName = volume.name.startsWith(projectName);
-      const isPvc = volume.name.startsWith('pvc-');
-      const ownedByTag = isPvc && provider.volumeLabels(volume).project === projectName;
-      if (!ownedByName && !ownedByTag) {
-        if (isPvc) {
-          console.warn(
-            `${tag} [sweep] Unattached CSI volume ${volume.name} carries no project=${projectName} tag — ` +
-              'NOT deleting (could belong to a concurrent run); review manually if it persists.',
-          );
-        }
-        continue;
-      }
-      console.log(`${tag} [sweep] Deleting orphaned volume ${volume.id} (${volume.name})`);
-      try {
-        await provider.deleteVolume(volume.id);
-        counts.volumes++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('volume list');
-    console.warn(`${tag} [sweep] Volume cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'volume list',
+    cleanupFailed: 'Volume cleanup failed',
+    count: 'volumes',
+    list: () => provider.listVolumesDetailed(),
+    owned: (volume) =>
+      sweepOwnsVolume(
+        sweep,
+        {
+          name: volume.name,
+          attached: provider.volumeAttachedServerIds(volume).length > 0,
+          projectTag: () => provider.volumeLabels(volume).project,
+        },
+        { pvcPrefix: 'pvc-' },
+      ),
+    announce: (volume) => `Deleting orphaned volume ${volume.id} (${volume.name})`,
+    remove: async (volume) => {
+      await provider.deleteVolume(volume.id);
+      return true;
+    },
+    thrown: (volume) => `Volume ${volume.id} delete failed`,
+  });
 
   // 3. Firewalls / SSH keys / VPCs. The provider exposes only exact-name
   // lookups for these, so enumeration walks the API directly (preflight's
@@ -212,151 +203,99 @@ export async function sweepOrphanedDigitalOceanResources(
   const walkPages = <T>(path: string, key: string) =>
     walkProviderPages<T>('digitalocean', `${API_BASE}${path}`, { key, perPage: 50, fetchImpl });
 
-  try {
-    const { items, complete } = await walkPages<{ id: string; name: string }>(
-      '/firewalls',
-      'firewalls',
-    );
-    if (!complete) markIncomplete('firewall list');
-    for (const fw of items) {
-      if (!fw.name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned firewall ${fw.name}`);
-      const { deleted } = await provider.deleteFirewallByName(fw.name);
-      if (deleted) counts.firewalls++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] Firewall ${fw.name} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('firewall list');
-    console.warn(`${tag} [sweep] Firewall cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'firewall list',
+    cleanupFailed: 'Firewall cleanup failed',
+    count: 'firewalls',
+    list: () => walkPages<{ id: string; name: string }>('/firewalls', 'firewalls'),
+    owned: (fw) => fw.name.startsWith(projectName),
+    announce: (fw) => `Deleting orphaned firewall ${fw.name}`,
+    remove: async (fw) =>
+      (await provider.deleteFirewallByName(fw.name)).deleted || `Firewall ${fw.name} delete failed`,
+  });
 
-  try {
-    const { items, complete } = await walkPages<{ id: number; name: string }>(
-      '/account/keys',
-      'ssh_keys',
-    );
-    if (!complete) markIncomplete('ssh-key list');
-    for (const sshKey of items) {
-      if (!sshKey.name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.name}`);
+  await sweepClass(sweep, {
+    listing: 'ssh-key list',
+    cleanupFailed: 'SSH-key cleanup failed',
+    count: 'sshKeys',
+    list: () => walkPages<{ id: number; name: string }>('/account/keys', 'ssh_keys'),
+    owned: (sshKey) => sshKey.name.startsWith(projectName),
+    announce: (sshKey) => `Deleting orphaned ssh key ${sshKey.name}`,
+    remove: async (sshKey) => {
       const outcome = await provider.deleteSSHKeyById(sshKey.id);
-      if (outcome === 'deleted') counts.sshKeys++;
-      else if (outcome === 'absent') {
-        // DigitalOcean lists a deleted key for up to 22 s: destroy's delete
-        // landed and this list was stale, so nothing was left behind.
-        console.log(`${tag} [sweep] ssh key ${sshKey.name} was already gone (stale list)`);
-      } else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('ssh-key list');
-    console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+      if (outcome === 'deleted') return true;
+      if (outcome !== 'absent') return `SSH key ${sshKey.name} delete failed`;
+      // DigitalOcean lists a deleted key for up to 22 s: destroy's delete
+      // landed and this list was stale, so nothing was left behind.
+      console.log(`${tag} [sweep] ssh key ${sshKey.name} was already gone (stale list)`);
+      return null;
+    },
+  });
 
   // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
   // method answers [] when the API call fails (its contract for destroy), so
   // an unreadable listing read as "no load balancers" and the class went
   // unchecked under a clean banner.
-  try {
-    const { items: lbs, complete } = await walkPages<{ id: string; name: string }>(
-      '/load_balancers',
-      'load_balancers',
-    );
-    if (!complete) markIncomplete('load-balancer list');
-    for (const lb of lbs) {
-      if (!lb.name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.name})`);
-      try {
-        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
-        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
-          throw new Error('the API refused the delete');
-        }
-        counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
+  await sweepClass(sweep, {
+    listing: 'load-balancer list',
+    cleanupFailed: 'Load-balancer cleanup failed',
+    count: 'loadBalancers',
+    list: () => walkPages<{ id: string; name: string }>('/load_balancers', 'load_balancers'),
+    owned: (lb) => lb.name.startsWith(projectName),
+    announce: (lb) => `Deleting orphaned load balancer ${lb.id} (${lb.name})`,
+    remove: async (lb) => {
+      // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+      if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+        throw new Error('the API refused the delete');
       }
-    }
-  } catch (e) {
-    markIncomplete('load-balancer list');
-    console.warn(
-      `${tag} [sweep] Load-balancer cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+      return true;
+    },
+    thrown: (lb) => `Load balancer ${lb.id} delete failed`,
+  });
 
-  try {
-    const { items, complete } = await walkPages<{ id: string; name: string }>('/vpcs', 'vpcs');
-    if (!complete) markIncomplete('vpc list');
-    for (const vpc of items) {
-      if (!vpc.name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned VPC ${vpc.id} (${vpc.name})`);
-      try {
-        const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
-        if (res.ok || res.status === 404) counts.networks++;
-        else {
-          sweep.fail();
-          console.warn(`${tag} [sweep] VPC ${vpc.id} delete returned ${res.status}`);
-        }
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] VPC ${vpc.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('vpc list');
-    console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'vpc list',
+    cleanupFailed: 'VPC cleanup failed',
+    count: 'networks',
+    list: () => walkPages<{ id: string; name: string }>('/vpcs', 'vpcs'),
+    owned: (vpc) => vpc.name.startsWith(projectName),
+    announce: (vpc) => `Deleting orphaned VPC ${vpc.id} (${vpc.name})`,
+    remove: async (vpc) => {
+      const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
+      return res.ok || res.status === 404 || `VPC ${vpc.id} delete returned ${res.status}`;
+    },
+    thrown: (vpc) => `VPC ${vpc.id} delete failed`,
+  });
 
   // 3c. App storage keys (security plan R9). Every deploy mints the env app a
   // key labelled `vc-app-<env bucket>`, and env buckets start with the project
   // name, so a key whose label starts with `vc-app-<project>` is this run's.
   // Destroy revokes them; one left here is a destroy leak, or a deploy that
   // crashed between the mint and the record (no destroy can see that one).
-  try {
-    const { appKeyLabel } = (await import('../../../src/lib/providers/app-key-api.js')) as {
-      appKeyLabel: (bucket: string, max: number) => string;
-    };
-    const labelPrefix = appKeyLabel(projectName, 63);
-    const { items, complete } = await walkPages<{ access_key: string; name: string }>(
-      '/spaces/keys',
-      'keys',
-    );
-    if (!complete) markIncomplete('app storage key list');
-    for (const key of items) {
-      if (!String(key.name ?? '').startsWith(labelPrefix)) continue;
-      console.log(`${tag} [sweep] Revoking orphaned app storage key (${key.name})`);
-      try {
-        const res = await fetchImpl(
-          `${API_BASE}/spaces/keys/${encodeURIComponent(key.access_key)}`,
-          { method: 'DELETE' },
-        );
-        if (res.ok || res.status === 404) counts.storageKeys = (counts.storageKeys ?? 0) + 1;
-        else {
-          sweep.fail();
-          console.warn(`${tag} [sweep] app storage key ${key.name} revoke returned ${res.status}`);
-        }
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] app storage key ${key.name} revoke failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('app storage key list');
-    console.warn(
-      `${tag} [sweep] App storage key cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+  let labelPrefix = '';
+  await sweepClass(sweep, {
+    listing: 'app storage key list',
+    cleanupFailed: 'App storage key cleanup failed',
+    count: 'storageKeys',
+    list: async () => {
+      const { appKeyLabel } = (await import('../../../src/lib/providers/app-key-api.js')) as {
+        appKeyLabel: (bucket: string, max: number) => string;
+      };
+      labelPrefix = appKeyLabel(projectName, 63);
+      return walkPages<{ access_key: string; name: string }>('/spaces/keys', 'keys');
+    },
+    owned: (key) => String(key.name ?? '').startsWith(labelPrefix),
+    announce: (key) => `Revoking orphaned app storage key (${key.name})`,
+    remove: async (key) => {
+      const res = await fetchImpl(`${API_BASE}/spaces/keys/${encodeURIComponent(key.access_key)}`, {
+        method: 'DELETE',
+      });
+      return (
+        res.ok || res.status === 404 || `app storage key ${key.name} revoke returned ${res.status}`
+      );
+    },
+    thrown: (key) => `app storage key ${key.name} revoke failed`,
+  });
 
   // Reserved IPs. No vibecarbon program mints one on DigitalOcean today: k8s
   // clusters made since 2026-11 point their domain at the master's own

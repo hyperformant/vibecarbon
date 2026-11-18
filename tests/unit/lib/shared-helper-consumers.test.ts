@@ -101,6 +101,39 @@ const REGISTRY = [
     ],
   },
   {
+    // The outline of a pass over one resource class: list, keep this run's,
+    // delete, count or fail, and mark the sweep incomplete on a listing that
+    // stopped early or threw. Each of the four sweeps wrote it out once per
+    // class, and the copies are where "an unreadable list is not reported"
+    // kept coming back. Hetzner's compute passes stay their own.
+    helper: 'sweepClass',
+    definition: 'tests/e2e/utils/sweep-core.ts',
+    consumers: [
+      'tests/e2e/utils/sweep-digitalocean.ts',
+      'tests/e2e/utils/sweep-linode.ts',
+      'tests/e2e/utils/sweep-vultr.ts',
+      'tests/e2e/utils/sweep-scaleway.ts',
+    ],
+    deepTests: [
+      'tests/unit/e2e/sweep-pass-transcript.test.ts',
+      'tests/unit/e2e/sweep-load-balancers-networks.test.ts',
+    ],
+  },
+  {
+    // The volume rule of those four sweeps: never an attached volume, and a
+    // CSI volume only with this run's project tag. A sweep with its own copy
+    // can lose the tag check, which is how a live rig's volumes were deleted.
+    helper: 'sweepOwnsVolume',
+    definition: 'tests/e2e/utils/sweep-core.ts',
+    consumers: [
+      'tests/e2e/utils/sweep-digitalocean.ts',
+      'tests/e2e/utils/sweep-linode.ts',
+      'tests/e2e/utils/sweep-vultr.ts',
+      'tests/e2e/utils/sweep-scaleway.ts',
+    ],
+    deepTests: ['tests/unit/e2e/sweep-pass-transcript.test.ts'],
+  },
+  {
     // One page walker for the harness, in each provider's pagination
     // dialect, that never says `complete` unless the provider said there is
     // no next page. The sweeps, preflight and verify-scale each had their

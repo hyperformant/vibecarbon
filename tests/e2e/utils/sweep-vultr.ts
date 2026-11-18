@@ -38,7 +38,14 @@
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { walkProviderPages } from './provider-pages.js';
-import { bucketSource, createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
+import {
+  bucketSource,
+  createSweep,
+  reportSweep,
+  sweepBuckets,
+  sweepClass,
+  sweepOwnsVolume,
+} from './sweep-core.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately EMPTY
@@ -154,16 +161,13 @@ export async function sweepOrphanedVultrResources(
   // The guard, the opening line, the counts and the incomplete flag
   // (sweep-core.ts). Vultr has no placement groups; `networks` counts VPCs and `floatingIps` reserved IPs.
   const sweep = createSweep(tag, 'Vultr', projectName, { loadBalancers: 0 });
-  const { counts, markIncomplete } = sweep;
+  const { markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.VULTR_API_TOKEN;
-  let provider = deps.provider;
+  const provider = deps.provider ?? (token ? await defaultProvider(token) : null);
   if (!provider) {
-    if (!token) {
-      markIncomplete('Vultr (no API token)');
-      return sweep.result();
-    }
-    provider = await defaultProvider(token);
+    markIncomplete('Vultr (no API token)');
+    return sweep.result();
   }
   const fetchImpl =
     deps.fetchImpl ??
@@ -173,63 +177,51 @@ export async function sweepOrphanedVultrResources(
         headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
       })) as typeof fetch);
 
+  // Each pass below is sweepClass's outline (sweep-core.ts): list, keep this
+  // run's, delete, count or fail, and mark the sweep incomplete when the
+  // listing cannot be read. A pass with `thrown` stops a throwing delete at
+  // that resource; one without ends on it, as it always did.
+
   // 1. Instances. deleteServer(waitUntilGone) polls until 404 so dependent
   // sweeps below never race Vultr's async teardown.
-  try {
-    const { items, complete } = await provider.listServersDetailed();
-    if (!complete) markIncomplete('instance list');
-    for (const instance of items) {
-      if (!instance.label.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned instance ${instance.id} (${instance.label})`);
-      try {
-        await provider.deleteServer(instance.id, { waitUntilGone: true });
-        counts.servers++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Instance ${instance.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('instance list');
-    console.warn(`${tag} [sweep] Instance cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'instance list',
+    cleanupFailed: 'Instance cleanup failed',
+    count: 'servers',
+    list: () => provider.listServersDetailed(),
+    owned: (instance) => instance.label.startsWith(projectName),
+    announce: (instance) => `Deleting orphaned instance ${instance.id} (${instance.label})`,
+    remove: async (instance) => {
+      await provider.deleteServer(instance.id, { waitUntilGone: true });
+      return true;
+    },
+    thrown: (instance) => `Instance ${instance.id} delete failed`,
+  });
 
   // 2. Block storage. Project-labeled volumes delete on prefix; pvc-* CSI
   // volumes delete ONLY with a matching project tag (see header).
-  try {
-    const { items, complete } = await provider.listVolumesDetailed();
-    if (!complete) markIncomplete('volume list');
-    for (const volume of items) {
-      if (provider.volumeAttachedServerIds(volume).length > 0) continue;
-      const ownedByName = volume.label.startsWith(projectName);
-      const isPvc = volume.label.startsWith('pvc');
-      const ownedByTag = isPvc && provider.volumeLabels(volume).project === projectName;
-      if (!ownedByName && !ownedByTag) {
-        if (isPvc) {
-          console.warn(
-            `${tag} [sweep] Unattached CSI volume ${volume.label} carries no project=${projectName} tag — ` +
-              'NOT deleting (could belong to a concurrent run); review manually if it persists.',
-          );
-        }
-        continue;
-      }
-      console.log(`${tag} [sweep] Deleting orphaned volume ${volume.id} (${volume.label})`);
-      try {
-        await provider.deleteVolume(volume.id);
-        counts.volumes++;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('volume list');
-    console.warn(`${tag} [sweep] Volume cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'volume list',
+    cleanupFailed: 'Volume cleanup failed',
+    count: 'volumes',
+    list: () => provider.listVolumesDetailed(),
+    owned: (volume) =>
+      sweepOwnsVolume(
+        sweep,
+        {
+          name: volume.label,
+          attached: provider.volumeAttachedServerIds(volume).length > 0,
+          projectTag: () => provider.volumeLabels(volume).project,
+        },
+        { pvcPrefix: 'pvc' },
+      ),
+    announce: (volume) => `Deleting orphaned volume ${volume.id} (${volume.label})`,
+    remove: async (volume) => {
+      await provider.deleteVolume(volume.id);
+      return true;
+    },
+    thrown: (volume) => `Volume ${volume.id} delete failed`,
+  });
 
   // 3. Firewall groups / account SSH keys. The provider exposes only
   // exact-name lookups for these, so enumeration walks the API directly;
@@ -241,29 +233,20 @@ export async function sweepOrphanedVultrResources(
   const walkPages = <T>(path: string, key: string) =>
     walkProviderPages<T>('vultr', `${API_BASE}${path}`, { key, perPage: 100, fetchImpl });
 
-  try {
-    const { items, complete } = await walkPages<{ id: string; description?: string }>(
-      '/firewalls',
-      'firewall_groups',
-    );
-    if (!complete) markIncomplete('firewall list');
-    for (const fw of items) {
-      // A Vultr firewall group's identity field is `description`, not
-      // `label` — and it carries no tags, so prefix matching is the only
-      // ownership signal available (header).
-      if (!fw.description?.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned firewall group ${fw.description}`);
-      const { deleted } = await provider.deleteFirewallByName(fw.description);
-      if (deleted) counts.firewalls++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] Firewall group ${fw.description} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('firewall list');
-    console.warn(`${tag} [sweep] Firewall cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'firewall list',
+    cleanupFailed: 'Firewall cleanup failed',
+    count: 'firewalls',
+    list: () => walkPages<{ id: string; description?: string }>('/firewalls', 'firewall_groups'),
+    // A Vultr firewall group's identity field is `description`, not
+    // `label` — and it carries no tags, so prefix matching is the only
+    // ownership signal available (header).
+    owned: (fw) => !!fw.description?.startsWith(projectName),
+    announce: (fw) => `Deleting orphaned firewall group ${fw.description}`,
+    remove: async (fw) =>
+      (await provider.deleteFirewallByName(fw.description ?? '')).deleted ||
+      `Firewall group ${fw.description} delete failed`,
+  });
 
   // Reserved IPs. vultr-k8s.js's `ingress` ReservedIp bills WHILE UNASSIGNED,
   // and deleting the instance it was attached to does NOT release it — so a
@@ -277,52 +260,36 @@ export async function sweepOrphanedVultrResources(
   // Attribution is the `label` the program sets (`<cluster>-ingress`), same
   // prefix contract as every other pass here. An unlabelled or foreign IP is
   // never touched.
-  try {
-    const { items, complete } = await walkPages<{
-      id: string;
-      label?: string;
-      subnet?: string;
-      instance_id?: string;
-    }>('/reserved-ips', 'reserved_ips');
-    if (!complete) markIncomplete('reserved-ip list');
-    for (const ip of items) {
-      if (!ip.label?.startsWith(projectName)) continue;
-      console.log(
-        `${tag} [sweep] Deleting orphaned reserved IP ${ip.label} (${ip.subnet ?? ip.id})`,
-      );
+  await sweepClass(sweep, {
+    listing: 'reserved-ip list',
+    cleanupFailed: 'Reserved IP cleanup failed',
+    count: 'floatingIps',
+    list: () =>
+      walkPages<{ id: string; label?: string; subnet?: string; instance_id?: string }>(
+        '/reserved-ips',
+        'reserved_ips',
+      ),
+    owned: (ip) => !!ip.label?.startsWith(projectName),
+    announce: (ip) => `Deleting orphaned reserved IP ${ip.label} (${ip.subnet ?? ip.id})`,
+    remove: async (ip) => {
       const res = await fetchImpl(`${API_BASE}/reserved-ips/${ip.id}`, { method: 'DELETE' });
-      if (res.ok || res.status === 404) counts.floatingIps++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] Reserved IP ${ip.label} delete failed (${res.status})`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('reserved-ip list');
-    console.warn(
-      `${tag} [sweep] Reserved IP cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+      return (
+        res.ok || res.status === 404 || `Reserved IP ${ip.label} delete failed (${res.status})`
+      );
+    },
+  });
 
-  try {
-    const { items, complete } = await walkPages<{ id: string; name?: string }>(
-      '/ssh-keys',
-      'ssh_keys',
-    );
-    if (!complete) markIncomplete('ssh-key list');
-    for (const sshKey of items) {
-      if (!sshKey.name?.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.name}`);
-      if (await provider.deleteSSHKeyByName(sshKey.name)) counts.sshKeys++;
-      else {
-        sweep.fail();
-        console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
-      }
-    }
-  } catch (e) {
-    markIncomplete('ssh-key list');
-    console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  await sweepClass(sweep, {
+    listing: 'ssh-key list',
+    cleanupFailed: 'SSH-key cleanup failed',
+    count: 'sshKeys',
+    list: () => walkPages<{ id: string; name?: string }>('/ssh-keys', 'ssh_keys'),
+    owned: (sshKey) => !!sshKey.name?.startsWith(projectName),
+    announce: (sshKey) => `Deleting orphaned ssh key ${sshKey.name}`,
+    remove: async (sshKey) =>
+      (await provider.deleteSSHKeyByName(sshKey.name ?? '')) ||
+      `SSH key ${sshKey.name} delete failed`,
+  });
 
   // 4. Load balancers + VPCs — never provisioned by the compose tier, but
   // enumerated so a future tier's leak can't hide behind a stub (same
@@ -331,34 +298,23 @@ export async function sweepOrphanedVultrResources(
   // method answers [] when the API call fails (its contract for destroy), so
   // an unreadable listing read as "no load balancers" and the class went
   // unchecked under a clean banner.
-  try {
-    const { items: lbs, complete } = await walkPages<{ id: number | string; label: string }>(
-      '/load-balancers',
-      'load_balancers',
-    );
-    if (!complete) markIncomplete('load-balancer list');
-    for (const lb of lbs) {
-      if (!lb.label.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.label})`);
-      try {
-        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
-        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
-          throw new Error('the API refused the delete');
-        }
-        counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
+  await sweepClass(sweep, {
+    listing: 'load-balancer list',
+    cleanupFailed: 'Load-balancer cleanup failed',
+    count: 'loadBalancers',
+    list: () =>
+      walkPages<{ id: number | string; label: string }>('/load-balancers', 'load_balancers'),
+    owned: (lb) => lb.label.startsWith(projectName),
+    announce: (lb) => `Deleting orphaned load balancer ${lb.id} (${lb.label})`,
+    remove: async (lb) => {
+      // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+      if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+        throw new Error('the API refused the delete');
       }
-    }
-  } catch (e) {
-    markIncomplete('load-balancer list');
-    console.warn(
-      `${tag} [sweep] Load-balancer cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+      return true;
+    },
+    thrown: (lb) => `Load balancer ${lb.id} delete failed`,
+  });
 
   // Listed by this sweep's own walk, not provider.listNetworks(), for the
   // same reason as the load balancers above: that method answers [] (or a
@@ -366,35 +322,22 @@ export async function sweepOrphanedVultrResources(
   // `description` is Vultr's identity field for a VPC (as it is for a
   // firewall group); `label` is accepted alongside it. Matching only on
   // `label` would make the whole VPC pass a silent no-op.
-  try {
-    const { items: vpcs, complete } = await walkPages<{
-      id: number | string;
-      label?: string;
-      description?: string;
-    }>('/vpcs', 'vpcs');
-    if (!complete) markIncomplete('vpc list');
-    for (const vpc of vpcs) {
-      const vpcName = vpc.label ?? vpc.description ?? '';
-      if (!vpcName.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned VPC ${vpc.id} (${vpcName})`);
-      try {
-        const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
-        if (res.ok || res.status === 404) counts.networks++;
-        else {
-          sweep.fail();
-          console.warn(`${tag} [sweep] VPC ${vpc.id} delete returned ${res.status}`);
-        }
-      } catch (err) {
-        sweep.fail();
-        console.warn(
-          `${tag} [sweep] VPC ${vpc.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-  } catch (e) {
-    markIncomplete('vpc list');
-    console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
-  }
+  const vpcName = (vpc: { label?: string; description?: string }) =>
+    vpc.label ?? vpc.description ?? '';
+  await sweepClass(sweep, {
+    listing: 'vpc list',
+    cleanupFailed: 'VPC cleanup failed',
+    count: 'networks',
+    list: () =>
+      walkPages<{ id: number | string; label?: string; description?: string }>('/vpcs', 'vpcs'),
+    owned: (vpc) => vpcName(vpc).startsWith(projectName),
+    announce: (vpc) => `Deleting orphaned VPC ${vpc.id} (${vpcName(vpc)})`,
+    remove: async (vpc) => {
+      const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
+      return res.ok || res.status === 404 || `VPC ${vpc.id} delete returned ${res.status}`;
+    },
+    thrown: (vpc) => `VPC ${vpc.id} delete failed`,
+  });
 
   // 5. Object Storage buckets — plain S3 ListBuckets against the ONE
   // cluster the subscription's keys belong to (header note 2).

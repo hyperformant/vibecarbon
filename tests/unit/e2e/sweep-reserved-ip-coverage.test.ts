@@ -66,7 +66,10 @@ describe('reserved-IP sweep coverage', () => {
     expect(c).toMatch(/reserved-ips/);
     expect(c).toMatch(/label\?\.startsWith\(projectName\)/);
     expect(c).toMatch(/method: 'DELETE'/);
-    expect(c).toMatch(/counts\.floatingIps\+\+/);
+    // The pass counts through sweepClass (sweep-core.ts) under this class.
+    expect(c).toMatch(
+      /await sweepClass\(sweep, \{\s*listing: 'reserved-ip list',[^}]*count: 'floatingIps'/,
+    );
   });
 
   it('DO and Linode do NOT delete an unattributable IP, but do fail the sweep', () => {
