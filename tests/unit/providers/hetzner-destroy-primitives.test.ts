@@ -317,14 +317,23 @@ describe('HetznerProvider destroy primitives — exact wire URLs (C10a)', () => 
   });
 
   describe('renameServer', () => {
-    it('PUTs /servers/{id} with {name} and does not check response.ok', async () => {
-      fetchWithRetryMock.mockResolvedValue(resp({ error: { message: 'ignored' } }, 423));
+    it('PUTs /servers/{id} with {name}', async () => {
+      fetchWithRetryMock.mockResolvedValue(resp({ server: { id: 500 } }));
 
       await expect(provider.renameServer(500, 'proj-prod-master')).resolves.toBeUndefined();
 
       expect(calls()).toEqual([['PUT', `${BASE}/servers/500`]]);
       const body = JSON.parse((fetchWithRetryMock.mock.calls[0][1] as RequestInit).body as string);
       expect(body).toEqual({ name: 'proj-prod-master' });
+    });
+
+    // It used to return quietly on a refusal, the one provider of five that
+    // did; the caller decides whether a failed rename matters.
+    it('throws the error.error.message shape on a refusal', async () => {
+      fetchWithRetryMock.mockResolvedValue(resp({ error: { message: 'server is locked' } }, 423));
+      await expect(provider.renameServer(500, 'proj-prod-master')).rejects.toThrow(
+        'Failed to rename server: server is locked',
+      );
     });
   });
 });

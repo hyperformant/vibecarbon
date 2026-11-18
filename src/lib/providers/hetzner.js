@@ -1182,20 +1182,24 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Rename a server. Verbatim move of scale.js's old inline
-   * `PUT /servers/{id}` call (C10a-style primitive move onto the provider) —
-   * doesn't check response.ok: the caller (scale's rename-to-permanent-name
-   * step) wraps this in its own non-critical try/catch, since the new
-   * server works fine under its temporary name if the rename fails.
+   * Rename a server: `PUT /servers/{id}` with the new name. A refusal throws
+   * the Hetzner `{error: {message}}` shape, as every other provider's rename
+   * does; the caller (scale's rename-to-permanent-name step) wraps this in
+   * its own non-critical try/catch, since the new server works fine under
+   * its temporary name if the rename fails.
    * @param {number|string} serverId - Server ID
    * @param {string} name - New server name
    * @returns {Promise<void>}
    */
   async renameServer(serverId, name) {
-    await this.apiRequest(`/servers/${serverId}`, {
+    const response = await this.apiRequest(`/servers/${serverId}`, {
       method: 'PUT',
       body: JSON.stringify({ name }),
     });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(`Failed to rename server: ${error.error?.message || 'Unknown error'}`);
+    }
   }
 
   /**
