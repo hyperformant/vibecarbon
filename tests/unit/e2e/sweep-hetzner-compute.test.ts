@@ -182,3 +182,18 @@ describe('sweepOrphanedHetznerResources: a pass that threw', () => {
     });
   }
 });
+
+describe('sweepOrphanedHetznerResources: the project-name guard', () => {
+  for (const name of ['', 'abc']) {
+    it(`refuses ${JSON.stringify(name)} before any request (a short prefix matches resources that are not ours)`, async () => {
+      const cloud = fakeCloud({});
+      await expect(
+        sweepOrphanedHetznerResources(TAG, name, 'tok', {
+          fetchImpl: cloud.impl,
+          objectStorageByRegion: noBuckets,
+        }),
+      ).rejects.toThrow(/refusing to sweep Hetzner with project name/);
+      expect(cloud.calls).toEqual([]);
+    });
+  }
+});

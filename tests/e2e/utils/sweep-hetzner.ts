@@ -77,6 +77,16 @@ export async function sweepOrphanedHetznerResources(
   hetznerToken: string,
   deps: HetznerSweepDeps = {},
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
+  if (!projectName || projectName.length < 4) {
+    // An empty or short prefix would match resources that are not ours (the
+    // placement-group, firewall, ssh-key, floating-IP, network and bucket
+    // passes all match on `startsWith(projectName)`). The other four sweeps
+    // have refused this since they were written; the shortest legitimate
+    // e2e project name is `testapp-…` / `citest-…`.
+    throw new Error(
+      `[sweep] refusing to sweep Hetzner with project name ${JSON.stringify(projectName)}`,
+    );
+  }
   const fetchImpl = deps.fetchImpl ?? fetch;
   console.log(`${tag} Sweeping orphaned Hetzner resources for ${projectName}...`);
   const counts: SweepBreakdown = {
