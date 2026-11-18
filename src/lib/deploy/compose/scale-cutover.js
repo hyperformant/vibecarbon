@@ -38,6 +38,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { errorFirstLine } from '../../cli/error-line.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
 import { composeWriterServices } from '../../services/standby-policy.js';
 import {
@@ -88,8 +89,6 @@ const ARCHIVER_STATE_SQL =
   "SELECT coalesce(last_archived_wal, '') || '|' || coalesce(last_failed_wal, '') FROM pg_stat_archiver";
 
 const WAL_FILE_RE = /^[0-9A-F]{24}$/;
-
-const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
  * Has the archiver pushed `switchWal` (or a later file)? WAL file names sort
@@ -194,7 +193,7 @@ export async function fenceComposePrimary({
       deps,
     });
     throw new Error(
-      `write fence on ${ip}: ${firstLine(err)}; ` +
+      `write fence on ${ip}: ${errorFirstLine(err)}; ` +
         (back.ok ? 'writes resumed there' : back.problems.join('; ')),
     );
   }
@@ -313,7 +312,7 @@ export async function rollbackComposeCutover({
       await setupCron(ip, sshKeyPath, projectName, backupConfig, { domain });
     } catch (err) {
       problems.push(
-        `the backup cron on ${ip} is not back (${firstLine(err)}); run vibecarbon deploy to reinstall it`,
+        `the backup cron on ${ip} is not back (${errorFirstLine(err)}); run vibecarbon deploy to reinstall it`,
       );
     }
   }
@@ -446,7 +445,7 @@ export async function rejoinComposeStandby({
     markUnproven({ environment });
     warn(
       `The standby ${standby.ip} could not be proven streaming from the primary ${primary.ip}: ` +
-        `${firstLine(err)}. Replication is marked degraded. ${hint}`,
+        `${errorFirstLine(err)}. Replication is marked degraded. ${hint}`,
     );
     return 'degraded';
   }

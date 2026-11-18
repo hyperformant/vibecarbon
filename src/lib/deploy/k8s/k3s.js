@@ -123,6 +123,7 @@ import {
   DB_POD_SELECTOR,
   DB_PVC,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_PROBE_MS,
   POD_EXEC_QUERY_MS,
   standbyDbRebuildHint,
@@ -157,6 +158,7 @@ import {
 import { awaitAcmeChallengesSettled, challengeWaitLine } from './acme-challenges.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { DEPLOY_OWNED_CERTIFICATES } from './acme-order-recovery.js';
+import { carbonAutoscalerSecretYaml } from './autoscaler-secret.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -3543,21 +3545,9 @@ export async function auditRls({ kubeconfig }) {
   const auditOut = await runCommandAsync(
     [
       'kubectl',
-      '-n',
-      'vibecarbon',
-      'exec',
-      '-i',
-      DB_POD,
-      '-c',
-      DB_CONTAINER,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-d',
-      'postgres',
-      '-tAc',
-      RLS_AUDIT_SQL,
+      ...dbExecArgv(['psql', '-U', 'postgres', '-d', 'postgres', '-tAc', RLS_AUDIT_SQL], {
+        stdin: true,
+      }),
     ],
     { env, silent: true, timeout: POD_EXEC_QUERY_MS },
   );
@@ -4195,10 +4185,11 @@ async function readRestoreSwapState(env, marker) {
     'echo VC_OK';
   let out;
   try {
-    out = await runCommandAsync(
-      ['kubectl', '-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', probe],
-      { env, silent: true, timeout: POD_EXEC_PROBE_MS },
-    );
+    out = await runCommandAsync(['kubectl', ...dbExecArgv(['sh', '-c', probe])], {
+      env,
+      silent: true,
+      timeout: POD_EXEC_PROBE_MS,
+    });
   } catch {
     return { state: 'unknown', previous: false };
   }
@@ -4323,19 +4314,14 @@ function dbPsql(env) {
       (await runCommandAsync(
         [
           'kubectl',
-          '-n',
-          'vibecarbon',
-          'exec',
-          DB_POD,
-          '-c',
-          DB_CONTAINER,
-          '--',
-          ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
-          'psql',
-          '-U',
-          'postgres',
-          '-tAc',
-          sql,
+          ...dbExecArgv([
+            ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+            'psql',
+            '-U',
+            'postgres',
+            '-tAc',
+            sql,
+          ]),
         ],
         { env, silent: true, timeout: POD_EXEC_QUERY_MS },
       )) ?? '',
@@ -4381,10 +4367,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
   // The bounds `vibecarbon restore` gives the same two scripts: a rename, and
   // an `rm -rf` of a whole cluster.
   const execInDb = (script, description, timeout) =>
-    runKubectlWithRetry(
-      ['-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', script],
-      { env, description, timeout },
-    );
+    runKubectlWithRetry(dbExecArgv(['sh', '-c', script]), { env, description, timeout });
   await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster', 60_000);
   try {
     await runKubectlWithRetry(
@@ -4753,26 +4736,15 @@ export async function applyK3sManifests({
             signal: caStop.signal,
           })
         : null;
-      {
-        const caSecretYaml = [
-          'apiVersion: v1',
-          'kind: Secret',
-          'metadata:',
-          '  name: carbon-autoscaler-config',
-          '  namespace: kube-system',
-          'type: Opaque',
-          'stringData:',
-          `  token: ${JSON.stringify(apiToken)}`,
-          `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
-          '',
-        ].join('\n');
-        await runKubectlWithRetry(['apply', '-f', '-'], {
-          env,
-          signal: caStop.signal,
-          input: caSecretYaml,
-          description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
-        });
-      }
+      await runKubectlWithRetry(['apply', '-f', '-'], {
+        env,
+        signal: caStop.signal,
+        input: carbonAutoscalerSecretYaml({
+          token: apiToken,
+          configJson: carbonAutoscalerConfigJson,
+        }),
+        description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
+      });
       // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
       //      kube-system but base/'s parent kustomization sets
       //      `namespace: vibecarbon`, whose namespace transformer would

@@ -232,12 +232,12 @@ describe('ensureLockfile', () => {
     });
   });
 
-  it('is a no-op when the lockfile is already present (no install spawned)', () => {
+  it('is a no-op when the lockfile is already present (no install spawned)', async () => {
     writeFileSync(join(projectDir, 'package.json'), '{"name":"x","version":"1.0.0"}\n');
     writeFileSync(join(projectDir, 'package-lock.json'), '{"lockfileVersion":3}\n');
 
     const steps: string[] = [];
-    const result = ensureLockfile(projectDir, 'npm', { onStep: (m) => steps.push(m) });
+    const result = await ensureLockfile(projectDir, 'npm', { onStep: (m) => steps.push(m) });
 
     expect(result).toEqual({
       lockfile: 'package-lock.json',
@@ -249,12 +249,12 @@ describe('ensureLockfile', () => {
     expect(steps).toEqual([]);
   });
 
-  it('accepts a pre-1.2 binary bun.lockb as satisfying the build', () => {
+  it('accepts a pre-1.2 binary bun.lockb as satisfying the build', async () => {
     writeFileSync(join(projectDir, 'package.json'), '{"name":"x","version":"1.0.0"}\n');
     writeFileSync(join(projectDir, 'bun.lockb'), 'binary');
 
     const steps: string[] = [];
-    const result = ensureLockfile(projectDir, 'bun', { onStep: (m) => steps.push(m) });
+    const result = await ensureLockfile(projectDir, 'bun', { onStep: (m) => steps.push(m) });
 
     expect(result).toEqual({ lockfile: 'bun.lockb', generated: false, accepted: true });
     expect(steps).toEqual([]);

@@ -16,6 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { getGHCRCredentials } from './lib/build.js';
+import { errorFirstLine } from './lib/cli/error-line.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -69,6 +70,7 @@ import {
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
+import { carbonAutoscalerSecretYaml } from './lib/deploy/k8s/autoscaler-secret.js';
 import { sweepStaleDeltaDirs } from './lib/deploy/layer-delta.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
@@ -799,7 +801,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
       });
     } catch (err) {
       p.log.warn(
-        `could not restart the add-on job on ${newIp} (${firstLineOf(err)}); the add-ons keep ` +
+        `could not restart the add-on job on ${newIp} (${errorFirstLine(err)}); the add-ons keep ` +
           'running, and vibecarbon status reads them from their containers until the next deploy',
       );
     }
@@ -905,7 +907,7 @@ export async function resumeComposeCutover(ctx) {
       await provider.deleteServer(newServerId);
     } catch (err) {
       throw new Error(
-        `could not delete the new server ${newIp} (id ${newServerId}): ${firstLineOf(err)}; ` +
+        `could not delete the new server ${newIp} (id ${newServerId}): ${errorFirstLine(err)}; ` +
           `the old server stays write-fenced so two primaries never take writes. ` +
           `Delete it, then ${scaleCutoverNextStep(environment)}.`,
       );
@@ -941,7 +943,7 @@ export async function resumeComposeCutover(ctx) {
         }
       } catch (err) {
         problems.push(
-          `could not point DNS back at the old server ${cutover.oldIp} (${firstLineOf(err)}); check ${domain} and *.${domain}`,
+          `could not point DNS back at the old server ${cutover.oldIp} (${errorFirstLine(err)}); check ${domain} and *.${domain}`,
         );
       }
     }
@@ -1044,8 +1046,6 @@ function formatPause(ms) {
   const total = Math.max(0, Math.round(ms / 1000));
   return total < 60 ? `${total}s` : `${Math.floor(total / 60)}m ${total % 60}s`;
 }
-
-const firstLineOf = (err) => String(err?.message ?? err).split('\n')[0];
 
 /** A promise with its resolve/reject in hand: the standby arm waits on the primary arm. */
 function deferred() {
@@ -1717,7 +1717,7 @@ async function scaleServers(ctx) {
             delete server._replacement;
             held = true;
             throw new Error(
-              `the DNS update failed (${firstLineOf(dnsErr)}) and where the records point now is ` +
+              `the DNS update failed (${errorFirstLine(dnsErr)}) and where the records point now is ` +
                 `unknown: ${move.pending.join(', ')}. The old server ${server.ip} stays write-fenced ` +
                 `and the new server ${newIp} is kept; ${scaleCutoverNextStep(environment)}.`,
             );
@@ -1726,14 +1726,14 @@ async function scaleServers(ctx) {
             flipped = true;
             saveScaledServers(ctx);
             throw new Error(
-              `the DNS update failed part way (${firstLineOf(dnsErr)}); ` +
+              `the DNS update failed part way (${errorFirstLine(dnsErr)}); ` +
                 `still to point at ${newIp}: ${move.pending.join(', ')}`,
             );
           }
           // `moved`: the update reported an error, but every record reads back
           // on the new server. The flip landed; carry on.
           p.log.warn(
-            `The DNS update reported an error (${firstLineOf(dnsErr)}), but every record now points at ${newIp}.`,
+            `The DNS update reported an error (${errorFirstLine(dnsErr)}), but every record now points at ${newIp}.`,
           );
         }
         s.stop('DNS updated');
@@ -1804,7 +1804,7 @@ async function scaleServers(ctx) {
       // Past the flip: nothing rolls back; the journal names what is left.
       throw new Error(
         `scale moved ${label}'s database to the new server ${newIp}, then failed: ` +
-          `${firstLineOf(scaleErr)}. The old server ${server.ip} (id ${server.id}) is kept, ` +
+          `${errorFirstLine(scaleErr)}. The old server ${server.ip} (id ${server.id}) is kept, ` +
           `write-fenced. Still to run: ${remainingCutoverSteps(progress).join(', ')}; ` +
           `${scaleCutoverNextStep(environment)}.`,
       );
@@ -1909,7 +1909,7 @@ async function scaleServers(ctx) {
     if (deleteErr) {
       throw new Error(
         `the new standby ${newIp} serves, but deleting ${describeOldServer(stateEntry.old)} failed: ` +
-          `${firstLineOf(deleteErr)}. It keeps billing and nothing tracks it any more: ` +
+          `${errorFirstLine(deleteErr)}. It keeps billing and nothing tracks it any more: ` +
           `delete it in the ${ctx.Provider?.NAME ?? 'provider'} console.`,
       );
     }
@@ -2572,6 +2572,9 @@ export function applyCaBoundsToConfig(configJson, { newMin, newMax, newType }) {
   return JSON.stringify(config, null, 2);
 }
 
+/** kubectl argv through one cluster's operator-side kubeconfig. */
+const kubectlArgv = (kubeconfigPath, args) => ['kubectl', '--kubeconfig', kubeconfigPath, ...args];
+
 /**
  * Poll the cluster's /healthz until the API server answers (5 min budget).
  * Shared by the autoscaler re-patch and the post-resize Ready wait.
@@ -2606,7 +2609,7 @@ async function waitForApiServer(kubeconfigPath, label) {
   try {
     await pollUntil(
       () => {
-        runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'get', '--raw=/healthz'], {
+        runCommand(kubectlArgv(kubeconfigPath, ['get', '--raw=/healthz']), {
           silent: true,
           timeout: 10_000,
         });
@@ -2674,36 +2677,21 @@ async function repatchClusterAutoscaler({
     // stores stringData as base64 under the hood too) — decode both
     // keys before treating them as plain text/JSON. runCommand returns
     // the captured stdout string when `silent: true`.
-    const configB64Raw = runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
-        '-n',
-        'kube-system',
-        'get',
-        'secret',
-        'carbon-autoscaler-config',
-        '-o',
-        'jsonpath={.data.config\\.json}',
-      ],
-      { silent: true },
-    );
-    const tokenB64Raw = runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
-        '-n',
-        'kube-system',
-        'get',
-        'secret',
-        'carbon-autoscaler-config',
-        '-o',
-        'jsonpath={.data.token}',
-      ],
-      { silent: true },
-    );
+    const readSecretKey = (key) =>
+      runCommand(
+        kubectlArgv(kubeconfigPath, [
+          '-n',
+          'kube-system',
+          'get',
+          'secret',
+          'carbon-autoscaler-config',
+          '-o',
+          `jsonpath={.data.${key}}`,
+        ]),
+        { silent: true },
+      );
+    const configB64Raw = readSecretKey('config\\.json');
+    const tokenB64Raw = readSecretKey('token');
     const configJson = Buffer.from(
       typeof configB64Raw === 'string' ? configB64Raw.trim() : '',
       'base64',
@@ -2713,36 +2701,21 @@ async function repatchClusterAutoscaler({
       'base64',
     ).toString('utf8');
     const mutatedConfigJson = applyCaBoundsToConfig(configJson, { newMin, newMax, newType });
-    // Mirrors renderCarbonAutoscalerConfig's Secret YAML shape in
-    // applyK3sManifests (k3s.js) exactly: stringData keeps both the
-    // token and the JSON off argv, piped via stdin.
-    const caSecretYaml = [
-      'apiVersion: v1',
-      'kind: Secret',
-      'metadata:',
-      '  name: carbon-autoscaler-config',
-      '  namespace: kube-system',
-      'type: Opaque',
-      'stringData:',
-      `  token: ${JSON.stringify(token)}`,
-      `  config.json: ${JSON.stringify(mutatedConfigJson)}`,
-      '',
-    ].join('\n');
-    runCommand(['kubectl', '--kubeconfig', kubeconfigPath, 'apply', '-f', '-'], {
+    // The Secret applyK3sManifests writes, piped via stdin so neither the
+    // token nor the JSON reaches argv.
+    const caSecretYaml = carbonAutoscalerSecretYaml({ token, configJson: mutatedConfigJson });
+    runCommand(kubectlArgv(kubeconfigPath, ['apply', '-f', '-']), {
       silent: true,
       input: caSecretYaml,
     });
     runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
+      kubectlArgv(kubeconfigPath, [
         '-n',
         'kube-system',
         'rollout',
         'restart',
         'deploy/cluster-autoscaler',
-      ],
+      ]),
       { silent: true },
     );
     const maxSize = Math.max(0, newMax - newMin);
@@ -3115,17 +3088,7 @@ async function scaleVerifyK8sReady(ctx) {
         waitForKubeletsRenewing({
           readLeases: () =>
             runCommand(
-              [
-                'kubectl',
-                '--kubeconfig',
-                kubeconfigPath,
-                '-n',
-                'kube-node-lease',
-                'get',
-                'leases',
-                '-o',
-                'json',
-              ],
+              kubectlArgv(kubeconfigPath, ['-n', 'kube-node-lease', 'get', 'leases', '-o', 'json']),
               { silent: true, timeout: 10_000 },
             ),
         }),
@@ -3160,17 +3123,14 @@ async function scaleVerifyK8sReady(ctx) {
     try {
       await perfAsync('scale.waitForCsiNode', async () =>
         runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
+          kubectlArgv(kubeconfigPath, [
             '-n',
             'kube-system',
             'rollout',
             'status',
             Provider.K8S_ASSETS.csiNodeDaemonSet,
             '--timeout=300s',
-          ],
+          ]),
           { silent: true },
         ),
       );
@@ -3230,10 +3190,7 @@ async function scaleVerifyK8sReady(ctx) {
     try {
       await perfAsync('scale.waitForPodsReady', async () =>
         runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
+          kubectlArgv(kubeconfigPath, [
             '-n',
             'vibecarbon',
             'wait',
@@ -3250,7 +3207,7 @@ async function scaleVerifyK8sReady(ctx) {
             // pods still coming up are correctly waited on.
             '--field-selector=status.phase!=Succeeded,status.phase!=Failed',
             `--timeout=${WAIT_TIMEOUT_SEC}s`,
-          ],
+          ]),
           { silent: true },
         ),
       );
@@ -3266,31 +3223,18 @@ async function scaleVerifyK8sReady(ctx) {
       // just "kubectl wait timed out" with no signal as to which
       // controller is wedged.
       try {
+        runCommand(kubectlArgv(kubeconfigPath, ['-n', 'vibecarbon', 'get', 'pods', '-o', 'wide']), {
+          silent: false,
+          ignoreError: true,
+        });
         runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
-            '-n',
-            'vibecarbon',
-            'get',
-            'pods',
-            '-o',
-            'wide',
-          ],
-          { silent: false, ignoreError: true },
-        );
-        runCommand(
-          [
-            'kubectl',
-            '--kubeconfig',
-            kubeconfigPath,
+          kubectlArgv(kubeconfigPath, [
             '-n',
             'vibecarbon',
             'get',
             'events',
             '--sort-by=.lastTimestamp',
-          ],
+          ]),
           { silent: false, ignoreError: true },
         );
         // Per-non-Ready-pod describe + previous-container logs. We

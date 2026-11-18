@@ -10,6 +10,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { isIP } from 'node:net';
 import * as p from '@clack/prompts';
+import { errorFirstLine } from '../../cli/error-line.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
 import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
@@ -1713,8 +1714,6 @@ export function composeStartAddonJobCmd(projectName, attemptId) {
   return addonJobStartCmd(projectName, attemptId, 'promoted');
 }
 
-const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
-
 /**
  * Stop the old primary's writers, by container name. Fail closed: only docker's
  * "No such container" skips an absent add-on; any other inspect error, or an
@@ -2305,7 +2304,7 @@ export async function failoverComposeHA(
         p.log.info('Fence lifted; the original primary is serving again.');
       }
     } catch (err) {
-      p.log.warn(`Could not lift the fence on the old primary: ${firstLine(err)}`);
+      p.log.warn(`Could not lift the fence on the old primary: ${errorFirstLine(err)}`);
     }
   };
 
@@ -2321,7 +2320,7 @@ export async function failoverComposeHA(
       return 'The standby was disarmed (wal-g role standby).';
     } catch (err) {
       return (
-        `The standby could NOT be disarmed (${firstLine(err)}): run ` +
+        `The standby could NOT be disarmed (${errorFirstLine(err)}): run ` +
         `\`vibecarbon deploy ${envName}\` before it can push a backup.`
       );
     }
@@ -2353,7 +2352,7 @@ export async function failoverComposeHA(
         deps: { roleRun },
       });
     } catch (err) {
-      const cause = `the wal-g role could not be armed on the standby (${firstLine(err)})`;
+      const cause = `the wal-g role could not be armed on the standby (${errorFirstLine(err)})`;
       if (journalAtEntry) {
         throw new Error(`Failover aborted before this run's promote: ${cause}. ${keptArmedLine()}`);
       }
@@ -2389,12 +2388,12 @@ export async function failoverComposeHA(
       if (mode === 'promote') {
         await unfence();
         throw new Error(
-          `Failover aborted: ${firstLine(err)}. Nothing was promoted; fix it and rerun ` +
+          `Failover aborted: ${errorFirstLine(err)}. Nothing was promoted; fix it and rerun ` +
             `vibecarbon failover ${envName}`,
         );
       }
       p.log.warn(
-        `Could not fence the old primary (${primaryServer.ip}): ${firstLine(err)}. Stop its ` +
+        `Could not fence the old primary (${primaryServer.ip}): ${errorFirstLine(err)}. Stop its ` +
           `writers by hand: ssh root@${primaryServer.ip} 'docker stop ${writerServices.map((svc) => `${projectName}-${svc}`).join(' ')}'`,
       );
     }
@@ -2510,7 +2509,7 @@ export async function failoverComposeHA(
         // The arm landed and nothing will promote: disarm it, unless an
         // earlier run's journaled promote may still land.
         throw new Error(
-          `${firstLine(err)}. ${journalAtEntry ? keptArmedLine() : await disarmComposeStandby()}`,
+          `${errorFirstLine(err)}. ${journalAtEntry ? keptArmedLine() : await disarmComposeStandby()}`,
         );
       }
     } catch (err) {
@@ -2535,7 +2534,7 @@ export async function failoverComposeHA(
       // leave the serving primary read-only (unfence never throws).
       await unfence();
       await clearJournal({ environment: envName }).catch((err) =>
-        p.log.warn(`Could not clear the failover journal: ${firstLine(err)}`),
+        p.log.warn(`Could not clear the failover journal: ${errorFirstLine(err)}`),
       );
       throw new Error(promotionNotIssuedMessage(envName, standbyServer.ip));
     }

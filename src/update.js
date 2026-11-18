@@ -19,10 +19,9 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { AmbiguousPrimaryError } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
+import { requireEnvOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { printable } from './lib/printable.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { sshKeyPathFor } from './lib/ssh.js';
 import { executeUpdatePlan, releaseLeftoverCordons } from './lib/update/execute.js';
 import { inspectAll } from './lib/update/inspect.js';
@@ -84,17 +83,6 @@ const SPEC = {
 // ============================================================================
 // HELPERS
 // ============================================================================
-
-/** The operator-IP firewall refresh, as `backup` does it. */
-async function refreshFirewall({ projectConfig, envName, envConfig, yes }) {
-  await requireOperatorIpAccess({
-    projectConfig,
-    environment: envName,
-    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
-    apiToken: resolveProviderToken(providerIdFor(envConfig)),
-    yes,
-  });
-}
 
 function planJson(plan, extra = {}) {
   return {
@@ -180,7 +168,7 @@ export async function run(args) {
     projectConfig,
   });
 
-  await refreshFirewall({ projectConfig, envName, envConfig, yes });
+  await requireEnvOperatorIpAccess({ projectConfig, envName, envConfig, yes });
 
   const sshKeyPath = sshKeyPathFor(envName);
   if (!existsSync(sshKeyPath)) {

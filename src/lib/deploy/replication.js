@@ -27,10 +27,12 @@ import {
   DB_GUARD_PROTOCOL_MARKER,
   DB_POD,
   DB_STATEFULSET,
+  dbExecArgv,
   POD_EXEC_QUERY_MS,
   POD_EXEC_WRITE_MS,
 } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
+import { isComposeTier } from './tier-registry.js';
 import {
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
@@ -1057,21 +1059,10 @@ export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = RE
   await sshKubectl(
     primaryIp,
     sshKeyPath,
-    [
-      'exec',
-      '-i',
-      '-n',
-      'vibecarbon',
+    dbExecArgv(['psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
+      stdin: true,
       pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-d',
-      'postgres',
-      '-v',
-      'ON_ERROR_STOP=1',
-    ],
+    }),
     { input: sql, timeout: POD_EXEC_WRITE_MS },
   );
 }
@@ -1514,7 +1505,7 @@ export async function reseedStandbyInPlace({
   try {
     stage = await runInPlaceStage(
       () =>
-        kubectl(['-n', 'vibecarbon', 'exec', '-i', DB_POD, '-c', DB_CONTAINER, '--', 'sh'], {
+        kubectl(dbExecArgv(['sh'], { stdin: true }), {
           input: script,
           timeout: clientS * 1000,
         }),
@@ -1827,16 +1818,6 @@ export const DB_IN_PLACE_STOP_UNSEEDED = Object.freeze([
 export const DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S = 120;
 
 const DB_POD_GET_ARGV = ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'];
-const dbExecArgv = (argv) => [
-  '-n',
-  'vibecarbon',
-  'exec',
-  DB_POD,
-  '-c',
-  DB_CONTAINER,
-  '--',
-  ...argv,
-];
 
 /** The db container's spec and status from a parsed pod, or nulls. */
 function dbContainerOf(pod) {
@@ -2274,23 +2255,39 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
     const out = await sshKubectl(
       ip,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        sql,
-      ],
+      dbExecArgv(
+        [
+          ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+          'psql',
+          '-U',
+          'postgres',
+          '-tAc',
+          sql,
+        ],
+        { pod },
+      ),
       { timeout: POD_EXEC_QUERY_MS },
     );
     return typeof out === 'string' ? out : '';
   };
+}
+
+/**
+ * A psql runner factory for a tier's database, `(ip) => exec(sql)`: the
+ * compose tiers run psql in the db container over ssh (composePsqlRunner,
+ * imported here only when needed: compose/ha.js imports this module), the k8s
+ * tiers in the db pod (k8sPsqlRunner).
+ *
+ * @param {string} tier
+ * @param {{ sshKeyPath: string, projectName: string }} opts
+ * @returns {Promise<(ip: string) => (sql: string, opts?: { readWrite?: boolean }) => Promise<string>>}
+ */
+export async function tierPsqlFor(tier, { sshKeyPath, projectName }) {
+  if (isComposeTier(tier)) {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    return (ip) => composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`);
+  }
+  return (ip) => k8sPsqlRunner(ip, sshKeyPath);
 }
 
 /**
@@ -2676,25 +2673,11 @@ export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
  */
 export async function isStandbyStreaming(standbyIp, sshKeyPath) {
   try {
-    const pod = await getPostgresPod(standbyIp, sshKeyPath);
-    const out = await sshKubectl(
+    const out = await k8sPsqlRunner(
       standbyIp,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        'SELECT status FROM pg_stat_wal_receiver',
-      ],
-      { timeout: POD_EXEC_QUERY_MS },
-    );
-    return (typeof out === 'string' ? out : '').trim() === 'streaming';
+    )('SELECT status FROM pg_stat_wal_receiver');
+    return out.trim() === 'streaming';
   } catch {
     return false;
   }
@@ -2710,32 +2693,27 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
  * @returns {Promise<string>}
  */
 export async function readK8sReplicationState(primaryIp, sshKeyPath) {
-  const pod = await getPostgresPod(primaryIp, sshKeyPath);
-  const result = await sshKubectl(
-    primaryIp,
-    sshKeyPath,
-    [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
-    ],
-    { timeout: POD_EXEC_QUERY_MS },
-  );
-  const out = (typeof result === 'string' ? result : '').trim();
-  // `psql -tAc` yields exactly one token: a pg_stat_replication.state value, or
-  // '' when no replica is connected. Anything else means the read itself failed —
-  // an SSH/kubectl error banner (e.g. "banner exchange: Connection timed out")
-  // leaked through as stdout. Throw so verifyStreaming RETRIES rather than letting
-  // the error text masquerade as a replication state in the deploy-abort message.
-  const VALID_STATES = new Set(['', 'startup', 'catchup', 'streaming', 'backup', 'stopping']);
-  if (!VALID_STATES.has(out)) {
+  const out = await k8sPsqlRunner(primaryIp, sshKeyPath)(STREAMING_STATE_SQL);
+  return replicationStateOf(out.trim());
+}
+
+/** Every pg_stat_replication.state value, and '' for no replica connected. */
+const REPLICATION_STATES = new Set(['', 'startup', 'catchup', 'streaming', 'backup', 'stopping']);
+
+/**
+ * The state a STREAMING_STATE_SQL read printed (trimmed), checked. `psql -tAc`
+ * yields exactly one token: a pg_stat_replication.state value, or '' when no
+ * replica is connected. Anything else means the read itself failed: an
+ * SSH/kubectl/docker error banner (e.g. "banner exchange: Connection timed
+ * out") leaked through as stdout. Throw so verifyStreaming RETRIES rather than
+ * letting the error text masquerade as a replication state in the deploy-abort
+ * message. Both HA tiers' verify reads go through it.
+ *
+ * @param {string} out
+ * @returns {string}
+ */
+export function replicationStateOf(out) {
+  if (!REPLICATION_STATES.has(out)) {
     throw new Error(`could not read pg_stat_replication (unexpected output: ${out.slice(0, 120)})`);
   }
   return out;

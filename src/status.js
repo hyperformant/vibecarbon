@@ -25,6 +25,7 @@ import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib
 import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
 import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
+import { dbExecArgv } from './lib/deploy/db-workload.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
 import { retiredReservedIps } from './lib/deploy/k8s/retired-reserved-ip.js';
@@ -647,20 +648,9 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
         : _sshKubectl(
             primary.ip,
             sshKeyPath,
-            [
-              'exec',
-              '-n',
-              'vibecarbon',
-              primaryPod,
-              '--',
-              'psql',
-              '-U',
-              'postgres',
-              '-d',
-              'postgres',
-              '-tAc',
-              targetSql,
-            ],
+            dbExecArgv(['psql', '-U', 'postgres', '-d', 'postgres', '-tAc', targetSql], {
+              pod: primaryPod,
+            }),
             { timeout: timeoutMs },
           );
 
@@ -703,20 +693,10 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
         const standbyOut = await _sshKubectl(
           standbyIp,
           sshKeyPath,
-          [
-            'exec',
-            '-n',
-            'vibecarbon',
-            await standbyPod,
-            '--',
-            'psql',
-            '-U',
-            'postgres',
-            '-d',
-            'postgres',
-            '-tAc',
-            buildStandbyReplayQuery(),
-          ],
+          dbExecArgv(
+            ['psql', '-U', 'postgres', '-d', 'postgres', '-tAc', buildStandbyReplayQuery()],
+            { pod: await standbyPod },
+          ),
           { timeout: timeoutMs },
         );
         standbyRow = parseStandbyReplayRow(standbyOut);

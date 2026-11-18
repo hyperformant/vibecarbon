@@ -41,7 +41,9 @@ import { readOperatorVar } from './lib/operator-env.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import {
   adaptDockerfileForPackageManager,
+  ensureLockfile,
   getPackageManagerVersion,
+  MAX_LOCKFILE_PASSES,
   MIN_PNPM_MAJOR,
   writePnpmWorkspaceSettings,
   writeTemplateLockfile,
@@ -1169,76 +1171,44 @@ async function bootstrap(cliArgs) {
     // cost is acceptable. For bun the work is moved earlier rather than
     // duplicated: `vibecarbon up` sees node_modules present and skips
     // re-install. Callers that only want scaffolding pass -skip-lockfile.
-    let lockfileCmd = null;
-    let lockfileMsg = null;
-    if (packageManager === 'npm') {
-      lockfileCmd = ['npm', 'install', '--no-audit', '--no-fund'];
-      lockfileMsg = 'Installing dependencies and generating package-lock.json';
-    } else if (packageManager === 'pnpm') {
-      lockfileCmd = ['pnpm', 'install', '--lockfile-only'];
-      lockfileMsg = 'Generating pnpm-lock.yaml (lockfile only)';
-    } else if (packageManager === 'bun') {
-      lockfileCmd = ['bun', 'install'];
-      lockfileMsg = 'Generating bun.lock (full install, bun has no lockfile-only mode)';
-    }
-    if (lockfileCmd) {
-      s.message(lockfileMsg);
-      await tick();
-      // Non-fatal if this fails — CI will regenerate or the user can install.
-      runCommand(lockfileCmd, {
-        cwd: projectDir,
-        cleanEnv: true,
-        ignoreError: true,
-      });
-      await tick();
-
+    const lockfileMsg = {
+      npm: 'Installing dependencies and generating package-lock.json',
+      pnpm: 'Generating pnpm-lock.yaml (lockfile only)',
+      bun: 'Generating bun.lock (full install, bun has no lockfile-only mode)',
+    }[packageManager];
+    if (lockfileMsg) {
+      // The deploy preflight's generator (ensureLockfile), with create's own
+      // start line and a spinner repaint around each install. A failed pnpm or
+      // bun install is non-fatal: CI will regenerate or the user can install.
+      //
       // Both places a generated project installs from — the Dockerfile and the
       // CI workflow we scaffold — run a strict `npm ci`, which replays the
       // lockfile verbatim and never re-resolves. So the lock `create` writes
       // has to be one npm actually accepts, or the user's very first build
-      // fails on a project they haven't touched yet.
-      //
-      // npm's optional-peer subtrees (@emnapi/*, reached through the wasm
-      // fallback packages) can need more than one pass to settle, so validate
-      // and re-run until `npm ci` is satisfied rather than assuming a fixed
-      // pass count. If it never converges, say so HERE, where the user is
-      // present and can act — a Docker build is the wrong place to find out.
-      if (packageManager === 'npm') {
-        const MAX_LOCKFILE_PASSES = 5;
-        let accepted = false;
-        for (let pass = 1; pass <= MAX_LOCKFILE_PASSES; pass++) {
-          // `ignoreError` makes a non-zero exit return null; success returns
-          // the captured stdout. `silent` keeps npm's output off the spinner.
-          const valid = runCommand(['npm', 'ci', '--dry-run', '--no-audit', '--no-fund'], {
-            cwd: projectDir,
-            cleanEnv: true,
-            ignoreError: true,
-            silent: true,
-          });
-          if (valid !== null) {
-            accepted = true;
-            break;
-          }
-          if (pass === MAX_LOCKFILE_PASSES) break;
-          s.message(`Reconciling package-lock.json (pass ${pass + 1}/${MAX_LOCKFILE_PASSES})`);
-          runCommand(lockfileCmd, { cwd: projectDir, cleanEnv: true, ignoreError: true });
-          await tick();
-        }
-        if (!accepted) {
-          s.stop('Could not generate a package-lock.json that `npm ci` accepts');
-          p.log.error(
-            `Gave up after ${MAX_LOCKFILE_PASSES} passes.\n\n` +
-              `Shipping this lockfile would fail your first Docker build and your\n` +
-              `first CI run, both install with a strict \`npm ci\` — so stopping here.\n\n` +
-              `To see why npm is rejecting it:\n` +
-              `  cd ${projectDir}\n` +
-              `  npm ci --dry-run\n\n` +
-              `The error names the package that won't settle. Removing node_modules\n` +
-              `and package-lock.json, then re-running \`npm install\`, usually clears it.\n` +
-              `If it doesn't, please report it along with that output.`,
-          );
-          process.exit(1);
-        }
+      // fails on a project they haven't touched yet. ensureLockfile validates
+      // and re-runs npm until `npm ci` is satisfied (optional-peer subtrees
+      // can need more than one pass). If it never converges, say so HERE,
+      // where the user is present and can act — a Docker build is the wrong
+      // place to find out.
+      const { accepted } = await ensureLockfile(projectDir, packageManager, {
+        onStep: (message) => s.message(message),
+        startMessage: lockfileMsg,
+        tick,
+      });
+      if (packageManager === 'npm' && !accepted) {
+        s.stop('Could not generate a package-lock.json that `npm ci` accepts');
+        p.log.error(
+          `Gave up after ${MAX_LOCKFILE_PASSES} passes.\n\n` +
+            `Shipping this lockfile would fail your first Docker build and your\n` +
+            `first CI run, both install with a strict \`npm ci\` — so stopping here.\n\n` +
+            `To see why npm is rejecting it:\n` +
+            `  cd ${projectDir}\n` +
+            `  npm ci --dry-run\n\n` +
+            `The error names the package that won't settle. Removing node_modules\n` +
+            `and package-lock.json, then re-running \`npm install\`, usually clears it.\n` +
+            `If it doesn't, please report it along with that output.`,
+        );
+        process.exit(1);
       }
     }
   }

@@ -53,19 +53,22 @@ const ROOTS = [
 /** The kubectl verbs that go through the kubelet to a pod. */
 const POD_VERB = /^(exec|logs|attach|cp|port-forward)$/;
 
-/** The functions that return a pod argv, whose callers the census reads instead. */
+/**
+ * The functions that return a pod argv, whose callers the census reads instead.
+ * dbExecArgv (db-workload.js) is the database container's; a listed builder
+ * that returns its argv is judged at its own callers too.
+ */
 const ARGV_BUILDERS = [
   'certManagerLogArgv',
   'dbExecArgv',
-  'k8sDbMarkerExec',
   'k8sWalgAuditArgv',
   'k8sWalgRoleExecArgv',
 ];
 
 /** A runner that binds what it runs: the census cannot see this from the call. */
 const BOUND_BY_RUNNER: Record<string, string> = {
-  'src/lib/deploy/orchestrator.js:safeRun':
-    'the post-deploy diagnostics helper: its one runCommandAsync passes timeout: 30_000',
+  'src/lib/deploy/orchestrator.js:kube':
+    "the post-deploy diagnostics' kubectl reads: each runs through safeRun, whose one runCommandAsync passes timeout: 30_000",
   'src/lib/deploy/k8s/k3s.js:clusterAutoscalerDiagnosticCommands':
     'returns argvs that only runDeployDiagnostic runs, at DIAGNOSTIC_TIMEOUT_MS',
   'src/lib/deploy/k8s/acme-challenges.js:runKubectl':
@@ -77,9 +80,9 @@ const BOUND_BY_RUNNER: Record<string, string> = {
  * the script's whole run, so the census trusts these by name. Checked below.
  */
 const BOUND_BY_SCRIPT: Record<string, string> = {
-  'src/backup.js:buildBackupJobWaitScript':
-    'runs at the job deadline plus 120 s; its pod logs are failure diagnostics',
-  'src/backup.js:triggerBackupJob': 'the failure diagnostics script runs at timeout: 90_000',
+  'src/backup.js:jobPodDiagnostics':
+    "the backup Job's failure dump, inside the two scripts that run it: the wait " +
+    'script at the job deadline plus 120 s, the follow-up at timeout: 90_000',
   'src/lib/deploy/k8s/ha/index.js:relayDiagnostics':
     'each lookup passes POD_EXEC_QUERY_MS to the runner',
 };
@@ -192,6 +195,8 @@ function scan(file: string, text: string) {
   }
 
   for (const call of findCalls(text, ARGV_BUILDERS)) {
+    // A listed builder that returns another's argv runs nothing: its callers are judged.
+    if (ARGV_BUILDERS.includes(call.fn)) continue;
     judge(call.at, call.at + call.text.length, call.name);
   }
 
@@ -265,7 +270,13 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
       new Set(Object.keys(BOUND_BY_SCRIPT)),
     );
     const backup = readFileSync(join(ROOT, 'src/backup.js'), 'utf-8');
-    expect(backup).toMatch(/kubectl logs[\s\S]{0,200}\{ timeout: 90_000 \}/);
+    expect(backup).toMatch(
+      /\$\{jobPodDiagnostics\(jobName, \{[^}]{0,160}\}\)\}`,\s*\{ timeout: 90_000 \}/,
+    );
+    const waitScript = backup.slice(backup.indexOf('export function buildBackupJobWaitScript('));
+    expect(waitScript.slice(0, waitScript.indexOf('\n}\n'))).toContain(
+      'jobPodDiagnostics(jobName, {',
+    );
     expect(backup).toMatch(
       /buildBackupJobWaitScript\(jobName\), \{[\s\S]{0,120}BACKUP_JOB_ACTIVE_DEADLINE_S \+ JOB_DEADLINE_GRACE_S \+ 120/,
     );
@@ -276,6 +287,9 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
   it('the runners it trusts really do bind what they run', () => {
     const orchestrator = readFileSync(join(ROOT, 'src/lib/deploy/orchestrator.js'), 'utf-8');
     expect(orchestrator).toMatch(/const safeRun = async[\s\S]{0,160}timeout: 30_000/);
+    expect(orchestrator).toMatch(
+      /const kube = \([\s\S]{0,80}?\) =>\s*kcExists \? safeRun\('kubectl', \['--kubeconfig', kubeconfig, \.\.\.argv\]\)/,
+    );
     const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
     const runner = k3s.slice(k3s.indexOf('export async function runDeployDiagnostic('));
     expect(runner.slice(0, runner.indexOf('catch (err)'))).toContain(
@@ -312,6 +326,10 @@ describe('the census bites', () => {
     ],
     ['logs', "async function a() { await kubectl(ip, ['logs', pod]); }"],
     ['a builder call', 'async function a() { await kubectl(dbExecArgv(["ls"])); }'],
+    [
+      'an unlisted function returning a builder argv',
+      "function newPodArgv(p) { return dbExecArgv(['ls'], { pod: p }); }",
+    ],
     [
       'an options variable with no timeout',
       "async function a() { const opts = { silent: true }; await kubectl(ip, ['exec', pod], opts); }",
@@ -366,6 +384,10 @@ describe('the census bites', () => {
     ['a word in a comment', "// await kubectl(ip, ['exec', pod]);\nfunction a() {}"],
     ['a word in a longer string', 'const s = "the \'exec\' verb";'],
     ['a verb tested, never run', "function a(argv) { return argv.includes('exec'); }"],
+    [
+      'a listed builder built on another',
+      "function k8sWalgRoleExecArgv(role) { return dbExecArgv(['sh', '-c', role]); }",
+    ],
   ])('leaves %s alone', (_name, body) => {
     expect(plant(body).unbounded).toEqual([]);
   });

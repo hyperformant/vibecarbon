@@ -218,6 +218,17 @@ export async function triggerDeployWorkflow(envName) {
 }
 
 /**
+ * The latest deploy.yml run's `--json` fields, as `gh run list` prints them
+ * (an array of at most one run), or null when gh failed.
+ */
+function latestDeployRun(fields) {
+  return runCommandAsync(
+    ['gh', 'run', 'list', '--workflow', 'deploy.yml', '--limit', '1', '--json', fields],
+    { cleanEnv: true, silent: true, ignoreError: true },
+  );
+}
+
+/**
  * Block until the most recent run of deploy.yml completes. Polls
  * `gh run list` every 5s; surfaces the final status when done.
  */
@@ -237,20 +248,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
     if (Date.now() - lastSnapshotAt >= 120_000) {
       try {
-        const stateOut = await runCommandAsync(
-          [
-            'gh',
-            'run',
-            'list',
-            '--workflow',
-            'deploy.yml',
-            '--limit',
-            '1',
-            '--json',
-            'databaseId,status,conclusion,jobs',
-          ],
-          { cleanEnv: true, silent: true, ignoreError: true },
-        );
+        const stateOut = await latestDeployRun('databaseId,status,conclusion,jobs');
         if (stateOut) {
           const info = JSON.parse(stateOut.toString())[0];
           const jobs = (info?.jobs ?? [])
@@ -270,23 +268,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
       }
       lastSnapshotAt = Date.now();
     }
-    const out =
-      (
-        await runCommandAsync(
-          [
-            'gh',
-            'run',
-            'list',
-            '--workflow',
-            'deploy.yml',
-            '--limit',
-            '1',
-            '--json',
-            'status,conclusion,databaseId',
-          ],
-          { cleanEnv: true, silent: true, ignoreError: true },
-        )
-      )?.toString() ?? '[]';
+    const out = (await latestDeployRun('status,conclusion,databaseId'))?.toString() ?? '[]';
     let run;
     try {
       run = JSON.parse(out)[0];
@@ -336,20 +318,7 @@ export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
   let runId = null;
   let logTail = '';
   try {
-    const out = await runCommandAsync(
-      [
-        'gh',
-        'run',
-        'list',
-        '--workflow',
-        'deploy.yml',
-        '--limit',
-        '1',
-        '--json',
-        'databaseId,status',
-      ],
-      { cleanEnv: true, silent: true, ignoreError: true },
-    );
+    const out = await latestDeployRun('databaseId,status');
     if (out) {
       const parsed = JSON.parse(out.toString())[0];
       runId = parsed?.databaseId ?? null;

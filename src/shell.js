@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
+import { knownHostsPath } from './lib/host-keys.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -141,7 +142,7 @@ export async function run(args) {
   // The ssh wrapper below points at it so reconnects after Hetzner recycles
   // a public IP don't trip TOFU rejections, and host-key checking still
   // works the way the deploy path expects.
-  const khPath = join(cwd, '.vibecarbon', `known_hosts_${envName}`);
+  const khPath = knownHostsPath(envName, cwd);
 
   const env = {
     ...process.env,

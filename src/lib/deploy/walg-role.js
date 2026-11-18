@@ -77,7 +77,7 @@ import { outputLines } from '../remote-sentinel.js';
 import { shEscape } from '../shell.js';
 import { sshRun } from '../ssh.js';
 import { validateProjectName } from '../validators.js';
-import { DB_CONTAINER, DB_POD } from './db-workload.js';
+import { DB_CONTAINER, DB_POD, dbExecArgv } from './db-workload.js';
 import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
 
 /** In-container path, both tiers. */
@@ -286,18 +286,7 @@ export function k8sWalgRoleIntentApplyArgv() {
  * @returns {string[]}
  */
 export function k8sWalgRoleExecArgv(role) {
-  return [
-    '-n',
-    'vibecarbon',
-    'exec',
-    DB_POD,
-    '-c',
-    DB_CONTAINER,
-    '--',
-    'sh',
-    '-c',
-    walgRoleWriteShell(WALG_ROLE_DIR, role),
-  ];
+  return dbExecArgv(['sh', '-c', walgRoleWriteShell(WALG_ROLE_DIR, role)]);
 }
 
 /**
@@ -591,14 +580,7 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
   const slots = await dropInactiveReplicationSlots((sql) =>
     kubectl(
       ip,
-      [
-        '-n',
-        'vibecarbon',
-        'exec',
-        DB_POD,
-        '-c',
-        DB_CONTAINER,
-        '--',
+      dbExecArgv([
         'psql',
         '-U',
         'postgres',
@@ -608,7 +590,7 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
         'ON_ERROR_STOP=1',
         '-tAc',
         sql,
-      ],
+      ]),
       { timeout: 30_000 },
     ),
   );

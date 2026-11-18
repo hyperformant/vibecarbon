@@ -44,6 +44,7 @@ import { summarizeCommandError } from '../cli/error-line.js';
 import { spinner } from '../cli/progress.js';
 import { haSshKeyName as haSshKeyNameFor } from '../deploy/k8s/ha-ssh-key.js';
 import { recordRetiredReservedIps } from '../deploy/k8s/retired-reserved-ip.js';
+import { stateS3Fields } from '../deploy/s3-record.js';
 import { k3sVersion } from '../images.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
@@ -292,15 +293,10 @@ export async function convergeClusterInfra({
       throw abort(['S3 credentials required to access pulumi backend']);
     }
     s3Config = {
-      bucket: envConfig.s3.bucket,
-      region: envConfig.s3.region,
-      endpoint: envConfig.s3.endpoint,
-      // Dedicated Pulumi-state bucket. Undefined for envs deployed before
-      // the state-bucket split — resolveBackendUrl then falls back to the
-      // app bucket, matching where their state actually still lives.
-      stateBucket: envConfig.s3.stateBucket,
-      stateBucketRegion: envConfig.s3.stateBucketRegion,
-      stateEndpoint: envConfig.s3.stateEndpoint,
+      // stateBucket is undefined for envs deployed before the state-bucket
+      // split: resolveBackendUrl then falls back to the app bucket, where
+      // their state still lives.
+      ...stateS3Fields(envConfig),
       accessKey: creds.accessKey,
       secretKey: creds.secretKey,
     };
