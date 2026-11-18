@@ -1,5 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { blockingAdvisories, judge, NO_FIX_YET } from '../../../scripts/audit-shipped-lockfile.mjs';
+
+const ROOT = join(import.meta.dirname, '..', '..', '..');
 
 // The shape `npm audit --json` gives: the advisory sits on the package it is
 // against, and every dependent repeats the package name as a string.
@@ -97,6 +101,14 @@ describe('judge', () => {
       newestReleaseOf: () => '4.0.7',
     });
     expect(failures).toEqual([expect.stringContaining('delete the entry')]);
+  });
+});
+
+describe('the gate is wired', () => {
+  it('the template job runs this script, not a bare npm audit', () => {
+    const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'test.yml'), 'utf-8');
+    expect(workflow).toContain('run: node ../scripts/audit-shipped-lockfile.mjs');
+    expect(workflow).not.toMatch(/^\s*run: npm audit\b/m);
   });
 });
 
