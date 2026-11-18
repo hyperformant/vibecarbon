@@ -75,6 +75,7 @@ db/migrations/               # Drizzle migrations, applied by the migrate step (
 | `GET /api/v1/auth/settings` | Auth settings (enabled providers, MFA config) |
 | `GET /api/v1/me` | Current user info with memberships |
 | `GET/POST /api/v1/organizations` | List/create organizations |
+| `PATCH /api/v1/organizations/:orgId` | Rename an organization (owner or admin) |
 | `GET/POST /api/v1/organizations/:orgId/members` | Manage members |
 | `PATCH /api/v1/organizations/:orgId/members/:userId` | Update member role |
 | `GET /api/v1/notifications` | User's active notifications |

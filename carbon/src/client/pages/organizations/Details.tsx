@@ -3,8 +3,9 @@ import {
   IconPencil as Pencil,
   IconAlertTriangle as TriangleAlert,
 } from '@tabler/icons-react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router';
 import { toast } from 'sonner';
 import { OrganizationNotFound } from '@/components/OrganizationNotFound';
@@ -24,7 +25,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { useOrganizations } from '@/hooks/useOrganizations';
+import { type Organization, useOrganizations } from '@/hooks/useOrganizations';
 import { apiJson } from '@/lib/api';
 import { ContentPanel } from '../../components/ContentPanel';
 
@@ -36,15 +37,57 @@ async function deleteOrganization(orgId: string): Promise<void> {
   );
 }
 
+async function renameOrganization(
+  orgId: string,
+  name: string,
+  fallback: string
+): Promise<Organization> {
+  const data = await apiJson<{ organization: Organization }>(
+    `/api/v1/organizations/${orgId}`,
+    { method: 'PATCH', body: { name } },
+    fallback
+  );
+  return data.organization;
+}
+
 export default function OrgDetails() {
   const { orgId } = useParams<{ orgId: string }>();
   const navigate = useNavigate();
-  const { organizations, refresh, isLoading: orgsLoading } = useOrganizations();
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const { organizations, memberships, refresh, isLoading: orgsLoading } = useOrganizations();
   const [isEditing, setIsEditing] = useState(false);
+  const [name, setName] = useState('');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const organization = organizations.find((org) => org.id === orgId);
   const isLastOrg = organizations.length <= 1;
+  // The server lets an owner or an admin rename; a member gets no edit button.
+  const role = memberships.find((m) => m.organization.id === orgId)?.role;
+  const canEdit = role === 'OWNER' || role === 'ADMIN';
+  const trimmedName = name.trim();
+
+  const renameMutation = useMutation({
+    mutationFn: () => renameOrganization(orgId ?? '', trimmedName, t('orgSettings.renameError')),
+    onSuccess: async () => {
+      // Every reader of the organizations (this page, the switcher) reads the
+      // saved name from the server.
+      await queryClient.invalidateQueries({ queryKey: ['organizations'] });
+      setIsEditing(false);
+      toast.success(t('orgSettings.renamed'));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const saveName = () => {
+    if (trimmedName === organization?.name) {
+      setIsEditing(false);
+      return;
+    }
+    renameMutation.mutate();
+  };
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteOrganization(orgId ?? ''),
@@ -91,8 +134,16 @@ export default function OrgDetails() {
               <CardTitle>Organization Information</CardTitle>
               <CardDescription>Basic details about this organization.</CardDescription>
             </div>
-            {!isEditing && (
-              <Button variant="ghost" size="icon-sm" onClick={() => setIsEditing(true)}>
+            {canEdit && !isEditing && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t('orgSettings.editName')}
+                onClick={() => {
+                  setName(organization.name);
+                  setIsEditing(true);
+                }}
+              >
                 <Pencil className="size-4" />
               </Button>
             )}
@@ -100,7 +151,13 @@ export default function OrgDetails() {
           <CardContent className="space-y-4">
             <div className="grid gap-2">
               <Label htmlFor="name">Name</Label>
-              <Input id="name" defaultValue={organization.name} disabled={!isEditing} />
+              <Input
+                id="name"
+                value={isEditing ? name : organization.name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={100}
+                disabled={!isEditing || renameMutation.isPending}
+              />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="slug">Slug</Label>
@@ -115,8 +172,15 @@ export default function OrgDetails() {
             </div>
             {isEditing && (
               <div className="flex gap-2">
-                <Button onClick={() => setIsEditing(false)}>Save Changes</Button>
-                <Button variant="outline" onClick={() => setIsEditing(false)}>
+                <Button onClick={saveName} disabled={!trimmedName || renameMutation.isPending}>
+                  {renameMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+                  Save Changes
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={renameMutation.isPending}
+                  onClick={() => setIsEditing(false)}
+                >
                   Cancel
                 </Button>
               </div>

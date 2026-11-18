@@ -321,6 +321,35 @@ const openApiSpec = {
         },
       },
     },
+    '/api/v1/organizations/{orgId}': {
+      patch: {
+        summary: 'Rename organization (owner or admin)',
+        tags: ['Organizations'],
+        security: [{ sessionCookie: [] }],
+        parameters: [{ name: 'orgId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name'],
+                properties: {
+                  name: { type: 'string', maxLength: 100 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Organization renamed' },
+          '400': { description: 'Bad request' },
+          '401': { description: 'Unauthorized' },
+          '403': { description: 'Not an owner or admin' },
+          '404': { description: 'Organization not found or access denied' },
+        },
+      },
+    },
     '/api/v1/billing/checkout': {
       post: {
         summary: 'Create checkout session',

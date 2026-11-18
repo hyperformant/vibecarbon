@@ -29,6 +29,8 @@ const db = vi.hoisted(() => ({
   writes: [] as Call[],
   /** Return an error to make that write fail. */
   fail: undefined as undefined | ((call: Call) => unknown),
+  /** Set to make every write return these rows instead of the row it wrote. */
+  returned: undefined as undefined | unknown[],
 }));
 
 const AT = '2026-01-01 00:00:00+00';
@@ -46,6 +48,7 @@ vi.mock('@server/db/client', async () => {
       db.writes.push(call);
       const error = db.fail?.(call);
       if (error) throw error;
+      if (db.returned) return db.returned;
       return [{ id: NEW_ID, createdAt: AT, updatedAt: AT, ...call.values }];
     }
     if (side === 'admin') {
@@ -175,6 +178,7 @@ beforeEach(() => {
   db.reads = [];
   db.writes = [];
   db.fail = undefined;
+  db.returned = undefined;
   sendEmail.mockClear();
 });
 
@@ -275,6 +279,101 @@ describe('POST /organizations', () => {
     expect(res.status).toBe(400);
     expect(await errorOf(res)).toBe('An organization with this slug already exists');
     expect(db.writes.map((w) => w.table)).toEqual(['organizations']);
+  });
+});
+
+describe('PATCH /organizations/:orgId', () => {
+  const rename = (caller: string | null, body: unknown, orgId = ORG) =>
+    as(caller).request(`/api/v1/organizations/${orgId}`, send('PATCH', body));
+
+  beforeEach(seedOrg);
+
+  it('answers 401 with no user', async () => {
+    const res = await rename(null, { name: 'Renamed' });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'Unauthorized' });
+    expect(db.writes).toEqual([]);
+  });
+
+  it.each([
+    ['the owner', OWNER],
+    ['an admin', ADMIN],
+  ])('%s renames the organization, and gets it back', async (_name, caller) => {
+    const res = await rename(caller, { name: '  Renamed Org  ' });
+    expect(res.status).toBe(200);
+    expect((await res.json()).organization).toEqual({
+      id: NEW_ID,
+      name: 'Renamed Org',
+      created_at: AT_JSON,
+      updated_at: AT_JSON,
+    });
+    // One write, to this organization only, of the trimmed name.
+    expect(db.writes.map((w) => [w.op, w.table, w.values, w.params])).toEqual([
+      ['update', 'organizations', { name: 'Renamed Org' }, [ORG]],
+    ]);
+  });
+
+  it('SECURITY: writes the name only, whatever else the body carries', async () => {
+    const res = await rename(OWNER, { name: 'Renamed', slug: 'taken-over', plan: 'ENTERPRISE', id: uuid(9) });
+    expect(res.status).toBe(200);
+    expect(db.writes[0].values).toEqual({ name: 'Renamed' });
+  });
+
+  it('answers 403 to a member who is not an admin, and writes nothing', async () => {
+    const res = await rename(MEMBER, { name: 'Renamed' });
+    expect(res.status).toBe(403);
+    expect(await errorOf(res)).toBe('You must be an admin to rename the organization');
+    expect(db.writes).toEqual([]);
+  });
+
+  it.each([
+    ['a caller outside the organization', OUTSIDER, ORG],
+    ['an organization id that is not a UUID', OWNER, 'not-a-uuid'],
+  ])('SECURITY: answers 404 for %s, and writes nothing', async (_name, caller, orgId) => {
+    const res = await rename(caller, { name: 'Renamed' }, orgId);
+    expect(res.status).toBe(404);
+    expect(await errorOf(res)).toBe('Organization not found or access denied');
+    expect(db.writes).toEqual([]);
+  });
+
+  it.each([
+    ['an empty name', { name: '' }, 'Name is required'],
+    ['a name of spaces only', { name: '   ' }, 'Name is required'],
+    ['a name over 100 characters', { name: 'a'.repeat(101) }, 'Name must be 100 characters or less'],
+    ['no name', {}, ''],
+    ['a name that is not text', { name: 42 }, ''],
+  ])('answers 400 for %s, and writes nothing', async (_name, body, message) => {
+    const res = await rename(OWNER, body);
+    expect(res.status).toBe(400);
+    expect(await errorOf(res)).toContain(message);
+    expect(db.writes).toEqual([]);
+  });
+
+  it('answers 400 for a body that is not JSON, as the other routes do', async () => {
+    const res = await as(OWNER).request(`/api/v1/organizations/${ORG}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: '{not json',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Invalid JSON body' });
+    expect(db.writes).toEqual([]);
+  });
+
+  it('accepts a name of exactly 100 characters', async () => {
+    expect((await rename(OWNER, { name: 'a'.repeat(100) })).status).toBe(200);
+  });
+
+  it('answers 404 when the organization is gone by the time of the write', async () => {
+    db.returned = [];
+    const res = await rename(OWNER, { name: 'Renamed' });
+    expect(res.status).toBe(404);
+    expect(await errorOf(res)).toBe('Organization not found or access denied');
+  });
+
+  it('answers 500 when the update fails', async () => {
+    db.fail = () => new Error('connection lost');
+    expect((await rename(OWNER, { name: 'Renamed' })).status).toBe(500);
   });
 });
 

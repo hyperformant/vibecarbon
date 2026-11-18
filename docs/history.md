@@ -1307,14 +1307,19 @@ swallows a failed call.
 - An endpoint read by more than one component goes through one hook in
   `src/client/hooks/api/` (`useSubscription`, `useServicesStatus`,
   `useAdminStats`).
+- "Save Changes" on the organization page saves the name, through the new
+  `PATCH /api/v1/organizations/:orgId` (owner or admin; the name alone is
+  written). Before, it only closed edit mode and the typed name was dropped.
+  A member who is not an admin no longer gets the edit button.
 
 **Do not undo:** a page-local `useQuery` for an endpoint that already has a
 hook fetches twice. A provider-to-variable table in the client trips the
 no-session-token invariant, which is unbounded on purpose.
 
 **Guard:** `carbon/tests/integration/server/routes/` (`v1-me-delete-billing`,
-`contact`, `theme-validation`, `admin-list-order`, `billing-status`) and
-`carbon/tests/component/billing-page.test.tsx`.
+`contact`, `theme-validation`, `admin-list-order`, `billing-status`,
+`v1-routes`) and `carbon/tests/component/` (`billing-page`,
+`organization-rename`).
 
 #### 2026-11-18: Template tests test the template
 
