@@ -123,7 +123,11 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   return {
     ...real,
     providerFor: () => FakeProvider,
-    getObjectStorageProvider: async () => ({ locateBucket: async () => bucketRegion }),
+    getObjectStorageProvider: async () => ({
+      locateBucket: async () => bucketRegion,
+      // No region's listing shows a bucket that was never created.
+      bucketListedIn: async () => null,
+    }),
   };
 });
 

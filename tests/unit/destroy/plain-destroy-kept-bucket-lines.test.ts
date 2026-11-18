@@ -30,6 +30,7 @@ const s3 = {
   deletePrefix: vi.fn(async () => ({ objectsRemoved: 4 })),
   emptyAndDeleteBucket: vi.fn(async () => ({ deleted: true, objectsRemoved: 2, warnings: [] })),
   locateBucket: vi.fn(async (): Promise<string | null> => null),
+  bucketListedIn: vi.fn(async (): Promise<string | null> => null),
   addressableRegions: vi.fn(() => ['fsn1', 'nbg1', 'hel1']),
   forRegion: vi.fn(() => s3),
 };

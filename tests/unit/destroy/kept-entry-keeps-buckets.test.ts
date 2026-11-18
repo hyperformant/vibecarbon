@@ -30,6 +30,8 @@ const s3 = {
     warnings: [],
   })),
   locateBucket: vi.fn(async (_b: string): Promise<string | null> => null),
+  // No region's ListBuckets shows it either (S3CompatibleProvider.bucketListedIn).
+  bucketListedIn: vi.fn(async (_b: string): Promise<string | null> => null),
   addressableRegions: vi.fn(() => ['fsn1', 'nbg1', 'hel1']),
   forRegion: vi.fn((_region: string) => s3),
 };
