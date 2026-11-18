@@ -79,11 +79,10 @@ import {
 } from './lib/deploy/walg-role.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
-import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
+import { requireEnvOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, sshKeyPathFor, sshKubectl } from './lib/ssh.js';
 import { readPrimaryWalGap } from './lib/status/backup-health.js';
 import { createTracker } from './lib/tracker.js';
@@ -483,13 +482,7 @@ export async function run(args, deps = {}) {
   }
 
   // Operator-IP firewall refresh: everything below needs SSH/k8s reachability.
-  await requireOperatorIpAccess({
-    projectConfig,
-    environment: envName,
-    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
-    apiToken: resolveProviderToken(providerIdFor(envConfig)),
-    yes: !!values.y,
-  });
+  await requireEnvOperatorIpAccess({ projectConfig, envName, envConfig, yes: !!values.y });
 
   // SSH key is required for everything restore touches.
   const sshKeyPath = sshKeyPathFor(envName);

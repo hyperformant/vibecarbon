@@ -12,6 +12,7 @@
 
 import * as p from '@clack/prompts';
 import { ensureOperatorIpAccess } from './operator-ip.js';
+import { providerIdFor, resolveProviderToken } from './providers/index.js';
 
 /**
  * No-op without a provider token: there is nothing to patch the firewall with.
@@ -50,4 +51,25 @@ export async function requireOperatorIpAccess({
     p.log.error(`Operator-IP check failed: ${err.message}`);
     process.exit(1);
   }
+}
+
+/**
+ * requireOperatorIpAccess for an environment as its record describes it: both
+ * firewalls for compose-HA and k8s HA, and the provider token from the
+ * operator's environment. The gate of `backup`, `restore` and `update`.
+ *
+ * @param {object} o
+ * @param {object} o.projectConfig
+ * @param {string} o.envName user-facing environment name
+ * @param {{ deployMode?: string, ha?: { enabled?: boolean } }} o.envConfig
+ * @param {boolean} o.yes
+ */
+export async function requireEnvOperatorIpAccess({ projectConfig, envName, envConfig, yes }) {
+  await requireOperatorIpAccess({
+    projectConfig,
+    environment: envName,
+    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
+    apiToken: resolveProviderToken(providerIdFor(envConfig)),
+    yes,
+  });
 }

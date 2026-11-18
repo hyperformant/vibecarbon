@@ -22,10 +22,9 @@ import { c } from './lib/colors.js';
 import { DB_STATEFULSET, POD_EXEC_WRITE_MS } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
-import { requireOperatorIpAccess } from './lib/operator-ip-gate.js';
+import { requireEnvOperatorIpAccess } from './lib/operator-ip-gate.js';
 import { perfAsync } from './lib/perf.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { sshKeyPathFor, sshKubectl, sshRunScript } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { parseBackupResult, pushedBackupNames } from './lib/walg/backup-result.js';
@@ -445,7 +444,7 @@ export async function run(args) {
 
   // Operator-IP whitelist refresh happens before any command that
   // touches the live cluster.
-  await ensureFirewallAccessIfNeeded({
+  await requireEnvOperatorIpAccess({
     projectConfig,
     envName,
     envConfig,
@@ -512,20 +511,6 @@ export async function run(args) {
 // ============================================================================
 // ORCHESTRATION HELPERS
 // ============================================================================
-
-/**
- * Refresh operator-IP firewall allowlist before an action that hits the
- * cluster (create; list reads the bucket only).
- */
-async function ensureFirewallAccessIfNeeded({ projectConfig, envName, envConfig, yes }) {
-  await requireOperatorIpAccess({
-    projectConfig,
-    environment: envName,
-    isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
-    apiToken: resolveProviderToken(providerIdFor(envConfig)),
-    yes,
-  });
-}
 
 /**
  * `-l`: the environment's base backups, read from the backup bucket's stop

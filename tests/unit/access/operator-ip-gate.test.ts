@@ -11,14 +11,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const m = vi.hoisted(() => ({
   ensureOperatorIpAccess: vi.fn(),
   log: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
+  resolveProviderToken: vi.fn(),
 }));
 
 vi.mock('@clack/prompts', () => ({ log: m.log }));
 vi.mock('../../../src/lib/operator-ip.js', () => ({
   ensureOperatorIpAccess: m.ensureOperatorIpAccess,
 }));
+vi.mock('../../../src/lib/providers/index.js', () => ({
+  providerIdFor: (envConfig: { provider?: string }) => envConfig.provider ?? 'hetzner',
+  resolveProviderToken: m.resolveProviderToken,
+}));
 
-import { requireOperatorIpAccess } from '../../../src/lib/operator-ip-gate.js';
+import {
+  requireEnvOperatorIpAccess,
+  requireOperatorIpAccess,
+} from '../../../src/lib/operator-ip-gate.js';
 
 const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
 const base = {
@@ -80,11 +88,50 @@ describe('requireOperatorIpAccess', () => {
   });
 });
 
+describe('requireEnvOperatorIpAccess', () => {
+  const env = (envConfig: Record<string, unknown>) => ({
+    projectConfig: { projectName: 'demo' },
+    envName: 'production',
+    envConfig,
+    yes: false,
+  });
+
+  it('gates both firewalls for compose-HA and k8s HA, one otherwise, with the provider token', async () => {
+    m.ensureOperatorIpAccess.mockResolvedValue({ added: false, cidr: '203.0.113.7/32' });
+    m.resolveProviderToken.mockImplementation((id: string) => `token-${id}`);
+    await requireEnvOperatorIpAccess(env({ provider: 'linode', deployMode: 'compose-ha' }));
+    await requireEnvOperatorIpAccess(env({ deployMode: 'k8s', ha: { enabled: true } }));
+    await requireEnvOperatorIpAccess(env({ deployMode: 'compose' }));
+    expect(m.resolveProviderToken.mock.calls).toEqual([['linode'], ['hetzner'], ['hetzner']]);
+    expect(
+      m.ensureOperatorIpAccess.mock.calls.map(([o]) => [o.environment, o.isHA, o.apiToken, o.yes]),
+    ).toEqual([
+      ['production', true, 'token-linode', false],
+      ['production', true, 'token-hetzner', false],
+      ['production', false, 'token-hetzner', false],
+    ]);
+  });
+
+  it('does nothing when the operator has no token for the provider', async () => {
+    m.resolveProviderToken.mockReturnValue(undefined);
+    await requireEnvOperatorIpAccess(env({ deployMode: 'compose' }));
+    expect(m.ensureOperatorIpAccess).not.toHaveBeenCalled();
+  });
+});
+
 describe('the commands that need SSH share the one gate', () => {
-  for (const file of ['backup.js', 'restore.js', 'update.js', 'failover.js', 'scale.js']) {
-    it(`${file} calls requireOperatorIpAccess and carries no copy`, () => {
+  // backup, restore and update gate the env as its record describes it.
+  const gates: Record<string, string> = {
+    'backup.js': 'await requireEnvOperatorIpAccess({',
+    'restore.js': 'await requireEnvOperatorIpAccess({',
+    'update.js': 'await requireEnvOperatorIpAccess({',
+    'failover.js': 'await requireOperatorIpAccess({',
+    'scale.js': 'await requireOperatorIpAccess({',
+  };
+  for (const [file, call] of Object.entries(gates)) {
+    it(`${file} calls the gate and carries no copy`, () => {
       const src = readFileSync(join(SRC, file), 'utf8');
-      expect(src).toContain('await requireOperatorIpAccess({');
+      expect(src).toContain(call);
       expect(src).not.toContain('ensureOperatorIpAccess(');
       expect(src).not.toContain('Operator-IP check failed');
     });
