@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/table';
 import { type SortOrder, useListControls } from '@/hooks/useListControls';
 import { apiJson } from '@/lib/api';
+import { getUserInitials } from '@/lib/utils';
 import { ContentPanel } from '../../components/ContentPanel';
 
 type User = {
@@ -66,18 +67,6 @@ async function fetchUsers(params: {
     {},
     'Failed to fetch users'
   );
-}
-
-function getUserInitials(user: User) {
-  if (user.name) {
-    return user.name
-      .split(' ')
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2);
-  }
-  return user.email?.[0]?.toUpperCase() || '?';
 }
 
 export default function AdminUsers() {

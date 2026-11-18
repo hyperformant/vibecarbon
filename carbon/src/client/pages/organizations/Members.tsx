@@ -45,6 +45,7 @@ import {
   useOrganizationMembers,
 } from '@/hooks/useOrganizationMembers';
 import { useOrganizations } from '@/hooks/useOrganizations';
+import { getUserInitials } from '@/lib/utils';
 import { ContentPanel } from '../../components/ContentPanel';
 
 function getRoleIcon(role: MemberRole) {
@@ -67,20 +68,6 @@ function getRoleBadgeVariant(role: MemberRole) {
     default:
       return 'outline';
   }
-}
-
-function getUserInitials(member: Member) {
-  if (!member.user) return '?';
-  const name = member.user.name;
-  if (name) {
-    return name
-      .split(' ')
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2);
-  }
-  return member.user.email?.[0]?.toUpperCase() || '?';
 }
 
 export default function Members() {
@@ -191,7 +178,7 @@ export default function Members() {
                   >
                     <div className="flex items-center gap-3">
                       <Avatar>
-                        <AvatarFallback>{getUserInitials(member)}</AvatarFallback>
+                        <AvatarFallback>{getUserInitials(member.user)}</AvatarFallback>
                       </Avatar>
                       <div>
                         <p className="font-medium">
