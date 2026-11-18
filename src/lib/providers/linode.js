@@ -16,12 +16,12 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
 import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
   replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
 
@@ -694,34 +694,10 @@ export class LinodeProvider extends BaseProvider {
     return { SERVER_TYPES: catalog, _locationTypes: locationTypes, _prices: prices };
   }
 
-  /**
-   * Returns server types available in the given region — the full catalog
-   * (Linode types are global), live when fetched, fallback otherwise.
-   * `architecture: 'x86'` is constant: Linode sells no ARM instances
-   * (audit 2026-08-07), matching DigitalOcean's constant-field precedent.
-   * @param {string} region - Region slug
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = LinodeProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in LinodeProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...LinodeProvider.SERVER_TYPES[name],
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(LinodeProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): the full catalog in every region (Linode types are global),
+  // live when fetched, fallback otherwise, with `architecture: 'x86'`
+  // constant because Linode sells no ARM instances (audit 2026-08-07).
 
   /**
    * The static HA standby pair: a DIFFERENT region on the same continent
@@ -744,43 +720,12 @@ export class LinodeProvider extends BaseProvider {
       'sg-sin-2': 'jp-tyo-3',
       'jp-tyo-3': 'sg-sin-2',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = LinodeProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(LinodeProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && LinodeProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(LinodeProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      // Single-region continent (br-gru is alone in `sa`) → nearest-hub
+      // fallback, never the primary.
+      (primaryRegion === 'us-iad' ? 'us-ord' : 'us-iad')
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-
-    // Single-region continent (br-gru is alone in `sa`) → nearest-hub
-    // fallback, never the primary.
-    return primaryRegion === 'us-iad' ? 'us-ord' : 'us-iad';
-  }
-
-  /**
-   * Equivalent server type in a target region. Linode's global catalog
-   * means the requested type is available everywhere the live data says it
-   * exists; the role-pick fallback mirrors DO's shape for the (unlikely)
-   * case a future per-region axis appears in the live data.
-   * @param {string} serverType
-   * @param {string} targetRegion
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = LinodeProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(LinodeProvider, serverType, targetRegion, role);
-    }
-
-    return serverType;
   }
 
   /**

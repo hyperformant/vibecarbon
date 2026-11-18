@@ -24,8 +24,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import { BaseProvider, replaceWireguardPeerRules, standbyPairOrNeighbour } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -420,33 +419,11 @@ export class VultrProvider extends BaseProvider {
     return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
   }
 
-  /**
-   * Server types available in a region — live per-region data when fetched
-   * (plan.locations is a real axis on Vultr), fallback catalog otherwise.
-   * `architecture: 'x86'` constant: Vultr's cloud-compute lines are x86.
-   * @param {string} region
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = VultrProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in VultrProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...VultrProvider.SERVER_TYPES[name],
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(VultrProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): live per-region data when fetched (plan.locations is a real
+  // axis on Vultr), the fallback catalog otherwise, with
+  // `architecture: 'x86'` constant because Vultr's cloud-compute lines are
+  // x86.
 
   /**
    * The static HA standby pair — conventional pairs, then same-continent,
@@ -466,38 +443,10 @@ export class VultrProvider extends BaseProvider {
       sgp: 'syd',
       syd: 'sgp',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = VultrProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(VultrProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && VultrProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(VultrProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      (primaryRegion === 'ewr' ? 'ord' : 'ewr')
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-    return primaryRegion === 'ewr' ? 'ord' : 'ewr';
-  }
-
-  /**
-   * Equivalent plan in a target region, using the live per-region axis when
-   * available (same walk shape as DO's).
-   * @param {string} serverType
-   * @param {string} targetRegion
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = VultrProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(VultrProvider, serverType, targetRegion, role);
-    }
-
-    return serverType;
   }
 
   /**

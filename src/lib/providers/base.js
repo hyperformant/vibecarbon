@@ -13,7 +13,7 @@
  * tests then walk you through the rest.
  */
 
-import { cheapestStandbyRegion, regionRoleDefaults } from '../sizing.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 
 /**
  * Whether a DELETE's HTTP status is the provider refusing it (4xx). A 5xx,
@@ -94,6 +94,78 @@ export function sweepLabels(labels) {
   return entries;
 }
 
+/**
+ * The body of BaseProvider.getServerTypesForRegion, for a provider class
+ * with no ARM line: the region's live types smallest first, else the whole
+ * offline catalog, each marked x86.
+ * @param {typeof BaseProvider} Provider - the calling subclass
+ * @param {string} region
+ * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
+ */
+function x86TypesForRegion(Provider, region) {
+  const available = Provider._locationTypes?.[region];
+
+  if (available) {
+    return [...available]
+      .filter((name) => name in Provider.SERVER_TYPES)
+      .map((name) => ({
+        name,
+        ...Provider.SERVER_TYPES[name],
+        architecture: 'x86',
+      }))
+      .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
+  }
+
+  return Object.entries(Provider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
+    name,
+    ...info,
+    architecture: 'x86',
+  }));
+}
+
+/**
+ * The body of BaseProvider.resolveServerTypeForRegion: `serverType` where
+ * the live catalog stocks it in `targetRegion`, else the role's stand-in;
+ * offline, `serverType` unchanged.
+ * @param {typeof BaseProvider} Provider - the calling subclass
+ * @param {string} serverType
+ * @param {string} targetRegion
+ * @param {string} [role]
+ * @returns {string|null}
+ */
+function typeStockedIn(Provider, serverType, targetRegion, role) {
+  // A live catalog that does not list the location stocks nothing there:
+  // the stand-in below then answers null, as cheapestRoleSet does.
+  const live = Provider._locationTypes;
+  const available = live ? (live[targetRegion] ?? new Set()) : undefined;
+
+  if (available) {
+    if (available.has(serverType)) return serverType;
+    return standbyStandIn(Provider, serverType, targetRegion, role);
+  }
+
+  // Offline fallback: no architecture split to reconcile.
+  return serverType;
+}
+
+/**
+ * The walk every provider's conventionalStandbyRegion takes: the provider's
+ * conventional pair for `primaryRegion` if it names one, else the first
+ * other region on the same continent, in REGION_CONTINENT order. undefined
+ * when there is neither, for the provider's own last resort.
+ * @param {Record<string, string>} regionContinent - the provider's REGION_CONTINENT
+ * @param {string} primaryRegion
+ * @param {Record<string, string>} [pairs] - conventional pairs, both directions
+ * @returns {string|undefined}
+ */
+export function standbyPairOrNeighbour(regionContinent, primaryRegion, pairs = {}) {
+  if (pairs[primaryRegion]) return pairs[primaryRegion];
+  const continent = regionContinent[primaryRegion];
+  return Object.keys(regionContinent).find(
+    (r) => r !== primaryRegion && regionContinent[r] === continent,
+  );
+}
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")
@@ -118,6 +190,14 @@ export class BaseProvider {
    * @type {Object<string, {vcpu: number, ram: number, disk: number, price: string}>}
    */
   static SERVER_TYPES = {};
+
+  /**
+   * The offline catalog: the server types getServerTypesForRegion lists for
+   * every region before a live fetchServerTypes has filled `_locationTypes`.
+   * Specs only, no prices.
+   * @type {Object<string, {vcpu: number, ram: number, disk: number}>}
+   */
+  static FALLBACK_SERVER_TYPES = {};
 
   /**
    * Default server type
@@ -1113,10 +1193,11 @@ export class BaseProvider {
 
   // ============================================================================
   // ABSTRACT STATIC METHODS - CATALOG
-  // Must be implemented by subclasses. Polymorphic call sites resolve these
-  // through the registered provider class (see lib/providers/index.js), so a
-  // new provider only needs to override the statics below — no call-site
-  // changes required.
+  // Must be implemented by subclasses, except where a method below has a
+  // base answer that reads the calling subclass's data. Polymorphic call
+  // sites resolve these through the registered provider class (see
+  // lib/providers/index.js), so a new provider only needs to override the
+  // statics below — no call-site changes required.
   //
   // Cache convention: a provider that caches fetched catalog data (e.g.
   // per-region server-type availability) on a class field should name that
@@ -1226,6 +1307,14 @@ export class BaseProvider {
   static _prices = null;
 
   /**
+   * The live catalog's per-region availability, filled by fetchServerTypes:
+   * `{ [region]: Set<type> }`. null before a live fetch, when the offline
+   * catalog (FALLBACK_SERVER_TYPES) answers instead.
+   * @type {Record<string, Set<string>>|null}
+   */
+  static _locationTypes = null;
+
+  /**
    * Monthly price of `type` in `location` from the live capture (`_prices`).
    * @param {string} type
    * @param {string} location
@@ -1251,11 +1340,21 @@ export class BaseProvider {
    * `architecture` is treated as x86, so a provider whose catalog is all-x86
    * may omit it.
    *
+   * The base answer suits a provider that sells no ARM (DigitalOcean, Linode,
+   * Vultr, Scaleway): the region's types from the live catalog
+   * (`_locationTypes`, `SERVER_TYPES`) smallest first, else the whole offline
+   * catalog (FALLBACK_SERVER_TYPES), every entry `architecture: 'x86'`. A
+   * provider with an ARM line or a per-region offline rule overrides it
+   * (HetznerProvider).
+   *
    * @param {string} region - Region ID
    * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture?: string}>}
    */
-  static getServerTypesForRegion(_region) {
-    throw new Error('getServerTypesForRegion() must be implemented by subclass');
+  static getServerTypesForRegion(region) {
+    // Polymorphic on purpose: lists the CALLING subclass's catalog (see
+    // assertAmd64ServerType below for why `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    return x86TypesForRegion(this, region);
   }
 
   /**
@@ -1333,13 +1432,21 @@ export class BaseProvider {
    * Returns the equivalent server type available in a target region: the
    * type itself when stocked there, else the role's cheapest orderable pick
    * of at least its RAM (src/lib/sizing.js standbyStandIn).
+   *
+   * Offline (no live catalog) the type is assumed stocked everywhere, which
+   * suits a provider with one uniform line and no architecture split. A
+   * provider that must first map ARM to amd64 overrides it (HetznerProvider).
    * @param {string} serverType - Original server type
    * @param {string} targetRegion - Region to resolve for
    * @param {string} [role] - compose, master, db or worker
    * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(_serverType, _targetRegion, _role) {
-    throw new Error('resolveServerTypeForRegion() must be implemented by subclass');
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
+    // Polymorphic on purpose: reads the CALLING subclass's live catalog and
+    // re-picks from its candidates (see assertAmd64ServerType below for why
+    // `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    return typeStockedIn(this, serverType, targetRegion, role);
   }
 
   /**

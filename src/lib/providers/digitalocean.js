@@ -23,8 +23,12 @@ import { fetchWithRetry } from '../fetch-retry.js';
 import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-unavailable.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
-import { BaseProvider, deleteFailure, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  deleteFailure,
+  replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
+} from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
 // touches, mirroring Hetzner's set: SSH and the k8s API.
@@ -694,41 +698,13 @@ export class DigitalOceanProvider extends BaseProvider {
     return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
   }
 
-  /**
-   * Returns server types available in the given region. Uses live
-   * per-region data when available (populated by fetchServerTypes),
-   * otherwise falls back to the full FALLBACK_SERVER_TYPES catalog (no
-   * offline per-region rule; see FALLBACK_SERVER_TYPES).
-   *
-   * Entries carry `architecture: 'x86'` for parity with
-   * HetznerProvider.getServerTypesForRegion — the field the shared prompt
-   * builders filter on (lib/server-types.js `filterAmd64Types`). It is a
-   * constant here because DigitalOcean sells NO ARM instances at all: 31 size
-   * slugs across the s/c/g/gd/m/gpu families, none of them ARM, and DO's own
-   * CCM and CSI publish amd64-only images regardless.
-   * @param {string} region - Region slug
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = DigitalOceanProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in DigitalOceanProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...DigitalOceanProvider.SERVER_TYPES[name],
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(DigitalOceanProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): every entry `architecture: 'x86'`, the field the shared prompt
+  // builders filter on (lib/server-types.js `filterAmd64Types`), because
+  // DigitalOcean sells NO ARM instances at all (31 size slugs across the
+  // s/c/g/gd/m/gpu families, none of them ARM, and DO's own CCM and CSI
+  // publish amd64-only images regardless); and offline, DO's uniform Basic
+  // droplet line means a requested type is assumed stocked everywhere.
 
   /**
    * The static HA standby pair for a given primary: a DIFFERENT region on
@@ -747,46 +723,11 @@ export class DigitalOceanProvider extends BaseProvider {
       sgp1: 'syd1',
       syd1: 'sgp1',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = DigitalOceanProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(DigitalOceanProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && DigitalOceanProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(DigitalOceanProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      // No same-continent partner (e.g. a future single-region continent).
+      'sfo3'
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-
-    // No same-continent partner (e.g. a future single-region continent).
-    return 'sfo3';
-  }
-
-  /**
-   * Returns the equivalent server type available in a target region.
-   * Mirrors HetznerProvider.resolveServerTypeForRegion's walk: if live data
-   * shows the requested type isn't available in the target region, fall
-   * back to the role's cheapest stocked pick of at least its RAM; offline, DO's
-   * uniform Basic droplet line means the requested type is always assumed
-   * available (no architecture-split fallback to reconcile, unlike
-   * Hetzner's cax/cpx case).
-   * @param {string} serverType - Original server type slug
-   * @param {string} targetRegion - Region to resolve for
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = DigitalOceanProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(DigitalOceanProvider, serverType, targetRegion, role);
-    }
-
-    // Offline fallback — no architecture split to reconcile.
-    return serverType;
   }
 
   /**

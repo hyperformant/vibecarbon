@@ -15,6 +15,7 @@ import {
   deleteFailure,
   deleteRefused,
   replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
@@ -203,18 +204,14 @@ export class HetznerProvider extends BaseProvider {
    * @returns {string} the static pair, before prices
    */
   static conventionalStandbyRegion(primaryRegion) {
-    const continent = HetznerProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(HetznerProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && HetznerProvider.REGION_CONTINENT[r] === continent,
+    return (
+      // Keep the conventional nbg1 -> fsn1 EU pairing; every other region
+      // takes its first same-continent neighbour.
+      standbyPairOrNeighbour(HetznerProvider.REGION_CONTINENT, primaryRegion, { nbg1: 'fsn1' }) ??
+      // No same-continent partner (e.g. a future single-region continent) —
+      // fall back to the robust EU default, but never to the primary itself.
+      (primaryRegion === 'nbg1' ? 'fsn1' : 'nbg1')
     );
-    if (sameContinent.length > 0) {
-      // Keep the conventional nbg1<->fsn1 EU pairing where it applies.
-      if (primaryRegion === 'nbg1') return 'fsn1';
-      return sameContinent[0];
-    }
-    // No same-continent partner (e.g. a future single-region continent) —
-    // fall back to the robust EU default, but never to the primary itself.
-    return primaryRegion === 'nbg1' ? 'fsn1' : 'nbg1';
   }
 
   // Offline fallback catalog — used when the API is unreachable or no token is available.

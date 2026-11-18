@@ -55,12 +55,12 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
 import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
   replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
 
@@ -705,34 +705,11 @@ export class ScalewayProvider extends BaseProvider {
     };
   }
 
-  /**
-   * Server types available in a zone — live per-zone data when fetched
-   * (the zone axis is real on Scaleway), fallback catalog otherwise (all
-   * three fallback types are live-verified present in every REGIONS zone).
-   * @param {string} region - zone (fr-par-1 …)
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = ScalewayProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in ScalewayProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...ScalewayProvider.SERVER_TYPES[name],
-          // fetchServerTypes filtered on arch === 'x86_64'.
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(ScalewayProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): live per-zone data when fetched (the zone axis is real on
+  // Scaleway), the fallback catalog otherwise (all three fallback types are
+  // live-verified present in every REGIONS zone), with `architecture: 'x86'`
+  // on every entry.
 
   /**
    * The static HA standby pair — cross-country pairs (fr-par ↔ nl-ams, same
@@ -750,38 +727,10 @@ export class ScalewayProvider extends BaseProvider {
       'nl-ams-1': 'fr-par-1',
       'nl-ams-2': 'fr-par-2',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = ScalewayProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(ScalewayProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && ScalewayProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(ScalewayProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      (primaryRegion === 'fr-par-1' ? 'nl-ams-1' : 'fr-par-1')
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-    return primaryRegion === 'fr-par-1' ? 'nl-ams-1' : 'fr-par-1';
-  }
-
-  /**
-   * Equivalent type in a target zone, using the live per-zone axis when
-   * available (same walk shape as DO's/Vultr's).
-   * @param {string} serverType
-   * @param {string} targetRegion - zone
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = ScalewayProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(ScalewayProvider, serverType, targetRegion, role);
-    }
-
-    return serverType;
   }
 
   /**
