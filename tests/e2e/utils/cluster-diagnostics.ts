@@ -45,11 +45,11 @@ export const CLUSTER_DIAG_LOG_TAIL = 50;
  * bundle runs (minutes after the push failed) the error window has rotated
  * out. Fetch deep, drop the probe chatter, keep a generous tail of substance.
  */
-export const CLUSTER_DIAG_REGISTRY_FETCH_TAIL = 4000;
-export const CLUSTER_DIAG_REGISTRY_KEEP_TAIL = 400;
+const CLUSTER_DIAG_REGISTRY_FETCH_TAIL = 4000;
+const CLUSTER_DIAG_REGISTRY_KEEP_TAIL = 400;
 
 /** Lines kept per `describe pod`. */
-export const CLUSTER_DIAG_DESCRIBE_TAIL = 40;
+const CLUSTER_DIAG_DESCRIBE_TAIL = 40;
 
 /** Cluster-wide event lines kept. */
 export const CLUSTER_DIAG_EVENT_TAIL = 60;

@@ -1,0 +1,10 @@
+# Fail on warnings and errors; info-level style notes are not a gate.
+failure-threshold: warning
+ignored:
+  # Unpinned apk packages are deliberate: a security fix in the distribution
+  # must reach a rebuilt image without a release of ours. The base image is
+  # pinned by digest instead.
+  - DL3018
+  # docker/postgres-walg copies the whole filesystem of its own earlier stage
+  # into scratch to flatten the layers. That is the point of the stage.
+  - DL3067

@@ -23,7 +23,7 @@ import { promises as dns, Resolver } from 'node:dns';
 import { connect } from 'node:net';
 import { getProviderClass } from '../../../src/lib/providers/index.js';
 
-export const PUBLIC_RESOLVER = '1.1.1.1';
+const PUBLIC_RESOLVER = '1.1.1.1';
 
 export interface DnsGateDeps {
   /** A records through the system resolver; [] when it has no answer. */

@@ -34,7 +34,7 @@ export type ObservabilityStepPlan =
   | { kind: 'run' }
   | { kind: 'skip'; reason: string };
 
-export const PILOT_LIGHT_OBSERVABILITY_SKIP_REASON =
+const PILOT_LIGHT_OBSERVABILITY_SKIP_REASON =
   'k8s-ha pilot-light design: the standby never installs observability, so the ' +
   'cluster failover promoted has no Grafana or Prometheus yet. These checks run ' +
   'after reconverge-deploy, the redeploy that makes it a full primary.';

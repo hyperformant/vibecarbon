@@ -126,9 +126,9 @@ export function walSegmentKeyPrefix(
 export const FORBIDDEN_ROLE_PREFIXES = ['primary/', 'standby/'] as const;
 
 /** How long to wait for the archiver to push the closed segment to S3. */
-export const WAL_EVIDENCE_BUDGET_MS = 120_000;
+const WAL_EVIDENCE_BUDGET_MS = 120_000;
 /** Poll interval while waiting. Also absorbs Hetzner's read-after-write lag. */
-export const WAL_EVIDENCE_INTERVAL_MS = 5_000;
+const WAL_EVIDENCE_INTERVAL_MS = 5_000;
 
 export interface BackupS3Target {
   bucket: string;
@@ -254,7 +254,7 @@ export function buildWalSwitchProbe(): string {
   ].join('\n');
 }
 
-export type WalSwitchStatus =
+type WalSwitchStatus =
   | 'switched'
   | 'skip:no-backup-target'
   | 'fail:standby-role'

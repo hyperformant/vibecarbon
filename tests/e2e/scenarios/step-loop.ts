@@ -16,7 +16,7 @@ import type { StepName, StepResult } from './types.js';
 export const DEPLOY_BUDGET_FAILURE_PREFIX = 'deploy: deploy_budget:';
 
 /** A failed step whose only failure is the cold-deploy time/size budget. */
-export function isDeployBudgetOnlyFailure(result: StepResult): boolean {
+function isDeployBudgetOnlyFailure(result: StepResult): boolean {
   return (
     result.name === 'verify-deploy' &&
     (result.status === 'fail' || result.status === 'error') &&

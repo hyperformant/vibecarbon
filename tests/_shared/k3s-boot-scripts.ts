@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { loadCloudInit } from '../../src/lib/iac/cloud-init.js';
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 
-export const K3S_DIR = join(__dirname, '../../carbon/cloud-init/k3s');
+const K3S_DIR = join(__dirname, '../../carbon/cloud-init/k3s');
 
 export const ROLES = ['master', 'worker', 'db'] as const;
 export type Role = (typeof ROLES)[number];
@@ -49,7 +49,7 @@ export function loadBootScript(file: string, role: Role): string | null {
 }
 
 /** The providers with a k8s tier, by id. */
-export const k8sProviderIds = (): string[] =>
+const k8sProviderIds = (): string[] =>
   Object.entries(PROVIDERS)
     .filter(([, P]) => P.SUPPORTED_TIERS.includes('k8s'))
     .map(([id]) => id);

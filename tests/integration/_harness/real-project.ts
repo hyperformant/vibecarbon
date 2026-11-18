@@ -25,7 +25,7 @@ import { createTempDir } from '../../_shared/temp-dir.js';
 const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 
-export type DeployMode = 'compose' | 'compose-ha' | 'k8s' | 'k8s-ha';
+type DeployMode = 'compose' | 'compose-ha' | 'k8s' | 'k8s-ha';
 
 export interface RealProjectOptions {
   /**

@@ -24,8 +24,8 @@ import { runCli as defaultRunCli, runUpdate as defaultRunUpdate } from '../utils
 import { adminSignIn, apiHeaders, type CookieJar } from './app-functional.js';
 import { dnsSafeFetch } from './health.js';
 
-export const RESTART_DUE_WINDOW_MS = 90_000;
-export const RESTART_CLEARED_WINDOW_MS = 120_000;
+const RESTART_DUE_WINDOW_MS = 90_000;
+const RESTART_CLEARED_WINDOW_MS = 120_000;
 const POLL_MS = 10_000;
 /** update -json's lists that make it exit 1 when not empty. */
 const UNFINISHED = [

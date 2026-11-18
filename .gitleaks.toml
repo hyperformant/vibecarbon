@@ -1,0 +1,17 @@
+# The default rules, with two allowances for values that are public by nature.
+[extend]
+useDefault = true
+
+# Tests and written plans are full of made-up keys, and the generic rule
+# matches any long string next to the word "key". Provider-specific rules
+# (AWS, GitHub, Stripe live keys, private keys and the rest) still apply there.
+[[allowlists]]
+description = "Fixtures and prose trip the generic rule"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)tests/''', '''^docs/''']
+
+# Stripe test-mode keys are fixtures and documentation samples.
+[[allowlists]]
+description = "Stripe test-mode keys"
+targetRules = ["stripe-access-token"]
+regexes = ['''sk_test_[0-9a-zA-Z]+''']

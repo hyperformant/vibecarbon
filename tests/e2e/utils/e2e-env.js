@@ -321,7 +321,7 @@ export function pinPublicDns() {
  *
  * @param {NodeJS.ProcessEnv} [env]
  */
-export function disableSshAskpass(env = process.env) {
+function disableSshAskpass(env = process.env) {
   env.SSH_ASKPASS_REQUIRE = 'never';
   env.SSH_ASKPASS = '/bin/false';
   delete env.DISPLAY;

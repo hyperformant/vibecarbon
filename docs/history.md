@@ -1202,6 +1202,26 @@ on all five providers, through each real store class),
 `tests/unit/e2e/sweep-*.test.ts`, `tests/unit/iac/remove-stack-state.test.ts`
 and `tests/unit/e2e/bucket-gone-census.test.ts`.
 
+#### 2026-11-18: Unused code, duplication, shell, workflow, Dockerfile and secret checks gate every PR
+
+The Lint job now also runs `pnpm unused` (knip), `pnpm dupes` (jscpd, budget in
+`.jscpd.json`) and `pnpm lint:infra`. The last one is `scripts/lint-infra.sh`:
+shellcheck over every tracked `.sh`, actionlint over the workflows, hadolint
+over the Dockerfiles, and gitleaks over the commits a branch adds to `main`.
+Each linter runs from the image pinned in `.github/lint-tools/Dockerfile`, so
+a laptop needs only Docker and Dependabot proposes the bumps.
+
+**Why:** the first sizing run found the checks mostly quiet, which is the cheap
+moment to turn them into gates. Warnings and errors fail; style notes do not.
+The cloud-init files are linted as the templates they are (placeholders and
+spliced snippets are not shell errors). Unpinned `apk` packages stay allowed,
+because a distribution's security fix must reach a rebuilt image without a
+release of ours. The secret scan lets the generic rule pass in tests and docs,
+where made-up keys are everywhere; provider-specific rules apply everywhere.
+The last 54 exports nothing imported were removed so knip starts from zero.
+The full-history secret scan, semgrep and mutation testing run from the
+devagents repo, not here.
+
 #### 2026-11-18: Copies shared across the CLI, the template and the e2e harness
 
 One pass removed code that was written more than once: per-provider methods

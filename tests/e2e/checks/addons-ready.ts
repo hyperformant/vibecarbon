@@ -29,7 +29,7 @@ import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 import { defaultRun, fail, missingHandle, type RemoteRun } from './ha-integrity.js';
 
 /** The one bound the harness gives the add-ons after the deploy returns. */
-export const ADDONS_READY_BUDGET_MS = 900_000;
+const ADDONS_READY_BUDGET_MS = 900_000;
 const POLL_MS = 10_000;
 const LOG_TAIL_LINES = 60;
 

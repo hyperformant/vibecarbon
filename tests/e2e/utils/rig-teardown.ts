@@ -35,7 +35,7 @@ const defaultDeps: RigTeardownDeps = {
 };
 
 /** The env var holding a provider's compute token, from the provider registry. */
-export function computeTokenEnvFor(provider: string): string | undefined {
+function computeTokenEnvFor(provider: string): string | undefined {
   const providers: Record<string, { computeTokenEnv?: string }> = testConfig.e2e.providers;
   return providers[provider]?.computeTokenEnv;
 }

@@ -1,7 +1,7 @@
 import { scratchNamePrefix } from './namespace.js';
 import { describeIncomplete, type PageDialect, walkProviderPages } from './provider-pages.js';
 
-export type PreflightStatus = 'ok' | 'slow' | 'failed';
+type PreflightStatus = 'ok' | 'slow' | 'failed';
 
 export interface PreflightCheck {
   service: string;

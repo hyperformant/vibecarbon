@@ -164,7 +164,7 @@ function isUnverifiedEmail(status: number, body: string, smtpConfigured: boolean
  * strip-session-token.ts). Null when the body is anything else. A bare 2xx is
  * not proof: anything that answers 200 at the path would read as a sign-up.
  */
-export function signupBodyError(body: string, email: string): string | null {
+function signupBodyError(body: string, email: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -678,7 +678,7 @@ export const CRON_JOBS = [
 ] as const;
 
 /** Libraries the db image's postgresql.conf preloads (docker/postgres-walg/postgresql.conf). */
-export const PRELOADED_LIBRARIES = ['pg_cron', 'pg_stat_statements'] as const;
+const PRELOADED_LIBRARIES = ['pg_cron', 'pg_stat_statements'] as const;
 
 /** Every deploy mode starts postgres with `-c config_file=` this path. */
 export const DB_CONFIG_FILE = '/etc/postgresql/postgresql.conf';

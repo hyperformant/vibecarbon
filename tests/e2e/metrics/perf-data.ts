@@ -33,7 +33,7 @@ function isKnownProvider(provider: string): provider is ProviderId {
   return Object.hasOwn(testConfig.e2e.providers, provider);
 }
 
-export interface PerfRunProvenance {
+interface PerfRunProvenance {
   /** Short (7-char) run id, traceable to a specific CI run. */
   id: string;
   /** Run start date, YYYY-MM-DD (UTC). */

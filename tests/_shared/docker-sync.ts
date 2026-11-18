@@ -17,13 +17,13 @@ export interface RunOptions {
   maxBuffer?: number;
 }
 
-export interface RunResult {
+interface RunResult {
   status: number | null;
   stdout: string;
   stderr: string;
 }
 
-export interface BinaryRunResult {
+interface BinaryRunResult {
   status: number | null;
   stdout: Buffer;
   stderr: string;
