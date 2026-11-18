@@ -218,6 +218,7 @@ Rules:
 - **Gate authenticated queries** with `enabled: !!user` to prevent 401s for logged-out users
 - **Call the API through `apiJson` / `apiFetch`** from `@/lib/api.ts`. The session is an HttpOnly cookie the browser sends same-origin; there is no token in page JS, so never add an `Authorization` header. When a route answers 403 `mfa_required`, `apiFetch` asks the user for a code (or sends them to enroll) and retries once; `reauth_required` sends them to sign in again
 - **Place reusable hooks** in `src/client/hooks/api/` — page-specific queries can live in the page file
+- **One query key, one fetcher.** When two components read the same endpoint, both call the same hook from `src/client/hooks/api/` (for example `useSubscription`, `useServicesStatus`, `useAdminStats`), which exports its key, fetcher and response type. Two `useQuery` calls with different keys fetch and cache the same data twice; the same key with two fetchers leaves the cache's failure behaviour to whichever component fetched first
 - **Invalidate related queries** after mutations: `queryClient.invalidateQueries({ queryKey: ['items'] })`
 - **Set `staleTime`** to control cache freshness (default is 5min via QueryClient config)
 

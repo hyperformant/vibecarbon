@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/chart';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAdminStats } from '@/hooks/api/useAdminStats';
-import { apiFetch } from '@/lib/api';
+import { apiJson } from '@/lib/api';
 
 interface PerformanceData {
   server: {
@@ -61,11 +61,8 @@ const signupsConfig = {
 export function PerformanceMetrics() {
   const { data: perfData, isLoading: perfLoading } = useQuery<PerformanceData>({
     queryKey: ['admin', 'performance'],
-    queryFn: async () => {
-      const res = await apiFetch('/api/v1/admin/performance');
-      if (!res.ok) throw new Error('Failed to fetch performance data');
-      return res.json();
-    },
+    queryFn: () =>
+      apiJson<PerformanceData>('/api/v1/admin/performance', {}, 'Failed to fetch performance data'),
     refetchInterval: 30_000,
   });
 
