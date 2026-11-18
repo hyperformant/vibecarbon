@@ -8,6 +8,7 @@ import {
 } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+import { KpiCard } from '@/components/admin/KpiCard';
 import { PageHeader } from '@/components/PageHeader';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -107,51 +108,6 @@ const CATEGORY_ORDER: CrawlerCategory[] = ['ai-search', 'ai-training', 'search']
 
 function CategoryBadge({ category }: { category: CrawlerCategory }) {
   return <Badge variant={CATEGORY_BADGE[category] ?? 'outline'}>{CATEGORY_LABELS[category]}</Badge>;
-}
-
-function KpiCard({
-  label,
-  value,
-  hint,
-  icon: Icon,
-  loading,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-  icon: React.ComponentType<{ className?: string }>;
-  loading: boolean;
-}) {
-  return (
-    <Card className="glass relative overflow-hidden">
-      <CardHeader className="relative z-10 pb-1">
-        <div className="flex items-center justify-between">
-          <CardDescription className="text-sm font-medium tracking-wide uppercase">
-            {label}
-          </CardDescription>
-          <div className="text-muted-foreground flex size-8 items-center justify-center rounded-md bg-muted">
-            <Icon className="size-4" />
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="relative z-10 pb-3">
-        {loading ? (
-          <Skeleton className="h-9 w-24 rounded-md" />
-        ) : (
-          <p className="text-card-foreground font-sans text-5xl font-bold tracking-tight tabular-nums">
-            {value}
-          </p>
-        )}
-        <div className="mt-1.5">
-          {loading ? (
-            <Skeleton className="h-5 w-32 rounded-md" />
-          ) : (
-            <span className="text-muted-foreground text-xs font-medium">{hint}</span>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
 }
 
 /** Short day label for the x-axis: `2026-08-24` → `Aug 24`. */
