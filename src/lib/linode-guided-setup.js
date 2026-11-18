@@ -14,18 +14,13 @@
  */
 
 import * as p from '@clack/prompts';
-import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c, link } from './colors.js';
 import {
   checkApiToken,
   createCredentialSaver,
-  finishS3Credentials,
-  promptForVerifiedToken,
-  promptS3KeyPair,
-  verifiedEnvToken,
+  resolveApiToken,
+  resolveS3KeyPair,
 } from './guided-setup-shared.js';
-import { readOperatorVar } from './operator-env.js';
-import { describeCredentialSource } from './project.js';
 
 const API_BASE = 'https://api.linode.com/v4';
 
@@ -113,100 +108,41 @@ const saveIfWanted = createCredentialSaver({
 });
 
 /**
- * Get API token with improved visual guidance.
- * Lookup order: env var (shell, or the project's .env.local via
- * bootstrapOperatorEnv) → interactive prompt
+ * Get the API token: the env var, else the interactive prompt (see
+ * resolveApiToken in guided-setup-shared.js).
  *
  * @param {string} [projectName] - Project name for display in guide
- * @param {{ save?: boolean, force?: boolean }} [options] - Options
- *   save: offer to save credentials (default true)
- *   force: skip the env lookup and go straight to interactive prompt (default false)
- * @returns {Promise<string|null>}
+ * @param {{ save?: boolean, force?: boolean }} [options] - see resolveApiToken
+ * @returns {Promise<string>}
  */
 export async function getApiToken(projectName, options = {}) {
-  const { save = true, force = false } = options;
-
-  if (!force) {
-    const envToken = await verifiedEnvToken(API_TOKEN);
-    if (envToken) return envToken;
-  }
-
-  // Off a TTY this prompt can never be answered — clack's promise would
-  // neither resolve nor cancel, draining the event loop into a silent
-  // exit 0 (the 2026-08-11 v1 RCA). Fail loudly with the env var instead.
-  assertInteractiveStdin({ what: 'the Linode API token', envVar: 'LINODE_API_TOKEN' });
-  // Interactive prompt (with retry on invalid token)
-  displayApiTokenGuide(projectName);
-  const token = await promptForVerifiedToken(API_TOKEN);
-
-  // In-process coherence (A2): a freshly-entered token must be visible to
-  // any later env-first resolution in this same process, regardless of
-  // whether the operator chooses to persist it to .env.local below.
-  process.env.LINODE_API_TOKEN = token;
-
-  if (save) {
-    await saveIfWanted({ LINODE_API_TOKEN: token });
-  }
-
-  return token;
+  return resolveApiToken(
+    API_TOKEN,
+    { displayTokenGuide: displayApiTokenGuide, saveIfWanted },
+    projectName,
+    options,
+  );
 }
 
 /**
- * Get Object Storage (S3-compatible) credentials with improved visual
- * guidance. Lookup order: env vars (shell, or the project's .env.local via
- * bootstrapOperatorEnv) → interactive prompt
+ * Get Object Storage (S3-compatible) credentials: the env vars, else the
+ * interactive prompt (see resolveS3KeyPair in guided-setup-shared.js).
  *
  * @param {string} [projectName] - Project name for display in guide
- * @param {{ save?: boolean, force?: boolean, skipPrompts?: boolean }} [options] - Options
- *   save: offer to save credentials (default true)
- *   force: skip env lookup and go straight to interactive prompt (default false)
- *   skipPrompts: never fall through to the interactive prompt — return null
- *     instead when env vars are missing (default false). Same non-TTY
- *     contract as digitalocean-guided-setup.js's getS3Credentials.
+ * @param {{ save?: boolean, force?: boolean, skipPrompts?: boolean, deferSave?: boolean }} [options] -
+ *   see resolveS3KeyPair
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
-
-  if (!force) {
-    const envAccessKey = readOperatorVar('LINODE_ACCESS_KEY').value;
-    const envSecretKey = readOperatorVar('LINODE_SECRET_KEY').value;
-
-    if (envAccessKey && envSecretKey) {
-      const from = describeCredentialSource(['LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY']);
-      p.log.info(`✓ Using Object Storage credentials from ${from.label}`);
-      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
-    }
-  }
-
-  if (skipPrompts) return null;
-
-  // Off a TTY this prompt can never be answered — clack's promise would
-  // neither resolve nor cancel, draining the event loop into a silent
-  // exit 0 (the 2026-08-11 v1 RCA). Fail loudly with the env var instead.
-  assertInteractiveStdin({
-    what: 'the Linode object-storage keys',
-    envVar: 'LINODE_ACCESS_KEY/LINODE_SECRET_KEY',
-  });
-  // Interactive prompt
-  displayS3CredentialsGuide(projectName);
-  const { accessKey, secretKey } = await promptS3KeyPair({
-    provider: 'Linode',
-    accessEnvKey: 'LINODE_ACCESS_KEY',
-    secretEnvKey: 'LINODE_SECRET_KEY',
-    label: 'Object Storage',
-  });
-
-  p.log.success('Object Storage credentials received!');
-
-  // In-process coherence (A2) — see getApiToken's identical comment above.
-  process.env.LINODE_ACCESS_KEY = accessKey;
-  process.env.LINODE_SECRET_KEY = secretKey;
-
-  return finishS3Credentials(
-    { accessKey, secretKey, source: 'what you pasted' },
-    { LINODE_ACCESS_KEY: accessKey, LINODE_SECRET_KEY: secretKey },
-    { save, deferSave },
-    saveIfWanted,
+  return resolveS3KeyPair(
+    {
+      provider: 'Linode',
+      accessEnvKey: 'LINODE_ACCESS_KEY',
+      secretEnvKey: 'LINODE_SECRET_KEY',
+      label: 'Object Storage',
+    },
+    { displayKeysGuide: displayS3CredentialsGuide, saveIfWanted },
+    projectName,
+    options,
   );
 }

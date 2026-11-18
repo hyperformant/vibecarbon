@@ -79,13 +79,16 @@
  * ownership filter below exists to prevent.
  */
 
-import { spinner } from './cli/progress.js';
 import {
+  aTargetsAt,
   matching,
+  namesPointingAt,
   pairDeleteResult,
-  relativeToFqdn,
+  recordsOwnedAt,
+  setupApexAndWildcard,
+  setupHaRecords,
   toRelativeName,
-  zoneTooLongMessage,
+  wholeZone,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -243,11 +246,7 @@ async function getRecords(apiToken, zone, { whole = false } = {}) {
     `/dns-zones/${zone}/records`,
     'records',
     'Scaleway DNS API error',
-    whole
-      ? {
-          pastGuard: zoneTooLongMessage(MAX_PAGES * PAGE_SIZE),
-        }
-      : {},
+    wholeZone(whole, MAX_PAGES * PAGE_SIZE),
   );
 }
 
@@ -361,8 +360,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
  */
 export async function readARecord(apiToken, zoneId, name) {
   const records = await getRecords(apiToken, zoneId);
-  const fqdn = String(name).replace(/\.$/, '');
-  return matching(records, fqdnToRelative(name, zoneId), fqdn, 'A').map((r) => r.data);
+  return aTargetsAt(records, fqdnToRelative(name, zoneId), name);
 }
 
 /**
@@ -382,17 +380,10 @@ export async function findARecordsAt(apiToken, zoneId, address) {
   // The whole zone or a throw: a partial read that missed the record would
   // let the address go.
   const records = await getRecords(apiToken, zoneId, { whole: true });
-  const names = records
-    .filter((r) => r.type === 'A' && r.data === address)
-    .map((r) => relativeToFqdn(r.name, zoneId));
-  return [...new Set(names)].sort();
+  return namesPointingAt(records, address, zoneId);
 }
 
-/**
- * A record delete the DNS API refused: the record still exists. A 404 is a
- * record already gone, never one of these. destroy reports each as a leak.
- * @typedef {{name: string, target: string, reason: string}} DnsDeleteFailure
- */
+/** @typedef {import('./dns-backend-helpers.js').DnsDeleteFailure} DnsDeleteFailure */
 
 /**
  * Delete a DNS record, but only if its target IP belongs to this caller.
@@ -423,24 +414,13 @@ export async function findARecordsAt(apiToken, zoneId, address) {
  * @returns {Promise<{deleted: number, skipped: number, total: number, skippedTargets: string[], failed: DnsDeleteFailure[]}>}
  */
 export async function deleteDNSRecord(apiToken, zoneId, name, ownedIps, type = 'A') {
-  const relativeName = fqdnToRelative(name, zoneId);
   const all = await getRecords(apiToken, zoneId, { whole: true });
-  const fqdn = String(name).replace(/\.$/, '');
-  const records = matching(all, relativeName, fqdn, type);
-  const total = records.length;
-
-  if (total === 0) {
-    return { deleted: 0, skipped: 0, total: 0, skippedTargets: [], failed: [] };
-  }
-
-  const owned = new Set(ownedIps || []);
-  const doomed = [];
-  const skippedTargets = [];
-
-  for (const record of records) {
-    if (owned.has(record.data)) doomed.push(record);
-    else skippedTargets.push(record.data);
-  }
+  const {
+    fqdn,
+    total,
+    owned: doomed,
+    skippedTargets,
+  } = recordsOwnedAt(all, { relativeName: fqdnToRelative(name, zoneId), name, type, ownedIps });
 
   let deleted = 0;
   const failed = [];
@@ -670,37 +650,14 @@ export async function registerExternalDomain(apiToken, domain, projectId) {
  * @returns {Promise<object>} Setup result
  */
 export async function setupSimple(apiToken, zoneId, domain, serverIp, options = {}) {
-  const { onProgress } = options;
-  // When caller provides onProgress, skip internal spinners (caller manages UI)
-  const s = onProgress ? null : spinner();
-
-  try {
-    s?.start(`Creating DNS records for ${domain}`);
-    onProgress?.(`Creating DNS records for ${domain}`);
-
-    const record = await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: domain,
-      value: serverIp,
-      ttl: DEFAULT_TTL,
-    });
-
-    // Wildcard A record for subdomains (registry, api, etc.)
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: `*.${domain}`,
-      value: serverIp,
-      ttl: DEFAULT_TTL,
-    });
-
-    s?.stop('DNS records created (root + wildcard)');
-    onProgress?.('DNS records created (root + wildcard)');
-
-    return { success: true, mode: 'simple', record };
-  } catch (error) {
-    s?.stop(`Scaleway DNS setup failed: ${error.message}`);
-    return { success: false, error: error.message };
-  }
+  return setupApexAndWildcard({
+    label: 'Scaleway',
+    domain,
+    ip: serverIp,
+    ttl: DEFAULT_TTL,
+    write: (config) => createDNSRecord(apiToken, zoneId, config),
+    onProgress: options.onProgress,
+  });
 }
 
 /**
@@ -716,40 +673,17 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
  * @param {string} zoneId - Zone identity — the zone NAME on Scaleway
  * @param {string} domain - Domain name
  * @param {Array} servers - Array of { name, ip, region } objects (primary first)
+ * @param {{onProgress?: (msg: string) => void}} [options] - onProgress: the
+ *   caller owns the line, so no spinner of our own starts
  * @returns {Promise<object>} Setup result
  */
 export async function setupHA(apiToken, zoneId, domain, servers, options = {}) {
-  // onProgress: the caller owns the line (or another step does, for a
-  // background write); no spinner of our own then. Same contract as setupSimple.
-  const { onProgress } = options;
-  const s = onProgress ? null : spinner();
-
-  try {
-    s?.start(`Creating DNS record for ${domain}`);
-    onProgress?.(`Creating DNS record for ${domain}`);
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: domain,
-      value: servers[0].ip,
-      ttl: HA_TTL,
-    });
-    s?.stop('Primary DNS record created');
-
-    await createDNSRecord(apiToken, zoneId, {
-      type: 'A',
-      name: `*.${domain}`,
-      value: servers[0].ip,
-      ttl: HA_TTL,
-    });
-
-    return {
-      success: true,
-      mode: 'dns',
-      primaryIp: servers[0].ip,
-      standbyIp: servers[1]?.ip,
-    };
-  } catch (error) {
-    s?.stop(`Scaleway DNS setup failed: ${error.message}`);
-    return { success: false, error: error.message };
-  }
+  return setupHaRecords({
+    label: 'Scaleway',
+    domain,
+    servers,
+    ttl: HA_TTL,
+    write: (config) => createDNSRecord(apiToken, zoneId, config),
+    onProgress: options.onProgress,
+  });
 }

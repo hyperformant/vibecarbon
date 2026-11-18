@@ -106,16 +106,31 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
     );
   });
 
+  // A backend's setup function either guards its own spinner or hands the
+  // whole flow to the shared one in dns-backend-helpers.js, whose guard is
+  // then the one that runs.
+  const helpers = readFileSync(
+    fileURLToPath(new URL('../../../src/lib/dns-backend-helpers.js', import.meta.url)),
+    'utf8',
+  );
+  const bodyOf = (source: string, fn: string) => {
+    const start = source.indexOf(`export async function ${fn}(`);
+    if (start === -1) return '';
+    const rest = source.slice(start);
+    const end = rest.indexOf('\nexport ');
+    return end === -1 ? rest : rest.slice(0, end);
+  };
+  const runningBody = (source: string, fn: string, shared: string) => {
+    const body = bodyOf(source, fn);
+    return new RegExp(`return ${shared}\\(`).test(body) ? bodyOf(helpers, shared) : body;
+  };
+
   it('setupHA honors onProgress by skipping its internal spinner (EVERY registered backend)', async () => {
     const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
     for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
       const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
       const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-      const setupHA = provider.slice(provider.indexOf('export async function setupHA('));
-      const body = setupHA.slice(
-        0,
-        setupHA.indexOf('\nexport ') === -1 ? undefined : setupHA.indexOf('\nexport '),
-      );
+      const body = runningBody(provider, 'setupHA', 'setupHaRecords');
       expect(body, id).toMatch(/const s = onProgress \? null : spinner\(\)/);
       expect(body, id).not.toMatch(/\bs\.(start|stop|message)\(/);
     }
@@ -129,7 +144,25 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
     for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
       const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
       const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-      expect(provider, id).toMatch(/const s = (?:options\.)?onProgress \? null : spinner\(\)/);
+      const body = runningBody(provider, 'setupSimple', 'setupApexAndWildcard');
+      expect(body, id).toMatch(/const s = (?:options\.)?onProgress \? null : spinner\(\)/);
+      expect(body, id).not.toMatch(/\bs\.(start|stop|message)\(/);
     }
+  });
+
+  it('the shared setup flows are the ones the backends hand off to (the walk reads real code)', async () => {
+    const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
+    const delegating = Object.entries(DNS_PROVIDERS).filter(([, row]) => {
+      const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
+      const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      return /return setupApexAndWildcard\(/.test(bodyOf(provider, 'setupSimple'));
+    });
+    expect(delegating.map(([id]) => id).sort()).toEqual([
+      'digitalocean',
+      'hetzner',
+      'linode',
+      'scaleway',
+      'vultr',
+    ]);
   });
 });

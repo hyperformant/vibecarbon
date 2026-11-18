@@ -18,6 +18,8 @@
  *      error carries the pointer that says so — and the external-domain
  *      primitives that close the gap live in this module.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({
@@ -612,6 +614,16 @@ describe('scaleway-dns setupSimple', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/domain not found/);
+  });
+
+  // Structural pin: setupSimple runs the shared flow, whose concurrent-spinner
+  // guard tests/unit/deploy/preplan-spinner-coverage.test.ts pins.
+  it('hands setupSimple to the shared setupApexAndWildcard flow', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/lib/scaleway-dns.js', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toMatch(/return setupApexAndWildcard\(/);
   });
 });
 

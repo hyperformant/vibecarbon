@@ -23,9 +23,15 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
-import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
-import { BaseProvider, replaceWireguardPeerRules } from './base.js';
+import {
+  BaseProvider,
+  normalizePublicKey,
+  replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
+  waitUntilServerUp,
+} from './base.js';
+import { deleteServerAt } from './delete-server.js';
+import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -65,29 +71,9 @@ export function encodeLabels(labels = {}) {
   return Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
 }
 
-/**
- * See DigitalOcean's KNOWN_MANGLED_LABEL_KEYS — same single known collision,
- * same unambiguity argument within this codebase's fixed tag-key set.
- * @type {Object<string,string>}
- */
-const KNOWN_MANGLED_LABEL_KEYS = { 'cluster-autoscaler-node': 'cluster-autoscaler/node' };
-
-/**
- * Decode a Vultr tag array back into a flat label map — inverse of
- * encodeLabels for this codebase's known key set.
- * @param {string[]|null} [tags]
- * @returns {Object<string,string>}
- */
-export function decodeLabels(tags = []) {
-  const out = {};
-  for (const tag of tags || []) {
-    const sep = tag.indexOf(':');
-    if (sep === -1) continue;
-    const wireKey = tag.slice(0, sep);
-    out[KNOWN_MANGLED_LABEL_KEYS[wireKey] ?? wireKey] = tag.slice(sep + 1);
-  }
-  return out;
-}
+// decodeLabels, the inverse of encodeLabels, is the same for the four
+// tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
+export { decodeLabels };
 
 /**
  * Split a CIDR into Vultr's `{subnet, subnet_size, ip_type}` rule fields.
@@ -420,33 +406,11 @@ export class VultrProvider extends BaseProvider {
     return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
   }
 
-  /**
-   * Server types available in a region — live per-region data when fetched
-   * (plan.locations is a real axis on Vultr), fallback catalog otherwise.
-   * `architecture: 'x86'` constant: Vultr's cloud-compute lines are x86.
-   * @param {string} region
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = VultrProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in VultrProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...VultrProvider.SERVER_TYPES[name],
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(VultrProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): live per-region data when fetched (plan.locations is a real
+  // axis on Vultr), the fallback catalog otherwise, with
+  // `architecture: 'x86'` constant because Vultr's cloud-compute lines are
+  // x86.
 
   /**
    * The static HA standby pair — conventional pairs, then same-continent,
@@ -466,38 +430,10 @@ export class VultrProvider extends BaseProvider {
       sgp: 'syd',
       syd: 'sgp',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = VultrProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(VultrProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && VultrProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(VultrProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      (primaryRegion === 'ewr' ? 'ord' : 'ewr')
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-    return primaryRegion === 'ewr' ? 'ord' : 'ewr';
-  }
-
-  /**
-   * Equivalent plan in a target region, using the live per-region axis when
-   * available (same walk shape as DO's).
-   * @param {string} serverType
-   * @param {string} targetRegion
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = VultrProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(VultrProvider, serverType, targetRegion, role);
-    }
-
-    return serverType;
   }
 
   /**
@@ -515,7 +451,8 @@ export class VultrProvider extends BaseProvider {
 
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors the sibling providers: CRUD via this.apiRequest,
-  // listings/teardown via fetchWithRetry (all through _walkCursor),
+  // listings/teardown via a bare fetchWithRetry (listings through
+  // _walkCursor, teardown through this.bareRequest),
   // getServerSummary a raw fetch with a hard 5s abort.
 
   /**
@@ -633,36 +570,13 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<void|boolean>}
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/instances/${serverId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
+    // Bare DELETE in both modes: Vultr's no-wait path never went through
+    // apiRequest.
+    return deleteServerAt(this, `/instances/${serverId}`, serverId, {
+      waitUntilGone,
+      bareDelete: true,
+      reason: (error) => error.error,
     });
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to delete server: ${error.error || 'Unknown error'}`);
-    }
-
-    if (!waitUntilGone) return;
-
-    if (response.status !== 404) {
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${VultrProvider.API_BASE}/instances/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 60_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
   }
 
   /**
@@ -691,7 +605,11 @@ export class VultrProvider extends BaseProvider {
     const response = await this.apiRequest(`/instances/${serverId}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to get server: ${error.error || 'Unknown error'}`);
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the instance (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${error.error || 'Unknown error'}`), {
+        status: response.status,
+      });
     }
     const { instance } = await response.json();
     return instance;
@@ -730,27 +648,15 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = VultrProvider.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
+    return waitUntilServerUp(
+      timeout,
+      async () => {
         const response = await this.apiRequest(`/instances/${serverId}`);
         const { instance } = await response.json();
-
-        if (instance.server_status === 'ok' && VultrProvider.getPublicIP(instance)) {
-          return instance;
-        }
-      } catch (error) {
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+        return instance;
+      },
+      (instance) => instance.server_status === 'ok' && VultrProvider.getPublicIP(instance),
+    );
   }
 
   /**
@@ -760,22 +666,10 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<{status: string, serverType: string|null}|null>}
    */
   async getServerSummary(serverId) {
-    try {
-      const response = await fetch(`${VultrProvider.API_BASE}/instances/${serverId}`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) return null;
-
-      const { instance } = await response.json();
-      return {
-        status: instance.status,
-        serverType: instance.plan || null,
-      };
-    } catch {
-      return null;
-    }
+    return this._serverSummaryAt(`/instances/${serverId}`, ({ instance }) => ({
+      status: instance.status,
+      serverType: instance.plan || null,
+    }));
   }
 
   /**
@@ -813,14 +707,10 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<string>} SSH key UUID
    */
   async createSSHKey(name, publicKey) {
-    const normalize = (key) => {
-      const [type, body] = (key || '').trim().split(/\s+/);
-      return `${type || ''} ${body || ''}`.trim();
-    };
-    const targetMaterial = normalize(publicKey);
+    const targetMaterial = normalizePublicKey(publicKey);
 
     const { items } = await this._walkCursor('/ssh-keys', 'ssh_keys');
-    const match = items.find((k) => normalize(k.ssh_key) === targetMaterial);
+    const match = items.find((k) => normalizePublicKey(k.ssh_key) === targetMaterial);
     if (match) return match.id;
 
     const response = await this.apiRequest('/ssh-keys', {
@@ -838,16 +728,6 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
-   * List ALL instances, optionally filtered by labels — client-side tag
-   * matching via the SAME encodeLabel encoding createServer tags with.
-   * @param {object} [labels]
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
-  }
-
-  /**
    * Instance listing preserving the walk's completeness signal — see
    * BaseProvider.listServersDetailed.
    * @param {object} [labels]
@@ -856,11 +736,7 @@ export class VultrProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const { items, complete, status } = await this._walkCursor('/instances', 'instances');
 
-    const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
-    const filtered =
-      wantedTags.length === 0
-        ? items
-        : items.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
+    const filtered = withAllTags(items, labels, encodeLabel);
 
     return status === undefined
       ? { items: filtered, complete }
@@ -957,10 +833,9 @@ export class VultrProvider extends BaseProvider {
     }
 
     for (const rule of existing.items) {
-      const res = await fetchWithRetry(
-        `${VultrProvider.API_BASE}/firewalls/${firewallId}/rules/${rule.id}`,
-        { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
+      const res = await this.bareRequest(`/firewalls/${firewallId}/rules/${rule.id}`, {
+        method: 'DELETE',
+      });
       if (!res.ok && res.status !== 404) {
         const body = await res.text().catch(() => '');
         throw new Error(`Vultr firewall rule delete failed (${res.status}): ${body}`);
@@ -1056,10 +931,7 @@ export class VultrProvider extends BaseProvider {
       const group = items.find((g) => g.description === name);
       if (!group) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${VultrProvider.API_BASE}/firewalls/${group.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/firewalls/${group.id}`, { method: 'DELETE' });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1077,11 +949,7 @@ export class VultrProvider extends BaseProvider {
     const match = items.find((k) => k.name === name);
     if (!match) return false;
 
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/ssh-keys/${match.id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/ssh-keys/${match.id}`);
   }
 
   /**
@@ -1108,11 +976,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or already gone (404)
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/blocks/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/blocks/${volumeId}`);
   }
 
   /**
@@ -1130,11 +994,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or already gone (404)
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/load-balancers/${lbId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/load-balancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors ───────────────────────────────────────

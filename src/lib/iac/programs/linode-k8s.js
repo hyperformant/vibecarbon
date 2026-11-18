@@ -39,12 +39,9 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../providers/linode.js';
-import {
-  SERVER_OWNER_LABELS,
-  serverResourceOptions,
-  workerResourceOptions,
-} from '../create-timeout.js';
+import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
+import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
 
 const VPC_CIDR = LinodeProvider.DEFAULT_VPC_CIDR;
 const MASTER_IP = '10.0.1.2';
@@ -127,25 +124,8 @@ function pulumiAddresses(cidrs) {
  * @returns {() => Promise<Record<string, unknown>>}
  */
 export function buildLinodeK8sProgram(config) {
-  const clusterName = `${config.projectName}-${config.environment}`;
-  // Ownership (SERVER_OWNER_LABELS) before the caller's labels, as every
-  // caller has always passed it: the same keys in the same order.
-  const labels = {
-    project: config.projectName,
-    environment: config.environment,
-    ...SERVER_OWNER_LABELS,
-    ...(config.labels ?? {}),
-  };
-  if (!config.allowedSshIps?.length) {
-    throw new Error(
-      'allowedSshIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
-  if (!config.allowedK8sApiIps?.length) {
-    throw new Error(
-      'allowedK8sApiIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
-    );
-  }
+  const { name: clusterName, labels } = stackIdentity(config);
+  requireOperatorCidrs(config, { k8sApi: true });
   const networkLabel = `${clusterName}-network`;
   const subnetLabel = `${clusterName}-subnet`;
   const sshKeyLabel = `${clusterName}-${config.location}-key`;
@@ -361,7 +341,7 @@ export function buildLinodeK8sProgram(config) {
       workerIps: workers.map((w) => w.ipAddress),
       floatingIp: reservedIp.address,
       networkId: network.id.apply((id) => String(id)),
-      sshKeyId: typeof sshKeyId === 'string' ? sshKeyId : sshKeyId.apply((id) => String(id)),
+      sshKeyId: sshKeyIdOutput(sshKeyId),
       k3sToken: pulumi.secret(k3sToken),
       clusterName,
       vpcCidr: VPC_CIDR,

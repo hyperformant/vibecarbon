@@ -13,7 +13,7 @@
  * tests then walk you through the rest.
  */
 
-import { cheapestStandbyRegion, regionRoleDefaults } from '../sizing.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 
 /**
  * Whether a DELETE's HTTP status is the provider refusing it (4xx). A 5xx,
@@ -94,6 +94,129 @@ export function sweepLabels(labels) {
   return entries;
 }
 
+/**
+ * The body of BaseProvider.getServerTypesForRegion, for a provider class
+ * with no ARM line: the region's live types smallest first, else the whole
+ * offline catalog, each marked x86.
+ * @param {typeof BaseProvider} Provider - the calling subclass
+ * @param {string} region
+ * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
+ */
+function x86TypesForRegion(Provider, region) {
+  const available = Provider._locationTypes?.[region];
+
+  if (available) {
+    return [...available]
+      .filter((name) => name in Provider.SERVER_TYPES)
+      .map((name) => ({
+        name,
+        ...Provider.SERVER_TYPES[name],
+        architecture: 'x86',
+      }))
+      .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
+  }
+
+  return Object.entries(Provider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
+    name,
+    ...info,
+    architecture: 'x86',
+  }));
+}
+
+/**
+ * The body of BaseProvider.resolveServerTypeForRegion: `serverType` where
+ * the live catalog stocks it in `targetRegion`, else the role's stand-in;
+ * offline, `serverType` unchanged.
+ * @param {typeof BaseProvider} Provider - the calling subclass
+ * @param {string} serverType
+ * @param {string} targetRegion
+ * @param {string} [role]
+ * @returns {string|null}
+ */
+function typeStockedIn(Provider, serverType, targetRegion, role) {
+  // A live catalog that does not list the location stocks nothing there:
+  // the stand-in below then answers null, as cheapestRoleSet does.
+  const live = Provider._locationTypes;
+  const available = live ? (live[targetRegion] ?? new Set()) : undefined;
+
+  if (available) {
+    if (available.has(serverType)) return serverType;
+    return standbyStandIn(Provider, serverType, targetRegion, role);
+  }
+
+  // Offline fallback: no architecture split to reconcile.
+  return serverType;
+}
+
+/**
+ * The walk every provider's conventionalStandbyRegion takes: the provider's
+ * conventional pair for `primaryRegion` if it names one, else the first
+ * other region on the same continent, in REGION_CONTINENT order. undefined
+ * when there is neither, for the provider's own last resort.
+ * @param {Record<string, string>} regionContinent - the provider's REGION_CONTINENT
+ * @param {string} primaryRegion
+ * @param {Record<string, string>} [pairs] - conventional pairs, both directions
+ * @returns {string|undefined}
+ */
+export function standbyPairOrNeighbour(regionContinent, primaryRegion, pairs = {}) {
+  if (pairs[primaryRegion]) return pairs[primaryRegion];
+  const continent = regionContinent[primaryRegion];
+  return Object.keys(regionContinent).find(
+    (r) => r !== primaryRegion && regionContinent[r] === continent,
+  );
+}
+
+/**
+ * The loop behind waitForServer on the providers that share it: read the
+ * server every 5 s until `isUp` says it is, for at most `timeout` ms. A read
+ * that throws (a network error, a body without the server) is retried, and
+ * rethrown as "Failed to check server status" only when it is the last
+ * chance before the deadline.
+ * @template T
+ * @param {number} timeout - ms
+ * @param {() => Promise<T>} read - one read of the server
+ * @param {(server: T) => boolean} isUp - is it ready to use?
+ * @returns {Promise<T>} the server, as `read` last returned it
+ */
+export async function waitUntilServerUp(timeout, read, isUp) {
+  const startTime = Date.now();
+  const pollInterval = 5000;
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const server = await read();
+      if (isUp(server)) {
+        return server;
+      }
+    } catch (error) {
+      // Network errors - continue retrying
+      if (Date.now() - startTime >= timeout - pollInterval) {
+        throw new Error(`Failed to check server status: ${error.message}`);
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+
+  throw new Error('Server creation timed out');
+}
+
+/**
+ * Normalize an OpenSSH public key to `${type} ${base64Body}` for MATERIAL
+ * comparison: the createSSHKey of DigitalOcean, Linode, Vultr and Scaleway
+ * finds an existing key by it. DigitalOcean dedupes SSH keys by fingerprint
+ * (the type+body bytes) account-wide, regardless of name or trailing comment
+ * (see its createSSHKey). Collapses whitespace runs and drops the optional
+ * trailing comment field, so two representations of the same key (different
+ * comment, different spacing) normalize identically.
+ * @param {string} [publicKey]
+ * @returns {string}
+ */
+export function normalizePublicKey(publicKey) {
+  const [type, body] = (publicKey || '').trim().split(/\s+/);
+  return `${type || ''} ${body || ''}`.trim();
+}
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")
@@ -118,6 +241,14 @@ export class BaseProvider {
    * @type {Object<string, {vcpu: number, ram: number, disk: number, price: string}>}
    */
   static SERVER_TYPES = {};
+
+  /**
+   * The offline catalog: the server types getServerTypesForRegion lists for
+   * every region before a live fetchServerTypes has filled `_locationTypes`.
+   * Specs only, no prices.
+   * @type {Object<string, {vcpu: number, ram: number, disk: number}>}
+   */
+  static FALLBACK_SERVER_TYPES = {};
 
   /**
    * Default server type
@@ -747,14 +878,16 @@ export class BaseProvider {
   }
 
   /**
-   * List servers matching labels/tags. Contract: returns ALL matching
-   * servers — implementations must walk the provider's pagination, not
-   * return a single page (B0-4).
+   * List servers matching labels/tags, as the bare array: the `items` of
+   * listServersDetailed, which each provider implements and which walks the
+   * provider's pagination (B0-4), so ALL matching servers come back. It
+   * soft-fails like listVolumes; LinodeProvider overrides it to reject an
+   * unfiltered listing whose VPC membership could not be read.
    * @param {object} labels - Labels to filter by
    * @returns {Promise<object[]>}
    */
-  async listServers(_labels = {}) {
-    throw new Error('listServers() must be implemented by subclass');
+  async listServers(labels = {}) {
+    return (await this.listServersDetailed(labels)).items;
   }
 
   /**
@@ -1113,10 +1246,11 @@ export class BaseProvider {
 
   // ============================================================================
   // ABSTRACT STATIC METHODS - CATALOG
-  // Must be implemented by subclasses. Polymorphic call sites resolve these
-  // through the registered provider class (see lib/providers/index.js), so a
-  // new provider only needs to override the statics below — no call-site
-  // changes required.
+  // Must be implemented by subclasses, except where a method below has a
+  // base answer that reads the calling subclass's data. Polymorphic call
+  // sites resolve these through the registered provider class (see
+  // lib/providers/index.js), so a new provider only needs to override the
+  // statics below — no call-site changes required.
   //
   // Cache convention: a provider that caches fetched catalog data (e.g.
   // per-region server-type availability) on a class field should name that
@@ -1226,6 +1360,14 @@ export class BaseProvider {
   static _prices = null;
 
   /**
+   * The live catalog's per-region availability, filled by fetchServerTypes:
+   * `{ [region]: Set<type> }`. null before a live fetch, when the offline
+   * catalog (FALLBACK_SERVER_TYPES) answers instead.
+   * @type {Record<string, Set<string>>|null}
+   */
+  static _locationTypes = null;
+
+  /**
    * Monthly price of `type` in `location` from the live capture (`_prices`).
    * @param {string} type
    * @param {string} location
@@ -1251,11 +1393,21 @@ export class BaseProvider {
    * `architecture` is treated as x86, so a provider whose catalog is all-x86
    * may omit it.
    *
+   * The base answer suits a provider that sells no ARM (DigitalOcean, Linode,
+   * Vultr, Scaleway): the region's types from the live catalog
+   * (`_locationTypes`, `SERVER_TYPES`) smallest first, else the whole offline
+   * catalog (FALLBACK_SERVER_TYPES), every entry `architecture: 'x86'`. A
+   * provider with an ARM line or a per-region offline rule overrides it
+   * (HetznerProvider).
+   *
    * @param {string} region - Region ID
    * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture?: string}>}
    */
-  static getServerTypesForRegion(_region) {
-    throw new Error('getServerTypesForRegion() must be implemented by subclass');
+  static getServerTypesForRegion(region) {
+    // Polymorphic on purpose: lists the CALLING subclass's catalog (see
+    // assertAmd64ServerType below for why `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    return x86TypesForRegion(this, region);
   }
 
   /**
@@ -1333,13 +1485,21 @@ export class BaseProvider {
    * Returns the equivalent server type available in a target region: the
    * type itself when stocked there, else the role's cheapest orderable pick
    * of at least its RAM (src/lib/sizing.js standbyStandIn).
+   *
+   * Offline (no live catalog) the type is assumed stocked everywhere, which
+   * suits a provider with one uniform line and no architecture split. A
+   * provider that must first map ARM to amd64 overrides it (HetznerProvider).
    * @param {string} serverType - Original server type
    * @param {string} targetRegion - Region to resolve for
    * @param {string} [role] - compose, master, db or worker
    * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(_serverType, _targetRegion, _role) {
-    throw new Error('resolveServerTypeForRegion() must be implemented by subclass');
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
+    // Polymorphic on purpose: reads the CALLING subclass's live catalog and
+    // re-picks from its candidates (see assertAmd64ServerType below for why
+    // `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    return typeStockedIn(this, serverType, targetRegion, role);
   }
 
   /**
@@ -1602,7 +1762,17 @@ export class BaseProvider {
   // ============================================================================
 
   /**
-   * Make an authenticated API request
+   * The headers that authenticate a request to this provider's API: a
+   * bearer token on four providers; ScalewayProvider overrides it with its
+   * X-Auth-Token.
+   * @returns {Record<string, string>}
+   */
+  authHeaders() {
+    return { Authorization: `Bearer ${this.apiToken}` };
+  }
+
+  /**
+   * Make an authenticated API request, with a JSON Content-Type
    * @param {string} endpoint - API endpoint (relative to API_BASE)
    * @param {object} [options={}] - Fetch options
    * @returns {Promise<Response>}
@@ -1610,7 +1780,7 @@ export class BaseProvider {
   async apiRequest(endpoint, options = {}) {
     const url = `${this.constructor.API_BASE}${endpoint}`;
     const headers = {
-      Authorization: `Bearer ${this.apiToken}`,
+      ...this.authHeaders(),
       'Content-Type': 'application/json',
       ...options.headers,
     };
@@ -1620,6 +1790,61 @@ export class BaseProvider {
     // backoff instead of the previous 3. Transient 5xx / 429 also retry.
     const { fetchWithRetry } = await import('../fetch-retry.js');
     return await fetchWithRetry(url, { ...options, headers });
+  }
+
+  /**
+   * An authenticated request with no JSON Content-Type: what the providers
+   * send for a body-less GET or DELETE outside apiRequest, which would add
+   * one. The providers keep those bare on purpose (see the transport notes
+   * in DigitalOceanProvider, LinodeProvider and VultrProvider); this spells
+   * the URL and the auth once. Retries through fetchWithRetry, as apiRequest
+   * does.
+   * @param {string} endpoint - API endpoint (relative to API_BASE)
+   * @param {object} [init={}] - Fetch options; its headers go after the auth
+   * @returns {Promise<Response>}
+   */
+  async bareRequest(endpoint, init = {}) {
+    const { fetchWithRetry } = await import('../fetch-retry.js');
+    return await fetchWithRetry(`${this.constructor.API_BASE}${endpoint}`, {
+      ...init,
+      headers: { ...this.authHeaders(), ...init.headers },
+    });
+  }
+
+  /**
+   * DELETE a resource, bare; true when it is gone, deleted now or already
+   * absent (404).
+   * @param {string} endpoint - API endpoint (relative to API_BASE)
+   * @returns {Promise<boolean>}
+   */
+  async deleteGone(endpoint) {
+    const response = await this.bareRequest(endpoint, { method: 'DELETE' });
+    return response.ok || response.status === 404;
+  }
+
+  /**
+   * The body of getServerSummary on a provider with one server resource
+   * (Hetzner, DigitalOcean, Linode, Vultr): a single raw fetch with a hard
+   * 5 s abort, never retried (see getServerSummary), and null for any
+   * failure, a refusal, a network error or a body without the server.
+   * @param {string} endpoint - the server's path under API_BASE
+   * @param {(body: any) => {status: string, serverType: string|null}} pick -
+   *   the summary from the response body
+   * @returns {Promise<{status: string, serverType: string|null}|null>}
+   */
+  async _serverSummaryAt(endpoint, pick) {
+    try {
+      const response = await fetch(`${this.constructor.API_BASE}${endpoint}`, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) return null;
+
+      return pick(await response.json());
+    } catch {
+      return null;
+    }
   }
 }
 

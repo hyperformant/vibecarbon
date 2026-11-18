@@ -285,7 +285,9 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
       expect(prompts.length, `${file}: prompt regex drifted`).toBe(validateCount(src));
       if (SHARED_PROMPTS_ONLY.has(file)) {
         expect(prompts.length, `${file}: grew a prompt of its own, drop it from the list`).toBe(0);
-        expect(src).toMatch(/await promptForVerifiedToken\(/);
+        // Its token comes through the shared flow (resolveApiToken, which
+        // prompts with promptForVerifiedToken in guided-setup-shared.js).
+        expect(src).toMatch(/\breturn resolveApiToken\(/);
         return;
       }
       expect(prompts.length).toBeGreaterThan(0);

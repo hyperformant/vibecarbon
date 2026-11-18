@@ -15,14 +15,9 @@
  */
 
 import * as p from '@clack/prompts';
-import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { verifyToken } from './cloudflare-dns.js';
 import { c, link } from './colors.js';
-import {
-  createCredentialSaver,
-  promptForVerifiedToken,
-  verifiedEnvToken,
-} from './guided-setup-shared.js';
+import { createCredentialSaver, resolveApiToken } from './guided-setup-shared.js';
 
 // What guided-setup-shared.js needs to look up, prompt for and verify the token.
 const API_TOKEN = {
@@ -63,40 +58,18 @@ const saveIfWanted = createCredentialSaver({
 });
 
 /**
- * Get API token with improved visual guidance.
- * Lookup order: env var (shell, or the project's .env.local via
- * bootstrapOperatorEnv) → interactive prompt.
+ * Get the API token: the env var, else the interactive prompt (see
+ * resolveApiToken in guided-setup-shared.js).
  *
  * @param {string} [projectName] - Project name for display in guide
- * @param {{ save?: boolean, force?: boolean }} [options] - Options
- *   save: offer to save credentials (default true)
- *   force: skip the env lookup and go straight to interactive prompt (default false)
- * @returns {Promise<string|null>}
+ * @param {{ save?: boolean, force?: boolean }} [options] - see resolveApiToken
+ * @returns {Promise<string>}
  */
 export async function getApiToken(projectName, options = {}) {
-  const { save = true, force = false } = options;
-
-  if (!force) {
-    const envToken = await verifiedEnvToken(API_TOKEN);
-    if (envToken) return envToken;
-  }
-
-  // Off a TTY this prompt can never be answered — clack's promise would
-  // neither resolve nor cancel, draining the event loop into a silent
-  // exit 0 (the 2026-08-11 v1 RCA). Fail loudly with the env var instead.
-  assertInteractiveStdin({ what: 'the Cloudflare API token', envVar: 'CLOUDFLARE_API_TOKEN' });
-  // Interactive prompt (with retry on invalid token)
-  displayApiTokenGuide(projectName);
-  const token = await promptForVerifiedToken(API_TOKEN);
-
-  // In-process coherence (A2): a freshly-entered token must be visible to
-  // any later env-first resolution in this same process, regardless of
-  // whether the operator chooses to persist it to .env.local below.
-  process.env.CLOUDFLARE_API_TOKEN = token;
-
-  if (save) {
-    await saveIfWanted({ CLOUDFLARE_API_TOKEN: token });
-  }
-
-  return token;
+  return resolveApiToken(
+    API_TOKEN,
+    { displayTokenGuide: displayApiTokenGuide, saveIfWanted },
+    projectName,
+    options,
+  );
 }

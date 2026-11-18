@@ -55,14 +55,18 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { standbyStandIn } from '../sizing.js';
 import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  normalizePublicKey,
   replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
   sweepLabels,
+  waitUntilServerUp,
 } from './base.js';
+import { transliterateWith } from './cloud-init-ascii.js';
+import { decodeLabels, withAllTags } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -129,70 +133,34 @@ export function encodeLabels(labels = {}) {
   return Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
 }
 
-/**
- * See DigitalOcean's KNOWN_MANGLED_LABEL_KEYS — same single known collision,
- * same unambiguity argument within this codebase's fixed tag-key set.
- * @type {Object<string,string>}
- */
-const KNOWN_MANGLED_LABEL_KEYS = { 'cluster-autoscaler-node': 'cluster-autoscaler/node' };
-
-/**
- * Decode a Scaleway tag array back into a flat label map — inverse of
- * encodeLabels for this codebase's known key set.
- * @param {string[]|null} [tags]
- * @returns {Object<string,string>}
- */
-export function decodeLabels(tags = []) {
-  const out = {};
-  for (const tag of tags || []) {
-    const sep = tag.indexOf(':');
-    if (sep === -1) continue;
-    const wireKey = tag.slice(0, sep);
-    out[KNOWN_MANGLED_LABEL_KEYS[wireKey] ?? wireKey] = tag.slice(sep + 1);
-  }
-  return out;
-}
+// decodeLabels, the inverse of encodeLabels, is the same for the four
+// tag-string providers (tag-labels.js); re-exported for the e2e sweeps.
+export { decodeLabels };
 
 // The shared cloud-init template carries typographic characters in its
 // comments (em-dashes, live as of 2026-08-09), and Scaleway user data
 // crosses the wire as PLAIN TEXT with NO base64 leg (unlike Linode/Vultr)
 // and no gzip — so there is no 7-bit-clean safety net between us and
 // whatever the Pulumi bridge / Scaleway ingestion does with non-ASCII
-// bytes. Same wire-contract decision as DigitalOcean's (see
-// digitalocean-compose.js's ASCII_TRANSLITERATION_MAP RCA — a mangled
-// em-dash there produced a C1 control char that made cloud-init reject the
-// ENTIRE #cloud-config part): never hand the wire a non-ASCII byte.
-// Known typography is transliterated explicitly; anything unmapped falls
-// through to assertAsciiCloudInit's loud refusal rather than a silent '?'.
-const ASCII_TRANSLITERATION_MAP = {
-  '—': '--', // em dash
-  '–': '-', // en dash
-  '‘': "'", // left single quote
-  '’': "'", // right single quote
-  '“': '"', // left double quote
-  '”': '"', // right double quote
-  '…': '...', // ellipsis
-};
+// bytes. Same wire-contract decision as DigitalOcean's (see the RCA in
+// digitalocean-compose.js — a mangled em-dash there produced a C1 control
+// char that made cloud-init reject the ENTIRE #cloud-config part): never
+// hand the wire a non-ASCII byte. Known typography is transliterated
+// explicitly, with the map DigitalOcean uses (cloud-init-ascii.js);
+// anything unmapped falls through to assertAsciiCloudInit's loud refusal
+// rather than a silent '?'.
 
 /**
  * Transliterate known typographic characters to ASCII — the Scaleway leg
- * of DO's wire-contract decision (see the map comment above). Applied by
+ * of DO's wire-contract decision (see the comment above). Applied by
  * loadScalewayComposeUserData BEFORE assertAsciiCloudInit, so mapped
  * typography degrades deterministically and anything unmapped still fails
- * loudly.
+ * loudly. A missing input reads as empty.
  * @param {string} input
  * @returns {string}
  */
 export function transliterateCloudInitToAscii(input) {
-  let out = '';
-  for (const ch of input ?? '') {
-    if (/** @type {number} */ (ch.codePointAt(0)) <= 0x7f) {
-      out += ch;
-      continue;
-    }
-    out += ASCII_TRANSLITERATION_MAP[ch] ?? ch;
-  }
-  return out;
+  return transliterateWith(input ?? '', (ch) => ch);
 }
 
 /**
@@ -705,34 +673,11 @@ export class ScalewayProvider extends BaseProvider {
     };
   }
 
-  /**
-   * Server types available in a zone — live per-zone data when fetched
-   * (the zone axis is real on Scaleway), fallback catalog otherwise (all
-   * three fallback types are live-verified present in every REGIONS zone).
-   * @param {string} region - zone (fr-par-1 …)
-   * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
-   */
-  static getServerTypesForRegion(region) {
-    const available = ScalewayProvider._locationTypes?.[region];
-
-    if (available) {
-      return [...available]
-        .filter((name) => name in ScalewayProvider.SERVER_TYPES)
-        .map((name) => ({
-          name,
-          ...ScalewayProvider.SERVER_TYPES[name],
-          // fetchServerTypes filtered on arch === 'x86_64'.
-          architecture: 'x86',
-        }))
-        .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
-    }
-
-    return Object.entries(ScalewayProvider.FALLBACK_SERVER_TYPES).map(([name, info]) => ({
-      name,
-      ...info,
-      architecture: 'x86',
-    }));
-  }
+  // getServerTypesForRegion and resolveServerTypeForRegion are the base's
+  // (base.js): live per-zone data when fetched (the zone axis is real on
+  // Scaleway), the fallback catalog otherwise (all three fallback types are
+  // live-verified present in every REGIONS zone), with `architecture: 'x86'`
+  // on every entry.
 
   /**
    * The static HA standby pair — cross-country pairs (fr-par ↔ nl-ams, same
@@ -750,38 +695,10 @@ export class ScalewayProvider extends BaseProvider {
       'nl-ams-1': 'fr-par-1',
       'nl-ams-2': 'fr-par-2',
     };
-    if (PAIRS[primaryRegion]) return PAIRS[primaryRegion];
-
-    const continent = ScalewayProvider.REGION_CONTINENT[primaryRegion];
-    const sameContinent = Object.keys(ScalewayProvider.REGION_CONTINENT).filter(
-      (r) => r !== primaryRegion && ScalewayProvider.REGION_CONTINENT[r] === continent,
+    return (
+      standbyPairOrNeighbour(ScalewayProvider.REGION_CONTINENT, primaryRegion, PAIRS) ??
+      (primaryRegion === 'fr-par-1' ? 'nl-ams-1' : 'fr-par-1')
     );
-    if (sameContinent.length > 0) return sameContinent[0];
-    return primaryRegion === 'fr-par-1' ? 'nl-ams-1' : 'fr-par-1';
-  }
-
-  /**
-   * Equivalent type in a target zone, using the live per-zone axis when
-   * available (same walk shape as DO's/Vultr's).
-   * @param {string} serverType
-   * @param {string} targetRegion - zone
-   * @param {string} [role] - the role the node plays (compose, master, db,
-   *   worker): a type not stocked there is re-picked for that role
-   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
-   * @returns {string|null} null when nothing fits, for the caller to refuse
-   */
-  static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    // A live catalog that does not list the location stocks nothing there:
-    // the stand-in below then answers null, as cheapestRoleSet does.
-    const live = ScalewayProvider._locationTypes;
-    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
-
-    if (available) {
-      if (available.has(serverType)) return serverType;
-      return standbyStandIn(ScalewayProvider, serverType, targetRegion, role);
-    }
-
-    return serverType;
   }
 
   /**
@@ -801,27 +718,17 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   // ── Instance methods ────────────────────────────────────────────────────
-  // Transport split mirrors the sibling providers: CRUD via this.apiRequest
-  // (X-Auth-Token — see the override), listings/teardown via fetchWithRetry
-  // through the zone-walking helpers, getServerSummary raw fetches with a
-  // hard 5s abort.
+  // Transport split mirrors the sibling providers: CRUD via this.apiRequest,
+  // listings/teardown bare (this.bareRequest, or fetchWithRetry in the
+  // zone-walking helpers), getServerSummary raw fetches with a hard 5s abort.
 
   /**
-   * Authenticated request — Scaleway auth is `X-Auth-Token: <secret key>`,
-   * not a Bearer header, so the base helper is overridden (same
-   * fetch-retry envelope).
-   * @param {string} endpoint - API path (relative to API_BASE)
-   * @param {object} [options={}] - Fetch options
-   * @returns {Promise<Response>}
+   * Scaleway authenticates with `X-Auth-Token: <secret key>`, not a Bearer
+   * header; apiRequest and bareRequest (base.js) send these.
+   * @returns {Record<string, string>}
    */
-  async apiRequest(endpoint, options = {}) {
-    const url = `${ScalewayProvider.API_BASE}${endpoint}`;
-    const headers = {
-      'X-Auth-Token': this.apiToken,
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
-    return await fetchWithRetry(url, { ...options, headers });
+  authHeaders() {
+    return { 'X-Auth-Token': this.apiToken };
   }
 
   /** Zones this provider operates in (REGIONS keys — see class header). */
@@ -842,9 +749,8 @@ export class ScalewayProvider extends BaseProvider {
   async _walkPageSize(path, key, query = '') {
     const items = [];
     for (let page = 1; page <= 20; page++) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}${path}?page_size=100&page=${page}${query ? `&${query}` : ''}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
+      const res = await this.bareRequest(
+        `${path}?page_size=100&page=${page}${query ? `&${query}` : ''}`,
       );
       if (!res.ok) return { items, complete: false, status: res.status };
       const data = await res.json().catch(() => ({}));
@@ -869,9 +775,8 @@ export class ScalewayProvider extends BaseProvider {
     const items = [];
     const sep = path.includes('?') ? '&' : '?';
     for (let page = 1; page <= 20; page++) {
-      const response = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}${path}${sep}per_page=100&page=${page}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
+      const response = await this.bareRequest(
+        `/instance/v1/zones/${zone}${path}${sep}per_page=100&page=${page}`,
       );
       if (!response.ok) return { items, complete: false, status: response.status };
       const data = await response.json();
@@ -918,10 +823,7 @@ export class ScalewayProvider extends BaseProvider {
     const cached = this._zoneCache.get(serverId);
     if (cached) return cached;
     for (const zone of ScalewayProvider._zones()) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/servers/${serverId}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
       if (res.ok) {
         this._zoneCache.set(serverId, zone);
         return zone;
@@ -1126,10 +1028,9 @@ export class ScalewayProvider extends BaseProvider {
     });
     if (!termRes.ok && termRes.status !== 404) {
       // … falling back to a plain DELETE (valid for stopped servers).
-      const delRes = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/servers/${serverId}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const delRes = await this.bareRequest(`/instance/v1/zones/${zone}/servers/${serverId}`, {
+        method: 'DELETE',
+      });
       if (!delRes.ok && delRes.status !== 404) {
         const error = await delRes.json().catch(() => ({}));
         throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
@@ -1168,10 +1069,9 @@ export class ScalewayProvider extends BaseProvider {
       let lastStatus;
       await pollUntil(
         async () => {
-          const res = await fetchWithRetry(
-            `${ScalewayProvider.API_BASE}/block/v1/zones/${zone}/volumes/${volumeId}`,
-            { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-          );
+          const res = await this.bareRequest(`/block/v1/zones/${zone}/volumes/${volumeId}`, {
+            method: 'DELETE',
+          });
           lastStatus = res.status;
           return res.ok || res.status === 404;
         },
@@ -1206,15 +1106,11 @@ export class ScalewayProvider extends BaseProvider {
     // 5. Release surviving flexible IPs (dynamic IPs 404 here — released
     // with the server; flexible ones bill €0.005/hr until deleted).
     for (const ipId of publicIpIds) {
-      const probe = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/ips/${ipId}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const probe = await this.bareRequest(`/instance/v1/zones/${zone}/ips/${ipId}`);
       if (!probe.ok) continue; // 404 = auto-released dynamic IP
-      const del = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/ips/${ipId}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const del = await this.bareRequest(`/instance/v1/zones/${zone}/ips/${ipId}`, {
+        method: 'DELETE',
+      });
       if (!del.ok && del.status !== 404) {
         console.warn(
           `Warning: Scaleway flexible IP ${ipId} (zone ${zone}) could not be released; it ` +
@@ -1256,7 +1152,11 @@ export class ScalewayProvider extends BaseProvider {
     const response = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to get server: ${error.message || 'Unknown error'}`);
+      // The status goes with it: a 401, 403 or 404 is a token that can't see
+      // the server (assertTokenSeesCluster).
+      throw Object.assign(new Error(`Failed to get server: ${error.message || 'Unknown error'}`), {
+        status: response.status,
+      });
     }
     const { server } = await response.json();
     return { zone, ...server };
@@ -1269,25 +1169,11 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
-        const server = await this.getServer(serverId);
-        if (server.state === 'running' && ScalewayProvider.getPublicIP(server)) {
-          return server;
-        }
-      } catch (error) {
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+    return waitUntilServerUp(
+      timeout,
+      () => this.getServer(serverId),
+      (server) => server.state === 'running' && ScalewayProvider.getPublicIP(server),
+    );
   }
 
   /**
@@ -1339,9 +1225,8 @@ export class ScalewayProvider extends BaseProvider {
     let incomplete = false;
     for (const zone of ScalewayProvider._zones()) {
       for (let page = 1; page <= 20; page++) {
-        const response = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/products/servers?per_page=100&page=${page}`,
-          { headers: { 'X-Auth-Token': this.apiToken } },
+        const response = await this.bareRequest(
+          `/instance/v1/zones/${zone}/products/servers?per_page=100&page=${page}`,
         );
         if (!response.ok) {
           incomplete = true;
@@ -1379,18 +1264,14 @@ export class ScalewayProvider extends BaseProvider {
    */
   async createSSHKey(name, publicKey) {
     const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
-    const normalize = (key) => {
-      const [type, body] = (key || '').trim().split(/\s+/);
-      return `${type || ''} ${body || ''}`.trim();
-    };
-    const targetMaterial = normalize(publicKey);
+    const targetMaterial = normalizePublicKey(publicKey);
 
     const { items: existingKeys } = await this._walkPageSize(
       '/iam/v1alpha1/ssh-keys',
       'ssh_keys',
       projectId ? `project_id=${projectId}` : '',
     );
-    const match = existingKeys.find((k) => normalize(k.public_key) === targetMaterial);
+    const match = existingKeys.find((k) => normalizePublicKey(k.public_key) === targetMaterial);
     if (match) return match.id;
 
     const body = { name, public_key: publicKey.trim() };
@@ -1410,17 +1291,6 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * List ALL servers across the REGIONS zones, optionally filtered by
-   * labels — client-side tag matching via the SAME encodeLabel encoding
-   * createServer tags with.
-   * @param {object} [labels]
-   * @returns {Promise<object[]>}
-   */
-  async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
-  }
-
-  /**
    * Server listing preserving the completeness signal — see
    * BaseProvider.listServersDetailed. Complete only when EVERY zone's walk
    * completed (a truncated zone hides residue exactly like a truncated
@@ -1431,11 +1301,7 @@ export class ScalewayProvider extends BaseProvider {
   async listServersDetailed(labels = {}) {
     const { items, complete, status } = await this._walkAllZones('/servers', 'servers');
 
-    const wantedTags = Object.entries(labels).map(([k, v]) => encodeLabel(k, v));
-    const filtered =
-      wantedTags.length === 0
-        ? items
-        : items.filter((s) => wantedTags.every((tag) => (s.tags || []).includes(tag)));
+    const filtered = withAllTags(items, labels, encodeLabel);
 
     return status === undefined
       ? { items: filtered, complete }
@@ -1495,9 +1361,8 @@ export class ScalewayProvider extends BaseProvider {
     const cached = this._sgZoneCache.get(firewallId);
     if (cached) return cached;
     for (const zone of ScalewayProvider._zones()) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/security_groups/${firewallId}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
+      const res = await this.bareRequest(
+        `/instance/v1/zones/${zone}/security_groups/${firewallId}`,
       );
       if (res.ok) {
         this._sgZoneCache.set(firewallId, zone);
@@ -1633,10 +1498,9 @@ export class ScalewayProvider extends BaseProvider {
       const fw = await this.findFirewallByName(name);
       if (!fw) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${fw.zone}/security_groups/${fw.id}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${fw.zone}/security_groups/${fw.id}`, {
+        method: 'DELETE',
+      });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1652,22 +1516,17 @@ export class ScalewayProvider extends BaseProvider {
    */
   async deleteSSHKeyByName(name) {
     const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
-    const res = await fetchWithRetry(
-      `${ScalewayProvider.API_BASE}/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}${
+    const res = await this.bareRequest(
+      `/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}${
         projectId ? `&project_id=${projectId}` : ''
       }`,
-      { headers: { 'X-Auth-Token': this.apiToken } },
     );
     if (!res.ok) return false;
     const { ssh_keys } = await res.json().catch(() => ({ ssh_keys: [] }));
     const match = (ssh_keys || []).find((k) => k.name === name);
     if (!match) return false;
 
-    const del = await fetchWithRetry(
-      `${ScalewayProvider.API_BASE}/iam/v1alpha1/ssh-keys/${match.id}`,
-      { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-    );
-    return del.ok || del.status === 404;
+    return this.deleteGone(`/iam/v1alpha1/ssh-keys/${match.id}`);
   }
 
   /**
@@ -1730,10 +1589,9 @@ export class ScalewayProvider extends BaseProvider {
     let sawFailure = false;
     for (const base of ['/block/v1/zones', '/instance/v1/zones']) {
       for (const zone of ScalewayProvider._zones()) {
-        const res = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}${base}/${zone}/volumes/${volumeId}`,
-          { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-        );
+        const res = await this.bareRequest(`${base}/${zone}/volumes/${volumeId}`, {
+          method: 'DELETE',
+        });
         if (res.ok) return true;
         if (res.status !== 404) sawFailure = true;
       }
@@ -1764,10 +1622,9 @@ export class ScalewayProvider extends BaseProvider {
   async deleteLoadBalancer(lbId) {
     let sawFailure = false;
     for (const zone of ScalewayProvider._zones()) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/lb/v1/zones/${zone}/lbs/${lbId}?release_ip=true`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/lb/v1/zones/${zone}/lbs/${lbId}?release_ip=true`, {
+        method: 'DELETE',
+      });
       if (res.ok) return true;
       if (res.status !== 404) sawFailure = true;
     }
@@ -1797,10 +1654,9 @@ export class ScalewayProvider extends BaseProvider {
     const zones = zone ? [zone] : ScalewayProvider._zones();
     let sawFailure = false;
     for (const z of zones) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${z}/ips/${ipId}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${z}/ips/${ipId}`, {
+        method: 'DELETE',
+      });
       if (res.ok) return true;
       if (res.status !== 404) sawFailure = true;
     }
@@ -1859,10 +1715,9 @@ export class ScalewayProvider extends BaseProvider {
         }
         continue;
       }
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${ip.zone}/ips/${ip.id}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${ip.zone}/ips/${ip.id}`, {
+        method: 'DELETE',
+      });
       if (res.ok || res.status === 404) deleted.push(ip.address);
       else {
         failed.push({
