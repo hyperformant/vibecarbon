@@ -66,15 +66,7 @@ interface VultrSweepProvider {
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyByName(name: string): Promise<boolean>;
-  listLoadBalancers(): Promise<Array<{ id: number | string; label: string }>>;
   deleteLoadBalancer(id: number | string): Promise<unknown>;
-  /**
-   * VPCs. `description` is Vultr's identity field for a VPC (as it is for a
-   * firewall group) — accepted alongside `label` so this half still sweeps
-   * if the provider hands back raw API rows rather than normalized ones.
-   * Matching only on `label` would make the whole VPC pass a silent no-op.
-   */
-  listNetworks(): Promise<Array<{ id: number | string; label?: string; description?: string }>>;
 }
 
 interface VultrSweepObjectStorage {
@@ -380,13 +372,24 @@ export async function sweepOrphanedVultrResources(
   // 4. Load balancers + VPCs — never provisioned by the compose tier, but
   // enumerated so a future tier's leak can't hide behind a stub (same
   // reasoning as the Linode sweep's listNetworks doc).
+  // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
+  // method answers [] when the API call fails (its contract for destroy), so
+  // an unreadable listing read as "no load balancers" and the class went
+  // unchecked under a clean banner.
   try {
-    const lbs = await provider.listLoadBalancers();
+    const { items: lbs, complete } = await walkPages<{ id: number | string; label: string }>(
+      '/load-balancers',
+      'load_balancers',
+    );
+    if (!complete) markIncomplete('load-balancer list');
     for (const lb of lbs) {
       if (!lb.label.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.label})`);
       try {
-        await provider.deleteLoadBalancer(lb.id);
+        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+          throw new Error('the API refused the delete');
+        }
         counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
       } catch (err) {
         enumFailed = true;
@@ -396,13 +399,25 @@ export async function sweepOrphanedVultrResources(
       }
     }
   } catch (e) {
+    markIncomplete('load-balancer list');
     console.warn(
       `${tag} [sweep] Load-balancer cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
   }
 
+  // Listed by this sweep's own walk, not provider.listNetworks(), for the
+  // same reason as the load balancers above: that method answers [] (or a
+  // partial list) when the API call fails.
+  // `description` is Vultr's identity field for a VPC (as it is for a
+  // firewall group); `label` is accepted alongside it. Matching only on
+  // `label` would make the whole VPC pass a silent no-op.
   try {
-    const vpcs = await provider.listNetworks();
+    const { items: vpcs, complete } = await walkPages<{
+      id: number | string;
+      label?: string;
+      description?: string;
+    }>('/vpcs', 'vpcs');
+    if (!complete) markIncomplete('vpc list');
     for (const vpc of vpcs) {
       const vpcName = vpc.label ?? vpc.description ?? '';
       if (!vpcName.startsWith(projectName)) continue;
@@ -422,6 +437,7 @@ export async function sweepOrphanedVultrResources(
       }
     }
   } catch (e) {
+    markIncomplete('vpc list');
     console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 

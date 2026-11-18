@@ -52,9 +52,7 @@ function fakeProvider(
     deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
     listFlexibleIPsDetailed: vi.fn().mockResolvedValue({ items: [], complete: true }),
     releaseFlexibleIP: vi.fn().mockResolvedValue(true),
-    listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(true),
-    listNetworks: vi.fn().mockResolvedValue([]),
     serverLabels: (s: { tags?: string[] }) =>
       Object.fromEntries((s.tags ?? []).map((t) => t.split(':') as [string, string])),
     ...overrides,

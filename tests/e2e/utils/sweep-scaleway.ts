@@ -84,9 +84,7 @@ interface ScalewaySweepProvider {
     complete: boolean;
   }>;
   releaseFlexibleIP(id: string, zone?: string): Promise<boolean>;
-  listLoadBalancers(): Promise<Array<{ id: string; name: string }>>;
   deleteLoadBalancer(id: string): Promise<unknown>;
-  listNetworks(): Promise<Array<{ id: string; name?: string }>>;
   serverLabels(server: object): Record<string, string>;
 }
 
@@ -225,6 +223,30 @@ export async function sweepOrphanedScalewayResources(
         const res = await fetchImpl(
           `${API_BASE}/instance/v1/zones/${zone}${path}?per_page=100&page=${page}`,
         );
+        if (!res.ok) return { items, complete: false };
+        data = (await res.json()) as Record<string, unknown>;
+      } catch {
+        return { items, complete: false };
+      }
+      const pageItems = Array.isArray(data[key]) ? (data[key] as T[]) : [];
+      items.push(...pageItems);
+      if (pageItems.length < 100) return { items, complete: true };
+    }
+    return { items, complete: false };
+  };
+
+  // The same walk for the APIs outside the Instance API (Load Balancer,
+  // VPC), which page with `page_size` and take a full path. A short page
+  // ends it; a page that fails, or 20 full pages, is an incomplete listing.
+  const walkPageSize = async <T>(
+    path: string,
+    key: string,
+  ): Promise<{ items: T[]; complete: boolean }> => {
+    const items: T[] = [];
+    for (let page = 1; page <= 20; page++) {
+      let data: Record<string, unknown>;
+      try {
+        const res = await fetchImpl(`${API_BASE}${path}?page_size=100&page=${page}`);
         if (!res.ok) return { items, complete: false };
         data = (await res.json()) as Record<string, unknown>;
       } catch {
@@ -396,65 +418,91 @@ export async function sweepOrphanedScalewayResources(
   // 6. Load balancers + Private Networks — never provisioned by the
   // compose tier, enumerated so a future tier's leak can't hide behind a
   // stub (same reasoning as the sibling sweeps).
-  try {
-    const lbs = await provider.listLoadBalancers();
-    for (const lb of lbs) {
-      if (!lb.name?.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.name})`);
-      try {
-        await provider.deleteLoadBalancer(lb.id);
-        counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
-      } catch (err) {
-        enumFailed = true;
-        console.warn(
-          `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
+  // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
+  // method answers [] when the API call fails (its contract for destroy), so
+  // an unreadable listing read as "no load balancers" and the class went
+  // unchecked under a clean banner.
+  // Load balancers are zone-scoped, like the provider's own walk.
+  for (const zone of SWEEP_ZONES) {
+    try {
+      const { items: lbs, complete } = await walkPageSize<{ id: string; name?: string }>(
+        `/lb/v1/zones/${zone}/lbs`,
+        'lbs',
+      );
+      if (!complete) markIncomplete(`load-balancer list (${zone})`);
+      for (const lb of lbs) {
+        if (!lb.name?.startsWith(projectName)) continue;
+        console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.name})`);
+        try {
+          // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+          if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+            throw new Error('the API refused the delete');
+          }
+          counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
+        } catch (err) {
+          enumFailed = true;
+          console.warn(
+            `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
+          );
+        }
       }
+    } catch (e) {
+      markIncomplete(`load-balancer list (${zone})`);
+      console.warn(
+        `${tag} [sweep] Load-balancer cleanup failed (${zone}): ${e instanceof Error ? e.message : e}`,
+      );
     }
-  } catch (e) {
-    console.warn(
-      `${tag} [sweep] Load-balancer cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
   }
 
-  try {
-    const networks = await provider.listNetworks();
-    for (const net of networks) {
-      const netName = net.name ?? '';
-      if (!netName.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Orphaned Private Network ${net.id} (${netName}) — deleting`);
-      try {
-        // Private Networks are region-scoped; try both regions — a 404 in
-        // the wrong one is benign.
-        let deleted = false;
-        for (const r of SWEEP_S3_REGIONS) {
-          const res = await fetchImpl(
-            `${API_BASE}/vpc/v2/regions/${r}/private-networks/${net.id}`,
-            {
-              method: 'DELETE',
-            },
-          );
-          if (res.ok) {
-            deleted = true;
-            break;
+  // Listed by this sweep's own walk, not provider.listNetworks(), for the
+  // same reason as the load balancers above: that method answers [] (or a
+  // partial list) when the API call fails.
+  // Private Networks are region-scoped, like the provider's own walk.
+  for (const region of SWEEP_S3_REGIONS) {
+    try {
+      const { items: networks, complete } = await walkPageSize<{ id: string; name?: string }>(
+        `/vpc/v2/regions/${region}/private-networks`,
+        'private_networks',
+      );
+      if (!complete) markIncomplete(`private-network list (${region})`);
+      for (const net of networks) {
+        const netName = net.name ?? '';
+        if (!netName.startsWith(projectName)) continue;
+        console.log(`${tag} [sweep] Orphaned Private Network ${net.id} (${netName}) — deleting`);
+        try {
+          // Private Networks are region-scoped; try both regions — a 404 in
+          // the wrong one is benign.
+          let deleted = false;
+          for (const r of SWEEP_S3_REGIONS) {
+            const res = await fetchImpl(
+              `${API_BASE}/vpc/v2/regions/${r}/private-networks/${net.id}`,
+              {
+                method: 'DELETE',
+              },
+            );
+            if (res.ok) {
+              deleted = true;
+              break;
+            }
           }
-        }
-        if (deleted) counts.networks++;
-        else {
+          if (deleted) counts.networks++;
+          else {
+            enumFailed = true;
+            console.warn(`${tag} [sweep] Private Network ${net.id} delete failed`);
+          }
+        } catch (err) {
           enumFailed = true;
-          console.warn(`${tag} [sweep] Private Network ${net.id} delete failed`);
+          console.warn(
+            `${tag} [sweep] Private Network ${net.id} delete failed: ${err instanceof Error ? err.message : err}`,
+          );
         }
-      } catch (err) {
-        enumFailed = true;
-        console.warn(
-          `${tag} [sweep] Private Network ${net.id} delete failed: ${err instanceof Error ? err.message : err}`,
-        );
       }
+    } catch (e) {
+      markIncomplete(`private-network list (${region})`);
+      console.warn(
+        `${tag} [sweep] Private-Network cleanup failed (${region}): ${e instanceof Error ? e.message : e}`,
+      );
     }
-  } catch (e) {
-    console.warn(
-      `${tag} [sweep] Private-Network cleanup failed: ${e instanceof Error ? e.message : e}`,
-    );
   }
 
   // 7. Object Storage buckets — the SAME IAM pair as compute signs S3;

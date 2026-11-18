@@ -57,9 +57,7 @@ const baseProvider = {
   deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true }),
   deleteSSHKeyById: vi.fn().mockResolvedValue('deleted' as const),
   deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
-  listLoadBalancers: vi.fn().mockResolvedValue([]),
   deleteLoadBalancer: vi.fn().mockResolvedValue(true),
-  listNetworks: vi.fn().mockResolvedValue([]),
 };
 
 const emptySpaces = {

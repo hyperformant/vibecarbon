@@ -48,9 +48,7 @@ interface LinodeSweepProvider {
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyByName(name: string): Promise<boolean>;
-  listLoadBalancers(): Promise<Array<{ id: number | string; label: string }>>;
   deleteLoadBalancer(id: number | string): Promise<unknown>;
-  listNetworks(): Promise<Array<{ id: number | string; label: string }>>;
 }
 
 interface LinodeSweepObjectStorage {
@@ -391,13 +389,24 @@ export async function sweepOrphanedLinodeResources(
   // 4. NodeBalancers + VPCs — never provisioned by the compose tier, but
   // enumerated so a future tier's leak can't hide behind a stub (same
   // reasoning as the provider's listNetworks doc).
+  //
+  // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
+  // method answers [] when the API call fails (its contract for destroy), so
+  // an unreadable listing read as "no load balancers" and the class went
+  // unchecked under a clean banner.
   try {
-    const lbs = await provider.listLoadBalancers();
+    const { items: lbs, complete } = await walkPages<{ id: number | string; label: string }>(
+      '/nodebalancers',
+    );
+    if (!complete) markIncomplete('NodeBalancer list');
     for (const lb of lbs) {
       if (!lb.label.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned NodeBalancer ${lb.id} (${lb.label})`);
       try {
-        await provider.deleteLoadBalancer(lb.id);
+        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+          throw new Error('the API refused the delete');
+        }
         counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
       } catch (err) {
         enumFailed = true;
@@ -407,13 +416,20 @@ export async function sweepOrphanedLinodeResources(
       }
     }
   } catch (e) {
+    markIncomplete('NodeBalancer list');
     console.warn(
       `${tag} [sweep] NodeBalancer cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
   }
 
+  // Listed by this sweep's own walk, not provider.listNetworks(), for the
+  // same reason as the load balancers above: that method answers [] (or a
+  // partial list) when the API call fails.
   try {
-    const vpcs = await provider.listNetworks();
+    const { items: vpcs, complete } = await walkPages<{ id: number | string; label: string }>(
+      '/vpcs',
+    );
+    if (!complete) markIncomplete('vpc list');
     for (const vpc of vpcs) {
       if (!vpc.label.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned VPC ${vpc.id} (${vpc.label})`);
@@ -432,6 +448,7 @@ export async function sweepOrphanedLinodeResources(
       }
     }
   } catch (e) {
+    markIncomplete('vpc list');
     console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 

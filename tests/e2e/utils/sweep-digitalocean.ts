@@ -10,8 +10,9 @@
  * Deletion goes through the provider instance API wherever it exists
  * (listServersDetailed / deleteServer(waitUntilGone) / listVolumesDetailed /
  * deleteVolume / deleteFirewallByName / deleteSSHKeyById /
- * listLoadBalancers / deleteLoadBalancer); enumeration of firewalls, ssh
- * keys, and VPCs — which the provider only exposes as exact-name lookups —
+ * deleteLoadBalancer); enumeration of firewalls, ssh keys, load balancers
+ * and VPCs — which the provider exposes as exact-name lookups or as
+ * listings that answer [] on a failed call —
  * walks the DO API directly with the same links.pages.next idiom as
  * preflight.ts. All operations are best-effort: failures warn and flip
  * `enumFailed`, they never propagate (teardown must complete).
@@ -50,7 +51,6 @@ interface DoSweepProvider {
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyById(id: number): Promise<'deleted' | 'absent' | 'stuck'>;
-  listLoadBalancers(): Promise<Array<{ id: string; name: string }>>;
   deleteLoadBalancer(id: string): Promise<unknown>;
 }
 
@@ -304,13 +304,24 @@ export async function sweepOrphanedDigitalOceanResources(
     console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
+  // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
+  // method answers [] when the API call fails (its contract for destroy), so
+  // an unreadable listing read as "no load balancers" and the class went
+  // unchecked under a clean banner.
   try {
-    const lbs = await provider.listLoadBalancers();
+    const { items: lbs, complete } = await walkPages<{ id: string; name: string }>(
+      '/load_balancers',
+      'load_balancers',
+    );
+    if (!complete) markIncomplete('load-balancer list');
     for (const lb of lbs) {
       if (!lb.name.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.name})`);
       try {
-        await provider.deleteLoadBalancer(lb.id);
+        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+          throw new Error('the API refused the delete');
+        }
         counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
       } catch (err) {
         enumFailed = true;
@@ -320,6 +331,7 @@ export async function sweepOrphanedDigitalOceanResources(
       }
     }
   } catch (e) {
+    markIncomplete('load-balancer list');
     console.warn(
       `${tag} [sweep] Load-balancer cleanup failed: ${e instanceof Error ? e.message : e}`,
     );

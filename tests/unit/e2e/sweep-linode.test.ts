@@ -37,9 +37,7 @@ function fakeProvider(
     deleteVolume: vi.fn().mockResolvedValue(true),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
     deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
-    listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(true),
-    listNetworks: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
