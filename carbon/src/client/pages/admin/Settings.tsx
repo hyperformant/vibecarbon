@@ -25,6 +25,64 @@ type LockedAccount = {
 
 const lockedAccountsQueryKey = ['admin', 'locked-accounts'];
 
+interface SettingToggleProps {
+  /** The app_settings key this switch writes through PATCH /api/v1/auth/admin/settings. */
+  settingKey: 'mfa_enabled' | 'user_docs_enabled' | 'api_docs_enabled';
+  label: string;
+  description: string;
+  checked: boolean;
+  loading: boolean;
+  loadingText: string;
+  /** Shown in a toast when the update fails, and the request's fallback error. */
+  errorMessage: string;
+}
+
+// One labelled switch for a global setting. Each owns its mutation, so one
+// pending update disables only its own switch.
+function SettingToggle({
+  settingKey,
+  label,
+  description,
+  checked,
+  loading,
+  loadingText,
+  errorMessage,
+}: SettingToggleProps) {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      apiJson<void>(
+        '/api/v1/auth/admin/settings',
+        { method: 'PATCH', body: { [settingKey]: enabled } },
+        errorMessage
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: authSettingsQueryKey });
+    },
+    onError: () => {
+      toast.error(errorMessage);
+    },
+  });
+
+  return (
+    <div className="flex items-center justify-between">
+      <div className="space-y-0.5">
+        <div className="font-medium">{label}</div>
+        <div className="text-sm text-muted-foreground">{description}</div>
+      </div>
+      {loading ? (
+        <div className="text-sm text-muted-foreground">{loadingText}</div>
+      ) : (
+        <Switch
+          checked={checked}
+          onCheckedChange={(enabled) => mutation.mutate(enabled)}
+          disabled={mutation.isPending}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function AdminSettings() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -47,51 +105,6 @@ export default function AdminSettings() {
   });
 
   const lockedAccounts = lockedAccountsData ?? [];
-
-  const mfaToggleMutation = useMutation({
-    mutationFn: (enabled: boolean) =>
-      apiJson<void>(
-        '/api/v1/auth/admin/settings',
-        { method: 'PATCH', body: { mfa_enabled: enabled } },
-        'Failed to update MFA setting'
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: authSettingsQueryKey });
-    },
-    onError: () => {
-      toast.error('Failed to update MFA setting');
-    },
-  });
-
-  const userDocsToggleMutation = useMutation({
-    mutationFn: (enabled: boolean) =>
-      apiJson<void>(
-        '/api/v1/auth/admin/settings',
-        { method: 'PATCH', body: { user_docs_enabled: enabled } },
-        t('admin.settings.documentation.userDocsUpdateFailed')
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: authSettingsQueryKey });
-    },
-    onError: () => {
-      toast.error(t('admin.settings.documentation.userDocsUpdateFailed'));
-    },
-  });
-
-  const apiDocsToggleMutation = useMutation({
-    mutationFn: (enabled: boolean) =>
-      apiJson<void>(
-        '/api/v1/auth/admin/settings',
-        { method: 'PATCH', body: { api_docs_enabled: enabled } },
-        t('admin.settings.documentation.apiDocsUpdateFailed')
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: authSettingsQueryKey });
-    },
-    onError: () => {
-      toast.error(t('admin.settings.documentation.apiDocsUpdateFailed'));
-    },
-  });
 
   const unlockMutation = useMutation({
     mutationFn: (email: string) =>
@@ -123,23 +136,16 @@ export default function AdminSettings() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <div className="font-medium">Require MFA</div>
-                  <div className="text-sm text-muted-foreground">
-                    Users must set up two-factor authentication
-                  </div>
-                </div>
-                {mfaLoading ? (
-                  <div className="text-sm text-muted-foreground">Loading...</div>
-                ) : (
-                  <Switch
-                    checked={mfaEnabled}
-                    onCheckedChange={(enabled) => mfaToggleMutation.mutate(enabled)}
-                    disabled={mfaToggleMutation.isPending}
-                  />
-                )}
-              </div>
+              {/* The MFA row keeps its English literals, the docs rows are translated. */}
+              <SettingToggle
+                settingKey="mfa_enabled"
+                label="Require MFA"
+                description="Users must set up two-factor authentication"
+                checked={mfaEnabled}
+                loading={mfaLoading}
+                loadingText="Loading..."
+                errorMessage="Failed to update MFA setting"
+              />
             </CardContent>
           </Card>
 
@@ -153,45 +159,24 @@ export default function AdminSettings() {
               <CardDescription>{t('admin.settings.documentation.description')}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <div className="font-medium">
-                    {t('admin.settings.documentation.userDocsLabel')}
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {t('admin.settings.documentation.userDocsDescription')}
-                  </div>
-                </div>
-                {mfaLoading ? (
-                  <div className="text-sm text-muted-foreground">{t('common.loading')}</div>
-                ) : (
-                  <Switch
-                    checked={userDocsEnabled}
-                    onCheckedChange={(enabled) => userDocsToggleMutation.mutate(enabled)}
-                    disabled={userDocsToggleMutation.isPending}
-                  />
-                )}
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <div className="font-medium">
-                    {t('admin.settings.documentation.apiDocsLabel')}
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {t('admin.settings.documentation.apiDocsDescription')}
-                  </div>
-                </div>
-                {mfaLoading ? (
-                  <div className="text-sm text-muted-foreground">{t('common.loading')}</div>
-                ) : (
-                  <Switch
-                    checked={apiDocsEnabled}
-                    onCheckedChange={(enabled) => apiDocsToggleMutation.mutate(enabled)}
-                    disabled={apiDocsToggleMutation.isPending}
-                  />
-                )}
-              </div>
+              <SettingToggle
+                settingKey="user_docs_enabled"
+                label={t('admin.settings.documentation.userDocsLabel')}
+                description={t('admin.settings.documentation.userDocsDescription')}
+                checked={userDocsEnabled}
+                loading={mfaLoading}
+                loadingText={t('common.loading')}
+                errorMessage={t('admin.settings.documentation.userDocsUpdateFailed')}
+              />
+              <SettingToggle
+                settingKey="api_docs_enabled"
+                label={t('admin.settings.documentation.apiDocsLabel')}
+                description={t('admin.settings.documentation.apiDocsDescription')}
+                checked={apiDocsEnabled}
+                loading={mfaLoading}
+                loadingText={t('common.loading')}
+                errorMessage={t('admin.settings.documentation.apiDocsUpdateFailed')}
+              />
             </CardContent>
           </Card>
 
