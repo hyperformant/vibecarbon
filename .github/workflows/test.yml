@@ -258,8 +258,13 @@ jobs:
       # scaffold to paying users is the worse outcome. If the noise becomes
       # unmanageable, move this to a scheduled job that opens an issue rather
       # than dropping the check.
+      # The one exception is an advisory with no fixed release anywhere, which
+      # no lockfile can clear. The script lists those by id (NO_FIX_YET),
+      # reports them, and fails again the day a newer release of the package
+      # is published. 2026-11-17: picomatch GHSA-fc5q-39xc-vjpf blocked every
+      # PR with nothing to refresh to.
       - name: Audit the shipped lockfile
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-shipped-lockfile.mjs
 
       - name: Typecheck
         run: npm run typecheck
