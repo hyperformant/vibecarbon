@@ -29,14 +29,11 @@ const world: { backstop: boolean; pulumiError: Error; madeHere: boolean } = {
   madeHere: false,
 };
 
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  const noop = () => {};
-  return {
-    ...actual,
-    log: { warn: noop, error: noop, info: noop, success: noop, message: noop, step: noop },
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['warn', 'error', 'info', 'success', 'message', 'step'],
+  }),
+);
 
 const store = projectConfigStore();
 vi.mock('../../../src/lib/config.js', async (orig) => {

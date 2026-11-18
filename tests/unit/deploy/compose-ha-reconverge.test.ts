@@ -47,14 +47,11 @@ const h = vi.hoisted(() => ({
 }));
 
 // Quiet clack: the effects narrate every step; the assertions read state.
-vi.mock('@clack/prompts', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  const quiet = () => {};
-  return {
-    ...actual,
-    log: { info: quiet, warn: quiet, success: quiet, message: quiet, error: quiet, step: quiet },
-  };
-});
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['info', 'warn', 'success', 'message', 'error', 'step'],
+  }),
+);
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;

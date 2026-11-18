@@ -25,16 +25,14 @@ import { basename, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REPO_ROOT, sourceFiles } from '../../../_shared/source-files.js';
 
-const clackMock = vi.hoisted(() => ({
-  password: vi.fn(),
-  text: vi.fn(),
-  select: vi.fn(),
-  confirm: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  note: vi.fn(),
-  log: { info: vi.fn(), warn: vi.fn(), success: vi.fn(), error: vi.fn() },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['password', 'text', 'select', 'confirm', 'cancel', 'note'],
+    log: ['info', 'warn', 'success', 'error'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../../src/lib/project.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../src/lib/project.js')>()),

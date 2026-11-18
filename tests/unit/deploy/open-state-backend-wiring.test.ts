@@ -42,26 +42,15 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   },
 }));
 
-const clackMock = vi.hoisted(() => ({
-  select: vi.fn(),
-  isCancel: vi.fn(() => false),
-  cancel: vi.fn(),
-  text: vi.fn(),
-  confirm: vi.fn(async () => true),
-  password: vi.fn(),
-  note: vi.fn(),
-  intro: vi.fn(),
-  outro: vi.fn(),
-  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
-  log: {
-    step: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-    message: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['select', 'cancel', 'text', 'password', 'note', 'intro', 'outro'],
+    log: ['step', 'info', 'warn', 'error', 'success', 'message'],
+    spinner: true,
+    with: { isCancel: vi.fn(() => false), confirm: vi.fn(async () => true) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof projectConfigStore> | null }));

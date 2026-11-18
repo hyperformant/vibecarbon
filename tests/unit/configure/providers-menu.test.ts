@@ -11,19 +11,14 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const clackMock = vi.hoisted(() => ({
-  select: vi.fn(),
-  confirm: vi.fn(),
-  password: vi.fn(),
-  isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')),
-  cancel: vi.fn(),
-  note: vi.fn(),
-  log: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    success: vi.fn(),
-  },
-}));
+const clackMock = await vi.hoisted(async () => {
+  const { clackFake } = await import('../../_shared/clack-fake.js');
+  return clackFake({
+    fns: ['select', 'confirm', 'password', 'cancel', 'note'],
+    log: ['info', 'warn', 'success'],
+    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
+  });
+});
 vi.mock('@clack/prompts', () => clackMock);
 
 const hetznerGuided = vi.hoisted(() => ({
