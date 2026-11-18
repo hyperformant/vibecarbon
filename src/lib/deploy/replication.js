@@ -32,6 +32,7 @@ import {
   POD_EXEC_WRITE_MS,
 } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
+import { isComposeTier } from './tier-registry.js';
 import {
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
@@ -2269,6 +2270,24 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
     );
     return typeof out === 'string' ? out : '';
   };
+}
+
+/**
+ * A psql runner factory for a tier's database, `(ip) => exec(sql)`: the
+ * compose tiers run psql in the db container over ssh (composePsqlRunner,
+ * imported here only when needed: compose/ha.js imports this module), the k8s
+ * tiers in the db pod (k8sPsqlRunner).
+ *
+ * @param {string} tier
+ * @param {{ sshKeyPath: string, projectName: string }} opts
+ * @returns {Promise<(ip: string) => (sql: string, opts?: { readWrite?: boolean }) => Promise<string>>}
+ */
+export async function tierPsqlFor(tier, { sshKeyPath, projectName }) {
+  if (isComposeTier(tier)) {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    return (ip) => composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`);
+  }
+  return (ip) => k8sPsqlRunner(ip, sshKeyPath);
 }
 
 /**

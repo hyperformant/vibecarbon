@@ -64,6 +64,7 @@ import {
   k8sDbRolloutWait,
   k8sPsqlRunner,
   StaleVolumeAttachmentError,
+  tierPsqlFor,
   WRITE_FENCE_SETTING,
 } from './replication.js';
 import {
@@ -681,11 +682,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
         'retired fence: the compose tier needs envConfig, whose enabled add-ons name the writers to fence',
       );
     }
-    let psqlFor = deps.psql;
-    if (!psqlFor) {
-      const { composePsqlRunner } = await import('./compose/ha.js');
-      psqlFor = (ip) => composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`);
-    }
+    const psqlFor = deps.psql || (await tierPsqlFor(tier, { sshKeyPath, projectName }));
     return composeBackend({
       run: deps.run ?? ((ip, command, opts) => composeSshRun(ip, sshKeyPath, command, opts)),
       psqlFor,
@@ -866,10 +863,8 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
   const sshKeyPath = deps.sshKeyPath ?? sshKeyPathFor(environment);
   const { warn = (line) => p.log.warn(line) } = deps;
   let psqlFor = deps.psql;
-  if (!psqlFor && tier === 'k8s-ha') psqlFor = (h) => k8sPsqlRunner(h, sshKeyPath);
-  if (!psqlFor && tier === 'compose-ha') {
-    const { composePsqlRunner } = await import('./compose/ha.js');
-    psqlFor = (h) => composePsqlRunner(h, sshKeyPath, `/opt/${projectName}`);
+  if (!psqlFor && (tier === 'k8s-ha' || tier === 'compose-ha')) {
+    psqlFor = await tierPsqlFor(tier, { sshKeyPath, projectName });
   }
   const exec = psqlFor ? psqlFor(ip) : null;
   let replica = false;

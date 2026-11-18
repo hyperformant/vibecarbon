@@ -86,7 +86,7 @@ import { clusterIngressIp } from './k8s/ingress-ip.js';
 import { createDeployDropRetired, releaseRetiredReservedIps } from './k8s/retired-reserved-ip.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
-import { k8sPsqlRunner } from './replication.js';
+import { tierPsqlFor } from './replication.js';
 import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
 import { haStacksFrom } from './standby-types.js';
@@ -561,23 +561,13 @@ function deployedPrimaryIp(tier, deployResult) {
   return deployResult?.masterIp ?? null;
 }
 
-/** psql on the deployed role primary, every tier (compose single included). */
-async function deployedPrimaryPsql(tier, environment, projectName, ip) {
-  if (isComposeTier(tier)) {
-    const { composePsqlRunner } = await import('./compose/ha.js');
-    return composePsqlRunner(ip, sshKeyPathFor(environment), `/opt/${projectName}`);
-  }
-  return k8sPsqlRunner(ip, sshKeyPathFor(environment));
-}
-
-/** psql on the role primary over the tier's transport (the write-fence checks). */
+/**
+ * psql on the role primary over the tier's transport, every tier (compose
+ * single included): the write-fence checks and the deploy-time lineage read.
+ */
 async function rolePrimaryPsql(tier, environment, projectName, ip) {
-  const key = sshKeyPathFor(environment);
-  if (isComposeTier(tier)) {
-    const { composePsqlRunner } = await import('./compose/ha.js');
-    return composePsqlRunner(ip, key, `/opt/${projectName}`);
-  }
-  return k8sPsqlRunner(ip, key);
+  const psqlFor = await tierPsqlFor(tier, { sshKeyPath: sshKeyPathFor(environment), projectName });
+  return psqlFor(ip);
 }
 
 /**
@@ -2993,7 +2983,7 @@ export async function executeDeployment(args, gatheredConfig) {
         // deploy -restore chose its lineage: nothing is left unrestored.
         restored: !!restorePoint,
         where: primaryIp,
-        exec: await deployedPrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
+        exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
         listLineages:
           lineageStore?.bucket && lineageStore.accessKey && lineageStore.secretKey
             ? async () =>
