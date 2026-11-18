@@ -3,7 +3,7 @@ import { plans } from '@shared/pricing';
 import { useQuery } from '@tanstack/react-query';
 import { apiJson } from '@/lib/api';
 
-interface Subscription {
+export interface Subscription {
   id: string;
   status: string;
   priceId: string;
@@ -23,7 +23,7 @@ interface Subscription {
   };
 }
 
-interface SubscriptionResponse {
+export interface SubscriptionResponse {
   subscription: Subscription | null;
   status: string;
 }
