@@ -36,7 +36,6 @@
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -64,6 +63,7 @@ import {
   __resetStatePassphraseForTests,
   statePassphraseFingerprint,
 } from '../../../src/lib/state-passphrase.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 // The fake cloud's server is a server class, as each provider's is.
@@ -99,14 +99,7 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
   }),
 }));
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const PROJECT = 'sealtest';
 const PASSPHRASE = 'c2VhbHNlYWxzZWFsc2VhbHNlYWxzZWFsc2VhbHNlYWxz';

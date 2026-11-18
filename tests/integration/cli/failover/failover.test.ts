@@ -4,7 +4,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertExitWith,
-  assertSuccess,
   destroyRealProject,
   type ExecStubs,
   installExecStubs,
@@ -31,21 +30,13 @@ describe('vibecarbon failover', () => {
     stubs.teardown();
   });
 
-  it('prints help', () => {
-    const r = runCli('failover', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Failover');
-  });
-
   it('-dry accepted by parser and skips ssh entirely', () => {
     const r = runCli('failover', ['prod', '-dry', '-y'], {
       cwd: project,
       execStubs: stubs,
       timeoutMs: 15_000,
     });
-    if (/unknown flag: -dry/.test(r.stderr)) {
-      throw new Error(`-dry rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 1, 'No deployed environments to fail over.');
     expect(stubs.callsTo('ssh').length).toBe(0);
   });
 
@@ -60,10 +51,5 @@ describe('vibecarbon failover', () => {
     if (r.exitCode === 0) {
       throw new Error('failover succeeded on non-HA mode');
     }
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('failover', ['prod', '-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 });

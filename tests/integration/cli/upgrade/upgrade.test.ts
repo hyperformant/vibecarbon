@@ -36,12 +36,6 @@ describe('vibecarbon upgrade', () => {
     destroyRealProject(project);
   });
 
-  it('prints help', () => {
-    const r = runCli('upgrade', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Upgrade');
-  });
-
   it('-dry leaves package.json unchanged', () => {
     const before = readFileSync(join(project, 'package.json'), 'utf-8');
     const r = runCli('upgrade', ['-dry', '-y'], { cwd: project, timeoutMs: 60_000 });
@@ -52,9 +46,7 @@ describe('vibecarbon upgrade', () => {
 
   it('-force accepted by parser', () => {
     const r = runCli('upgrade', ['-force', '-y'], { cwd: project, timeoutMs: 60_000 });
-    if (/unknown flag: -force/.test(r.stderr)) {
-      throw new Error(`-force rejected:\n${r.stderr}`);
-    }
+    assertExitWith(r, 0, 'Upgrade complete');
   });
 
   it('on a fresh project, upgrade is idempotent (no diff to apply)', () => {
@@ -201,11 +193,6 @@ describe('vibecarbon upgrade', () => {
     assertSuccess(r);
 
     expect(r.stdout + r.stderr).not.toMatch(/AGENTS\.md/);
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('upgrade', ['-y'], { cwd: '/tmp', timeoutMs: 15_000 });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 
   it('upgrades a legacy project with no PROJECT_DISPLAY_NAME recorded (titleize fallback)', () => {

@@ -8,7 +8,6 @@
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails the first test instead of skipping.
  */
-import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -16,16 +15,10 @@ import { join, relative, sep } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { __resetStateProbesForTests, getOrCreateStack } from '../../../src/lib/iac/index.js';
 import { __resetStatePassphraseForTests } from '../../../src/lib/state-passphrase.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const PASSPHRASE = 'aG9tZWhvbWVob21laG9tZWhvbWVob21laG9tZWhvbWVo';
 // Unique per run, so a file an older run left in the real home cannot decide

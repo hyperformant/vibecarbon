@@ -7,22 +7,16 @@
  * Skipped locally where no pulumi CLI is installed. Under CI the integration
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { destroyStack, removeStackState, upStack } from '../../../src/lib/iac/index.js';
 import { LOCK_EXPIRY_MS, StackHeldError } from '../../../src/lib/iac/stack-lock.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const PROJECT = 'locktest';
 const dir = mkdtempSync(join(tmpdir(), 'vc-stack-lock-'));

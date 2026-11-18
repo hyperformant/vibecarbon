@@ -5,13 +5,14 @@
  * so it also proves the SDK runs in the directory it was given instead of
  * making its own `automation-*` one.
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { statePassphraseFingerprint } from '../../../src/lib/state-passphrase.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
@@ -19,14 +20,7 @@ const WORKSPACE_DIR = pathToFileURL(join(SRC, 'lib/iac/workspace-dir.js')).href;
 const IAC = pathToFileURL(join(SRC, 'lib/iac/index.js')).href;
 const PASSPHRASE = 'd29ya3NwYWNld29ya3NwYWNld29ya3NwYWNld29ya3Nw';
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const root = createTempDir('vc-workspace-dir-exit-');
 

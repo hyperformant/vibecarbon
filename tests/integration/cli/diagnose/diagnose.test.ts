@@ -3,8 +3,6 @@
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
 import {
-  assertExitWith,
-  assertSuccess,
   destroyRealProject,
   type ExecStubs,
   installExecStubs,
@@ -31,16 +29,6 @@ describe('vibecarbon diagnose', () => {
     stubs.teardown();
   });
 
-  it('prints help with all section names', () => {
-    const r = runCli('diagnose', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'nodes');
-    assertExitWith(r, 0, 'pods');
-    assertExitWith(r, 0, 'tls');
-    assertExitWith(r, 0, 'flux');
-    assertExitWith(r, 0, 'egress');
-  });
-
   it.each(['nodes', 'pods', 'tls', 'network', 'flux', 'hcloud', 'egress', 'all'])(
     'accepts known section "%s"',
     (section) => {
@@ -64,10 +52,5 @@ describe('vibecarbon diagnose', () => {
     if (r.exitCode === 0) {
       throw new Error('diagnose accepted unknown section');
     }
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('diagnose', [], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 });

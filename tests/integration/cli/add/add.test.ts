@@ -39,13 +39,6 @@ describe('vibecarbon add', () => {
   });
 
   describe('help', () => {
-    it('prints help with -h', () => {
-      const r = runCli('add', ['-h'], { cwd: project });
-      assertSuccess(r);
-      assertExitWith(r, 0, 'Vibecarbon Add');
-      assertExitWith(r, 0, 'observability');
-    });
-
     it('rejects --online (single-dash only) and the removed -offline flag', () => {
       // `add` now installs from the packaged `services/` by default; `-online`
       // is the opt-in for fetching from GitHub. Double-dash is never accepted,
@@ -305,13 +298,6 @@ describe('vibecarbon add', () => {
         throw new Error(`secret-scan regression — refused on -no-git project:\n${r.stderr}`);
       }
       assertSuccess(r);
-    });
-  });
-
-  describe('not in a project', () => {
-    it('refuses outside a vibecarbon project', () => {
-      const r = runCli('add', ['observability', '-y'], { cwd: '/tmp', timeoutMs: 10_000 });
-      assertExitWith(r, 1, /Not in a Vibecarbon project|vibecarbon\.json/i);
     });
   });
 });

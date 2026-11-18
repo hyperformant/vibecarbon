@@ -37,7 +37,6 @@
  * integration job installs the CLI pinned to the SDK version, and a missing
  * CLI there fails this test instead of skipping it.
  */
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -52,6 +51,7 @@ import {
 import { importStackState } from '../../../src/lib/iac/index.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
 import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
+import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
 
 // The fake cloud as a provider, for the deploy's own drop: its retired
 // resources are the fake cloud's reserved IP and assignment, as DigitalOcean's
@@ -81,14 +81,7 @@ vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
   progressLog: (line: string) => progress.push(line),
 }));
 
-const hasPulumi = (() => {
-  try {
-    execFileSync('pulumi', ['version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-})();
+const hasPulumi = pulumiOnPath();
 
 const dir = mkdtempSync(join(tmpdir(), 'vc-retired-'));
 const cloudFile = join(dir, 'cloud.json');

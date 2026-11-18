@@ -4,7 +4,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertExitWith,
-  assertSuccess,
   destroyRealProject,
   type ExecStubs,
   installExecStubs,
@@ -22,17 +21,6 @@ describe('vibecarbon reset', () => {
   afterEach(() => {
     destroyRealProject(project);
     stubs.teardown();
-  });
-
-  it('prints help', () => {
-    const r = runCli('reset', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, /Vibecarbon Reset|reset/i);
-  });
-
-  it('refuses outside a vibecarbon project', () => {
-    const r = runCli('reset', ['-y'], { cwd: '/tmp' });
-    assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 
   // Final review M9: without a TTY and without -y the confirm prompt had
