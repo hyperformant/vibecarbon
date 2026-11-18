@@ -24,6 +24,7 @@
  * never deleted — better a loud leak than a cross-run data loss.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { walkProviderPages } from './provider-pages.js';
 import { createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
@@ -208,31 +209,8 @@ export async function sweepOrphanedDigitalOceanResources(
   // lookups for these, so enumeration walks the API directly (preflight's
   // links.pages.next idiom); deletion still routes through the provider's
   // name-based methods where they exist.
-  const walkPages = async <T>(
-    path: string,
-    key: string,
-  ): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      let data: Record<string, unknown>;
-      try {
-        const res = await fetchImpl(`${API_BASE}${path}?per_page=50&page=${page}`);
-        if (!res.ok) return { items, complete: false };
-        data = (await res.json()) as Record<string, unknown>;
-      } catch {
-        return { items, complete: false };
-      }
-      if (Array.isArray(data[key])) items.push(...(data[key] as T[]));
-      if (!(data.links as { pages?: { next?: string } } | undefined)?.pages?.next) {
-        return { items, complete: true };
-      }
-      page++;
-    }
-    // The guard ran out with a next page still pending: residue past it was
-    // never read, so the listing is incomplete (as sweep-scaleway.ts answers).
-    return { items, complete: false };
-  };
+  const walkPages = <T>(path: string, key: string) =>
+    walkProviderPages<T>('digitalocean', `${API_BASE}${path}`, { key, perPage: 50, fetchImpl });
 
   try {
     const { items, complete } = await walkPages<{ id: string; name: string }>(
@@ -406,25 +384,14 @@ export async function sweepOrphanedDigitalOceanResources(
     // Paginated walk, not a single fat page: a truncated listing reads as
     // "nothing found", which is precisely the false-clean this pass exists to
     // remove (see list-endpoint-pagination-sweep.test.ts).
-    type ReservedIpPage = {
-      reserved_ips?: Array<{ ip?: string; droplet?: unknown | null }>;
-      links?: { pages?: { next?: string } };
-    };
-    const reserved: Array<{ ip?: string; droplet?: unknown | null }> = [];
-    let url: string | null = `${API_BASE}/reserved_ips?per_page=200`;
-    let pageOk = true;
-    for (let guard = 0; guard < 20 && url; guard++) {
-      const res = await fetchImpl(url);
-      if (!res.ok) {
-        pageOk = false;
-        break;
-      }
-      const body = (await res.json()) as ReservedIpPage;
-      url = body.links?.pages?.next ?? null;
-      reserved.push(...(body.reserved_ips ?? []));
-    }
-    // `url` still set means the 20-page guard ran out mid-chain.
-    if (!pageOk || url) {
+    type ReservedIp = { ip?: string; droplet?: unknown | null };
+    const { items: reserved, complete } = await walkProviderPages<ReservedIp>(
+      'digitalocean',
+      `${API_BASE}/reserved_ips`,
+      // A fetch error goes to the catch below, which names it.
+      { key: 'reserved_ips', perPage: 200, fetchImpl, onThrow: 'throw' },
+    );
+    if (!complete) {
       markIncomplete('reserved-ip list');
     } else {
       const unassigned = reserved.filter((r) => !r.droplet);

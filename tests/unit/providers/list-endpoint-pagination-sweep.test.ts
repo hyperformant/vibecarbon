@@ -131,16 +131,21 @@ const URL_SITE_RE =
   /(?:API_BASE\}|API_BASE_URL\}|api\.hetzner\.cloud\/v1|api\.digitalocean\.com\/v2)(\/[^\s`'"]+)/g;
 const API_REQUEST_RE = /apiRequest\(\s*[`'"](\/[^`'"]+)/g;
 
+const HARNESS_WALKER_RE =
+  /walkProviderPages\s*(?:<[^>\n]*>)?\s*\(|\bdialect:\s*'(?:hetzner|digitalocean|linode|vultr|scaleway)/;
+
 /**
  * True when this call site cannot be a truncated listing:
  *  - id-addressed single resource (`/servers/${id}`) or action endpoint;
  *  - exact-name server-side filter (`?name=`);
  *  - explicit pagination (`page=` in the URL, a `&page=` continuation within
- *    the next few lines, or the shared listHetznerPages walker);
+ *    the next few lines, the shared listHetznerPages walker, or the e2e
+ *    harness walker walkProviderPages, whose call may open up to three lines
+ *    above the URL or sit in a table row that names its `dialect`);
  *  - a mutation (POST/DELETE/PUT/PATCH), which returns no listing;
  *  - a URL constant whose every use appends a page param.
  */
-function isSafe(token: string, window: string, line: string, source: string): boolean {
+function isSafe(token: string, window: string, line: string, source: string, before = ''): boolean {
   const [path] = token.split('?');
   const segments = path.split('/').filter(Boolean);
   const last = segments[segments.length - 1] ?? '';
@@ -165,6 +170,11 @@ function isSafe(token: string, window: string, line: string, source: string): bo
   // sweep rejected the exact fix it recommends.
   if (/links\??\.?\s*(?:\?\.)?pages\??\.?\s*(?:\?\.)?next/.test(window)) return true;
   if (/listHetznerPages\s*\(/.test(window)) return true;
+  // The e2e harness walker (tests/e2e/utils/provider-pages.ts): every page,
+  // in the provider's own dialect, with a `complete` flag. Its URL argument
+  // is formatted onto its own line, so the call opens above it (`before`);
+  // a listing kept in a table is recognised by the `dialect` it names.
+  if (HARNESS_WALKER_RE.test(`${before}\n${window}`)) return true;
   if (/method:\s*['"](?:POST|DELETE|PUT|PATCH)/.test(window)) return true;
   // `const HETZNER_SERVERS_URL = '.../servers?per_page=50'` is fine when the
   // fetch site appends `&page=` to it.
@@ -192,12 +202,13 @@ function collectSites(): { all: Site[]; unsafe: Site[] } {
           continue;
         }
         const window = lines.slice(i, i + 10).join('\n');
+        const before = lines.slice(Math.max(0, i - 3), i).join('\n');
         for (const re of [URL_SITE_RE, API_REQUEST_RE]) {
           re.lastIndex = 0;
           for (const m of line.matchAll(re)) {
             const token = m[1];
             all.push({ file, line: i + 1, token });
-            if (!isSafe(token, window, line, source)) {
+            if (!isSafe(token, window, line, source, before)) {
               unsafe.push({ file, line: i + 1, token });
             }
           }
@@ -261,6 +272,24 @@ describe('classifier sanity (not vacuously permissive)', () => {
     expect(isSafe('/firewalls/${id}/actions/set_rules', '', '', src)).toBe(true);
     // biome-ignore-end lint/suspicious/noTemplateCurlyInString: end
     expect(isSafe('/ssh_keys', "method: 'POST',", '', src)).toBe(true);
+  });
+
+  it('accepts a harness-walker call that opens above the URL, and a table row that names its dialect', () => {
+    const call = "const walk = await walkProviderPages<Row>(\n  'digitalocean',";
+    expect(isSafe('/reserved_ips', "{ key: 'reserved_ips', perPage: 200 },", '', src, call)).toBe(
+      true,
+    );
+    expect(
+      isSafe(
+        '/servers',
+        "url: 'https://api.hetzner.cloud/v1/servers',",
+        '',
+        src,
+        "dialect: 'hetzner',",
+      ),
+    ).toBe(true);
+    // The same URL with no walker in sight is still a bare collection GET.
+    expect(isSafe('/reserved_ips', 'await fetchImpl(url);', '', src, 'const x = 1;')).toBe(false);
   });
 
   it('does NOT accept per_page alone as pagination (the [?&]page= anchor is load-bearing)', () => {

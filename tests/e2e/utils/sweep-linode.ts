@@ -17,6 +17,7 @@
  * k8s tier, kept now so the family stays uniform.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { walkProviderPages } from './provider-pages.js';
 import { createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
@@ -104,34 +105,20 @@ async function defaultObjectStorage(
       // ListBuckets). Hostname shape:
       // `<bucket>.<cluster>.linodeobjects.com` — the cluster slug is
       // recovered by stripping the bucket's own name and the domain.
+      const walk = await walkProviderPages<{ label?: string; hostname?: string }>(
+        'linode',
+        'https://api.linode.com/v4/object-storage/buckets',
+        { perPage: 100, fetchImpl, headers: { Authorization: `Bearer ${token}` } },
+      );
+      // A failed page, a throw or 20 pages with more pending: unreadable.
+      if (!walk.complete) return null;
       const buckets: Array<{ name: string; cluster: string }> = [];
-      let page = 1;
-      for (let guard = 0; guard < 20; guard++) {
-        let data: {
-          data?: Array<{ label?: string; hostname?: string }>;
-          page?: number;
-          pages?: number;
-        };
-        try {
-          const res = await fetchImpl(
-            `https://api.linode.com/v4/object-storage/buckets?page_size=100&page=${page}`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          );
-          if (!res.ok) return null;
-          data = (await res.json()) as typeof data;
-        } catch {
-          return null;
-        }
-        for (const b of data.data ?? []) {
-          if (!b.label || !b.hostname) continue;
-          const cluster = b.hostname.replace(`${b.label}.`, '').replace('.linodeobjects.com', '');
-          buckets.push({ name: b.label, cluster });
-        }
-        if (!data.pages || page >= data.pages) return buckets;
-        page++;
+      for (const b of walk.items) {
+        if (!b.label || !b.hostname) continue;
+        const cluster = b.hostname.replace(`${b.label}.`, '').replace('.linodeobjects.com', '');
+        buckets.push({ name: b.label, cluster });
       }
-      // The 20-page guard ran out with pages left: unreadable, not complete.
-      return null;
+      return buckets;
     },
     async emptyAndDeleteBucket(cluster: string, name: string) {
       const provider = new LinodeObjectStorageProvider(key, secret, cluster);
@@ -236,28 +223,8 @@ export async function sweepOrphanedLinodeResources(
   // lookups for these, so enumeration walks the API directly (the
   // `{data, page, pages}` idiom); deletion routes through the provider's
   // label-based methods.
-  const walkPages = async <T>(path: string): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      let data: { data?: T[]; page?: number; pages?: number };
-      try {
-        const res = await fetchImpl(`${API_BASE}${path}?page_size=100&page=${page}`);
-        if (!res.ok) return { items, complete: false };
-        data = (await res.json()) as { data?: T[]; page?: number; pages?: number };
-      } catch {
-        return { items, complete: false };
-      }
-      if (Array.isArray(data.data)) items.push(...data.data);
-      if (!data.pages || page >= data.pages) {
-        return { items, complete: true };
-      }
-      page++;
-    }
-    // The guard ran out with a next page still pending: residue past it was
-    // never read, so the listing is incomplete (as sweep-scaleway.ts answers).
-    return { items, complete: false };
-  };
+  const walkPages = <T>(path: string) =>
+    walkProviderPages<T>('linode', `${API_BASE}${path}`, { perPage: 100, fetchImpl });
 
   try {
     const { items, complete } = await walkPages<{ id: number; label: string; tags?: string[] }>(
@@ -326,27 +293,14 @@ export async function sweepOrphanedLinodeResources(
     // Paginated walk, not a single fat page: a truncated listing reads as
     // "nothing found", which is precisely the false-clean this pass exists to
     // remove (see list-endpoint-pagination-sweep.test.ts).
-    const ips: Array<{ address?: string; reserved?: boolean; linode_id?: number | null }> = [];
-    let pageOk = true;
-    let ended = false;
-    for (let page = 1; page <= 20; page++) {
-      const res = await fetchImpl(`${API_BASE}/networking/ips?page=${page}&page_size=100`);
-      if (!res.ok) {
-        pageOk = false;
-        break;
-      }
-      const body = (await res.json()) as {
-        data?: Array<{ address?: string; reserved?: boolean; linode_id?: number | null }>;
-        pages?: number;
-      };
-      ips.push(...(body.data ?? []));
-      if (!body.pages || page >= body.pages) {
-        ended = true;
-        break;
-      }
-    }
-    // `ended` false with every page ok means the 20-page guard ran out.
-    if (!pageOk || !ended) {
+    type Ip = { address?: string; reserved?: boolean; linode_id?: number | null };
+    const { items: ips, complete } = await walkProviderPages<Ip>(
+      'linode',
+      `${API_BASE}/networking/ips`,
+      // A fetch error goes to the catch below, which names it.
+      { perPage: 100, fetchImpl, onThrow: 'throw' },
+    );
+    if (!complete) {
       markIncomplete('reserved-ip list');
     } else {
       const stranded = ips.filter((i) => i.reserved && !i.linode_id);

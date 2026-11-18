@@ -45,6 +45,7 @@
  * unattached pvc-* volume is REPORTED, never deleted.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { walkProviderPages } from './provider-pages.js';
 import { bucketSource, createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 
 /**
@@ -190,53 +191,22 @@ export async function sweepOrphanedScalewayResources(
   // Zone-scoped page walk for the resource families the provider only
   // exposes as exact-name lookups (security groups) or that live outside
   // the Instance API (IAM ssh keys use their own path — see below).
-  const walkZonePages = async <T>(
-    zone: string,
-    path: string,
-    key: string,
-  ): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    for (let page = 1; page <= 20; page++) {
-      let data: Record<string, unknown>;
-      try {
-        const res = await fetchImpl(
-          `${API_BASE}/instance/v1/zones/${zone}${path}?per_page=100&page=${page}`,
-        );
-        if (!res.ok) return { items, complete: false };
-        data = (await res.json()) as Record<string, unknown>;
-      } catch {
-        return { items, complete: false };
-      }
-      const pageItems = Array.isArray(data[key]) ? (data[key] as T[]) : [];
-      items.push(...pageItems);
-      if (pageItems.length < 100) return { items, complete: true };
-    }
-    return { items, complete: false };
-  };
+  const walkZonePages = <T>(zone: string, path: string, key: string) =>
+    walkProviderPages<T>('scaleway', `${API_BASE}/instance/v1/zones/${zone}${path}`, {
+      key,
+      perPage: 100,
+      fetchImpl,
+    });
 
   // The same walk for the APIs outside the Instance API (Load Balancer,
   // VPC), which page with `page_size` and take a full path. A short page
   // ends it; a page that fails, or 20 full pages, is an incomplete listing.
-  const walkPageSize = async <T>(
-    path: string,
-    key: string,
-  ): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    for (let page = 1; page <= 20; page++) {
-      let data: Record<string, unknown>;
-      try {
-        const res = await fetchImpl(`${API_BASE}${path}?page_size=100&page=${page}`);
-        if (!res.ok) return { items, complete: false };
-        data = (await res.json()) as Record<string, unknown>;
-      } catch {
-        return { items, complete: false };
-      }
-      const pageItems = Array.isArray(data[key]) ? (data[key] as T[]) : [];
-      items.push(...pageItems);
-      if (pageItems.length < 100) return { items, complete: true };
-    }
-    return { items, complete: false };
-  };
+  const walkPageSize = <T>(path: string, key: string) =>
+    walkProviderPages<T>('scaleway-page-size', `${API_BASE}${path}`, {
+      key,
+      perPage: 100,
+      fetchImpl,
+    });
 
   // 1. Instances. deleteServer is the full billing-leak-safe chain
   // (terminate → wait gone → delete detached SBS volumes → release IPs),
@@ -333,23 +303,12 @@ export async function sweepOrphanedScalewayResources(
 
   // 4. IAM ssh keys — Project-scoped, global API (page/page_size walk).
   try {
-    const keys: Array<{ id: string; name?: string }> = [];
-    let complete = false;
-    for (let page = 1; page <= 20; page++) {
-      const res = await fetchImpl(
-        `${API_BASE}/iam/v1alpha1/ssh-keys?page_size=100&page=${page}${
-          projectId ? `&project_id=${projectId}` : ''
-        }`,
-      );
-      if (!res.ok) break;
-      const data = (await res.json()) as { ssh_keys?: Array<{ id: string; name?: string }> };
-      const pageItems = data.ssh_keys ?? [];
-      keys.push(...pageItems);
-      if (pageItems.length < 100) {
-        complete = true;
-        break;
-      }
-    }
+    const { items: keys, complete } = await walkProviderPages<{ id: string; name?: string }>(
+      'scaleway-page-size',
+      `${API_BASE}/iam/v1alpha1/ssh-keys${projectId ? `?project_id=${projectId}` : ''}`,
+      // A fetch error goes to the catch below, which names it.
+      { key: 'ssh_keys', perPage: 100, fetchImpl, onThrow: 'throw' },
+    );
     if (!complete) markIncomplete('ssh-key list');
     for (const sshKey of keys) {
       if (!sshKey.name?.startsWith(projectName)) continue;

@@ -101,6 +101,25 @@ const REGISTRY = [
     ],
   },
   {
+    // One page walker for the harness, in each provider's pagination
+    // dialect, that never says `complete` unless the provider said there is
+    // no next page. The sweeps, preflight and verify-scale each had their
+    // own loops, and three of the sweeps' called a listing that ran out of
+    // page budget complete. The pagination tripwire
+    // (list-endpoint-pagination-sweep.test.ts) recognises a call to it.
+    helper: 'walkProviderPages',
+    definition: 'tests/e2e/utils/provider-pages.ts',
+    consumers: [
+      'tests/e2e/utils/preflight.ts', // project-clean checks
+      'tests/e2e/utils/sweep-digitalocean.ts', // firewalls, keys, load balancers, VPCs, reserved IPs, tags
+      'tests/e2e/utils/sweep-linode.ts', // the same, and the bucket listing
+      'tests/e2e/utils/sweep-vultr.ts', // cursor walks
+      'tests/e2e/utils/sweep-scaleway.ts', // per-zone and page_size walks
+      'tests/e2e/utils/server-types.ts', // verify-scale's server-type snapshot
+    ],
+    deepTests: ['tests/unit/e2e/provider-pages.test.ts', 'tests/unit/e2e/sweep-page-guard.test.ts'],
+  },
+  {
     helper: 'e2eCliEnv',
     definition: 'tests/e2e/utils/e2e-env.js',
     consumers: [

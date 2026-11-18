@@ -37,6 +37,7 @@
  * the k8s tier, kept now so the family stays uniform.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { walkProviderPages } from './provider-pages.js';
 import { bucketSource, createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 
 /**
@@ -237,33 +238,8 @@ export async function sweepOrphanedVultrResources(
   // Cursor pagination (header note 1): each response carries the next
   // page's opaque cursor at `meta.links.next`, empty string when the walk is
   // done. The ≤20-page guard matches the sibling sweeps.
-  const walkPages = async <T>(
-    path: string,
-    key: string,
-  ): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    let cursor = '';
-    for (let guard = 0; guard < 20; guard++) {
-      let data: Record<string, unknown>;
-      try {
-        const url =
-          `${API_BASE}${path}?per_page=100` +
-          (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-        const res = await fetchImpl(url);
-        if (!res.ok) return { items, complete: false };
-        data = (await res.json()) as Record<string, unknown>;
-      } catch {
-        return { items, complete: false };
-      }
-      if (Array.isArray(data[key])) items.push(...(data[key] as T[]));
-      const next = (data.meta as { links?: { next?: string } } | undefined)?.links?.next;
-      if (!next) return { items, complete: true };
-      cursor = next;
-    }
-    // The guard ran out with a next page still pending: residue past it was
-    // never read, so the listing is incomplete (as sweep-scaleway.ts answers).
-    return { items, complete: false };
-  };
+  const walkPages = <T>(path: string, key: string) =>
+    walkProviderPages<T>('vultr', `${API_BASE}${path}`, { key, perPage: 100, fetchImpl });
 
   try {
     const { items, complete } = await walkPages<{ id: string; description?: string }>(
