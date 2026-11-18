@@ -27,8 +27,9 @@ import {
   requireEnvOperatorIpAccess,
   requireOperatorIpAccess,
 } from '../../../src/lib/operator-ip-gate.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
+const SRC = join(REPO_ROOT, 'src');
 const base = {
   projectConfig: { projectName: 'demo' },
   environment: 'production',

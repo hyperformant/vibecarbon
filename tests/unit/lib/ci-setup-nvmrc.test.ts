@@ -29,11 +29,12 @@ import {
   installWorkflowFile,
 } from '../../../src/lib/ci-setup.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const WORKFLOW_REL = '.github/workflows/vibecarbon-build.yml';
 const NVMRC_REL = '.nvmrc';
 /** What the CLI ships — the generated project's .nvmrc must match it byte for byte. */
-const TEMPLATE_NVMRC = readFileSync(join(process.cwd(), 'carbon', '.nvmrc'), 'utf-8');
+const TEMPLATE_NVMRC = readRepoFile('carbon', '.nvmrc');
 
 describe('ci-setup: .nvmrc install + commit gating', () => {
   let project: string;

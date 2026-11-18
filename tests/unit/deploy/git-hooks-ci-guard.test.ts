@@ -15,8 +15,9 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const HOOKS = join(process.cwd(), 'git-hooks');
+const HOOKS = join(REPO_ROOT, 'git-hooks');
 
 describe('git hooks', () => {
   const hooks = readdirSync(HOOKS);
@@ -64,8 +65,7 @@ describe('git hooks', () => {
  * test.yml is green for that commit.
  */
 describe('npm lifecycle gates', () => {
-  const scripts = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf-8'))
-    .scripts as Record<string, string>;
+  const scripts = JSON.parse(readRepoFile('package.json')).scripts as Record<string, string>;
   const GATE = /pnpm\s+(test:unit|test:integration|lint|test:prepush)/;
   const gated = Object.entries(scripts).filter(
     ([name, body]) =>

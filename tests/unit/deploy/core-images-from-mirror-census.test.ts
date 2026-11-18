@@ -33,7 +33,7 @@
  * namespace confusion), asserted at the bottom against K3S_VERSION.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { parseAst } from 'vite';
@@ -64,20 +64,19 @@ import {
   traefikImageRef,
   upstreamRef,
 } from '../../../src/lib/images.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const gitFiles = (...pathspecs: string[]) =>
   execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...pathspecs],
-    { cwd: ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8' },
   )
     .split('\n')
-    .filter((f) => f && existsSync(join(ROOT, f)));
+    .filter((f) => f && existsSync(join(REPO_ROOT, f)));
 
 const MIRROR_PREFIX = 'ghcr.io/hyperformant/';
-const ADDONS = (JSON.parse(read('services/index.json')) as Array<{ name: string }>).map(
+const ADDONS = (JSON.parse(readRepoFile('services/index.json')) as Array<{ name: string }>).map(
   (s) => s.name,
 );
 
@@ -120,7 +119,7 @@ const CLOUD_INIT_FILES = gitFiles('carbon/cloud-init');
 const SRC_FILES = gitFiles('src').filter((f) => /\.m?js$/.test(f));
 
 /** `image:` values plus every digest-pinned token, comments skipped. */
-function textSites(rel: string, text = read(rel)): Site[] {
+function textSites(rel: string, text = readRepoFile(rel)): Site[] {
   const out: Site[] = [];
   text.split('\n').forEach((line, i) => {
     if (/^\s*#/.test(line)) return;
@@ -152,7 +151,7 @@ function walk(node: Node, fn: (n: Node) => void) {
 }
 
 /** String literals and template chunks in a JS source, as image sites. */
-function jsSites(rel: string, text = read(rel)): Site[] {
+function jsSites(rel: string, text = readRepoFile(rel)): Site[] {
   const out: Site[] = [];
   walk(parseAst(text), (n) => {
     let value: string | undefined;
@@ -234,8 +233,8 @@ const fillImages = (text: string) =>
 type ComposeDoc = { services?: Record<string, { image?: string }> };
 // Compose's `!reset` / `!override` merge tags mean nothing to js-yaml; drop them.
 const composeServices = (rel: string) =>
-  (loadYaml(fillImages(read(rel)).replace(/!(?:reset|override)\b/g, '')) as ComposeDoc).services ??
-  {};
+  (loadYaml(fillImages(readRepoFile(rel)).replace(/!(?:reset|override)\b/g, '')) as ComposeDoc)
+    .services ?? {};
 const PROD_IMAGES = Object.fromEntries(
   Object.entries(composeServices('carbon/docker-compose.prod.yml'))
     .filter(([, svc]) => svc?.image)
@@ -247,14 +246,14 @@ const SERVER_OVERRIDDEN_BASE_REFS = new Set(
     .map(([, svc]) => svc.image as string),
 );
 const composeSites = (f: string) =>
-  textSites(f, fillImages(read(f))).filter(
+  textSites(f, fillImages(readRepoFile(f))).filter(
     (s) => !(f === 'carbon/docker-compose.yml' && SERVER_OVERRIDDEN_BASE_REFS.has(s.ref)),
   );
 
 const ALL_SITES = [
   ...JS_EVALUATED,
   ...COMPOSE_FILES.flatMap(composeSites),
-  ...K8S_FILES.flatMap((f) => textSites(f, fillImages(read(f)))),
+  ...K8S_FILES.flatMap((f) => textSites(f, fillImages(readRepoFile(f)))),
   ...CLOUD_INIT_FILES.flatMap((f) => textSites(f)),
   ...SRC_FILES.flatMap((f) => jsSites(f)),
 ];
@@ -366,7 +365,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh', 'linode-master-init.sh'];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
-    const k3sVersion = read('src/lib/images.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
+    const k3sVersion = readRepoFile('src/lib/images.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
     expect(k3sVersion, 'bump K3S_IMAGES_TXT from the new release’s k3s-images.txt').toBe(
       K3S_IMAGES_TXT.version,
     );
@@ -391,13 +390,13 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   });
 
   it('the registries.yaml snippet mirrors ONLY the alias onto ghcr, rewriting exactly those repos', () => {
-    const doc = loadYaml(`mirrors:\n${read(SNIPPET)}`) as {
+    const doc = loadYaml(`mirrors:\n${readRepoFile(SNIPPET)}`) as {
       mirrors: Record<string, unknown>;
     };
     expect(doc.mirrors).toEqual({ [K3S_SYSTEM_REGISTRY]: EXPECTED_ALIAS_MIRROR });
     // Nothing a shell would expand: the DO scripts write registries.yaml
     // through an UNQUOTED heredoc.
-    expect(read(SNIPPET)).not.toMatch(/[`\\]|\$[\w{(]/);
+    expect(readRepoFile(SNIPPET)).not.toMatch(/[`\\]|\$[\w{(]/);
   });
 
   it.each(SERVER_SCRIPTS)('%s runs k3s with the alias as its system default registry', (name) => {

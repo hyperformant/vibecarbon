@@ -1,11 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { composeBackupCmd } from '../../../src/lib/deploy/compose/index.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const SCRIPT_PATH = fileURLToPath(
-  new URL('../../../carbon/backup/compose-backup.sh', import.meta.url),
-);
+const SCRIPT_PATH = join(REPO_ROOT, 'carbon/backup/compose-backup.sh');
 
 describe('composeBackupCmd', () => {
   it('routes through compose-backup.sh with an explicit RETAIN binding to bash', () => {

@@ -21,20 +21,20 @@
  *
  * Every container and network here is named vctest-* and removed in afterAll.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { K3S_SYSTEM_REGISTRY, k3sVersion, traefikImageRef } from '../../../src/lib/images.js';
 import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const describeDocker =
   process.env.DOCKER_INTEGRATION === 'true' && process.env.VC_K3S_VERSION
     ? describe
     : describe.skip;
 
-const ROOT = process.cwd();
 const VERSION = process.env.VC_K3S_VERSION || k3sVersion();
 const IMAGE = `rancher/k3s:${VERSION.replace('+', '-')}`;
 const TRAEFIK_TAG = (process.env.VC_TRAEFIK_IMAGE || traefikImageRef()).match(
@@ -53,10 +53,7 @@ const kubectl = (...args: string[]) => must('docker', ['exec', NODE, 'kubectl', 
 
 /** registries.yaml as master-init.sh writes it, with the same snippet. */
 function registriesYaml() {
-  const snippet = readFileSync(
-    join(ROOT, 'carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml'),
-    'utf-8',
-  );
+  const snippet = readRepoFile('carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml');
   return `mirrors:\n${snippet}`;
 }
 
@@ -75,10 +72,12 @@ describeDocker(`k3s ${VERSION} with the flags in master-init.sh`, () => {
       '10.0.1.254',
       NET,
     ]);
-    const flags = k3sServerFlags(
-      readFileSync(join(ROOT, 'carbon/cloud-init/k3s/master-init.sh'), 'utf-8'),
-      { k3s_token: 'vctest', floating_ip: NODE_IP, PUBLIC_IP: NODE_IP, PRIVATE_IFACE: 'eth0' },
-    );
+    const flags = k3sServerFlags(readRepoFile('carbon/cloud-init/k3s/master-init.sh'), {
+      k3s_token: 'vctest',
+      floating_ip: NODE_IP,
+      PUBLIC_IP: NODE_IP,
+      PRIVATE_IFACE: 'eth0',
+    });
     must('docker', [
       'run',
       '-d',
@@ -183,9 +182,8 @@ describeDocker(`k3s ${VERSION} with the flags in master-init.sh`, () => {
   it(
     'the Traefik CRDs of the Traefik about to go out install',
     () => {
-      const kustomization = readFileSync(
-        join(ROOT, 'carbon/k8s/infra/traefik-crds/kustomization.yaml'),
-        'utf-8',
+      const kustomization = readRepoFile(
+        'carbon/k8s/infra/traefik-crds/kustomization.yaml',
       ).replaceAll('{{TRAEFIK_VERSION}}', TRAEFIK_TAG);
       must('docker', ['exec', NODE, 'mkdir', '-p', '/tmp/traefik-crds']);
       must(

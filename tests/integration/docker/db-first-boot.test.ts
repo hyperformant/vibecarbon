@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { listDockerNetworks, pickFreeSubnetPrefix } from '../../../src/lib/subnet.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * First boot of the db image with the backup bucket UNREACHABLE.
@@ -27,7 +28,6 @@ import { listDockerNetworks, pickFreeSubnetPrefix } from '../../../src/lib/subne
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
-const ROOT = process.cwd();
 const PROJECT = `vcfirstboot${process.pid}`;
 const IMAGE = 'vibecarbon-db-first-boot';
 const TAG = String(process.pid);
@@ -43,14 +43,20 @@ describeDocker('db image first boot with an unreachable backup bucket', () => {
     compose(['exec', '-T', 'db', 'psql', '-U', 'postgres', '-tAc', sql]).trim();
 
   beforeAll(() => {
-    run('docker', ['build', '-q', '-t', `${IMAGE}:${TAG}`, join(ROOT, 'docker', 'postgres-walg')]);
+    run('docker', [
+      'build',
+      '-q',
+      '-t',
+      `${IMAGE}:${TAG}`,
+      join(REPO_ROOT, 'docker', 'postgres-walg'),
+    ]);
     dir = mkdtempSync(join(tmpdir(), 'vc-db-first-boot-'));
-    copyFileSync(join(ROOT, 'carbon', 'docker-compose.yml'), join(dir, 'docker-compose.yml'));
+    copyFileSync(join(REPO_ROOT, 'carbon', 'docker-compose.yml'), join(dir, 'docker-compose.yml'));
     mkdirSync(join(dir, 'volumes', 'db'), { recursive: true });
     mkdirSync(join(dir, 'db', 'migrations'), { recursive: true });
     for (const script of ['wal-archive.sh', 'db-guard.sh']) {
       copyFileSync(
-        join(ROOT, 'carbon', 'volumes', 'db', script),
+        join(REPO_ROOT, 'carbon', 'volumes', 'db', script),
         join(dir, 'volumes', 'db', script),
       );
     }

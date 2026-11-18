@@ -20,11 +20,11 @@
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { writePnpmWorkspaceSettings } from '../../../src/lib/package-manager.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const REPO_ROOT = resolve(__dirname, '../../..');
 const CARBON = join(REPO_ROOT, 'carbon');
 
 // Resolved from OUTSIDE the repo on purpose: the temp project below has no

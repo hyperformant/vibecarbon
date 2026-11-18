@@ -25,12 +25,10 @@
  * class.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const SCAN_ROOTS = ['src', 'tests/e2e', 'scripts'];
 
 /** Flags kubectl accepts only AFTER the verb. */

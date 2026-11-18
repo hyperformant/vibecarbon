@@ -16,12 +16,9 @@
  * never walked.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const GUARD = 'src/lib/deploy/failover-guard.js';
 
 /**
@@ -127,13 +124,13 @@ function srcFiles() {
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
     {
-      cwd: REPO,
+      cwd: REPO_ROOT,
       encoding: 'utf-8',
     },
   )
     .split('\n')
     .filter((f) => f.endsWith('.js'));
-  return listed.map((path) => ({ path, text: readFileSync(join(REPO, path), 'utf-8') }));
+  return listed.map((path) => ({ path, text: readRepoFile(path) }));
 }
 
 describe('census: promotion is never inferred from pg_is_in_recovery() alone', () => {
@@ -212,7 +209,7 @@ describe('census: promotion is never inferred from pg_is_in_recovery() alone', (
   });
 
   it('the guard owns readReplicaState', () => {
-    const guard = readFileSync(join(REPO, GUARD), 'utf-8');
+    const guard = readRepoFile(GUARD);
     expect(guard).toMatch(/export async function readReplicaState\b/);
   });
 });

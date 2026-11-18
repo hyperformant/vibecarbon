@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 // Regression guard for e2e run 29177112956 (compose scale + compose-ha deploy
 // both failed with `error while removing network … has active endpoints`).
@@ -26,9 +26,8 @@ import { describe, expect, it } from 'vitest';
 // var name AND default — must stay IDENTICAL across the base subnet, the
 // observability Traefik ipv4_address, and GF_AUTH_PROXY_WHITELIST, or overlay
 // subsets diverge again / Grafana trusts the wrong IP.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const BASE = join(repoRoot, 'carbon/docker-compose.yml');
-const OBS = join(repoRoot, 'services/observability/compose/docker-compose.yml');
+const BASE = join(REPO_ROOT, 'carbon/docker-compose.yml');
+const OBS = join(REPO_ROOT, 'services/observability/compose/docker-compose.yml');
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose ${VAR:-default} placeholder, not a JS template
 const PREFIX_EXPR = '${DEV_SUBNET_PREFIX:-172.30.0}';
 

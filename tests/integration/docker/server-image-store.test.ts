@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 // A compose server's Docker daemon config, run for real: every distinct
 // /etc/docker/daemon.json the compose user data writes
@@ -31,8 +31,6 @@ import { dockerRunner, waitFor } from '../../_shared/docker-sync.js';
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(HERE, '../../..');
 // .github/workflows/docker-newest.yml sets this to the newest Docker.
 const DIND_IMAGE = process.env.VC_DIND_IMAGE || 'docker:29-dind';
 const REGISTRY_IMAGE = 'registry:3.1.2';

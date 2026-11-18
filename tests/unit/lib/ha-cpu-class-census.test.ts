@@ -26,13 +26,10 @@
  * Structure follows configure-standby-replication-callers-census.test.ts.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const RESOLVER = 'resolveServerTypeForRegion';
 const STAND_IN = 'standbyStandIn';
 
@@ -218,15 +215,13 @@ function walkedFiles() {
   const listed = execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', 'src', 'scripts', 'tests/e2e'],
-    { cwd: REPO, encoding: 'utf-8' },
+    { cwd: REPO_ROOT, encoding: 'utf-8' },
   );
   return listed
     .split('\n')
     .filter((f) => /\.(m?js|ts)$/.test(f))
-    .map((path) => ({ path, text: readFileSync(join(REPO, path), 'utf-8') }));
+    .map((path) => ({ path, text: readRepoFile(path) }));
 }
-
-const read = (path: string) => readFileSync(join(REPO, path), 'utf-8');
 
 describe('HA sizes census: no price-only standby resolution outside the pickers', () => {
   const files = walkedFiles();
@@ -271,7 +266,9 @@ describe('HA sizes census: no price-only standby resolution outside the pickers'
     ['tests/e2e/utils/region-resolver.ts', ['haRoleSets']],
   ])('%s sizes HA through %j', (path, pickers) => {
     for (const picker of pickers) {
-      expect(callsOf(path, read(path), picker), `${path} calls ${picker}`).toBeGreaterThan(0);
+      expect(callsOf(path, readRepoFile(path), picker), `${path} calls ${picker}`).toBeGreaterThan(
+        0,
+      );
     }
   });
 

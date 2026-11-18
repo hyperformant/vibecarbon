@@ -14,10 +14,9 @@
  *   skipped for want of keys only when the entry moves (a kept entry keeps
  *   its buckets for the rerun).
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkS3CredentialMismatch } from '../../../src/lib/destroy/s3-credential-check.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const HETZNER_KEYS: [string, string] = ['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY'];
 const BOTH_SET = { HETZNER_ACCESS_KEY: 'ak', HETZNER_SECRET_KEY: 'sk' };
@@ -399,7 +398,7 @@ describe('a backups bucket other environments keep backups in', () => {
 
 describe('destroy wires the check to the app bucket rule it applies', () => {
   it('passes ownsAppBucket, the rule deleteAppBucketEffect deletes by', () => {
-    const src = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
+    const src = readRepoFile('src/destroy.js');
     const at = src.indexOf('checkS3CredentialMismatch({');
     expect(at).toBeGreaterThan(-1);
     const call = src.slice(at, src.indexOf('})', at));
@@ -408,7 +407,7 @@ describe('destroy wires the check to the app bucket rule it applies', () => {
   });
 
   it('passes the stacks the plan opens and the holders handleBackupBucket keeps the bucket for', () => {
-    const src = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
+    const src = readRepoFile('src/destroy.js');
     const at = src.indexOf('checkS3CredentialMismatch({');
     const call = src.slice(at, src.indexOf('})) {', at));
     expect(call).toContain('environment: envName,');

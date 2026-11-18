@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // A compose-HA failover persists the swap by flipping the `role` FIELD on
 // servers[]: array order, entry names, and the Pulumi stack names are all
@@ -497,7 +496,7 @@ describe('failover recovery instructions', () => {
   });
 
   it('is what failoverComposeHA prints — the old "Redeploy to update configuration" is gone', () => {
-    const haSource = readFileSync(join(process.cwd(), 'src/lib/deploy/compose/ha.js'), 'utf-8');
+    const haSource = readRepoFile('src/lib/deploy/compose/ha.js');
     // Scope to the render region (everything failoverComposeHA emits after the
     // success line) so an import alone can't satisfy the pin — the CALL has to
     // be where the instructions are actually printed.
@@ -531,7 +530,7 @@ describe('standby resync hint (restore.js post-restore re-seed)', () => {
   });
 
   it('is the hint restore.js actually renders', () => {
-    const restoreSource = readFileSync(join(process.cwd(), 'src/restore.js'), 'utf-8');
+    const restoreSource = readRepoFile('src/restore.js');
     expect(restoreSource).toContain('composeHaStandbyResyncHint({');
     expect(restoreSource).not.toContain('to resync the standby.`');
   });

@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * The variable the docs tell you to put a provider's API token in is the one
@@ -23,9 +24,7 @@ const { buildEnv } = await import('../../../src/lib/iac/index.js');
 const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
   P.SUPPORTED_TIERS.includes('k8s'),
 );
-const ROOT = process.cwd();
-const read = (path: string) => readFileSync(join(ROOT, path), 'utf-8');
-const SECURITY = read('docs/security.md');
+const SECURITY = readRepoFile('docs/security.md');
 /** The token's row in the infrastructure secrets table. */
 const ROW = SECURITY.split('\n').find((line) => line.startsWith('| `HETZNER_API_TOKEN`')) ?? '';
 /** The rotation steps, heading to the next section. */
@@ -116,9 +115,9 @@ describe('docs/security.md names the variable each deploy reads', () => {
 });
 
 describe('no doc tells you to set a token variable the deploy does not read', () => {
-  const docs = readdirSync(join(ROOT, 'docs'))
+  const docs = readdirSync(join(REPO_ROOT, 'docs'))
     .filter((name) => name.endsWith('.md'))
-    .map((name) => [`docs/${name}`, read(`docs/${name}`)] as const);
+    .map((name) => [`docs/${name}`, readRepoFile(`docs/${name}`)] as const);
 
   it.each(K8S_PROVIDERS)('%s: no "export" or "stored as" of the Pulumi variable', (_id, P) => {
     for (const [path, text] of docs) {

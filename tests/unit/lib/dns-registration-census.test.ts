@@ -17,13 +17,12 @@
  *     shipped without deleteApexAndWildcard (wildcard-orphan class).
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DNS_PROVIDERS, getDnsProvider } from '../../../src/lib/dns-provider.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const LIB_DIR = fileURLToPath(new URL('../../../src/lib', import.meta.url));
+const LIB_DIR = join(REPO_ROOT, 'src/lib');
 
 // The uniform surface every backend must export as functions. Extras
 // (verifyToken, deleteHealthCheck, getZone, getRrsets, ...) are allowed —
@@ -69,19 +68,18 @@ describe('providers manage A records only', () => {
   });
 
   it('nothing under src/ or carbon/ names an _acme-challenge record or the DNS01_PROVIDERS table', () => {
-    const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
     const walk = (dir: string, exts: string[]): string[] =>
       sourceFiles(dir, { exts, skip: ['node_modules'] });
-    const src = walk(join(ROOT, 'src'), ['.js']);
+    const src = walk(join(REPO_ROOT, 'src'), ['.js']);
     expect(src.length).toBeGreaterThan(100);
     // The template's compose files and scripts: a DNS-01 rationale in a
     // comment there is as stale as one in the CLI.
-    const carbon = walk(join(ROOT, 'carbon'), ['.yml', '.yaml', '.js', '.mjs']);
+    const carbon = walk(join(REPO_ROOT, 'carbon'), ['.yml', '.yaml', '.js', '.mjs']);
     expect(carbon.length).toBeGreaterThan(5);
     const hits = [...src, ...carbon].filter((f) =>
       /_acme-challenge|DNS01_PROVIDERS/.test(readFileSync(f, 'utf8')),
     );
-    expect(hits.map((f) => f.slice(ROOT.length))).toEqual([]);
+    expect(hits.map((f) => relative(REPO_ROOT, f))).toEqual([]);
   });
 });
 

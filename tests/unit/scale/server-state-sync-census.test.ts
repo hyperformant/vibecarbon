@@ -15,13 +15,9 @@
  *   - deploy repairs pending syncs before it runs any plan (and so any `up`);
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const read = (f: string) => readFileSync(join(ROOT, f), 'utf-8');
 const isComment = (l: string) => /^\s*(\/\/|\*|\/\*)/.test(l);
 const code = (text: string) =>
   text
@@ -32,7 +28,7 @@ const code = (text: string) =>
 const srcFiles = spawnSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
-  { cwd: ROOT, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .stdout.split('\n')
   .filter((f) => f.endsWith('.js'))
@@ -40,7 +36,7 @@ const srcFiles = spawnSync(
 
 /** Top-level functions: a column-0 `function` line up to the next column-0 `}`. */
 function topLevelFunctions(file: string) {
-  const lines = read(file).split('\n');
+  const lines = readRepoFile(file).split('\n');
   const out: { id: string; name: string; body: string }[] = [];
   lines.forEach((l, i) => {
     const m = /^(?:export\s+)?(?:async\s+)?function\s*\*?\s*(\w+)\s*\(/.exec(l);
@@ -62,7 +58,7 @@ describe('servers created or deleted outside Pulumi are followed by the state sy
   });
 
   it('every delete of the server the stack names records the sync first and runs it after', () => {
-    const scale = code(read('src/scale.js'));
+    const scale = code(readRepoFile('src/scale.js'));
     const oldDeletes = scale.match(/provider\.deleteServer\(server\.id\)/g) ?? [];
     // The primary arm's (finishComposeCutover) and the standby arm's.
     expect(oldDeletes).toHaveLength(2);
@@ -96,14 +92,14 @@ describe('servers created or deleted outside Pulumi are followed by the state sy
   });
 
   it('every other scale delete removes a replacement the stack never knew', () => {
-    const scale = code(read('src/scale.js'));
+    const scale = code(readRepoFile('src/scale.js'));
     const all = scale.match(/\.deleteServer\([^)]*\)/g) ?? [];
     const others = all.filter((d) => d !== '.deleteServer(server.id)');
     expect(others).toEqual(['.deleteServer(newServerId)', '.deleteServer(newServerId)']);
   });
 
   it('deploy repairs pending syncs on the compose tiers before it runs any plan', () => {
-    const orch = code(read('src/lib/deploy/orchestrator.js'));
+    const orch = code(readRepoFile('src/lib/deploy/orchestrator.js'));
     const repair = orch.indexOf('await repairPendingServerState(');
     expect(repair).toBeGreaterThan(-1);
     expect(orch.slice(Math.max(0, repair - 300), repair)).toMatch(
@@ -114,10 +110,12 @@ describe('servers created or deleted outside Pulumi are followed by the state sy
   });
 
   it('compose-ha deploy knows whether -server-type was given (the per-stack type rule reads it)', () => {
-    const orch = code(read('src/lib/deploy/orchestrator.js'));
+    const orch = code(readRepoFile('src/lib/deploy/orchestrator.js'));
     const haCtx = orch.slice(orch.indexOf('const composeHaCtx = {'));
     expect(haCtx.slice(0, haCtx.indexOf('};'))).toMatch(/serverTypeRequested: !!args\.serverType,/);
-    expect(code(read('src/lib/deploy/effects/compose-ha.js'))).toMatch(/ctx\.serverTypeRequested/);
+    expect(code(readRepoFile('src/lib/deploy/effects/compose-ha.js'))).toMatch(
+      /ctx\.serverTypeRequested/,
+    );
   });
 
   it('scale resolves the backend after the token prompt and before anything moves', () => {

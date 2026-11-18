@@ -23,6 +23,7 @@ vi.mock('../../../src/lib/dns-provider.js', async (importOriginal) => {
   return { ...actual, getDnsProvider };
 });
 
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { verifyDnsFlip } from '../../e2e/checks/ha-integrity.js';
 import { hcloudChildEnv } from '../../e2e/utils/compute-token.js';
 
@@ -75,7 +76,7 @@ describe('hcloudChildEnv', () => {
 });
 
 describe('census: no Hetzner-named token on provider-neutral paths', () => {
-  const root = join(__dirname, '../../e2e');
+  const root = join(REPO_ROOT, 'tests/e2e');
   const lifecycle = readFileSync(join(root, 'scenarios/_run-lifecycle.ts'), 'utf-8');
   const runner = readFileSync(join(root, 'runner.ts'), 'utf-8');
   const collector = readFileSync(join(root, 'metrics/collector.ts'), 'utf-8');

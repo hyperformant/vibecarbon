@@ -4,11 +4,10 @@
  * pin the structure): the export exists, setupReplication delegates to it,
  * and the primaryConfigured flag short-circuits it.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/ha/index.js'), 'utf-8');
+const src = readRepoFile('src/lib/deploy/k8s/ha/index.js');
 
 describe('configurePrimaryForReplication', () => {
   it('is exported and owns the primary-side perf slices', () => {
@@ -52,10 +51,7 @@ describe('configurePrimaryForReplication', () => {
 });
 
 describe('fan-out chaining + streaming fast-path', () => {
-  const effects = readFileSync(
-    join(__dirname, '../../../src/lib/deploy/effects/k8s-ha.js'),
-    'utf-8',
-  );
+  const effects = readRepoFile('src/lib/deploy/effects/k8s-ha.js');
 
   it('early prep chains transport → primary completion → primary config, opportunistically', () => {
     const prep = effects.slice(effects.indexOf('const transportPrep'));

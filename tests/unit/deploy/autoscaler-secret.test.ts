@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { carbonAutoscalerSecretYaml } from '../../../src/lib/deploy/k8s/autoscaler-secret.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('carbonAutoscalerSecretYaml', () => {
   it('is the kube-system Secret with each value JSON-quoted on its own line', () => {
@@ -21,9 +22,8 @@ describe('carbonAutoscalerSecretYaml', () => {
   });
 
   it('both writers build it here: deploy and the scale re-patch', async () => {
-    const { readFileSync } = await import('node:fs');
     for (const f of ['src/lib/deploy/k8s/k3s.js', 'src/scale.js']) {
-      const src = readFileSync(new URL(`../../../${f}`, import.meta.url), 'utf8');
+      const src = readRepoFile(`${f}`);
       expect(src, f).toContain('carbonAutoscalerSecretYaml({');
       expect(src, f).not.toContain("'  name: carbon-autoscaler-config',");
     }

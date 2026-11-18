@@ -32,6 +32,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import {
   enclosingBracket,
   enclosingFunctionName,
@@ -41,7 +42,6 @@ import {
   STRING,
 } from '../helpers/js-call-scan.js';
 
-const ROOT = join(__dirname, '../../..');
 const ROOTS = [
   'src/lib/deploy',
   'src/lib/iac',
@@ -229,7 +229,7 @@ function census(root: string) {
 const label = (s: Site) => `${s.file}:${s.line} ${s.fn} (${s.what})`;
 
 describe('census: every kubectl call that reaches a pod has a bound', () => {
-  const found = census(ROOT);
+  const found = census(REPO_ROOT);
 
   it('every pod call names a timeout', () => {
     expect(found.unbounded.map(label)).toEqual([]);
@@ -269,7 +269,7 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
     expect(new Set(sites.map((s) => `${s.file}:${s.fn}`))).toEqual(
       new Set(Object.keys(BOUND_BY_SCRIPT)),
     );
-    const backup = readFileSync(join(ROOT, 'src/backup.js'), 'utf-8');
+    const backup = readRepoFile('src/backup.js');
     expect(backup).toMatch(
       /\$\{jobPodDiagnostics\(jobName, \{[^}]{0,160}\}\)\}`,\s*\{ timeout: 90_000 \}/,
     );
@@ -280,17 +280,17 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
     expect(backup).toMatch(
       /buildBackupJobWaitScript\(jobName\), \{[\s\S]{0,120}BACKUP_JOB_ACTIVE_DEADLINE_S \+ JOB_DEADLINE_GRACE_S \+ 120/,
     );
-    const ha = readFileSync(join(ROOT, 'src/lib/deploy/k8s/ha/index.js'), 'utf-8');
+    const ha = readRepoFile('src/lib/deploy/k8s/ha/index.js');
     expect(ha).toContain('exec(primaryIp, script, undefined, POD_EXEC_QUERY_MS)');
   });
 
   it('the runners it trusts really do bind what they run', () => {
-    const orchestrator = readFileSync(join(ROOT, 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const orchestrator = readRepoFile('src/lib/deploy/orchestrator.js');
     expect(orchestrator).toMatch(/const safeRun = async[\s\S]{0,160}timeout: 30_000/);
     expect(orchestrator).toMatch(
       /const kube = \([\s\S]{0,80}?\) =>\s*kcExists \? safeRun\('kubectl', \['--kubeconfig', kubeconfig, \.\.\.argv\]\)/,
     );
-    const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const runner = k3s.slice(k3s.indexOf('export async function runDeployDiagnostic('));
     expect(runner.slice(0, runner.indexOf('catch (err)'))).toContain(
       'timeout: DIAGNOSTIC_TIMEOUT_MS',

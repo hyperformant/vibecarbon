@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('C-4: restore.js uses tar safety flags', () => {
   // GNU tar strips leading `/` by default — the unsafe opt-in is `-P` /
@@ -10,7 +9,7 @@ describe('C-4: restore.js uses tar safety flags', () => {
   // real GNU tar option and fails at extraction time.)
 
   it('restore.js tar invocations include --no-xattrs and --no-same-owner, never --absolute-names', () => {
-    const src = readFileSync(join(process.cwd(), 'src', 'restore.js'), 'utf-8');
+    const src = readRepoFile('src', 'restore.js');
     const tarInvocations = src.match(/tar[\s\S]{0,200}(xzf|-xzf)/g) || [];
     for (const inv of tarInvocations) {
       expect(inv).toContain('--no-xattrs');
@@ -21,17 +20,14 @@ describe('C-4: restore.js uses tar safety flags', () => {
   });
 
   it('restore.js uses argv-form sshRun for tar extraction of untrusted remotePath', () => {
-    const src = readFileSync(join(process.cwd(), 'src', 'restore.js'), 'utf-8');
+    const src = readRepoFile('src', 'restore.js');
     // The primary extraction (line ~165) must use sshRun with argv form.
     // Check that the old sshExec string-form tar call is gone.
     expect(src).not.toMatch(/sshExec\([^)]+`[^`]*tar\s+xzf\s+\$\{remotePath\}/);
   });
 
   it('compose/index.js tar invocations include --no-xattrs and --no-same-owner, never --absolute-names', async () => {
-    const src = readFileSync(
-      join(process.cwd(), 'src', 'lib', 'deploy', 'compose', 'index.js'),
-      'utf-8',
-    );
+    const src = readRepoFile('src', 'lib', 'deploy', 'compose', 'index.js');
     const tarInvocations = src.match(/tar[\s\S]{0,200}(xzf|-xzf)/g) || [];
     expect(tarInvocations.length).toBeGreaterThan(0);
     for (const inv of tarInvocations) {

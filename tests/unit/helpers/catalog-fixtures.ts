@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { getProviderClass } from '../../../src/lib/providers/index.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Dated provider catalogs for unit tests, and a loader that seeds a provider
@@ -21,7 +21,7 @@ import { getProviderClass } from '../../../src/lib/providers/index.js';
  * in the provider reaches these tests with no copy to keep in step.
  */
 
-const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), '../fixtures/catalogs');
+const FIXTURE_DIR = join(REPO_ROOT, 'tests/unit/fixtures/catalogs');
 
 // biome-ignore lint/suspicious/noExplicitAny: fixtures are untyped API JSON
 type Json = any;

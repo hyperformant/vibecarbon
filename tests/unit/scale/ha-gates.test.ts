@@ -9,12 +9,9 @@
  *     servers; k8s-ha: both clusters, since a k8s-ha scale applies to both).
  * restore gets the same journal refusal, ahead of its prompts.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { assertScaleNotRetired } from '../../../src/scale.js';
-
-const ROOT = join(__dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /** A compose-HA pair a failover swapped, not yet reconverged: 10.0.0.1 is retired. */
 const swapped = {
@@ -78,7 +75,7 @@ describe('assertScaleNotRetired', () => {
 
 describe('census: scale and restore refuse on a journal before their prompts', () => {
   const body = (file: string, from: string) => {
-    const text = readFileSync(join(ROOT, file), 'utf-8');
+    const text = readRepoFile(file);
     return text.slice(text.indexOf(from));
   };
 

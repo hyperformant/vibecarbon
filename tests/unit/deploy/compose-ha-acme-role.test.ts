@@ -38,6 +38,7 @@ import {
   restoreComposeTls,
   restoreFailoverTls,
 } from '../../../src/lib/deploy/compose/tls-restore.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { acmeJson } from './_tls-fixtures.ts';
 
@@ -55,7 +56,7 @@ describe('every Traefik caserver line honors the disarm var (census over carbon 
   // ACME_CA_SERVER, then the prod default. Any compose file that restates the
   // Traefik command (Compose replaces sequences) must keep that order; a
   // future file that adds a caserver line is drafted automatically.
-  const carbonDir = join(process.cwd(), 'carbon');
+  const carbonDir = join(REPO_ROOT, 'carbon');
   const composeFiles = readdirSync(carbonDir).filter((f) => /^docker-compose.*\.ya?ml$/.test(f));
 
   it('finds the one caserver site (the base prod file)', () => {

@@ -18,7 +18,6 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -35,13 +34,13 @@ import {
   writeComposeBackupFence,
   writeK8sBackupFence,
 } from '../../../src/lib/deploy/backup-fence.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const ARCHIVE = join(ROOT, 'carbon/volumes/db/wal-archive.sh');
-const COMPOSE_BACKUP = join(ROOT, 'carbon/backup/compose-backup.sh');
-const CRONJOB = join(ROOT, 'carbon/k8s/base/backup/cronjob.yaml');
-const WALG_ENV = join(ROOT, 'carbon/volumes/db/walg-env.sh');
+const ARCHIVE = join(REPO_ROOT, 'carbon/volumes/db/wal-archive.sh');
+const COMPOSE_BACKUP = join(REPO_ROOT, 'carbon/backup/compose-backup.sh');
+const CRONJOB = join(REPO_ROOT, 'carbon/k8s/base/backup/cronjob.yaml');
+const WALG_ENV = join(REPO_ROOT, 'carbon/volumes/db/walg-env.sh');
 const SYSID = '7699032860122738725';
 const BASE_PREFIX = 's3://bkt/backups/p/e/walg';
 
@@ -501,12 +500,12 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
 describe('census: every backup push path checks the fence first', () => {
   const PUSH = /wal-g (?:wal-push|backup-push|delete before)|"\$WALG" wal-push/;
   const walk = (dir: string): string[] =>
-    spawnSync('git', ['ls-files', dir], { cwd: ROOT, encoding: 'utf-8' })
+    spawnSync('git', ['ls-files', dir], { cwd: REPO_ROOT, encoding: 'utf-8' })
       .stdout.split('\n')
       .filter((f) => /\.(sh|ya?ml)$/.test(f));
 
   const pushFiles = walk('carbon').filter((f) =>
-    readFileSync(join(ROOT, f), 'utf-8')
+    readRepoFile(f)
       .split('\n')
       .some((l) => !/^\s*#/.test(l) && PUSH.test(l)),
   );
@@ -523,7 +522,7 @@ describe('census: every backup push path checks the fence first', () => {
   });
 
   it.each(pushFiles)('%s reads the fence object before its first push', (file) => {
-    const text = readFileSync(join(ROOT, file), 'utf-8');
+    const text = readRepoFile(file);
     const lines = text.split('\n');
     const firstPush = lines.findIndex((l) => !/^\s*#/.test(l) && PUSH.test(l));
     const fenceRead = lines.findIndex((l) => l.includes(`st cat ${BACKUP_FENCE_OBJECT}`));
@@ -548,7 +547,7 @@ describe('census: every backup push path checks the fence first', () => {
       ],
     ];
     for (const [file, promote, flip, swap] of flows) {
-      const text = readFileSync(join(ROOT, file), 'utf-8');
+      const text = readRepoFile(file);
       const body = text.slice(
         text.indexOf(
           file.endsWith('ha.js')
@@ -619,7 +618,7 @@ describe('the fence write outcome is persisted and shown', () => {
   });
 
   it('every write site records its outcome, and the deploy save carries it', () => {
-    const at = (file: string) => readFileSync(join(ROOT, file), 'utf-8');
+    const at = (file: string) => readRepoFile(file);
     expect(at('src/lib/deploy/compose/ha.js')).toMatch(
       /recordFence\(\{ environment: envName \}, fenceWrite\)/,
     );

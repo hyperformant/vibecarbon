@@ -22,6 +22,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
@@ -270,7 +271,7 @@ describe('assertDeployRestoreAllowed', () => {
   });
 
   it('the orchestrator calls it before the first skeleton save', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const call = src.indexOf('assertDeployRestoreAllowed({');
     expect(call).toBeGreaterThan(-1);
     expect(call).toBeLessThan(src.indexOf('  saveSkeletonEnv();'));
@@ -449,23 +450,17 @@ function projectDir() {
   writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
-    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+    readRepoFile('carbon/k8s/base/db/statefulset.yaml'),
   );
   mkdirSync(join(dir, 'k8s', 'base', 'backup'), { recursive: true });
   mkdirSync(join(dir, 'k8s', 'base', 'config'), { recursive: true });
   mkdirSync(join(dir, 'k8s', 'infra', 'traefik-crds'), { recursive: true });
   writeFileSync(
     join(dir, 'k8s', 'infra', 'traefik-crds', 'kustomization.yaml'),
-    readFileSync(
-      join(__dirname, '../../../carbon/k8s/infra/traefik-crds/kustomization.yaml'),
-      'utf-8',
-    ),
+    readRepoFile('carbon/k8s/infra/traefik-crds/kustomization.yaml'),
   );
   for (const f of ['backup/cronjob.yaml', 'config/configmap.yaml']) {
-    writeFileSync(
-      join(dir, 'k8s', 'base', f),
-      readFileSync(join(__dirname, '../../../carbon/k8s/base', f), 'utf-8'),
-    );
+    writeFileSync(join(dir, 'k8s', 'base', f), readRepoFile('carbon/k8s/base', f));
   }
   return dir;
 }
@@ -754,7 +749,7 @@ describe('applyK3sManifests with a restore point', () => {
   });
 
   it('deployK3s checks the marker once the cluster answers, before the image build and the k3s-apply gate', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const at = (needle: string) => {
       const i = body.indexOf(needle);
@@ -772,7 +767,7 @@ describe('applyK3sManifests with a restore point', () => {
   });
 
   it('deployK3s pushes the first base on the restored timeline once the app is up, outside the apply gate (H2b)', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const at = (needle: string) => {
       const i = body.indexOf(needle);

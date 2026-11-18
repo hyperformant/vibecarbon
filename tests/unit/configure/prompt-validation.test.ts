@@ -14,10 +14,9 @@
  * design — an exception added later without a genuine registry gap is a bug
  * in the mapping, not a legitimate exception.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registryEntry } from '../../../src/lib/config-registry.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const clackMock = vi.hoisted(() => ({
   text: vi.fn(),
@@ -231,7 +230,7 @@ describe('promptSecret — Minor fix: defers to validateOperatorValue when entry
 });
 
 describe('configure prompt-site census — every registered-key prompt validates through the registry', () => {
-  const src = readFileSync(join(process.cwd(), 'src/configure.js'), 'utf-8');
+  const src = readRepoFile('src/configure.js');
 
   /**
    * Exceptions to "every promptText()/promptSecret() call site passes

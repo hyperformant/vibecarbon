@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Failover-record TTL census (mitigation-audit cluster 6, 2026-08-16).
@@ -22,7 +23,7 @@ import { describe, expect, it } from 'vitest';
  * so a numeric HA_TTL would be meaningless there.
  */
 
-const DNS_DIR = join(process.cwd(), 'src', 'lib');
+const DNS_DIR = join(REPO_ROOT, 'src', 'lib');
 
 // `*-dns.js` matches exactly the six provider record-writers; the shared
 // helpers (dns-propagation.js, dns-provider.js) don't carry the suffix.

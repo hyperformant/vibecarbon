@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // Reader/writer mismatch guard for the compose firewall id.
 //
@@ -20,8 +18,6 @@ import { describe, expect, it } from 'vitest';
 //
 // The wire-level "does the provider actually attach it" half is covered
 // behaviorally in replacement-server-args.test.ts for both providers.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const read = (rel: string) => readFileSync(join(repoRoot, rel), 'utf-8');
 
 describe('compose firewallId survives the whole export -> persist -> read chain', () => {
   it('both compose Pulumi programs export firewallId', () => {
@@ -29,39 +25,40 @@ describe('compose firewallId survives the whole export -> persist -> read chain'
       'src/lib/iac/programs/hetzner-compose.js',
       'src/lib/iac/programs/digitalocean-compose.js',
     ]) {
-      expect(read(program), `${program} must export firewallId for scale to re-attach`).toMatch(
-        /firewallId:\s*firewall\.id/,
-      );
+      expect(
+        readRepoFile(program),
+        `${program} must export firewallId for scale to re-attach`,
+      ).toMatch(/firewallId:\s*firewall\.id/);
     }
   });
 
   it('the single-compose provision effect captures firewallId off the stack outputs', () => {
-    expect(read('src/lib/deploy/effects/index.js')).toMatch(
+    expect(readRepoFile('src/lib/deploy/effects/index.js')).toMatch(
       /providerFirewallId\s*=\s*result\.outputs\.firewallId/,
     );
   });
 
   it('the compose-ha provision effect captures firewallId for BOTH nodes', () => {
-    const src = read('src/lib/deploy/effects/compose-ha.js');
+    const src = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     expect(src).toMatch(/firewallId:\s*primaryResult\.outputs\.firewallId/);
     expect(src).toMatch(/firewallId:\s*standbyResult\.outputs\.firewallId/);
   });
 
   it('both persist paths write firewallId onto the SERVER entry', () => {
     // Single compose: orchestrator builds servers[0] from deployResult.
-    expect(read('src/lib/deploy/orchestrator.js')).toMatch(
+    expect(readRepoFile('src/lib/deploy/orchestrator.js')).toMatch(
       /deployResult\.firewallId\s*&&\s*\{\s*firewallId:\s*deployResult\.firewallId\s*\}/,
     );
     // compose-ha: one entry per node (serverEntry, built for the role primary
     // and the role standby), each with its own stack's firewall.
-    const ha = read('src/lib/deploy/effects/compose-ha.js');
+    const ha = readRepoFile('src/lib/deploy/effects/compose-ha.js');
     expect(ha).toMatch(/node\.firewallId\s*&&\s*\{\s*firewallId:\s*node\.firewallId\s*\}/);
     expect(ha).toMatch(/serverEntry\(primary,\s*'primary'/);
     expect(ha).toMatch(/serverEntry\(standby,\s*'standby'/);
   });
 
   it('scale reads it off the server entry, never off envConfig (nothing writes that)', () => {
-    const src = read('src/scale.js');
+    const src = readRepoFile('src/scale.js');
     expect(src).toMatch(/firewallId:\s*server\.firewallId/);
     // Judge CODE, not prose — the fix's own comment names the dead key.
     const code = src

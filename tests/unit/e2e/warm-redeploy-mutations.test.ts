@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import {
   mutateAppHealthRoute,
   mutateConfigMapManifest,
@@ -24,7 +25,6 @@ import {
  * reshape fails here, in the unit tier, instead of 40 minutes into an e2e run.
  */
 
-const REPO_ROOT = process.cwd();
 const TEMPLATE_MANIFEST = join(REPO_ROOT, 'carbon', WARM_REDEPLOY_MANIFEST_FILE);
 const TEMPLATE_APP = join(REPO_ROOT, 'carbon', WARM_REDEPLOY_APP_FILE);
 
@@ -140,7 +140,7 @@ describe('route path wiring', () => {
   it('the asserted public path matches where index.ts mounts the health router', () => {
     // The e2e step GETs WARM_REDEPLOY_ROUTE_URL_PATH. If the mount point in the
     // template ever moves, that GET would 404 and be misread as "stale image".
-    const indexSrc = readFileSync(join(REPO_ROOT, 'carbon/src/server/index.ts'), 'utf-8');
+    const indexSrc = readRepoFile('carbon/src/server/index.ts');
     expect(indexSrc).toContain("app.route('/api/health', healthRoutes);");
     expect(WARM_REDEPLOY_ROUTE_URL_PATH).toBe('/api/health/e2e-warm-marker');
   });

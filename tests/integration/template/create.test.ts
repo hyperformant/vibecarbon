@@ -22,6 +22,7 @@ import { gitScrubbedEnv } from '../../_shared/git-env.js';
 // runner sets — see the module doc. Without this the "default options" block
 // below tests whatever manager launched vitest, not the customer default.
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 describe('create-vibecarbon E2E', () => {
@@ -86,7 +87,7 @@ describe('create-vibecarbon E2E', () => {
       const out = execFileSync(
         'node',
         [
-          join(process.cwd(), 'src/cli.js'),
+          join(REPO_ROOT, 'src/cli.js'),
           'create',
           'shell-pass',
           '-y',
@@ -127,7 +128,7 @@ describe('create-vibecarbon E2E', () => {
     beforeAll(() => {
       // Run create-vibecarbon with -y flag (non-interactive)
       execSync(
-        `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile`,
+        `node ${join(REPO_ROOT, 'src/cli.js')} create ${projectName} -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile`,
         {
           cwd: tempDir,
           encoding: 'utf-8',
@@ -167,9 +168,7 @@ describe('create-vibecarbon E2E', () => {
       // generated project through corepack — the extra install step the npm
       // default exists to remove. A pin appearing only in the OUTPUT would
       // mean create.js started inventing one again.
-      const templatePkg = JSON.parse(
-        readFileSync(join(process.cwd(), 'carbon', 'package.json'), 'utf-8'),
-      );
+      const templatePkg = JSON.parse(readRepoFile('carbon', 'package.json'));
       expect(templatePkg.packageManager).toBeUndefined();
       const pkg = JSON.parse(readFileSync(join(projectDir(), 'package.json'), 'utf-8'));
       expect(pkg.packageManager).toBeUndefined();
@@ -288,7 +287,7 @@ describe('create-vibecarbon E2E', () => {
     it('copies binary icon assets byte-identical to the template (no UTF-8 corruption)', () => {
       // copyTemplate() runs a UTF-8 read/replace/write over template files;
       // binary assets must bypass it (isBinaryFile) or PNGs arrive corrupted.
-      const templatePublic = join(process.cwd(), 'carbon/src/client/public');
+      const templatePublic = join(REPO_ROOT, 'carbon/src/client/public');
       const projectPublic = join(projectDir(), 'src/client/public');
       for (const asset of [
         'favicon.svg',
@@ -391,7 +390,7 @@ describe('create-vibecarbon E2E', () => {
       // code whose schema never gets created
       // (docs/rca/2026-08-25-migration-drift.md).
       const dir = (root: string) => join(root, 'db/migrations');
-      const template = join(process.cwd(), 'carbon');
+      const template = join(REPO_ROOT, 'carbon');
       for (const sub of ['', 'meta']) {
         const want = readdirSync(join(dir(template), sub)).sort();
         expect(want.length).toBeGreaterThan(1);
@@ -515,7 +514,7 @@ describe('create-vibecarbon E2E', () => {
       const result = spawnSync(
         'node',
         [
-          join(process.cwd(), 'src/cli.js'),
+          join(REPO_ROOT, 'src/cli.js'),
           'create',
           gitProject,
           '-y',
@@ -717,7 +716,7 @@ describe('create-vibecarbon E2E', () => {
       const result = spawnSync(
         'node',
         [
-          join(process.cwd(), 'src/cli.js'),
+          join(REPO_ROOT, 'src/cli.js'),
           'create',
           noIdProject,
           '-y',
@@ -773,7 +772,7 @@ describe('create-vibecarbon E2E', () => {
       const result = spawnSync(
         process.execPath,
         [
-          join(process.cwd(), 'src/cli.js'),
+          join(REPO_ROOT, 'src/cli.js'),
           'create',
           noGitProject,
           '-y',
@@ -843,7 +842,7 @@ describe('create-vibecarbon E2E', () => {
       () => {
         const npmProject = 'test-e2e-npm';
         execSync(
-          `node ${join(process.cwd(), 'src/cli.js')} create ${npmProject} -y -admin-email test@e2e.local -admin-password testpass123 -pm npm -skip-lockfile`,
+          `node ${join(REPO_ROOT, 'src/cli.js')} create ${npmProject} -y -admin-email test@e2e.local -admin-password testpass123 -pm npm -skip-lockfile`,
           {
             cwd: tempDir,
             encoding: 'utf-8',
@@ -865,7 +864,7 @@ describe('create-vibecarbon E2E', () => {
       () => {
         const pnpmProject = 'test-e2e-pnpm';
         execSync(
-          `node ${join(process.cwd(), 'src/cli.js')} create ${pnpmProject} -y -admin-email test@e2e.local -admin-password testpass123 -pm pnpm -skip-lockfile`,
+          `node ${join(REPO_ROOT, 'src/cli.js')} create ${pnpmProject} -y -admin-email test@e2e.local -admin-password testpass123 -pm pnpm -skip-lockfile`,
           {
             cwd: tempDir,
             encoding: 'utf-8',
@@ -887,7 +886,7 @@ describe('create-vibecarbon E2E', () => {
       () => {
         const bunProject = 'test-e2e-bun';
         execSync(
-          `node ${join(process.cwd(), 'src/cli.js')} create ${bunProject} -y -admin-email test@e2e.local -admin-password testpass123 -pm bun -skip-lockfile`,
+          `node ${join(REPO_ROOT, 'src/cli.js')} create ${bunProject} -y -admin-email test@e2e.local -admin-password testpass123 -pm bun -skip-lockfile`,
           {
             cwd: tempDir,
             encoding: 'utf-8',
@@ -913,7 +912,7 @@ describe('create-vibecarbon E2E', () => {
     it('generates all required security secrets in .env.local', () => {
       const secretsProject = 'test-e2e-secrets';
       execSync(
-        `node ${join(process.cwd(), 'src/cli.js')} create ${secretsProject} -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile`,
+        `node ${join(REPO_ROOT, 'src/cli.js')} create ${secretsProject} -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile`,
         {
           cwd: tempDir,
           encoding: 'utf-8',
@@ -943,7 +942,7 @@ describe('create-vibecarbon E2E', () => {
     it('-display-name overrides the derived display name', () => {
       const displayProject = 'test-e2e-display';
       execSync(
-        `node ${join(process.cwd(), 'src/cli.js')} create ${displayProject} -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile -display-name "Acme Cloud"`,
+        `node ${join(REPO_ROOT, 'src/cli.js')} create ${displayProject} -y -admin-email test@e2e.local -admin-password testpass123 -skip-lockfile -display-name "Acme Cloud"`,
         {
           cwd: tempDir,
           encoding: 'utf-8',

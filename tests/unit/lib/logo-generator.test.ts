@@ -12,11 +12,9 @@ import {
   resolveSingleStoryA,
   writeLogoSvgs,
 } from '../../../src/lib/logo-generator.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ICON_SVG = readFileSync(
-  join(process.cwd(), 'carbon/src/client/assets/logo-icon.svg'),
-  'utf8',
-);
+const ICON_SVG = readRepoFile('carbon/src/client/assets/logo-icon.svg');
 const viewBoxWidth = (svg: string) => Number(svg.match(/viewBox="0 0 ([\d.]+) /)?.[1]);
 const viewBoxHeight = (svg: string) => Number(svg.match(/viewBox="0 0 [\d.]+ ([\d.]+)"/)?.[1]);
 

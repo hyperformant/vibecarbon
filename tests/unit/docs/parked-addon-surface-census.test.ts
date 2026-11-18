@@ -19,23 +19,21 @@
  * touching this file. Code paths that only run for an existing install
  * (status rows, upgrade, remove) are not user docs and are not scanned.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PARKED_FEATURES } from '../../../src/add.js';
 import { generateEnvLocal, generateReadme } from '../../../src/create.js';
 import { loadAllSpecs } from '../../../src/lib/cli/command-registry.js';
 import { renderCommandList, renderHelp } from '../../../src/lib/cli/help.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // Never user docs: dependencies, build output, and the per-developer agent
 // memory `create` makes empty in each project.
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', 'agent-memory']);
 
 function walk(dir: string, keep: (rel: string) => boolean): string[] {
-  return sourceFiles(dir, { skip: SKIP_DIRS, relativeTo: ROOT }).filter(keep);
+  return sourceFiles(dir, { skip: SKIP_DIRS, relativeTo: REPO_ROOT }).filter(keep);
 }
 
 const isTemplateDoc = (rel: string) =>
@@ -46,11 +44,11 @@ const isTemplateDoc = (rel: string) =>
 
 /** Every user-facing doc file, relative to the repo root. */
 function userDocs(): string[] {
-  const rootDocs = readdirSync(ROOT).filter((f) => f.endsWith('.md') && f !== 'CHANGELOG.md');
-  const repoDocs = walk(join(ROOT, 'docs'), (rel) => rel.endsWith('.md')).filter(
+  const rootDocs = readdirSync(REPO_ROOT).filter((f) => f.endsWith('.md') && f !== 'CHANGELOG.md');
+  const repoDocs = walk(join(REPO_ROOT, 'docs'), (rel) => rel.endsWith('.md')).filter(
     (rel) => rel !== 'docs/history.md',
   );
-  const templateDocs = walk(join(ROOT, 'carbon'), isTemplateDoc);
+  const templateDocs = walk(join(REPO_ROOT, 'carbon'), isTemplateDoc);
   return [...rootDocs, ...repoDocs, ...templateDocs];
 }
 
@@ -100,9 +98,7 @@ describe('parked add-on surface census', () => {
   });
 
   it('no repo or template doc names a parked add-on', () => {
-    const found = docs.flatMap((rel) =>
-      mentions(rel, readFileSync(join(ROOT, rel), 'utf-8'), PARKED_FEATURES),
-    );
+    const found = docs.flatMap((rel) => mentions(rel, readRepoFile(rel), PARKED_FEATURES));
     expect(found, `parked add-ons named in user docs:\n${found.join('\n')}`).toEqual([]);
   });
 

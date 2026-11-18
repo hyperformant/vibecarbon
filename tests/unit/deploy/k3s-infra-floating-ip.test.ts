@@ -9,10 +9,9 @@
  * to refresh that result: the stack's reserved IP leaves state by surgery
  * (lib/iac/retired-resources.js), never by an up that deletes it.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clusterIngressIp, infraFloatingIp } from '../../../src/lib/deploy/k8s/ingress-ip.js';
 // @ts-expect-error — JS module without types
@@ -20,6 +19,7 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const SAVED = { masterIp: '198.51.100.7', floatingIp: '203.0.113.9' };
 
@@ -66,10 +66,7 @@ describe('a saved DigitalOcean result no longer forces the cluster up', () => {
 });
 
 describe('deployK3s reads its floating IP only through infraFloatingIp', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/k8s/k3s.js', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
   // The code that runs: from the infra step's gate to the function's return.
   const start = src.indexOf(
     "if (!infraStepSkips(state, 'k3s-infra', infraInputs, [options.environment])) {",

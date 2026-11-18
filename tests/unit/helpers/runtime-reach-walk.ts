@@ -27,7 +27,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 type ReachKind = 'use' | 'forward' | 'excluded';
 
@@ -55,7 +55,7 @@ export interface NonRenderingReader {
 }
 
 /** Every `.js` file under `dir`, paths relative to `root`. */
-export function loadSourceTree(dir: string, root = process.cwd()): SourceFile[] {
+export function loadSourceTree(dir: string, root = REPO_ROOT): SourceFile[] {
   return sourceFiles(join(root, dir), { exts: ['.js'] })
     .sort()
     .map((abs) => ({ path: relative(root, abs), src: readFileSync(abs, 'utf8') }));

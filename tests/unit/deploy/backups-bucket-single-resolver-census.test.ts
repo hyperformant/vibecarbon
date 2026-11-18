@@ -43,11 +43,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const SCANNED = ['src', 'tests/e2e'];
 const S3_BASE = 'src/lib/providers/s3-base.js';
 const OWNER = 'src/lib/backups-bucket.js';
@@ -286,15 +284,15 @@ function perSideStorageOffenders(root: string): string[] {
 
 describe('backups bucket single resolver census', () => {
   it('scans the real tree (not vacuously green)', () => {
-    const all = files(ROOT).map(([f]) => f);
+    const all = files(REPO_ROOT).map(([f]) => f);
     expect(all.length).toBeGreaterThan(50);
     expect(all).toContain(OWNER);
-    expect(readFileSync(join(ROOT, OWNER), 'utf-8')).toMatch(/chooseBackupsBucket\(/);
-    expect(readFileSync(join(ROOT, DEPLOY), 'utf-8')).toMatch(/chooseBackupsBucket\(/);
+    expect(readRepoFile(OWNER)).toMatch(/chooseBackupsBucket\(/);
+    expect(readRepoFile(DEPLOY)).toMatch(/chooseBackupsBucket\(/);
   });
 
   it('(a) only backups-bucket.js reads the backupS3 record; everything else asks backupsTargetOf', () => {
-    const offenders = rawRecordReaders(ROOT);
+    const offenders = rawRecordReaders(REPO_ROOT);
     expect(
       offenders,
       `read the backups bucket with backupsTargetOf(envConfig) (src/lib/backups-bucket.js): ${offenders.join(', ')}`,
@@ -302,7 +300,7 @@ describe('backups bucket single resolver census', () => {
   });
 
   it('(b) only s3-base.js and backups-bucket.js spell a backups bucket name', () => {
-    const offenders = backupsNameOffenders(ROOT);
+    const offenders = backupsNameOffenders(REPO_ROOT);
     expect(
       offenders,
       `choose the backups bucket with chooseBackupsBucket and read it with backupsTargetOf (src/lib/backups-bucket.js): ${offenders.join(', ')}`,
@@ -310,7 +308,7 @@ describe('backups bucket single resolver census', () => {
   });
 
   it('(b) chooseBackupsBucket( is called only by the deploy and backups-bucket.js', () => {
-    const offenders = chooserCallers(ROOT);
+    const offenders = chooserCallers(REPO_ROOT);
     expect(
       offenders,
       `the deploy chooses the backups bucket; every other command reads the record with backupsTargetOf: ${offenders.join(', ')}`,
@@ -318,7 +316,7 @@ describe('backups bucket single resolver census', () => {
   });
 
   it('(c) no src/ file spreads an uploads config with the bucket swapped', () => {
-    const offenders = swappedBucketSpreads(ROOT);
+    const offenders = swappedBucketSpreads(REPO_ROOT);
     expect(
       offenders,
       `build the backups bucket's S3 config with backupStorageConfig (src/lib/backups-bucket.js), which takes its region and endpoint from the target: ${offenders.join(', ')}`,
@@ -326,12 +324,12 @@ describe('backups bucket single resolver census', () => {
   });
 
   it('(d) both k8s-ha sides take the one backups target through ...options', () => {
-    expect(callArgs(readFileSync(join(ROOT, K8S_HA), 'utf-8'), 'deployK3s')).toHaveLength(2);
-    expect(perSideStorageOffenders(ROOT)).toEqual([]);
+    expect(callArgs(readRepoFile(K8S_HA), 'deployK3s')).toHaveLength(2);
+    expect(perSideStorageOffenders(REPO_ROOT)).toEqual([]);
   });
 
   it('(d) no src/ file names backupBucketName', () => {
-    const offenders = bucketNameOnlyMentions(ROOT);
+    const offenders = bucketNameOnlyMentions(REPO_ROOT);
     expect(
       offenders,
       `pass the whole backups target (backupTarget: { bucket, region, endpoint }), never its name alone: ${offenders.join(', ')}`,

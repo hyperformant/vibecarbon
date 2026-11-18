@@ -11,8 +11,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const SCRIPT = join(import.meta.dirname, '..', '..', '..', 'carbon', 'scripts', 'secret-scan.mjs');
+const SCRIPT = join(REPO_ROOT, 'carbon', 'scripts', 'secret-scan.mjs');
 
 const FAKE_64 = 'a'.repeat(64);
 const FAKE_UUID = '00000000-aaaa-bbbb-cccc-000000000000';

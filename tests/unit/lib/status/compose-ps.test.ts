@@ -1,11 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   composeRunningServices,
   parseComposePs,
   publishedPorts,
 } from '../../../../src/lib/status/compose-ps.js';
+import { readRepoFile } from '../../../_shared/source-files.js';
 
 /** Records the args it was called with and returns the given stdout. */
 function fakeExecFile(stdout: string) {
@@ -181,7 +180,7 @@ describe('parseComposePs: both shapes of `compose ps --format json`', () => {
 
 describe('every `compose ps --format json` caller shares the one parser', () => {
   it.each(['src/up.js', 'src/upgrade.js', 'src/lib/status/compose-ps.js'])('%s', (file) => {
-    const text = readFileSync(join(process.cwd(), file), 'utf8');
+    const text = readRepoFile(file);
     expect(text).toContain("'compose', 'ps', '--format', 'json'");
     expect(text).toContain('parseComposePs(');
   });

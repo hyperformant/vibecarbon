@@ -15,7 +15,7 @@ import {
   resolveDbImage,
   traefikImageRef,
 } from '../../../src/lib/images.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * The boot image pull: every compose server (all five providers) starts
@@ -24,7 +24,6 @@ import { sourceFiles } from '../../_shared/source-files.js';
  * after cloud-init's Docker restart (a pull in flight dies with the daemon),
  * never hold the ready marker, and pull exactly the refs the compose files use.
  */
-const REPO = join(import.meta.dirname, '..', '..', '..');
 
 const RENDERED: Record<string, string> = {
   hetzner: loadHetznerComposeUserData(),
@@ -36,7 +35,7 @@ const RENDERED: Record<string, string> = {
 
 describe('boot pull refs', () => {
   it('are the db image and the traefik and docker-socket-proxy mirrors the compose files run', () => {
-    const prod = readFileSync(join(REPO, 'carbon', 'docker-compose.prod.yml'), 'utf8');
+    const prod = readRepoFile('carbon', 'docker-compose.prod.yml');
     const [db, traefik, proxy] = bootPullImages();
     expect(db).toBe(dbImageRef());
     expect(prod).toContain('image: ${TRAEFIK_IMAGE:?');
@@ -67,11 +66,14 @@ describe('boot pull db ref follows the deploy', () => {
   });
 
   it('census: no source file outside images.js prefetches through dbImageRef()', () => {
-    const offenders = sourceFiles([join(REPO, 'src'), join(REPO, 'carbon', 'cloud-init')], {
-      exts: ['.js', '.ts', '.sh', '.yaml', '.yml'],
-    })
+    const offenders = sourceFiles(
+      [join(REPO_ROOT, 'src'), join(REPO_ROOT, 'carbon', 'cloud-init')],
+      {
+        exts: ['.js', '.ts', '.sh', '.yaml', '.yml'],
+      },
+    )
       .filter((full) => /\bdbImageRef\(/.test(readFileSync(full, 'utf8')))
-      .map((full) => full.slice(REPO.length + 1));
+      .map((full) => full.slice(REPO_ROOT.length + 1));
     expect(offenders.filter((f) => f !== 'src/lib/images.js')).toEqual([]);
   });
 });

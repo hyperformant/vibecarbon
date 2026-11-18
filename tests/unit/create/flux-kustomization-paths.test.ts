@@ -3,6 +3,7 @@ import { isAbsolute, join, relative } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { copyK8sTemplate } from '../../../src/create.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -26,8 +27,7 @@ type Doc = {
   spec?: { path?: string; sourceRef?: { kind?: string; name?: string }; url?: string };
 };
 
-const ROOT = join(__dirname, '..', '..', '..');
-const CLUSTERS = join(ROOT, 'carbon/k8s/flux/clusters');
+const CLUSTERS = join(REPO_ROOT, 'carbon/k8s/flux/clusters');
 const KUSTOMIZATION_FILES = ['kustomization.yaml', 'kustomization.yml', 'Kustomization'];
 
 /** Every cluster file, by directory walk, so a new cluster or file is covered. */

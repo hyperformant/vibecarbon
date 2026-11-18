@@ -12,16 +12,13 @@
  *    before anything is written, instead of reaching the end of a promote
  *    where swapHaRoles could only warn and leave the journal set.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { auditComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
-
-const ROOT = join(__dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('M1: compose saves the swap before the TLS wait', () => {
   it('flip < swap save < TLS wait, in failoverComposeHA', () => {
-    const src = readFileSync(join(ROOT, 'src/lib/deploy/compose/ha.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/compose/ha.js');
     const body = src.slice(src.indexOf('export async function failoverComposeHA('));
     const flip = body.indexOf('dnsFlip = await flipDns(');
     const swap = body.indexOf('swapRoles(envName');

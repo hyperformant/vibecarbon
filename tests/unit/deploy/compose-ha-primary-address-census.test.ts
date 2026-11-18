@@ -20,13 +20,10 @@
  * (`wg.WG_PRIMARY_IP`) does.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const NAMES = new Set(['WG_PRIMARY_IP', 'WG_STANDBY_IP']);
 const TUNNEL_LITERAL = /^10\.99\.0\.[12]$/;
 const ALLOWED = new Map([
@@ -66,12 +63,12 @@ function srcFiles() {
   const listed = execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
-    { cwd: REPO, encoding: 'utf-8' },
+    { cwd: REPO_ROOT, encoding: 'utf-8' },
   );
   return listed
     .split('\n')
     .filter((f) => f.endsWith('.js'))
-    .map((path) => ({ path, text: readFileSync(join(REPO, path), 'utf-8') }));
+    .map((path) => ({ path, text: readRepoFile(path) }));
 }
 
 describe('compose-HA primary tunnel address census (R11)', () => {
@@ -97,7 +94,7 @@ describe('compose-HA primary tunnel address census (R11)', () => {
 
   it('the compose consumers resolve through wgIpOf', () => {
     for (const path of ['src/lib/deploy/effects/compose-ha.js', 'src/lib/deploy/compose/ha.js']) {
-      expect(readFileSync(join(REPO, path), 'utf-8')).toContain('wgIpOf(');
+      expect(readRepoFile(path)).toContain('wgIpOf(');
     }
   });
 

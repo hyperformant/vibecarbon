@@ -17,11 +17,11 @@
  */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const REPO_ROOT = resolve(import.meta.dirname, '../../..');
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
 /** Make every dir under `dir` writable again, so it can be removed. */

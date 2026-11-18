@@ -6,9 +6,10 @@ import {
   loadScalewayComposeUserData,
   renderScalewayUserData,
 } from '../../../src/lib/iac/programs/scaleway-compose.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const CLOUD_INIT_PATH = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
-const PROGRAM_PATH = join(process.cwd(), 'src', 'lib', 'iac', 'programs', 'scaleway-compose.js');
+const CLOUD_INIT_PATH = join(REPO_ROOT, 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
+const PROGRAM_PATH = join(REPO_ROOT, 'src', 'lib', 'iac', 'programs', 'scaleway-compose.js');
 const sharedCloudInit = readFileSync(CLOUD_INIT_PATH, 'utf-8');
 const programSource = readFileSync(PROGRAM_PATH, 'utf-8');
 

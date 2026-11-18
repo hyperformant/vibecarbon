@@ -11,7 +11,7 @@
  * give a segment up.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -28,6 +28,7 @@ import {
   parseWalName,
 } from '../../../src/lib/status/backup-health.js';
 import { attachBackups } from '../../../src/status.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { withSshContract } from '../../_shared/ssh-contract.js';
 
 const NOW = Date.parse('2026-10-21T12:00:00.000Z');
@@ -575,15 +576,13 @@ describe('--json', () => {
       walSegmentsDropped24h: 0,
       walGap: null,
     });
-    expect(readFileSync(join(__dirname, '../../../src/status.js'), 'utf8')).toContain(
-      'writeJson(allData)',
-    );
+    expect(readRepoFile('src/status.js')).toContain('writeJson(allData)');
   });
 });
 
 describe('census: backup reads take their target from the recorded primary/lineage', () => {
-  const src = readFileSync(join(__dirname, '../../../src/lib/status/backup-health.js'), 'utf8');
-  const status = readFileSync(join(__dirname, '../../../src/status.js'), 'utf8');
+  const src = readRepoFile('src/lib/status/backup-health.js');
+  const status = readRepoFile('src/status.js');
 
   it('every ssh/kubectl/psql call in backup-health.js targets the resolvePrimary ip', () => {
     expect(src).toContain('resolvePrimary(');

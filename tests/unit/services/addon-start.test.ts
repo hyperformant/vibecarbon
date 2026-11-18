@@ -33,8 +33,7 @@ import {
   COMPOSE_DEPENDS_ON_FIXTURE,
   composeConfigStub,
 } from '../../_shared/compose-config-stub.js';
-
-const REPO = join(import.meta.dirname, '..', '..', '..');
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 const servicesOf = (path: string): Record<string, any> =>
@@ -51,7 +50,7 @@ const servicesOf = (path: string): Record<string, any> =>
   )?.services ?? {}) as Record<string, any>;
 
 const BASE_FILES = ['docker-compose.yml', 'docker-compose.prod.yml']
-  .map((f) => join(REPO, 'carbon', f))
+  .map((f) => join(REPO_ROOT, 'carbon', f))
   .filter((p) => existsSync(p));
 const BASE_SERVICES = new Set(BASE_FILES.flatMap((p) => Object.keys(servicesOf(p))));
 
@@ -69,7 +68,7 @@ describe('every compose service is classified core or add-on', () => {
       const { composeServices, composeSetup } = loadAddonStandby(name);
       const declared = new Set([...composeServices, ...composeSetup]);
       for (const f of ['docker-compose.yml', 'docker-compose.prod.yml']) {
-        const p = join(REPO, 'services', name, 'compose', f);
+        const p = join(REPO_ROOT, 'services', name, 'compose', f);
         if (!existsSync(p)) continue;
         for (const svc of Object.keys(servicesOf(p))) {
           expect(
@@ -82,7 +81,7 @@ describe('every compose service is classified core or add-on', () => {
 
     it(`${name}: wires-the-app reading matches a real YAML parse`, () => {
       const wired = ['docker-compose.yml', 'docker-compose.prod.yml'].some((f) => {
-        const p = join(REPO, 'services', name, 'compose', f);
+        const p = join(REPO_ROOT, 'services', name, 'compose', f);
         return existsSync(p) && 'app' in servicesOf(p);
       });
       expect(addonWiresApp(name)).toBe(wired);

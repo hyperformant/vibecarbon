@@ -13,21 +13,16 @@
  * `strategy: Recreate`, because two hostNetwork socat relays on one node cannot
  * both bind the gateway port, so a surge pod would crash-loop.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
   REPL_GATEWAY_APPLY_SHELL,
   renderReplGatewayManifest,
 } from '../../../src/lib/deploy/k8s/ha/index.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const MANIFEST = readFileSync(
-  join(ROOT, 'carbon/k8s/base/repl-gateway/repl-gateway.yaml'),
-  'utf-8',
-);
-const SRC = readFileSync(join(ROOT, 'src/lib/deploy/k8s/ha/index.js'), 'utf-8');
+const MANIFEST = readRepoFile('carbon/k8s/base/repl-gateway/repl-gateway.yaml');
+const SRC = readRepoFile('src/lib/deploy/k8s/ha/index.js');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;

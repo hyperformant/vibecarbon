@@ -11,7 +11,6 @@
  * compose user data installs every Docker package, unpinned, through the real
  * renderer; (c) no provider's COMPOSE_IMAGE is a prebuilt Docker image.
  */
-import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -26,9 +25,7 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // The only file allowed to spell a Docker install.
 const INSTALL_MODULE = 'src/lib/iac/docker-install.js';
@@ -42,11 +39,11 @@ const K8S_SCRIPTS_ALLOWED_TO_DIFFER =
 
 describe('(a) no compose program or provider spells its own Docker install', () => {
   const files = [
-    ...sourceFiles(join(ROOT, 'src')).filter((f) => f.endsWith('.js')),
-    ...sourceFiles(join(ROOT, 'carbon', 'cloud-init')).filter(
+    ...sourceFiles(join(REPO_ROOT, 'src')).filter((f) => f.endsWith('.js')),
+    ...sourceFiles(join(REPO_ROOT, 'carbon', 'cloud-init')).filter(
       (f) => f.endsWith('.yaml') || f.endsWith('.sh'),
     ),
-  ].map((f) => relative(ROOT, f));
+  ].map((f) => relative(REPO_ROOT, f));
 
   const spellsInstall = (text: string) =>
     /\bdownload\.docker\.com\b/.test(text) ||
@@ -54,20 +51,20 @@ describe('(a) no compose program or provider spells its own Docker install', () 
 
   it('only the shared module contains download.docker.com or `apt-get ... install ... docker-ce`', () => {
     const offenders = files.filter(
-      (rel) => rel !== INSTALL_MODULE && spellsInstall(readFileSync(join(ROOT, rel), 'utf-8')),
+      (rel) => rel !== INSTALL_MODULE && spellsInstall(readRepoFile(rel)),
     );
     expect(offenders).toEqual([]);
   });
 
   it('the shared module does spell it (the scan can find an install)', () => {
-    expect(spellsInstall(readFileSync(join(ROOT, INSTALL_MODULE), 'utf-8'))).toBe(true);
+    expect(spellsInstall(readRepoFile(INSTALL_MODULE))).toBe(true);
   });
 
   it('the k8s scripts never install docker-ce (they run no docker install at all)', () => {
     const k3s = files.filter((f) => f.startsWith('carbon/cloud-init/k3s/') && f.endsWith('.sh'));
     expect(k3s.length, K8S_SCRIPTS_ALLOWED_TO_DIFFER).toBeGreaterThan(0);
     for (const rel of k3s) {
-      expect(readFileSync(join(ROOT, rel), 'utf-8'), rel).not.toMatch(/\bdocker-ce\b(?!-setup)/);
+      expect(readRepoFile(rel), rel).not.toMatch(/\bdocker-ce\b(?!-setup)/);
     }
   });
 });
@@ -119,7 +116,7 @@ describe.each(Object.entries(RENDERERS))('(b) %s rendered compose user data', (_
 
 describe('wireguard-tools install refreshes with the quiet trimmed update', () => {
   it('uses aptQuietUpdate(APT_TRIMMED_INDEXES), not a plain update', () => {
-    const src = readFileSync(join(ROOT, 'src/lib/deploy/wireguard.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/wireguard.js');
     expect(src).toContain('aptQuietUpdate(APT_TRIMMED_INDEXES)');
     expect(src).not.toContain("aptGet('update -qq')");
   });
@@ -141,7 +138,7 @@ describe('(c) no compose COMPOSE_IMAGE is a prebuilt Docker image', () => {
 
   it('no compose program names a Docker image either', () => {
     for (const p of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
-      const src = readFileSync(join(ROOT, 'src/lib/iac/programs', `${p}-compose.js`), 'utf-8');
+      const src = readRepoFile('src/lib/iac/programs', `${p}-compose.js`);
       for (const m of src.matchAll(/^\s*image(?:Id)?:\s*(['"`][^'"`\n]*['"`])/gm)) {
         expect(m[1], `${p}-compose.js`).not.toMatch(/docker/i);
       }

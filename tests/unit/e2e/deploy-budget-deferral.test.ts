@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Source pin for where a cold-deploy budget miss fails the scenario
@@ -13,10 +12,7 @@ import { describe, expect, it } from 'vitest';
  * after its own checks have run.
  */
 describe('_run-lifecycle.ts: a deploy budget miss fails verify-deploy, not deploy', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../tests/e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
   const budgetIdx = src.indexOf('checkDeployBudget(');
   const verifyDeployIdx = src.indexOf("name: 'verify-deploy',");
 

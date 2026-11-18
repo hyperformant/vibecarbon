@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { devS3Port } from '../../../src/lib/dev-s3.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * docker-up.js publishes the local S3 on the port S3_ENDPOINT names: two
@@ -11,7 +12,7 @@ import { devS3Port } from '../../../src/lib/dev-s3.js';
  * (the one setPortOffset writes into S3_ENDPOINT, tests/unit/lib/dev-s3-port.test.ts).
  */
 
-const DOCKER_UP = join(__dirname, '..', '..', '..', 'carbon', 'scripts', 'docker-up.js');
+const DOCKER_UP = join(REPO_ROOT, 'carbon', 'scripts', 'docker-up.js');
 
 function publishedS3Port(envLocal: string): number {
   const dir = mkdtempSync(join(tmpdir(), 'vc-dev-s3-up-'));

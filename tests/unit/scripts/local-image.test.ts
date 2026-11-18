@@ -5,20 +5,23 @@
  * what each of the four pnpm scripts runs and prints: the docker arguments
  * and every line, written out here as the old scripts had them.
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error: plain JS ops script, no types
 import { LOCAL_IMAGES, localImagePlan } from '../../../scripts/local-image.mjs';
 import { dbImageRef, NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
-
-const ROOT = join(__dirname, '..', '..', '..');
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 describe('local image scripts', () => {
   it('db image: builds docker/postgres-walg under the CLI ref and prints the shadow notice', () => {
     const ref = dbImageRef();
     const plan = localImagePlan('db');
-    expect(plan.build.argv).toEqual(['build', '-t', ref, join(ROOT, 'docker', 'postgres-walg')]);
+    expect(plan.build.argv).toEqual([
+      'build',
+      '-t',
+      ref,
+      join(REPO_ROOT, 'docker', 'postgres-walg'),
+    ]);
     expect(plan.build.start).toBe(
       `Building ${ref} from docker/postgres-walg (local only, not pushed)`,
     );
@@ -52,7 +55,12 @@ describe('local image scripts', () => {
     const ref = NODE_RUNTIME_IMAGE.split('@')[0];
     expect(ref).not.toContain('@');
     const plan = localImagePlan('node-runtime');
-    expect(plan.build.argv).toEqual(['build', '-t', ref, join(ROOT, 'docker', 'node-runtime')]);
+    expect(plan.build.argv).toEqual([
+      'build',
+      '-t',
+      ref,
+      join(REPO_ROOT, 'docker', 'node-runtime'),
+    ]);
     expect(plan.build.start).toBe(
       `Building ${ref} from docker/node-runtime (local only, not pushed)`,
     );
@@ -88,7 +96,7 @@ describe('local image scripts', () => {
   });
 
   it('the four pnpm script names still exist and run the one script', () => {
-    const scripts = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).scripts;
+    const scripts = JSON.parse(readRepoFile('package.json')).scripts;
     expect(scripts['db-image:build-local']).toBe('node scripts/local-image.mjs db build');
     expect(scripts['db-image:remove-local']).toBe('node scripts/local-image.mjs db remove');
     expect(scripts['node-runtime:build-local']).toBe(

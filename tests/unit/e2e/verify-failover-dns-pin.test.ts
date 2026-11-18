@@ -33,10 +33,9 @@
  * reach the environment by a path the pin does not cover.
  */
 
-import { readFileSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { testConfig } from '../../config.js';
 import {
   type AuthoritativeDeps,
@@ -68,8 +67,7 @@ const PIN: ResolutionPin = {
 
 const noSleep = () => Promise.resolve();
 
-const read = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../../${rel}`, import.meta.url)), 'utf8');
+const read = (rel: string) => readRepoFile(`${rel}`);
 
 /** Drop line and block comments so source censuses match CODE, not prose. */
 function stripComments(src: string): string {
@@ -663,10 +661,7 @@ describe('post-failover DNS wait target', () => {
   // carries the promoted cluster's floating IP, and the wait compared it to
   // the master node's own address, which can never match.
   it('waits for the IP the A records carry, not for a node address', () => {
-    const lifecycle = readFileSync(
-      fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-      'utf8',
-    );
+    const lifecycle = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(lifecycle).toContain('? readServingIp(config.projectDir, config.envPrefix)');
     expect(lifecycle).not.toContain('const promotedIp = sshCheckMasterIp');
   });

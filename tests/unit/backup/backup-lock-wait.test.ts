@@ -23,12 +23,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { composeBackupCmd } from '../../../src/lib/deploy/compose/index.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
-const SCRIPT = fileURLToPath(new URL('../../../carbon/backup/compose-backup.sh', import.meta.url));
+const SCRIPT = join(REPO_ROOT, 'carbon/backup/compose-backup.sh');
 const scratch = mkdtempSync(join(tmpdir(), 'backup-lock-wait-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 

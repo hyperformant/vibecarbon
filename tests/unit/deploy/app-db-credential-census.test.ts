@@ -22,10 +22,7 @@ import {
   INFRA_SECRET_KEYS,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK } from '../../../src/lib/project.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 type ComposeService = {
   environment?: string[] | Record<string, string>;
@@ -38,7 +35,7 @@ type ComposeService = {
 // Compose's merge tags (`!reset`, `!override`) are not YAML core; drop them.
 const services = (rel: string) =>
   (
-    loadYaml(read(rel).replace(/!(reset|override)\b/g, '')) as {
+    loadYaml(readRepoFile(rel).replace(/!(reset|override)\b/g, '')) as {
       services: Record<string, ComposeService>;
     }
   ).services;
@@ -107,7 +104,7 @@ describe('compose: the app connects as app_service, app-migrate as the owner', (
   });
 
   it('the prod overlay requires APP_DB_PASSWORD, and so does the preflight fallback', () => {
-    expect(read('carbon/docker-compose.prod.yml')).toMatch(/\$\{APP_DB_PASSWORD:\?/);
+    expect(readRepoFile('carbon/docker-compose.prod.yml')).toMatch(/\$\{APP_DB_PASSWORD:\?/);
     expect(COMPOSE_REQUIRED_ENV_FALLBACK).toContain('APP_DB_PASSWORD');
   });
 });
@@ -126,7 +123,7 @@ type K8sContainer = {
 };
 
 describe('k8s: only the migrate init container reads the owner password', () => {
-  const deployment = loadYaml(read('carbon/k8s/base/app/deployment.yaml')) as {
+  const deployment = loadYaml(readRepoFile('carbon/k8s/base/app/deployment.yaml')) as {
     spec: { template: { spec: { containers: K8sContainer[]; initContainers?: K8sContainer[] } } };
   };
   const pod = deployment.spec.template.spec;
@@ -172,7 +169,7 @@ describe('k8s: only the migrate init container reads the owner password', () => 
   it('the deploy points both containers at the deployed image', () => {
     // The one image change to deployment/app in the deploy is the template
     // patch (it also stamps the secrets sha), and it names both containers.
-    const src = read('src/lib/deploy/k8s/k3s.js').replace(/\s+/g, ' ');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js').replace(/\s+/g, ' ');
     expect(src.match(/'set', 'image', 'deployment\/app'/g)).toBeNull();
     const patch = src.slice(src.indexOf('const appTemplatePatch = {'));
     const body = patch.slice(0, patch.indexOf('await runKubectlWithRetry('));
@@ -287,12 +284,12 @@ describe('no plain hash is fed secret values anywhere in src/', () => {
   it('no createHash in src/ takes secret-derived values', () => {
     const offenders: string[] = [];
     let seen = 0;
-    for (const file of sourceFiles(join(ROOT, 'src'), { exts: ['.js'] })) {
+    for (const file of sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js'] })) {
       const src = readFileSync(file, 'utf-8');
       for (const feed of hashFeeds(src)) {
         seen++;
         if (SECRETISH.test(feed))
-          offenders.push(`${file.slice(ROOT.length + 1)}: ${feed.slice(0, 80)}`);
+          offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${feed.slice(0, 80)}`);
       }
     }
     expect(seen).toBeGreaterThan(5);
@@ -300,7 +297,7 @@ describe('no plain hash is fed secret values anywhere in src/', () => {
   });
 
   it('appPodSecretsSha is gone and the annotation is built from readAppSecretVersions', () => {
-    const src = read('src/lib/deploy/k8s/k3s.js');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(src).not.toMatch(/appPodSecretsSha/);
     expect(src).toMatch(/\[APP_SECRETS_SHA_ANNOTATION\]:\s*await readAppSecretVersions\(/);
   });

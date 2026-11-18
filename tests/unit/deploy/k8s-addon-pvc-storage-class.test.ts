@@ -1,13 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildDbManifestValues,
   renderK8sBase,
   renderK8sStorageClassPlaceholder,
 } from '../../../src/lib/deploy/k8s/k3s.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { adoptTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
@@ -41,13 +40,12 @@ const TEST_TLS = {
 // The substitution cannot be a post-apply `kubectl patch`: storageClassName is
 // IMMUTABLE once the object exists, which is why the renderer produces a temp
 // copy consumed BEFORE the apply.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PLACEHOLDER = '{{K8S_STORAGE_CLASS}}';
 
 /** Every PVC we ship, from both addon and bundled-manifest trees. */
 function pvcFiles(): string[] {
   // A root that is absent holds no PVC.
-  const roots = [join(repoRoot, 'services'), join(repoRoot, 'carbon/k8s')].filter((root) =>
+  const roots = [join(REPO_ROOT, 'services'), join(REPO_ROOT, 'carbon/k8s')].filter((root) =>
     existsSync(root),
   );
   return (
@@ -69,7 +67,7 @@ describe('every shipped PVC pins its StorageClass', () => {
       (f) => !/^\s*storageClassName:/m.test(readFileSync(f, 'utf-8')),
     );
     expect(
-      offenders.map((f) => f.replace(`${repoRoot}/`, '')),
+      offenders.map((f) => f.replace(`${REPO_ROOT}/`, '')),
       'A PVC with no storageClassName is bound by the DefaultStorageClass admission ' +
         'plugin. Our clusters have TWO defaults, so the plugin picks by creationTimestamp ' +
         'and the DB/cache can land on node-local disk. Pin it to {{K8S_STORAGE_CLASS}}.',
@@ -119,7 +117,7 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
     mkdirSync(join(root, 'db'), { recursive: true });
     writeFileSync(
       join(root, 'db', 'statefulset.yaml'),
-      readFileSync(join(repoRoot, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+      readRepoFile('carbon/k8s/base/db/statefulset.yaml'),
     );
     return root;
   };

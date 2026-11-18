@@ -10,6 +10,7 @@ import { BUNDLED_K8S_DIR, buildK3sApplyInputs } from '../../../src/lib/deploy/k8
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 // @ts-expect-error — JS module without types
 import { activateImageSet, bundledImageSet } from '../../../src/lib/images.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -23,9 +24,9 @@ import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
  * until `k3s-apply` was hand-deleted from `.vibecarbon/deploy-state-<env>.json`.
  */
 
-const REPO_BUNDLED_K8S = join(process.cwd(), 'carbon', 'k8s');
+const REPO_BUNDLED_K8S = join(REPO_ROOT, 'carbon', 'k8s');
 // Module scope: the tests below mock process.cwd() to a temp project.
-const REPO_K3S_CLOUD_INIT = join(process.cwd(), 'carbon', 'cloud-init', 'k3s');
+const REPO_K3S_CLOUD_INIT = join(REPO_ROOT, 'carbon', 'cloud-init', 'k3s');
 // digestDir of an empty/missing tree — the "we digested nothing" sentinel a
 // wrong BUNDLED_K8S_DIR path would silently produce.
 const EMPTY_TREE_DIGEST = digestDir(join(tmpdir(), 'vc-definitely-not-a-real-dir'));
@@ -317,7 +318,7 @@ describe('buildK3sApplyInputs — a replaced provider token opens the gate', () 
 
   it('deployK3s passes the deploy token to the gate', () => {
     // process.cwd() is the temp dir here.
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
     expect(gateCall.slice(0, gateCall.indexOf('});'))).toMatch(
@@ -377,7 +378,7 @@ describe('buildK3sApplyInputs: the autoscaler worker pool opens the gate', () =>
   });
 
   it('deployK3s hands the gate the same pool the apply renders', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
     const gateArgs = gateCall.slice(0, gateCall.indexOf('});'));
@@ -395,7 +396,7 @@ describe('buildK3sApplyInputs: the autoscaler worker pool opens the gate', () =>
 
 describe('deployK3s feeds the k3s-apply gate its pilot-light role and storage targets', () => {
   it('deployK3s hands the gate the app config and the backups target', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
     const args = gateCall.slice(0, gateCall.indexOf('});'));
@@ -404,7 +405,7 @@ describe('deployK3s feeds the k3s-apply gate its pilot-light role and storage ta
   });
 
   it('passes options.role to buildK3sApplyInputs', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
     expect(gateCall.slice(0, gateCall.indexOf('});'))).toMatch(/\n\s+role: options\.role,\n/);
@@ -424,7 +425,7 @@ describe('buildK3sApplyInputs — no environment or key prefix input', () => {
   });
 
   it('deployK3s does not pass an environment to the gate', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = src.slice(src.indexOf('export async function deployK3s('));
     const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
     const args = gateCall.slice(0, gateCall.indexOf('});'));

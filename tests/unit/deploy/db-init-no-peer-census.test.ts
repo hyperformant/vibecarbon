@@ -15,10 +15,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const BASE = join(ROOT, 'carbon/k8s/base');
+const BASE = join(REPO_ROOT, 'carbon/k8s/base');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
@@ -48,7 +47,7 @@ describe('db init containers reach no peer', () => {
   });
 
   it('no deploy source renders or applies the seed ConfigMap', () => {
-    const hits = sourceFiles(join(ROOT, 'src')).filter(
+    const hits = sourceFiles(join(REPO_ROOT, 'src')).filter(
       (f) => f.endsWith('.js') && readFileSync(f, 'utf-8').includes('vibecarbon-seed-standby'),
     );
     expect(hits).toEqual([]);

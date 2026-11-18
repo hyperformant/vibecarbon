@@ -9,11 +9,10 @@
  * when the env is production.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const destroySrc = readFileSync(join(__dirname, '../../../src/destroy.js'), 'utf-8');
+const destroySrc = readRepoFile('src/destroy.js');
 
 describe('C-6: prod destroy requires type-to-confirm even with -y', () => {
   it('derives the gate from the shared lib/prod-confirm.js predicate', () => {

@@ -3,9 +3,8 @@
  * after verify-deploy (two DO k8s-ha runs lost their failover coverage to a
  * 21s overrun). A functional failure still aborts.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   abortsLifecycle,
   DEPLOY_BUDGET_FAILURE_PREFIX,
@@ -75,10 +74,7 @@ describe('deploy_budget miss vs functional failure', () => {
   });
 
   it('the lifecycle throws exactly the prefix the loop exempts, and the verdict counts the failed step', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-      'utf8',
-    );
+    const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(src).toContain(
       `throw new Error(\`${DEPLOY_BUDGET_FAILURE_PREFIX} \${deployBudgetMiss.message}\`)`,
     );

@@ -9,14 +9,13 @@
  * joining a master that is gone. The CLI is the operator's (on PATH, not an
  * npm dependency), so the deploy preflight refuses an old one.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   assertPulumiSupportsWorkerJoinTrigger,
   checkDeployPrerequisites,
   PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER,
 } from '../../../src/lib/deploy/preflight.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const has = () => true;
 const atLeast = (v: string, min: string) => {
@@ -78,9 +77,8 @@ describe('checkDeployPrerequisites runs the gate', () => {
 
   it('the Pulumi CI installs (the lockfile SDK version) clears the floor', () => {
     // test.yml installs the CLI at exactly the @pulumi/pulumi SDK version.
-    const sdk = JSON.parse(
-      readFileSync(join(process.cwd(), 'node_modules/@pulumi/pulumi/package.json'), 'utf-8'),
-    ).version as string;
+    const sdk = JSON.parse(readRepoFile('node_modules/@pulumi/pulumi/package.json'))
+      .version as string;
     expect(atLeast(sdk, PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER), sdk).toBe(true);
   });
 });

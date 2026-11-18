@@ -20,11 +20,10 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC = join(fileURLToPath(new URL('../../..', import.meta.url)), 'src');
+const SRC = join(REPO_ROOT, 'src');
 
 const RAW_SSH = /(\|\s*ssh\s)|(exec \/usr\/bin\/ssh)/;
 const SHARED_MARKERS = /composeSshOptsString|SSH_CONNECTION_OPTS|ServerAliveInterval/;

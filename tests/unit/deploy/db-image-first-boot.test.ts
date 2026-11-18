@@ -9,18 +9,14 @@
  * The fix lives in docker/postgres-walg/db-entrypoint.sh; these pin the
  * pieces it depends on so a "simplification" can't quietly undo it.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
-
-const DOCKERFILE = read('docker/postgres-walg/Dockerfile');
-const ENTRYPOINT = read('docker/postgres-walg/db-entrypoint.sh');
-const CONF = read('docker/postgres-walg/postgresql.conf');
-const COMPOSE = loadYaml(read('carbon/docker-compose.yml')) as {
+const DOCKERFILE = readRepoFile('docker/postgres-walg/Dockerfile');
+const ENTRYPOINT = readRepoFile('docker/postgres-walg/db-entrypoint.sh');
+const CONF = readRepoFile('docker/postgres-walg/postgresql.conf');
+const COMPOSE = loadYaml(readRepoFile('carbon/docker-compose.yml')) as {
   services: Record<string, { command?: string[]; environment?: Record<string, unknown> }>;
 };
 const DB = COMPOSE.services.db;

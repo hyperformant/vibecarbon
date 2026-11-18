@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { basename, dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // Regression guard: `ports: []` DOES NOT clear an inherited port publication.
 //
@@ -30,12 +29,11 @@ import { sourceFiles } from '../../_shared/source-files.js';
 // with `ports: []` fails here rather than silently publishing to the host.
 // (docs/tests.md, class 1 — "where the operation has a greppable wire
 // signature, write a repo-wide sweep; those catch new bypassing call sites".)
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 /** Every docker-compose file we ship, from both template roots. */
 function composeFiles(): string[] {
   // A root that is absent (a partial checkout) is left out; the other still sweeps.
-  const roots = [join(repoRoot, 'carbon'), join(repoRoot, 'services')].filter((root) =>
+  const roots = [join(REPO_ROOT, 'carbon'), join(REPO_ROOT, 'services')].filter((root) =>
     existsSync(root),
   );
   return sourceFiles(roots, { skip: ['node_modules', 'dist'] })
@@ -80,7 +78,7 @@ describe('compose overlays clear inherited port publications with !reset, never 
       content.split('\n').forEach((line, i) => {
         // Matches `ports: []` and `ports:  [ ]`, with or without a trailing comment.
         if (/^\s*ports:\s*\[\s*\]\s*(#.*)?$/.test(line)) {
-          offenders.push(`${relative(repoRoot, file)}:${i + 1}`);
+          offenders.push(`${relative(REPO_ROOT, file)}:${i + 1}`);
         }
       });
     }
@@ -94,7 +92,7 @@ describe('compose overlays clear inherited port publications with !reset, never 
 
   it('every deliberate un-publish site uses `!reset null`', () => {
     for (const { file, service } of RESET_SITES) {
-      const content = readFileSync(join(repoRoot, file), 'utf-8');
+      const content = readRepoFile(file);
       // The service block runs to the next same-or-shallower-indent service key.
       const block = content.split(new RegExp(`^  ${service}:\\s*$`, 'm'))[1];
       expect(block, `${file} no longer defines a \`${service}\` service`).toBeDefined();
@@ -108,7 +106,7 @@ describe('compose overlays clear inherited port publications with !reset, never 
 
   it('each reset still has a base publication to remove (guard is not vacuous)', () => {
     for (const { file, published } of LOAD_BEARING_BASE_PUBLICATIONS) {
-      const content = readFileSync(join(repoRoot, file), 'utf-8');
+      const content = readRepoFile(file);
       for (const mapping of published) {
         expect(
           content,

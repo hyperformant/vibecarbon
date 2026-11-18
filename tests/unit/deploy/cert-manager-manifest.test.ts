@@ -31,13 +31,14 @@ import {
   renderCertManagerKustomization,
   writeCertManagerKustomization,
 } from '../../../carbon/scripts/render-cert-manager.mjs';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
 
 const FIXTURE = join(
-  __dirname,
-  `../../fixtures/cert-manager-${CERT_MANAGER_VERSION}-deployments.upstream.txt`,
+  REPO_ROOT,
+  `tests/fixtures/cert-manager-${CERT_MANAGER_VERSION}-deployments.upstream.txt`,
 );
 const UPSTREAM_ARGS = [
   '--v=2',
@@ -175,7 +176,7 @@ describe('the script form (GitOps workflow)', () => {
     dirs.push(dir);
     const res = spawnSync(
       process.execPath,
-      [join(__dirname, '../../../carbon/scripts/render-cert-manager.mjs'), join(dir, 'k')],
+      [join(REPO_ROOT, 'carbon/scripts/render-cert-manager.mjs'), join(dir, 'k')],
       { encoding: 'utf-8' },
     );
     expect(res.status).toBe(0);
@@ -187,7 +188,7 @@ describe('the script form (GitOps workflow)', () => {
   it('refuses without a target directory', () => {
     const res = spawnSync(
       process.execPath,
-      [join(__dirname, '../../../carbon/scripts/render-cert-manager.mjs')],
+      [join(REPO_ROOT, 'carbon/scripts/render-cert-manager.mjs')],
       { encoding: 'utf-8' },
     );
     expect(res.status).toBe(1);
@@ -197,7 +198,7 @@ describe('the script form (GitOps workflow)', () => {
 
 describe('the kubectl floor (lib/runtime-floors.js)', () => {
   it('the k8s deploy preflight checks it right after the tool lookup', () => {
-    const k3s = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const tools = k3s.indexOf("for (const tool of ['docker', 'ssh', 'kubectl'])");
     const floor = k3s.indexOf('kubectlFloorProblem(');
     const ok = k3s.indexOf("s.stop('Preflight OK')");

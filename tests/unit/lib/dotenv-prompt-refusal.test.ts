@@ -22,11 +22,12 @@
  *
  * Fixture values only — nothing here is a real credential.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registryEntry } from '../../../src/lib/config-registry.js';
 import { dotenvPromptProblem } from '../../../src/lib/operator-env.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const clackMock = vi.hoisted(() => ({
   password: vi.fn(),
@@ -49,8 +50,6 @@ const verifyTokenMock = vi.hoisted(() => vi.fn(async () => ({ valid: true })));
 vi.mock('../../../src/lib/cloudflare-dns.js', () => ({ verifyToken: verifyTokenMock }));
 const fetchMock = vi.hoisted(() => vi.fn());
 vi.stubGlobal('fetch', fetchMock);
-
-const ROOT = join(import.meta.dirname, '../../..');
 
 /** `'` mixed with `"`: no form Node, Compose and Vite all read the same way. */
 const MIXED = `mix ' and "`;
@@ -192,7 +191,7 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
   // guided-setup-shared.js holds the token and key-pair prompts the provider
   // modules used to carry one copy each of; it names the key by parameter
   // (`envKey`, `accessEnvKey`, `secretEnvKey`), not by literal.
-  const files = readdirSync(join(ROOT, 'src/lib'))
+  const files = readdirSync(join(REPO_ROOT, 'src/lib'))
     .filter((f) => f.endsWith('-guided-setup.js'))
     .concat(['configure-providers.js', 'guided-setup-shared.js']);
 
@@ -274,7 +273,7 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
 
   for (const file of files) {
     it(file, () => {
-      const src = readFileSync(join(ROOT, 'src/lib', file), 'utf-8');
+      const src = readRepoFile('src/lib', file);
       const prompts = promptsIn(src);
       // Every text/password prompt in these modules carries a validate, and
       // every validate belongs to one of them: a prompt that lost its validate
@@ -300,7 +299,7 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
   }
 
   it("create.js's admin-password prompt checks ADMIN_PASSWORD", () => {
-    const src = readFileSync(join(ROOT, 'src/create.js'), 'utf-8');
+    const src = readRepoFile('src/create.js');
     expect(src).toMatch(/dotenvValueProblem\('ADMIN_PASSWORD', value\)/);
   });
 });

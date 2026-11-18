@@ -27,6 +27,7 @@ import { buildEnv } from '../../../src/lib/iac/index.js';
 import { findEnvDrift } from '../../../src/lib/project.js';
 import { DigitalOceanSpacesProvider } from '../../../src/lib/providers/digitalocean-spaces.js';
 import { LinodeObjectStorageProvider } from '../../../src/lib/providers/linode-objectstorage.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const INFRA = {
   accessKey: 'SENTINEL_INFRA_AK',
@@ -176,7 +177,7 @@ describe('R9 lifecycle on a mint provider', () => {
   });
 
   it('a failed deploy never revokes the old key: rotation runs only after finish() and before the final save', async () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const finish = src.indexOf('appBucketFinalize.finish(p.log)');
     const exit = src.indexOf('process.exit(1);', finish);
     const rotate = src.indexOf('await finishAppKeyRotation(', finish);
@@ -746,7 +747,7 @@ describe('readiness: the app key HeadBucket runs inside the concurrent finalize'
   });
 
   it('the orchestrator never awaits the readiness check serially before IaC', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const uses = [...src.matchAll(/waitForAppKeyReady\(/g)];
     // Exactly one call, inside startAppBucketFinalize, and not awaited there.
     expect(uses).toHaveLength(1);
@@ -861,7 +862,7 @@ describe('GitOps gets the app pair, never the infra pair on a scoping provider',
   });
 
   it('no repo-level S3 pair is seeded; the per-env secrets carry the app pair', async () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/github-environments.js'), 'utf-8');
+    const src = readRepoFile('src/lib/github-environments.js');
     expect(src).not.toMatch(/setSecretFromBodyFile\('S3_(ACCESS|SECRET)_KEY'/);
     const { buildPerEnvSecrets } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
     const perEnv = buildPerEnvSecrets(

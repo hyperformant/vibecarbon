@@ -33,8 +33,6 @@
  * only need the id to build their message, so reading it directly is
  * simpler and more robust than resolving a provider class they never use.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { hetznerOnlyGateError } from '../../../src/console.js';
 import { SPEC as DESTROY_SPEC } from '../../../src/destroy.js';
@@ -42,9 +40,10 @@ import { hcloudGateSkipNote } from '../../../src/diagnose.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { buildShellTryHint } from '../../../src/shell.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('scale.js pricing line — Provider.NAME + Provider.PRICING_URL (sanctioned deviation)', () => {
-  const SCALE_SRC = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+  const SCALE_SRC = readRepoFile('src/scale.js');
 
   it('both call sites interpolate Provider.NAME and Provider.PRICING_URL', () => {
     const pattern =
@@ -59,7 +58,7 @@ describe('scale.js pricing line — Provider.NAME + Provider.PRICING_URL (sancti
 });
 
 describe('scale.js SSH-key registration message — Provider.NAME interpolation (sanctioned deviation 6)', () => {
-  const SCALE_SRC = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+  const SCALE_SRC = readRepoFile('src/scale.js');
 
   it('interpolates Provider.NAME instead of a hardcoded "Hetzner" literal', () => {
     const pattern = /prep\.start\(`Registering SSH key with \$\{Provider\.NAME\}\.\.\.`\);/;
@@ -96,7 +95,7 @@ describe('destroy.js SPEC — teardown bullets derive from Provider.NAME (sancti
 });
 
 describe('destroy.js console-hint + orphan-token strings — Provider.NAME/.TOKEN_ENV interpolation (sanctioned deviation)', () => {
-  const DESTROY_SRC = readFileSync(join(process.cwd(), 'src/destroy.js'), 'utf-8');
+  const DESTROY_SRC = readRepoFile('src/destroy.js');
 
   // deleteAppBucketEffect's no-credentials issue. It used to say "Run
   // `vibecarbon destroy` again", which cannot run: the environment has moved

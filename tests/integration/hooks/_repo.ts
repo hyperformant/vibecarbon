@@ -15,8 +15,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const HOOKS_DIR = resolve(import.meta.dirname, '../../../.claude/hooks');
+const HOOKS_DIR = resolve(REPO_ROOT, '.claude/hooks');
 
 const GIT_ENV = {
   GIT_AUTHOR_NAME: 'Hook Test',

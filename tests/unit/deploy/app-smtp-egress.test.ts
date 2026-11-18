@@ -7,19 +7,15 @@
  * config worked on compose (whose stack has no egress policy). Auth now
  * sends its own emails from the app, which makes this load-bearing.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = join(__dirname, '../../..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('k8s: the app can reach an SMTP server', () => {
   // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
   type Doc = any;
   const docs: Doc[] = [];
-  loadAll(read('carbon/k8s/base/app/network-policy.yaml'), (d) => {
+  loadAll(readRepoFile('carbon/k8s/base/app/network-policy.yaml'), (d) => {
     if (d) docs.push(d);
   });
   const policy = docs.find((d) => d.kind === 'NetworkPolicy' && d.metadata.name === 'app-policy');

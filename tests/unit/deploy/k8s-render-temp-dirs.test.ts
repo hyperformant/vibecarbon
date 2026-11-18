@@ -10,10 +10,11 @@
  * succeeds) and the leader wait made to fail.
  */
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
@@ -58,20 +59,18 @@ function child(stdout = '') {
   return c as unknown as ReturnType<typeof spawn>;
 }
 
-const REPO = join(__dirname, '../../..');
-
 function projectDir() {
   const dir = createTempDir('vc-k8s-render-project-');
   mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });
   writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
-    readFileSync(join(REPO, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+    readRepoFile('carbon/k8s/base/db/statefulset.yaml'),
   );
   mkdirSync(join(dir, 'k8s', 'infra', 'traefik-crds'), { recursive: true });
   writeFileSync(
     join(dir, 'k8s', 'infra', 'traefik-crds', 'kustomization.yaml'),
-    readFileSync(join(REPO, 'carbon/k8s/infra/traefik-crds/kustomization.yaml'), 'utf-8'),
+    readRepoFile('carbon/k8s/infra/traefik-crds/kustomization.yaml'),
   );
   return dir;
 }
@@ -141,7 +140,7 @@ describe('the k8s manifest renders', () => {
     mkdirSync(join(src, 'db'));
     writeFileSync(
       join(src, 'db', 'statefulset.yaml'),
-      `# {{NEVER_FILLED}}\n${readFileSync(join(REPO, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8')}`,
+      `# {{NEVER_FILLED}}\n${readRepoFile('carbon/k8s/base/db/statefulset.yaml')}`,
     );
     const values = {
       ...buildDbManifestValues({

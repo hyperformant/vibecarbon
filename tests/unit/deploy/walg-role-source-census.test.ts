@@ -34,9 +34,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { COMMENT, enclosingBracket, lex } from '../helpers/js-call-scan.js';
 
-const REPO = join(__dirname, '../../..');
 const ROOTS = [
   'src',
   'carbon/backup',
@@ -296,18 +296,18 @@ function roleAssignmentsOutsideParser(root: string): string[] {
 
 describe('census: the wal-g role has one file, one parser, one writer module', () => {
   it('walks real trees', () => {
-    const { files } = tree(REPO);
+    const { files } = tree(REPO_ROOT);
     expect(files.length).toBeGreaterThan(200);
     expect(files).toContain('carbon/docker-compose.prod.yml');
     expect(files).toContain('tests/e2e/checks/ha-integrity.ts');
   });
 
   it('nothing reads or writes a WALG_ROLE env any more', () => {
-    expect(envRoleHits(REPO)).toEqual([]);
+    expect(envRoleHits(REPO_ROOT)).toEqual([]);
   });
 
   it('only walg-role.js and db-guard.sh (both copies) write the role file', () => {
-    expect(roleTmpWriters(REPO)).toEqual(
+    expect(roleTmpWriters(REPO_ROOT)).toEqual(
       [
         'carbon/k8s/base/backup/configmap-walg.yaml',
         'carbon/volumes/db/db-guard.sh',
@@ -317,7 +317,7 @@ describe('census: the wal-g role has one file, one parser, one writer module', (
   });
 
   it('every file that reads the role file carries THE parser verbatim, or renders it from walg-role.js', () => {
-    const { readers, withoutParser } = roleFileReaders(REPO);
+    const { readers, withoutParser } = roleFileReaders(REPO_ROOT);
     expect(withoutParser).toEqual([]);
     expect(readers).toEqual(
       [
@@ -330,25 +330,25 @@ describe('census: the wal-g role has one file, one parser, one writer module', (
   });
 
   it('host and e2e readers render the role read from walg-role.js (C6)', () => {
-    expect(unrenderedReaders(REPO)).toEqual([]);
+    expect(unrenderedReaders(REPO_ROOT)).toEqual([]);
   });
 
   it('one read-back: every WALG_ROLE_FILE= answer is read through parseWalgRoleReadBack', () => {
-    expect(readBackParsers(REPO)).toEqual([]);
+    expect(readBackParsers(REPO_ROOT)).toEqual([]);
   });
 
   it('no code path rolls the db to change its role', () => {
-    expect(dbEnvRolls(REPO)).toEqual([]);
+    expect(dbEnvRolls(REPO_ROOT)).toEqual([]);
   });
 
   it('no raw role parse or write outside the parser and the named writers', () => {
-    expect(rawRoleAccess(REPO)).toEqual([]);
+    expect(rawRoleAccess(REPO_ROOT)).toEqual([]);
   });
 
   it('only THE parser assigns VC_WALG_ROLE in shell and YAML', () => {
-    expect(roleAssignmentsOutsideParser(REPO)).toEqual([]);
+    expect(roleAssignmentsOutsideParser(REPO_ROOT)).toEqual([]);
     // the census sees the three parser copies it lets through
-    const { files, text } = tree(REPO);
+    const { files, text } = tree(REPO_ROOT);
     expect(
       files.filter((f) => /\.(sh|ya?ml)$/.test(f) && parserRanges(text(f)).length > 0).sort(),
     ).toEqual(
@@ -385,7 +385,7 @@ describe('census bites', () => {
     ];
     for (const f of keep) {
       mkdirSync(dirname(join(dir, f)), { recursive: true });
-      writeFileSync(join(dir, f), readFileSync(join(REPO, f), 'utf-8'));
+      writeFileSync(join(dir, f), readRepoFile(f));
     }
     for (const [f, t] of Object.entries(files)) {
       mkdirSync(dirname(join(dir, f)), { recursive: true });
@@ -407,7 +407,7 @@ describe('census bites', () => {
   });
 
   it('a ConfigMap whose indented parser differs by one character is a reader without THE parser', () => {
-    const yaml = readFileSync(join(REPO, DB_GUARD_COPY), 'utf-8');
+    const yaml = readRepoFile(DB_GUARD_COPY);
     const changed = yaml.replace(
       'primary) VC_WALG_ROLE=primary ;;',
       'primary) VC_WALG_ROLE=primarY ;;',

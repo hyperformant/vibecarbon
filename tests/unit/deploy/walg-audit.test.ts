@@ -14,12 +14,12 @@
 
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 // vi.useFakeTimers() does not fake `node:timers/promises` (sinon limitation),
 // so route runWithRetry's sleep through the faked global setTimeout — mirrors
@@ -277,7 +277,6 @@ describe('the audit reads the role file', () => {
   // The probe, run for real with bash against the real walg-env.sh, a stub
   // pg_controldata and a role file in each state.
   describe('run for real', () => {
-    const repo = fileURLToPath(new URL('../../../', import.meta.url));
     const work = mkdtempSync(join(tmpdir(), 'vc-walg-audit-'));
     afterAll(() => rmSync(work, { recursive: true, force: true }));
     writeFileSync(
@@ -294,7 +293,7 @@ describe('the audit reads the role file', () => {
       if (role !== null) writeFileSync(file, role);
       const probe = buildWalgAuditProbe({ requirePrimary }).replaceAll(
         '/etc/postgresql/walg-env.sh',
-        join(repo, 'carbon/volumes/db/walg-env.sh'),
+        join(REPO_ROOT, 'carbon/volumes/db/walg-env.sh'),
       );
       const r = spawnSync('bash', ['-c', probe], {
         encoding: 'utf-8',
@@ -335,7 +334,7 @@ describe('the audit reads the role file', () => {
       n += 1;
       const probe = buildWalgAuditProbe().replaceAll(
         '/etc/postgresql/walg-env.sh',
-        join(repo, 'carbon/volumes/db/walg-env.sh'),
+        join(REPO_ROOT, 'carbon/volumes/db/walg-env.sh'),
       );
       const r = spawnSync('bash', ['-c', probe], {
         encoding: 'utf-8',
@@ -714,10 +713,7 @@ describe('k8s audit is NOT behind the persisted k3s-apply skip gate', () => {
    * the gate block. Brace-matching finds the gate block's real extent rather
    * than eyeballing line numbers.
    */
-  const SRC = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/k8s/k3s.js', import.meta.url)),
-    'utf-8',
-  );
+  const SRC = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
   /** Source span of the `if (!skipApply) { … }` block (skipApply = shouldSkipK3sApply). */
   function applyGateBlock(): string {

@@ -20,11 +20,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /** `ALTER|CREATE ROLE|USER <name> ... PASSWORD <literal or variable>`; the match ends at the literal. */
 const SETS_PASSWORD =
@@ -51,10 +48,10 @@ function passwordLogRisks(text: string): string[] {
 }
 
 const sources = ['src', 'carbon', 'services']
-  .flatMap((d) => sourceFiles(join(ROOT, d), { skip: ['node_modules', '.git'] }))
+  .flatMap((d) => sourceFiles(join(REPO_ROOT, d), { skip: ['node_modules', '.git'] }))
   .filter((p) => /\.(js|ts|sh|sql)$/.test(p))
   .filter((p) => !/\/(tests?|migrations)\//.test(p) && !/\.test\.[jt]s$/.test(p))
-  .map((p) => ({ path: relative(ROOT, p), text: readFileSync(p, 'utf-8') }));
+  .map((p) => ({ path: relative(REPO_ROOT, p), text: readFileSync(p, 'utf-8') }));
 
 describe('census: a role password never rides in a loggable statement', () => {
   it('finds the role-password sites it is meant to police', () => {

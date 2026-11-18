@@ -40,6 +40,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /** A resolved restore point, as restore.js hands it to restoreCompose. */
 const RESTORE = {
@@ -68,8 +69,6 @@ vi.mock('../../../src/lib/cli/progress.js', async () => {
 
 const stalenessPromise = import('../../../src/lib/deploy/walg-staleness.js');
 const composePromise = import('../../../src/lib/deploy/compose/index.js');
-
-const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 
 /**
  * The failure verbatim from the incident log (project prefix kept), including

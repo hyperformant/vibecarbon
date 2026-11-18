@@ -2,9 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { adoptTempDir } from '../../_shared/temp-dir.js';
-
-const REPO_ROOT = resolve(__dirname, '../../..');
 
 function kustomizeBuild(path: string): { ok: boolean; stdout: string; stderr: string } {
   // `kubectl kustomize` is pure client-side — it doesn't need a kubeconfig

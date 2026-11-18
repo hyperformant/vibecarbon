@@ -20,9 +20,9 @@
 import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const CLOUD_INIT_DIR = join(process.cwd(), 'carbon', 'cloud-init');
+const CLOUD_INIT_DIR = join(REPO_ROOT, 'carbon', 'cloud-init');
 
 describe('sshd concurrency provisioning census', () => {
   const files = sourceFiles(CLOUD_INIT_DIR, { exts: ['.yaml', '.yml', '.sh'] });

@@ -11,6 +11,7 @@ import {
 } from '../../../src/lib/deploy/k8s/k3s.js';
 // @ts-expect-error — JS module without types
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Regression coverage for the content-blind `k3s-build` skip gate.
@@ -36,7 +37,7 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
 /** The template file PR #243's e2e mutator edits — the exact bug shape. */
 const APP_FILE = join('src', 'server', 'routes', 'health.ts');
 
-const REPO_DOCKERFILE = join(process.cwd(), 'carbon', 'Dockerfile');
+const REPO_DOCKERFILE = join(REPO_ROOT, 'carbon', 'Dockerfile');
 
 describe('buildK3sBuildInputs — the app source tree is part of the gate', () => {
   let dir: string;
@@ -334,7 +335,7 @@ describe('a source change cascades build → apply (which delivers)', () => {
 });
 
 describe('deployK3s wires the content-aware gate end to end', () => {
-  const K3S_SRC = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8') as string;
+  const K3S_SRC = readRepoFile('src/lib/deploy/k8s/k3s.js') as string;
   const deployBody = K3S_SRC.slice(K3S_SRC.indexOf('export async function deployK3s('));
   // The build gate lives in deliverAppImage, which deployK3s calls.
   const deliverBody = K3S_SRC.slice(

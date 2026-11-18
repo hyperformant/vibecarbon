@@ -19,12 +19,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderS3EgressVpcManifest } from '../../../src/lib/deploy/k8s/k3s.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const REAL_TEMPLATE = join(ROOT, 'carbon/k8s/base/s3-egress-vpc/s3-egress-vpc.yaml');
+const REAL_TEMPLATE = join(REPO_ROOT, 'carbon/k8s/base/s3-egress-vpc/s3-egress-vpc.yaml');
 
 function kustomizeBuild(path: string) {
-  const result = spawnSync('kubectl', ['kustomize', path], { cwd: ROOT, encoding: 'utf-8' });
+  const result = spawnSync('kubectl', ['kustomize', path], { cwd: REPO_ROOT, encoding: 'utf-8' });
   return { ok: result.status === 0, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
@@ -96,7 +96,7 @@ describe('s3-egress-vpc.yaml kustomize-build validation', () => {
   // first-invocation latency).
   beforeAll(() => {
     spawnSync('kubectl', ['kustomize', 'carbon/k8s/base/s3-egress-vpc'], {
-      cwd: ROOT,
+      cwd: REPO_ROOT,
       encoding: 'utf-8',
     });
   }, 60_000);
@@ -119,10 +119,7 @@ describe('s3-egress-vpc.yaml kustomize-build validation', () => {
   });
 
   it('is NOT referenced by the parent carbon/k8s/base kustomization (byte-identical for every provider)', () => {
-    const baseKustomization = readFileSync(
-      join(ROOT, 'carbon/k8s/base/kustomization.yaml'),
-      'utf-8',
-    );
+    const baseKustomization = readRepoFile('carbon/k8s/base/kustomization.yaml');
     expect(baseKustomization).not.toContain('s3-egress-vpc');
   });
 });

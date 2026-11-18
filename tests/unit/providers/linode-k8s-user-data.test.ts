@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const masterVars = {
   k3s_version: 'v1.37.2+k3s1',
@@ -173,10 +174,7 @@ describe('LinodeProvider k8s user-data statics', () => {
 
   it('both templates and the db render are pure ASCII', async () => {
     const texts = ['master', 'worker'].map((role) =>
-      readFileSync(
-        join(__dirname, `../../../carbon/cloud-init/k3s/linode-${role}-init.sh`),
-        'utf-8',
-      ),
+      readRepoFile(`carbon/cloud-init/k3s/linode-${role}-init.sh`),
     );
     texts.push(await LinodeProvider.getK8sDbUserData(agentVars));
     for (const text of texts) {

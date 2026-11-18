@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -10,11 +10,9 @@ import {
   inspectTarget,
   parseInspectOutput,
 } from '../../../src/lib/update/inspect.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const FIXTURE = readFileSync(
-  join(import.meta.dirname, '../../fixtures/update/inspect-compose.txt'),
-  'utf-8',
-);
+const FIXTURE = readRepoFile('tests/fixtures/update/inspect-compose.txt');
 
 const target = (name: string) => ({
   name,

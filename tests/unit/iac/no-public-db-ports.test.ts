@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * The database has no public port. Operators reach it through
@@ -155,9 +154,8 @@ describe('compose firewalls publish no database port', () => {
 });
 
 describe('operator CIDR rewrites touch only SSH and the k8s API', () => {
-  const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
   it.each(PROVIDERS)('%s.js locks only SSH (22) and the k8s API (6443)', (provider) => {
-    const src = read(`src/lib/providers/${provider}.js`);
+    const src = readRepoFile(`src/lib/providers/${provider}.js`);
     expect(src).toMatch(/const OPERATOR_LOCKED_PORTS = new Set\(\[SSH_PORT, K8S_API_PORT\]\);/);
     expect(src).toMatch(/const SSH_PORT = '?22'?;/);
     expect(src).toMatch(/const K8S_API_PORT = '?6443'?;/);

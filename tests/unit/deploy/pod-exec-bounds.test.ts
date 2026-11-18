@@ -29,8 +29,8 @@ import {
 } from '../../../src/lib/deploy/k8s/readiness.js';
 import { WALG_AUDIT_PROBE_TIMEOUT_MS } from '../../../src/lib/deploy/walg-audit.js';
 import { verifyPostgres } from '../../../src/restore.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const KILL_AFTER_MS = 150;
 
 let dir: string;
@@ -250,7 +250,7 @@ describe('a warm deploy reads readiness from the API', () => {
   });
 
   const deploy = () => {
-    const src = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     return src.slice(src.indexOf('async function deployK3sSteps('));
   };
 

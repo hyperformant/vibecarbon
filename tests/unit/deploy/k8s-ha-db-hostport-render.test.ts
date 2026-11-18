@@ -18,9 +18,9 @@ import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const BASE = join(ROOT, 'carbon/k8s/base');
+const BASE = join(REPO_ROOT, 'carbon/k8s/base');
 
 const TEST_TLS = {
   dnsNames: ['app.example.test'],
@@ -91,7 +91,7 @@ const { buildDbManifestValues, renderK8sBase, rendersReplicationHostPort } = awa
 const { configurePrimaryForReplication } = await import('../../../src/lib/deploy/k8s/ha/index.js');
 
 function kustomize(path: string): Doc[] {
-  const res = spawnSync('kubectl', ['kustomize', path], { cwd: ROOT, encoding: 'utf-8' });
+  const res = spawnSync('kubectl', ['kustomize', path], { cwd: REPO_ROOT, encoding: 'utf-8' });
   if (res.status !== 0) throw new Error(`kustomize build failed:\n${res.stderr}`);
   return (loadAll(res.stdout) as Doc[]).filter(Boolean);
 }

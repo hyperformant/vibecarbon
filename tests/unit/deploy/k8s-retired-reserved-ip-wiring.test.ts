@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const { haSidesRecord } = await import('../../../src/lib/deploy/orchestrator.js');
 
@@ -193,10 +194,7 @@ describe('haSidesRecord: each side records its ingress address', () => {
 });
 
 describe('the up records what the surgery takes out', () => {
-  const k3s = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/k8s/k3s.js', import.meta.url)),
-    'utf8',
-  );
+  const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
   it("deployK3s's up hands the addresses to the environment's record, under the operator's name", () => {
     const up = k3s.indexOf('upStack(options.environment, program, {');
     const call = k3s.slice(up, k3s.indexOf('requiredOutputs,', up));

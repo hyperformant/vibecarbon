@@ -13,7 +13,7 @@ import {
   k8sStandbyZeroedWorkloads,
   loadAddonStandby,
 } from '../../../src/lib/services/standby-policy.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -23,8 +23,7 @@ import { createTempDir } from '../../_shared/temp-dir.js';
  * the declaration instead of hand lists.
  */
 
-const ROOT = process.cwd();
-const SERVICES = join(ROOT, 'services');
+const SERVICES = join(REPO_ROOT, 'services');
 const SHARED_COMPOSE = new Set(['db', 'app', 'traefik']);
 const WORKLOAD_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet']);
 
@@ -175,8 +174,8 @@ function censusFiles(): string[] {
   return [
     'src/failover.js',
     'src/scale.js',
-    ...sourceFiles(join(ROOT, 'src/lib/deploy'), { exts: ['.js'], relativeTo: ROOT }),
-  ].filter((f) => existsSync(join(ROOT, f)));
+    ...sourceFiles(join(REPO_ROOT, 'src/lib/deploy'), { exts: ['.js'], relativeTo: REPO_ROOT }),
+  ].filter((f) => existsSync(join(REPO_ROOT, f)));
 }
 
 const LITERAL = /['"`](n8n|metabase|redis)(-setup)?['"`]/;
@@ -184,7 +183,7 @@ const LITERAL = /['"`](n8n|metabase|redis)(-setup)?['"`]/;
 describe('no hand-written add-on lists in deploy/failover/scale', () => {
   const hits: { file: string; line: string }[] = [];
   for (const file of censusFiles()) {
-    for (const line of readFileSync(join(ROOT, file), 'utf8').split('\n')) {
+    for (const line of readRepoFile(file).split('\n')) {
       if (LITERAL.test(line)) hits.push({ file, line });
     }
   }

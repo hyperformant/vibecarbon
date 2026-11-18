@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 describe('Generated Project Lint and Build', () => {
@@ -22,7 +23,7 @@ describe('Generated Project Lint and Build', () => {
       execFileSync(
         'node',
         [
-          join(process.cwd(), 'src/cli.js'),
+          join(REPO_ROOT, 'src/cli.js'),
           'create',
           projectName,
           '-y',

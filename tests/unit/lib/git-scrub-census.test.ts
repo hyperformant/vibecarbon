@@ -34,9 +34,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { basename, join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { escapeRegExp } from '../../_shared/regexp.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 const SPAWNERS = new Set([
   'runCommand',
@@ -200,7 +198,7 @@ function collectFromSource(rel: string, src: string, inTests: boolean): Site[] {
 function collect(files: string[], inTests: boolean): Site[] {
   return files.flatMap((file) =>
     collectFromSource(
-      relative(ROOT, file).split(sep).join('/'),
+      relative(REPO_ROOT, file).split(sep).join('/'),
       readFileSync(file, 'utf-8'),
       inTests,
     ),
@@ -220,9 +218,9 @@ const FIX =
 describe('every git invocation scrubs the inherited git context', () => {
   it('src/ and bin/', () => {
     const files = [
-      ...walk(join(ROOT, 'src')),
-      ...(statSync(join(ROOT, 'bin'), { throwIfNoEntry: false })?.isDirectory()
-        ? walk(join(ROOT, 'bin'))
+      ...walk(join(REPO_ROOT, 'src')),
+      ...(statSync(join(REPO_ROOT, 'bin'), { throwIfNoEntry: false })?.isDirectory()
+        ? walk(join(REPO_ROOT, 'bin'))
         : []),
     ];
     expect(files.length).toBeGreaterThan(50);
@@ -236,7 +234,7 @@ describe('every git invocation scrubs the inherited git context', () => {
 
   it('tests/ helpers that run git in a temp repo', () => {
     const sites = collect(
-      walk(join(ROOT, 'tests')).filter((f) => !f.endsWith('git-scrub-census.test.ts')),
+      walk(join(REPO_ROOT, 'tests')).filter((f) => !f.endsWith('git-scrub-census.test.ts')),
       true,
     );
     expect(

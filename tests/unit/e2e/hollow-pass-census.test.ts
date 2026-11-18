@@ -41,9 +41,9 @@
  *    pass because no marker was over budget.
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import {
   authSettingsShapeError,
   checkRoute,
@@ -73,8 +73,7 @@ import * as standbyAddons from '../../e2e/checks/standby-addons.js';
 import * as tlsReuse from '../../e2e/checks/tls-reuse.js';
 import type { VerificationResult } from '../../e2e/scenarios/types.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CHECKS_DIR = join(__dirname, '..', '..', 'e2e', 'checks');
+const CHECKS_DIR = join(REPO_ROOT, 'tests', 'e2e', 'checks');
 
 const D = 'app.example.com';
 const EMAIL = 'e2e@test.local';

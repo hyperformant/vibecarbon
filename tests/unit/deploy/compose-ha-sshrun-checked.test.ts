@@ -1,8 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { sshRunChecked } from '../../../src/lib/deploy/compose/index.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // `sshRun` NEVER throws — it answers `false`. That contract is deliberate and
 // load-bearing for the poll loops in ha.js, which read `false` as "not ready
@@ -28,8 +26,7 @@ import { sshRunChecked } from '../../../src/lib/deploy/compose/index.js';
 //      pg_basebackup raced a postmaster that was not yet accepting connections.
 //      (The restart and its loop are gone: a deploy no longer restarts the
 //      primary, see no-warm-primary-restart-census.test.ts.)
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const haSrc = readFileSync(join(repoRoot, 'src/lib/deploy/compose/ha.js'), 'utf-8');
+const haSrc = readRepoFile('src/lib/deploy/compose/ha.js');
 
 /** Commands that must abort the deploy when they fail. */
 const MUST_SUCCEED = [

@@ -6,6 +6,7 @@ import { generateEnvLocal } from '../../../src/create.js';
 import { devS3Endpoint, devS3Port } from '../../../src/lib/dev-s3.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { setPortOffset } from '../../../src/up.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * The dev-only local S3 port follows the DEV_* port contract (explicit
@@ -15,13 +16,9 @@ import { setPortOffset } from '../../../src/up.js';
  * tests/integration/template/dev-s3-port.test.ts.
  */
 
-const ROOT = join(__dirname, '..', '..', '..');
-
 describe('devS3Port', () => {
   it('is one rule in two byte-identical copies (CLI and template)', () => {
-    expect(readFileSync(join(ROOT, 'src/lib/dev-s3.js'), 'utf-8')).toBe(
-      readFileSync(join(ROOT, 'carbon/scripts/lib/dev-s3.js'), 'utf-8'),
-    );
+    expect(readRepoFile('src/lib/dev-s3.js')).toBe(readRepoFile('carbon/scripts/lib/dev-s3.js'));
   });
 
   it('shifts with DEV_PORT_OFFSET and lets DEV_S3_PORT win', () => {

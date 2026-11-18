@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,6 +7,7 @@ import {
 } from '../../../src/lib/project.js';
 import { templatePathFor } from '../../../src/lib/template-paths.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const REQUIRED_IGNORES = [
   '.vibecarbon/',
@@ -23,10 +23,7 @@ const REQUIRED_IGNORES = [
 ];
 
 describe('C-2: template .gitignore invariants', () => {
-  const templateGitignore = readFileSync(
-    join(process.cwd(), 'carbon', templatePathFor('.gitignore')),
-    'utf-8',
-  );
+  const templateGitignore = readRepoFile('carbon', templatePathFor('.gitignore'));
 
   it.each(REQUIRED_IGNORES)('carbon/_gitignore (shipped as .gitignore) ignores %s', (pattern) => {
     const lines = templateGitignore
@@ -39,7 +36,7 @@ describe('C-2: template .gitignore invariants', () => {
 
 describe('C-2: validateGitignore helper', () => {
   it('returns empty list when all required patterns are present', () => {
-    const path = join(process.cwd(), 'carbon', templatePathFor('.gitignore'));
+    const path = join(REPO_ROOT, 'carbon', templatePathFor('.gitignore'));
     expect(validateGitignore(path)).toEqual([]);
   });
 
@@ -143,7 +140,7 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
   });
 
   it("names the template's Cursor rules, not the whole .cursor directory", () => {
-    const argv = buildGitAddArgv(join(import.meta.dirname, '..', '..', '..', 'carbon'));
+    const argv = buildGitAddArgv(join(REPO_ROOT, 'carbon'));
     expect(argv).toContain('.cursor/rules/');
     expect(argv).not.toContain('.cursor/');
   });
@@ -154,7 +151,7 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
   });
 
   it('includes drizzle.config.ts, the config the schema workflow reads', () => {
-    expect(buildGitAddArgv(join(process.cwd(), 'carbon'))).toContain('drizzle.config.ts');
+    expect(buildGitAddArgv(join(REPO_ROOT, 'carbon'))).toContain('drizzle.config.ts');
   });
 
   it('includes an allowlisted file that exists', () => {

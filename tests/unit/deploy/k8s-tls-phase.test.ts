@@ -11,9 +11,8 @@
  * with TLS pending (recorded, warned, exit 0) instead of failing it; a hit
  * records trusted and saves a snapshot from the primary cluster.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { loadSourceTree, maskSource } from '../helpers/runtime-reach-walk.js';
 import { expectNoKeyLeak } from './_no-key-leak.ts';
 import { k8sSecretJson } from './_tls-fixtures.ts';
@@ -24,7 +23,7 @@ const { publicProbeConnect } = await import('../../../src/lib/deploy/public-doma
 const { TLS_FIRST_LOOK_BUDGET_MS } = await import('../../../src/lib/deploy/tls-ready.js');
 const { caSlug } = await import('../../../src/lib/deploy/tls-snapshot.js');
 
-const SRC = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf8');
+const SRC = readRepoFile('src/lib/deploy/orchestrator.js');
 
 const DOMAIN = 'app.example.com';
 const IDENTITY = {
@@ -130,10 +129,7 @@ describe('app phase', () => {
     // The probe's socket options live in public-domain-probe.js now, the one
     // path every probe of the app's domain takes; the orchestrator has none.
     expect(SRC.match(/rejectUnauthorized/g) ?? []).toHaveLength(0);
-    const probeSrc = readFileSync(
-      join(__dirname, '../../../src/lib/deploy/public-domain-probe.js'),
-      'utf8',
-    );
+    const probeSrc = readRepoFile('src/lib/deploy/public-domain-probe.js');
     expect(probeSrc.match(/rejectUnauthorized/g) ?? []).toHaveLength(1);
     expect(probeSrc).toMatch(/if \(verifyTls === false\) \{[^}]*rejectUnauthorized = false/);
   });
@@ -400,7 +396,7 @@ describe('TLS phase: re-issue of a restored certificate (tls-reissue-watch.js)',
 });
 
 describe('deploy timing records (k3s.js)', () => {
-  const K3S = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf8');
+  const K3S = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
   it('the restore records its write, and the apply records the Certificate and the controller', () => {
     const restore = K3S.indexOf('restoreK8sTlsSecret({');

@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -27,6 +25,7 @@ vi.mock('@clack/prompts', () => ({
 }));
 
 import { runProjectAssignment } from '../../../src/lib/project-assignment.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 class FakeDoProvider {
   static PROJECT_ID_ENV = 'DIGITALOCEAN_PROJECT_ID';
@@ -109,11 +108,10 @@ describe('call-site wiring census', () => {
   // The helper only matters if the two resource-creating verbs actually call
   // it. Source-pin both call sites so deleting either wire fails here, not
   // in a live deploy.
-  const ROOT = join(__dirname, '..', '..', '..');
   it.each([['src/lib/deploy/orchestrator.js'], ['src/scale.js']])(
     '%s calls runProjectAssignment',
     (rel) => {
-      const source = readFileSync(join(ROOT, rel), 'utf-8');
+      const source = readRepoFile(rel);
       expect(source).toMatch(/runProjectAssignment\(/);
     },
   );

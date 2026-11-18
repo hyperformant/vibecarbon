@@ -13,19 +13,18 @@
  * different directory and is not flagged: it is never built from a home dir.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { vibecarbonHome } from '../../../src/lib/vibecarbon-home.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
 const HELPER = 'src/lib/vibecarbon-home.js';
 
 const files = execFileSync(
   'git',
   ['ls-files', 'src/*.js', 'src/**/*.js', 'scripts/*.js', 'scripts/**/*.js', 'tests/e2e/**/*.ts'],
-  { cwd: ROOT, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .split('\n')
   .filter(Boolean);
@@ -41,9 +40,7 @@ const HOME_THEN_DIR =
   /(?:homedir\(\)|env\.HOME\b|env\.USERPROFILE\b)[^;]{0,160}?['"`/]\.vibecarbon(?![.\w-])/;
 
 function offenders(): string[] {
-  return files
-    .filter((f) => f !== HELPER)
-    .filter((f) => HOME_THEN_DIR.test(code(readFileSync(join(ROOT, f), 'utf-8'))));
+  return files.filter((f) => f !== HELPER).filter((f) => HOME_THEN_DIR.test(code(readRepoFile(f))));
 }
 
 describe('vibecarbon home census', () => {
@@ -52,9 +49,7 @@ describe('vibecarbon home census', () => {
   });
 
   it('walks the sources that write there (not vacuous)', () => {
-    const users = files.filter((f) =>
-      readFileSync(join(ROOT, f), 'utf-8').includes('vibecarbonHome('),
-    );
+    const users = files.filter((f) => readRepoFile(f).includes('vibecarbonHome('));
     // deploy logs, registry, Pulumi state, ssh mux, uplink lock, fingerprint
     // key, telemetry, update check, volume ledger, diagnose, e2e logs.
     expect(users.length).toBeGreaterThanOrEqual(12);

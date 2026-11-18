@@ -21,11 +21,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /** Every file under `dir` with one of `exts`, skipping vendored trees. */
 function walk(dir: string, exts: string[]): string[] {
@@ -33,8 +30,8 @@ function walk(dir: string, exts: string[]): string[] {
 }
 
 const SHIPPED = [
-  ...walk(join(ROOT, 'src'), ['.js', '.mjs', '.sh', '.yaml', '.yml']),
-  ...walk(join(ROOT, 'carbon'), ['.js', '.mjs', '.ts', '.sh', '.yaml', '.yml', '.sql']),
+  ...walk(join(REPO_ROOT, 'src'), ['.js', '.mjs', '.sh', '.yaml', '.yml']),
+  ...walk(join(REPO_ROOT, 'carbon'), ['.js', '.mjs', '.ts', '.sh', '.yaml', '.yml', '.sql']),
 ];
 
 /** The helper-pod path's names: its pod, its exports, its detach plumbing. */
@@ -53,7 +50,7 @@ const POD_WITH_PVC =
 /** The unquoted remote kubectl join the reseed closure used to build (C13). */
 const BARE_KUBECTL_JOIN = /\[\s*['"`]kubectl['"`]\s*,\s*\.\.\.\w+\s*\]\.join\(/;
 
-const rel = (f: string) => relative(ROOT, f);
+const rel = (f: string) => relative(REPO_ROOT, f);
 
 describe('the helper-pod reseed path stays deleted', () => {
   it('the matchers see what they ban (they cannot go blind)', () => {
@@ -95,24 +92,22 @@ describe('the helper-pod reseed path stays deleted', () => {
   });
 
   it('no shipped code or manifest builds a Pod that mounts a PersistentVolumeClaim', () => {
-    const hits = [...SHIPPED, ...walk(join(ROOT, 'carbon'), ['.json'])]
+    const hits = [...SHIPPED, ...walk(join(REPO_ROOT, 'carbon'), ['.json'])]
       .filter((f) => POD_WITH_PVC.test(readFileSync(f, 'utf-8')))
       .map(rel);
     expect(hits, 'a CLI-built Pod mounting a PVC').toEqual([]);
   });
 
   it('the k8s-ha reseed module never scales the db to zero and quotes every remote kubectl', () => {
-    const src = readFileSync(join(ROOT, 'src/lib/deploy/k8s/ha/index.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/ha/index.js');
     expect(src).not.toMatch(/--replicas=0/);
     expect(src).not.toMatch(BARE_KUBECTL_JOIN);
-    expect(readFileSync(join(ROOT, 'src/lib/deploy/replication.js'), 'utf-8')).not.toMatch(
-      BARE_KUBECTL_JOIN,
-    );
+    expect(readRepoFile('src/lib/deploy/replication.js')).not.toMatch(BARE_KUBECTL_JOIN);
   });
 
   it('the cold deploy seeds through the in-place mechanism failover and restore use', () => {
-    const ha = readFileSync(join(ROOT, 'src/lib/deploy/k8s/ha/index.js'), 'utf-8');
-    const rep = readFileSync(join(ROOT, 'src/lib/deploy/replication.js'), 'utf-8');
+    const ha = readRepoFile('src/lib/deploy/k8s/ha/index.js');
+    const rep = readRepoFile('src/lib/deploy/replication.js');
     // The cold deploy (setupReplication) and reseedStandbyFromPrimary (failover,
     // restore) both stage with the one in-place stage builder and run the one
     // in-place reseed.

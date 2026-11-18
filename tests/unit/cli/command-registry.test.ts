@@ -1,15 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildSpec } from '../../../src/add.js';
 import { KNOWN_COMMANDS } from '../../../src/cli.js';
 import { COMMANDS, loadAllSpecs } from '../../../src/lib/cli/command-registry.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const dispatched = [
-  ...readFileSync(join(process.cwd(), 'src', 'cli.js'), 'utf-8').matchAll(
-    /^\s+case '([a-z-]+)':/gm,
-  ),
-]
+const dispatched = [...readRepoFile('src', 'cli.js').matchAll(/^\s+case '([a-z-]+)':/gm)]
   .map((m) => m[1])
   .sort();
 

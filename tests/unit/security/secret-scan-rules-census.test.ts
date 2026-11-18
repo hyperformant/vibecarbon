@@ -10,15 +10,11 @@
  * drifted, and by 2026-11-16 it lacked the DigitalOcean, Linode, Vultr and
  * Scaleway rules, so a project's hook passed four of five providers' tokens.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SECRET_RULES as CLI_RULES } from '../../../src/lib/secret-scan.js';
 import { SECRET_RULES } from '../../../src/lib/secret-scan-rules.js';
 import { getFilePolicy } from '../../../src/lib/upgrade-policy.js';
-
-const root = join(import.meta.dirname, '..', '..', '..');
-const read = (f: string) => readFileSync(join(root, f), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const CLI_MODULE = 'src/lib/secret-scan-rules.js';
 const TEMPLATE_MODULE = 'carbon/scripts/lib/secret-scan-rules.js';
@@ -32,11 +28,11 @@ const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*
 
 describe('the secret-scan rule module', () => {
   it('is byte-identical in the CLI and in the template', () => {
-    expect(read(TEMPLATE_MODULE)).toBe(read(CLI_MODULE));
+    expect(readRepoFile(TEMPLATE_MODULE)).toBe(readRepoFile(CLI_MODULE));
   });
 
   it('imports nothing, so a generated project can run it without the CLI', () => {
-    expect(code(read(CLI_MODULE))).not.toMatch(/\bimport\b|\brequire\(/);
+    expect(code(readRepoFile(CLI_MODULE))).not.toMatch(/\bimport\b|\brequire\(/);
   });
 
   it('holds every rule, each provider included', () => {
@@ -67,7 +63,7 @@ describe('the secret-scan rule module', () => {
 describe('both scanners take their rules from the module', () => {
   for (const { file, specifier } of CONSUMERS) {
     it(`${file} imports ${specifier} and defines no rule, pattern or allowlist match of its own`, () => {
-      const src = code(read(file));
+      const src = code(readRepoFile(file));
       const imported = new RegExp(
         `import\\s*\\{[^}]*\\bscanContent\\b[^}]*\\}\\s*from\\s*'${specifier.replaceAll('.', '\\.')}'`,
       );

@@ -8,17 +8,14 @@
  * `ubuntu-latest` moved. A job must not depend on what the image happens to
  * carry.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 type Step = { name?: string; run?: string };
 type Workflow = { jobs: Record<string, { steps?: Step[] }> };
 
-const workflow = loadYaml(
-  readFileSync(join(process.cwd(), '.github/workflows/test.yml'), 'utf8'),
-) as Workflow;
+const workflow = loadYaml(readRepoFile('.github/workflows/test.yml')) as Workflow;
 
 const RUNS_INTEGRATION = /pnpm test:integration\b/;
 const INSTALLS_PULUMI = /get\.pulumi\.com/;

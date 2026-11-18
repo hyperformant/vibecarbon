@@ -23,22 +23,19 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
 type Node = any;
 type Src = { file: string; text: string };
 
-const SRC: Src[] = sourceFiles(join(ROOT, 'src'), {
+const SRC: Src[] = sourceFiles(join(REPO_ROOT, 'src'), {
   exts: ['.js', '.mjs'],
   skip: ['node_modules', '.git'],
 }).map((f) => ({
-  file: relative(ROOT, f),
+  file: relative(REPO_ROOT, f),
   text: readFileSync(f, 'utf-8'),
 }));
 
@@ -578,7 +575,7 @@ describe('the reseed repair is gone', () => {
   });
 
   it('the stale-attachment repair site left docs/mitigations.yml with its code', () => {
-    const y = readFileSync(join(ROOT, 'docs/mitigations.yml'), 'utf-8');
+    const y = readRepoFile('docs/mitigations.yml');
     const cls = y.slice(y.indexOf('- class: do-csi-stale-volumeattachment'));
     const entry = cls.slice(0, cls.indexOf('\n  - class:', 1));
     expect(entry).toMatch(/\n {4}sites: \[\]\n/);

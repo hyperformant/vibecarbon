@@ -31,7 +31,7 @@
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { type Config, projectConfigStore } from '../helpers/project-config-store.js';
 
 const logs: string[] = [];
@@ -213,7 +213,7 @@ afterEach(() => {
 
 // ─────────────────────────── the class table ───────────────────────────
 
-const SRC = join(__dirname, '../../../src');
+const SRC = join(REPO_ROOT, 'src');
 
 /** Source without comment lines: JSDoc types name `resourceClass: string`. */
 function codeOf(path: string): string {

@@ -20,13 +20,12 @@
  *    reachable from every command automatically.
  */
 import { readFileSync } from 'node:fs';
-import { relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC_DIR = fileURLToPath(new URL('../../../src', import.meta.url));
+const SRC_DIR = join(REPO_ROOT, 'src');
 
 const BACKEND_IDS = Object.keys(DNS_PROVIDERS);
 

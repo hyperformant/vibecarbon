@@ -34,11 +34,10 @@
  * greppable wire signature (see list-endpoint-pagination-sweep.test.ts
  * for the pattern).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const REGISTRY = [
   {
@@ -374,6 +373,25 @@ const REGISTRY = [
     ],
   },
   {
+    // Reading a repository file by its path from the root. Tests used to find
+    // the root each their own way (process.cwd(), three levels up from
+    // __dirname, a URL), and the ones that asked the working directory read
+    // nothing when run from anywhere else. REPO_ROOT, beside it in the same
+    // file, is that root. About 260 files read through it; the ones listed
+    // are the harnesses other tests build on and the first of each kind.
+    helper: 'readRepoFile',
+    definition: 'tests/_shared/source-files.ts',
+    consumers: [
+      'tests/integration/cli/upgrade/upgrade.test.ts',
+      'tests/integration/docker/db-restore-staged.test.ts',
+      'tests/unit/deploy/env-scope-writers.test.ts',
+      'tests/unit/deploy/retired-fence-entrypoints-census.test.ts',
+      'tests/unit/deploy/walg-archive-script-parity.test.ts',
+      'tests/unit/lib/shared-helper-consumers.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/source-files.test.ts'],
+  },
+  {
     // The recursive file walk under every source census. Each census had its
     // own copy (a local walk, files(), a recursive readdirSync), and each
     // copy chose for itself what to skip and whether to follow a link, so no
@@ -579,16 +597,14 @@ const REGISTRY = [
   },
 ] as const;
 
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {
   it(`is exported from ${definition}`, () => {
-    expect(read(definition)).toMatch(new RegExp(`export (?:async )?function ${helper}\\b`));
+    expect(readRepoFile(definition)).toMatch(new RegExp(`export (?:async )?function ${helper}\\b`));
   });
 
   it.each([...consumers])('%s routes through it', (consumer) => {
     expect(
-      read(consumer),
+      readRepoFile(consumer),
       `${consumer} no longer references ${helper}. If it grew its own copy, that is ` +
         'de-convergence — the first step of every sibling-parity drift. Route it back through ' +
         `${definition}, or update this registry WITH a parity argument for why the surfaces ` +
@@ -597,6 +613,6 @@ describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers
   });
 
   it.each([...deepTests])('deep test %s still exists', (deepTest) => {
-    expect(existsSync(join(ROOT, deepTest))).toBe(true);
+    expect(existsSync(join(REPO_ROOT, deepTest))).toBe(true);
   });
 });

@@ -12,17 +12,18 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TEMPLATE_ONLY_TESTS } from '../../../src/create.js';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 describe('template-only tests', () => {
   it('lists the migrations census, and it exists in the template', () => {
     expect(TEMPLATE_ONLY_TESTS).toContain('template-migrations-census.test.ts');
-    const tiers = readdirSync(join(ROOT, 'carbon', 'tests'), { withFileTypes: true })
+    const tiers = readdirSync(join(REPO_ROOT, 'carbon', 'tests'), { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
     for (const name of TEMPLATE_ONLY_TESTS) {
-      const found = tiers.some((tier) => existsSync(join(ROOT, 'carbon', 'tests', tier, name)));
+      const found = tiers.some((tier) =>
+        existsSync(join(REPO_ROOT, 'carbon', 'tests', tier, name)),
+      );
       expect(found, name).toBe(true);
     }
   });
@@ -31,10 +32,10 @@ describe('template-only tests', () => {
   // project it failed on a missing file for every add-on not installed.
   it("lists the add-on init-grants test, which reads this repo's add-on bundles", () => {
     expect(TEMPLATE_ONLY_TESTS).toContain('addon-init-grants.test.ts');
-    const test = join(ROOT, 'carbon', 'tests', 'db', 'addon-init-grants.test.ts');
+    const test = join(REPO_ROOT, 'carbon', 'tests', 'db', 'addon-init-grants.test.ts');
     expect(existsSync(test)).toBe(true);
     for (const addon of ['metabase', 'n8n']) {
-      expect(existsSync(join(ROOT, 'services', addon, 'db', 'init.sh')), addon).toBe(true);
+      expect(existsSync(join(REPO_ROOT, 'services', addon, 'db', 'init.sh')), addon).toBe(true);
     }
   });
 

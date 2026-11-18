@@ -22,8 +22,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv, readEnvFiles } from '../../../src/lib/dotenv.js';
 import { loadEnvVariables, repairLegacyEnvQuoting } from '../../../src/lib/project.js';
-
-const ROOT = join(import.meta.dirname, '../../..');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('deploy/scale entry heal — the hook the commands call', () => {
   const dirs: string[] = [];
@@ -72,7 +71,7 @@ describe('deploy/scale entry heal — call order pinned in source', () => {
   };
 
   it('deploy.js main() heals before the 0d env preflight and the operator gate', () => {
-    const src = readFileSync(join(ROOT, 'src/deploy.js'), 'utf-8');
+    const src = readRepoFile('src/deploy.js');
     expect(src).toMatch(
       /import \{[^}]*\brepairLegacyEnvQuoting\b[^}]*\} from '\.\/lib\/project\.js'/,
     );
@@ -87,7 +86,7 @@ describe('deploy/scale entry heal — call order pinned in source', () => {
   });
 
   it('scale.js run() heals after the project guard and before the strategy that bundles the local .env', () => {
-    const src = readFileSync(join(ROOT, 'src/scale.js'), 'utf-8');
+    const src = readRepoFile('src/scale.js');
     expect(src).toMatch(
       /import \{[^}]*\brepairLegacyEnvQuoting\b[^}]*\} from '\.\/lib\/project\.js'/,
     );

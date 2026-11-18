@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertComposeFloor, assertDockerRunning } from '../../../src/up.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('assertDockerRunning', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -57,7 +56,7 @@ describe('assertComposeFloor: vibecarbon up checks the local Compose first', () 
   );
 
   it('runs before anything else reaches docker compose', () => {
-    const text = readFileSync(join(process.cwd(), 'src/up.js'), 'utf8');
+    const text = readRepoFile('src/up.js');
     const run = text.slice(text.indexOf('export async function run('));
     expect(run.indexOf('assertComposeFloor()')).toBeGreaterThan(
       run.indexOf('assertDockerRunning()'),

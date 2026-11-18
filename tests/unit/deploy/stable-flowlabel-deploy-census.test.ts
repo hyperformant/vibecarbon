@@ -38,7 +38,7 @@ import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { parseAst } from 'vite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // Every carrier bottoms out here (compose's sshRunAsync, lib/ssh.js's sshRun,
 // prePullImages' own ssh), so the mock sees what each node is sent.
@@ -57,9 +57,7 @@ const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js
 const { stableFlowLabelPrefix } = await import('../../../src/lib/deploy/stable-flowlabel.js');
 const { TIERS } = await import('../../../src/lib/deploy/tier-registry.js');
 
-const ROOT = process.cwd();
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
-const SNIPPET = read('carbon/cloud-init/k3s/_stable-flowlabel.sh');
+const SNIPPET = readRepoFile('carbon/cloud-init/k3s/_stable-flowlabel.sh');
 const PREFIX = stableFlowLabelPrefix();
 
 type Tier = 'compose' | 'compose-ha' | 'k8s' | 'k8s-ha';
@@ -77,7 +75,7 @@ describe('one source: the deploy writes what every cloud-init copy writes', () =
     const write = /^printf '(.+)\\n' > (\S+)$/m.exec(PREFIX);
     expect(write, 'the prefix persists the setting with one printf').not.toBeNull();
     const [, line, path] = write as RegExpExecArray;
-    const doc = loadYaml(read('carbon/cloud-init/docker-ce-setup.yaml')) as {
+    const doc = loadYaml(readRepoFile('carbon/cloud-init/docker-ce-setup.yaml')) as {
       bootcmd: unknown[];
       write_files: Array<{ path: string; content: string }>;
     };
@@ -208,7 +206,7 @@ describe('compose and compose-ha: check-db-ledger sets it first on every server'
   });
 });
 
-const K3S = read('src/lib/deploy/k8s/k3s.js');
+const K3S = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
 type Node = any;
@@ -320,7 +318,7 @@ describe('k8s and k8s-ha: deployK3s sets it first on every node', () => {
   });
 
   it('k8s-ha runs deployK3s for both clusters', () => {
-    const fn = fnNode(read('src/lib/deploy/effects/k8s-ha.js'), 'haK8sProvisionClusters');
+    const fn = fnNode(readRepoFile('src/lib/deploy/effects/k8s-ha.js'), 'haK8sProvisionClusters');
     const roles = callsIn(fn, 'deployK3s').map(({ call }) => {
       const role = call.arguments[0].properties.find((p: Node) => p.key?.name === 'role');
       return role?.value?.value;
@@ -329,8 +327,8 @@ describe('k8s and k8s-ha: deployK3s sets it first on every node', () => {
   });
 
   it("k8s-ha failover pre-pulls the standby's nodes through the same prePullImages", () => {
-    const fn = fnNode(read('src/failover.js'), 'prePullStandbyImages');
-    const body = read('src/failover.js').slice(fn.start, fn.end);
+    const fn = fnNode(readRepoFile('src/failover.js'), 'prePullStandbyImages');
+    const body = readRepoFile('src/failover.js').slice(fn.start, fn.end);
     expect(callsIn(fn, 'prePullImages')).toHaveLength(1);
     expect(body).toMatch(
       /nodeIps = \[servers\.standby\.ip, servers\.standby\.dbIp, \.\.\.\(workerIps \?\? \[\]\)\]/,
@@ -380,8 +378,8 @@ const REMOTE_PULL =
 /** `<file> <function>` for every string or template literal (or .sh line) that pulls. */
 function pullSitesInSrc(): string[] {
   const found = new Set<string>();
-  for (const path of sourceFiles(join(ROOT, 'src'), { exts: ['.js', '.mjs', '.sh'] })) {
-    const rel = relative(ROOT, path);
+  for (const path of sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js', '.mjs', '.sh'] })) {
+    const rel = relative(REPO_ROOT, path);
     const src = readFileSync(path, 'utf-8');
     if (path.endsWith('.sh')) {
       const lines = src.split('\n').filter((l) => !l.trimStart().startsWith('#'));
@@ -417,7 +415,7 @@ describe('every remote image pull in src/ comes after a carrier', () => {
     if ('self' in entry) {
       // Its own remote command sets it first (the wire tests above prove each).
       const [file, name] = site.split(' ');
-      expect(callsIn(fnNode(read(file), name), 'withStableFlowLabel')).toHaveLength(1);
+      expect(callsIn(fnNode(readRepoFile(file), name), 'withStableFlowLabel')).toHaveLength(1);
       return;
     }
     for (const [tier, step] of Object.entries(entry.steps) as Array<[Tier, string]>) {

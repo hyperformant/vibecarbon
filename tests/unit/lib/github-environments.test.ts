@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const runCommandAsyncMock = vi.fn();
@@ -63,7 +64,7 @@ describe('github-environments', () => {
       const mod = await freshImport();
       expect(Object.keys(mod)).not.toContain('seedOrgSecrets');
       // `gh secret set` without --env is repo-level: every call names one.
-      const src = readFileSync(join(process.cwd(), 'src/lib/github-environments.js'), 'utf-8');
+      const src = readRepoFile('src/lib/github-environments.js');
       const calls = [...src.matchAll(/(?<!function )setSecretFromBodyFile\(([^)]*)\)/g)].map(
         ([, args]) => args.split(',').map((a) => a.trim()),
       );

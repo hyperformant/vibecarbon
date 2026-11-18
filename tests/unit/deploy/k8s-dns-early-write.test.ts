@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createK8sDnsWriter } from '../../../src/lib/deploy/k8s/dns-record.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
@@ -302,7 +301,7 @@ describe('createK8sDnsWriter persists the target before writing', () => {
 });
 
 describe('the orchestrator wires it', () => {
-  const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
   it("single k8s passes the writer's onInfraReady into deployK3s's options", () => {
     const branch = src.slice(src.indexOf("} else if (tier === 'k8s') {"));

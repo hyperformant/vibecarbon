@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const masterVars = {
   k3s_version: 'v1.37.2+k3s1',
@@ -186,8 +187,8 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
   }
 
   it('both templates and the db render are pure ASCII (DO user-data wire contract — see digitalocean-compose.js ASCII_TRANSLITERATION_MAP RCA)', async () => {
-    const masterPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-master-init.sh');
-    const workerPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-worker-init.sh');
+    const masterPath = join(REPO_ROOT, 'carbon/cloud-init/k3s/do-master-init.sh');
+    const workerPath = join(REPO_ROOT, 'carbon/cloud-init/k3s/do-worker-init.sh');
     expect(isPureAscii(readFileSync(masterPath, 'utf-8'))).toBe(true);
     expect(isPureAscii(readFileSync(workerPath, 'utf-8'))).toBe(true);
     expect(isPureAscii(await DigitalOceanProvider.getK8sDbUserData(dbVars))).toBe(true);

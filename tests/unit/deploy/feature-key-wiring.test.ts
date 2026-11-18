@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 // These guard the "manifest actually references the keys" half of feature-key
 // propagation. Without them, the CLI can seed vibecarbon-app-secrets perfectly and
 // the app pod / container still never reads STRIPE_*/SMTP_*/BILLING_PROVIDER.
 // The repo has no YAML parser dependency, so these assert on raw text.
-const CARBON = join(process.cwd(), 'carbon');
+const CARBON = join(REPO_ROOT, 'carbon');
 
 describe('k8s app deployment wires vibecarbon-app-secrets', () => {
   const yaml = readFileSync(join(CARBON, 'k8s/base/app/deployment.yaml'), 'utf-8');

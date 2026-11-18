@@ -20,7 +20,7 @@ import {
   unrenderedPlaceholders,
 } from '../../../src/lib/deploy/k8s/unrendered-placeholders.js';
 import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
@@ -36,9 +36,9 @@ const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environ
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
-const CARBON = join(process.cwd(), 'carbon');
+const CARBON = join(REPO_ROOT, 'carbon');
 const CARBON_K8S = join(CARBON, 'k8s');
-const SERVICES = join(process.cwd(), 'services');
+const SERVICES = join(REPO_ROOT, 'services');
 const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
 const PRIMARY = 'k8s/flux/clusters/primary/vibecarbon.yaml';
 const STANDBY = 'k8s/flux/clusters/standby/vibecarbon.yaml';

@@ -36,6 +36,7 @@ import {
   sshRun,
   sshRunScript,
 } from '../../../src/lib/ssh.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 // pollUntil/runWithRetry schedule a NEW timer after each attempt, so a single
 // runAllTimersAsync can't drain the chain — advance the clock in fixed steps
@@ -448,7 +449,7 @@ describe('ssh port-forward tunnels: none exist', () => {
     // 31927810430).
     const { readFileSync, readdirSync, statSync } = await import('node:fs');
     const { join, relative } = await import('node:path');
-    const root = join(process.cwd(), 'src');
+    const root = join(REPO_ROOT, 'src');
     const offenders: string[] = [];
     let scanned = 0;
     (function walk(d: string) {

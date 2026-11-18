@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
@@ -11,6 +11,7 @@ import {
   resolveRestoreBase,
   resolveS3Config,
 } from '../../../src/lib/walg/restore-base.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * Restore resolves its exact base backup in the CLI, from the wal-g stop
@@ -105,10 +106,7 @@ function fakeS3(objects: Record<string, string>, opts: { missingBucket?: boolean
 }
 
 describe('listBaseBackups', () => {
-  const sentinel = readFileSync(
-    join(process.cwd(), 'tests/fixtures/walg/sentinel-3.0.9.json'),
-    'utf-8',
-  );
+  const sentinel = readRepoFile('tests/fixtures/walg/sentinel-3.0.9.json');
   const fixture = JSON.parse(sentinel);
   const NAME = fixture.name as string;
   const prefix = 'backups/myapp/prod/walg';
@@ -177,9 +175,7 @@ describe('listBaseBackups', () => {
 });
 
 describe('resolveDeployRestorePoint reads the backups bucket at its own endpoint', () => {
-  const fixture = JSON.parse(
-    readFileSync(join(process.cwd(), 'tests/fixtures/walg/sentinel-3.0.9.json'), 'utf-8'),
-  );
+  const fixture = JSON.parse(readRepoFile('tests/fixtures/walg/sentinel-3.0.9.json'));
   const NAME = fixture.name as string;
   const LINEAGE = '7699032860122738725';
   const prefix = 'backups/myapp/prod/walg';

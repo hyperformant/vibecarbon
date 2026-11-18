@@ -3,9 +3,10 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { copyTemplate, generateEnvLocal, generateReadme } from '../../../src/create.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
-const TEMPLATE_DIR = resolve(import.meta.dirname, '../../../carbon');
+const TEMPLATE_DIR = resolve(REPO_ROOT, 'carbon');
 
 describe('Project Scaffolding Integration', () => {
   let tempDir: string;

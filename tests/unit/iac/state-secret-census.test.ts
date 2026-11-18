@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it, vi } from 'vitest';
 import { SERVER_RESOURCE_TYPES } from '../../../src/lib/iac/create-timeout.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Census: everything a provider program hands the Pulumi engine that carries a
@@ -165,7 +166,7 @@ async function revealed(value: unknown): Promise<unknown> {
 
 describe('secrets in Pulumi state (census)', () => {
   it('every program in src/lib/iac/programs has a row in this census', () => {
-    const dir = join(process.cwd(), 'src/lib/iac/programs');
+    const dir = join(REPO_ROOT, 'src/lib/iac/programs');
     const files = readdirSync(dir).filter((f) => f.endsWith('.js'));
     expect(files.sort()).toEqual(Object.keys(PROGRAMS).sort());
   });

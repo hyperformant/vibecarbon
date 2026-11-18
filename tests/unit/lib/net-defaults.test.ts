@@ -10,13 +10,10 @@
  * a healthy bucket's settle gate after 25 minutes.
  */
 import dns from 'node:dns';
-import { readFileSync } from 'node:fs';
 import net from 'node:net';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { applyNetworkDefaults, CONNECT_ATTEMPT_TIMEOUT_MS } from '../../../src/lib/net-defaults.js';
-
-const repoFile = (rel: string) => readFileSync(join(import.meta.dirname, '../../..', rel), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('applyNetworkDefaults', () => {
   let order: ReturnType<typeof dns.getDefaultResultOrder>;
@@ -53,7 +50,7 @@ describe('applyNetworkDefaults', () => {
 describe('who applies them', () => {
   it('is the only place these defaults are set', () => {
     for (const file of ['src/cli.js', 'tests/e2e/utils/e2e-env.js']) {
-      const source = repoFile(file);
+      const source = readRepoFile(file);
       expect(source, file).toContain('applyNetworkDefaults()');
       expect(source, file).not.toContain('setDefaultResultOrder');
       expect(source, file).not.toContain('setDefaultAutoSelectFamily');

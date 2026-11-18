@@ -23,16 +23,13 @@
  * env proving it is ignored) that keep the token out of everything else.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-const REPO = join(__dirname, '../../..');
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const shipped = spawnSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard', 'src', 'carbon'],
-  { cwd: REPO, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .stdout.split('\n')
   .filter(Boolean)
@@ -42,7 +39,7 @@ const shipped = spawnSync(
 const harness = spawnSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard', 'tests'],
-  { cwd: REPO, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .stdout.split('\n')
   .filter(Boolean)
@@ -66,7 +63,7 @@ describe('census: the wal-g role is not an env var anywhere it ships', () => {
   it('no WALG_ROLE token in src/ or carbon/', () => {
     const files = shipped.map((path) => ({
       path,
-      text: readFileSync(join(REPO, path), 'utf-8'),
+      text: readRepoFile(path),
     }));
     expect(files.length).toBeGreaterThan(100);
     expect(
@@ -78,7 +75,7 @@ describe('census: the wal-g role is not an env var anywhere it ships', () => {
   it('no WALG_ROLE token in the e2e harness (tests/ outside the unit tier)', () => {
     const files = harness.map((path) => ({
       path,
-      text: readFileSync(join(REPO, path), 'utf-8'),
+      text: readRepoFile(path),
     }));
     expect(files.some((f) => f.path === 'tests/e2e/checks/ha-integrity.ts')).toBe(true);
     expect(files.length).toBeGreaterThan(50);
@@ -94,7 +91,7 @@ describe('census: the wal-g role is not an env var anywhere it ships', () => {
       'src/lib/deploy/effects/compose-ha.js',
       'src/scale.js',
     ]) {
-      expect(readFileSync(join(REPO, f), 'utf-8'), f).not.toMatch(/composeRoleEnv|\bWALG_ROLE\s*:/);
+      expect(readRepoFile(f), f).not.toMatch(/composeRoleEnv|\bWALG_ROLE\s*:/);
     }
   });
 

@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -52,14 +53,13 @@ const {
 const workload = await import('../../../src/lib/deploy/db-workload.js');
 const { standbyDbRebuildHint } = workload;
 
-const ROOT = join(__dirname, '../../..');
-const BASE = join(ROOT, 'carbon/k8s/base');
+const BASE = join(REPO_ROOT, 'carbon/k8s/base');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
 
 function kustomize(path: string): Doc[] {
-  const res = spawnSync('kubectl', ['kustomize', path], { cwd: ROOT, encoding: 'utf-8' });
+  const res = spawnSync('kubectl', ['kustomize', path], { cwd: REPO_ROOT, encoding: 'utf-8' });
   if (res.status !== 0) throw new Error(`kustomize build failed:\n${res.stderr}`);
   return (loadAll(res.stdout) as Doc[]).filter(Boolean);
 }
@@ -95,9 +95,7 @@ describe('k8s/base renders the db StatefulSet', () => {
   it('no WALG_ROLE env and no WALG_ROLE render value', () => {
     expect(container.env.find((e: Doc) => e.name === 'WALG_ROLE')).toBeUndefined();
     expect(values()).not.toHaveProperty('WALG_ROLE');
-    expect(readFileSync(join(ROOT, 'carbon/docker-compose.yml'), 'utf-8')).not.toMatch(
-      /^\s*WALG_ROLE:/m,
-    );
+    expect(readRepoFile('carbon/docker-compose.yml')).not.toMatch(/^\s*WALG_ROLE:/m);
   });
 
   it('uses the names every kubectl call relies on', () => {
@@ -115,10 +113,7 @@ describe('k8s/base renders the db StatefulSet', () => {
     expect(sts.spec.selector.matchLabels).toEqual({ app: workload.DB_APP_LABEL });
     expect(sts.spec.template.metadata.labels.app).toBe('vibecarbon-db');
     expect(workload.DB_POD_SELECTOR).toBe('app=vibecarbon-db');
-    const statusRoute = readFileSync(
-      join(ROOT, 'carbon/src/server/routes/_internal/services-status.ts'),
-      'utf-8',
-    );
+    const statusRoute = readRepoFile('carbon/src/server/routes/_internal/services-status.ts');
     expect(statusRoute).toContain("'vibecarbon-db': 'PostgreSQL'");
   });
 
@@ -193,7 +188,7 @@ describe('k8s/base renders the db StatefulSet', () => {
   });
 
   it('starts postgres with exactly compose’s flags (WAL archiving on from the first boot)', () => {
-    const compose = load(readFileSync(join(ROOT, 'carbon/docker-compose.yml'), 'utf-8')) as Doc;
+    const compose = load(readRepoFile('carbon/docker-compose.yml')) as Doc;
     expect(container.args).toEqual(compose.services.db.command);
     expect(container.args).toContain('config_file=/etc/postgresql/postgresql.conf');
     expect(container.args).toContain('archive_mode=on');
@@ -297,7 +292,7 @@ describe('k8s/base renders the db StatefulSet', () => {
     // the same tree carry the same one.
     const projectDir = mkdtempSync(join(tmpdir(), 'vc-sha-'));
     try {
-      cpSync(join(ROOT, 'carbon/k8s'), join(projectDir, 'k8s'), { recursive: true });
+      cpSync(join(REPO_ROOT, 'carbon/k8s'), join(projectDir, 'k8s'), { recursive: true });
       const sha = walArchiveConfigSha(projectDir);
       expect(sha).toMatch(/^[0-9a-f]{16}$/);
       expect(walArchiveConfigSha(projectDir)).toBe(sha);
@@ -344,7 +339,7 @@ describe('k8s/base renders the db StatefulSet', () => {
       expect(text).not.toContain('app.kubernetes.io/instance');
     }
     for (const addon of ['n8n', 'metabase']) {
-      const np = readFileSync(join(ROOT, `services/${addon}/k8s/network-policy.yaml`), 'utf-8');
+      const np = readRepoFile(`services/${addon}/k8s/network-policy.yaml`);
       expect(np).toContain('app: vibecarbon-db');
     }
   });
@@ -629,7 +624,7 @@ describe('summarizeDbPods / summarizeNotReadyNodes', () => {
 
 describe('the chart is gone for good', () => {
   it('k3s.js installs no chart for the database and patches no db config at runtime', () => {
-    const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(k3s).not.toContain('ALTER SYSTEM');
   });
 });
@@ -708,7 +703,7 @@ describe('assertNoRetiredChartDb — a chart-era cluster is refused, not silentl
   });
 
   it('applyK3sManifests runs it before anything creates the db StatefulSet', () => {
-    const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const body = k3s.slice(k3s.indexOf('export async function applyK3sManifests('));
     const probe = body.indexOf('await assertNoRetiredChartDb({ env })');
     expect(probe).toBeGreaterThan(-1);
@@ -721,7 +716,7 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
   // Without the delete patch Flux would apply `{{DB_IMAGE}}:{{DB_IMAGE_TAG}}`
   // and a literal StorageClass: an InvalidImageName outage on the next roll.
   for (const cluster of ['primary', 'standby']) {
-    const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
+    const file = join(REPO_ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
     const base = () =>
       (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
         (d) => d?.kind === 'Kustomization' && d.metadata.name === 'vibecarbon-base',
@@ -783,7 +778,7 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
   }
 
   it('primary: also health-checks the CLI-applied cluster-autoscaler', () => {
-    const file = join(ROOT, 'carbon/k8s/flux/clusters/primary/vibecarbon.yaml');
+    const file = join(REPO_ROOT, 'carbon/k8s/flux/clusters/primary/vibecarbon.yaml');
     const base = (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
       (d) => d?.kind === 'Kustomization' && d.metadata.name === 'vibecarbon-base',
     );

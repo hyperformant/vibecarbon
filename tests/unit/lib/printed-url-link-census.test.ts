@@ -25,12 +25,9 @@
  * not URLs and never match.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-
-const ROOT = join(__dirname, '../../..');
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
 type Node = any;
@@ -280,7 +277,7 @@ function scan(file: string, text: string): Scan {
 }
 
 const files = execFileSync('git', ['ls-files', 'src/*.js', 'src/**/*.js'], {
-  cwd: ROOT,
+  cwd: REPO_ROOT,
   encoding: 'utf-8',
 })
   .split('\n')
@@ -302,7 +299,7 @@ function census(sources: [string, string][]) {
 }
 
 describe('every printed URL goes through link()', () => {
-  const result = census(files.map((f) => [f, readFileSync(join(ROOT, f), 'utf-8')]));
+  const result = census(files.map((f) => [f, readRepoFile(f)]));
 
   it('walks the CLI source', () => {
     expect(files.length).toBeGreaterThan(50);

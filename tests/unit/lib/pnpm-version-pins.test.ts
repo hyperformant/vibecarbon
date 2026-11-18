@@ -37,12 +37,12 @@
  * a `RUN` line, a script, or a doc — has to be triaged here rather than
  * quietly escaping the sweep.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), 'utf-8');
+const read = (...parts: string[]) => readRepoFile(...parts);
 
 /** THE source of truth. */
 const ROOT_PKG = 'package.json';
@@ -132,7 +132,7 @@ const SCANNED = /(\.(json|ya?ml|[cm]?[jt]sx?|md|sh)$|(^|[\\/])[^\\/.]+$)/;
 function walk(dir: string, visit: (relPath: string) => void): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    const rel = relative(ROOT, full);
+    const rel = relative(REPO_ROOT, full);
     if (SKIP_DIRS.has(entry.name) || SKIP_PATHS.includes(rel)) continue;
     if (entry.isDirectory()) {
       if (!entry.name.startsWith('.') || entry.name === '.github') walk(full, visit);
@@ -145,7 +145,7 @@ function walk(dir: string, visit: (relPath: string) => void): void {
 /** Every root-owned `*.yml` under a `.github/workflows/`, ROOT-relative. */
 function findWorkflows(): string[] {
   const out: string[] = [];
-  walk(ROOT, (rel) => {
+  walk(REPO_ROOT, (rel) => {
     if (/\.ya?ml$/.test(rel) && rel.includes(join('.github', 'workflows'))) out.push(rel);
   });
   return out;
@@ -154,9 +154,9 @@ function findWorkflows(): string[] {
 /** Every root-owned scanned file whose text names a concrete pnpm version. */
 function findPnpmVersionSites(): string[] {
   const out: string[] = [];
-  walk(ROOT, (rel) => {
+  walk(REPO_ROOT, (rel) => {
     if (rel === SELF || rel.endsWith('pnpm-lock.yaml') || !SCANNED.test(rel)) return;
-    if (/\bpnpm@\d/.test(readFileSync(join(ROOT, rel), 'utf-8'))) out.push(rel);
+    if (/\bpnpm@\d/.test(readRepoFile(rel))) out.push(rel);
   });
   return out;
 }
@@ -269,7 +269,7 @@ describe('no root-owned file outside the source names a pnpm version', () => {
     // Guards the walker: a skip rule that accidentally matched everything
     // would make the inventory above vacuously pass.
     const seen: string[] = [];
-    walk(ROOT, (rel) => seen.push(rel));
+    walk(REPO_ROOT, (rel) => seen.push(rel));
     expect(seen).toContain(join('.github', 'workflows', 'test.yml'));
     expect(seen).toContain(ROOT_PKG);
     expect(seen.filter((rel) => rel.split(sep)[0] === 'carbon')).toEqual([]);
@@ -289,11 +289,11 @@ describe('the SKIP_PATHS rationales still hold (2026-08-07 audit)', () => {
   // A deleted tree fails too: a skip for a path that no longer exists is
   // pure cruft.
   it.each(SKIP_PATHS)('%s still exists (a skip for a deleted tree is stale)', (skip) => {
-    expect(statSync(join(ROOT, skip)).isDirectory()).toBe(true);
+    expect(statSync(join(REPO_ROOT, skip)).isDirectory()).toBe(true);
   });
 
   it('carbon/ is still npm-by-design — otherwise the blanket skip hides real pnpm pins', () => {
-    const carbonPkg = JSON.parse(readFileSync(join(ROOT, 'carbon', 'package.json'), 'utf-8')) as {
+    const carbonPkg = JSON.parse(readRepoFile('carbon', 'package.json')) as {
       packageManager?: string;
     };
     expect(
@@ -301,7 +301,7 @@ describe('the SKIP_PATHS rationales still hold (2026-08-07 audit)', () => {
       'carbon/package.json now declares a pnpm packageManager — remove the carbon SKIP_PATHS row and give its pins a proper inventory.',
     ).not.toMatch(/^pnpm@/);
     expect(
-      existsSync(join(ROOT, 'carbon', 'pnpm-lock.yaml')),
+      existsSync(join(REPO_ROOT, 'carbon', 'pnpm-lock.yaml')),
       'carbon/ now carries a pnpm lockfile — remove the carbon SKIP_PATHS row and give its pins a proper inventory.',
     ).toBe(false);
   });

@@ -12,9 +12,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll as loadYamlAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const BASE = join(process.cwd(), 'carbon', 'k8s', 'base');
+const BASE = join(REPO_ROOT, 'carbon', 'k8s', 'base');
 
 interface Probe {
   exec?: { command?: string[] };

@@ -7,7 +7,7 @@
  * the grafana-tls certificate on every project that added it before the
  * one-certificate-per-name fix.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -17,9 +17,10 @@ import {
   isContainedRelPath,
 } from '../../../src/lib/addon-upgrade-files.js';
 import { getAddonFilePolicy, getFilePolicy } from '../../../src/lib/upgrade-policy.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
-const SERVICES = join(process.cwd(), 'services');
+const SERVICES = join(REPO_ROOT, 'services');
 const ROOT = '/srv/project';
 
 /** A throwaway services/ tree with one add-on. */
@@ -216,7 +217,7 @@ describe('containment', () => {
 
 describe('upgrade.js refuses an uncontained path before its policy check', () => {
   it('filters every upgrade entry through isContainedRelPath ahead of getFilePolicy', () => {
-    const src = readFileSync(join(process.cwd(), 'src', 'upgrade.js'), 'utf8');
+    const src = readRepoFile('src', 'upgrade.js');
     const start = src.indexOf('const shippedEntries = [');
     const loop = src.indexOf('of upgradeEntries) {', start);
     const build = src.slice(start, loop);

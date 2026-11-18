@@ -18,10 +18,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const DIR = join(fileURLToPath(new URL('../../..', import.meta.url)), 'carbon/cloud-init/k3s');
+const DIR = join(REPO_ROOT, 'carbon/cloud-init/k3s');
 const scripts = readdirSync(DIR)
   .filter((f) => f.endsWith('.sh'))
   .map((f) => ({ name: f, lines: readFileSync(join(DIR, f), 'utf8').split('\n') }));

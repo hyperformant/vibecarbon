@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { STALE_SECRET_PREFIXES } from '../../../src/lib/temp-dir.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 const logged = vi.hoisted(() => [] as string[]);
@@ -155,7 +155,7 @@ describe('importStackState', () => {
   });
 });
 
-const SRC = join(import.meta.dirname, '..', '..', '..', 'src');
+const SRC = join(REPO_ROOT, 'src');
 
 /** `source` with comments blanked out, so prose cannot count as a call. */
 function blankComments(source: string): string {

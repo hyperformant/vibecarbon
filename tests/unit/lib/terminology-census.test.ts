@@ -51,8 +51,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const ROOT = join(import.meta.dirname, '..', '..', '..');
 const SELF = 'tests/unit/lib/terminology-census.test.ts';
 const HISTORY = 'docs/history.md';
 
@@ -95,7 +95,7 @@ function repoFiles(): string[] {
     'git',
     ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
     {
-      cwd: ROOT,
+      cwd: REPO_ROOT,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     },
@@ -106,7 +106,7 @@ function repoFiles(): string[] {
 function repoSources(): Source[] {
   const sources: Source[] = [];
   for (const rel of repoFiles()) {
-    const abs = join(ROOT, rel);
+    const abs = join(REPO_ROOT, rel);
     // A tracked file deleted in the working tree has nothing to scan.
     if (!existsSync(abs)) continue;
     if (BINARY_EXT.test(rel)) {
@@ -131,7 +131,7 @@ describe('terminology census: the retired stack vocabulary', () => {
   });
 
   it('every exemption still points at something real', () => {
-    for (const p of VENDORED) expect(existsSync(join(ROOT, p)), p).toBe(true);
+    for (const p of VENDORED) expect(existsSync(join(REPO_ROOT, p)), p).toBe(true);
   });
 
   it('catches a planted hit, in records of the past too', () => {

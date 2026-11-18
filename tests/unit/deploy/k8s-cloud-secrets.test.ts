@@ -58,7 +58,7 @@
  * leaves of the retired ones, needs a real apiserver:
  * tests/integration/docker/k8s-cloud-secrets-takeover.test.ts.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +67,7 @@ import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 type Call = { argv: string[]; input?: string; env?: NodeJS.ProcessEnv };
@@ -358,12 +359,9 @@ describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
   });
 
   it('the cluster autoscaler reads only its own Secret, none of these', () => {
-    const docs = loadAll(
-      readFileSync(
-        join(__dirname, '../../../carbon/k8s/base/cluster-autoscaler/deployment.yaml'),
-        'utf-8',
-      ),
-    ) as { spec?: { template?: { spec?: Record<string, never> } } }[];
+    const docs = loadAll(readRepoFile('carbon/k8s/base/cluster-autoscaler/deployment.yaml')) as {
+      spec?: { template?: { spec?: Record<string, never> } };
+    }[];
     const read = new Set<string>();
     for (const doc of docs) {
       const pod = (doc?.spec?.template?.spec ?? {}) as {
@@ -382,7 +380,7 @@ describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
 });
 
 describe('docs/deploy-hetzner.md says where the token lives, in each mode', () => {
-  const doc = readFileSync(join(__dirname, '../../../docs/deploy-hetzner.md'), 'utf-8');
+  const doc = readRepoFile('docs/deploy-hetzner.md');
   const prerequisite = doc.slice(
     doc.indexOf('2. **A Hetzner Cloud API token**'),
     doc.indexOf('3. **S3 credentials'),
@@ -424,10 +422,7 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
       'kube-system/hcloud',
     ]);
     expect(Object.values(made[0].keys)).toContain('secrets.HETZNER_API_TOKEN');
-    const template = readFileSync(
-      join(__dirname, '../../../carbon/.github/workflows/deploy.yml'),
-      'utf-8',
-    );
+    const template = readRepoFile('carbon/.github/workflows/deploy.yml');
     for (const { name } of made)
       expect(template).not.toMatch(new RegExp(`create secret generic ${escapeRegExp(name)}\\b`));
   });
@@ -1588,7 +1583,7 @@ describe('applyCloudSecrets', () => {
     });
 
     it('docs/security.md says the same: deploy again and let it finish before revoking', () => {
-      const doc = readFileSync(join(__dirname, '../../../docs/security.md'), 'utf-8');
+      const doc = readRepoFile('docs/security.md');
       const step = doc
         .split('\n')
         .find((line) => line.startsWith('5. Once that deploy has succeeded'));
@@ -1989,7 +1984,7 @@ describe('applyCloudSecrets', () => {
         ['kubectl', '-n', 'kube-system', 'get', WORKLOAD_KINDS, '-o', 'json'],
       ]);
       // And the docs say so.
-      expect(readFileSync(join(__dirname, '../../../docs/security.md'), 'utf-8')).toContain(
+      expect(readRepoFile('docs/security.md')).toContain(
         'keeping one while a Deployment, StatefulSet, DaemonSet or CronJob still reads it; ' +
           "Jobs and bare pods aren't checked",
       );
@@ -2515,7 +2510,7 @@ describe('secretReaders', () => {
 
 describe("restartSecretReaders' doc is its own", () => {
   it('its JSDoc sits right above it, and FINISH_BEFORE_REVOKE above that', () => {
-    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const src = readRepoFile('src/lib/deploy/k8s/k3s.js');
     const fnAt = src.indexOf('export async function restartSecretReaders(');
     const docAt = src.lastIndexOf('/**', fnAt);
     const doc = src.slice(docAt, fnAt);
@@ -2528,7 +2523,7 @@ describe("restartSecretReaders' doc is its own", () => {
 });
 
 describe('deployK3s hands the token over on every deploy', () => {
-  const K3S = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+  const K3S = readRepoFile('src/lib/deploy/k8s/k3s.js');
   const BODY = K3S.slice(K3S.indexOf('async function deployK3sSteps('));
   const LINES = BODY.split('\n');
   const tpl = (s: string) => s.replaceAll('#{', '$' + '{');

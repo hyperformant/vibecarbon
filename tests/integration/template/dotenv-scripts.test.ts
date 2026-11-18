@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const carbon = join(import.meta.dirname, '..', '..', '..', 'carbon');
+const carbon = join(REPO_ROOT, 'carbon');
 const readers = [
   'scripts/dev.js',
   'scripts/docker-up.js',

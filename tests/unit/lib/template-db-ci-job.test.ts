@@ -5,13 +5,11 @@
  * This pins the `template-db` job in test.yml to the steps carbon/TESTING.md
  * documents, and keeps it secret-free so it runs on fork and Dependabot PRs.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), 'utf-8');
+const read = (...parts: string[]) => readRepoFile(...parts);
 
 type Step = { name?: string; run?: string; uses?: string; env?: Record<string, string> };
 type Job = {

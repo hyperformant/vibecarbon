@@ -15,6 +15,7 @@ import { DigitalOceanSpacesProvider } from '../../../src/lib/providers/digitaloc
 import { HetznerS3Provider } from '../../../src/lib/providers/hetzner-s3.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { S3CompatibleProvider } from '../../../src/lib/providers/s3-base.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 type Fake = {
   bucketExists: (b: string) => Promise<boolean>;
@@ -97,7 +98,7 @@ describe('createBucket quiet period', () => {
   });
 });
 
-const providersDir = join(import.meta.dirname, '../../../src/lib/providers');
+const providersDir = join(REPO_ROOT, 'src/lib/providers');
 type S3Class = { name: string; bucketQuietMs?: unknown };
 
 describe('bucketQuietMs census', () => {

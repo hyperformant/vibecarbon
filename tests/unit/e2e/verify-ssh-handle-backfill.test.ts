@@ -18,14 +18,10 @@
  * key silently missing from the pod env, found 2026-07-15), so the check
  * written for k8s was precisely the one k8s never got.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const src = readFileSync(
-  fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
-  'utf8',
-);
+const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
 // Comment-ONLY lines: a naive `//` stripper also eats the `//` inside URLs.
 const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 

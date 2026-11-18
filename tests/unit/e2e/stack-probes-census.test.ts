@@ -15,10 +15,8 @@ import * as hcloud from '@pulumi/hcloud';
 import * as linode from '@pulumi/linode';
 import * as scaleway from '@pulumiverse/scaleway';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { PROBED_TYPES } from '../../e2e/utils/stack-probes.ts';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
 
 const SDKS: Record<string, { provider: string; mod: unknown }> = {
   '@pulumi/hcloud': { provider: 'hetzner', mod: hcloud },
@@ -39,7 +37,7 @@ const badImports: string[] = [];
 
 function constructions(): Construction[] {
   const out: Construction[] = [];
-  for (const file of sourceFiles(join(ROOT, 'src', 'lib'), { exts: ['.js'] })) {
+  for (const file of sourceFiles(join(REPO_ROOT, 'src', 'lib'), { exts: ['.js'] })) {
     const src = readFileSync(file, 'utf8');
     // import * as <ns> from '<pkg>'
     const ns: Record<string, string> = {};

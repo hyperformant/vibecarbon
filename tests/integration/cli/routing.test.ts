@@ -17,9 +17,10 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { KNOWN_COMMANDS } from '../../../src/cli.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { assertSuccess, destroyRealProject, realProject, runCli } from '../_harness/index.js';
 
-const CLI_PATH = join(import.meta.dirname, '../../../src/cli.js');
+const CLI_PATH = join(REPO_ROOT, 'src/cli.js');
 const NODE = process.execPath;
 
 // Simpler: run the CLI file directly as a script

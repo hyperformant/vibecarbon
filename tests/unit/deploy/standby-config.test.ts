@@ -9,7 +9,7 @@
  * is already running and never belongs in the list.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -17,11 +17,9 @@ import {
   deriveScaleUpList,
   failoverAddonManifests,
 } from '../../../src/lib/deploy/k8s/standby-config.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const appManifestText = readFileSync(
-  join(__dirname, '../../../carbon/k8s/base/app/deployment.yaml'),
-  'utf-8',
-);
+const appManifestText = readRepoFile('carbon/k8s/base/app/deployment.yaml');
 
 describe('deriveScaleUpList', () => {
   it('brings up the app at its manifest replica count, then the autoscaler', () => {
@@ -50,8 +48,7 @@ describe('deriveScaleUpList', () => {
   });
 
   it('lists each add-on after the app at its manifest replica count, the autoscaler last', () => {
-    const manifest = (name: string) =>
-      readFileSync(join(__dirname, `../../../services/${name}/k8s/deployment.yaml`), 'utf-8');
+    const manifest = (name: string) => readRepoFile(`services/${name}/k8s/deployment.yaml`);
     const list = deriveScaleUpList({
       appManifestText,
       addons: [

@@ -19,13 +19,9 @@
  * creates; the in-cluster autoscaler (src/autoscaler/) deletes worker nodes.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const read = (f: string) => readFileSync(join(ROOT, f), 'utf-8');
 const isComment = (l: string) => /^\s*(\/\/|\*|\/\*)/.test(l);
 const code = (text: string) =>
   text
@@ -36,7 +32,7 @@ const code = (text: string) =>
 const srcFiles = spawnSync(
   'git',
   ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
-  { cwd: ROOT, encoding: 'utf-8' },
+  { cwd: REPO_ROOT, encoding: 'utf-8' },
 )
   .stdout.split('\n')
   .filter((f) => f.endsWith('.js'));
@@ -105,7 +101,7 @@ const DELETE = /\.deleteServer\(/;
 describe('a server that ran a primary is destroyed only behind a pushed base', () => {
   const fns = srcFiles
     .filter((f) => !Object.keys(EXEMPT_DIRS).some((d) => f.startsWith(d)))
-    .flatMap((f) => topLevelFunctions(f, read(f)));
+    .flatMap((f) => topLevelFunctions(f, readRepoFile(f)));
 
   it('every deleteServer caller under src/ is on the census, and every entry still calls it', () => {
     const callers = fns.filter((f) => DELETE.test(f.body)).map((f) => `${f.file}#${f.name}`);
@@ -114,8 +110,8 @@ describe('a server that ran a primary is destroyed only behind a pushed base', (
     const loose = srcFiles
       .filter((f) => !Object.keys(EXEMPT_DIRS).some((d) => f.startsWith(d)))
       .filter((f) => {
-        const lines = read(f).split('\n');
-        const inFns = topLevelFunctions(f, read(f));
+        const lines = readRepoFile(f).split('\n');
+        const inFns = topLevelFunctions(f, readRepoFile(f));
         const n = lines.filter((l) => !isComment(l) && DELETE.test(l)).length;
         const m = inFns.reduce(
           (acc, fn) => acc + (fn.body.match(/\.deleteServer\(/g)?.length ?? 0),
@@ -165,7 +161,7 @@ describe('a server that ran a primary is destroyed only behind a pushed base', (
   });
 
   it('destroy: every primary teardown runs from a destroy effect, after preDestroyBackup took a pushed base', () => {
-    const destroy = code(read('src/destroy.js'));
+    const destroy = code(readRepoFile('src/destroy.js'));
     const main = fns.find((f) => f.file === 'src/destroy.js' && f.name === 'main')?.body ?? '';
     expect(main.indexOf('await preDestroyBackup(')).toBeGreaterThan(-1);
     expect(main.indexOf('await preDestroyBackup(')).toBeLessThan(

@@ -33,11 +33,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const ROOTS = ['src', 'carbon', 'scripts', 'services'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', 'coverage']);
 const TEXT_EXTS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.sh', '.yaml', '.yml', '.json', '.tpl'];
@@ -136,7 +134,7 @@ function censusViolations(root: string): string[] {
   ]);
 }
 
-const FILES = readTree(REPO);
+const FILES = readTree(REPO_ROOT);
 
 describe('the census matchers', () => {
   it('see a YAML, JSON or JS Secret manifest named vibecarbon-tls, directly or by constant', () => {
@@ -208,7 +206,7 @@ describe('Secret/vibecarbon-tls writer census', () => {
   });
 
   it('finds no writer of the Secret outside buildRestoredTlsSecret (rules 1 and 2)', () => {
-    expect(censusViolations(REPO)).toEqual([]);
+    expect(censusViolations(REPO_ROOT)).toEqual([]);
   });
 
   it('bites: a planted writer in a scanned tree fails the census', () => {

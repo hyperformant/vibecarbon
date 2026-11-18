@@ -57,12 +57,10 @@
  * ~18 rows below — operator-local HTTP/SDK/CLI calls) correctly has no
  * business adding it.
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
 
 // ---------------------------------------------------------------------------
@@ -275,13 +273,13 @@ function detectLine(line: string): string | null {
 
 function collectSites(): Site[] {
   const sites: Site[] = [];
-  for (const file of sourceFiles(join(ROOT, 'src'), {
+  for (const file of sourceFiles(join(REPO_ROOT, 'src'), {
     exts: ['.js'],
     skip: SKIP_DIRS,
     skipDotDirs: true,
-    relativeTo: ROOT,
+    relativeTo: REPO_ROOT,
   })) {
-    const lines = readFileSync(join(ROOT, file), 'utf-8').split('\n');
+    const lines = readRepoFile(file).split('\n');
     const detections: Array<{ index: number; name: string }> = [];
     for (let i = 0; i < lines.length; i++) {
       if (isCommentLine(lines[i])) continue;

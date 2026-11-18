@@ -5,7 +5,7 @@ import { CONFIG_KEYS, registryEntry } from '../../../src/lib/config-registry.js'
 import { resolveDockerHubCreds } from '../../../src/lib/deploy/docker-hub.js';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { PROVIDERS, resolveProviderToken } from '../../../src/lib/providers/index.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Census: every read of a REGISTERED operator key FROM `process.env` goes
@@ -74,8 +74,7 @@ import { sourceFiles } from '../../_shared/source-files.js';
  *     Deliberately out of scope.
  */
 
-const ROOT = process.cwd();
-const SRC = join(ROOT, 'src');
+const SRC = join(REPO_ROOT, 'src');
 
 /** The reader itself is the one module allowed to touch `process.env` for these keys. */
 const READER = join('lib', 'operator-env.js');

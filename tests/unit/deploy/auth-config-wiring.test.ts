@@ -5,22 +5,18 @@
  * separate auth service to map them onto.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { APP_RUNTIME_KEYS } from '../../../src/lib/deploy/app-runtime-env.js';
 import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK } from '../../../src/lib/project.js';
-
-const ROOT = join(__dirname, '../../..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 type ComposeService = { env_file?: string[]; environment?: string[] };
 // Compose's merge tags (`!reset`, `!override`) are not YAML core; drop them.
 const services = (rel: string) =>
   (
-    loadYaml(read(rel).replace(/!(reset|override)\b/g, '')) as {
+    loadYaml(readRepoFile(rel).replace(/!(reset|override)\b/g, '')) as {
       services: Record<string, ComposeService>;
     }
   ).services;
@@ -74,7 +70,7 @@ describe('compose: the app reads auth config from its own environment', () => {
 });
 
 describe('k8s: the app pod reads auth config from vibecarbon-app-secrets', () => {
-  const deployment = read('carbon/k8s/base/app/deployment.yaml');
+  const deployment = readRepoFile('carbon/k8s/base/app/deployment.yaml');
 
   it('takes every secret key (OAuth, SMTP, BETTER_AUTH_SECRET) via envFrom', () => {
     expect(deployment).toMatch(/envFrom:[\s\S]*?- secretRef:\s+name: vibecarbon-app-secrets/);
@@ -106,7 +102,7 @@ describe('k8s: the app pod reads auth config from vibecarbon-app-secrets', () =>
   });
 
   it('no retired auth-provider keys are rendered', () => {
-    const k3s = read('src/lib/deploy/k8s/k3s.js');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(k3s).not.toMatch(/AZURE_TENANT_URL/);
   });
 });

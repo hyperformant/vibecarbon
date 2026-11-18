@@ -18,15 +18,13 @@
  *     APP_DB_PASSWORD,
  *     and the app NetworkPolicy admits egress to the db StatefulSet's pod on 5432.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { load, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { APP_RUNTIME_KEYS } from '../../../src/lib/deploy/app-runtime-env.js';
 import { INFRA_SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const carbon = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../../carbon/${rel}`, import.meta.url)), 'utf8');
+const carbon = (rel: string) => readRepoFile(`carbon/${rel}`);
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;

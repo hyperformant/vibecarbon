@@ -17,7 +17,7 @@
  * tests/unit/restore/restore-resolves-base-first.test.ts.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -26,20 +26,19 @@ import {
   manifestImageValues,
   mirroredImageName,
 } from '../../../src/lib/images.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const gitFiles = (...pathspecs: string[]) =>
   execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...pathspecs],
-    { cwd: ROOT, encoding: 'utf8' },
+    { cwd: REPO_ROOT, encoding: 'utf8' },
   )
     .split('\n')
-    .filter((f) => f && existsSync(join(ROOT, f)));
+    .filter((f) => f && existsSync(join(REPO_ROOT, f)));
 
 /** What a server runs: compose under prod, the k8s tree, cloud-init. */
-const ADDONS = (JSON.parse(read('services/index.json')) as Array<{ name: string }>).map(
+const ADDONS = (JSON.parse(readRepoFile('services/index.json')) as Array<{ name: string }>).map(
   (s) => s.name,
 );
 const isAddon = (f: string) =>
@@ -64,7 +63,7 @@ const OUTSIDE_THE_SET: Record<string, string> = {
 
 type Site = { where: string; ref: string };
 
-function imageSites(rel: string, text = read(rel)): Site[] {
+function imageSites(rel: string, text = readRepoFile(rel)): Site[] {
   const out: Site[] = [];
   text.split('\n').forEach((line, i) => {
     if (/^\s*#/.test(line)) return;
@@ -91,7 +90,7 @@ const SET_PACKAGES = Object.values({ ...CHANNEL_IMAGES, ...CHANNEL_KUBERNETES_IM
 );
 
 /** Rule (a), anywhere in the text: a set package as a literal, image: or not. */
-function literalPackages(rel: string, text = read(rel)): string[] {
+function literalPackages(rel: string, text = readRepoFile(rel)): string[] {
   return text
     .split('\n')
     .flatMap((line, i) =>
@@ -105,7 +104,7 @@ function literalPackages(rel: string, text = read(rel)): string[] {
 
 const SRC = gitFiles('src').filter((f) => /\.m?js$/.test(f));
 const importersOf = (name: string) =>
-  SRC.filter((f) => new RegExp(`\\b${name}\\b`).test(read(f))).sort();
+  SRC.filter((f) => new RegExp(`\\b${name}\\b`).test(readRepoFile(f))).sort();
 
 describe('no template image bypasses the resolved set', () => {
   it('walked the templates (a moved directory must not empty the census)', () => {
@@ -158,14 +157,14 @@ describe('every image token in a template is one a deploy fills', () => {
       'DB_IMAGE',
     ]);
     const tokens = TEMPLATES.flatMap((f) =>
-      [...read(f).matchAll(/\{\{([A-Z0-9_]*(?:_IMAGE|_VERSION))\}\}/g)].map((m) => m[1]),
+      [...readRepoFile(f).matchAll(/\{\{([A-Z0-9_]*(?:_IMAGE|_VERSION))\}\}/g)].map((m) => m[1]),
     );
     expect(tokens.length).toBeGreaterThan(5);
     expect([...new Set(tokens)].filter((token) => !known.has(token))).toEqual([]);
   });
 
   it('the renderer refuses a leftover image token', () => {
-    const k3s = read('src/lib/deploy/k8s/k3s.js');
+    const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toContain("[REGISTRY_MANIFEST, 'a registry with an unresolved image");
     expect(k3s).toMatch(/\[TRAEFIK_MANIFEST,/);
     expect(k3s).toMatch(
@@ -174,7 +173,7 @@ describe('every image token in a template is one a deploy fills', () => {
   });
 
   it('a project .env is filled by every bundle, over whatever the project carries', () => {
-    const bundle = read('src/lib/deploy/bundle.js');
+    const bundle = readRepoFile('src/lib/deploy/bundle.js');
     expect(bundle).toContain('envOverrides.TRAEFIK_IMAGE = traefikImageRef();');
     expect(bundle).toContain(
       'envOverrides.DOCKER_SOCKET_PROXY_IMAGE = dockerSocketProxyImageRef();',
@@ -190,14 +189,14 @@ describe('only a deploy reads the channel', () => {
     ]);
     expect(importersOf('readChannel')).toEqual(['src/lib/version-channel.js']);
     expect(importersOf('CHANNEL_URL')).toEqual(['src/lib/version-channel.js']);
-    const calls = read('src/lib/deploy/orchestrator.js').match(/resolveDeployImageSet\(/g);
+    const calls = readRepoFile('src/lib/deploy/orchestrator.js').match(/resolveDeployImageSet\(/g);
     expect(calls).toHaveLength(1);
   });
 
   it.each(['src/restore.js', 'src/failover.js', 'src/scale.js', 'src/configure.js'])(
     '%s runs the recorded set',
     (rel) => {
-      expect(read(rel)).toMatch(/useRecordedImageSet\(envConfig/);
+      expect(readRepoFile(rel)).toMatch(/useRecordedImageSet\(envConfig/);
     },
   );
 
@@ -212,7 +211,7 @@ describe('only a deploy reads the channel', () => {
   });
 
   it('the read cannot be pointed elsewhere from the environment', () => {
-    const reader = read('src/lib/version-channel.js');
+    const reader = readRepoFile('src/lib/version-channel.js');
     expect(reader).not.toMatch(/process\.env/);
     expect(reader).toContain("redirect: 'error'");
   });
@@ -227,10 +226,12 @@ describe('the set is activated in one place', () => {
   });
 
   it('only images.js names a k3s version', () => {
-    expect(SRC.filter((f) => /K3S_VERSION = /.test(read(f)))).toEqual(['src/lib/images.js']);
+    expect(SRC.filter((f) => /K3S_VERSION = /.test(readRepoFile(f)))).toEqual([
+      'src/lib/images.js',
+    ]);
   });
 
   it('a step that does not re-run on an unchanged set sees the set in its inputs', () => {
-    expect(read('src/lib/deploy/k8s/k3s.js')).toMatch(/imageSetDigest: createHash/);
+    expect(readRepoFile('src/lib/deploy/k8s/k3s.js')).toMatch(/imageSetDigest: createHash/);
   });
 });

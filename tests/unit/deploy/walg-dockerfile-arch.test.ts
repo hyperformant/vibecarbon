@@ -23,14 +23,11 @@
  * download unnoticed.
  */
 
-import { readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DB_IMAGE_TAG } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 const WALG_VERSION = 'v3.0.9';
 const WALG_IMAGE = `ghcr.io/hyperformant/wal-g:${WALG_VERSION.slice(1)}`;
@@ -49,7 +46,7 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
 
 /** Every Dockerfile in the repo, as ROOT-relative paths. */
 function findDockerfiles(dir: string): string[] {
-  return sourceFiles(dir, { skip: SKIP_DIRS, skipDotDirs: true, relativeTo: ROOT }).filter(
+  return sourceFiles(dir, { skip: SKIP_DIRS, skipDotDirs: true, relativeTo: REPO_ROOT }).filter(
     (rel) => {
       const name = basename(rel);
       return name === 'Dockerfile' || name.startsWith('Dockerfile.');
@@ -70,7 +67,7 @@ function logicalInstructions(dockerfile: string): string[] {
 }
 
 describe('docker/wal-g/Dockerfile builds wal-g static (musl-safe)', () => {
-  const dockerfile = readFileSync(join(ROOT, WALG_BUILDER), 'utf-8');
+  const dockerfile = readRepoFile(WALG_BUILDER);
   const instructions = logicalInstructions(dockerfile);
   const buildLayer = instructions.find((i) => /^RUN\b/.test(i) && i.includes('go build')) ?? '';
 
@@ -103,7 +100,7 @@ describe('docker/wal-g/Dockerfile builds wal-g static (musl-safe)', () => {
 const isLlvmDelete = (i: string) => /^RUN\b/.test(i) && /\brm\b/.test(i) && i.includes('libLLVM');
 
 describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
-  const dockerfile = readFileSync(join(ROOT, DB_IMAGE_DOCKERFILE), 'utf-8');
+  const dockerfile = readRepoFile(DB_IMAGE_DOCKERFILE);
   const instructions = logicalInstructions(dockerfile);
   const froms = instructions.filter((i) => /^FROM\b/.test(i));
   const pgFroms = froms.filter((i) => !i.includes('hyperformant/wal-g') && i !== 'FROM scratch');
@@ -161,7 +158,7 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
   });
 
   it('postgresql.conf turns jit off, since the image carries no LLVM', () => {
-    const conf = readFileSync(join(ROOT, 'docker', 'postgres-walg', 'postgresql.conf'), 'utf-8');
+    const conf = readRepoFile('docker', 'postgres-walg', 'postgresql.conf');
     expect(conf).toMatch(/^jit = off\s*$/m);
   });
 
@@ -227,7 +224,7 @@ describe('version lockstep across the delivery chain', () => {
 });
 
 describe('repo-wide: no Dockerfile downloads a pinned-arch binary unverified', () => {
-  const dockerfiles = findDockerfiles(ROOT).sort();
+  const dockerfiles = findDockerfiles(REPO_ROOT).sort();
 
   it('knows about every Dockerfile in the repo', () => {
     // A new Dockerfile must be triaged here rather than silently escaping the
@@ -244,7 +241,7 @@ describe('repo-wide: no Dockerfile downloads a pinned-arch binary unverified', (
   });
 
   it.each(dockerfiles)('%s fetches no hardcoded-arch release asset', (relPath) => {
-    const instructions = logicalInstructions(readFileSync(join(ROOT, relPath), 'utf-8'));
+    const instructions = logicalInstructions(readRepoFile(relPath));
     const fetches = instructions.filter((i) => /^RUN\b/.test(i) && /\b(curl|wget)\b/.test(i));
     for (const layer of fetches) {
       // Downloads may mention an arch only via a TARGETARCH-resolved variable.

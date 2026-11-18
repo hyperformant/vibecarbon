@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // The registry-login skip gates fingerprinted their token with
 // `token.slice(0, 8)`. For the formats we actually see that is a CONSTANT:
@@ -19,8 +17,7 @@ import { describe, expect, it } from 'vitest';
 //     .vibecarbon/deploy-state-*.json — which the GHCR call site's own comment
 //     said it was trying to avoid ("hash the token's fingerprint, not the
 //     token itself").
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const effectsSrc = readFileSync(join(repoRoot, 'src/lib/deploy/effects/index.js'), 'utf-8');
+const effectsSrc = readRepoFile('src/lib/deploy/effects/index.js');
 
 // Re-implements the shipped fingerprint so the PROPERTY (not the source text)
 // is what gets asserted below.

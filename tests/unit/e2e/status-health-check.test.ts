@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { assessStatusJson, checkStatusHealth } from '../../e2e/checks/status-health.js';
 
 const row = (container: string, health: string, label = health, detail = '') => ({
@@ -325,10 +326,7 @@ describe('checkStatusHealth', () => {
 
   it('the window after a compose-ha failover is past the longest TTL a provider allows', async () => {
     const { readFileSync } = await import('node:fs');
-    const src = readFileSync(
-      new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url),
-      'utf8',
-    );
+    const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(src).toContain('timeoutMs: recordJustMoved ? 360_000 : 180_000');
     const linode = readFileSync(new URL('../../../src/lib/linode-dns.js', import.meta.url), 'utf8');
     expect(linode).toMatch(/ALLOWED_TTL_SEC = \[\s*300,/);

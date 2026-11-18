@@ -11,9 +11,9 @@ import { describe, expect, it } from 'vitest';
 // @ts-expect-error plain .mjs without types
 import { readImageConst } from '../../../.github/scripts/image-const.mjs';
 import * as images from '../../../src/lib/images.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const WF_DIR = join(ROOT, '.github', 'workflows');
+const WF_DIR = join(REPO_ROOT, '.github', 'workflows');
 
 type Step = { run?: string };
 type Workflow = {

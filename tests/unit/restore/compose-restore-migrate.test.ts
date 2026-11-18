@@ -27,8 +27,8 @@ import {
   VC_COMPOSE_SCRIPT,
 } from '../../../src/lib/deploy/compose/command.js';
 import { restoreCompose } from '../../../src/lib/deploy/compose/index.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const REPO = join(import.meta.dirname, '..', '..', '..');
 const MIGRATE = `cd /opt/proj && ${VC_COMPOSE} run --rm --no-deps app-migrate`;
 
 /** A resolved restore point, as restore.js hands it to restoreCompose. */
@@ -129,7 +129,7 @@ describe('the post-restore migrate runs from the server -f set (prod override in
 
   it('in that set app-migrate is the deployed image, its build reset (and a build in the base file)', () => {
     const block = (file: string) => {
-      const text = readFileSync(join(REPO, 'carbon', file), 'utf-8');
+      const text = readRepoFile('carbon', file);
       return text.split(/^ {2}app-migrate:\s*$/m)[1]?.split(/^ {2}\S/m)[0] ?? '';
     };
     const base = block('docker-compose.yml');

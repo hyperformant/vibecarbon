@@ -13,9 +13,9 @@
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const SRC = join(__dirname, '../../../src');
+const SRC = join(REPO_ROOT, 'src');
 
 /** Local names bound to setupSimple / setupHA by destructuring or import. */
 function aliasesOf(source: string): string[] {

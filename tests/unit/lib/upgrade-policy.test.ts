@@ -5,11 +5,12 @@
  * here silently overwrites user code, so the category rules get pinned.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { getFilePolicy, getUpgradeableFiles } from '../../../src/lib/upgrade-policy.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('getFilePolicy', () => {
   it('classifies infra files as safe', () => {
@@ -125,7 +126,7 @@ describe('needs-review conflict prompts default to replace', () => {
   // files nobody renames. Pins BOTH selects (initial prompt + post-diff
   // re-prompt) in src/upgrade.js.
   it("every conflict select in upgrade.js uses initialValue: 'replace'", () => {
-    const src = readFileSync(join(__dirname, '../../../src/upgrade.js'), 'utf-8');
+    const src = readRepoFile('src/upgrade.js');
     const defaults = [...src.matchAll(/initialValue: '(\w+)'/g)].map((m) => m[1]);
     expect(defaults.length).toBeGreaterThanOrEqual(2);
     expect(new Set(defaults)).toEqual(new Set(['replace']));

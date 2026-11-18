@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * The private-NIC wait loop of the Hetzner k3s init scripts, run against REAL
@@ -24,7 +25,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
-const ROOT = process.cwd();
 const IMAGE = 'ubuntu:26.04';
 const NAME = `vctest-dhcpwait-${process.pid}`;
 const START = 'echo "Waiting for private network interface..."';
@@ -34,7 +34,7 @@ const docker = (args: string[], timeout = 120_000) =>
   execFileSync('docker', args, { encoding: 'utf-8', stdio: 'pipe', timeout });
 
 function loopOf(file: string): string {
-  const text = readFileSync(join(ROOT, 'carbon/cloud-init/k3s', file), 'utf-8');
+  const text = readRepoFile('carbon/cloud-init/k3s', file);
   const from = text.indexOf(START);
   const to = text.indexOf(END);
   expect(from, `${file}: loop start`).toBeGreaterThan(-1);

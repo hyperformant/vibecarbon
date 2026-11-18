@@ -18,12 +18,11 @@
  * the deploy before the patch, a standby delivers nothing) is driven through
  * the spawn-mocked harness in k3s-apply-manifests-ordering.test.ts.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const SRC = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+const SRC = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
 /** The source text of a top-level `export async function <name>(`. */
 function fnBody(name: string): string {

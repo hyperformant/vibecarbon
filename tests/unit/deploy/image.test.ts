@@ -2,7 +2,6 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildLocalImage,
@@ -12,6 +11,7 @@ import {
 } from '../../../src/lib/deploy/image.js';
 import { PLATFORM_BUILD_FLAG } from '../../../src/lib/deploy/platform.js';
 import { NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 vi.mock('node:child_process', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -339,8 +339,6 @@ describe('readRuntimeBaseRef', () => {
   });
 
   it("matches the shipped template's pin", () => {
-    expect(readRuntimeBaseRef(fileURLToPath(new URL('../../../carbon', import.meta.url)))).toBe(
-      NODE_RUNTIME_IMAGE,
-    );
+    expect(readRuntimeBaseRef(join(REPO_ROOT, 'carbon'))).toBe(NODE_RUNTIME_IMAGE);
   });
 });

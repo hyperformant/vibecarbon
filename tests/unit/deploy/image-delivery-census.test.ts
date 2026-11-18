@@ -27,13 +27,11 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
-const SRC = join(REPO, 'src');
+const SRC = join(REPO_ROOT, 'src');
 const PRIMITIVES = new Set(['deliverImage', 'buildAppImage', 'copyAppImageToStandby']);
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.

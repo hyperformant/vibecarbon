@@ -3,11 +3,10 @@
  * window it reads the bucket's creation time beside IaC and records it on the
  * env, with nothing printed; on a 0-window provider it does nothing at all.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { S3Client } from '@aws-sdk/client-s3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startAppBucketFinalize } from '../../../src/lib/deploy/orchestrator.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const MIN = 60_000;
 
@@ -109,10 +108,7 @@ describe.each(['digitalocean', 'linode', 'scaleway', 'vultr'])(
 );
 
 describe('orchestrator wiring', () => {
-  const src = readFileSync(
-    join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
-    'utf-8',
-  );
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
   it('persists bucketCreatedAt only when finish produced one', () => {
     expect(src).toMatch(

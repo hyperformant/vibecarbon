@@ -19,11 +19,10 @@ import { dump, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { PLACEHOLDERS, SECRET_PLACEHOLDERS } from '../../../src/create.js';
 import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const BASE = join(ROOT, 'carbon/k8s/base');
-const SERVICES = join(ROOT, 'services');
+const BASE = join(REPO_ROOT, 'carbon/k8s/base');
+const SERVICES = join(REPO_ROOT, 'services');
 const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
@@ -80,7 +79,7 @@ function addBaseAddons(into: string) {
 }
 
 function fluxBasePatches(cluster: string): Doc[] {
-  const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
+  const file = join(REPO_ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
   const ks = (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
     (d) => d?.kind === 'Kustomization' && d.metadata?.name === 'vibecarbon-base',
   );
@@ -201,7 +200,7 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
     }, 60_000);
 
     it(`${cluster}: still health-checks the CLI-owned registry Deployment`, () => {
-      const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
+      const file = join(REPO_ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
       const ks = (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
         (d) => d?.kind === 'Kustomization' && d.metadata?.name === 'vibecarbon-base',
       );

@@ -15,6 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { argvOver, composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
@@ -749,8 +750,7 @@ describe('message census: a refusal that fires on a journal names -abort', () =>
 
 describe('run(): -abort sits behind the production confirmation', () => {
   it('confirmProdOrExit runs before runFailoverAbort in the abort branch', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(join(__dirname, '../../../src/failover.js'), 'utf-8');
+    const src = readRepoFile('src/failover.js');
     const branch = src.slice(src.indexOf('if (parsed.abort) {'));
     const confirm = branch.indexOf('await confirmProdOrExit(envName');
     const abort = branch.indexOf('await runFailoverAbort(');

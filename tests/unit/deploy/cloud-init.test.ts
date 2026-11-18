@@ -5,9 +5,10 @@ import {
   buildSetupServerError,
   loadCloudInitScript,
 } from '../../../src/lib/deploy/compose/index.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 describe('compose cloud-init user_data', () => {
-  const cloudInitPath = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
+  const cloudInitPath = join(REPO_ROOT, 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
 
   it('ships the cloud-init YAML in carbon/cloud-init/', () => {
     // Must be packaged with the CLI so every `vibecarbon deploy` has it.

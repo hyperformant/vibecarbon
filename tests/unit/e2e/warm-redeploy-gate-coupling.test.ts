@@ -9,6 +9,7 @@ import {
   buildK3sBuildInputs,
   // @ts-expect-error — JS module without types
 } from '../../../src/lib/deploy/k8s/k3s.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   mutateAppHealthRoute,
   mutateConfigMapManifest,
@@ -36,26 +37,18 @@ import {
  * (imageTag, restore, domain) while the thing a customer changed went unwatched.
  */
 
-const REPO_ROOT = process.cwd();
-
 /** Minimal project tree: only what the two gate builders read. */
 function buildFixture(): string {
   const dir = mkdtempSync(join(tmpdir(), 'vc-warm-coupling-'));
   // The manifest half — a real copy of the template the CLI lays down.
   const manifestDest = join(dir, WARM_REDEPLOY_MANIFEST_FILE);
   mkdirSync(dirname(manifestDest), { recursive: true });
-  writeFileSync(
-    manifestDest,
-    readFileSync(join(REPO_ROOT, 'carbon', WARM_REDEPLOY_MANIFEST_FILE), 'utf-8'),
-  );
+  writeFileSync(manifestDest, readRepoFile('carbon', WARM_REDEPLOY_MANIFEST_FILE));
   // The app half — plus the Dockerfile digestAppSource parses for COPY sources.
   const appDest = join(dir, WARM_REDEPLOY_APP_FILE);
   mkdirSync(dirname(appDest), { recursive: true });
-  writeFileSync(appDest, readFileSync(join(REPO_ROOT, 'carbon', WARM_REDEPLOY_APP_FILE), 'utf-8'));
-  writeFileSync(
-    join(dir, 'Dockerfile'),
-    readFileSync(join(REPO_ROOT, 'carbon/Dockerfile'), 'utf-8'),
-  );
+  writeFileSync(appDest, readRepoFile('carbon', WARM_REDEPLOY_APP_FILE));
+  writeFileSync(join(dir, 'Dockerfile'), readRepoFile('carbon/Dockerfile'));
   writeFileSync(join(dir, '.env.local'), 'VITE_PUBLIC_URL=https://example.test\n');
   return dir;
 }
@@ -132,7 +125,7 @@ describe('warm-redeploy-change premise: the mutated files are inside the gate di
   });
 
   it('the project Dockerfile still COPYs the tree the app assertion edits', () => {
-    const dockerfile = readFileSync(join(REPO_ROOT, 'carbon/Dockerfile'), 'utf-8');
+    const dockerfile = readRepoFile('carbon/Dockerfile');
     expect(dockerfile).toMatch(/^COPY\s+src\/\s/m);
   });
 });

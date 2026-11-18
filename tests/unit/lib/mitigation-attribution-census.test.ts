@@ -45,15 +45,14 @@
  * convention escapes the ladder detector; the positive controls at the
  * bottom keep the detectors themselves honest.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { INFRA_PATTERNS } from '../../e2e/utils/classify-failure.js';
 
-const ROOT = process.cwd();
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'coverage']);
 const REGISTRY_PATH = 'docs/mitigations.yml';
 const SIBLING_CENSUS = 'tests/unit/lib/transient-classifier-census.test.ts';
@@ -92,7 +91,7 @@ const RegistrySchema = z.object({
 type Registry = z.infer<typeof RegistrySchema>;
 
 function loadRegistry(): Registry {
-  const raw = readFileSync(join(ROOT, REGISTRY_PATH), 'utf-8');
+  const raw = readRepoFile(REGISTRY_PATH);
   const parsed = RegistrySchema.safeParse(load(raw));
   if (!parsed.success) {
     throw new Error(`${REGISTRY_PATH} failed schema validation:\n${parsed.error.message}`);
@@ -113,18 +112,23 @@ function isCommentLine(line: string): boolean {
 }
 
 function walkFiles(dir: string, ext: string): string[] {
-  return sourceFiles(dir, { exts: [ext], skip: SKIP_DIRS, skipDotDirs: true, relativeTo: ROOT });
+  return sourceFiles(dir, {
+    exts: [ext],
+    skip: SKIP_DIRS,
+    skipDotDirs: true,
+    relativeTo: REPO_ROOT,
+  });
 }
 
 /** `file :: NAME` for every ladder constant in src/**.js and tests/e2e/**.ts. */
 function detectLadderSites(): Set<string> {
   const sites = new Set<string>();
   const files = [
-    ...walkFiles(join(ROOT, 'src'), '.js'),
-    ...walkFiles(join(ROOT, 'tests/e2e'), '.ts'),
+    ...walkFiles(join(REPO_ROOT, 'src'), '.js'),
+    ...walkFiles(join(REPO_ROOT, 'tests/e2e'), '.ts'),
   ];
   for (const file of files) {
-    for (const line of readFileSync(join(ROOT, file), 'utf-8').split('\n')) {
+    for (const line of readRepoFile(file).split('\n')) {
       if (isCommentLine(line)) continue;
       const m = LADDER_RE.exec(line);
       if (m) sites.add(`${file} :: ${m[1]}`);
@@ -139,7 +143,7 @@ function detectLadderSites(): Set<string> {
  * there immediately demands a class assignment here.
  */
 function scrapeClassifierSites(): Set<string> {
-  const source = readFileSync(join(ROOT, SIBLING_CENSUS), 'utf-8');
+  const source = readRepoFile(SIBLING_CENSUS);
   const sites = new Set<string>();
   for (const m of source.matchAll(/file: '([^']+)',\s*name: '([^']+)'/g)) {
     sites.add(`${m[1]} :: ${m[2]}`);
@@ -229,7 +233,7 @@ describe('mitigation attribution census', () => {
       if (c.attribution !== 'external-asserted') continue;
       if (!c.proofDebtSpec) {
         violations.push(`${c.class}: asserted-external with no proofDebtSpec`);
-      } else if (!existsSync(join(ROOT, c.proofDebtSpec))) {
+      } else if (!existsSync(join(REPO_ROOT, c.proofDebtSpec))) {
         violations.push(`${c.class}: proofDebtSpec does not exist: ${c.proofDebtSpec}`);
       }
     }
@@ -300,7 +304,7 @@ describe('mitigation attribution census', () => {
     const violations: string[] = [];
     for (const c of registry.classes) {
       const openPath = c.rootFix?.startsWith('open: ') ? c.rootFix.slice('open: '.length) : null;
-      if (openPath && !existsSync(join(ROOT, openPath))) {
+      if (openPath && !existsSync(join(REPO_ROOT, openPath))) {
         violations.push(`${c.class}: rootFix spec does not exist: ${openPath}`);
       }
     }

@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import {
   CODE,
   enclosingFunctionName,
@@ -24,7 +24,6 @@ import {
   STRING,
 } from '../helpers/js-call-scan.js';
 
-const ROOT = join(__dirname, '../../..');
 const GENERATORS = ['generateSSHKeyPair', 'ensureSshKey'] as const;
 const GUARD = 'requireDeployKey';
 
@@ -79,8 +78,8 @@ function topLevelKeys(text: string, opener: string): string[] {
   return keys;
 }
 
-const SOURCES = sourceFiles(join(ROOT, 'src'), { exts: ['.js', '.mjs'] }).map((path) => ({
-  rel: relative(ROOT, path),
+const SOURCES = sourceFiles(join(REPO_ROOT, 'src'), { exts: ['.js', '.mjs'] }).map((path) => ({
+  rel: relative(REPO_ROOT, path),
   text: readFileSync(path, 'utf8'),
 }));
 
@@ -117,7 +116,7 @@ describe('deploy key census', () => {
   });
 
   it("the k8s modes' own checks see the record: deploymentConfig carries envConfig to deployK3s and the k8s-ha key step", () => {
-    const text = readFileSync(join(ROOT, 'src/lib/deploy/orchestrator.js'), 'utf8');
+    const text = readRepoFile('src/lib/deploy/orchestrator.js');
     expect(topLevelKeys(text, 'const deploymentConfig = {')).toContain('envConfig');
     // Both k8s tiers hand the effects that object as their options.
     expect(text).toContain('const k8sCtx = { options: { ...deploymentConfig,');

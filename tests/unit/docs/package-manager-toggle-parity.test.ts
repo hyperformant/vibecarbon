@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /**
  * The CLI's package-manager prompt and the docs' package-manager switcher are
@@ -24,11 +24,9 @@ import { describe, expect, it } from 'vitest';
  * src/create.js does not exist.
  */
 
-const ROOT = process.cwd();
-
 /** Reads a `const NAME = true|false` declaration out of a source file. */
 function readBooleanConst(relPath: string, name: string): boolean {
-  const src = readFileSync(join(ROOT, relPath), 'utf-8');
+  const src = readRepoFile(relPath);
   const match = src.match(new RegExp(`\\b${name}\\s*=\\s*(true|false)\\b`));
   if (!match) {
     throw new Error(
@@ -61,7 +59,7 @@ describe('package-manager choice is offered consistently, or not at all', () => 
   it('the docs page renders the switcher behind the flag, not unconditionally', () => {
     // The flag only helps if the render site consults it. A component rendered
     // unconditionally would pass the assertion above and still show the toggle.
-    const page = readFileSync(join(ROOT, 'carbon', 'src', 'client', 'pages', 'Docs.tsx'), 'utf-8');
+    const page = readRepoFile('carbon', 'src', 'client', 'pages', 'Docs.tsx');
     expect(page).toContain(DOCS_FLAG);
     const unguarded = /^\s*<PackageManagerSwitcher\b/m.test(
       page.replace(new RegExp(`\\{${DOCS_FLAG} && \\([\\s\\S]*?\\)\\}`, 'g'), ''),
@@ -77,8 +75,8 @@ describe('package-manager choice is offered consistently, or not at all', () => 
     // presence in the reference is correct. This pins the pairing so a future
     // removal of the flag also removes the docs line.
     const cli = readBooleanConst(CLI_FILE, CLI_FLAG);
-    const documentsPmFlag = readFileSync(join(ROOT, DOCS_PAGE), 'utf-8').includes('-pm');
-    const cliAcceptsPmFlag = readFileSync(join(ROOT, CLI_FILE), 'utf-8').includes("name: 'pm'");
+    const documentsPmFlag = readRepoFile(DOCS_PAGE).includes('-pm');
+    const cliAcceptsPmFlag = readRepoFile(CLI_FILE).includes("name: 'pm'");
     expect(
       documentsPmFlag && !cliAcceptsPmFlag,
       'cli.mdx documents `-pm` but src/create.js no longer accepts it.',

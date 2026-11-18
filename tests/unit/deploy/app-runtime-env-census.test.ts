@@ -34,14 +34,11 @@ import {
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = join(import.meta.dirname, '..', '..', '..');
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 /** Keys of the zod object in carbon/src/server/lib/env.ts, read from the source. */
 function envSchemaKeys(): string[] {
-  const src = read('carbon/src/server/lib/env.ts');
+  const src = readRepoFile('carbon/src/server/lib/env.ts');
   const start = src.indexOf('const envSchema = z.object({');
   const end = src.indexOf('\n});', start);
   expect(start, 'envSchema not found in env.ts').toBeGreaterThan(-1);
@@ -97,13 +94,13 @@ describe('census (a): every key the app reads is delivered', () => {
     // injects KUBERNETES_*, the compose `environment:` block sets
     // DOCKER_API_PROXY, and DOCKER is the image's own marker.
     const platform = new Set(['DOCKER', 'DOCKER_API_PROXY']);
-    const files = sourceFiles(join(ROOT, 'carbon/src/server'), {
+    const files = sourceFiles(join(REPO_ROOT, 'carbon/src/server'), {
       exts: ['.ts'],
-      relativeTo: ROOT,
+      relativeTo: REPO_ROOT,
     }).filter((rel) => !/\.test\.ts$/.test(rel));
     const read_ = new Set<string>();
     for (const f of files) {
-      for (const m of read(f).matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) read_.add(m[1]);
+      for (const m of readRepoFile(f).matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) read_.add(m[1]);
     }
     expect(read_.size).toBeGreaterThan(5);
     const missing = [...read_].filter(

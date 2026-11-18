@@ -36,12 +36,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /** The database lineage (system identifier) whose folder holds the backup. */
 const LINEAGE = '7699032860122738725';
 const BASE_PREFIX = 's3://b/backups/p/prod/walg';
 /** The real walg-env.sh, in place of the in-container path. */
-const WALG_ENV = `. ${join(process.cwd(), 'carbon/volumes/db/walg-env.sh')}`;
+const WALG_ENV = `. ${join(REPO_ROOT, 'carbon/volumes/db/walg-env.sh')}`;
 
 const BACKUP = 'base_000000010000000000000002';
 const CONF = renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE }));

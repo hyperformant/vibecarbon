@@ -34,7 +34,7 @@ import { describe, expect, it } from 'vitest';
 import { operatorSecretKeys } from '../../../src/lib/config-registry.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
  * Canonical prefix for a provider: its registry id, uppercased.
@@ -121,7 +121,7 @@ describe('credential key convention — config-registry operator secrets', () =>
 });
 
 describe('credential key convention — config-registry <-> .env.e2e.example parity', () => {
-  const examplePath = join(process.cwd(), 'tests', '.env.e2e.example');
+  const examplePath = join(REPO_ROOT, 'tests', '.env.e2e.example');
   const exampleKeys = Object.keys(parseDotenv(readFileSync(examplePath, 'utf-8')));
 
   // DOCKER_HUB_* were excluded here before the operator config hygiene pass
@@ -163,7 +163,7 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
 
 describe('credential key convention — no legacy operator-only spellings survive in src/', () => {
   it('no *_SPACES_* / *_OBJECT_STORAGE_* credential spelling remains under src/', () => {
-    const srcRoot = join(process.cwd(), 'src');
+    const srcRoot = join(REPO_ROOT, 'src');
     const offenders: string[] = [];
     for (const file of sourceFiles(srcRoot, { exts: ['.js', '.ts', '.mjs'] })) {
       const text = readFileSync(file, 'utf-8');

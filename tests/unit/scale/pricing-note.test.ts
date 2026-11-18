@@ -13,12 +13,11 @@
  * pin). This test pins the exact rendered output for the Hetzner case so a
  * future refactor can't silently change what the user sees again.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const SCALE_SRC = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+const SCALE_SRC = readRepoFile('src/scale.js');
 
 describe('scale.js pricing note — exact string pin', () => {
   it('both note call sites interpolate Provider.NAME and Provider.PRICING_URL', () => {

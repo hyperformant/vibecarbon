@@ -42,9 +42,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONFIG_KEYS, type ConfigKey, registryEntry } from '../../../src/lib/config-registry.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = process.cwd();
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // Kinds `operator-env.js`'s KIND_FALLBACKS already gives a describe for
 // (consulted there only when a registry entry carries no `shape` of its
@@ -86,7 +84,7 @@ const EXAMPLE_FILE_FOR_WHERE: Record<ConfigKey['where'], string> = {
 const EXAMPLE_FILES = [...new Set(Object.values(EXAMPLE_FILE_FOR_WHERE))];
 
 function readExample(relPath: string): string[] {
-  return readFileSync(join(ROOT, relPath), 'utf-8').split('\n');
+  return readRepoFile(relPath).split('\n');
 }
 
 describe('env docs census — forward: every registry entry is documented with its format', () => {
@@ -160,7 +158,7 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
 };
 
 function readCarbonSrcSources(): string[] {
-  return sourceFiles(join(ROOT, 'carbon', 'src'), {
+  return sourceFiles(join(REPO_ROOT, 'carbon', 'src'), {
     exts: ['.ts', '.tsx'],
     skip: ['node_modules'],
   }).map((f) => readFileSync(f, 'utf-8'));
@@ -220,12 +218,12 @@ describe('readByCarbonSrc — a bare quoted key in a string is not a read (M15)'
 
 /** All `carbon/docker-compose*.yml` files, plus the one module compose file that lives outside carbon/ (observability). */
 function composeSources(): string[] {
-  const carbonDir = join(ROOT, 'carbon');
+  const carbonDir = join(REPO_ROOT, 'carbon');
   const carbonComposeFiles = readdirSync(carbonDir)
     .filter((f) => /^docker-compose.*\.yml$/.test(f))
     .map((f) => join(carbonDir, f));
   const outOfTree = [
-    join(ROOT, 'services', 'observability', 'compose', 'docker-compose.yml'),
+    join(REPO_ROOT, 'services', 'observability', 'compose', 'docker-compose.yml'),
   ].filter(existsSync);
   return [...carbonComposeFiles, ...outOfTree].map((f) => readFileSync(f, 'utf-8'));
 }
@@ -236,7 +234,7 @@ function composeSources(): string[] {
  */
 function scriptSources(): string[] {
   const files = ['scripts', 'scripts/lib'].flatMap((sub) => {
-    const dir = join(ROOT, 'carbon', sub);
+    const dir = join(REPO_ROOT, 'carbon', sub);
     return readdirSync(dir, { withFileTypes: true })
       .filter((e) => e.isFile() && /\.(ts|js)$/.test(e.name))
       .map((e) => join(dir, e.name));
@@ -319,7 +317,7 @@ describe('env docs census — reverse: every documented key is a registry entry 
   const allExampleKeys = new Map<string, string[]>(); // key -> files it appears in
 
   for (const file of EXAMPLE_FILES) {
-    const parsed = parseDotenv(readFileSync(join(ROOT, file), 'utf-8'));
+    const parsed = parseDotenv(readRepoFile(file));
     for (const key of Object.keys(parsed)) {
       const files = allExampleKeys.get(key) ?? [];
       files.push(file);
@@ -380,7 +378,7 @@ describe('env docs census — reverse: every documented key is a registry entry 
 
 describe('env docs census — supporting files exist where expected', () => {
   it('carbon/.env.local.example exists (the .env.local docs counterpart)', () => {
-    expect(() => readFileSync(join(ROOT, 'carbon/.env.local.example'), 'utf-8')).not.toThrow();
+    expect(() => readRepoFile('carbon/.env.local.example')).not.toThrow();
   });
 
   it('carbon/.env.local.example opens with the do-not-copy warning (A9: create writes real secrets into .env.local)', () => {
@@ -390,7 +388,7 @@ describe('env docs census — supporting files exist where expected', () => {
     // wipe them, and nothing can regenerate them for a running database.
     // The warning must be the FIRST thing under the banner, before any
     // sentence that describes the file as ".example counterpart".
-    const lines = readFileSync(join(ROOT, 'carbon/.env.local.example'), 'utf-8').split('\n');
+    const lines = readRepoFile('carbon/.env.local.example').split('\n');
     const firstProse = lines.findIndex((l, i) => i >= 3 && l.startsWith('# ') && !/^# =+$/.test(l));
     expect(firstProse).toBeGreaterThan(0);
     expect(lines[firstProse]).toMatch(/^# DO NOT copy this file over \.env\.local/);
@@ -405,7 +403,7 @@ describe('env docs census — supporting files exist where expected', () => {
   });
 
   it('carbon/_gitignore does not ignore .env.local.example', () => {
-    const gitignore = readFileSync(join(ROOT, 'carbon/_gitignore'), 'utf-8');
+    const gitignore = readRepoFile('carbon/_gitignore');
     const lines = gitignore
       .split('\n')
       .map((l) => l.trim())
@@ -432,7 +430,7 @@ describe('env docs census — supporting files exist where expected', () => {
   });
 
   it('src/create.js copies .env.local.example alongside .env.example', () => {
-    const src = readFileSync(join(ROOT, 'src', 'create.js'), 'utf-8');
+    const src = readRepoFile('src', 'create.js');
     expect(src).toMatch(/\.env\.local\.example/);
   });
 });

@@ -1,16 +1,12 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // Guards that the CI image builder passes the VITE_* build args the client
 // bundle reads. Without these the GHCR image (used by compose push/CI mode)
 // bakes empty values. They source from repo-level Actions variables seeded by
 // `vibecarbon deploy` (seedBuildVars).
 describe('vibecarbon-build.yml bakes VITE build args', () => {
-  const wf = readFileSync(
-    join(process.cwd(), 'carbon/.github/workflows/vibecarbon-build.yml'),
-    'utf-8',
-  );
+  const wf = readRepoFile('carbon/.github/workflows/vibecarbon-build.yml');
 
   it('has a build-args block', () => {
     expect(wf).toMatch(/build-args:\s*\|/);

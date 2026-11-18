@@ -19,10 +19,9 @@
  * resolveSshCheckMasterIp → buildDbHandle.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/command.js', async (importOriginal) => {
@@ -42,6 +41,7 @@ vi.mock('../../../src/lib/command.js', async (importOriginal) => {
 });
 
 import { ensureSshKey } from '../../../src/lib/deploy/k8s/k3s.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 import { buildDbHandle, resolveSshCheckMasterIp } from '../../e2e/checks/app-functional.js';
 import type { ReplTarget } from '../../e2e/checks/replication.js';
 import type { DeployMode, StepName } from '../../e2e/scenarios/types.js';
@@ -56,8 +56,7 @@ const STANDBY = '10.0.0.11';
 const STANDBY_DB = '10.0.0.12';
 const WORKER = '10.0.0.3';
 
-const srcFile = (rel: string) =>
-  readFileSync(fileURLToPath(new URL(`../../../src/${rel}`, import.meta.url)), 'utf8');
+const srcFile = (rel: string) => readRepoFile(`src/${rel}`);
 
 /** Write `.vibecarbon/deploy_key_<env>` the way generateSSHKeyPair leaves it. */
 function writeDeployKey(dir: string): void {

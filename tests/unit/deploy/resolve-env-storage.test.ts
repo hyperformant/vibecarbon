@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveEnvStorage, StorageBucketMismatchError } from '../../../src/lib/deploy/prompts.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
 
@@ -93,7 +93,7 @@ describe('resolveEnvStorage', () => {
 describe('envConfig.s3.bucketPin survives every save that rebuilds s3', () => {
   // A pin dropped by the post-deploy save would make the next deploy derive
   // the env name again and fail closed on its own persisted bucket.
-  const read = (f: string) => readFileSync(new URL(`../../../${f}`, import.meta.url), 'utf8');
+  const read = (f: string) => readRepoFile(`${f}`);
 
   it('deploy hands the pin from envConfig to s3Config', () => {
     expect(read('src/lib/deploy/prompts.js')).toContain(

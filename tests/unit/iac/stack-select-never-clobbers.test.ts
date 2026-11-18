@@ -31,8 +31,8 @@
  * The fix drives select and create ourselves so absence is a decision we make,
  * on evidence, rather than one the SDK makes for us.
  */
-import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const selectStackMock = vi.fn();
 const createStackMock = vi.fn();
@@ -329,7 +329,7 @@ describe('structural pin', () => {
   // createOrSelectStack is the SDK call whose swallowed StackNotFoundError
   // destroyed real state. It must not come back.
   it('src/lib/iac/index.js never calls LocalWorkspace.createOrSelectStack', () => {
-    const src = readFileSync(new URL('../../../src/lib/iac/index.js', import.meta.url), 'utf8');
+    const src = readRepoFile('src/lib/iac/index.js');
     // Strip comments — the RCA is written up in prose there and names the call.
     const code = src
       .split('\n')
@@ -339,7 +339,7 @@ describe('structural pin', () => {
   });
 
   it('the mutate-existing entry points pass requireExisting', () => {
-    const src = readFileSync(new URL('../../../src/lib/iac/index.js', import.meta.url), 'utf8');
+    const src = readRepoFile('src/lib/iac/index.js');
     // destroyStack + getStackOutputs + removeStackState
     expect(src.match(/requireExisting: true/g)).toHaveLength(3);
   });

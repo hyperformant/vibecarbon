@@ -30,8 +30,9 @@ import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
 import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
-const K3S_DIR = join(__dirname, '../../../carbon/cloud-init/k3s');
+const K3S_DIR = join(REPO_ROOT, 'carbon/cloud-init/k3s');
 const SENTINEL = 'vc-sentinel-api-token-5e1d';
 // The join token the CLI hands every program (lib/iac/k3s-token.js): a
 // program refuses to build without one.

@@ -7,6 +7,7 @@
  * Sentinel values only.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // Same safety-mock recipe as apply-ca-bounds-to-config.test.ts: scale.js's
 // module graph must resolve at import time, none of it is exercised here.
@@ -65,9 +66,7 @@ describe('readOldAppEnv', () => {
 
 describe('scale keeps the .env replay when the app.env read fails', () => {
   it('a failed app.env read is thrown inside the per-server try, whose catch deletes the new server', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+    const src = readRepoFile('src/scale.js');
     // The read lives in prepareReplacementServer, not in a catch of its own...
     const prepStart = src.indexOf('async function prepareReplacementServer(');
     const prepEnd = src.indexOf('\n}\n', prepStart);
@@ -88,9 +87,7 @@ describe('scale keeps the .env replay when the app.env read fails', () => {
   });
 
   it('reads app.env only after, and outside, the .env read', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+    const src = readRepoFile('src/scale.js');
     const envRead = src.indexOf('oldEnv = dropUnportableEnv(parseDotenv(envText));');
     const catchAfter = src.indexOf("s.stop('Could not read old-server config", envRead);
     const appRead = src.indexOf('oldAppEnv = await readOldAppEnv(', envRead);
@@ -101,9 +98,7 @@ describe('scale keeps the .env replay when the app.env read fails', () => {
   });
 
   it('a failed old-server .env read stops that server scale instead of using the project .env', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+    const src = readRepoFile('src/scale.js');
     const envRead = src.indexOf('oldEnv = dropUnportableEnv(parseDotenv(envText));');
     const nextStep = src.indexOf("s.start('Copying project files...');", envRead);
     const between = src.slice(envRead, nextStep);

@@ -10,11 +10,12 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../../_shared/temp-dir.js';
 
-const CLI = join(resolve(__dirname, '../../../..'), 'src', 'cli.js');
+const CLI = join(REPO_ROOT, 'src', 'cli.js');
 const dirs: string[] = [];
 
 afterEach(() => {

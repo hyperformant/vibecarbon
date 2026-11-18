@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashContent } from '../../../../src/lib/checksum.js';
 import { staleObservabilityTlsProblem } from '../../../../src/lib/deploy/k8s/one-certificate.js';
 import { gitScrubbedEnv } from '../../../_shared/git-env.js';
+import { REPO_ROOT, readRepoFile } from '../../../_shared/source-files.js';
 import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
@@ -119,9 +120,7 @@ describe('vibecarbon upgrade', () => {
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
-    const workArtifacts = untracked.filter(
-      (rel) => !existsSync(join(process.cwd(), 'carbon', rel)),
-    );
+    const workArtifacts = untracked.filter((rel) => !existsSync(join(REPO_ROOT, 'carbon', rel)));
     expect(
       workArtifacts,
       'upgrade left non-template files a customer `git add -A` would commit — and the secret ' +
@@ -221,7 +220,7 @@ describe('vibecarbon upgrade', () => {
     dir: string,
     { recordChecksums }: { recordChecksums: boolean },
   ) {
-    const SVC = join(process.cwd(), 'services', 'observability');
+    const SVC = join(REPO_ROOT, 'services', 'observability');
     const obs = join(dir, 'k8s', 'base', 'observability');
     mkdirSync(obs, { recursive: true });
     const stale: Record<string, string> = {
@@ -494,7 +493,7 @@ describe('vibecarbon upgrade after configure cicd', () => {
    * at the real owner: the image and clone URLs, not prose.
    */
   const shipped = (rel: string, owner: string) =>
-    readFileSync(join(process.cwd(), 'carbon', rel), 'utf-8')
+    readRepoFile('carbon', rel)
       .replaceAll('{{GITHUB_OWNER}}', 'test-app')
       .replaceAll('{{PROJECT_NAME}}', 'test-app')
       .replaceAll('github.com/test-app/test-app', `github.com/${owner}/test-app`)
@@ -631,10 +630,7 @@ describe('vibecarbon upgrade after configure cicd', () => {
     // k8s/infra/traefik-crds raw, a file upgrade moves to its
     // {{TRAEFIK_VERSION}} token. Byte for byte one this CLI shipped, so it is
     // the CLI's to replace.
-    const shipped = readFileSync(
-      join(process.cwd(), 'tests/fixtures/deploy-workflow-v0.50.1.yml'),
-      'utf-8',
-    );
+    const shipped = readRepoFile('tests/fixtures/deploy-workflow-v0.50.1.yml');
     expect(shipped).toContain('kubectl apply -k k8s/infra/traefik-crds/');
     workflowsWithoutChecksums(shipped);
 
@@ -642,7 +638,7 @@ describe('vibecarbon upgrade after configure cicd', () => {
     if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
     assertSuccess(r);
 
-    expect(read(DEPLOY_YML)).toBe(readFileSync(join(process.cwd(), 'carbon', DEPLOY_YML), 'utf-8'));
+    expect(read(DEPLOY_YML)).toBe(readRepoFile('carbon', DEPLOY_YML));
     expect(existsSync(join(project, `${DEPLOY_YML}.upgrade-new`))).toBe(false);
     expect(JSON.parse(read('.vibecarbon.json')).fileChecksums[DEPLOY_YML]).toBe(
       hashContent(read(DEPLOY_YML)),
@@ -653,10 +649,7 @@ describe('vibecarbon upgrade after configure cicd', () => {
     // A workflow the user wrote (or edited) looks the same to upgrade as one
     // configure installed before checksums: no record. Only a byte-for-byte
     // shipped copy is the CLI's; anything else is the user's to review.
-    const theirs = `${readFileSync(
-      join(process.cwd(), 'tests/fixtures/deploy-workflow-v0.50.1.yml'),
-      'utf-8',
-    )}# deploys our staging cluster too\n`;
+    const theirs = `${readRepoFile('tests/fixtures/deploy-workflow-v0.50.1.yml')}# deploys our staging cluster too\n`;
     workflowsWithoutChecksums(theirs);
 
     const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
@@ -664,9 +657,7 @@ describe('vibecarbon upgrade after configure cicd', () => {
     assertSuccess(r);
 
     expect(read(DEPLOY_YML)).toBe(theirs);
-    expect(read(`${DEPLOY_YML}.upgrade-new`)).toBe(
-      readFileSync(join(process.cwd(), 'carbon', DEPLOY_YML), 'utf-8'),
-    );
+    expect(read(`${DEPLOY_YML}.upgrade-new`)).toBe(readRepoFile('carbon', DEPLOY_YML));
     expect(existsSync(join(project, `${DEPLOY_YML}.upgrade-backup`))).toBe(false);
   });
 });
@@ -697,9 +688,7 @@ describe('vibecarbon upgrade after vibecarbon add', () => {
     writeFileSync(path, older(readFileSync(path, 'utf-8')));
     const configPath = join(project, '.vibecarbon.json');
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    config.fileChecksums[REL] = hashContent(
-      older(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8')),
-    );
+    config.fileChecksums[REL] = hashContent(older(readRepoFile('carbon', REL)));
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
     const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
@@ -712,7 +701,7 @@ describe('vibecarbon upgrade after vibecarbon add', () => {
     expect(existsSync(`${path}.upgrade-new`)).toBe(false);
     // Recorded without add's entry, like create recorded it.
     expect(JSON.parse(readFileSync(configPath, 'utf-8')).fileChecksums[REL]).toBe(
-      hashContent(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8')),
+      hashContent(readRepoFile('carbon', REL)),
     );
   });
 
@@ -723,7 +712,7 @@ describe('vibecarbon upgrade after vibecarbon add', () => {
     // hand: the older template's file exactly, which is no reason to read it
     // as untouched. add's entry is missing, and that is the user's edit.
     const older = (text: string) => text.replace('labels:', '# older template\nlabels:');
-    const theirs = older(readFileSync(join(process.cwd(), 'carbon', REL), 'utf-8'));
+    const theirs = older(readRepoFile('carbon', REL));
     expect(readFileSync(path, 'utf-8')).toContain('  - redis/\n');
     writeFileSync(path, theirs);
     const configPath = join(project, '.vibecarbon.json');

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateProjectName } from '../../../src/lib/validators.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('C-7: project path traversal rejection', () => {
   it.each([['../evil'], ['../../etc'], ['/abs/path'], ['foo/bar'], ['.hidden'], ['..'], ['.']])(
@@ -16,17 +17,13 @@ describe('C-7: project path traversal rejection', () => {
 
 describe('C-7: create.js uses validateProjectName not the old loose isValidProjectName', () => {
   it('create.js no longer defines isValidProjectName', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src', 'create.js'), 'utf-8');
+    const src = readRepoFile('src', 'create.js');
     expect(src).not.toMatch(/function isValidProjectName/);
     expect(src).toContain('validateProjectName');
   });
 
   it('create.js no longer defines a projectPath variable separate from projectName', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src', 'create.js'), 'utf-8');
+    const src = readRepoFile('src', 'create.js');
     // The legacy code had `let projectPath = args.projectName;`
     expect(src).not.toMatch(/let projectPath = args\.projectName/);
   });

@@ -15,13 +15,12 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { bootPullImages } from '../../../src/lib/iac/compose-cloud-init.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 describe('cloud-init pulls images only through the detached compose boot pull', () => {
-  const CLOUD_INIT = fileURLToPath(new URL('../../../carbon/cloud-init', import.meta.url));
+  const CLOUD_INIT = join(REPO_ROOT, 'carbon/cloud-init');
   const pullLines = () =>
     sourceFiles(CLOUD_INIT).flatMap((f) =>
       readFileSync(f, 'utf-8')

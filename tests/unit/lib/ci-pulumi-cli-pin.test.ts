@@ -4,13 +4,10 @@
  * @pulumi/pulumi SDK version the lockfile installed: no second version
  * literal to drift, and never "latest".
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const workflow = readFileSync(join(ROOT, '.github/workflows/test.yml'), 'utf-8');
+const workflow = readRepoFile('.github/workflows/test.yml');
 
 /** The `integration:` job's text, up to the next top-level job. */
 function job(name: string) {
@@ -36,10 +33,7 @@ describe('CI installs a pinned pulumi CLI for the integration tier', () => {
   });
 
   it('the real-engine test fails, never skips, under CI', () => {
-    const test = readFileSync(
-      join(ROOT, 'tests/integration/iac/server-state-follows-scale.test.ts'),
-      'utf-8',
-    );
+    const test = readRepoFile('tests/integration/iac/server-state-follows-scale.test.ts');
     expect(test).toMatch(/describe\.skipIf\(!hasPulumi && !process\.env\.CI\)/);
     expect(test).toMatch(/expect\(hasPulumi,/);
   });

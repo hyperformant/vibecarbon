@@ -18,19 +18,15 @@
  *     DO resolves same-region Spaces endpoints to a VPC-internal address that
  *     the private-range exclusion above cuts off.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const load = (rel: string) => {
   const out: Record<string, never>[] = [];
-  loadAll(
-    readFileSync(fileURLToPath(new URL(`../../../carbon/k8s/${rel}`, import.meta.url)), 'utf8'),
-    (d) => {
-      if (d) out.push(d as Record<string, never>);
-    },
-  );
+  loadAll(readRepoFile(`carbon/k8s/${rel}`), (d) => {
+    if (d) out.push(d as Record<string, never>);
+  });
   return out;
 };
 
@@ -70,12 +66,7 @@ describe('k8s S3 egress coverage', () => {
   });
 
   it('the VPC file still renders its placeholder, never a literal CIDR', () => {
-    const raw = readFileSync(
-      fileURLToPath(
-        new URL('../../../carbon/k8s/base/s3-egress-vpc/s3-egress-vpc.yaml', import.meta.url),
-      ),
-      'utf8',
-    );
+    const raw = readRepoFile('carbon/k8s/base/s3-egress-vpc/s3-egress-vpc.yaml');
     const cidrs = [...raw.matchAll(/cidr: (\S+)/g)].map((m) => m[1]);
     // 2 arms: the registry left the S3-egress family when its backend moved
     // to the master's filesystem (registry-no-object-storage.test.ts, 2026-08-30)

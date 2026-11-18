@@ -18,13 +18,10 @@
  * are asserted here too.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const NAME = 'configureStandbyReplication';
 const GUARDS = new Set(['detectComposeHaRoleSwap', 'assertNoComposeHaRoleSwap']);
 const DEPLOY_EFFECT = 'src/lib/deploy/effects/compose-ha.js';
@@ -151,12 +148,12 @@ function srcFiles() {
   const listed = execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', 'src'],
-    { cwd: REPO, encoding: 'utf-8' },
+    { cwd: REPO_ROOT, encoding: 'utf-8' },
   );
   return listed
     .split('\n')
     .filter((f) => f.endsWith('.js'))
-    .map((path) => ({ path, text: readFileSync(join(REPO, path), 'utf-8') }));
+    .map((path) => ({ path, text: readRepoFile(path) }));
 }
 
 describe('configureStandbyReplication callers census (C2)', () => {
@@ -179,7 +176,7 @@ describe('configureStandbyReplication callers census (C2)', () => {
   });
 
   it('the deploy effect is exempt only because the orchestrator classifies a swapped env first', () => {
-    const text = readFileSync(join(REPO, ORCHESTRATOR), 'utf-8');
+    const text = readRepoFile(ORCHESTRATOR);
     let calls = 0;
     walk(parseAst(text), (n) => {
       if (

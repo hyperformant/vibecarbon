@@ -13,17 +13,13 @@
  * window this closes. And a deploy refuses while a failover journal is set, on
  * every HA tier: its final save rebuilds `ha` and would drop the journal.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { assertNoFailoverInFlight } from '../../../src/lib/deploy/failover-guard.js';
-
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
-const read = (rel: string) => readFileSync(`${repoRoot}${rel}`, 'utf-8');
+import { readRepoFile } from '../../_shared/source-files.js';
 
 /** Source with comments stripped, so a commented-out call does not count. */
 const code = (rel: string) =>
-  read(rel)
+  readRepoFile(rel)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
 

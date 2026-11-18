@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
  * Behavioral guard for the npm tarball (blocker #9, 2026-08-08 pre-launch audit).
@@ -15,15 +15,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  * (e.g. a developer's actual carbon/.env.local) happen to exist at test time.
  */
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-
 // path -> whether we created its parent dir (so cleanup only removes what we made)
 const sentinels: { path: string; createdDir?: string }[] = [
-  { path: join(repoRoot, 'carbon', '.env.launchtest-sentinel') },
-  { path: join(repoRoot, 'carbon', 'launchtest-sentinel.generated.sql') },
+  { path: join(REPO_ROOT, 'carbon', '.env.launchtest-sentinel') },
+  { path: join(REPO_ROOT, 'carbon', 'launchtest-sentinel.generated.sql') },
   {
-    path: join(repoRoot, 'carbon', '.claude', 'agent-memory', 'launchtest-sentinel.md'),
-    createdDir: join(repoRoot, 'carbon', '.claude', 'agent-memory'),
+    path: join(REPO_ROOT, 'carbon', '.claude', 'agent-memory', 'launchtest-sentinel.md'),
+    createdDir: join(REPO_ROOT, 'carbon', '.claude', 'agent-memory'),
   },
 ];
 
@@ -53,7 +51,7 @@ afterAll(() => {
 
 function packedFiles(): string[] {
   const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
   });

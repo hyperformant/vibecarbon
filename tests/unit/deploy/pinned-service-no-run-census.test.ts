@@ -13,12 +13,9 @@
  */
 import { readFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { TRAEFIK_VOLUME_SH } from '../../../src/lib/deploy/compose/tls-restore.js';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 function walk(dir: string, keep: (f: string) => boolean): string[] {
   return sourceFiles(dir, { skip: ['node_modules'], skipDotDirs: true }).filter(
@@ -60,15 +57,15 @@ function offenders(source: string, pinned: string[]): string[] {
 }
 
 const overlays = [
-  ...walk(join(ROOT, 'services'), (f) => /docker-compose[^/]*\.ya?ml$/.test(f)),
-  ...walk(join(ROOT, 'carbon'), (f) => /docker-compose[^/]*\.ya?ml$/.test(f)),
+  ...walk(join(REPO_ROOT, 'services'), (f) => /docker-compose[^/]*\.ya?ml$/.test(f)),
+  ...walk(join(REPO_ROOT, 'carbon'), (f) => /docker-compose[^/]*\.ya?ml$/.test(f)),
 ];
 const PINNED = [...new Set(overlays.flatMap((f) => pinnedServices(readFileSync(f, 'utf8'))))];
 
 const FRAGMENT_FILE = 'src/lib/deploy/compose/tls-restore.js';
 const sources = [
-  ...walk(join(ROOT, 'src'), (f) => /\.(js|sh)$/.test(f)),
-  ...walk(join(ROOT, 'carbon/backup'), (f) => f.endsWith('.sh')),
+  ...walk(join(REPO_ROOT, 'src'), (f) => /\.(js|sh)$/.test(f)),
+  ...walk(join(REPO_ROOT, 'carbon/backup'), (f) => f.endsWith('.sh')),
 ];
 
 describe('pinned services are never run beside themselves', () => {
@@ -82,10 +79,10 @@ describe('pinned services are never run beside themselves', () => {
     for (const f of sources) {
       let text = readFileSync(f, 'utf8');
       // The one allowed spelling: the shared fragment's own definition.
-      if (relative(ROOT, f) === FRAGMENT_FILE) {
+      if (relative(REPO_ROOT, f) === FRAGMENT_FILE) {
         text = text.replace(/export const TRAEFIK_VOLUME_SH =[\s\S]*?;\n/, '');
       }
-      for (const o of offenders(text, PINNED)) bad.push(`${relative(ROOT, f)}: ${o}`);
+      for (const o of offenders(text, PINNED)) bad.push(`${relative(REPO_ROOT, f)}: ${o}`);
     }
     expect(bad).toEqual([]);
   });

@@ -21,9 +21,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
-
-const ROOT = join(__dirname, '../../..');
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 // "namespace/workload" of every API client that no Egress policy selects, and why.
 const UNRESTRICTED_API_CLIENTS: Record<string, string> = {
@@ -60,10 +58,10 @@ function kustomizeNamespace(dir: string): string | undefined {
   return undefined;
 }
 
-const manifestRoots = [join(ROOT, 'carbon/k8s'), join(ROOT, 'services')];
+const manifestRoots = [join(REPO_ROOT, 'carbon/k8s'), join(REPO_ROOT, 'services')];
 const files = manifestRoots
   .flatMap((r) => yamlFiles(r))
-  .filter((f) => f.includes('/k8s/') || f.startsWith(join(ROOT, 'carbon/k8s')));
+  .filter((f) => f.includes('/k8s/') || f.startsWith(join(REPO_ROOT, 'carbon/k8s')));
 const all = files.flatMap((file) =>
   docsIn(file).map((doc) => ({
     file,
@@ -89,7 +87,7 @@ const clients = all
   .map((m) => {
     const tpl = podTemplate(m.doc);
     return {
-      id: `${relative(ROOT, m.file)} ${m.doc.kind}/${m.doc.metadata?.name}`,
+      id: `${relative(REPO_ROOT, m.file)} ${m.doc.kind}/${m.doc.metadata?.name}`,
       key: `${m.namespace}/${m.doc.metadata?.name}`,
       namespace: m.namespace,
       labels: (tpl?.metadata?.labels ?? {}) as Record<string, string>,
@@ -168,7 +166,7 @@ describe('manifest comments name no retired service-role key', () => {
         .map((line, i) => ({ f, line, n: i + 1 }))
         .filter(({ line }) => /^\s*#.*service-role/i.test(line)),
     )
-    .map(({ f, n }) => `${relative(ROOT, f)}:${n}`);
+    .map(({ f, n }) => `${relative(REPO_ROOT, f)}:${n}`);
 
   it('has no comment containing service-role', () => {
     expect(offenders).toEqual([]);

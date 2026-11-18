@@ -1,6 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 import {
   autoscalerRepatchProblem,
   CA_REPATCH_FAILED,
@@ -37,7 +36,7 @@ describe('verify-scale: the autoscaler took the new worker settings', () => {
   });
 
   it('matches the lines src/scale.js prints', () => {
-    const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+    const src = readRepoFile('src/scale.js');
     expect(src).toMatch(/`cluster-autoscaler re-patched \(\$\{label\}\): worker-pool/);
     expect(src).toMatch(/`CA re-patch failed \(\$\{label\}\)`/);
     expect([...ok('x').matchAll(CA_REPATCHED)]).toHaveLength(1);
@@ -45,7 +44,7 @@ describe('verify-scale: the autoscaler took the new worker settings', () => {
   });
 
   it('verify-scale runs the check', () => {
-    const src = readFileSync(join(process.cwd(), 'tests/e2e/scenarios/_run-lifecycle.ts'), 'utf-8');
+    const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     const verify = src.slice(src.indexOf("name: 'verify-scale',"));
     const body = verify.slice(0, verify.indexOf('// 2. Type-comparison path'));
     expect(body).toMatch(/autoscalerRepatchProblem\(combined, config\.mode\)/);

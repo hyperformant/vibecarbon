@@ -13,10 +13,9 @@ import { describe, expect, it } from 'vitest';
 import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
 import { PROMOTE_ISSUER_ANNOTATION } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 import { buildDbManifestValues, renderK8sBase } from '../../../src/lib/deploy/k8s/k3s.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
-const ROOT = join(__dirname, '../../..');
-const BASE = join(ROOT, 'carbon/k8s/base');
+const BASE = join(REPO_ROOT, 'carbon/k8s/base');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;

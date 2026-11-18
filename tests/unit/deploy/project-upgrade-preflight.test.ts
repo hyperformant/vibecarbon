@@ -4,12 +4,12 @@
  * the retired stack and the deploy waited on a migration status the old app
  * never reports, failing on a server that was actually serving.
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { projectUpgradeProblem } from '../../../src/lib/deploy/preflight.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
-const TEMPLATE_COMPOSE = readFileSync(join(process.cwd(), 'carbon', 'docker-compose.yml'), 'utf8');
+const TEMPLATE_COMPOSE = readRepoFile('carbon', 'docker-compose.yml');
 // The db service an older CLI generated: built on the server, no DB_IMAGE.
 const RETIRED_COMPOSE = `services:
   db:

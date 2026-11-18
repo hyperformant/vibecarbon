@@ -10,14 +10,14 @@
  * uplink lock in the real home, with nothing failing.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { E2E_HOME_DIRNAME, resolveE2EHome } from '../../e2e/utils/e2e-home.js';
 
-const ROOT = join(__dirname, '../../..');
 const HOME_MODULE = 'tests/e2e/utils/e2e-home.js';
 
 /** Every e2e entry point that reads or writes the CLI home. */
@@ -44,14 +44,14 @@ function runWithFakeHome(script: string, preset?: string): string {
   delete env.VIBECARBON_HOME;
   if (preset) env.VIBECARBON_HOME = preset;
   return execFileSync('node', ['--input-type=module', '-e', script], {
-    cwd: ROOT,
+    cwd: REPO_ROOT,
     env,
     encoding: 'utf-8',
     timeout: 60_000,
   }).trim();
 }
 
-const url = (rel: string) => JSON.stringify(pathToFileURL(join(ROOT, rel)).href);
+const url = (rel: string) => JSON.stringify(pathToFileURL(join(REPO_ROOT, rel)).href);
 
 describe('e2e harness CLI home', () => {
   it('is ~/.vibecarbon-e2e, and a preset VIBECARBON_HOME wins', () => {
@@ -62,12 +62,12 @@ describe('e2e harness CLI home', () => {
   });
 
   it.each(ENTRY_POINTS)('%s imports it before anything else', (file) => {
-    const first = imports(readFileSync(join(ROOT, file), 'utf-8'))[0];
+    const first = imports(readRepoFile(file))[0];
     expect(first).toMatch(SIDE_EFFECT_HOME_IMPORT);
   });
 
   it('imports node builtins only, so nothing loads before the home is set', () => {
-    const own = imports(readFileSync(join(ROOT, HOME_MODULE), 'utf-8'));
+    const own = imports(readRepoFile(HOME_MODULE));
     expect(own.length).toBeGreaterThan(0);
     for (const statement of own) expect(statement).toMatch(/from 'node:[\w/]+';$/);
   });

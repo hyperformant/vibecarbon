@@ -31,7 +31,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { demoteComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
 import { DROP_INACTIVE_SLOTS_SQL } from '../../../src/lib/deploy/replication-slot.js';
 import { demoteK8sWalgRole } from '../../../src/lib/deploy/walg-role.js';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import {
   type CallSite,
@@ -42,8 +42,6 @@ import {
   matchBracket,
 } from '../helpers/js-call-scan.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
-
-const ROOT = join(__dirname, '../../..');
 
 describe('DROP_INACTIVE_SLOTS_SQL', () => {
   it('is the reviewed statement', () => {
@@ -273,7 +271,7 @@ function writersOf(source: string): { writers: string[]; validators: string[] } 
   return { writers: writers.sort(), validators: validators.sort() };
 }
 
-const WRITERS = writersOf(readFileSync(join(ROOT, ROLE_MODULE), 'utf-8')).writers;
+const WRITERS = writersOf(readRepoFile(ROLE_MODULE)).writers;
 
 /** Source files the call scanner reads. */
 const JS_FILE = /\.(m|c)?[jt]s$/;
@@ -454,7 +452,7 @@ const STANDBY_WRITES: Record<string, StandbyWrite> = {
 
 describe('census: every standby role write is a demotion that drops slots', () => {
   it('the writers are walg-role.js exports that take a role; only assert* validators are not', () => {
-    const { writers, validators } = writersOf(readFileSync(join(ROOT, ROLE_MODULE), 'utf-8'));
+    const { writers, validators } = writersOf(readRepoFile(ROLE_MODULE));
     expect(writers).toEqual(
       [
         'composeWalgRoleWriteShell',
@@ -469,20 +467,20 @@ describe('census: every standby role write is a demotion that drops slots', () =
   });
 
   it('every walked source lexes cleanly, so no call can hide from the scanner', () => {
-    expect(unscannable(ROOT)).toEqual([]);
+    expect(unscannable(REPO_ROOT)).toEqual([]);
   });
 
   it('every standby-capable role write is a known site, counted per function', () => {
-    expect(standbyWriteSites(ROOT)).toEqual(expectedSites(STANDBY_WRITES));
+    expect(standbyWriteSites(REPO_ROOT)).toEqual(expectedSites(STANDBY_WRITES));
   });
 
   it('every drops-slots site drops the inactive slots in the same function', () => {
-    expect(unpairedDemoters(ROOT, STANDBY_WRITES)).toEqual([]);
+    expect(unpairedDemoters(REPO_ROOT, STANDBY_WRITES)).toEqual([]);
   });
 
   it('both k8s demotion paths go through demoteK8sWalgRole', () => {
     for (const path of ['src/failover.js', 'src/lib/deploy/retired-fence.js']) {
-      expect(readFileSync(join(ROOT, path), 'utf-8'), path).toMatch(/demoteK8sWalgRole\(/);
+      expect(readRepoFile(path), path).toMatch(/demoteK8sWalgRole\(/);
     }
   });
 });

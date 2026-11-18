@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 // Regression guard: a systemd unit installed by cloud-init must be STARTED,
 // not merely enabled.
@@ -31,8 +30,7 @@ import { sourceFiles } from '../../_shared/source-files.js';
 // reboot persistence) and wireguard.js's vibecarbon-wg0.service (the deploy
 // brings wg0 up live in the same run). Their invariant is established by the
 // deploy itself, not by the unit.
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const cloudInitRoot = join(repoRoot, 'carbon/cloud-init');
+const cloudInitRoot = join(REPO_ROOT, 'carbon/cloud-init');
 
 function cloudInitFiles(): string[] {
   return sourceFiles(cloudInitRoot, { exts: ['.sh', '.yaml', '.yml'] }).sort();
@@ -61,7 +59,7 @@ describe('cloud-init starts the units it installs', () => {
             new RegExp(`systemctl\\s+(start|restart)\\s+(--\\S+\\s+)*${unit}`).test(next),
           );
         if (!followedByStart) {
-          offenders.push(`${relative(repoRoot, file)}:${i + 1} — ${unit}`);
+          offenders.push(`${relative(REPO_ROOT, file)}:${i + 1} — ${unit}`);
         }
       });
     }

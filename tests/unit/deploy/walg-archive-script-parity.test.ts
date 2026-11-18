@@ -34,19 +34,18 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, describe, expect, it } from 'vitest';
 import { WALG_ROLE_PARSE_SH, walgRoleReadFragment } from '../../../src/lib/deploy/walg-role.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const COMPOSE_SCRIPT = 'carbon/volumes/db/wal-archive.sh';
 const WALG_ENV_SCRIPT = 'carbon/volumes/db/walg-env.sh';
 const K8S_CONFIGMAP = 'carbon/k8s/base/backup/configmap-walg.yaml';
 
-const composeBody = readFileSync(`${repoRoot}${COMPOSE_SCRIPT}`, 'utf-8');
-const walgEnvBody = readFileSync(`${repoRoot}${WALG_ENV_SCRIPT}`, 'utf-8');
-const configMapRaw = readFileSync(`${repoRoot}${K8S_CONFIGMAP}`, 'utf-8');
+const composeBody = readRepoFile(COMPOSE_SCRIPT);
+const walgEnvBody = readRepoFile(WALG_ENV_SCRIPT);
+const configMapRaw = readRepoFile(K8S_CONFIGMAP);
 const configMap = loadYaml(configMapRaw) as { data: Record<string, string> };
 const k8sBody = configMap.data['wal-archive.sh'];
 const k8sWalgEnvBody = configMap.data['walg-env.sh'];
@@ -110,10 +109,8 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
   });
 
   it('the ConfigMap carries db-guard.sh byte-identical, and it parses under sh', () => {
-    expect(configMap.data['db-guard.sh']).toBe(
-      readFileSync(`${repoRoot}carbon/volumes/db/db-guard.sh`, 'utf-8'),
-    );
-    expect(spawnSync('sh', ['-n', `${repoRoot}carbon/volumes/db/db-guard.sh`]).status).toBe(0);
+    expect(configMap.data['db-guard.sh']).toBe(readRepoFile('carbon/volumes/db/db-guard.sh'));
+    expect(spawnSync('sh', ['-n', `${REPO_ROOT}/carbon/volumes/db/db-guard.sh`]).status).toBe(0);
   });
 
   it('both tiers source walg-env.sh before anything reads the prefix', () => {
@@ -209,8 +206,8 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
 // carries the ConfigMap's sha: a changed script changes the template, and the
 // same apply rolls the pod (inside the db rollout wait).
 describe('a changed wal-archive.sh actually reaches the running db pod', () => {
-  const k3s = readFileSync(`${repoRoot}src/lib/deploy/k8s/k3s.js`, 'utf-8');
-  const sts = readFileSync(`${repoRoot}carbon/k8s/base/db/statefulset.yaml`, 'utf-8');
+  const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');
+  const sts = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
 
   it('is still mounted by subPath — the premise of the sha annotation', () => {
     // If this ever becomes a whole-directory mount, the kubelet updates it in
@@ -240,12 +237,12 @@ describe('a changed wal-archive.sh actually reaches the running db pod', () => {
 describe('wal-archive.sh with no backup target', () => {
   const bin = controldataBin('no-target');
   const run = (base: string) =>
-    spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'], {
+    spawnSync('bash', [`${REPO_ROOT}/${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
         PATH: `${bin}:${process.env.PATH}`,
         WALG_S3_PREFIX_BASE: base,
-        WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+        WALG_ENV_SH: `${REPO_ROOT}/${WALG_ENV_SCRIPT}`,
         VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
@@ -267,7 +264,7 @@ describe('wal-archive.sh with no backup target', () => {
   it('a missing walg-env.sh refuses (exit 1, postgres retries), never a silent no-target skip', () => {
     const r = spawnSync(
       'bash',
-      [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
+      [`${REPO_ROOT}/${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
       {
         encoding: 'utf-8',
         env: {
@@ -306,7 +303,7 @@ describe('walg-env.sh exports the lineage folder', () => {
   const source = (env: Record<string, string>, readable = true) =>
     spawnSync(
       'sh',
-      ['-c', `set -eu; . "${repoRoot}${WALG_ENV_SCRIPT}"; printf '%s' "$WALG_S3_PREFIX"`],
+      ['-c', `set -eu; . "${REPO_ROOT}/${WALG_ENV_SCRIPT}"; printf '%s' "$WALG_S3_PREFIX"`],
       {
         encoding: 'utf-8',
         env: {
@@ -356,7 +353,7 @@ describe('walg-env.sh exports the lineage folder', () => {
   });
 
   it('runs under busybox-style sh with set -u (no bashisms)', () => {
-    const r = spawnSync('sh', ['-n', `${repoRoot}${WALG_ENV_SCRIPT}`], { encoding: 'utf-8' });
+    const r = spawnSync('sh', ['-n', `${REPO_ROOT}/${WALG_ENV_SCRIPT}`], { encoding: 'utf-8' });
     expect(r.status, r.stderr).toBe(0);
     expect(walgEnvBody).not.toMatch(/\[\[|\$\{[A-Za-z_]+:[0-9]/);
   });
@@ -379,7 +376,7 @@ describe('the wal-g role parser (one text, carried by walg-env.sh)', () => {
   const viaEnv = (f: string) => {
     const r = spawnSync(
       'sh',
-      ['-c', `. "${repoRoot}${WALG_ENV_SCRIPT}" && printf 'R=[%s]' "$VC_WALG_ROLE"`],
+      ['-c', `. "${REPO_ROOT}/${WALG_ENV_SCRIPT}" && printf 'R=[%s]' "$VC_WALG_ROLE"`],
       {
         encoding: 'utf-8',
         env: {
@@ -456,13 +453,13 @@ describe('wal-archive.sh on an overwrite refusal', () => {
     const started = Date.now();
     const r = spawnSync(
       'bash',
-      [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
+      [`${REPO_ROOT}/${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
       {
         encoding: 'utf-8',
         env: {
           PATH: `${bin}:${process.env.PATH}`,
           WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
-          WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+          WALG_ENV_SH: `${REPO_ROOT}/${WALG_ENV_SCRIPT}`,
           WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
           VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
           WAL_ARCHIVE_RETRIES: '3',
@@ -507,12 +504,12 @@ describe('wal-archive.sh when every push fails', () => {
     mkdirSync(join(pgdata, 'pg_wal'), { recursive: true });
     writeFileSync(join(pgdata, 'pg_wal', SEG), 'x');
     const run = (env: Record<string, string> = {}) =>
-      spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
+      spawnSync('bash', [`${REPO_ROOT}/${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
         encoding: 'utf-8',
         env: {
           PATH: `${bin}:${process.env.PATH}`,
           WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
-          WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+          WALG_ENV_SH: `${REPO_ROOT}/${WALG_ENV_SCRIPT}`,
           WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
           VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
           WAL_ARCHIVE_RETRIES: '2',
@@ -643,12 +640,12 @@ describe('wal-archive.sh role guard', () => {
       writeFileSync(join(roleDir, 'target'), 'primary\n');
       symlinkSync(join(roleDir, 'target'), file);
     } else if (role !== null) writeFileSync(file, role);
-    const r = spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
+    const r = spawnSync('bash', [`${REPO_ROOT}/${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
       encoding: 'utf-8',
       env: {
         PATH: `${bin}:${process.env.PATH}`,
         WALG_S3_PREFIX_BASE: base,
-        WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+        WALG_ENV_SH: `${REPO_ROOT}/${WALG_ENV_SCRIPT}`,
         WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
         VC_WALG_ROLE_FILE: file,
         WAL_ARCHIVE_RETRIES: '1',

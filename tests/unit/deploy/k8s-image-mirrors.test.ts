@@ -33,7 +33,7 @@
  *  (e) the workflow mirrors exactly the set, via the same generator this test runs.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { extname, join, sep } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -79,9 +79,8 @@ import {
 } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { namesHost } from '../../_shared/hosts.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
-const ROOT = process.cwd();
-const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const WORKFLOW = '.github/workflows/publish-images.yml';
 const MIRROR_WORKFLOW = '.github/workflows/mirror-images.yml';
 const MATRIX_SCRIPT = 'scripts/mirror-matrix.mjs';
@@ -321,7 +320,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       // re-deriving them and `kubectl set image` would pin the OLD sidecar
       // versions over the new manifest — or, if a container was renamed, do
       // nothing at all and hand the deploy straight back to registry.k8s.io.
-      const pinned = read(initScript).match(pattern)?.[1];
+      const pinned = readRepoFile(initScript).match(pattern)?.[1];
       const expected = {
         hetzner: HETZNER_CSI_VERSION,
         digitalocean: DO_CSI_VERSION,
@@ -353,7 +352,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       '1.36': null,
       '1.37': null,
     };
-    const k3sMinor = read('src/lib/images.js').match(
+    const k3sMinor = readRepoFile('src/lib/images.js').match(
       /K3S_VERSION = 'v(\d+\.\d+)\.\d+\+k3s\d+'/,
     )?.[1];
     expect(k3sMinor, 'no K3S_VERSION pin found in images.js').toBeDefined();
@@ -387,7 +386,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     // read exactly one env var, HCLOUD_VOLUME_DEFAULT_LOCATION). Deleting this
     // line now would re-open the leak that #236 backstopped: destroy.js's
     // `project-label` match and the sweep both key off it.
-    const initScript = read('carbon/cloud-init/k3s/master-init.sh');
+    const initScript = readRepoFile('carbon/cloud-init/k3s/master-init.sh');
     // Escaped `\${` so this asserts the cloud-init PLACEHOLDER, not a value.
     expect(initScript).toContain(`HCLOUD_VOLUME_EXTRA_LABELS="project=\${project_name}"`);
     expect(initScript).toContain('deployment/hcloud-csi-controller');
@@ -532,7 +531,7 @@ describe('csiSidecarSetImagePlan()', () => {
 });
 
 describe('applyK3sManifests re-pins the CSI sidecars before the db StatefulSet is applied', () => {
-  const whole = read('src/lib/deploy/k8s/k3s.js');
+  const whole = readRepoFile('src/lib/deploy/k8s/k3s.js');
   // Scoped to applyK3sManifests' BODY: `renderK8sBase` is also defined
   // earlier in this file, and ordering assertions against the definition
   // rather than the call site would pass while proving nothing.
@@ -584,7 +583,7 @@ describe('every consuming reference resolves through the mirror', () => {
   it('the e2e scale-trigger workload builds its image ref from images.js', () => {
     // Not a literal: this file is the one that proves the mirror works on a
     // real node, so it must pull the ref from the same constant the deploy does.
-    const lifecycle = read('tests/e2e/scenarios/_run-lifecycle.ts');
+    const lifecycle = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(lifecycle).toMatch(/import \{[^}]*pauseImageRef[^}]*\} from '.*images\.js'/);
     expect(lifecycle).toMatch(/image: \$\{pauseImageRef\(\)\}/);
   });
@@ -603,7 +602,7 @@ describe('every consuming reference resolves through the mirror', () => {
     expect(files.some((f) => f.split(sep).includes('node_modules'))).toBe(false);
     for (const rel of files) {
       if (rel === join('src', 'lib', 'images.js')) continue;
-      read(rel)
+      readRepoFile(rel)
         .split('\n')
         .forEach((line, i) => {
           if (!namesHost(line, 'registry.k8s.io')) return;
@@ -616,7 +615,7 @@ describe('every consuming reference resolves through the mirror', () => {
 });
 
 describe('publish workflow mirrors exactly the set', () => {
-  const workflow = read(WORKFLOW);
+  const workflow = readRepoFile(WORKFLOW);
   // Executable YAML only; comments are where the reasoning lives.
   const executable = (text: string) =>
     text
@@ -624,7 +623,7 @@ describe('publish workflow mirrors exactly the set', () => {
       .filter((line) => !/^\s*#/.test(line))
       .join('\n');
   const code = executable(workflow);
-  const mirrorWorkflow = read(MIRROR_WORKFLOW);
+  const mirrorWorkflow = readRepoFile(MIRROR_WORKFLOW);
   const mirrorCode = executable(mirrorWorkflow);
 
   it('generates its matrix by running the checked-in generator script', () => {
@@ -635,7 +634,7 @@ describe('publish workflow mirrors exactly the set', () => {
   });
 
   it('the generator emits one src/dst/digest entry per mirror-set entry', () => {
-    const out = execFileSync('node', [join(ROOT, MATRIX_SCRIPT)], { encoding: 'utf8' });
+    const out = execFileSync('node', [join(REPO_ROOT, MATRIX_SCRIPT)], { encoding: 'utf8' });
     const matrix = JSON.parse(out);
     expect(matrix).toEqual(
       MIRRORED_IMAGES.map((image) => ({
@@ -854,9 +853,9 @@ function sweepFiles(): string[] {
   return execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...dirs],
-    { cwd: ROOT, encoding: 'utf-8' },
+    { cwd: REPO_ROOT, encoding: 'utf-8' },
   )
     .split('\n')
-    .filter((rel) => rel && exts.has(extname(rel)) && existsSync(join(ROOT, rel)))
+    .filter((rel) => rel && exts.has(extname(rel)) && existsSync(join(REPO_ROOT, rel)))
     .map((rel) => rel.split('/').join(sep));
 }

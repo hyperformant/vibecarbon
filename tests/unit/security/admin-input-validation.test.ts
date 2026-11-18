@@ -1,18 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('C-8: create.js uses validateAdminEmail/Password from lib/validators', () => {
   it('create.js imports the strict validators', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src', 'create.js'), 'utf-8');
+    const src = readRepoFile('src', 'create.js');
     expect(src).toContain('validateAdminEmail');
     expect(src).toContain('validateAdminPassword');
   });
 
   it('create.js no longer uses the loose inline email regex', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const src = readFileSync(join(process.cwd(), 'src', 'create.js'), 'utf-8');
+    const src = readRepoFile('src', 'create.js');
     // The old pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/
     expect(src).not.toMatch(/\^\[\^\\s@\]\+@\[\^\\s@\]\+\\\.\[\^\\s@\]\+\$/);
   });

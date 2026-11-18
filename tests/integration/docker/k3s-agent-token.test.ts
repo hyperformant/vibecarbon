@@ -21,17 +21,15 @@
  * Needs Docker and the wireguard module (the flags ask for wireguard-native).
  * Every container and network here is named vctest-* and removed in afterAll.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { k3sVersion } from '../../../src/lib/images.js';
 import { dockerRunner, dockerTierSkip, waitFor } from '../../_shared/docker-sync.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const SKIPPED = dockerTierSkip('k3s-agent-token', 'Docker and the wireguard module');
 
-const ROOT = process.cwd();
 const VERSION = process.env.VC_K3S_VERSION || k3sVersion();
 const IMAGE = `rancher/k3s:${VERSION.replace('+', '-')}`;
 const NET = `vctest-k3s-join-net-${process.pid}`;
@@ -47,7 +45,7 @@ const LONG = 180_000;
 
 const { run, must } = dockerRunner({ timeoutMs: LONG });
 const kubectl = (...args: string[]) => run('docker', ['exec', MASTER, 'kubectl', ...args]);
-const script = (file: string) => readFileSync(join(ROOT, 'carbon/cloud-init/k3s', file), 'utf-8');
+const script = (file: string) => readRepoFile('carbon/cloud-init/k3s', file);
 /** `docker run` for a k3s node on the test network, at its own address. */
 const node = (name: string, ip: string, env: string[], args: string[]) =>
   must('docker', [
