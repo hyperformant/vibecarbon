@@ -3,8 +3,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  assertExitWith,
-  assertSuccess,
   destroyRealProject,
   type ExecStubs,
   installExecStubs,
@@ -27,14 +25,6 @@ describe('vibecarbon up', () => {
   afterEach(() => {
     destroyRealProject(project);
     stubs.teardown();
-  });
-
-  describe('help', () => {
-    it('prints help', () => {
-      const r = runCli('up', ['-h'], { cwd: project });
-      assertSuccess(r);
-      assertExitWith(r, 0, 'Vibecarbon Up');
-    });
   });
 
   describe('orchestration', () => {

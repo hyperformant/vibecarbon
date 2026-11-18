@@ -2,13 +2,7 @@
  * vibecarbon scale — flag matrix.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon scale', () => {
   let project: string;
@@ -17,12 +11,6 @@ describe('vibecarbon scale', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help', () => {
-    const r = runCli('scale', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Scale');
   });
 
   it('-type cx33 accepted by parser', () => {

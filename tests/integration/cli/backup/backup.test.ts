@@ -2,13 +2,7 @@
  * vibecarbon backup — flag matrix against a real project.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon backup', () => {
   let project: string;
@@ -17,12 +11,6 @@ describe('vibecarbon backup', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help', () => {
-    const r = runCli('backup', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Backup');
   });
 
   it('-l (list) accepted by parser', () => {

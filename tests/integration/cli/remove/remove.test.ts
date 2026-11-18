@@ -27,12 +27,6 @@ describe('vibecarbon remove', () => {
   });
 
   describe('help', () => {
-    it('prints help', () => {
-      const r = runCli('remove', ['-h'], { cwd: project });
-      assertSuccess(r);
-      assertExitWith(r, 0, 'Vibecarbon Remove');
-    });
-
     it('rejects the double-dash --force form (single-dash -force remains as a -y alias)', () => {
       const r = runCli('remove', ['--force'], { cwd: project });
       assertExitWith(r, 1, 'unknown flag: --force');

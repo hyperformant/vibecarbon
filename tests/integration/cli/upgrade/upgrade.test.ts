@@ -18,7 +18,6 @@ import { staleObservabilityTlsProblem } from '../../../../src/lib/deploy/k8s/one
 import { gitScrubbedEnv } from '../../../_shared/git-env.js';
 import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
-  assertExitWith,
   assertSuccess,
   destroyRealProject,
   type ExecStubs,
@@ -34,12 +33,6 @@ describe('vibecarbon upgrade', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help', () => {
-    const r = runCli('upgrade', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Upgrade');
   });
 
   it('-dry leaves package.json unchanged', () => {

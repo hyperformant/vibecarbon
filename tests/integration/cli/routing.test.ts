@@ -5,6 +5,7 @@
  * - KNOWN_COMMANDS registry (all commands are listed, including newly added ones)
  * - Help text mentions every registered command
  * - -h exits 0 and prints usage, and --help is rejected
+ * - <command> -h prints that command's exact title, for every command
  * - -v and --version exit 0 and print version
  * - No args exits 0 (shows help)
  * - Unknown command exits 1
@@ -14,8 +15,9 @@
 
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { KNOWN_COMMANDS } from '../../../src/cli.js';
+import { assertSuccess, destroyRealProject, realProject, runCli } from '../_harness/index.js';
 
 const CLI_PATH = join(import.meta.dirname, '../../../src/cli.js');
 const NODE = process.execPath;
@@ -149,6 +151,106 @@ describe('CLI -h', () => {
     const result = runCliScript(['-h']);
     expect(result.stdout).toContain('scale');
   });
+});
+
+// Every command's own -h, run inside a real project as a user would. The
+// first line must be that command's exact title and summary: a loose match
+// such as /down/i passes on almost any output, including another command's
+// help. `also` holds the extra lines a command's help must carry. This table
+// replaces the per-command "prints help" tests.
+const HELP_TITLES: Array<{ command: string; title: string; also?: string[] }> = [
+  {
+    command: 'access',
+    title: 'Vibecarbon Access - Manage the SSH and k8s-API operator-CIDR allowlist',
+  },
+  {
+    command: 'add',
+    title: 'Vibecarbon Add - Add features (observability, redis)',
+    also: ['observability'],
+  },
+  { command: 'backup', title: 'Vibecarbon Backup - Create or list database backups' },
+  {
+    command: 'configure',
+    title:
+      'Vibecarbon Configure - Configure external services and settings: billing, OAuth, SMTP, CI/CD, globalization, and more',
+  },
+  { command: 'console', title: "Vibecarbon Console - Open Hetzner's web VNC console for a node" },
+  {
+    command: 'create',
+    title: 'Vibecarbon Create - Create a new Vibecarbon project',
+    also: ['-pm'],
+  },
+  {
+    command: 'deploy',
+    title: 'Vibecarbon Deploy - Deploy an environment (interactive picker for mode and region)',
+    // -allow-degraded: the HA replication gate opt-out is documented (finding #1).
+    also: ['-mode', '-region', '-full', '-allow-degraded'],
+  },
+  {
+    command: 'destroy',
+    title: 'Vibecarbon Destroy - Tear down a cloud environment',
+    also: ['-orphans', '-purge'],
+  },
+  {
+    command: 'diagnose',
+    title:
+      'Vibecarbon Diagnose - Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*',
+    // The section names.
+    also: ['nodes', 'pods', 'tls', 'flux', 'egress'],
+  },
+  { command: 'down', title: 'Vibecarbon Down - Stop the local development environment' },
+  { command: 'failover', title: 'Vibecarbon Failover - Initiate failover to the standby region' },
+  { command: 'next', title: 'Vibecarbon Next - Tell me what to do next, and offer to run it' },
+  { command: 'remove', title: 'Vibecarbon Remove - Remove features from a project' },
+  { command: 'reset', title: 'Vibecarbon Reset - Reset the local environment (removes all data)' },
+  { command: 'restore', title: 'Vibecarbon Restore - Restore the database from a backup' },
+  { command: 'scale', title: 'Vibecarbon Scale - Scale worker nodes and instance sizes' },
+  {
+    command: 'shell',
+    title:
+      'Vibecarbon Shell - Open an interactive bash with KUBECONFIG and cloud credentials exported',
+  },
+  { command: 'status', title: 'Vibecarbon Status - Show project and deployment status' },
+  {
+    command: 'telemetry',
+    title: 'Vibecarbon Telemetry - Control anonymous usage analytics (status by default)',
+  },
+  { command: 'up', title: 'Vibecarbon Up - Start the local development environment' },
+  {
+    command: 'update',
+    title: 'Vibecarbon Update - Install system updates and restart servers when needed',
+    also: ['Looking for vibecarbon upgrade?'],
+  },
+  {
+    command: 'upgrade',
+    title: 'Vibecarbon Upgrade - Upgrade infrastructure files to the latest template',
+  },
+];
+
+describe('<command> -h prints that command’s help', () => {
+  let project: string;
+  beforeAll(() => {
+    project = realProject();
+  });
+  afterAll(() => {
+    destroyRealProject(project);
+  });
+
+  it('has a row for every KNOWN_COMMAND', () => {
+    expect(HELP_TITLES.map((row) => row.command).sort()).toEqual([...KNOWN_COMMANDS].sort());
+  });
+
+  it.each(HELP_TITLES)(
+    '$command -h exits 0 and starts with its exact title',
+    ({ command, title, also }) => {
+      const r = runCli(command, ['-h'], { cwd: project });
+      assertSuccess(r);
+      expect(r.stdout.split('\n')[0]).toBe(title);
+      for (const text of also ?? []) {
+        expect(r.stdout, `${command} -h is missing "${text}"`).toContain(text);
+      }
+    },
+  );
 });
 
 describe("CLI '?' alias", () => {

@@ -24,12 +24,6 @@ describe('vibecarbon status', () => {
     destroyRealProject(project);
   });
 
-  it('prints help', () => {
-    const r = runCli('status', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Status');
-  });
-
   it('rejects unknown -bogus flag', () => {
     const r = runCli('status', ['-bogus'], { cwd: project });
     assertExitWith(r, 1, /unknown flag/i);

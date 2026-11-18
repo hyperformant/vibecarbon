@@ -5,13 +5,7 @@
  * not-in-project matrix.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon access', () => {
   let project: string;
@@ -20,12 +14,6 @@ describe('vibecarbon access', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help', () => {
-    const r = runCli('access', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, /access/i);
   });
 
   it('rejects double-dash flags', () => {

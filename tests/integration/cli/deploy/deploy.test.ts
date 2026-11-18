@@ -8,13 +8,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 import { FETCH_TRIPWIRE_SENTINEL } from './_fixtures/fetch-tripwire-sentinel.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -37,17 +31,6 @@ describe('vibecarbon deploy', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help', () => {
-    const r = runCli('deploy', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Deploy');
-    assertExitWith(r, 0, '-mode');
-    assertExitWith(r, 0, '-region');
-    assertExitWith(r, 0, '-full');
-    // Finding #1: the HA replication gate opt-out is documented in help.
-    assertExitWith(r, 0, '-allow-degraded');
   });
 
   it('-allow-degraded accepted by parser (finding #1 gate opt-out)', () => {

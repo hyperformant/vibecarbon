@@ -51,25 +51,6 @@ describe('planDeploy(compose)', () => {
     }
   });
 
-  it('is pure: repeated calls produce structurally identical plans with no I/O', () => {
-    // Steps carry `when` closures (fresh per call, so reference-inequal); compare
-    // the serializable shape — name, effect, and whether the step is gated.
-    const shape = () =>
-      planDeploy('compose').map((s) => ({
-        name: s.name,
-        effect: s.effect,
-        gated: typeof s.when === 'function',
-      }));
-    expect(shape()).toEqual(shape());
-  });
-
-  it('references only effects that exist in the registry', async () => {
-    const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('compose')) {
-      expect(typeof EFFECTS[step.effect]).toBe('function');
-    }
-  });
-
   it('gates conditional steps with when-predicates and leaves unconditional steps ungated', () => {
     const byName = Object.fromEntries(planDeploy('compose').map((s) => [s.name, s]));
 
@@ -140,23 +121,6 @@ describe('planDeploy(k8s)', () => {
     expect(step.name).toBe('deploy-cluster');
     expect(step.effect).toBe('k8sDeployCluster');
     expect(step.when).toBeUndefined();
-  });
-
-  it('references only effects that exist in the registry', async () => {
-    const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('k8s')) {
-      expect(typeof EFFECTS[step.effect]).toBe('function');
-    }
-  });
-
-  it('is pure: repeated calls produce structurally identical plans', () => {
-    const shape = () =>
-      planDeploy('k8s').map((s) => ({
-        name: s.name,
-        effect: s.effect,
-        gated: typeof s.when === 'function',
-      }));
-    expect(shape()).toEqual(shape());
   });
 });
 
@@ -294,23 +258,6 @@ describe('planDeploy(k8s-ha)', () => {
     await runPlan(planDeploy('k8s-ha'), coldCtx, stubEffects);
     expect(ran).toEqual(EXPECTED_K8S_HA_SEQUENCE);
   });
-
-  it('references only effects that exist in the registry', async () => {
-    const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('k8s-ha')) {
-      expect(typeof EFFECTS[step.effect]).toBe('function');
-    }
-  });
-
-  it('is pure: repeated calls produce structurally identical plans', () => {
-    const shape = () =>
-      planDeploy('k8s-ha').map((s) => ({
-        name: s.name,
-        effect: s.effect,
-        gated: typeof s.when === 'function',
-      }));
-    expect(shape()).toEqual(shape());
-  });
 });
 
 // The compose-ha deploy plan is a pure, faithful decomposition of the (now
@@ -438,21 +385,27 @@ describe('planDeploy(compose-ha)', () => {
     // The per-server remote build is not a step of its own any more.
     expect(byName['remote-build']).toBeUndefined();
   });
+});
 
-  it('references only effects that exist in the registry', async () => {
-    const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
-    for (const step of planDeploy('compose-ha')) {
-      expect(typeof EFFECTS[step.effect]).toBe('function');
-    }
-  });
+describe('planDeploy, every tier', () => {
+  const TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
 
-  it('is pure: repeated calls produce structurally identical plans', () => {
+  it.each(TIERS)('%s is pure: repeated calls produce structurally identical plans', (tier) => {
+    // Steps carry `when` closures (fresh per call, so reference-inequal); compare
+    // the serializable shape — name, effect, and whether the step is gated.
     const shape = () =>
-      planDeploy('compose-ha').map((s) => ({
+      planDeploy(tier).map((s) => ({
         name: s.name,
         effect: s.effect,
         gated: typeof s.when === 'function',
       }));
     expect(shape()).toEqual(shape());
+  });
+
+  it.each(TIERS)('%s references only effects that exist in the registry', async (tier) => {
+    const { EFFECTS } = await import('../../../../src/lib/deploy/effects/index.js');
+    for (const step of planDeploy(tier)) {
+      expect(typeof EFFECTS[step.effect]).toBe('function');
+    }
   });
 });

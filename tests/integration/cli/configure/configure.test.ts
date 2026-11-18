@@ -19,12 +19,6 @@ describe('vibecarbon configure', () => {
     destroyRealProject(project);
   });
 
-  it('prints help', () => {
-    const r = runCli('configure', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, /Vibecarbon Configure|configure/i);
-  });
-
   it('mentions Providers as a configurable feature (B1: first in the menu)', () => {
     const r = runCli('configure', ['-h'], { cwd: project });
     assertSuccess(r);

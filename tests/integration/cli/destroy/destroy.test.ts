@@ -2,13 +2,7 @@
  * vibecarbon destroy — flag matrix against a real project.
  */
 import { afterEach, beforeEach, describe, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertExitWith, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon destroy', () => {
   let project: string;
@@ -17,14 +11,6 @@ describe('vibecarbon destroy', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help', () => {
-    const r = runCli('destroy', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Vibecarbon Destroy');
-    assertExitWith(r, 0, '-orphans');
-    assertExitWith(r, 0, '-purge');
   });
 
   it('-orphans accepted by parser', () => {

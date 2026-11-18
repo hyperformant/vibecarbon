@@ -2,13 +2,7 @@
  * vibecarbon update: help, registry placement. Never reaches a server.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  assertExitWith,
-  assertSuccess,
-  destroyRealProject,
-  realProject,
-  runCli,
-} from '../../_harness/index.js';
+import { assertSuccess, destroyRealProject, realProject, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon update', () => {
   let project: string;
@@ -17,13 +11,6 @@ describe('vibecarbon update', () => {
   });
   afterEach(() => {
     destroyRealProject(project);
-  });
-
-  it('prints help with the summary and the pointer to upgrade', () => {
-    const r = runCli('update', ['-h'], { cwd: project });
-    assertSuccess(r);
-    assertExitWith(r, 0, 'Install system updates and restart servers when needed');
-    expect(r.stdout).toContain('Looking for vibecarbon upgrade?');
   });
 
   it('upgrade help points back at update', () => {
