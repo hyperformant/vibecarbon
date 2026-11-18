@@ -97,6 +97,20 @@ describe('GET /api/v1/admin/users ordering', () => {
   });
 });
 
+describe('the admin lists without a signed-in user', () => {
+  const anonymous = appWithUser(null, '/api/v1', v1Routes);
+
+  it.each(['organizations', 'users', 'notifications'])(
+    '%s: answers 401 before reading anything',
+    async (list) => {
+      const res = await anonymous.request(`/api/v1/admin/${list}`);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: 'Unauthorized' });
+      expect(orderByCalls).toEqual([]);
+    }
+  );
+});
+
 describe('the admin lists share their query check and pagination block', () => {
   it.each(['organizations', 'users'])('%s: answers with the page it was asked for', async (list) => {
     const res = await app.request(`/api/v1/admin/${list}?page=2&limit=5`);

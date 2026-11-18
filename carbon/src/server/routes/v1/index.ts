@@ -806,12 +806,6 @@ v1Routes.delete('/organizations/:orgId', requireAal2, async (c) => {
 
 // List all organizations (super admin)
 v1Routes.get('/admin/organizations', async (c) => {
-  const user = c.get('user');
-
-  if (!user) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
@@ -881,12 +875,6 @@ v1Routes.get('/admin/organizations', async (c) => {
 
 // List all users (super admin)
 v1Routes.get('/admin/users', async (c) => {
-  const user = c.get('user');
-
-  if (!user) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
@@ -1073,12 +1061,6 @@ v1Routes.post('/notifications/:notificationId/dismiss', async (c) => {
 
 // List all notifications (including inactive) for admin management
 v1Routes.get('/admin/notifications', async (c) => {
-  const user = c.get('user');
-
-  if (!user) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
