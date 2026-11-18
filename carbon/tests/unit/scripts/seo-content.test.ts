@@ -1,5 +1,16 @@
-import { describe, expect, it } from 'vitest';
-import { isDraft, parseFrontmatter, substituteMdxProps } from '../../../scripts/lib/seo-content';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  decodeHtmlEntities,
+  isDraft,
+  loadSiteName,
+  loadSiteUrl,
+  parseFrontmatter,
+  substituteMdxProps,
+} from '../../../scripts/lib/seo-content';
+
+// The project's .env files are not read: a checkout's .env.local (a display
+// name, a site URL) must not decide these results.
+vi.mock('../../../scripts/lib/dotenv.js', () => ({ readEnvFiles: () => ({}) }));
 
 describe('substituteMdxProps', () => {
   const props = { projectName: 'My SaaS', adminEmail: 'admin@example.com' };
@@ -59,5 +70,40 @@ describe('parseFrontmatter', () => {
     const { fm, body } = parseFrontmatter('# Just markdown\n');
     expect(fm).toEqual({});
     expect(body).toBe('# Just markdown\n');
+  });
+});
+
+describe('loadSiteUrl', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('prefers VITE_PUBLIC_URL over SITE_URL and drops a trailing slash', () => {
+    vi.stubEnv('VITE_PUBLIC_URL', 'https://app.example.com/');
+    vi.stubEnv('SITE_URL', 'https://other.example.com');
+    expect(loadSiteUrl()).toBe('https://app.example.com');
+  });
+});
+
+describe('loadSiteName', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('takes the display name from the environment first', () => {
+    vi.stubEnv('VITE_PROJECT_DISPLAY_NAME', 'Acme Cloud');
+    expect(loadSiteName('<title>Other</title>')).toBe('Acme Cloud');
+  });
+
+  it('falls back to the decoded index.html <title>, then a default', () => {
+    vi.stubEnv('VITE_PROJECT_DISPLAY_NAME', '');
+    vi.stubEnv('PROJECT_DISPLAY_NAME', '');
+    expect(loadSiteName('<title>Tom &amp; Jerry&#39;s</title>')).toBe("Tom & Jerry's");
+  });
+});
+
+describe('decodeHtmlEntities', () => {
+  it('decodes &amp; last, so an escaped entity stays escaped once', () => {
+    expect(decodeHtmlEntities(' &amp;lt; ')).toBe('&lt;');
   });
 });
