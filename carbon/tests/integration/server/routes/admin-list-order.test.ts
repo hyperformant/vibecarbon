@@ -96,3 +96,21 @@ describe('GET /api/v1/admin/users ordering', () => {
     );
   });
 });
+
+describe('the admin lists share their query check and pagination block', () => {
+  it.each(['organizations', 'users'])('%s: answers with the page it was asked for', async (list) => {
+    const res = await app.request(`/api/v1/admin/${list}?page=2&limit=5`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body[list]).toEqual([]);
+    expect(body.pagination).toEqual({ page: 2, limit: 5, total: 0, totalPages: 0 });
+  });
+
+  it.each(['organizations', 'users'])('%s: refuses a bad query with 400', async (list) => {
+    for (const query of ['limit=0', 'sortBy=role', 'sortOrder=up', 'search=%3Cscript%3E']) {
+      const res = await app.request(`/api/v1/admin/${list}?${query}`);
+      expect(res.status, query).toBe(400);
+      expect(((await res.json()) as { error: string }).error, query).toBeTruthy();
+    }
+  });
+});

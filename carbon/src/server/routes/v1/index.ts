@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lte, or, sql } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb, type UserDb, withUserDb } from '../../db/client';
 import {
@@ -87,6 +87,32 @@ const adminPaginationSchema = z.object({
   page: z.coerce.number().int().min(1).max(1000).optional().default(1),
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
 });
+
+/**
+ * The admin lists' query string, validated against adminPaginationSchema:
+ * `{ data }`, or a 400 naming what is wrong as `{ response }`.
+ */
+function parseAdminListQuery(
+  c: Context<{ Variables: HonoVariables }>
+): { data: z.infer<typeof adminPaginationSchema> } | { response: Response } {
+  const result = adminPaginationSchema.safeParse({
+    search: c.req.query('search'),
+    sortBy: c.req.query('sortBy'),
+    sortOrder: c.req.query('sortOrder'),
+    page: c.req.query('page'),
+    limit: c.req.query('limit'),
+  });
+  if (!result.success) {
+    const errors = result.error.issues.map((e) => e.message).join(', ');
+    return { response: c.json({ error: errors }, 400) };
+  }
+  return { data: result.data };
+}
+
+/** The `pagination` block of an admin list response. */
+function paginationJson(page: number, limit: number, total: number) {
+  return { page, limit, total: total || 0, totalPages: Math.ceil((total || 0) / limit) };
+}
 
 type OrgRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
@@ -789,21 +815,9 @@ v1Routes.get('/admin/organizations', async (c) => {
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  // Validate and parse query params
-  const queryResult = adminPaginationSchema.safeParse({
-    search: c.req.query('search'),
-    sortBy: c.req.query('sortBy'),
-    sortOrder: c.req.query('sortOrder'),
-    page: c.req.query('page'),
-    limit: c.req.query('limit'),
-  });
-
-  if (!queryResult.success) {
-    const errors = queryResult.error.issues.map((e) => e.message).join(', ');
-    return c.json({ error: errors }, 400);
-  }
-
-  const { search, sortBy, sortOrder, page, limit } = queryResult.data;
+  const parsed = parseAdminListQuery(c);
+  if ('response' in parsed) return parsed.response;
+  const { search, sortBy, sortOrder, page, limit } = parsed.data;
   const offset = (page - 1) * limit;
 
   // Search filter (input validated by the Zod schema and bound as a
@@ -861,12 +875,7 @@ v1Routes.get('/admin/organizations', async (c) => {
       createdAt: isoTimestamp(org.createdAt),
       updatedAt: isoTimestamp(org.updatedAt),
     })),
-    pagination: {
-      page,
-      limit,
-      total: total || 0,
-      totalPages: Math.ceil((total || 0) / limit),
-    },
+    pagination: paginationJson(page, limit, total),
   });
 });
 
@@ -881,22 +890,9 @@ v1Routes.get('/admin/users', async (c) => {
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  // Validate and parse query params
-  const queryResult = adminPaginationSchema.safeParse({
-    search: c.req.query('search'),
-    sortBy: c.req.query('sortBy'),
-    sortOrder: c.req.query('sortOrder'),
-    page: c.req.query('page'),
-    limit: c.req.query('limit'),
-  });
-
-  if (!queryResult.success) {
-    const errors = queryResult.error.issues.map((e) => e.message).join(', ');
-    return c.json({ error: errors }, 400);
-  }
-
-  const { search, sortBy, sortOrder, page, limit } = queryResult.data;
-
+  const parsed = parseAdminListQuery(c);
+  if ('response' in parsed) return parsed.response;
+  const { search, sortBy, sortOrder, page, limit } = parsed.data;
   const offset = (page - 1) * limit;
 
   // Search across every user (input validated by the Zod schema and bound as
@@ -961,12 +957,7 @@ v1Routes.get('/admin/users', async (c) => {
       lastSignIn: u.lastSignInAt?.toISOString() ?? null,
       createdAt: u.createdAt.toISOString(),
     })),
-    pagination: {
-      page,
-      limit,
-      total: total || 0,
-      totalPages: Math.ceil((total || 0) / limit),
-    },
+    pagination: paginationJson(page, limit, total),
   });
 });
 
