@@ -8,7 +8,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { envS3Record } from '../../../src/lib/deploy/s3-record.js';
+import { envS3Record, stateS3Fields } from '../../../src/lib/deploy/s3-record.js';
 
 const s3Config = {
   bucket: 'myapp-cd9ecc-prod-storage',
@@ -67,6 +67,38 @@ describe('envS3Record', () => {
     expect(offenders).toEqual([]);
     for (const f of ['src/lib/deploy/orchestrator.js', 'src/lib/deploy/effects/compose-ha.js']) {
       expect(readFileSync(f, 'utf-8')).toMatch(/s3: envS3Record\(s3Config, /);
+    }
+  });
+});
+
+describe('stateS3Fields', () => {
+  it("is the record's six backend fields, absent ones kept as undefined, nothing else", () => {
+    const record = envS3Record(
+      { ...s3Config, bucketPin: 'pin', appKey },
+      { bucketCreatedAt: null },
+    );
+    const fields = stateS3Fields({ s3: record });
+    expect(Object.keys(fields)).toEqual([
+      'bucket',
+      'region',
+      'endpoint',
+      'stateBucket',
+      'stateBucketRegion',
+      'stateEndpoint',
+    ]);
+    expect(fields).toEqual({ ...s3Config, stateBucketRegion: undefined, stateEndpoint: undefined });
+  });
+
+  it('every state-backend rebuild reads it, never the fields by hand', () => {
+    for (const f of [
+      'src/failover.js',
+      'src/destroy.js',
+      'src/lib/deploy/compose/server-state-sync.js',
+      'src/lib/iac/converge-cluster.js',
+    ]) {
+      const text = readFileSync(f, 'utf-8');
+      expect(text, f).toContain('stateS3Fields(envConfig)');
+      expect(text, f).not.toMatch(/stateBucketRegion: envConfig\.s3\./);
     }
   });
 });

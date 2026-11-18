@@ -44,6 +44,7 @@ import { fenceInfoLines } from './lib/deploy/hetzner-app-key-fence.js';
 import { haSshKeyName as haSshKeyNameFor } from './lib/deploy/k8s/ha-ssh-key.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
+import { stateS3Fields } from './lib/deploy/s3-record.js';
 import {
   isComposeTier,
   isHATier,
@@ -4734,17 +4735,10 @@ async function destroyK8sTier({
     const destroyS3Config = await resolveDestroyS3Config(
       Provider,
       projectConfig.projectName,
-      envConfig.s3 && {
-        bucket: envConfig.s3.bucket,
-        region: envConfig.s3.region,
-        endpoint: envConfig.s3.endpoint,
-        // Resolve the Pulumi backend to the dedicated state bucket. Falls
-        // back (via resolveBackendUrl's `?? bucket`) to the app bucket for
-        // envs deployed before the state-bucket split.
-        stateBucket: envConfig.s3.stateBucket,
-        stateBucketRegion: envConfig.s3.stateBucketRegion,
-        stateEndpoint: envConfig.s3.stateEndpoint,
-      },
+      // The Pulumi backend is the dedicated state bucket. resolveBackendUrl
+      // falls back (`?? bucket`) to the app bucket for envs deployed before
+      // the state-bucket split.
+      envConfig.s3 && stateS3Fields(envConfig),
     );
     // Pre-Pulumi sweep: reap cluster-autoscaler-spawned workers BEFORE
     // Pulumi tries to destroy the cluster network/firewall. CA-spawned
@@ -5322,14 +5316,7 @@ async function removePulumiStackStateEffect(ctx) {
   const s3Config = await resolveDestroyS3Config(
     Provider,
     projectConfig.projectName,
-    envConfig.s3 && {
-      bucket: envConfig.s3.bucket,
-      region: envConfig.s3.region,
-      endpoint: envConfig.s3.endpoint,
-      stateBucket: envConfig.s3.stateBucket,
-      stateBucketRegion: envConfig.s3.stateBucketRegion,
-      stateEndpoint: envConfig.s3.stateEndpoint,
-    },
+    envConfig.s3 && stateS3Fields(envConfig),
   );
   if (envConfig.s3 && !s3Config) {
     const keys =

@@ -87,6 +87,7 @@ import {
 } from './lib/deploy/replication.js';
 import { slotDropSkippedNote } from './lib/deploy/replication-slot.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
+import { stateS3Fields } from './lib/deploy/s3-record.js';
 import { DB_LINEAGE_SQL, parseDbLineage } from './lib/deploy/standby-lineage.js';
 import { DR_S3_CLIENT_OPTIONS } from './lib/deploy/tls-snapshot.js';
 import {
@@ -1265,12 +1266,7 @@ function firstErrorLine(err) {
 function buildStateS3Config(envConfig, s3Creds) {
   if (!envConfig.s3?.bucket || !s3Creds) return undefined;
   return {
-    bucket: envConfig.s3.bucket,
-    region: envConfig.s3.region,
-    endpoint: envConfig.s3.endpoint,
-    stateBucket: envConfig.s3.stateBucket,
-    stateBucketRegion: envConfig.s3.stateBucketRegion,
-    stateEndpoint: envConfig.s3.stateEndpoint,
+    ...stateS3Fields(envConfig),
     accessKey: s3Creds.accessKey,
     secretKey: s3Creds.secretKey,
   };
