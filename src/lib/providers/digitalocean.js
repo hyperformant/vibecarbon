@@ -694,8 +694,9 @@ export class DigitalOceanProvider extends BaseProvider {
   // Transport choice mirrors HetznerProvider method-for-method: the original
   // CRUD surface (createServer/deleteServer(no-wait)/getServer/waitForServer/
   // createSSHKey) goes through `this.apiRequest`; list/firewall/teardown
-  // methods (introduced alongside C9/C10a on Hetzner) use a direct
-  // `fetchWithRetry` with a bare Authorization header, matching hetzner.js's
+  // methods (introduced alongside C9/C10a on Hetzner) use a `fetchWithRetry`
+  // with a bare Authorization header (`this.bareRequest` where that is the
+  // only header), matching hetzner.js's
   // own split — getServerType (M3 Task 1) joins this group. getServerSummary
   // stays a single raw `fetch` with a hard 5s abort (never
   // fetchWithRetry/apiRequest) — see BaseProvider's doc.
@@ -1197,10 +1198,7 @@ export class DigitalOceanProvider extends BaseProvider {
   async findOrCreateProject(name) {
     let page = 1;
     for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${DigitalOceanProvider.API_BASE}/projects?per_page=200&page=${page}`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
+      const response = await this.bareRequest(`/projects?per_page=200&page=${page}`);
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         throw new Error(
@@ -1431,10 +1429,7 @@ export class DigitalOceanProvider extends BaseProvider {
       const fw = await this.findFirewallByName(name);
       if (!fw) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/firewalls/${fw.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/firewalls/${fw.id}`, { method: 'DELETE' });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1525,10 +1520,7 @@ export class DigitalOceanProvider extends BaseProvider {
       const vpc = vpcs.find((v) => v.name === name);
       if (!vpc) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/vpcs/${vpc.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
       if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
       const body = await res.text().catch(() => '');
       return {
@@ -1557,11 +1549,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/volumes/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/volumes/${volumeId}`);
   }
 
   /**
@@ -1689,10 +1677,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @throws when the read fails
    */
   async reservedIpAssignment(address, labels) {
-    const response = await fetchWithRetry(
-      `${DigitalOceanProvider.API_BASE}/reserved_ips/${address}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/reserved_ips/${address}`);
     if (response.status === 404) return { found: false };
     if (!response.ok) {
       throw new Error(`GET /reserved_ips/${address} failed: HTTP ${response.status}`);
@@ -1726,11 +1711,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(
-      `${DigitalOceanProvider.API_BASE}/load_balancers/${lbId}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/load_balancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors (Task 7) ───────────────────────────

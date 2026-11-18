@@ -8,18 +8,17 @@
  * how to read a refusal's error body, and whether its no-wait DELETE goes
  * through apiRequest or bare. The transports are each provider's on purpose
  * (see HetznerProvider.deleteServer): apiRequest adds a JSON Content-Type,
- * the wait path's bare fetchWithRetry does not, and the poll probe is a
- * plain, un-retried fetch.
+ * the wait path's bareRequest does not, and the poll probe is a plain,
+ * un-retried fetch.
  */
 
-import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
 
 /**
  * DELETE a server; refuse unless the answer is ok or a 404 (already gone);
  * with `waitUntilGone`, poll GET until it 404s.
  *
- * @param {{apiToken: string, apiRequest: Function, constructor: {API_BASE: string}}} provider
+ * @param {{apiRequest: Function, bareRequest: Function, authHeaders: () => Record<string, string>, constructor: {API_BASE: string}}} provider
  * @param {string} path - the server's path under the provider's API_BASE
  * @param {number|string} serverId - named in the poll's description
  * @param {object} how
@@ -37,11 +36,9 @@ export async function deleteServerAt(
   serverId,
   { waitUntilGone, reason, budgetMs = 60_000, bareDelete = false },
 ) {
-  const url = `${provider.constructor.API_BASE}${path}`;
-  const auth = () => ({ Authorization: `Bearer ${provider.apiToken}` });
   const response =
     waitUntilGone || bareDelete
-      ? await fetchWithRetry(url, { method: 'DELETE', headers: auth() })
+      ? await provider.bareRequest(path, { method: 'DELETE' })
       : await provider.apiRequest(path, { method: 'DELETE' });
 
   if (!response.ok && response.status !== 404) {
@@ -55,7 +52,9 @@ export async function deleteServerAt(
     // exhaustion we simply stop waiting — the return value below is unaffected.
     await pollUntil(
       async () => {
-        const probe = await fetch(url, { headers: auth() });
+        const probe = await fetch(`${provider.constructor.API_BASE}${path}`, {
+          headers: provider.authHeaders(),
+        });
         return probe.status === 404;
       },
       {

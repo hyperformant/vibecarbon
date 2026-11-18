@@ -733,27 +733,17 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   // ── Instance methods ────────────────────────────────────────────────────
-  // Transport split mirrors the sibling providers: CRUD via this.apiRequest
-  // (X-Auth-Token — see the override), listings/teardown via fetchWithRetry
-  // through the zone-walking helpers, getServerSummary raw fetches with a
-  // hard 5s abort.
+  // Transport split mirrors the sibling providers: CRUD via this.apiRequest,
+  // listings/teardown bare (this.bareRequest, or fetchWithRetry in the
+  // zone-walking helpers), getServerSummary raw fetches with a hard 5s abort.
 
   /**
-   * Authenticated request — Scaleway auth is `X-Auth-Token: <secret key>`,
-   * not a Bearer header, so the base helper is overridden (same
-   * fetch-retry envelope).
-   * @param {string} endpoint - API path (relative to API_BASE)
-   * @param {object} [options={}] - Fetch options
-   * @returns {Promise<Response>}
+   * Scaleway authenticates with `X-Auth-Token: <secret key>`, not a Bearer
+   * header; apiRequest and bareRequest (base.js) send these.
+   * @returns {Record<string, string>}
    */
-  async apiRequest(endpoint, options = {}) {
-    const url = `${ScalewayProvider.API_BASE}${endpoint}`;
-    const headers = {
-      'X-Auth-Token': this.apiToken,
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
-    return await fetchWithRetry(url, { ...options, headers });
+  authHeaders() {
+    return { 'X-Auth-Token': this.apiToken };
   }
 
   /** Zones this provider operates in (REGIONS keys — see class header). */
@@ -774,9 +764,8 @@ export class ScalewayProvider extends BaseProvider {
   async _walkPageSize(path, key, query = '') {
     const items = [];
     for (let page = 1; page <= 20; page++) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}${path}?page_size=100&page=${page}${query ? `&${query}` : ''}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
+      const res = await this.bareRequest(
+        `${path}?page_size=100&page=${page}${query ? `&${query}` : ''}`,
       );
       if (!res.ok) return { items, complete: false, status: res.status };
       const data = await res.json().catch(() => ({}));
@@ -801,9 +790,8 @@ export class ScalewayProvider extends BaseProvider {
     const items = [];
     const sep = path.includes('?') ? '&' : '?';
     for (let page = 1; page <= 20; page++) {
-      const response = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}${path}${sep}per_page=100&page=${page}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
+      const response = await this.bareRequest(
+        `/instance/v1/zones/${zone}${path}${sep}per_page=100&page=${page}`,
       );
       if (!response.ok) return { items, complete: false, status: response.status };
       const data = await response.json();
@@ -850,10 +838,7 @@ export class ScalewayProvider extends BaseProvider {
     const cached = this._zoneCache.get(serverId);
     if (cached) return cached;
     for (const zone of ScalewayProvider._zones()) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/servers/${serverId}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
       if (res.ok) {
         this._zoneCache.set(serverId, zone);
         return zone;
@@ -1058,10 +1043,9 @@ export class ScalewayProvider extends BaseProvider {
     });
     if (!termRes.ok && termRes.status !== 404) {
       // … falling back to a plain DELETE (valid for stopped servers).
-      const delRes = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/servers/${serverId}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const delRes = await this.bareRequest(`/instance/v1/zones/${zone}/servers/${serverId}`, {
+        method: 'DELETE',
+      });
       if (!delRes.ok && delRes.status !== 404) {
         const error = await delRes.json().catch(() => ({}));
         throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
@@ -1100,10 +1084,9 @@ export class ScalewayProvider extends BaseProvider {
       let lastStatus;
       await pollUntil(
         async () => {
-          const res = await fetchWithRetry(
-            `${ScalewayProvider.API_BASE}/block/v1/zones/${zone}/volumes/${volumeId}`,
-            { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-          );
+          const res = await this.bareRequest(`/block/v1/zones/${zone}/volumes/${volumeId}`, {
+            method: 'DELETE',
+          });
           lastStatus = res.status;
           return res.ok || res.status === 404;
         },
@@ -1138,15 +1121,11 @@ export class ScalewayProvider extends BaseProvider {
     // 5. Release surviving flexible IPs (dynamic IPs 404 here — released
     // with the server; flexible ones bill €0.005/hr until deleted).
     for (const ipId of publicIpIds) {
-      const probe = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/ips/${ipId}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const probe = await this.bareRequest(`/instance/v1/zones/${zone}/ips/${ipId}`);
       if (!probe.ok) continue; // 404 = auto-released dynamic IP
-      const del = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/ips/${ipId}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const del = await this.bareRequest(`/instance/v1/zones/${zone}/ips/${ipId}`, {
+        method: 'DELETE',
+      });
       if (!del.ok && del.status !== 404) {
         console.warn(
           `Warning: Scaleway flexible IP ${ipId} (zone ${zone}) could not be released; it ` +
@@ -1261,9 +1240,8 @@ export class ScalewayProvider extends BaseProvider {
     let incomplete = false;
     for (const zone of ScalewayProvider._zones()) {
       for (let page = 1; page <= 20; page++) {
-        const response = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/products/servers?per_page=100&page=${page}`,
-          { headers: { 'X-Auth-Token': this.apiToken } },
+        const response = await this.bareRequest(
+          `/instance/v1/zones/${zone}/products/servers?per_page=100&page=${page}`,
         );
         if (!response.ok) {
           incomplete = true;
@@ -1413,9 +1391,8 @@ export class ScalewayProvider extends BaseProvider {
     const cached = this._sgZoneCache.get(firewallId);
     if (cached) return cached;
     for (const zone of ScalewayProvider._zones()) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/security_groups/${firewallId}`,
-        { headers: { 'X-Auth-Token': this.apiToken } },
+      const res = await this.bareRequest(
+        `/instance/v1/zones/${zone}/security_groups/${firewallId}`,
       );
       if (res.ok) {
         this._sgZoneCache.set(firewallId, zone);
@@ -1551,10 +1528,9 @@ export class ScalewayProvider extends BaseProvider {
       const fw = await this.findFirewallByName(name);
       if (!fw) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${fw.zone}/security_groups/${fw.id}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${fw.zone}/security_groups/${fw.id}`, {
+        method: 'DELETE',
+      });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1570,22 +1546,17 @@ export class ScalewayProvider extends BaseProvider {
    */
   async deleteSSHKeyByName(name) {
     const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
-    const res = await fetchWithRetry(
-      `${ScalewayProvider.API_BASE}/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}${
+    const res = await this.bareRequest(
+      `/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}${
         projectId ? `&project_id=${projectId}` : ''
       }`,
-      { headers: { 'X-Auth-Token': this.apiToken } },
     );
     if (!res.ok) return false;
     const { ssh_keys } = await res.json().catch(() => ({ ssh_keys: [] }));
     const match = (ssh_keys || []).find((k) => k.name === name);
     if (!match) return false;
 
-    const del = await fetchWithRetry(
-      `${ScalewayProvider.API_BASE}/iam/v1alpha1/ssh-keys/${match.id}`,
-      { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-    );
-    return del.ok || del.status === 404;
+    return this.deleteGone(`/iam/v1alpha1/ssh-keys/${match.id}`);
   }
 
   /**
@@ -1648,10 +1619,9 @@ export class ScalewayProvider extends BaseProvider {
     let sawFailure = false;
     for (const base of ['/block/v1/zones', '/instance/v1/zones']) {
       for (const zone of ScalewayProvider._zones()) {
-        const res = await fetchWithRetry(
-          `${ScalewayProvider.API_BASE}${base}/${zone}/volumes/${volumeId}`,
-          { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-        );
+        const res = await this.bareRequest(`${base}/${zone}/volumes/${volumeId}`, {
+          method: 'DELETE',
+        });
         if (res.ok) return true;
         if (res.status !== 404) sawFailure = true;
       }
@@ -1682,10 +1652,9 @@ export class ScalewayProvider extends BaseProvider {
   async deleteLoadBalancer(lbId) {
     let sawFailure = false;
     for (const zone of ScalewayProvider._zones()) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/lb/v1/zones/${zone}/lbs/${lbId}?release_ip=true`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/lb/v1/zones/${zone}/lbs/${lbId}?release_ip=true`, {
+        method: 'DELETE',
+      });
       if (res.ok) return true;
       if (res.status !== 404) sawFailure = true;
     }
@@ -1715,10 +1684,9 @@ export class ScalewayProvider extends BaseProvider {
     const zones = zone ? [zone] : ScalewayProvider._zones();
     let sawFailure = false;
     for (const z of zones) {
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${z}/ips/${ipId}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${z}/ips/${ipId}`, {
+        method: 'DELETE',
+      });
       if (res.ok) return true;
       if (res.status !== 404) sawFailure = true;
     }
@@ -1777,10 +1745,9 @@ export class ScalewayProvider extends BaseProvider {
         }
         continue;
       }
-      const res = await fetchWithRetry(
-        `${ScalewayProvider.API_BASE}/instance/v1/zones/${ip.zone}/ips/${ip.id}`,
-        { method: 'DELETE', headers: { 'X-Auth-Token': this.apiToken } },
-      );
+      const res = await this.bareRequest(`/instance/v1/zones/${ip.zone}/ips/${ip.id}`, {
+        method: 'DELETE',
+      });
       if (res.ok || res.status === 404) deleted.push(ip.address);
       else {
         failed.push({

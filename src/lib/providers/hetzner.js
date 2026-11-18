@@ -1081,10 +1081,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<{cores: number, memoryGb: number, architecture: string, disk: number}>}
    */
   async getServerType(name) {
-    const response = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/server_types?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/server_types?name=${encodeURIComponent(name)}`);
     if (!response.ok) {
       throw new Error(`Failed to fetch server type "${name}": ${response.status}`);
     }
@@ -1321,10 +1318,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async findServersByName(name, { strict = false } = {}) {
-    const response = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/servers?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/servers?name=${encodeURIComponent(name)}`);
     if (!response.ok) {
       if (strict) throw this.serverLookupError(name, response.status);
       return [];
@@ -1346,10 +1340,7 @@ export class HetznerProvider extends BaseProvider {
    *   applyOperatorCidrs's "skip silently for a not-yet-deployed env" case).
    */
   async findFirewallByName(name) {
-    const res = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/firewalls?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const res = await this.bareRequest(`/firewalls?name=${encodeURIComponent(name)}`);
     if (!res.ok) return null;
     const { firewalls } = await res.json();
     return firewalls?.[0] ?? null;
@@ -1468,7 +1459,8 @@ export class HetznerProvider extends BaseProvider {
   // with MECHANICAL substitutions only: the `apiToken` param became
   // `this.apiToken`, and each `https://api.hetzner.cloud/v1` URL literal became
   // the `${HetznerProvider.API_BASE}` template (byte-identical string). Every
-  // one keeps its direct `fetchWithRetry` (NOT this.apiRequest — apiRequest
+  // one keeps a bare `fetchWithRetry`, spelled `this.bareRequest` where the
+  // auth header is the only one (NOT this.apiRequest — apiRequest
   // adds a JSON Content-Type header and re-prefixes API_BASE, changing the wire
   // bytes) and, where present, its deliberately-un-retried raw-`fetch` poll
   // probe. The load-bearing teardown semantics (202-then-poll, `?name=`
@@ -1562,22 +1554,14 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<boolean>} true if a key was found and deleted (or 404)
    */
   async deleteSSHKeyByName(name) {
-    const listResponse = await fetchWithRetry(
-      `${HetznerProvider.API_BASE}/ssh_keys?name=${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const listResponse = await this.bareRequest(`/ssh_keys?name=${encodeURIComponent(name)}`);
 
     const { ssh_keys } = await listResponse.json();
     const sshKey = ssh_keys?.[0];
 
     if (!sshKey) return false;
 
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/ssh_keys/${sshKey.id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/ssh_keys/${sshKey.id}`);
   }
 
   /**
@@ -1631,10 +1615,7 @@ export class HetznerProvider extends BaseProvider {
         });
         continue;
       }
-      const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/floating_ips/${ip.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const response = await this.bareRequest(`/floating_ips/${ip.id}`, { method: 'DELETE' });
       if (response.ok || response.status === 404) deleted.push(ip.ip);
       else {
         failed.push({
@@ -1706,12 +1687,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or 404
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/volumes/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/volumes/${volumeId}`);
   }
 
   /**
@@ -1729,12 +1705,7 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or 404
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/load_balancers/${lbId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/load_balancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors (Task 7) ───────────────────────────

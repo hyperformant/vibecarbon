@@ -722,7 +722,8 @@ export class LinodeProvider extends BaseProvider {
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors hetzner.js/digitalocean.js method-for-method:
   // original CRUD surface through `this.apiRequest`; list/firewall/teardown
-  // methods through direct `fetchWithRetry`; getServerSummary a single raw
+  // methods through a bare `fetchWithRetry` (`this.bareRequest`, or the page
+  // walk); getServerSummary a single raw
   // `fetch` with a hard 5s abort.
 
   /**
@@ -1060,10 +1061,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{cores: number, memoryGb: number, architecture: string, disk: number}>}
    */
   async getServerType(name) {
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/linode/types/${encodeURIComponent(name)}`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/linode/types/${encodeURIComponent(name)}`);
     if (response.status === 404) {
       throw new Error(`Server type "${name}" not found`);
     }
@@ -1344,10 +1342,7 @@ export class LinodeProvider extends BaseProvider {
       const fw = await this.findFirewallByName(name);
       if (!fw) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${LinodeProvider.API_BASE}/networking/firewalls/${fw.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/networking/firewalls/${fw.id}`, { method: 'DELETE' });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -1366,11 +1361,7 @@ export class LinodeProvider extends BaseProvider {
     });
     if (!match) return false;
 
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/profile/sshkeys/${match.id}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/profile/sshkeys/${match.id}`);
   }
 
   /**
@@ -1400,10 +1391,7 @@ export class LinodeProvider extends BaseProvider {
       const vpc = vpcs.find((v) => v.name === name);
       if (!vpc) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${LinodeProvider.API_BASE}/vpcs/${vpc.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
       if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
       const body = await res.text().catch(() => '');
       return {
@@ -1430,10 +1418,9 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<import('./base.js').ReservedIpRelease>}
    */
   async deleteReservedIpByAddress(address) {
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/networking/reserved/ips/${address}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
+    const response = await this.bareRequest(`/networking/reserved/ips/${address}`, {
+      method: 'DELETE',
+    });
     if (response.ok || response.status === 404) return { released: true };
     return {
       released: false,
@@ -1552,11 +1539,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${LinodeProvider.API_BASE}/volumes/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/volumes/${volumeId}`);
   }
 
   /**
@@ -1575,11 +1558,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or if already gone (404)
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(`${LinodeProvider.API_BASE}/nodebalancers/${lbId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/nodebalancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors ───────────────────────────────────────

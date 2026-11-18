@@ -451,7 +451,8 @@ export class VultrProvider extends BaseProvider {
 
   // ── Instance methods ────────────────────────────────────────────────────
   // Transport split mirrors the sibling providers: CRUD via this.apiRequest,
-  // listings/teardown via fetchWithRetry (all through _walkCursor),
+  // listings/teardown via a bare fetchWithRetry (listings through
+  // _walkCursor, teardown through this.bareRequest),
   // getServerSummary a raw fetch with a hard 5s abort.
 
   /**
@@ -858,10 +859,9 @@ export class VultrProvider extends BaseProvider {
     }
 
     for (const rule of existing.items) {
-      const res = await fetchWithRetry(
-        `${VultrProvider.API_BASE}/firewalls/${firewallId}/rules/${rule.id}`,
-        { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
+      const res = await this.bareRequest(`/firewalls/${firewallId}/rules/${rule.id}`, {
+        method: 'DELETE',
+      });
       if (!res.ok && res.status !== 404) {
         const body = await res.text().catch(() => '');
         throw new Error(`Vultr firewall rule delete failed (${res.status}): ${body}`);
@@ -957,10 +957,7 @@ export class VultrProvider extends BaseProvider {
       const group = items.find((g) => g.description === name);
       if (!group) return { deleted: false, everExisted: false, apiError: null };
       everExisted = true;
-      const res = await fetchWithRetry(`${VultrProvider.API_BASE}/firewalls/${group.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
+      const res = await this.bareRequest(`/firewalls/${group.id}`, { method: 'DELETE' });
       return { deleted: res.ok || res.status === 404, everExisted, apiError: null };
     } catch (err) {
       return { deleted: false, everExisted, apiError: err };
@@ -978,11 +975,7 @@ export class VultrProvider extends BaseProvider {
     const match = items.find((k) => k.name === name);
     if (!match) return false;
 
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/ssh-keys/${match.id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/ssh-keys/${match.id}`);
   }
 
   /**
@@ -1009,11 +1002,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or already gone (404)
    */
   async deleteVolume(volumeId) {
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/blocks/${volumeId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/blocks/${volumeId}`);
   }
 
   /**
@@ -1031,11 +1020,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<boolean>} true on success or already gone (404)
    */
   async deleteLoadBalancer(lbId) {
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/load-balancers/${lbId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-    return response.ok || response.status === 404;
+    return this.deleteGone(`/load-balancers/${lbId}`);
   }
 
   // ── Destroy-sweep field accessors ───────────────────────────────────────

@@ -1760,7 +1760,17 @@ export class BaseProvider {
   // ============================================================================
 
   /**
-   * Make an authenticated API request
+   * The headers that authenticate a request to this provider's API: a
+   * bearer token on four providers; ScalewayProvider overrides it with its
+   * X-Auth-Token.
+   * @returns {Record<string, string>}
+   */
+  authHeaders() {
+    return { Authorization: `Bearer ${this.apiToken}` };
+  }
+
+  /**
+   * Make an authenticated API request, with a JSON Content-Type
    * @param {string} endpoint - API endpoint (relative to API_BASE)
    * @param {object} [options={}] - Fetch options
    * @returns {Promise<Response>}
@@ -1768,7 +1778,7 @@ export class BaseProvider {
   async apiRequest(endpoint, options = {}) {
     const url = `${this.constructor.API_BASE}${endpoint}`;
     const headers = {
-      Authorization: `Bearer ${this.apiToken}`,
+      ...this.authHeaders(),
       'Content-Type': 'application/json',
       ...options.headers,
     };
@@ -1778,6 +1788,36 @@ export class BaseProvider {
     // backoff instead of the previous 3. Transient 5xx / 429 also retry.
     const { fetchWithRetry } = await import('../fetch-retry.js');
     return await fetchWithRetry(url, { ...options, headers });
+  }
+
+  /**
+   * An authenticated request with no JSON Content-Type: what the providers
+   * send for a body-less GET or DELETE outside apiRequest, which would add
+   * one. The providers keep those bare on purpose (see the transport notes
+   * in DigitalOceanProvider, LinodeProvider and VultrProvider); this spells
+   * the URL and the auth once. Retries through fetchWithRetry, as apiRequest
+   * does.
+   * @param {string} endpoint - API endpoint (relative to API_BASE)
+   * @param {object} [init={}] - Fetch options; its headers go after the auth
+   * @returns {Promise<Response>}
+   */
+  async bareRequest(endpoint, init = {}) {
+    const { fetchWithRetry } = await import('../fetch-retry.js');
+    return await fetchWithRetry(`${this.constructor.API_BASE}${endpoint}`, {
+      ...init,
+      headers: { ...this.authHeaders(), ...init.headers },
+    });
+  }
+
+  /**
+   * DELETE a resource, bare; true when it is gone, deleted now or already
+   * absent (404).
+   * @param {string} endpoint - API endpoint (relative to API_BASE)
+   * @returns {Promise<boolean>}
+   */
+  async deleteGone(endpoint) {
+    const response = await this.bareRequest(endpoint, { method: 'DELETE' });
+    return response.ok || response.status === 404;
   }
 }
 
