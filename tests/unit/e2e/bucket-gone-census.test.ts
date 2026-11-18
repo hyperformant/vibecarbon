@@ -189,9 +189,18 @@ function textMatchSites(): Array<{ file: string; line: number; body: string }> {
 
 describe('bucket-already-gone census', () => {
   it('finds the call sites it is meant to police (the walk itself works)', () => {
+    // The five sweeps share one bucket pass, sweepBuckets in sweep-core.ts:
+    // its catch is the site rule (a) polices for all of them. Each sweep
+    // file must still route its buckets through it, or its buckets would be
+    // deleted somewhere this walk does not look. (Until 2026-11-17 each
+    // sweep carried its own copy of the loop and was a site itself.)
     const files = new Set(callSites().map((s) => s.file));
+    expect(files).toContain('tests/e2e/utils/sweep-core.ts');
     for (const sweep of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
-      expect(files).toContain(`tests/e2e/utils/sweep-${sweep}.ts`);
+      const source = readFileSync(join(ROOT, `tests/e2e/utils/sweep-${sweep}.ts`), 'utf-8');
+      expect(source, `sweep-${sweep}.ts no longer calls sweepBuckets`).toMatch(
+        /\bawait sweepBuckets\(/,
+      );
     }
   });
 

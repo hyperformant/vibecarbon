@@ -4,7 +4,7 @@
  * (./sweep-provider.ts) can reach it without loading the whole lifecycle.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { classifyBucketDeleteError } from './bucket-already-gone.js';
+import { assertSweepableProjectName, bucketSource, sweepBuckets } from './sweep-core.js';
 
 /** One Object Storage location's view (each endpoint lists only its own buckets). */
 interface HetznerSweepObjectStorage {
@@ -77,16 +77,10 @@ export async function sweepOrphanedHetznerResources(
   hetznerToken: string,
   deps: HetznerSweepDeps = {},
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
-  if (!projectName || projectName.length < 4) {
-    // An empty or short prefix would match resources that are not ours (the
-    // placement-group, firewall, ssh-key, floating-IP, network and bucket
-    // passes all match on `startsWith(projectName)`). The other four sweeps
-    // have refused this since they were written; the shortest legitimate
-    // e2e project name is `testapp-…` / `citest-…`.
-    throw new Error(
-      `[sweep] refusing to sweep Hetzner with project name ${JSON.stringify(projectName)}`,
-    );
-  }
+  // An empty or short prefix would match resources that are not ours (the
+  // placement-group, firewall, ssh-key, floating-IP, network and bucket
+  // passes all match on `startsWith(projectName)`).
+  assertSweepableProjectName('Hetzner', projectName);
   const fetchImpl = deps.fetchImpl ?? fetch;
   console.log(`${tag} Sweeping orphaned Hetzner resources for ${projectName}...`);
   const counts: SweepBreakdown = {
@@ -550,45 +544,25 @@ export async function sweepOrphanedHetznerResources(
     // stranded whichever location a scenario landed in. Each endpoint lists
     // only its own location's buckets (probed 2026-11-15), so a bucket is
     // deleted through the location that listed it.
-    for (const [region, store] of Object.entries(storesByRegion ?? {})) {
-      let listed: string[];
-      try {
-        listed = await store.listBuckets();
-      } catch (listErr) {
-        enumFailed = true;
-        console.warn(
-          `${tag} [sweep] S3 bucket list failed in ${region}: ${listErr instanceof Error ? listErr.message : String(listErr)}; its leftover buckets cannot be ruled out`,
-        );
-        continue;
-      }
-      for (const name of listed.filter((n) => n.startsWith(projectName))) {
-        console.log(`${tag} [sweep] Deleting S3 bucket ${name} (${region})`);
-        try {
-          const { objectsRemoved } = await store.emptyAndDeleteBucket(name);
-          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-          counts.s3Buckets++;
-        } catch (bucketErr) {
-          const verdict = await classifyBucketDeleteError(
-            bucketErr,
-            name,
-            () => store.locateBucket(name),
-            () => store.listBuckets(),
+    await sweepBuckets(
+      {
+        tag,
+        projectName,
+        counts,
+        fail: () => {
+          enumFailed = true;
+        },
+      },
+      'S3 bucket',
+      Object.entries(storesByRegion ?? {}).map(([region, store]) =>
+        bucketSource(store, region, (listErr) => {
+          enumFailed = true;
+          console.warn(
+            `${tag} [sweep] S3 bucket list failed in ${region}: ${listErr instanceof Error ? listErr.message : String(listErr)}; its leftover buckets cannot be ruled out`,
           );
-          if (verdict.gone) {
-            // Stale listing: destroy already removed it, and a second
-            // listing no longer shows it. Goal state, not an enumeration
-            // failure. See bucket-already-gone.ts. A bucket this location
-            // still lists is never called gone: a new Hetzner bucket can
-            // answer NoSuchBucket for up to 15 minutes (bucketQuietMs in
-            // hetzner-s3.js) while it exists and bills (2026-11-16).
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-          } else {
-            enumFailed = true;
-            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-          }
-        }
-      }
-    }
+        }),
+      ),
+    );
   } catch (e) {
     // The stores could not be built (module load), so no bucket was checked.
     enumFailed = true;

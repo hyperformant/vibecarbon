@@ -45,7 +45,7 @@
  * unattached pvc-* volume is REPORTED, never deleted.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { classifyBucketDeleteError } from './bucket-already-gone.js';
+import { bucketSource, createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately
@@ -164,31 +164,10 @@ export async function sweepOrphanedScalewayResources(
   projectName: string,
   deps: ScalewaySweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
-  if (!projectName || projectName.length < 4) {
-    throw new Error(
-      `[sweep] refusing to sweep Scaleway with project name ${JSON.stringify(projectName)}`,
-    );
-  }
-  console.log(`${tag} Sweeping orphaned Scaleway resources for ${projectName}...`);
-
-  const counts: SweepBreakdown = {
-    servers: 0,
-    volumes: 0,
-    placementGroups: 0, // never provisioned by our Scaleway paths
-    firewalls: 0, // security groups
-    floatingIps: 0, // flexible IPs — REAL on Scaleway (€0.005/hr survivors)
-    networks: 0, // Private Networks
-    s3Buckets: 0,
-    sshKeys: 0,
-    loadBalancers: 0,
-  };
-  let enumFailed = false;
-  const markIncomplete = (what: string) => {
-    enumFailed = true;
-    console.warn(
-      `${tag} [sweep] ${what} enumeration incomplete — residue past the last readable page cannot be ruled out`,
-    );
-  };
+  // The guard, the opening line, the counts and the incomplete flag
+  // (sweep-core.ts). Placement groups are never provisioned by our Scaleway paths; `firewalls` counts security groups, `floatingIps` flexible IPs (real here: €0.005/hr survivors) and `networks` Private Networks.
+  const sweep = createSweep(tag, 'Scaleway', projectName, { loadBalancers: 0 });
+  const { counts, markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.SCALEWAY_SECRET_KEY;
   const projectId = deps.projectId ?? process.env.SCALEWAY_DEFAULT_PROJECT_ID;
@@ -196,7 +175,7 @@ export async function sweepOrphanedScalewayResources(
   if (!provider) {
     if (!token) {
       markIncomplete('Scaleway (no SCALEWAY_SECRET_KEY)');
-      return { counts, enumFailed };
+      return sweep.result();
     }
     provider = await defaultProvider(token);
   }
@@ -272,7 +251,7 @@ export async function sweepOrphanedScalewayResources(
         await provider.deleteServer(server.id, { waitUntilGone: true });
         counts.servers++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Instance ${server.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -310,7 +289,7 @@ export async function sweepOrphanedScalewayResources(
         await provider.deleteVolume(volume.id);
         counts.volumes++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -340,7 +319,7 @@ export async function sweepOrphanedScalewayResources(
         const { deleted } = await provider.deleteFirewallByName(sg.name);
         if (deleted) counts.firewalls++;
         else {
-          enumFailed = true;
+          sweep.fail();
           console.warn(`${tag} [sweep] Security group ${sg.name} delete failed`);
         }
       }
@@ -377,7 +356,7 @@ export async function sweepOrphanedScalewayResources(
       console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.name}`);
       if (await provider.deleteSSHKeyByName(sshKey.name)) counts.sshKeys++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
       }
     }
@@ -404,7 +383,7 @@ export async function sweepOrphanedScalewayResources(
       );
       if (await provider.releaseFlexibleIP(ip.id, ip.zone)) counts.floatingIps++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] Flexible IP ${ip.id} release failed`);
       }
     }
@@ -440,7 +419,7 @@ export async function sweepOrphanedScalewayResources(
           }
           counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
         } catch (err) {
-          enumFailed = true;
+          sweep.fail();
           console.warn(
             `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
           );
@@ -487,11 +466,11 @@ export async function sweepOrphanedScalewayResources(
           }
           if (deleted) counts.networks++;
           else {
-            enumFailed = true;
+            sweep.fail();
             console.warn(`${tag} [sweep] Private Network ${net.id} delete failed`);
           }
         } catch (err) {
-          enumFailed = true;
+          sweep.fail();
           console.warn(
             `${tag} [sweep] Private Network ${net.id} delete failed: ${err instanceof Error ? err.message : err}`,
           );
@@ -526,77 +505,27 @@ export async function sweepOrphanedScalewayResources(
       }
     }
   }
-  for (const [region, store] of Object.entries(storesByRegion ?? {})) {
-    let buckets: string[] | null;
-    try {
-      buckets = await store.listBuckets();
-    } catch {
-      buckets = null;
-    }
-    if (buckets === null) {
-      markIncomplete(`Object Storage bucket list (${region})`);
-      continue;
-    }
-    for (const name of buckets) {
-      if (PROTECTED_OBJECT_STORAGE_BUCKETS.has(name)) continue;
-      if (!name.startsWith(projectName)) continue;
-      console.log(`${tag} [sweep] Deleting Object Storage bucket ${name} (${region})`);
-      try {
-        const { objectsRemoved } = await store.emptyAndDeleteBucket(name);
-        console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-        counts.s3Buckets++;
-      } catch (err) {
-        const verdict = await classifyBucketDeleteError(
-          err,
-          name,
-          () => store.locateBucket(name),
-          () => store.listBuckets(),
-        );
-        if (verdict.gone) {
-          // Stale listing: destroy already removed it, and a second
-          // listing no longer shows it. Goal state, not an enumeration
-          // failure. See bucket-already-gone.ts.
-          console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-        } else {
-          enumFailed = true;
-          console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-        }
-      }
-    }
-  }
+  await sweepBuckets(
+    sweep,
+    'Object Storage bucket',
+    Object.entries(storesByRegion ?? {}).map(([region, store]) =>
+      bucketSource(store, region, () => markIncomplete(`Object Storage bucket list (${region})`)),
+    ),
+    { protectedNames: PROTECTED_OBJECT_STORAGE_BUCKETS },
+  );
 
-  // Regression banner — same grep-stable `[sweep] REGRESSION` marker as the
-  // sibling sweeps; the clean line names the cloud it actually verified.
-  const totalOrphans =
-    counts.servers +
-    counts.volumes +
-    counts.firewalls +
-    counts.floatingIps +
-    (counts.loadBalancers ?? 0) +
-    counts.networks +
-    counts.s3Buckets +
-    counts.sshKeys;
-  if (totalOrphans > 0) {
-    const breakdown = [
-      `instances=${counts.servers}`,
-      `volumes=${counts.volumes}`,
-      `security-groups=${counts.firewalls}`,
-      `flexible-ips=${counts.floatingIps}`,
-      `load-balancers=${counts.loadBalancers ?? 0}`,
-      `private-networks=${counts.networks}`,
-      `buckets=${counts.s3Buckets}`,
-      `ssh-keys=${counts.sshKeys}`,
-    ].join(', ');
-    console.warn(
-      `${tag} [sweep] REGRESSION: destroy left ${totalOrphans} Scaleway orphan resource(s) (${breakdown}). vibecarbon destroy did not free these — fix the corresponding destroy code path.`,
-    );
-  } else if (enumFailed) {
-    console.warn(
-      `${tag} [sweep] REGRESSION: could not enumerate one or more Scaleway resource types — orphan check is incomplete, treat as a destroy regression.`,
-    );
-  } else {
-    console.log(`${tag} [sweep] No Scaleway orphans found — destroy worked cleanly.`);
-  }
+  // The closing banner (sweep-core.ts). The rows are this cloud's classes
+  // in breakdown order; a class left out here is left out of the total.
+  reportSweep(sweep, [
+    ['instances', 'servers'],
+    ['volumes', 'volumes'],
+    ['security-groups', 'firewalls'],
+    ['flexible-ips', 'floatingIps'],
+    ['load-balancers', 'loadBalancers'],
+    ['private-networks', 'networks'],
+    ['buckets', 's3Buckets'],
+    ['ssh-keys', 'sshKeys'],
+  ]);
 
-  return { counts, enumFailed };
+  return sweep.result();
 }

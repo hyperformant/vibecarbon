@@ -17,7 +17,7 @@
  * k8s tier, kept now so the family stays uniform.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { classifyBucketDeleteError } from './bucket-already-gone.js';
+import { createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
@@ -149,39 +149,17 @@ export async function sweepOrphanedLinodeResources(
   projectName: string,
   deps: LinodeSweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
-  if (!projectName || projectName.length < 4) {
-    throw new Error(
-      `[sweep] refusing to sweep Linode with project name ${JSON.stringify(projectName)}`,
-    );
-  }
-  console.log(`${tag} Sweeping orphaned Linode resources for ${projectName}...`);
-
-  const counts: SweepBreakdown = {
-    servers: 0,
-    volumes: 0,
-    placementGroups: 0, // Linode placement groups are never provisioned by our paths
-    firewalls: 0,
-    floatingIps: 0,
-    networks: 0, // VPCs
-    s3Buckets: 0,
-    sshKeys: 0,
-    loadBalancers: 0, // NodeBalancers
-    storageKeys: 0,
-  };
-  let enumFailed = false;
-  const markIncomplete = (what: string) => {
-    enumFailed = true;
-    console.warn(
-      `${tag} [sweep] ${what} enumeration incomplete — residue past the last readable page cannot be ruled out`,
-    );
-  };
+  // The guard, the opening line, the counts and the incomplete flag
+  // (sweep-core.ts). Linode placement groups are never provisioned by our paths; `networks` counts VPCs and `loadBalancers` NodeBalancers.
+  const sweep = createSweep(tag, 'Linode', projectName, { loadBalancers: 0, storageKeys: 0 });
+  const { counts, markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.LINODE_API_TOKEN;
   let provider = deps.provider;
   if (!provider) {
     if (!token) {
       markIncomplete('Linode (no API token)');
-      return { counts, enumFailed };
+      return sweep.result();
     }
     provider = await defaultProvider(token);
   }
@@ -205,7 +183,7 @@ export async function sweepOrphanedLinodeResources(
         await provider.deleteServer(instance.id, { waitUntilGone: true });
         counts.servers++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Instance ${instance.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -243,7 +221,7 @@ export async function sweepOrphanedLinodeResources(
         await provider.deleteVolume(volume.id);
         counts.volumes++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -301,7 +279,7 @@ export async function sweepOrphanedLinodeResources(
       const { deleted } = await provider.deleteFirewallByName(fw.label);
       if (deleted) counts.firewalls++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] Firewall ${fw.label} delete failed`);
       }
     }
@@ -318,7 +296,7 @@ export async function sweepOrphanedLinodeResources(
       console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.label}`);
       if (await provider.deleteSSHKeyByName(sshKey.label)) counts.sshKeys++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] SSH key ${sshKey.label} delete failed`);
       }
     }
@@ -409,7 +387,7 @@ export async function sweepOrphanedLinodeResources(
         }
         counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] NodeBalancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -437,11 +415,11 @@ export async function sweepOrphanedLinodeResources(
         const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
         if (res.ok || res.status === 404) counts.networks++;
         else {
-          enumFailed = true;
+          sweep.fail();
           console.warn(`${tag} [sweep] VPC ${vpc.id} delete returned ${res.status}`);
         }
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] VPC ${vpc.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -475,11 +453,11 @@ export async function sweepOrphanedLinodeResources(
         });
         if (res.ok || res.status === 404) counts.storageKeys = (counts.storageKeys ?? 0) + 1;
         else {
-          enumFailed = true;
+          sweep.fail();
           console.warn(`${tag} [sweep] app storage key ${key.label} revoke returned ${res.status}`);
         }
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] app storage key ${key.label} revoke failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -516,42 +494,31 @@ export async function sweepOrphanedLinodeResources(
     }
   }
   if (objectStorage) {
-    let buckets: Array<{ name: string; cluster: string }> | null;
-    try {
-      buckets = await objectStorage.listAllBuckets();
-    } catch {
-      buckets = null;
-    }
-    if (buckets === null) {
-      markIncomplete('Object Storage bucket list');
-    } else {
-      for (const { name, cluster } of buckets) {
-        if (PROTECTED_OBJECT_STORAGE_BUCKETS.has(name)) continue;
-        if (!name.startsWith(projectName)) continue;
-        console.log(`${tag} [sweep] Deleting Object Storage bucket ${name} (${cluster})`);
-        try {
-          const { objectsRemoved } = await objectStorage.emptyAndDeleteBucket(cluster, name);
-          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-          counts.s3Buckets++;
-        } catch (err) {
-          const verdict = await classifyBucketDeleteError(
-            err,
-            name,
-            () => objectStorage.locateBucket(cluster, name),
-            async () => (await objectStorage.listAllBuckets())?.map((b) => b.name) ?? null,
-          );
-          if (verdict.gone) {
-            // Stale listing: destroy already removed it, and a second
-            // listing no longer shows it. Goal state, not an enumeration
-            // failure. See bucket-already-gone.ts.
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-          } else {
-            enumFailed = true;
-            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-          }
-        }
-      }
-    }
+    const store = objectStorage;
+    await sweepBuckets(
+      sweep,
+      'Object Storage bucket',
+      [
+        {
+          // One account-wide listing; each row carries the cluster the
+          // bucket is emptied, deleted and located through.
+          async listBuckets() {
+            const buckets = await store.listAllBuckets();
+            return buckets === null
+              ? null
+              : buckets.map(({ name, cluster }) => ({ name, where: cluster }));
+          },
+          async emptyAndDeleteBucket(bucket) {
+            return store.emptyAndDeleteBucket(bucket.where, bucket.name);
+          },
+          async locateBucket(bucket) {
+            return store.locateBucket(bucket.where, bucket.name);
+          },
+          unreadable: () => markIncomplete('Object Storage bucket list'),
+        },
+      ],
+      { protectedNames: PROTECTED_OBJECT_STORAGE_BUCKETS },
+    );
   }
 
   // 6. Empty run tags (sweep-run-tags.ts), last, so the instances and volumes
@@ -586,38 +553,18 @@ export async function sweepOrphanedLinodeResources(
     },
   );
 
-  // Regression banner — same grep-stable `[sweep] REGRESSION` marker as the
-  // sibling sweeps; the clean line names the cloud it actually verified.
-  const totalOrphans =
-    counts.servers +
-    counts.volumes +
-    counts.firewalls +
-    (counts.loadBalancers ?? 0) +
-    counts.networks +
-    counts.s3Buckets +
-    counts.sshKeys +
-    (counts.storageKeys ?? 0);
-  if (totalOrphans > 0) {
-    const breakdown = [
-      `instances=${counts.servers}`,
-      `volumes=${counts.volumes}`,
-      `firewalls=${counts.firewalls}`,
-      `nodebalancers=${counts.loadBalancers ?? 0}`,
-      `vpcs=${counts.networks}`,
-      `buckets=${counts.s3Buckets}`,
-      `ssh-keys=${counts.sshKeys}`,
-      `app-storage-keys=${counts.storageKeys ?? 0}`,
-    ].join(', ');
-    console.warn(
-      `${tag} [sweep] REGRESSION: destroy left ${totalOrphans} Linode orphan resource(s) (${breakdown}). vibecarbon destroy did not free these — fix the corresponding destroy code path.`,
-    );
-  } else if (enumFailed) {
-    console.warn(
-      `${tag} [sweep] REGRESSION: could not enumerate one or more Linode resource types — orphan check is incomplete, treat as a destroy regression.`,
-    );
-  } else {
-    console.log(`${tag} [sweep] No Linode orphans found — destroy worked cleanly.`);
-  }
+  // The closing banner (sweep-core.ts). The rows are this cloud's classes
+  // in breakdown order; a class left out here is left out of the total.
+  reportSweep(sweep, [
+    ['instances', 'servers'],
+    ['volumes', 'volumes'],
+    ['firewalls', 'firewalls'],
+    ['nodebalancers', 'loadBalancers'],
+    ['vpcs', 'networks'],
+    ['buckets', 's3Buckets'],
+    ['ssh-keys', 'sshKeys'],
+    ['app-storage-keys', 'storageKeys'],
+  ]);
 
-  return { counts, enumFailed };
+  return sweep.result();
 }

@@ -24,7 +24,7 @@
  * never deleted — better a loud leak than a cross-run data loss.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { classifyBucketDeleteError } from './bucket-already-gone.js';
+import { createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 import { runTagOwner, sweepRunTags } from './sweep-run-tags.js';
 
 /**
@@ -123,41 +123,17 @@ export async function sweepOrphanedDigitalOceanResources(
   projectName: string,
   deps: DoSweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
-  if (!projectName || projectName.length < 4) {
-    // An empty/short prefix would match resources that are not ours; the
-    // shortest legitimate e2e project name is `testapp-…` / `citest-…`.
-    throw new Error(
-      `[sweep] refusing to sweep DigitalOcean with project name ${JSON.stringify(projectName)}`,
-    );
-  }
-  console.log(`${tag} Sweeping orphaned DigitalOcean resources for ${projectName}...`);
-
-  const counts: SweepBreakdown = {
-    servers: 0,
-    volumes: 0,
-    placementGroups: 0, // DigitalOcean has no placement groups
-    firewalls: 0,
-    floatingIps: 0,
-    networks: 0, // VPCs
-    s3Buckets: 0,
-    sshKeys: 0,
-    loadBalancers: 0,
-    storageKeys: 0,
-  };
-  let enumFailed = false;
-  const markIncomplete = (what: string) => {
-    enumFailed = true;
-    console.warn(
-      `${tag} [sweep] ${what} enumeration incomplete — residue past the last readable page cannot be ruled out`,
-    );
-  };
+  // The guard, the opening line, the counts and the incomplete flag
+  // (sweep-core.ts). DigitalOcean has no placement groups; `networks` counts VPCs.
+  const sweep = createSweep(tag, 'DigitalOcean', projectName, { loadBalancers: 0, storageKeys: 0 });
+  const { counts, markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.DIGITALOCEAN_API_TOKEN;
   let provider = deps.provider;
   if (!provider) {
     if (!token) {
       markIncomplete('DigitalOcean (no API token)');
-      return { counts, enumFailed };
+      return sweep.result();
     }
     provider = await defaultProvider(token);
   }
@@ -182,7 +158,7 @@ export async function sweepOrphanedDigitalOceanResources(
         await provider.deleteServer(droplet.id, { waitUntilGone: true });
         counts.servers++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Droplet ${droplet.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -217,7 +193,7 @@ export async function sweepOrphanedDigitalOceanResources(
         await provider.deleteVolume(volume.id);
         counts.volumes++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -270,7 +246,7 @@ export async function sweepOrphanedDigitalOceanResources(
       const { deleted } = await provider.deleteFirewallByName(fw.name);
       if (deleted) counts.firewalls++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] Firewall ${fw.name} delete failed`);
       }
     }
@@ -295,7 +271,7 @@ export async function sweepOrphanedDigitalOceanResources(
         // landed and this list was stale, so nothing was left behind.
         console.log(`${tag} [sweep] ssh key ${sshKey.name} was already gone (stale list)`);
       } else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
       }
     }
@@ -324,7 +300,7 @@ export async function sweepOrphanedDigitalOceanResources(
         }
         counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -347,11 +323,11 @@ export async function sweepOrphanedDigitalOceanResources(
         const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
         if (res.ok || res.status === 404) counts.networks++;
         else {
-          enumFailed = true;
+          sweep.fail();
           console.warn(`${tag} [sweep] VPC ${vpc.id} delete returned ${res.status}`);
         }
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] VPC ${vpc.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -387,11 +363,11 @@ export async function sweepOrphanedDigitalOceanResources(
         );
         if (res.ok || res.status === 404) counts.storageKeys = (counts.storageKeys ?? 0) + 1;
         else {
-          enumFailed = true;
+          sweep.fail();
           console.warn(`${tag} [sweep] app storage key ${key.name} revoke returned ${res.status}`);
         }
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] app storage key ${key.name} revoke failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -491,52 +467,27 @@ export async function sweepOrphanedDigitalOceanResources(
     }
   }
   if (spaces) {
-    const handled = new Set<string>();
-    for (const region of spaces.regions()) {
-      let buckets: string[] | null;
-      try {
-        buckets = await spaces.listBuckets(region);
-      } catch {
-        buckets = null;
-      }
-      if (buckets === null) {
-        markIncomplete(`Spaces region ${region}`);
-        continue;
-      }
-      for (const name of buckets) {
-        if (handled.has(name)) continue;
-        if (PROTECTED_SPACES_BUCKETS.has(name)) {
-          // The account's deliberate subscription anchor (see the constant's
-          // doc) — never swept, even if a project prefix ever matches it.
-          handled.add(name);
-          continue;
-        }
-        if (!name.startsWith(projectName)) continue;
-        handled.add(name);
-        console.log(`${tag} [sweep] Deleting Spaces bucket ${name} (${region})`);
-        try {
-          const { objectsRemoved } = await spaces.emptyAndDeleteBucket(region, name);
-          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-          counts.s3Buckets++;
-        } catch (err) {
-          const verdict = await classifyBucketDeleteError(
-            err,
-            name,
-            () => spaces.locateBucket(region, name),
-            () => spaces.listBuckets(region),
-          );
-          if (verdict.gone) {
-            // Stale listing: destroy already removed it, and a second
-            // listing no longer shows it. Goal state, not an enumeration
-            // failure. See bucket-already-gone.ts.
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-          } else {
-            enumFailed = true;
-            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-          }
-        }
-      }
-    }
+    const store = spaces;
+    await sweepBuckets(
+      sweep,
+      'Spaces bucket',
+      store.regions().map((region) => ({
+        async listBuckets() {
+          const names = await store.listBuckets(region);
+          return names === null ? null : names.map((name) => ({ name, where: region }));
+        },
+        async emptyAndDeleteBucket(bucket) {
+          return store.emptyAndDeleteBucket(region, bucket.name);
+        },
+        async locateBucket(bucket) {
+          return store.locateBucket(region, bucket.name);
+        },
+        unreadable: () => markIncomplete(`Spaces region ${region}`),
+      })),
+      // vc-local-e2e is the account's deliberate subscription anchor (see the
+      // constant's doc): never swept, even if a project prefix ever matches it.
+      { protectedNames: PROTECTED_SPACES_BUCKETS, dedupe: true },
+    );
   }
 
   // 5. Empty run tags (sweep-run-tags.ts), last, so the droplets and volumes
@@ -567,38 +518,18 @@ export async function sweepOrphanedDigitalOceanResources(
     },
   });
 
-  // Regression banner — same grep-stable `[sweep] REGRESSION` marker as the
-  // Hetzner sweep, and the clean line names the cloud it actually verified.
-  const totalOrphans =
-    counts.servers +
-    counts.volumes +
-    counts.firewalls +
-    (counts.loadBalancers ?? 0) +
-    counts.networks +
-    counts.s3Buckets +
-    counts.sshKeys +
-    (counts.storageKeys ?? 0);
-  if (totalOrphans > 0) {
-    const breakdown = [
-      `droplets=${counts.servers}`,
-      `volumes=${counts.volumes}`,
-      `firewalls=${counts.firewalls}`,
-      `load-balancers=${counts.loadBalancers ?? 0}`,
-      `vpcs=${counts.networks}`,
-      `spaces-buckets=${counts.s3Buckets}`,
-      `ssh-keys=${counts.sshKeys}`,
-      `app-storage-keys=${counts.storageKeys ?? 0}`,
-    ].join(', ');
-    console.warn(
-      `${tag} [sweep] REGRESSION: destroy left ${totalOrphans} DigitalOcean orphan resource(s) (${breakdown}). vibecarbon destroy did not free these — fix the corresponding destroy code path.`,
-    );
-  } else if (enumFailed) {
-    console.warn(
-      `${tag} [sweep] REGRESSION: could not enumerate one or more DigitalOcean resource types — orphan check is incomplete, treat as a destroy regression.`,
-    );
-  } else {
-    console.log(`${tag} [sweep] No DigitalOcean orphans found — destroy worked cleanly.`);
-  }
+  // The closing banner (sweep-core.ts). The rows are this cloud's classes
+  // in breakdown order; a class left out here is left out of the total.
+  reportSweep(sweep, [
+    ['droplets', 'servers'],
+    ['volumes', 'volumes'],
+    ['firewalls', 'firewalls'],
+    ['load-balancers', 'loadBalancers'],
+    ['vpcs', 'networks'],
+    ['spaces-buckets', 's3Buckets'],
+    ['ssh-keys', 'sshKeys'],
+    ['app-storage-keys', 'storageKeys'],
+  ]);
 
-  return { counts, enumFailed };
+  return sweep.result();
 }
