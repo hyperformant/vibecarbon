@@ -1,36 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
+import { fetchServicesStatus } from '@/hooks/api/useServicesStatus';
 import { adminServices } from '@/lib/admin-services';
-import { apiFetch } from '@/lib/api';
-
-interface ServiceStatus {
-  name: string;
-  container: string;
-  status: 'healthy' | 'unhealthy' | 'unknown';
-  latencyMs?: number;
-  error?: string;
-}
-
-interface ServicesStatusResponse {
-  summary: {
-    healthy: number;
-    unhealthy: number;
-    total: number;
-  };
-  services: ServiceStatus[];
-  timestamp: string;
-}
 
 /**
  * Fetch running services from the API.
- * Maps container names to service IDs for the admin sidebar.
+ * Maps container names to service IDs for the admin sidebar. A failed
+ * request counts as nothing running, so the sidebar never shows an error.
  */
 async function fetchRunningServices(): Promise<Set<string>> {
   try {
-    const response = await apiFetch('/api/_internal/services/status');
-    if (!response.ok) {
-      return new Set();
-    }
-    const data: ServicesStatusResponse = await response.json();
+    const data = await fetchServicesStatus();
 
     // Map container names to running status
     const runningContainers = new Set(
