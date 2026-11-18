@@ -281,15 +281,17 @@ describe('paymentFailedEmail', () => {
 
 describe('drift guards (carbon/ source)', () => {
   const src = readFileSync(join(process.cwd(), 'carbon/src/server/emails/templates.ts'), 'utf-8');
+  const html = readFileSync(join(process.cwd(), 'carbon/src/server/lib/html.ts'), 'utf-8');
 
-  it('defines escapeHtml and applies it to interpolated text values', () => {
-    expect(src).toMatch(/function escapeHtml\(/);
+  it('imports the server escapeHtml and applies it to interpolated text values', () => {
+    expect(src).toMatch(/import \{ escapeHtml \} from '\.\.\/lib\/html';/);
     expect(src).toMatch(/escapeHtml\(params\.inviterName\)/);
     expect(src).toMatch(/escapeHtml\(params\.organizationName\)/);
     expect(src).toMatch(/escapeHtml\(params\.planName\)/);
     // The escape helper replaces the dangerous characters.
-    expect(src).toMatch(/replace\(\/</);
-    expect(src).toMatch(/replace\(\/>/);
+    expect(html).toMatch(/export function escapeHtml\(/);
+    expect(html).toMatch(/replace\(\/</);
+    expect(html).toMatch(/replace\(\/>/);
   });
 
   it('subscriptionConfirmEmail has no trial param and no trial notice', () => {

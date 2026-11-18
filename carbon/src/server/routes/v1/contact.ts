@@ -6,6 +6,7 @@ import { contactSubmissions } from '../../db/schema';
 import { sendEmail } from '../../lib/email';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
+import { escapeHtml } from '../../lib/html';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
 import type { HonoVariables } from '../../types';
@@ -62,13 +63,6 @@ contactRoutes.post('/submit', async (c) => {
 
     // Notify admin via email (non-blocking)
     if (env.SMTP_ADMIN_EMAIL) {
-      const escapeHtml = (s: string) =>
-        s
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#39;');
       // SECURITY: the Subject is a mail header, not HTML, so it is not
       // entity-escaped (the reader would see `&amp;`). What a header must not
       // carry is a line break, which would start a header of the sender's
