@@ -166,6 +166,41 @@ export function standbyPairOrNeighbour(regionContinent, primaryRegion, pairs = {
   );
 }
 
+/**
+ * The loop behind waitForServer on the providers that share it: read the
+ * server every 5 s until `isUp` says it is, for at most `timeout` ms. A read
+ * that throws (a network error, a body without the server) is retried, and
+ * rethrown as "Failed to check server status" only when it is the last
+ * chance before the deadline.
+ * @template T
+ * @param {number} timeout - ms
+ * @param {() => Promise<T>} read - one read of the server
+ * @param {(server: T) => boolean} isUp - is it ready to use?
+ * @returns {Promise<T>} the server, as `read` last returned it
+ */
+export async function waitUntilServerUp(timeout, read, isUp) {
+  const startTime = Date.now();
+  const pollInterval = 5000;
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const server = await read();
+      if (isUp(server)) {
+        return server;
+      }
+    } catch (error) {
+      // Network errors - continue retrying
+      if (Date.now() - startTime >= timeout - pollInterval) {
+        throw new Error(`Failed to check server status: ${error.message}`);
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+
+  throw new Error('Server creation timed out');
+}
+
 export class BaseProvider {
   /**
    * Provider display name (e.g., "Hetzner Cloud")

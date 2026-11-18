@@ -27,6 +27,7 @@ import {
   deleteFailure,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
+  waitUntilServerUp,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
 import { decodeLabels } from './tag-labels.js';
@@ -977,27 +978,15 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
+    return waitUntilServerUp(
+      timeout,
+      async () => {
         const response = await this.apiRequest(`/droplets/${serverId}`);
         const { droplet } = await response.json();
-
-        if (droplet.status === 'active' && DigitalOceanProvider.getPublicIP(droplet)) {
-          return droplet;
-        }
-      } catch (error) {
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+        return droplet;
+      },
+      (droplet) => droplet.status === 'active' && DigitalOceanProvider.getPublicIP(droplet),
+    );
   }
 
   /**

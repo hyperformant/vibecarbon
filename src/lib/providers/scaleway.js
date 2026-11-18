@@ -62,6 +62,7 @@ import {
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
   sweepLabels,
+  waitUntilServerUp,
 } from './base.js';
 import { decodeLabels } from './tag-labels.js';
 
@@ -1203,25 +1204,11 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
-        const server = await this.getServer(serverId);
-        if (server.state === 'running' && ScalewayProvider.getPublicIP(server)) {
-          return server;
-        }
-      } catch (error) {
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+    return waitUntilServerUp(
+      timeout,
+      () => this.getServer(serverId),
+      (server) => server.state === 'running' && ScalewayProvider.getPublicIP(server),
+    );
   }
 
   /**

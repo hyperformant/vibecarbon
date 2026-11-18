@@ -17,6 +17,7 @@ import {
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
   sweepLabels,
+  waitUntilServerUp,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
@@ -1191,28 +1192,15 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
+    return waitUntilServerUp(
+      timeout,
+      async () => {
         const response = await this.apiRequest(`/servers/${serverId}`);
         const { server } = await response.json();
-
-        if (server.status === 'running') {
-          return server;
-        }
-      } catch (error) {
-        // Network errors - continue retrying
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+        return server;
+      },
+      (server) => server.status === 'running',
+    );
   }
 
   /**

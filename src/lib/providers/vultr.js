@@ -23,7 +23,12 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
-import { BaseProvider, replaceWireguardPeerRules, standbyPairOrNeighbour } from './base.js';
+import {
+  BaseProvider,
+  replaceWireguardPeerRules,
+  standbyPairOrNeighbour,
+  waitUntilServerUp,
+} from './base.js';
 import { deleteServerAt } from './delete-server.js';
 import { decodeLabels } from './tag-labels.js';
 
@@ -641,27 +646,15 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async waitForServer(serverId, timeout = VultrProvider.WAIT_FOR_SERVER_TIMEOUT_MS) {
-    const startTime = Date.now();
-    const pollInterval = 5000;
-
-    while (Date.now() - startTime < timeout) {
-      try {
+    return waitUntilServerUp(
+      timeout,
+      async () => {
         const response = await this.apiRequest(`/instances/${serverId}`);
         const { instance } = await response.json();
-
-        if (instance.server_status === 'ok' && VultrProvider.getPublicIP(instance)) {
-          return instance;
-        }
-      } catch (error) {
-        if (Date.now() - startTime >= timeout - pollInterval) {
-          throw new Error(`Failed to check server status: ${error.message}`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-
-    throw new Error('Server creation timed out');
+        return instance;
+      },
+      (instance) => instance.server_status === 'ok' && VultrProvider.getPublicIP(instance),
+    );
   }
 
   /**
