@@ -2654,25 +2654,11 @@ export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
  */
 export async function isStandbyStreaming(standbyIp, sshKeyPath) {
   try {
-    const pod = await getPostgresPod(standbyIp, sshKeyPath);
-    const out = await sshKubectl(
+    const out = await k8sPsqlRunner(
       standbyIp,
       sshKeyPath,
-      [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        'SELECT status FROM pg_stat_wal_receiver',
-      ],
-      { timeout: POD_EXEC_QUERY_MS },
-    );
-    return (typeof out === 'string' ? out : '').trim() === 'streaming';
+    )('SELECT status FROM pg_stat_wal_receiver');
+    return out.trim() === 'streaming';
   } catch {
     return false;
   }
@@ -2688,25 +2674,8 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
  * @returns {Promise<string>}
  */
 export async function readK8sReplicationState(primaryIp, sshKeyPath) {
-  const pod = await getPostgresPod(primaryIp, sshKeyPath);
-  const result = await sshKubectl(
-    primaryIp,
-    sshKeyPath,
-    [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
-    ],
-    { timeout: POD_EXEC_QUERY_MS },
-  );
-  return replicationStateOf((typeof result === 'string' ? result : '').trim());
+  const out = await k8sPsqlRunner(primaryIp, sshKeyPath)(STREAMING_STATE_SQL);
+  return replicationStateOf(out.trim());
 }
 
 /** Every pg_stat_replication.state value, and '' for no replica connected. */
