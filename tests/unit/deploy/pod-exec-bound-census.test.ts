@@ -80,9 +80,9 @@ const BOUND_BY_RUNNER: Record<string, string> = {
  * the script's whole run, so the census trusts these by name. Checked below.
  */
 const BOUND_BY_SCRIPT: Record<string, string> = {
-  'src/backup.js:buildBackupJobWaitScript':
-    'runs at the job deadline plus 120 s; its pod logs are failure diagnostics',
-  'src/backup.js:triggerBackupJob': 'the failure diagnostics script runs at timeout: 90_000',
+  'src/backup.js:jobPodDiagnostics':
+    "the backup Job's failure dump, inside the two scripts that run it: the wait " +
+    'script at the job deadline plus 120 s, the follow-up at timeout: 90_000',
   'src/lib/deploy/k8s/ha/index.js:relayDiagnostics':
     'each lookup passes POD_EXEC_QUERY_MS to the runner',
 };
@@ -270,7 +270,13 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
       new Set(Object.keys(BOUND_BY_SCRIPT)),
     );
     const backup = readFileSync(join(ROOT, 'src/backup.js'), 'utf-8');
-    expect(backup).toMatch(/kubectl logs[\s\S]{0,200}\{ timeout: 90_000 \}/);
+    expect(backup).toMatch(
+      /\$\{jobPodDiagnostics\(jobName, \{[^}]{0,160}\}\)\}`,\s*\{ timeout: 90_000 \}/,
+    );
+    const waitScript = backup.slice(backup.indexOf('export function buildBackupJobWaitScript('));
+    expect(waitScript.slice(0, waitScript.indexOf('\n}\n'))).toContain(
+      'jobPodDiagnostics(jobName, {',
+    );
     expect(backup).toMatch(
       /buildBackupJobWaitScript\(jobName\), \{[\s\S]{0,120}BACKUP_JOB_ACTIVE_DEADLINE_S \+ JOB_DEADLINE_GRACE_S \+ 120/,
     );

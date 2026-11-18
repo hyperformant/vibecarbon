@@ -128,6 +128,37 @@ export const BACKUP_JOB_ACTIVE_DEADLINE_S = 3600;
 /** After activeDeadlineSeconds the Job controller still has to mark it Failed. */
 const JOB_DEADLINE_GRACE_S = 60;
 
+/**
+ * The bash fragment both backup Job failure dumps end with: each pod of the
+ * Job, found by name (Job pods are `<jobName>-<5char>`; a label query on a
+ * freshly failed Job pod can come back empty), with its container exit codes,
+ * describe, and current and previous logs. The wait script's copy runs before
+ * the pod is GC'd and keeps more lines. Each dump keeps the wording it always
+ * printed.
+ *
+ * @param {string} jobName
+ * @param {{ describeTail: number, logTail: number, gone: string, exitCodes: string }} opts
+ * @returns {string}
+ */
+function jobPodDiagnostics(jobName, { describeTail, logTail, gone, exitCodes }) {
+  return `PODS=$(kubectl get pods -n vibecarbon -o name 2>/dev/null | grep "${jobName}" || true)
+if [ -z "\${PODS}" ]; then
+  echo "=== No pod matching ${jobName} found — ${gone} ==="
+else
+  for pod in \${PODS}; do
+    echo "=== \${pod}: container statuses (${exitCodes}) ==="
+    kubectl get \${pod} -n vibecarbon -o jsonpath='restartCount={.status.containerStatuses[*].restartCount}{"\\n"}lastTerminated={.status.containerStatuses[*].lastState.terminated}{"\\n"}currentState={.status.containerStatuses[*].state}{"\\n"}' 2>&1
+    echo ""
+    echo "=== \${pod}: kubectl describe ==="
+    kubectl describe \${pod} -n vibecarbon 2>&1 | tail -${describeTail}
+    echo "=== \${pod}: current container logs ==="
+    kubectl logs \${pod} -n vibecarbon --tail=${logTail} 2>&1 || true
+    echo "=== \${pod}: --previous logs (the crashed-container output) ==="
+    kubectl logs \${pod} -n vibecarbon --previous --tail=${logTail} 2>&1 || true
+  done
+fi`;
+}
+
 export function buildBackupJobWaitScript(jobName) {
   return `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 DEADLINE=$(($(date +%s) + ${BACKUP_JOB_ACTIVE_DEADLINE_S + JOB_DEADLINE_GRACE_S}))
@@ -159,22 +190,12 @@ echo ""
 echo "=== Pod events (matching ${jobName} or backup-manual) ==="
 kubectl get events -n vibecarbon --field-selector involvedObject.kind=Pod --sort-by=.lastTimestamp 2>&1 | grep -E "${jobName}|backup-manual" | tail -30
 echo ""
-PODS=$(kubectl get pods -n vibecarbon -o name 2>/dev/null | grep "${jobName}" || true)
-if [ -z "\${PODS}" ]; then
-  echo "=== No pod matching ${jobName} found — already GC'd ==="
-else
-  for pod in \${PODS}; do
-    echo "=== \${pod}: container statuses (exit code disambiguates failure) ==="
-    kubectl get \${pod} -n vibecarbon -o jsonpath='restartCount={.status.containerStatuses[*].restartCount}{"\\n"}lastTerminated={.status.containerStatuses[*].lastState.terminated}{"\\n"}currentState={.status.containerStatuses[*].state}{"\\n"}' 2>&1
-    echo ""
-    echo "=== \${pod}: kubectl describe ==="
-    kubectl describe \${pod} -n vibecarbon 2>&1 | tail -60
-    echo "=== \${pod}: current container logs ==="
-    kubectl logs \${pod} -n vibecarbon --tail=200 2>&1 || true
-    echo "=== \${pod}: --previous logs (the crashed-container output) ==="
-    kubectl logs \${pod} -n vibecarbon --previous --tail=200 2>&1 || true
-  done
-fi
+${jobPodDiagnostics(jobName, {
+  describeTail: 60,
+  logTail: 200,
+  gone: "already GC'd",
+  exitCodes: 'exit code disambiguates failure',
+})}
 exit 1`;
 }
 
@@ -323,22 +344,12 @@ kubectl get events -n vibecarbon --field-selector involvedObject.kind=Pod --sort
 # Find pods by NAME pattern (not label) — labels on freshly-failed Job pods
 # can return empty even when the pod exists; name pattern matches because
 # Job pods are deterministically named <jobName>-<5char>.
-PODS=$(kubectl get pods -n vibecarbon -o name 2>/dev/null | grep "${jobName}" || true)
-if [ -z "\${PODS}" ]; then
-  echo "=== No pod matching ${jobName} found — already GC'd? ==="
-else
-  for pod in \${PODS}; do
-    echo "=== \${pod}: container statuses (exit code disambiguates the failure) ==="
-    kubectl get \${pod} -n vibecarbon -o jsonpath='restartCount={.status.containerStatuses[*].restartCount}{"\\n"}lastTerminated={.status.containerStatuses[*].lastState.terminated}{"\\n"}currentState={.status.containerStatuses[*].state}{"\\n"}' 2>&1
-    echo ""
-    echo "=== \${pod}: kubectl describe ==="
-    kubectl describe \${pod} -n vibecarbon 2>&1 | tail -50
-    echo "=== \${pod}: current container logs ==="
-    kubectl logs \${pod} -n vibecarbon --tail=100 2>&1 || true
-    echo "=== \${pod}: --previous logs (the crashed-container output) ==="
-    kubectl logs \${pod} -n vibecarbon --previous --tail=100 2>&1 || true
-  done
-fi`,
+${jobPodDiagnostics(jobName, {
+  describeTail: 50,
+  logTail: 100,
+  gone: "already GC'd?",
+  exitCodes: 'exit code disambiguates the failure',
+})}`,
         { timeout: 90_000 },
       );
     } catch {
