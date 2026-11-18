@@ -1249,15 +1249,28 @@ function isNoSuchBucket(err) {
  * answers "no such bucket" for a bucket full of data, so that answer alone
  * never means gone where the keys reach other regions.
  *
+ * And "no HeadBucket finds it" is not proof either. A new Hetzner bucket that
+ * was read in its first second can answer NoSuchBucket to the delete and 404
+ * to every HeadBucket for up to 15 minutes while it exists and bills
+ * (bucketQuietMs in hetzner-s3.js). On 2026-11-16 destroy called such a
+ * bucket "not found in any region" and left it, while ListBuckets on the
+ * same endpoint still showed it. So the listing is read last
+ * (bucketListedIn), after the search, and a bucket the provider still lists
+ * is never reported as gone: that is "cannot tell", thrown as an error
+ * marked `bucketUnconfirmed`, which the caller records as UNVERIFIED
+ * (recordBucketNotDeleted). One read decides what to say. Nothing here waits
+ * or tries the delete again.
+ *
  * Returns where `op` ran, or `{ gone: true, searched }` only when every
- * region asked said not found (`searched`, how many were asked, words the
- * line). A region that answers anything else throws (locateBucket names the
- * bucket and the region), and so does a store that says NoSuchBucket where the
- * search then finds the bucket: the caller keeps it and records why.
+ * region asked said not found and no region's listing shows the bucket
+ * (`searched`, how many were asked, words the line). A region that answers
+ * anything else throws (locateBucket and bucketListedIn name the bucket and
+ * the region), and so does a store that says NoSuchBucket where the search
+ * then finds the bucket: the caller keeps it and records why.
  * `ran.region` is where `op` is running, set before each run starts, so a
  * caller whose op fails or times out at a found region reports that region.
  * @template T
- * @param {{ forRegion: (region: string) => any, locateBucket: (bucket: string) => Promise<string|null>, addressableRegions: () => string[] }} store
+ * @param {{ forRegion: (region: string) => any, locateBucket: (bucket: string) => Promise<string|null>, bucketListedIn: (bucket: string) => Promise<string|null>, addressableRegions: () => string[] }} store
  *   the client at `region`
  * @param {string} bucket
  * @param {string} region - where the record says the bucket is
@@ -1272,7 +1285,31 @@ async function atBucketRegion(store, bucket, region, op, ran = {}) {
   } catch (err) {
     if (!isNoSuchBucket(err)) throw err;
     const found = await store.locateBucket(bucket);
-    if (found === null) return { gone: true, searched: store.addressableRegions().length };
+    if (found === null) {
+      const said = `${bucket} answered NoSuchBucket and no HeadBucket finds it`;
+      let listedIn;
+      try {
+        listedIn = await store.bucketListedIn(bucket);
+      } catch (listErr) {
+        throw Object.assign(
+          new Error(
+            `${said}, but ${listErr.message}, so destroy cannot tell whether it is gone and left it`,
+            { cause: listErr },
+          ),
+          { bucketUnconfirmed: true },
+        );
+      }
+      if (listedIn !== null) {
+        ran.region = listedIn;
+        throw Object.assign(
+          new Error(
+            `${said}, but the bucket listing in ${listedIn} still shows it, so destroy cannot tell whether it is gone and left it`,
+          ),
+          { bucketUnconfirmed: true, listedIn },
+        );
+      }
+      return { gone: true, searched: store.addressableRegions().length };
+    }
     if (found === region) {
       throw new Error(
         `${bucket} answered NoSuchBucket in ${region}, but a HeadBucket there finds it: the store is answering two ways, so it was left in place; look at it in the Object Storage console before deleting anything by hand`,
@@ -1283,12 +1320,51 @@ async function atBucketRegion(store, bucket, region, op, ran = {}) {
   }
 }
 
+/**
+ * Record a bucket a -purge did not delete. A bucket that answered "no such
+ * bucket" while the provider's listing still showed it, or while that listing
+ * could not be read (atBucketRegion's `bucketUnconfirmed`), is UNVERIFIED:
+ * destroy cannot tell whether it is gone, and it may be billing. Its hint
+ * says to look again in about 15 minutes, the longest a new Hetzner bucket
+ * has kept answering that way (894 s, 2026-11-05), and it names the console,
+ * never a destroy rerun: a bucket line does not keep the environment's entry
+ * (ENTRY_KEEP_BY_CLASS), so a rerun would find nothing to run against.
+ * Every other failure is a LEAK, as before.
+ *
+ * @param {{ leak: Function, unverified: Function }} leaks
+ * @param {object} o
+ * @param {Error & { bucketUnconfirmed?: boolean }} o.error
+ * @param {string} o.bucket
+ * @param {string} o.resource - describeResource() of the bucket
+ * @param {string} o.providerName
+ * @param {string} o.leakReason - the reason line for an ordinary failure
+ * @param {string} o.hint - what to do in the console once the bucket is there
+ */
+function recordBucketNotDeleted(
+  leaks,
+  { error, bucket, resource, providerName, leakReason, hint },
+) {
+  if (!error?.bucketUnconfirmed) {
+    leaks.leak({ resourceClass: 'bucket', resource, reason: leakReason, hint });
+    return;
+  }
+  leaks.unverified({
+    resourceClass: 'bucket',
+    resource,
+    reason: `not confirmed gone: ${error.message}`,
+    hint:
+      `${bucket} may still exist and keep billing: a new bucket can answer "no such bucket" for about 15 minutes. ` +
+      `Look for it in the ${providerName} Object Storage console in about 15 minutes. If it is there: ${hint}`,
+  });
+}
+
 /** ` in fsn1, not nbg1 as its record said` when the bucket was found elsewhere. */
 const foundElsewhere = (ran, recorded) =>
   ran && ran !== recorded ? ` in ${ran}, not ${recorded} as its record said` : '';
 
 /**
- * The line for a bucket that no region these keys reach has. "In any region"
+ * The line for a bucket that no region these keys reach has and no region's
+ * listing shows (atBucketRegion's `gone`). "In any region"
  * only when more than one was asked: keys for one cluster asked just that
  * one, and the line reads as it always did there.
  * @param {string} what - "Backup bucket" or "S3 bucket"
@@ -1452,11 +1528,17 @@ async function handleBackupBucket(
     );
     return { purged: true };
   } catch (error) {
-    spinner.stop(`Backup bucket purge failed: ${error.message}`);
-    leaks.leak({
-      resourceClass: 'bucket',
+    spinner.stop(
+      error?.bucketUnconfirmed
+        ? `Backup bucket not confirmed gone: ${error.message}`
+        : `Backup bucket purge failed: ${error.message}`,
+    );
+    recordBucketNotDeleted(leaks, {
+      error,
+      bucket: bucketName,
       resource: describeResource({ name: bucketName, region: ran.region }),
-      reason: `purge failed: ${error.message}`,
+      providerName: Provider.NAME,
+      leakReason: `purge failed: ${error.message}`,
       hint: backupsLeakHint(Provider.NAME, { bucketName, envBackupPrefix, holders }),
     });
     return { purged: false };
@@ -1985,11 +2067,17 @@ async function deleteAppBucketEffect(ctx) {
       });
     }
   } catch (error) {
-    spinner.stop(`S3 deletion failed: ${error.message}`);
-    results.leaks.leak({
-      resourceClass: 'bucket',
+    spinner.stop(
+      error?.bucketUnconfirmed
+        ? `S3 bucket not confirmed gone: ${error.message}`
+        : `S3 deletion failed: ${error.message}`,
+    );
+    recordBucketNotDeleted(results.leaks, {
+      error,
+      bucket: s3BucketName,
       resource: describeResource({ name: s3BucketName, region: ran.region }),
-      reason: `not deleted: ${error.message}`,
+      providerName: Provider.NAME,
+      leakReason: `not deleted: ${error.message}`,
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });
   }

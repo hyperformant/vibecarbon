@@ -4,7 +4,7 @@
  * (./sweep-provider.ts) can reach it without loading the whole lifecycle.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { classifyBucketDeleteError } from './bucket-already-gone.js';
+import { assertSweepableProjectName, bucketSource, sweepBuckets } from './sweep-core.js';
 
 /** One Object Storage location's view (each endpoint lists only its own buckets). */
 interface HetznerSweepObjectStorage {
@@ -77,6 +77,10 @@ export async function sweepOrphanedHetznerResources(
   hetznerToken: string,
   deps: HetznerSweepDeps = {},
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
+  // An empty or short prefix would match resources that are not ours (the
+  // placement-group, firewall, ssh-key, floating-IP, network and bucket
+  // passes all match on `startsWith(projectName)`).
+  assertSweepableProjectName('Hetzner', projectName);
   const fetchImpl = deps.fetchImpl ?? fetch;
   console.log(`${tag} Sweeping orphaned Hetzner resources for ${projectName}...`);
   const counts: SweepBreakdown = {
@@ -174,6 +178,34 @@ export async function sweepOrphanedHetznerResources(
     );
   };
 
+  // DELETE one dependent resource and report what the API said. Until
+  // 2026-11-17 the volume, placement-group, firewall, ssh-key, floating-IP
+  // and network passes ignored the response and counted the resource as
+  // swept, so a refused delete (a 409 "still in use", a 5xx, three failed
+  // attempts) read as a cleaned-up orphan while the resource stayed and
+  // billed. 'deleted' is the only outcome a pass may count. 'gone' is a 404:
+  // destroy's own delete landed and the listing was stale, the goal state.
+  // 'failed' marks the sweep incomplete and names the resource.
+  const deleteResource = async (
+    what: string,
+    path: string,
+  ): Promise<'deleted' | 'gone' | 'failed'> => {
+    const resp = await sweepFetch(`https://api.hetzner.cloud/v1${path}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${hetznerToken}` },
+    });
+    if (resp?.ok) return 'deleted';
+    if (resp?.status === 404) {
+      console.log(`${tag} [sweep] ${what} was already gone (stale list)`);
+      return 'gone';
+    }
+    enumFailed = true;
+    console.warn(
+      `${tag} [sweep] ${what} delete failed: returned ${resp?.status ?? 'no response'}, so it may still exist`,
+    );
+    return 'failed';
+  };
+
   // 1. Delete any servers whose name contains the project name
   // We collect the IDs we DELETE'd so we can confirm completion before
   // sweeping dependent resources. Hetzner server DELETE is async — the API
@@ -211,6 +243,8 @@ export async function sweepOrphanedHetznerResources(
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('server list');
     console.warn(`${tag} [sweep] Server cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -267,14 +301,17 @@ export async function sweepOrphanedHetznerResources(
       // Only delete unattached PVC volumes (K8s leftovers)
       if (vol.server === null && vol.name.startsWith('pvc-')) {
         console.log(`${tag} [sweep] Deleting orphaned volume ${vol.id} (${vol.name})`);
-        await sweepFetch(`https://api.hetzner.cloud/v1/volumes/${vol.id}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${hetznerToken}` },
-        });
-        counts.volumes++;
+        if (
+          (await deleteResource(`Volume ${vol.id} (${vol.name})`, `/volumes/${vol.id}`)) ===
+          'deleted'
+        ) {
+          counts.volumes++;
+        }
       }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('volume list');
     console.warn(`${tag} [sweep] Volume cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -308,13 +345,18 @@ export async function sweepOrphanedHetznerResources(
       if (!pg.name.startsWith(projectName)) continue;
       if (liveRefs(pg.servers).length > 0) continue; // still referenced by a live server
       console.log(`${tag} [sweep] Deleting orphaned placement-group ${pg.id} (${pg.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/placement_groups/${pg.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.placementGroups++;
+      if (
+        (await deleteResource(
+          `Placement group ${pg.id} (${pg.name})`,
+          `/placement_groups/${pg.id}`,
+        )) === 'deleted'
+      ) {
+        counts.placementGroups++;
+      }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('placement-group list');
     console.warn(
       `${tag} [sweep] Placement-group cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
@@ -348,13 +390,16 @@ export async function sweepOrphanedHetznerResources(
       });
       if (liveAttachments.length > 0) continue;
       console.log(`${tag} [sweep] Deleting orphaned firewall ${fw.id} (${fw.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/firewalls/${fw.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.firewalls++;
+      if (
+        (await deleteResource(`Firewall ${fw.id} (${fw.name})`, `/firewalls/${fw.id}`)) ===
+        'deleted'
+      ) {
+        counts.firewalls++;
+      }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('firewall list');
     console.warn(`${tag} [sweep] Firewall cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -377,13 +422,16 @@ export async function sweepOrphanedHetznerResources(
     for (const key of sshKeys) {
       if (!key.name?.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned SSH key ${key.id} (${key.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/ssh_keys/${key.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.sshKeys++;
+      if (
+        (await deleteResource(`SSH key ${key.id} (${key.name})`, `/ssh_keys/${key.id}`)) ===
+        'deleted'
+      ) {
+        counts.sshKeys++;
+      }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('ssh-key list');
     console.warn(`${tag} [sweep] SSH key cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -407,13 +455,16 @@ export async function sweepOrphanedHetznerResources(
       // to a server we just DELETE'd as released.
       if (fip.server != null && !deletedServerIds.includes(fip.server)) continue;
       console.log(`${tag} [sweep] Deleting orphaned floating IP ${fip.id} (${fip.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/floating_ips/${fip.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.floatingIps++;
+      if (
+        (await deleteResource(`Floating IP ${fip.id} (${fip.name})`, `/floating_ips/${fip.id}`)) ===
+        'deleted'
+      ) {
+        counts.floatingIps++;
+      }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('floating-IP list');
     console.warn(
       `${tag} [sweep] Floating IP cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
@@ -439,13 +490,16 @@ export async function sweepOrphanedHetznerResources(
       const liveServers = (net.servers ?? []).filter((sid) => !deletedServerIds.includes(sid));
       if (liveServers.length > 0) continue;
       console.log(`${tag} [sweep] Deleting orphaned network ${net.id} (${net.name})`);
-      await sweepFetch(`https://api.hetzner.cloud/v1/networks/${net.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${hetznerToken}` },
-      });
-      counts.networks++;
+      if (
+        (await deleteResource(`Network ${net.id} (${net.name})`, `/networks/${net.id}`)) ===
+        'deleted'
+      ) {
+        counts.networks++;
+      }
     }
   } catch (e) {
+    // The pass stopped part-way, so what it did not reach is unchecked.
+    markIncomplete('network list');
     console.warn(`${tag} [sweep] Network cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -456,7 +510,8 @@ export async function sweepOrphanedHetznerResources(
   // HetznerS3Provider.emptyAndDeleteBucket so we get version + multipart
   // handling for free instead of re-implementing it inline. A bucket it
   // cannot delete fails the sweep (enumFailed), unless the delete said "no
-  // such bucket" and no location holds it: a stale listing, the goal state.
+  // such bucket", no location holds it, and a second listing no longer shows
+  // it: a stale listing, the goal state.
   // A sweep that could not look fails it too: missing storage keys, or a
   // location whose ListBuckets failed, leave its buckets unchecked.
   try {
@@ -489,42 +544,25 @@ export async function sweepOrphanedHetznerResources(
     // stranded whichever location a scenario landed in. Each endpoint lists
     // only its own location's buckets (probed 2026-11-15), so a bucket is
     // deleted through the location that listed it.
-    for (const [region, store] of Object.entries(storesByRegion ?? {})) {
-      let listed: string[];
-      try {
-        listed = await store.listBuckets();
-      } catch (listErr) {
-        enumFailed = true;
-        console.warn(
-          `${tag} [sweep] S3 bucket list failed in ${region}: ${listErr instanceof Error ? listErr.message : String(listErr)}; its leftover buckets cannot be ruled out`,
-        );
-        continue;
-      }
-      for (const name of listed.filter((n) => n.startsWith(projectName))) {
-        console.log(`${tag} [sweep] Deleting S3 bucket ${name} (${region})`);
-        try {
-          const { objectsRemoved } = await store.emptyAndDeleteBucket(name);
-          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-          counts.s3Buckets++;
-        } catch (bucketErr) {
-          const verdict = await classifyBucketDeleteError(bucketErr, () =>
-            store.locateBucket(name),
+    await sweepBuckets(
+      {
+        tag,
+        projectName,
+        counts,
+        fail: () => {
+          enumFailed = true;
+        },
+      },
+      'S3 bucket',
+      Object.entries(storesByRegion ?? {}).map(([region, store]) =>
+        bucketSource(store, region, (listErr) => {
+          enumFailed = true;
+          console.warn(
+            `${tag} [sweep] S3 bucket list failed in ${region}: ${listErr instanceof Error ? listErr.message : String(listErr)}; its leftover buckets cannot be ruled out`,
           );
-          if (verdict.gone) {
-            // Stale listing: destroy already removed it. Goal state, not an
-            // enumeration failure — see bucket-already-gone.ts. Caveat: a
-            // HEAD or LIST in a new bucket's first second can leave it
-            // answering NoSuchBucket for up to 15 minutes (bucketQuietMs in
-            // hetzner-s3.js), so such a live bucket could read as gone here.
-            // No worse than before this verdict, when every error read clean.
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-          } else {
-            enumFailed = true;
-            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-          }
-        }
-      }
-    }
+        }),
+      ),
+    );
   } catch (e) {
     // The stores could not be built (module load), so no bucket was checked.
     enumFailed = true;

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadE2EEnvFile } from '../../../tests/e2e/utils/e2e-env-file.js';
+import { loadE2EEnvFile, readE2EEnv } from '../../../tests/e2e/utils/e2e-env-file.js';
 
 describe('loadE2EEnvFile — A6 operator token file loader', () => {
   let dir: string;
@@ -85,5 +85,54 @@ describe('loadE2EEnvFile — A6 operator token file loader', () => {
     } finally {
       delete process.env.E2E_ENV_FILE_TEST_KEY;
     }
+  });
+});
+
+describe('readE2EEnv', () => {
+  // The lookup the out-of-band tools use (sweep-project.ts,
+  // sweep-stale-stacks-ci.ts, audit-residue.ts): the file with the real env
+  // laid over it, in a new object.
+  let dir: string;
+  let file: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'read-e2e-env-'));
+    file = join(dir, '.env.e2e');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('the real env wins over the file', () => {
+    writeFileSync(file, "HETZNER_API_TOKEN='file-token'\nHETZNER_ACCESS_KEY='file-ak'\n");
+    const env = readE2EEnv(file, { HETZNER_API_TOKEN: 'shell-token' });
+    expect(env.HETZNER_API_TOKEN).toBe('shell-token');
+    expect(env.HETZNER_ACCESS_KEY).toBe('file-ak');
+  });
+
+  it('a blank real value counts as unset and falls back to the file (CI passes unset secrets as empty strings)', () => {
+    writeFileSync(file, "VULTR_STORAGE_REGION='ewr1'\n");
+    const env = readE2EEnv(file, { VULTR_STORAGE_REGION: '' });
+    expect(env.VULTR_STORAGE_REGION).toBe('ewr1');
+  });
+
+  it('a blank real value with nothing in the file stays unset', () => {
+    writeFileSync(file, '');
+    const env = readE2EEnv(file, { LINODE_API_TOKEN: '' });
+    expect('LINODE_API_TOKEN' in env).toBe(false);
+  });
+
+  it('a missing file reads as the real env alone', () => {
+    const env = readE2EEnv(join(dir, 'absent'), { SCALEWAY_SECRET_KEY: 'shell' });
+    expect(env).toEqual({ SCALEWAY_SECRET_KEY: 'shell' });
+  });
+
+  it('changes neither the real env nor anything else: it returns a new object', () => {
+    writeFileSync(file, "DOCKER_HUB_USERNAME='acme'\n");
+    const real: NodeJS.ProcessEnv = { HOME: '/home/x' };
+    const env = readE2EEnv(file, real);
+    expect(real).toEqual({ HOME: '/home/x' });
+    expect(env).toEqual({ HOME: '/home/x', DOCKER_HUB_USERNAME: 'acme' });
   });
 });

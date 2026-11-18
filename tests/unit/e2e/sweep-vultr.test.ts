@@ -40,9 +40,7 @@ function fakeProvider(
     deleteVolume: vi.fn().mockResolvedValue(true),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
     deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
-    listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(true),
-    listNetworks: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -246,13 +244,16 @@ describe('sweepOrphanedVultrResources', () => {
   it('sweeps a VPC identified only by `description` (Vultr VPCs carry no label)', async () => {
     // Matching on `label` alone would make the whole VPC pass a silent
     // no-op against raw API rows — the leak would never be reported.
-    const fetchImpl = fakeFetch({});
-    const provider = fakeProvider({
-      listNetworks: vi.fn().mockResolvedValue([
-        { id: 'vpc-1', description: 'testapp-v1-net' },
-        { id: 'vpc-2', description: 'someone-elses-net' },
-      ]),
+    const fetchImpl = fakeFetch({
+      '/vpcs': {
+        vpcs: [
+          { id: 'vpc-1', description: 'testapp-v1-net' },
+          { id: 'vpc-2', description: 'someone-elses-net' },
+        ],
+        meta: { links: { next: '' } },
+      },
     });
+    const provider = fakeProvider();
 
     const { counts } = await sweepOrphanedVultrResources(TAG, 'testapp-v1', {
       provider,
@@ -288,7 +289,31 @@ describe('sweepOrphanedVultrResources', () => {
     expect(counts.s3Buckets).toBe(1);
   });
 
-  it('a bucket destroy removed seconds earlier reads clean once its cluster has none', async () => {
+  it('a bucket destroy removed seconds earlier reads clean once its cluster has none and a second listing has dropped it', async () => {
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const storage = fakeStorage({
+      listBuckets: vi.fn().mockResolvedValueOnce(['testapp-v1-backups']).mockResolvedValue([]),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket,
+    });
+    const { counts, enumFailed } = await sweepOrphanedVultrResources(TAG, 'testapp-v1', {
+      provider: fakeProvider(),
+      objectStorage: storage,
+      fetchImpl: fakeFetch({}),
+      storageRegion: 'ewr1',
+    });
+    expect(locateBucket).toHaveBeenCalledWith('testapp-v1-backups');
+    // Read once to enumerate and once more after the search, never again.
+    expect(storage.listBuckets).toHaveBeenCalledTimes(2);
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('the 2026-11-16 leak: no such bucket and no region holds it, but the listing still shows it, so the sweep FAILS and never says gone', async () => {
+    // A new Hetzner bucket answered this way for 20 minutes while it existed
+    // and billed. The listing was the one answer that told the truth.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const locateBucket = vi.fn().mockResolvedValue(null);
     const storage = fakeStorage({
       listBuckets: vi.fn().mockResolvedValue(['testapp-v1-backups']),
@@ -302,8 +327,16 @@ describe('sweepOrphanedVultrResources', () => {
       storageRegion: 'ewr1',
     });
     expect(locateBucket).toHaveBeenCalledWith('testapp-v1-backups');
-    expect(enumFailed).toBe(false);
+    const said = (spy: typeof log) => spy.mock.calls.map((c) => String(c[0])).join('\n');
+    const logged = said(log);
+    const warned = said(warn);
+    log.mockRestore();
+    warn.mockRestore();
+    expect(enumFailed).toBe(true);
     expect(counts.s3Buckets).toBe(0);
+    expect(logged).not.toMatch(/already gone/);
+    expect(warned).toMatch(/FAILED testapp-v1-backups: .*listing still shows it/);
+    expect(storage.listBuckets).toHaveBeenCalledTimes(2);
   });
 
   it('a NoSuchBucket for a bucket the cluster still holds FAILS the sweep', async () => {

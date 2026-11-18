@@ -650,6 +650,44 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * Which region's own ListBuckets shows this bucket, of the regions these
+   * keys can address (addressableRegions), or null when every one of those
+   * listings was read and none shows it. Each endpoint lists only its own
+   * region's buckets (Hetzner and DigitalOcean, probed 2026-11-15 and again
+   * on Hetzner 2026-11-17), so every region is asked.
+   *
+   * The second witness for "this bucket is gone", after locateBucket. A new
+   * Hetzner bucket that was read in its first second can answer NoSuchBucket
+   * and 404 to every HeadBucket for up to 15 minutes (bucketQuietMs in
+   * hetzner-s3.js) while it exists and bills, and the listing is the one
+   * answer that kept telling the truth about it (2026-11-16). So a caller
+   * about to say gone asks this last, and a bucket still listed is never
+   * gone. A listing that cannot be read throws, naming the bucket and the
+   * region, for the same reason locateBucket does: silence is not absence.
+   * @param {string} bucketName
+   * @returns {Promise<string|null>} the region whose listing shows it, or null
+   */
+  async bucketListedIn(bucketName) {
+    for (const region of this.addressableRegions()) {
+      let buckets;
+      try {
+        buckets = await this.forRegion(region).listBuckets();
+      } catch (error) {
+        const endpoint = this.constructor.ENDPOINTS[region];
+        throw Object.assign(
+          new Error(
+            `${region} answered "${describeS3Error(error, { endpoint })}" when asked to list its buckets, so whether it still lists ${bucketName} cannot be told`,
+            { cause: error },
+          ),
+          { name: 'BucketListError', bucket: bucketName, region },
+        );
+      }
+      if (buckets.some((b) => b.name === bucketName)) return region;
+    }
+    return null;
+  }
+
+  /**
    * Create a new bucket.
    *
    * Outer loop handles two operation-specific conditions that aren't

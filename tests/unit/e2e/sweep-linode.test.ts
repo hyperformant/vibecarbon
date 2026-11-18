@@ -37,9 +37,7 @@ function fakeProvider(
     deleteVolume: vi.fn().mockResolvedValue(true),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
     deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
-    listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(true),
-    listNetworks: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -350,7 +348,33 @@ describe('sweepOrphanedLinodeResources', () => {
     expect(counts.s3Buckets).toBe(1);
   });
 
-  it('a bucket destroy removed seconds earlier reads clean once its cluster has none', async () => {
+  it('a bucket destroy removed seconds earlier reads clean once its cluster has none and a second listing has dropped it', async () => {
+    const locateBucket = vi.fn().mockResolvedValue(null);
+    const storage = fakeStorage({
+      listAllBuckets: vi
+        .fn()
+        .mockResolvedValueOnce([{ name: 'testapp-l1-backups', cluster: 'us-iad-10' }])
+        .mockResolvedValue([]),
+      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
+      locateBucket,
+    });
+    const { counts, enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
+      provider: fakeProvider(),
+      objectStorage: storage,
+      fetchImpl: fakeFetch({}),
+    });
+    expect(locateBucket).toHaveBeenCalledWith('us-iad-10', 'testapp-l1-backups');
+    // Read once to enumerate and once more after the search, never again.
+    expect(storage.listAllBuckets).toHaveBeenCalledTimes(2);
+    expect(enumFailed).toBe(false);
+    expect(counts.s3Buckets).toBe(0);
+  });
+
+  it('the 2026-11-16 leak: no such bucket and no region holds it, but the listing still shows it, so the sweep FAILS and never says gone', async () => {
+    // A new Hetzner bucket answered this way for 20 minutes while it existed
+    // and billed. The listing was the one answer that told the truth.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const locateBucket = vi.fn().mockResolvedValue(null);
     const storage = fakeStorage({
       listAllBuckets: vi
@@ -365,8 +389,16 @@ describe('sweepOrphanedLinodeResources', () => {
       fetchImpl: fakeFetch({}),
     });
     expect(locateBucket).toHaveBeenCalledWith('us-iad-10', 'testapp-l1-backups');
-    expect(enumFailed).toBe(false);
+    const said = (spy: typeof log) => spy.mock.calls.map((c) => String(c[0])).join('\n');
+    const logged = said(log);
+    const warned = said(warn);
+    log.mockRestore();
+    warn.mockRestore();
+    expect(enumFailed).toBe(true);
     expect(counts.s3Buckets).toBe(0);
+    expect(logged).not.toMatch(/already gone/);
+    expect(warned).toMatch(/FAILED testapp-l1-backups: .*listing still shows it/);
+    expect(storage.listAllBuckets).toHaveBeenCalledTimes(2);
   });
 
   it('a NoSuchBucket for a bucket the cluster still holds FAILS the sweep', async () => {

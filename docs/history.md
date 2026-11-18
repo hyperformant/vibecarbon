@@ -1145,11 +1145,59 @@ an early read.
 **Still open:** that bucket was left behind. `destroy` reported it not found
 in any region and the e2e sweep called it already gone, because both asked
 while Hetzner was still answering "no such bucket" for a bucket it listed.
+Closed on 2026-11-17 by the entry "A bucket the provider still lists is never
+reported as gone".
 
 **Do not undo:** keep the reason on the warning. Without it this failure
 cannot be told apart from an outage.
 
 **Guard:** `tests/unit/providers/bucket-sustained-visibility.test.ts`.
+
+#### 2026-11-17: A bucket the provider still lists is never reported as gone
+
+When a bucket's delete answers "no such bucket" and a HeadBucket in every
+region the keys reach finds nothing, `destroy` and the e2e sweeps now read the
+provider's bucket listing once more before they say anything. Only a listing
+that was read and no longer shows the bucket makes it gone. A bucket still
+listed, or a listing that cannot be read, is "cannot tell": `destroy -purge`
+records the app or backups bucket as UNVERIFIED and exits 2, with a hint to
+look in the console in about 15 minutes, and the sweep fails for that bucket.
+The same check guards the "state bucket does not exist" verdict that lets a
+destroy skip a Pulumi stack, and the age-based bucket reaper now fails a
+bucket it listed, skipped as "not at this endpoint" and then deleted nowhere.
+
+**Why:** on 2026-11-16 a Hetzner compose e2e deploy stopped on a new bucket
+that would not answer. For the next 20 minutes that bucket answered
+NoSuchBucket to the delete and 404 to every HeadBucket while ListBuckets on
+the same endpoint still showed it. `destroy` printed "not found in any region
+(already deleted or never created)", the sweep printed "already gone (stale
+listing)", and a billable bucket stayed until it was deleted by hand. This is
+the known Hetzner behaviour after an early read (2026-11-05, longest seen
+894 s), so "no such bucket, and no HeadBucket finds it" is not proof there.
+The listing was the one answer that told the truth.
+
+The check reads once and decides what to say. It does not wait and does not
+try the delete again. Listings lag real deletes too, so it can be wrong the
+other way: measured on 2026-11-17, Hetzner dropped 14 of 15 deleted buckets
+from ListBuckets by the first read after the delete was acknowledged, and the
+last by the next read, under half a second, in all three locations.
+DigitalOcean keeps a deleted bucket listed for 1 to 3 s. The second read comes
+after the failed delete and the whole HeadBucket search, so a sweep that runs
+right behind a clean destroy fails only when a provider's listing lags longer
+than those round trips. Linode, Vultr and Scaleway are not measured.
+
+**Do not undo:** do not go back to treating "no region holds it" as gone, and
+do not add a wait or a second delete to ride out the 15 minutes or the listing
+lag. If a provider's listing lag starts failing clean sweeps, measure it and
+remove the early read. The hint names the console and not a destroy rerun on
+purpose: a bucket line does not keep the environment's entry, so a rerun would
+find nothing to run against.
+
+**Guard:** `tests/unit/destroy/purge-locate-key-scope.test.ts` (the incident
+on all five providers, through each real store class),
+`tests/unit/e2e/bucket-already-gone.test.ts`, the five
+`tests/unit/e2e/sweep-*.test.ts`, `tests/unit/iac/remove-stack-state.test.ts`
+and `tests/unit/e2e/bucket-gone-census.test.ts`.
 
 ## Added and later removed
 
@@ -1194,7 +1242,8 @@ cannot be told apart from an outage.
    shorter than the inner one, a timer that keeps the process alive.
    (#46, #230, #316)
 7. **Destroy claiming or leaking the wrong thing.** Ownership by name
-   substring, locks cleared without proof. (#225, #384, #449, #451)
+   substring, locks cleared without proof, a bucket called gone while the
+   provider still listed it. (#225, #384, #449, #451, 2026-11-17)
 8. **Checks that pass on nothing.** A check satisfied by an error page, a
    guard matching dead code, unit tests reaching real hosts, checks that were
    always skipped. (#226, #352, #439, #457)
@@ -1208,6 +1257,7 @@ cannot be told apart from an outage.
 | DigitalOcean | The API can disagree with itself for a while after a write | A 404 on a just-listed resource is not proof it is gone |
 | DigitalOcean | Its resolver stalls SRV lookups for about 31 s | Package downloads turn SRV lookups off |
 | Hetzner | Reading a new bucket at once starts minutes of random failures | Write first, read later |
+| Hetzner | A bucket can answer "no such bucket" for 15 minutes while its listing shows it | A listed bucket is never reported as gone |
 | Hetzner | An object written seconds ago can read as missing | Retention runs before the backup push |
 | Hetzner | First boot can wait 120 s for the network | A slow network stage there is not project code |
 | Linode | DNS has a 300 s minimum TTL | A failover can take up to five minutes to be seen |

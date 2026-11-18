@@ -188,7 +188,8 @@ describe('lifecycle wiring', () => {
     const stepAt = src.indexOf("name: 'reconverge-deploy'");
     expect(stepAt).toBeGreaterThan(-1);
     const step = src.slice(stepAt);
-    const deployAt = step.indexOf('runDeploy(');
+    // The step deploys through the lifecycle's one deploy helper.
+    const deployAt = step.indexOf('deployScenario(');
     const proveAt = step.indexOf(
       'provesObservabilityAfterReconverge(config.mode, config.features)',
     );

@@ -152,6 +152,7 @@ import {
   getSshKeyPath,
 } from '../utils/ssh.js';
 import { noteHttpEvidence, resetSshReachability } from '../utils/ssh-reachability.js';
+import { stripAnsi } from '../utils/strip-ansi.js';
 import { orphanTotal, sweepProjectOrphans } from '../utils/sweep-provider.js';
 import {
   mutateAppHealthRoute,
@@ -946,6 +947,33 @@ export async function runLifecycle(
     return computeToken;
   };
   const hcloudEnv = hcloudChildEnv(config.provider ?? 'hetzner', computeToken);
+
+  // The one place a lifecycle step runs `vibecarbon deploy`. Every deploy
+  // after the first RE-SEEDS .vibecarbon.json from these settings
+  // (seedDeployEnvConfig), so each of them has to carry all of the scenario's
+  // settings, `provider` above all: once, only the first deploy passed it,
+  // the re-seed dropped it, and a DigitalOcean scenario's redeploy defaulted
+  // to Hetzner and tripped the region guard. Six steps deploy (deploy,
+  // warm-deploy, warm-redeploy-change, restore-deploy, restore,
+  // reconverge-deploy); they differ only in their time budget and in
+  // `restore`. tests/unit/e2e/lifecycle-restore-reseed-provider.test.ts pins
+  // this helper and that no step calls runDeploy around it.
+  const deployScenario = (timeout: number, extra: { restore?: 'latest' } = {}) =>
+    runDeploy(config.envPrefix, {
+      cwd: config.projectDir,
+      timeout,
+      mode: config.mode,
+      domain: config.domain,
+      dnsProvider: config.dnsProvider,
+      serverType: config.serverType,
+      region: config.region,
+      secondaryRegion: config.secondaryRegion,
+      provider: config.provider,
+      // buildEnv synthesizes the provider CLI token env from the resolved provider (see final review B8-3); deploy children must NOT receive DIGITALOCEAN_TOKEN so DO runs prove the customer path.
+      env: hcloudEnv,
+      ...expandedDeployBounds,
+      ...extra,
+    });
   const typeSnapshotProvider = config.provider ?? 'hetzner';
   const typeSnapshotToken = providerTokenFor(typeSnapshotProvider);
 
@@ -2594,23 +2622,9 @@ EOF`;
             // No --direct flag needed — direct is the default for compose
             // deploys (CI/CD is opt-in via `vibecarbon configure`). K8s ignores
             // the flag and uses its 'local' build path either way.
-            const result = await runDeploy(config.envPrefix, {
-              cwd: config.projectDir,
-              timeout: TIMEOUTS.deploy,
-              mode: config.mode,
-              domain: config.domain,
-              dnsProvider: config.dnsProvider,
-              serverType: config.serverType,
-              region: config.region,
-              secondaryRegion: config.secondaryRegion,
-              provider: config.provider,
-              // buildEnv synthesizes the provider CLI token env from the resolved provider (see final review B8-3); deploy children must NOT receive DIGITALOCEAN_TOKEN so DO runs prove the customer path.
-              env: hcloudEnv,
-              ...expandedDeployBounds,
-            });
+            const result = await deployScenario(TIMEOUTS.deploy);
             if (result.exitCode !== 0) {
-              // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-              const stderrClean = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+              const stderrClean = stripAnsi(result.stderr || '').trim();
               // FAIL: line → Error: line (+ perf context) → (failed) perf
               // marker → raw tail. The structured tiers keep the thrown
               // message classifiable (classify-failure.ts) instead of a
@@ -2642,8 +2656,7 @@ EOF`;
             // diagnostics get swallowed even though deploy "succeeded" while the
             // cluster is in fact broken (e.g., HA's ImagePullBackOff cascade where
             // set-image never ran but deploy still exits 0).
-            // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-            const successStderr = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '');
+            const successStderr = stripAnsi(result.stderr || '');
             const diagLines = successStderr
               .split('\n')
               .filter((l: string) => /\[k8s-deploy\]|\[k8s-ha\]|\[deploy\]/.test(l))
@@ -2655,8 +2668,7 @@ EOF`;
 
             // Detect suspiciously fast deploys (real deploys take 60+ seconds)
             if (result.durationMs < 30_000) {
-              // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-              const cleanOutput = (result.stdout || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+              const cleanOutput = stripAnsi(result.stdout || '').trim();
               console.warn(
                 `${tag} WARNING: Deploy completed in ${(result.durationMs / 1000).toFixed(1)}s (suspiciously fast). Full output:\n${cleanOutput.slice(-2000)}`,
               );
@@ -2666,8 +2678,7 @@ EOF`;
             const dnsLines = (result.stdout || '')
               .split('\n')
               .filter((l: string) => /DNS|dns|Floating|floating|domain|configured/i.test(l))
-              // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-              .map((l: string) => l.replace(/\x1b\[[0-9;]*m/g, '').trim())
+              .map((l: string) => stripAnsi(l).trim())
               .filter(Boolean);
             if (dnsLines.length > 0) {
               console.log(`${tag} DNS output: ${dnsLines.join(' | ')}`);
@@ -2816,22 +2827,9 @@ EOF`;
           `vibecarbon deploy ${config.envPrefix} --${config.mode} (warm)`,
           async (stepId) => {
             const deploy = async () => {
-              const result = await runDeploy(config.envPrefix, {
-                cwd: config.projectDir,
-                timeout: TIMEOUTS['warm-deploy'],
-                mode: config.mode,
-                domain: config.domain,
-                dnsProvider: config.dnsProvider,
-                serverType: config.serverType,
-                region: config.region,
-                secondaryRegion: config.secondaryRegion,
-                provider: config.provider,
-                env: hcloudEnv,
-                ...expandedDeployBounds,
-              });
+              const result = await deployScenario(TIMEOUTS['warm-deploy']);
               if (result.exitCode !== 0) {
-                // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-                const stderrClean = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+                const stderrClean = stripAnsi(result.stderr || '').trim();
                 throw new Error(
                   `Warm deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
                 );
@@ -2902,22 +2900,9 @@ EOF`;
             // 2. Redeploy against EXISTING state. Same invocation as
             //    warm-deploy — no -full, no state wipe; the step-skip gates
             //    are exactly what is under test.
-            const result = await runDeploy(config.envPrefix, {
-              cwd: config.projectDir,
-              timeout: TIMEOUTS['warm-redeploy-change'],
-              mode: config.mode,
-              domain: config.domain,
-              dnsProvider: config.dnsProvider,
-              serverType: config.serverType,
-              region: config.region,
-              secondaryRegion: config.secondaryRegion,
-              provider: config.provider,
-              env: hcloudEnv,
-              ...expandedDeployBounds,
-            });
+            const result = await deployScenario(TIMEOUTS['warm-redeploy-change']);
             if (result.exitCode !== 0) {
-              // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-              const stderrClean = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+              const stderrClean = stripAnsi(result.stderr || '').trim();
               throw new Error(
                 `Warm redeploy (with change) exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
               );
@@ -3515,19 +3500,8 @@ EOF`;
           'restore-deploy',
           `vibecarbon deploy ${config.envPrefix} -mode ${config.mode} -restore latest -y`,
           async (stepId) => {
-            const deployResult = await runDeploy(config.envPrefix, {
-              cwd: config.projectDir,
-              timeout: TIMEOUTS['restore-deploy'],
-              mode: config.mode,
-              domain: config.domain,
-              dnsProvider: config.dnsProvider,
-              serverType: config.serverType,
-              region: config.region,
-              secondaryRegion: config.secondaryRegion,
-              provider: config.provider,
+            const deployResult = await deployScenario(TIMEOUTS['restore-deploy'], {
               restore: 'latest',
-              env: hcloudEnv,
-              ...expandedDeployBounds,
             });
             if (deployResult.exitCode !== 0) {
               const detail = extractDeployFailureDetail(deployResult.stdout, deployResult.stderr);
@@ -3575,22 +3549,9 @@ EOF`;
         executeStep('restore', `vibecarbon deploy + restore ${config.envPrefix}`, async () => {
           // Re-deploy fresh infrastructure (same config as the initial deploy).
           // Direct-default applies — no flag needed.
-          const deployResult = await runDeploy(config.envPrefix, {
-            cwd: config.projectDir,
-            timeout: TIMEOUTS.deploy,
-            mode: config.mode,
-            domain: config.domain,
-            dnsProvider: config.dnsProvider,
-            serverType: config.serverType,
-            region: config.region,
-            secondaryRegion: config.secondaryRegion,
-            provider: config.provider,
-            env: hcloudEnv,
-            ...expandedDeployBounds,
-          });
+          const deployResult = await deployScenario(TIMEOUTS.deploy);
           if (deployResult.exitCode !== 0) {
-            // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-            const dStderr = (deployResult.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+            const dStderr = stripAnsi(deployResult.stderr || '').trim();
             // Shared extraction (see extract-failure-detail.ts): FAIL: line →
             // Error: line (+ perf context) → (failed) perf marker → raw tail.
             // The Error: tier is load-bearing here — on 2026-07-08 the perf
@@ -3920,8 +3881,7 @@ EOF`;
               env: hcloudEnv,
             });
             const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-            // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-            const output = combined.replace(/\x1b\[[0-9;]*m/g, '');
+            const output = stripAnsi(combined);
             const results: VerificationResult[] = [
               checkSecondFailoverRefused({
                 exitCode: result.exitCode,
@@ -4036,27 +3996,16 @@ EOF`;
             // The promoted primary keeps serving through the reconverge: its
             // db is never restarted or recreated (primary_not_restarted).
             await assertPrimaryNotRestartedAcross(stepId, async () => {
-              const result = await runDeploy(config.envPrefix, {
-                cwd: config.projectDir,
+              const result = await deployScenario(
                 // This redeploy re-seeds the retired side's postgres from
                 // scratch (full serial pg_basebackup reseed) — not the no-op
                 // convergence check warm-deploy times — so it gets the same
                 // generous budget as the initial cold deploy rather than
                 // warm-deploy's 30-min one.
-                timeout: TIMEOUTS['reconverge-deploy'],
-                mode: config.mode,
-                domain: config.domain,
-                dnsProvider: config.dnsProvider,
-                serverType: config.serverType,
-                region: config.region,
-                secondaryRegion: config.secondaryRegion,
-                provider: config.provider,
-                env: hcloudEnv,
-                ...expandedDeployBounds,
-              });
+                TIMEOUTS['reconverge-deploy'],
+              );
               if (result.exitCode !== 0) {
-                // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-                const stderrClean = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+                const stderrClean = stripAnsi(result.stderr || '').trim();
                 throw new Error(
                   `Reconverge deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
                 );

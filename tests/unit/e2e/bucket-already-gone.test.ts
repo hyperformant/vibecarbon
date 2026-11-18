@@ -13,6 +13,12 @@
  * with `<Code>NoSuchBucket</Code><Message></Message>`. The SDK keeps the code
  * on err.name and words the empty message "UnknownError".
  *
+ * Live veto 3 (hetzner/compose, 2026-11-16), the opposite mistake: a new
+ * bucket answered NoSuchBucket to the delete and 404 to every HeadBucket for
+ * 20 minutes while ListBuckets on the same endpoint still showed it, and the
+ * sweep called it "already gone" and left it billing. So the listing is read
+ * once more after the search, and a bucket it still shows is never gone.
+ *
  * These tests feed the real SDK deserializer the raw bodies captured live,
  * through the product's emptyAndDeleteBucket, so the error under test is the
  * one the sweep actually receives.
@@ -26,6 +32,11 @@ import {
 } from '../../../tests/e2e/utils/bucket-already-gone.js';
 
 const BUCKET = 'citest-k8s-1-abc-backups';
+
+/** The listing, read again after the search, no longer shows the bucket. */
+const dropped = async () => ['someone-elses-bucket'];
+/** The listing, read again after the search, still shows the bucket. */
+const stillListed = async () => ['someone-elses-bucket', BUCKET];
 
 const xmlError = (code: string, message = '') =>
   `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${message}</Message><BucketName>${BUCKET}</BucketName><RequestId>tx0</RequestId><HostId>h</HostId></Error>`;
@@ -97,7 +108,9 @@ describe('classifyBucketDeleteError', () => {
 
     const locate = vi.fn().mockResolvedValue(null);
     expect(saysBucketMissing(err)).toBe(true);
-    expect(await classifyBucketDeleteError(err, locate)).toMatchObject({ gone: true });
+    expect(await classifyBucketDeleteError(err, BUCKET, locate, dropped)).toMatchObject({
+      gone: true,
+    });
     expect(locate).toHaveBeenCalledTimes(1);
   });
 
@@ -105,7 +118,9 @@ describe('classifyBucketDeleteError', () => {
     const err = (await sweepDeleteError(() => ({ status: 404 }))) as Error;
     expect(err.name).toBe('NotFound');
     expect(err.message).toBe('UnknownError');
-    expect(await classifyBucketDeleteError(err, async () => null)).toMatchObject({ gone: true });
+    expect(await classifyBucketDeleteError(err, BUCKET, async () => null, dropped)).toMatchObject({
+      gone: true,
+    });
   });
 
   it('reads a NoSuchBucket that emptyAndDeleteBucket wrapped (its version step) as gone', async () => {
@@ -116,7 +131,9 @@ describe('classifyBucketDeleteError', () => {
     )) as Error;
     // The wrapper keeps only "UnknownError" in its words; the code is on the cause.
     expect(err.message).toMatch(/Failed to list\/delete object versions in .*: UnknownError$/);
-    expect(await classifyBucketDeleteError(err, async () => null)).toMatchObject({ gone: true });
+    expect(await classifyBucketDeleteError(err, BUCKET, async () => null, dropped)).toMatchObject({
+      gone: true,
+    });
   });
 
   it('still reads the worded spellings as missing-bucket answers', async () => {
@@ -126,14 +143,78 @@ describe('classifyBucketDeleteError', () => {
       'The specified bucket does not exist',
     ]) {
       expect(saysBucketMissing(err)).toBe(true);
-      expect(await classifyBucketDeleteError(err, async () => null)).toMatchObject({ gone: true });
+      expect(await classifyBucketDeleteError(err, BUCKET, async () => null, dropped)).toMatchObject(
+        { gone: true },
+      );
     }
+  });
+
+  it('the 2026-11-16 leak: NoSuchBucket, no HeadBucket finds it, and the listing still shows it is NOT gone', async () => {
+    // What Hetzner sent for 20 minutes about a bucket that existed and billed.
+    const err = await sweepDeleteError(() => ({ status: 404, body: EMPTY_NO_SUCH_BUCKET }));
+    const order: string[] = [];
+    const verdict = await classifyBucketDeleteError(
+      err,
+      BUCKET,
+      async () => {
+        order.push('locate');
+        return null;
+      },
+      async () => {
+        order.push('relist');
+        return stillListed();
+      },
+    );
+    expect(verdict.gone).toBe(false);
+    expect(verdict.why).toMatch(/NoSuchBucket/);
+    expect(verdict.why).toMatch(/listing still shows it/);
+    // What to do, in plain words.
+    expect(verdict.why).toMatch(/15 minutes/);
+    expect(verdict.why).toMatch(/provider console/);
+    // The listing is the last word: it is read after the search, once.
+    expect(order).toEqual(['locate', 'relist']);
+  });
+
+  it('a listing that cannot be read again cannot vouch for a missing bucket: a FAILURE', async () => {
+    const err = await sweepDeleteError(() => ({ status: 404, body: EMPTY_NO_SUCH_BUCKET }));
+    const unreadable = await classifyBucketDeleteError(
+      err,
+      BUCKET,
+      async () => null,
+      async () => null,
+    );
+    expect(unreadable.gone).toBe(false);
+    expect(unreadable.why).toMatch(/could not be read again/);
+
+    const threw = await classifyBucketDeleteError(
+      err,
+      BUCKET,
+      async () => null,
+      async () => {
+        throw new Error('connect ETIMEDOUT');
+      },
+    );
+    expect(threw.gone).toBe(false);
+    expect(threw.why).toMatch(/ETIMEDOUT/);
+  });
+
+  it('matches the bucket by its whole name, never by prefix', async () => {
+    const err = await sweepDeleteError(() => ({ status: 404, body: EMPTY_NO_SUCH_BUCKET }));
+    const verdict = await classifyBucketDeleteError(
+      err,
+      BUCKET,
+      async () => null,
+      async () => [`${BUCKET}-2`, `x-${BUCKET}`],
+    );
+    expect(verdict.gone).toBe(true);
   });
 
   it("a missing-bucket answer is one endpoint's: a bucket some region still holds is a FAILURE", async () => {
     // Live 2026-11-15: nyc3 answers NoSuchBucket for a bucket that lives in sfo3.
     const err = await sweepDeleteError(() => ({ status: 404, body: EMPTY_NO_SUCH_BUCKET }));
-    const verdict = await classifyBucketDeleteError(err, async () => 'sfo3');
+    const relist = vi.fn(dropped);
+    const verdict = await classifyBucketDeleteError(err, BUCKET, async () => 'sfo3', relist);
+    expect(relist).not.toHaveBeenCalled();
     expect(verdict.gone).toBe(false);
     expect(verdict.why).toMatch(/sfo3/);
     expect(verdict.why).toMatch(/NoSuchBucket/);
@@ -141,9 +222,14 @@ describe('classifyBucketDeleteError', () => {
 
   it('a missing-bucket answer the search cannot confirm is a FAILURE', async () => {
     const err = await sweepDeleteError(() => ({ status: 404, body: EMPTY_NO_SUCH_BUCKET }));
-    const verdict = await classifyBucketDeleteError(err, async () => {
-      throw new Error('sgp1 answered "no answer from sgp1"');
-    });
+    const verdict = await classifyBucketDeleteError(
+      err,
+      BUCKET,
+      async () => {
+        throw new Error('sgp1 answered "no answer from sgp1"');
+      },
+      dropped,
+    );
     expect(verdict.gone).toBe(false);
     expect(verdict.why).toMatch(/sgp1/);
   });
@@ -153,10 +239,12 @@ describe('classifyBucketDeleteError', () => {
       const err = await sweepDeleteError(() => ({ status: 403, body }));
       const locate = vi.fn().mockResolvedValue(null);
       expect(saysBucketMissing(err)).toBe(false);
-      const verdict = await classifyBucketDeleteError(err, locate);
+      const relist = vi.fn(dropped);
+      const verdict = await classifyBucketDeleteError(err, BUCKET, locate, relist);
       expect(verdict.gone).toBe(false);
       expect(verdict.why).toMatch(/403/);
       expect(locate).not.toHaveBeenCalled();
+      expect(relist).not.toHaveBeenCalled();
     }
   });
 
@@ -173,7 +261,7 @@ describe('classifyBucketDeleteError', () => {
     expect((err as Error).message).toMatch(/Failed to abort multipart uploads/);
     const locate = vi.fn().mockResolvedValue(null);
     expect(saysBucketMissing(err)).toBe(false);
-    expect((await classifyBucketDeleteError(err, locate)).gone).toBe(false);
+    expect((await classifyBucketDeleteError(err, BUCKET, locate, dropped)).gone).toBe(false);
     expect(locate).not.toHaveBeenCalled();
   });
 
@@ -193,14 +281,14 @@ describe('classifyBucketDeleteError', () => {
     ]) {
       const locate = vi.fn().mockResolvedValue(null);
       expect(saysBucketMissing(err)).toBe(false);
-      expect((await classifyBucketDeleteError(err, locate)).gone).toBe(false);
+      expect((await classifyBucketDeleteError(err, BUCKET, locate, dropped)).gone).toBe(false);
       expect(locate).not.toHaveBeenCalled();
     }
   });
 
   it('names the code and the HTTP status in the FAILED reason, not just "UnknownError"', async () => {
     const err = await sweepDeleteError(() => ({ status: 403, body: xmlError('AccessDenied') }));
-    const { why } = await classifyBucketDeleteError(err, async () => null);
+    const { why } = await classifyBucketDeleteError(err, BUCKET, async () => null, dropped);
     expect(why).toMatch(/AccessDenied/);
     expect(why).toMatch(/HTTP 403/);
   });

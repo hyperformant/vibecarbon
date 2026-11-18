@@ -37,7 +37,8 @@
  * the k8s tier, kept now so the family stays uniform.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
-import { classifyBucketDeleteError } from './bucket-already-gone.js';
+import { walkProviderPages } from './provider-pages.js';
+import { bucketSource, createSweep, reportSweep, sweepBuckets } from './sweep-core.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately EMPTY
@@ -66,15 +67,7 @@ interface VultrSweepProvider {
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyByName(name: string): Promise<boolean>;
-  listLoadBalancers(): Promise<Array<{ id: number | string; label: string }>>;
   deleteLoadBalancer(id: number | string): Promise<unknown>;
-  /**
-   * VPCs. `description` is Vultr's identity field for a VPC (as it is for a
-   * firewall group) — accepted alongside `label` so this half still sweeps
-   * if the provider hands back raw API rows rather than normalized ones.
-   * Matching only on `label` would make the whole VPC pass a silent no-op.
-   */
-  listNetworks(): Promise<Array<{ id: number | string; label?: string; description?: string }>>;
 }
 
 interface VultrSweepObjectStorage {
@@ -158,38 +151,17 @@ export async function sweepOrphanedVultrResources(
   projectName: string,
   deps: VultrSweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
-  if (!projectName || projectName.length < 4) {
-    throw new Error(
-      `[sweep] refusing to sweep Vultr with project name ${JSON.stringify(projectName)}`,
-    );
-  }
-  console.log(`${tag} Sweeping orphaned Vultr resources for ${projectName}...`);
-
-  const counts: SweepBreakdown = {
-    servers: 0,
-    volumes: 0,
-    placementGroups: 0, // Vultr has no placement groups
-    firewalls: 0,
-    floatingIps: 0,
-    networks: 0, // VPCs
-    s3Buckets: 0,
-    sshKeys: 0,
-    loadBalancers: 0,
-  };
-  let enumFailed = false;
-  const markIncomplete = (what: string) => {
-    enumFailed = true;
-    console.warn(
-      `${tag} [sweep] ${what} enumeration incomplete — residue past the last readable page cannot be ruled out`,
-    );
-  };
+  // The guard, the opening line, the counts and the incomplete flag
+  // (sweep-core.ts). Vultr has no placement groups; `networks` counts VPCs and `floatingIps` reserved IPs.
+  const sweep = createSweep(tag, 'Vultr', projectName, { loadBalancers: 0 });
+  const { counts, markIncomplete } = sweep;
 
   const token = deps.token ?? process.env.VULTR_API_TOKEN;
   let provider = deps.provider;
   if (!provider) {
     if (!token) {
       markIncomplete('Vultr (no API token)');
-      return { counts, enumFailed };
+      return sweep.result();
     }
     provider = await defaultProvider(token);
   }
@@ -213,7 +185,7 @@ export async function sweepOrphanedVultrResources(
         await provider.deleteServer(instance.id, { waitUntilGone: true });
         counts.servers++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Instance ${instance.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -248,7 +220,7 @@ export async function sweepOrphanedVultrResources(
         await provider.deleteVolume(volume.id);
         counts.volumes++;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Volume ${volume.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -266,31 +238,8 @@ export async function sweepOrphanedVultrResources(
   // Cursor pagination (header note 1): each response carries the next
   // page's opaque cursor at `meta.links.next`, empty string when the walk is
   // done. The ≤20-page guard matches the sibling sweeps.
-  const walkPages = async <T>(
-    path: string,
-    key: string,
-  ): Promise<{ items: T[]; complete: boolean }> => {
-    const items: T[] = [];
-    let cursor = '';
-    for (let guard = 0; guard < 20; guard++) {
-      let data: Record<string, unknown>;
-      try {
-        const url =
-          `${API_BASE}${path}?per_page=100` +
-          (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-        const res = await fetchImpl(url);
-        if (!res.ok) return { items, complete: false };
-        data = (await res.json()) as Record<string, unknown>;
-      } catch {
-        return { items, complete: false };
-      }
-      if (Array.isArray(data[key])) items.push(...(data[key] as T[]));
-      const next = (data.meta as { links?: { next?: string } } | undefined)?.links?.next;
-      if (!next) return { items, complete: true };
-      cursor = next;
-    }
-    return { items, complete: true };
-  };
+  const walkPages = <T>(path: string, key: string) =>
+    walkProviderPages<T>('vultr', `${API_BASE}${path}`, { key, perPage: 100, fetchImpl });
 
   try {
     const { items, complete } = await walkPages<{ id: string; description?: string }>(
@@ -307,7 +256,7 @@ export async function sweepOrphanedVultrResources(
       const { deleted } = await provider.deleteFirewallByName(fw.description);
       if (deleted) counts.firewalls++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] Firewall group ${fw.description} delete failed`);
       }
     }
@@ -344,7 +293,7 @@ export async function sweepOrphanedVultrResources(
       const res = await fetchImpl(`${API_BASE}/reserved-ips/${ip.id}`, { method: 'DELETE' });
       if (res.ok || res.status === 404) counts.floatingIps++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] Reserved IP ${ip.label} delete failed (${res.status})`);
       }
     }
@@ -366,7 +315,7 @@ export async function sweepOrphanedVultrResources(
       console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.name}`);
       if (await provider.deleteSSHKeyByName(sshKey.name)) counts.sshKeys++;
       else {
-        enumFailed = true;
+        sweep.fail();
         console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
       }
     }
@@ -378,29 +327,52 @@ export async function sweepOrphanedVultrResources(
   // 4. Load balancers + VPCs — never provisioned by the compose tier, but
   // enumerated so a future tier's leak can't hide behind a stub (same
   // reasoning as the Linode sweep's listNetworks doc).
+  // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
+  // method answers [] when the API call fails (its contract for destroy), so
+  // an unreadable listing read as "no load balancers" and the class went
+  // unchecked under a clean banner.
   try {
-    const lbs = await provider.listLoadBalancers();
+    const { items: lbs, complete } = await walkPages<{ id: number | string; label: string }>(
+      '/load-balancers',
+      'load_balancers',
+    );
+    if (!complete) markIncomplete('load-balancer list');
     for (const lb of lbs) {
       if (!lb.label.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned load balancer ${lb.id} (${lb.label})`);
       try {
-        await provider.deleteLoadBalancer(lb.id);
+        // deleteLoadBalancer answers true for a 2xx or a 404; false is a refusal.
+        if ((await provider.deleteLoadBalancer(lb.id)) === false) {
+          throw new Error('the API refused the delete');
+        }
         counts.loadBalancers = (counts.loadBalancers ?? 0) + 1;
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] Load balancer ${lb.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
       }
     }
   } catch (e) {
+    markIncomplete('load-balancer list');
     console.warn(
       `${tag} [sweep] Load-balancer cleanup failed: ${e instanceof Error ? e.message : e}`,
     );
   }
 
+  // Listed by this sweep's own walk, not provider.listNetworks(), for the
+  // same reason as the load balancers above: that method answers [] (or a
+  // partial list) when the API call fails.
+  // `description` is Vultr's identity field for a VPC (as it is for a
+  // firewall group); `label` is accepted alongside it. Matching only on
+  // `label` would make the whole VPC pass a silent no-op.
   try {
-    const vpcs = await provider.listNetworks();
+    const { items: vpcs, complete } = await walkPages<{
+      id: number | string;
+      label?: string;
+      description?: string;
+    }>('/vpcs', 'vpcs');
+    if (!complete) markIncomplete('vpc list');
     for (const vpc of vpcs) {
       const vpcName = vpc.label ?? vpc.description ?? '';
       if (!vpcName.startsWith(projectName)) continue;
@@ -409,17 +381,18 @@ export async function sweepOrphanedVultrResources(
         const res = await fetchImpl(`${API_BASE}/vpcs/${vpc.id}`, { method: 'DELETE' });
         if (res.ok || res.status === 404) counts.networks++;
         else {
-          enumFailed = true;
+          sweep.fail();
           console.warn(`${tag} [sweep] VPC ${vpc.id} delete returned ${res.status}`);
         }
       } catch (err) {
-        enumFailed = true;
+        sweep.fail();
         console.warn(
           `${tag} [sweep] VPC ${vpc.id} delete failed: ${err instanceof Error ? err.message : err}`,
         );
       }
     }
   } catch (e) {
+    markIncomplete('vpc list');
     console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
@@ -447,72 +420,26 @@ export async function sweepOrphanedVultrResources(
     }
   }
   if (objectStorage) {
-    let buckets: string[] | null;
-    try {
-      buckets = await objectStorage.listBuckets();
-    } catch {
-      buckets = null;
-    }
-    if (buckets === null) {
-      markIncomplete('Object Storage bucket list');
-    } else {
-      for (const name of buckets) {
-        if (PROTECTED_OBJECT_STORAGE_BUCKETS.has(name)) continue;
-        if (!name.startsWith(projectName)) continue;
-        console.log(
-          `${tag} [sweep] Deleting Object Storage bucket ${name}${cluster ? ` (${cluster})` : ''}`,
-        );
-        try {
-          const { objectsRemoved } = await objectStorage.emptyAndDeleteBucket(name);
-          console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
-          counts.s3Buckets++;
-        } catch (err) {
-          const verdict = await classifyBucketDeleteError(err, () =>
-            objectStorage.locateBucket(name),
-          );
-          if (verdict.gone) {
-            // Stale listing: destroy already removed it. Goal state, not an
-            // enumeration failure — see bucket-already-gone.ts.
-            console.log(`${tag} [sweep]   ${name} already gone (stale listing): ${verdict.why}`);
-          } else {
-            enumFailed = true;
-            console.warn(`${tag} [sweep]   FAILED ${name}: ${verdict.why}`);
-          }
-        }
-      }
-    }
+    await sweepBuckets(
+      sweep,
+      'Object Storage bucket',
+      [bucketSource(objectStorage, cluster, () => markIncomplete('Object Storage bucket list'))],
+      { protectedNames: PROTECTED_OBJECT_STORAGE_BUCKETS },
+    );
   }
 
-  // Regression banner — same grep-stable `[sweep] REGRESSION` marker as the
-  // sibling sweeps; the clean line names the cloud it actually verified.
-  const totalOrphans =
-    counts.servers +
-    counts.volumes +
-    counts.firewalls +
-    (counts.loadBalancers ?? 0) +
-    counts.networks +
-    counts.s3Buckets +
-    counts.sshKeys;
-  if (totalOrphans > 0) {
-    const breakdown = [
-      `instances=${counts.servers}`,
-      `volumes=${counts.volumes}`,
-      `firewalls=${counts.firewalls}`,
-      `load-balancers=${counts.loadBalancers ?? 0}`,
-      `vpcs=${counts.networks}`,
-      `buckets=${counts.s3Buckets}`,
-      `ssh-keys=${counts.sshKeys}`,
-    ].join(', ');
-    console.warn(
-      `${tag} [sweep] REGRESSION: destroy left ${totalOrphans} Vultr orphan resource(s) (${breakdown}). vibecarbon destroy did not free these — fix the corresponding destroy code path.`,
-    );
-  } else if (enumFailed) {
-    console.warn(
-      `${tag} [sweep] REGRESSION: could not enumerate one or more Vultr resource types — orphan check is incomplete, treat as a destroy regression.`,
-    );
-  } else {
-    console.log(`${tag} [sweep] No Vultr orphans found — destroy worked cleanly.`);
-  }
+  // The closing banner (sweep-core.ts). The rows are this cloud's classes
+  // in breakdown order; a class left out here is left out of the total.
+  reportSweep(sweep, [
+    ['instances', 'servers'],
+    ['volumes', 'volumes'],
+    ['firewalls', 'firewalls'],
+    ['reserved-ips', 'floatingIps'],
+    ['load-balancers', 'loadBalancers'],
+    ['vpcs', 'networks'],
+    ['buckets', 's3Buckets'],
+    ['ssh-keys', 'sshKeys'],
+  ]);
 
-  return { counts, enumFailed };
+  return sweep.result();
 }

@@ -11,11 +11,11 @@
  * Usage: tsx tests/e2e/sweep-stale-stacks-ci.ts [--dry-run]
  *   --dry-run lists and decides, and logs `would delete <key>` per key.
  */
-import { existsSync, readFileSync } from 'node:fs';
+
 import { join } from 'node:path';
-import { parseDotenv } from '../../src/lib/dotenv.js';
 import { applyNetworkDefaults } from '../../src/lib/net-defaults.js';
 import { testConfig } from '../config.js';
+import { readE2EEnv } from './utils/e2e-env-file.js';
 import { probeFor } from './utils/stack-probes.ts';
 import { e2eStateStore, ownsStaleScratchProject } from './utils/state-store.ts';
 import { sweepRunStacks } from './utils/sweep-run-stacks.ts';
@@ -27,10 +27,7 @@ const dryRun = process.argv.includes('--dry-run');
 
 // The operator env file fills in only what the real env leaves blank (the
 // same lookup sweep-project.ts uses); CI passes everything through env.
-const envFile = join(import.meta.dirname, '..', '.env.e2e');
-const fileEnv = existsSync(envFile) ? parseDotenv(readFileSync(envFile, 'utf-8')) : {};
-const env: Record<string, string | undefined> = { ...fileEnv };
-for (const [k, v] of Object.entries(process.env)) if (v) env[k] = v;
+const env = readE2EEnv(join(import.meta.dirname, '..', '.env.e2e'));
 
 for (const [provider, entry] of Object.entries(testConfig.e2e.providers)) {
   try {

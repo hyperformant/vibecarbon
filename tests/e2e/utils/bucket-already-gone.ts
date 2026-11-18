@@ -25,10 +25,36 @@
  * of a bodiless 404, and the words, on the error or anything in its `cause`
  * chain (emptyAndDeleteBucket wraps its version and multipart steps). And
  * it is never trusted alone: it is one endpoint's answer, and DO's nyc3 says
- * NoSuchBucket for a bucket that lives in sfo3 (probed 2026-11-15). The
- * bucket counts as gone only when `locate` (the store's locateBucket: a
- * HeadBucket in every region the keys can address) finds it nowhere, the
- * same proof destroy's atBucketRegion asks for.
+ * NoSuchBucket for a bucket that lives in sfo3 (probed 2026-11-15). So
+ * `locate` (the store's locateBucket: a HeadBucket in every region the keys
+ * can address) must find it nowhere, the same search destroy's
+ * atBucketRegion makes.
+ *
+ * Live veto 3 (hetzner/compose, 2026-11-16), the opposite mistake: a deploy
+ * died on a new bucket that would not answer, and for the next 20 minutes
+ * that bucket answered NoSuchBucket to the delete and 404 to every HeadBucket
+ * while ListBuckets on the same endpoint still showed it. Destroy and this
+ * sweep both called it gone and left a billable bucket behind. A HEAD or
+ * LIST in a Hetzner bucket's first second does this for up to 15 minutes
+ * (bucketQuietMs in src/lib/providers/hetzner-s3.js), so "NoSuchBucket, and
+ * no HeadBucket finds it" is not proof.
+ *
+ * The rule since then: a bucket the provider's own listing still shows is
+ * never reported as gone. After the search, `relist` reads the listing once
+ * more. Only a listing that was read and no longer shows the bucket makes it
+ * gone. One that still shows it, or cannot be read, is "cannot tell", and
+ * the sweep fails for that bucket.
+ *
+ * What that costs: listings lag real deletes too. Hetzner dropped 14 of 15
+ * deleted buckets from ListBuckets by the first read after the delete was
+ * acknowledged and the last by the second, under half a second (measured
+ * 2026-11-17, all three locations); DigitalOcean keeps one for 1 to 3 s. The
+ * second read comes after the failed delete and the whole HeadBucket search,
+ * so it is later than the first by at least those round trips. A provider
+ * whose listing lags longer than that still fails a sweep whose destroy was
+ * clean. That is the side to be wrong on: a rerun clears it, and a leaked
+ * bucket bills until someone finds it. Nothing here waits or asks twice to
+ * ride the lag out.
  *
  * Deliberately narrow: a 403, a network error, an object-level 404
  * (NoSuchKey, NoSuchUpload) or a search that cannot tell keeps failing the
@@ -37,6 +63,12 @@
 
 /** The store's locateBucket: the region holding the bucket, or null when none does. */
 export type LocateBucket = () => Promise<string | null>;
+
+/**
+ * A fresh read of the listing the sweep enumerated from, taken when called:
+ * the bucket names it shows now, or null when it cannot be read.
+ */
+export type RelistBuckets = () => Promise<string[] | null>;
 
 export type BucketDeleteVerdict = { gone: true; why: string } | { gone: false; why: string };
 
@@ -99,11 +131,15 @@ export function describeBucketError(err: unknown): string {
 
 /**
  * The sweep's verdict on a failed bucket delete: gone only when the store
- * says the bucket does not exist AND no region these keys reach holds it.
+ * says the bucket does not exist, no region these keys reach holds it, AND a
+ * listing read after that search no longer shows it. The order is the point:
+ * `relist` runs last, so it is the latest word on the bucket.
  */
 export async function classifyBucketDeleteError(
   err: unknown,
+  bucket: string,
   locate: LocateBucket,
+  relist: RelistBuckets,
 ): Promise<BucketDeleteVerdict> {
   const said = describeBucketError(err);
   if (!saysBucketMissing(err)) return { gone: false, why: said };
@@ -119,5 +155,25 @@ export async function classifyBucketDeleteError(
   if (found !== null) {
     return { gone: false, why: `${said}, but a HeadBucket finds it in ${found}` };
   }
-  return { gone: true, why: `${said}, and no region holds it` };
+  let listed: string[] | null;
+  let listProblem = '';
+  try {
+    listed = await relist();
+  } catch (listErr) {
+    listed = null;
+    listProblem = `: ${describeBucketError(listErr)}`;
+  }
+  if (listed === null) {
+    return {
+      gone: false,
+      why: `${said}, and no HeadBucket finds it, but the bucket listing could not be read again${listProblem}, so whether it is gone cannot be told`,
+    };
+  }
+  if (listed.includes(bucket)) {
+    return {
+      gone: false,
+      why: `${said}, and no HeadBucket finds it, but the bucket listing still shows it: it may be a live bucket that is not answering yet (on Hetzner, up to about 15 minutes), so it is not counted as gone. Sweep again in about 15 minutes, or delete it in the provider console`,
+    };
+  }
+  return { gone: true, why: `${said}, no region holds it, and the listing no longer shows it` };
 }

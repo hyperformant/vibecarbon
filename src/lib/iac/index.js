@@ -2108,6 +2108,13 @@ async function stackConfirmedAbsent(err, options) {
  * Scaleway; the one cluster Vultr and Linode keys work on) and only returns
  * null when each one answered "not found"; any other answer (or no answer)
  * keeps the original error.
+ *
+ * And a bucket the provider's own listing still shows is never missing
+ * (bucketListedIn, read after the search): a new Hetzner bucket can answer
+ * NoSuchBucket and 404 to every HeadBucket for up to 15 minutes while it
+ * exists (2026-11-16, bucketQuietMs in hetzner-s3.js). Such a bucket, or a
+ * listing that cannot be read, keeps the original error too, so the stack
+ * stays UNVERIFIED and the environment's entry stays for a rerun.
  * @param {Error} err
  * @param {{provider?: string, s3Config?: {stateBucket?: string, bucket?: string, accessKey?: string, secretKey?: string, stateBucketRegion?: string, region?: string}}} options
  * @returns {Promise<boolean>}
@@ -2125,7 +2132,8 @@ async function stateBucketConfirmedMissing(err, options) {
       s3.secretKey,
       s3.stateBucketRegion || s3.region,
     );
-    return (await store.locateBucket(bucket)) === null;
+    if ((await store.locateBucket(bucket)) !== null) return false;
+    return (await store.bucketListedIn(bucket)) === null;
   } catch {
     return false;
   }

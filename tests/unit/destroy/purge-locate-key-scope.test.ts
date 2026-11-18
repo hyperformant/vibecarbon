@@ -12,15 +12,33 @@
  * search. Where the keys reach every region (Hetzner, DigitalOcean,
  * Scaleway) every region is asked, and any answer but not found still
  * fails closed.
+ *
+ * And "not found" needs one more witness: the provider's own bucket listing,
+ * read after the search (bucketListedIn). On 2026-11-16 a new Hetzner bucket
+ * answered NoSuchBucket to the delete and 404 to every HeadBucket for 20
+ * minutes while ListBuckets on the same endpoint still showed it. Destroy
+ * said "not found in any region (already deleted or never created)", exited
+ * 0, and left a billable bucket. A bucket the listing still shows is now
+ * UNVERIFIED and exit 2, on every provider.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
 
-/** Which host holds nothing (404) and what every other host answers. */
+/**
+ * Which host answers 403 to everything, and what each host's ListBuckets
+ * shows. No host holds any bucket: every bucket command says NoSuchBucket
+ * and every HeadBucket says NotFound, whatever the listings show.
+ */
 const world = vi.hoisted(() => ({
   elsewhere: 'missing' as 'missing' | 'forbidden',
   forbiddenHost: '' as string,
   asked: [] as string[],
+  /** host -> the bucket names its ListBuckets shows (none when absent). */
+  listed: {} as Record<string, string[]>,
+  /** A host whose ListBuckets answers 403 while its bucket commands still answer. */
+  listingRefusedHost: '' as string,
+  /** Every request in order, as `Command@host`. */
+  sent: [] as string[],
 }));
 
 const notFound = (name: string) =>
@@ -41,7 +59,12 @@ vi.mock('@aws-sdk/client-s3', async (orig) => {
     }
     async send(command: { constructor: { name: string } }) {
       world.asked.push(this.host);
+      world.sent.push(`${command.constructor.name}@${this.host}`);
       if (world.forbiddenHost && this.host === world.forbiddenHost) throw forbidden();
+      if (command.constructor.name === 'ListBucketsCommand') {
+        if (world.listingRefusedHost === this.host) throw forbidden();
+        return { Buckets: (world.listed[this.host] ?? []).map((Name) => ({ Name })) };
+      }
       // No bucket anywhere: a bucket command says NoSuchBucket, a HEAD says NotFound.
       throw notFound(
         command.constructor.name === 'HeadBucketCommand' ? 'NotFound' : 'NoSuchBucket',
@@ -143,6 +166,9 @@ async function purge(provider: string, region: string) {
 beforeEach(() => {
   world.asked = [];
   world.forbiddenHost = '';
+  world.listed = {};
+  world.listingRefusedHost = '';
+  world.sent = [];
 });
 
 describe.each(CASES)(
@@ -179,6 +205,104 @@ describe.each(CASES)(
         expect(results.leaks.exitCode()).toBe(2);
         expect(results.appBucketPurged).toBeUndefined();
         expect(results.backupsPurged).toBeUndefined();
+      });
+    }
+  },
+);
+
+describe.each(CASES)(
+  '-purge of a bucket $provider still lists while it answers NoSuchBucket (the 2026-11-16 leak)',
+  ({ provider, region, scope }) => {
+    const unverified = (results: { leaks: ReturnType<typeof createLeakLedger> }) =>
+      results.leaks.entries.filter((e) => e.severity === 'unverified');
+
+    it('records each bucket as UNVERIFIED and exits 2, never "not found"', async () => {
+      const { own } = await hostsOf(provider, region);
+      world.listed = { [own]: [APP, BACKUPS, 'someone-elses-bucket'] };
+      const { results, stops } = await purge(provider, region);
+
+      expect(stops.some((m) => /not found/.test(m))).toBe(false);
+      expect(stops.some((m) => m.startsWith(`stop:S3 bucket not confirmed gone: ${APP} `))).toBe(
+        true,
+      );
+      expect(
+        stops.some((m) => m.startsWith(`stop:Backup bucket not confirmed gone: ${BACKUPS} `)),
+      ).toBe(true);
+
+      const lines = unverified(results);
+      expect(lines.map((e) => e.resourceClass)).toEqual(['bucket', 'bucket']);
+      // Each line names its bucket, says why, and says what to do.
+      for (const [line, bucket] of [
+        [lines[0], APP],
+        [lines[1], BACKUPS],
+      ] as const) {
+        expect(line.resource).toContain(bucket);
+        expect(line.reason).toContain(`${bucket} answered NoSuchBucket`);
+        expect(line.reason).toMatch(/the bucket listing in \S+ still shows it/);
+        expect(line.hint).toContain(bucket);
+        expect(line.hint).toMatch(/in about 15 minutes/);
+        expect(line.hint).toMatch(/the provider Object Storage console/);
+        // A bucket line does not keep the entry, so a rerun finds nothing.
+        expect(line.hint).not.toMatch(/vibecarbon destroy/);
+      }
+      expect(results.leaks.counts().leak).toBe(0);
+      expect(results.leaks.exitCode()).toBe(2);
+      // Nothing was deleted and nothing is known gone: no record says purged.
+      expect(results.appBucketPurged).toBeUndefined();
+      expect(results.backupsPurged).toBeUndefined();
+    });
+
+    it('reads the listing after the HeadBucket search, once per region, and never tries the delete again', async () => {
+      const { own, addressable } = await hostsOf(provider, region);
+      world.listed = { [own]: [APP] };
+      const ctx = await purge(provider, region);
+      expect(unverified(ctx.results).map((e) => e.resource)).toEqual([
+        expect.stringContaining(APP),
+      ]);
+
+      // The app bucket's requests are the ones before the backups purge starts.
+      const appRun = world.sent.slice(0, world.sent.indexOf(`ListObjectsV2Command@${own}`, 1));
+      const kinds = appRun.map((c) => c.split('@')[0]);
+      const lastHead = kinds.lastIndexOf('HeadBucketCommand');
+      const firstList = kinds.indexOf('ListBucketsCommand');
+      expect(lastHead).toBeGreaterThan(-1);
+      expect(firstList).toBeGreaterThan(lastHead);
+      // One delete attempt (it fails at its first request), one search, and
+      // the listing read until the bucket shows: no second try, no wait.
+      expect(kinds.filter((k) => k === 'ListObjectsV2Command')).toHaveLength(1);
+      expect(kinds.filter((k) => k === 'HeadBucketCommand')).toHaveLength(addressable.length);
+      expect(kinds.filter((k) => k === 'ListBucketsCommand').length).toBeLessThanOrEqual(
+        addressable.length,
+      );
+    });
+
+    it('a listing that cannot be read cannot vouch for it either: UNVERIFIED, exit 2', async () => {
+      const { own } = await hostsOf(provider, region);
+      world.listingRefusedHost = own;
+      const { results, stops } = await purge(provider, region);
+
+      expect(stops.some((m) => /not found/.test(m))).toBe(false);
+      expect(unverified(results)).toHaveLength(2);
+      expect(unverified(results)[0].reason).toMatch(/when asked to list its buckets/);
+      expect(results.leaks.exitCode()).toBe(2);
+      expect(results.backupsPurged).toBeUndefined();
+    });
+
+    if (scope === 'all') {
+      it('a listing in another region these keys reach counts too', async () => {
+        const { others } = await hostsOf(provider, region);
+        world.listed = { [others[0]]: [APP] };
+        const { results, stops } = await purge(provider, region);
+
+        expect(stops.some((m) => m.startsWith(`stop:S3 bucket not confirmed gone: ${APP} `))).toBe(
+          true,
+        );
+        // The backups bucket is listed nowhere: still "not found", as before.
+        expect(stops).toContain(
+          'stop:Backup bucket not found in any region (already deleted or never created)',
+        );
+        expect(unverified(results)).toHaveLength(1);
+        expect(results.leaks.exitCode()).toBe(2);
       });
     }
   },

@@ -12,15 +12,18 @@
  *
  * The opposite mistake is worse. A "no such bucket" is one endpoint's answer
  * (DO's nyc3 says it for a bucket that lives in sfo3, probed 2026-11-15), so
- * reading it as gone without asking every region can hide a real leak.
+ * reading it as gone without asking every region can hide a real leak. And
+ * asking every region is not enough either: on 2026-11-16 a new Hetzner
+ * bucket answered NoSuchBucket to the delete and 404 to every HeadBucket for
+ * 20 minutes while ListBuckets still showed it, and it was left billing.
  *
  * So the rule, enforced here for every call site:
  *  (a) a catch around `.emptyAndDeleteBucket(` in src/, scripts/ or
  *      tests/e2e/ decides "already gone" through classifyBucketDeleteError
  *      (tests/e2e/utils/bucket-already-gone.ts), which reads the code and
  *      the HTTP status, not just the words, and counts the bucket gone only
- *      when locateBucket finds it in no region; or it is listed below with
- *      a reason;
+ *      when locateBucket finds it in no region and a listing read after that
+ *      no longer shows it; or it is listed below with a reason;
  *  (b) no source line decides a bucket is missing by matching an error's
  *      TEXT against a missing-bucket spelling, except the listed sites whose
  *      input is text by nature (another program's output).
@@ -46,7 +49,8 @@ const CALL_SITE_EXCEPTIONS: Array<{ file: string; call: string; reason: string }
     call: 'return store.emptyAndDeleteBucket(bucketName);',
     reason:
       "The backups purge's op inside atBucketRegion, whose isNoSuchBucket reads name, Code and " +
-      'HTTP 404, then asks locateBucket before it says gone.',
+      'HTTP 404, then asks locateBucket and then bucketListedIn before it says gone ' +
+      '(behaviour: tests/unit/destroy/purge-locate-key-scope.test.ts).',
   },
   {
     file: 'src/destroy.js',
@@ -66,7 +70,17 @@ const CALL_SITE_EXCEPTIONS: Array<{ file: string; call: string; reason: string }
     reason:
       'The age-based reaper reads err.name (isWrongEndpointError), never the words, and only ' +
       'skips the bucket for this region; it claims nothing clean, and it walks every region, ' +
-      "so the bucket's own region deletes a real one.",
+      "so the bucket's own region deletes a real one. A bucket it skipped that no region then " +
+      'deleted fails the sweep (listedButDeletedNowhere).',
+  },
+  {
+    file: 'scripts/sweep-hetzner.js',
+    call: 'const result = await store.emptyAndDeleteBucket(name);',
+    reason:
+      'The CI safety-net script decides nothing about a missing bucket: every error from the ' +
+      'delete, that one included, is recorded as a gap (sweepS3Buckets), and a gap fails the ' +
+      "script's verdict (sweepVerdict), so it can never read clean " +
+      '(behaviour: tests/unit/scripts/sweep-hetzner-buckets.test.ts).',
   },
 ];
 
@@ -175,9 +189,18 @@ function textMatchSites(): Array<{ file: string; line: number; body: string }> {
 
 describe('bucket-already-gone census', () => {
   it('finds the call sites it is meant to police (the walk itself works)', () => {
+    // The five sweeps share one bucket pass, sweepBuckets in sweep-core.ts:
+    // its catch is the site rule (a) polices for all of them. Each sweep
+    // file must still route its buckets through it, or its buckets would be
+    // deleted somewhere this walk does not look. (Until 2026-11-17 each
+    // sweep carried its own copy of the loop and was a site itself.)
     const files = new Set(callSites().map((s) => s.file));
+    expect(files).toContain('tests/e2e/utils/sweep-core.ts');
     for (const sweep of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
-      expect(files).toContain(`tests/e2e/utils/sweep-${sweep}.ts`);
+      const source = readFileSync(join(ROOT, `tests/e2e/utils/sweep-${sweep}.ts`), 'utf-8');
+      expect(source, `sweep-${sweep}.ts no longer calls sweepBuckets`).toMatch(
+        /\bawait sweepBuckets\(/,
+      );
     }
   });
 
@@ -186,18 +209,19 @@ describe('bucket-already-gone census', () => {
       .filter((site) => !isExcepted(site))
       .filter(
         (site) =>
-          !/await\s+classifyBucketDeleteError\(\s*\w+\s*,\s*\(\)\s*=>\s*[\w.]+\.locateBucket\(/.test(
+          !/await\s+classifyBucketDeleteError\(\s*\w+\s*,\s*name\s*,\s*\(\)\s*=>\s*[\w.]+\.locateBucket\([^\n]*\n\s*(?:async )?\(\)\s*=>\s*(?:\(await )?[\w.]+\.list(?:All)?Buckets\(/.test(
             site.catchBody,
           ),
       )
       .map((s) => `${s.file}:${s.line}  ${s.call}`);
     expect(
       offenders,
-      'Route this catch through `await classifyBucketDeleteError(err, () => store.locateBucket(...))` ' +
+      'Route this catch through `await classifyBucketDeleteError(err, name, () => ' +
+        'store.locateBucket(...), () => store.listBuckets())` ' +
         '(tests/e2e/utils/bucket-already-gone.ts). It reads the S3 code and the HTTP status, not just ' +
         'the words (an empty message reaches you as "UnknownError"), and it counts a bucket gone only ' +
-        'when no region holds it. If this site truly needs no classifier, add it to ' +
-        'CALL_SITE_EXCEPTIONS with a reason.',
+        'when no region holds it and the listing, read again, no longer shows it. If this site ' +
+        'truly needs no classifier, add it to CALL_SITE_EXCEPTIONS with a reason.',
     ).toEqual([]);
   });
 
@@ -228,10 +252,10 @@ describe('bucket-already-gone census', () => {
     expect([...stale, ...staleText]).toEqual([]);
   });
 
-  it('the classifier needs the locate search: its signature takes one', () => {
+  it('the classifier needs the locate search and the second listing: its signature takes both', () => {
     const helper = readFileSync(join(ROOT, 'tests/e2e/utils/bucket-already-gone.ts'), 'utf-8');
     expect(helper).toMatch(
-      /export async function classifyBucketDeleteError\(\s*err: unknown,\s*locate:/,
+      /export async function classifyBucketDeleteError\(\s*err: unknown,\s*bucket: string,\s*locate: LocateBucket,\s*relist: RelistBuckets,/,
     );
     expect(helper).toMatch(/httpStatusCode/);
   });

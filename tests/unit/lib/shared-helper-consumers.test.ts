@@ -72,6 +72,23 @@ const REGISTRY = [
     helper: 'classifyBucketDeleteError',
     definition: 'tests/e2e/utils/bucket-already-gone.ts',
     consumers: [
+      // The one bucket pass all five sweeps run (the row below): its catch
+      // is where a failed bucket delete is decided.
+      'tests/e2e/utils/sweep-core.ts',
+    ],
+    deepTests: [
+      'tests/unit/e2e/bucket-already-gone.test.ts',
+      'tests/unit/e2e/bucket-gone-census.test.ts',
+    ],
+  },
+  {
+    // The bucket pass itself. Each sweep used to carry its own copy of the
+    // loop and of the catch above, and the copies had drifted (the Hetzner
+    // one logged every delete error and never failed the sweep). A sweep
+    // that stops calling this has grown its own loop again.
+    helper: 'sweepBuckets',
+    definition: 'tests/e2e/utils/sweep-core.ts',
+    consumers: [
       'tests/e2e/utils/sweep-hetzner.ts', // Object Storage bucket delete
       'tests/e2e/utils/sweep-digitalocean.ts', // Spaces bucket delete
       'tests/e2e/utils/sweep-vultr.ts', // Object Storage bucket delete
@@ -79,9 +96,28 @@ const REGISTRY = [
       'tests/e2e/utils/sweep-scaleway.ts', // Object Storage bucket delete
     ],
     deepTests: [
-      'tests/unit/e2e/bucket-already-gone.test.ts',
+      'tests/unit/e2e/sweep-hetzner.test.ts',
       'tests/unit/e2e/bucket-gone-census.test.ts',
     ],
+  },
+  {
+    // One page walker for the harness, in each provider's pagination
+    // dialect, that never says `complete` unless the provider said there is
+    // no next page. The sweeps, preflight and verify-scale each had their
+    // own loops, and three of the sweeps' called a listing that ran out of
+    // page budget complete. The pagination tripwire
+    // (list-endpoint-pagination-sweep.test.ts) recognises a call to it.
+    helper: 'walkProviderPages',
+    definition: 'tests/e2e/utils/provider-pages.ts',
+    consumers: [
+      'tests/e2e/utils/preflight.ts', // project-clean checks
+      'tests/e2e/utils/sweep-digitalocean.ts', // firewalls, keys, load balancers, VPCs, reserved IPs, tags
+      'tests/e2e/utils/sweep-linode.ts', // the same, and the bucket listing
+      'tests/e2e/utils/sweep-vultr.ts', // cursor walks
+      'tests/e2e/utils/sweep-scaleway.ts', // per-zone and page_size walks
+      'tests/e2e/utils/server-types.ts', // verify-scale's server-type snapshot
+    ],
+    deepTests: ['tests/unit/e2e/provider-pages.test.ts', 'tests/unit/e2e/sweep-page-guard.test.ts'],
   },
   {
     helper: 'e2eCliEnv',

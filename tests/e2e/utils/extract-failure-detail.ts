@@ -18,8 +18,7 @@
  * tagged a retryable infra failure as [unknown].
  */
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
+import { stripAnsi } from './strip-ansi.js';
 
 function lastMatchingLine(s: string, test: (line: string) => boolean): string | null {
   const lines = s
@@ -53,8 +52,8 @@ function lastAcmeUrnSnippet(s: string): string | null {
 }
 
 export function extractDeployFailureDetail(stdout?: string, stderr?: string): string {
-  const out = (stdout || '').replace(ANSI_RE, '').trim();
-  const err = (stderr || '').replace(ANSI_RE, '').trim();
+  const out = stripAnsi(stdout || '').trim();
+  const err = stripAnsi(stderr || '').trim();
 
   const failLine = lastMatchingLine(out, isFailLine) || lastMatchingLine(err, isFailLine);
   if (failLine) return failLine;
