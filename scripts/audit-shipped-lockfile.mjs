@@ -21,16 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 /** @type {Array<{ advisory: string, package: string, newestRelease: string, added: string }>} */
-export const NO_FIX_YET = [
-  // ReDoS in extglob matching. Reaches the template through vite, vitest and
-  // @scalar/api-reference; every published picomatch is in range.
-  {
-    advisory: 'GHSA-fc5q-39xc-vjpf',
-    package: 'picomatch',
-    newestRelease: '4.0.7',
-    added: '2026-11-17',
-  },
-];
+export const NO_FIX_YET = [];
 
 const BLOCKING = new Set(['high', 'critical']);
 
