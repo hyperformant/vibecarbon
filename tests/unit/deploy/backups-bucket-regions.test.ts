@@ -16,10 +16,9 @@
  * `<project>-<salt>-<region>-backups` (src/lib/backups-bucket.js), and an
  * environment that already has a record keeps it.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const s3 = await vi.hoisted(async () =>
@@ -290,7 +289,7 @@ describe('a second storage region never moves another bucket region', () => {
   // deploy staged, whether it reached the plan or died first.
   let scratch = '';
   beforeEach(() => {
-    scratch = mkdtempSync(join(tmpdir(), 'vc-backups-regions-'));
+    scratch = createTempDir('vc-backups-regions-');
     vi.spyOn(process, 'cwd').mockReturnValue(scratch);
     s3.reset();
     run.ctx = null;

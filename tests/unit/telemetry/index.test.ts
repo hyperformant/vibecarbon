@@ -1,26 +1,22 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   recordCommandStart,
   reportCrash,
   settlePendingTelemetry,
 } from '../../../src/lib/telemetry/index.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let stateDir: string;
 let cwd: string;
 const fetchImpl = vi.fn();
 
 beforeEach(() => {
-  stateDir = mkdtempSync(join(tmpdir(), 'vc-t-state-'));
-  cwd = mkdtempSync(join(tmpdir(), 'vc-t-proj-'));
+  stateDir = createTempDir('vc-t-state-');
+  cwd = createTempDir('vc-t-proj-');
   fetchImpl.mockReset();
   fetchImpl.mockResolvedValue(new Response(null, { status: 204 }));
-});
-afterEach(() => {
-  rmSync(stateDir, { recursive: true, force: true });
-  rmSync(cwd, { recursive: true, force: true });
 });
 
 const manifest = {

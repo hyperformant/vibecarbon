@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -8,6 +7,7 @@ import {
   scanContent,
   scanTree,
 } from '../../../src/lib/secret-scan.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('secret-scan', () => {
   describe('AWS', () => {
@@ -404,11 +404,7 @@ describe('secret-scan', () => {
     let dir: string;
 
     beforeEach(() => {
-      dir = mkdtempSync(join(tmpdir(), 'vibecarbon-secret-scan-'));
-    });
-
-    afterEach(() => {
-      rmSync(dir, { recursive: true, force: true });
+      dir = createTempDir('vibecarbon-secret-scan-');
     });
 
     it('skips local-only env files when there is no .git directory', () => {
@@ -445,11 +441,10 @@ describe('secret-scan', () => {
     let dir: string;
 
     beforeEach(() => {
-      dir = mkdtempSync(join(tmpdir(), 'vibecarbon-secret-refuse-'));
+      dir = createTempDir('vibecarbon-secret-refuse-');
     });
 
     afterEach(() => {
-      rmSync(dir, { recursive: true, force: true });
       vi.restoreAllMocks();
     });
 

@@ -15,16 +15,15 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
-  rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { REMOTE_SCRIPT } from '../../../src/lib/deploy/layer-delta.js';
 import { TARGET_PLATFORM } from '../../../src/lib/deploy/platform.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const sha = (b: string | Buffer) => createHash('sha256').update(b).digest('hex');
 const BODIES = ['base-0', 'base-1', 'base-2', 'app-3', 'app-4'];
@@ -219,14 +218,13 @@ const loaded = () => {
 };
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'vc-layer-delta-remote-'));
+  root = createTempDir('vc-layer-delta-remote-');
   stub = join(root, 'stub');
   deltaRoot = join(root, 'delta-root');
   mkdirSync(stub);
   writeStub('docker', DOCKER_STUB);
   writeStub('ctr', CTR_STUB);
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
   describe('docker target', () => {

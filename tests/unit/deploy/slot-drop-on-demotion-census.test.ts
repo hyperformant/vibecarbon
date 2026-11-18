@@ -24,14 +24,14 @@
  * balancing scanner (tests/unit/helpers/js-call-scan.ts), so a call whose
  * arguments span lines is read whole; a line-based grep missed those.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { demoteComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
 import { DROP_INACTIVE_SLOTS_SQL } from '../../../src/lib/deploy/replication-slot.js';
 import { demoteK8sWalgRole } from '../../../src/lib/deploy/walg-role.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import {
   type CallSite,
@@ -488,7 +488,7 @@ describe('census: every standby role write is a demotion that drops slots', () =
 describe('census bites', () => {
   /** A temp repo: an empty src/, tests/e2e/ and carbon/, plus `files`. */
   const fixture = (files: Record<string, string>): string => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-slot-census-'));
+    const dir = createTempDir('vc-slot-census-');
     for (const d of ['src', 'tests/e2e', 'carbon']) mkdirSync(join(dir, d), { recursive: true });
     for (const [f, text] of Object.entries(files)) {
       mkdirSync(dirname(join(dir, f)), { recursive: true });

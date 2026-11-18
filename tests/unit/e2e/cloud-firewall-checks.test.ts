@@ -7,10 +7,10 @@
  * (role-labeled `name` + separate `providerServerName`) and compose-ha
  * (already-real `name`) persisted shapes.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   checkServerFirewall,
   extractAttachedServerIds,
@@ -169,10 +169,7 @@ describe('resolveComposeFirewallServers', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'fw-resolve-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('fw-resolve-');
   });
 
   const write = (obj: unknown) =>

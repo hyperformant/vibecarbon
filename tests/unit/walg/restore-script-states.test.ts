@@ -22,21 +22,20 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /** The database lineage (system identifier) whose folder holds the backup. */
 const LINEAGE = '7699032860122738725';
@@ -173,17 +172,13 @@ const ls = (p = pgdata) => readdirSync(p).sort();
 const read = (rel: string) => readFileSync(join(pgdata, rel), 'utf-8').trim();
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-restore-states-'));
+  dir = createTempDir('vc-restore-states-');
   pgdata = join(dir, 'data');
   bin = join(dir, 'bin');
   mkdirSync(pgdata);
   mkdirSync(bin);
   writeFileSync(join(bin, 'chown'), '#!/bin/sh\nexit 0\n');
   chmodSync(join(bin, 'chown'), 0o755);
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 for (const [tier, build] of TIERS) {

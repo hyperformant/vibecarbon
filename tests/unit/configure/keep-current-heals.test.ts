@@ -8,8 +8,7 @@
  * overwrite=yes, Enter on the password, fixture values for the rest. Real
  * project.js, real dotenv module, real files in a temp dir. Fixture values only.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
@@ -39,6 +38,7 @@ vi.mock('../../../src/lib/cli/progress.js', () => ({
 }));
 
 import * as configure from '../../../src/configure.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const LEGACY_LOCAL = "SMTP_HOST=smtp.resend.com\nSMTP_PASS='pa'\\''ss'\n";
 
@@ -46,7 +46,7 @@ describe('configure keep-current on a legacy-quoted .env.local', () => {
   let cwd: string;
   let previousCwd: string;
   beforeEach(() => {
-    cwd = mkdtempSync(join(tmpdir(), 'vc-keep-current-'));
+    cwd = createTempDir('vc-keep-current-');
     writeFileSync(join(cwd, '.env'), 'SMTP_HOST=smtp.resend.com\n');
     writeFileSync(join(cwd, '.env.local'), LEGACY_LOCAL);
     previousCwd = process.cwd();
@@ -59,7 +59,6 @@ describe('configure keep-current on a legacy-quoted .env.local', () => {
   });
   afterEach(() => {
     process.chdir(previousCwd);
-    rmSync(cwd, { recursive: true, force: true });
   });
 
   it('Enter on the existing password writes the decoded value back, not the truncated read', async () => {

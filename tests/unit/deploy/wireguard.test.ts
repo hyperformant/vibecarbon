@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -21,6 +20,7 @@ import {
 } from '../../../src/lib/deploy/wireguard.js';
 import * as ssh from '../../../src/lib/ssh.js';
 import { assertSshRunArgv } from '../../_shared/ssh-contract.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const KEY = '/etc/wireguard/vibecarbon-wg0.key';
 const OLD_KEY = '/etc/vibecarbon-wg.key';
@@ -229,7 +229,7 @@ describe('exchangeAndBringUpTunnel', () => {
 
     /** Runs the key step against scratch files standing in for the two paths. */
     function runKeyStep(script: string, files: { old?: string; current?: string }) {
-      const dir = mkdtempSync(join(tmpdir(), 'wg-key-'));
+      const dir = createTempDir('wg-key-');
       const oldPath = join(dir, 'old');
       const current = join(dir, 'current');
       if (files.old) writeFileSync(oldPath, files.old, { mode: 0o600 });
@@ -388,7 +388,7 @@ describe('a tunnel that already matches is left alone', () => {
   };
 
   function run(overrides: Partial<typeof live> | 'no-interface' = {}) {
-    const dir = mkdtempSync(join(tmpdir(), 'wg-bringup-'));
+    const dir = createTempDir('wg-bringup-');
     const state = overrides === 'no-interface' ? null : { ...live, ...overrides };
     const log = join(dir, 'calls.log');
     writeFileSync(
@@ -464,7 +464,7 @@ esac
   it('the boot script brings wg0 up on a node that has none, as every boot does', () => {
     // `set -e` stopped the script at `ip link del wg0`, so the unit failed and
     // the tunnel stayed down after every reboot (real servers, 2026-11-05).
-    const dir = mkdtempSync(join(tmpdir(), 'wg-boot-'));
+    const dir = createTempDir('wg-boot-');
     const log = join(dir, 'calls.log');
     writeFileSync(
       join(dir, 'ip'),

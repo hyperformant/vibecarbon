@@ -17,8 +17,7 @@
  * Deployments, verbatim, in tests/fixtures.
  */
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -32,6 +31,7 @@ import {
   writeCertManagerKustomization,
 } from '../../../carbon/scripts/render-cert-manager.mjs';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
@@ -56,7 +56,7 @@ afterEach(() => {
 
 /** A kustomization dir over a local copy of `manifest` (kustomize refuses files outside its root). */
 function renderDir(manifest = FIXTURE): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-cert-manager-'));
+  const dir = createTempDir('vc-cert-manager-');
   dirs.push(dir);
   copyFileSync(manifest, join(dir, 'cert-manager.yaml'));
   writeCertManagerKustomization(dir, { resource: 'cert-manager.yaml' });
@@ -158,7 +158,7 @@ describe('the rendered cert-manager manifest', () => {
   });
 
   it('refuses a manifest whose first container is not the controller', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-cert-manager-'));
+    const dir = createTempDir('vc-cert-manager-');
     dirs.push(dir);
     const moved = readFileSync(FIXTURE, 'utf-8').replace(
       '- name: cert-manager-controller',
@@ -172,7 +172,7 @@ describe('the rendered cert-manager manifest', () => {
 
 describe('the script form (GitOps workflow)', () => {
   it('writes the same kustomization the CLI applies', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-cert-manager-'));
+    const dir = createTempDir('vc-cert-manager-');
     dirs.push(dir);
     const res = spawnSync(
       process.execPath,

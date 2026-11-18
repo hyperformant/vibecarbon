@@ -10,11 +10,11 @@
  * Driven here with a fake `kubectl` on PATH that answers from the fixture.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SCRIPT = join(REPO_ROOT, 'carbon/scripts/await-cert-manager-leader.sh');
 const WF = readRepoFile('carbon/.github/workflows/deploy.yml');
@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 function runScript(env: Record<string, string>) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-cm-leader-'));
+  const dir = createTempDir('vc-cm-leader-');
   dirs.push(dir);
   writeFileSync(join(dir, 'kubectl'), FAKE_KUBECTL);
   chmodSync(join(dir, 'kubectl'), 0o755);

@@ -7,10 +7,10 @@
  * name. Every mode now writes through sshKeyPathFor; this runs the real k8s key
  * writer and then the destroy flow's own backup options against the same dir.
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/command.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/lib/command.js')>();
@@ -39,10 +39,9 @@ const k8s = {
 describe('pre-destroy backup on a single-cluster k8s env', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'predestroy-key-'));
+    dir = createTempDir('predestroy-key-');
     mkdirSync(join(dir, '.vibecarbon'));
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('receives the helper path, finds the deployed key, and runs the backup', async () => {
     const { privateKeyPath } = await ensureSshKey(dir, 'd3');

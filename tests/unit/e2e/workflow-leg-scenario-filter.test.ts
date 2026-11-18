@@ -19,11 +19,10 @@
  * skip-with-exit-0 branch — rather than about the text of the script.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const WORKFLOW_PATH = '.github/workflows/e2e-us-perf.yml';
 const LEG_STEP_NAME = 'Run e2e (provider leg)';
@@ -62,8 +61,7 @@ function neuter(script: string): string {
   return script.replace(marker, 'printf "%s\\n" "${FLAGS[@]}"');
 }
 
-const workDir = mkdtempSync(join(tmpdir(), 'vc-leg-filter-'));
-afterAll(() => rmSync(workDir, { recursive: true, force: true }));
+const workDir = createTempDir('vc-leg-filter-');
 
 /** Run the leg step's script as GitHub would (`bash -e`, plus its own pipefail). */
 function runLeg(provider: string, scenarios: string): { stdout: string; flags: string[] } {

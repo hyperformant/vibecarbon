@@ -8,6 +8,7 @@ import {
 import { templatePathFor } from '../../../src/lib/template-paths.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const REQUIRED_IGNORES = [
   '.vibecarbon/',
@@ -41,19 +42,14 @@ describe('C-2: validateGitignore helper', () => {
   });
 
   it('reports missing patterns', async () => {
-    const { writeFileSync, mkdtempSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const tmp = mkdtempSync(join(tmpdir(), 'vb-gitignore-test-'));
-    try {
-      const p = join(tmp, '.gitignore');
-      writeFileSync(p, 'node_modules\n.env\n'); // missing several
-      const missing = validateGitignore(p);
-      expect(missing).toContain('.vibecarbon/');
-      expect(missing).toContain('*.key');
-      expect(missing).toContain('*.tfstate');
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    const { writeFileSync } = await import('node:fs');
+    const tmp = createTempDir('vb-gitignore-test-');
+    const p = join(tmp, '.gitignore');
+    writeFileSync(p, 'node_modules\n.env\n'); // missing several
+    const missing = validateGitignore(p);
+    expect(missing).toContain('.vibecarbon/');
+    expect(missing).toContain('*.key');
+    expect(missing).toContain('*.tfstate');
   });
 
   it('reports missing file', () => {
@@ -73,21 +69,16 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
   it('stages no .env file and nothing under .vibecarbon/, even when they exist', async () => {
     // The checks above run in this checkout, where none of these exist, and
     // the allowlist only ever returns paths that do. Here they all exist.
-    const { writeFileSync, mkdirSync, mkdtempSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const tmp = mkdtempSync(join(tmpdir(), 'vb-allowlist-test-'));
-    try {
-      const present = ['.env', '.env.local', '.env.example', '.env.local.example', 'package.json'];
-      for (const name of present) writeFileSync(join(tmp, name), '');
-      mkdirSync(join(tmp, '.vibecarbon'));
-      writeFileSync(join(tmp, '.vibecarbon', 'deploy_key'), '');
-      const paths = buildGitAddArgv(tmp)
-        .slice(3)
-        .filter((p) => !p.startsWith(':('));
-      expect(paths).toEqual(['package.json']);
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const tmp = createTempDir('vb-allowlist-test-');
+    const present = ['.env', '.env.local', '.env.example', '.env.local.example', 'package.json'];
+    for (const name of present) writeFileSync(join(tmp, name), '');
+    mkdirSync(join(tmp, '.vibecarbon'));
+    writeFileSync(join(tmp, '.vibecarbon', 'deploy_key'), '');
+    const paths = buildGitAddArgv(tmp)
+      .slice(3)
+      .filter((p) => !p.startsWith(':('));
+    expect(paths).toEqual(['package.json']);
   });
 
   // The allowlist names whole directories (src/, tests/, volumes/). Without
@@ -95,48 +86,37 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
   // does not cover its name (.env.e2e, .env.production) or is missing
   // (deleted, or a project created without git by an older CLI).
   it('stages no .env file inside an allowlisted directory, with no .gitignore to help', async () => {
-    const { writeFileSync, mkdirSync, mkdtempSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { writeFileSync, mkdirSync } = await import('node:fs');
     const { execFileSync } = await import('node:child_process');
-    const tmp = mkdtempSync(join(tmpdir(), 'vb-allowlist-env-'));
-    try {
-      const git = (...args: string[]) =>
-        execFileSync('git', args, {
-          env: gitScrubbedEnv(),
-          cwd: tmp,
-          encoding: 'utf-8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-      git('init', '-q');
-      for (const dir of ['src', 'tests', 'tests/e2e', 'volumes']) mkdirSync(join(tmp, dir));
-      const files = [
-        'src/app.ts',
-        'src/.env.production',
-        'tests/a.test.ts',
-        'tests/.env.e2e',
-        'tests/e2e/.env',
-        'volumes/.env.local',
-        'package.json',
-      ];
-      for (const name of files) writeFileSync(join(tmp, name), 'x');
-      const [cmd, ...args] = buildGitAddArgv(tmp);
-      execFileSync(cmd, args, { cwd: tmp, stdio: 'ignore', env: gitScrubbedEnv() });
-      const staged = git('diff', '--cached', '--name-only').split('\n').filter(Boolean).sort();
-      expect(staged).toEqual(['package.json', 'src/app.ts', 'tests/a.test.ts']);
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    const tmp = createTempDir('vb-allowlist-env-');
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        env: gitScrubbedEnv(),
+        cwd: tmp,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    git('init', '-q');
+    for (const dir of ['src', 'tests', 'tests/e2e', 'volumes']) mkdirSync(join(tmp, dir));
+    const files = [
+      'src/app.ts',
+      'src/.env.production',
+      'tests/a.test.ts',
+      'tests/.env.e2e',
+      'tests/e2e/.env',
+      'volumes/.env.local',
+      'package.json',
+    ];
+    for (const name of files) writeFileSync(join(tmp, name), 'x');
+    const [cmd, ...args] = buildGitAddArgv(tmp);
+    execFileSync(cmd, args, { cwd: tmp, stdio: 'ignore', env: gitScrubbedEnv() });
+    const staged = git('diff', '--cached', '--name-only').split('\n').filter(Boolean).sort();
+    expect(staged).toEqual(['package.json', 'src/app.ts', 'tests/a.test.ts']);
   });
 
   it('adds no exclusion when nothing is staged (a lone exclusion would stage everything)', async () => {
-    const { mkdtempSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const tmp = mkdtempSync(join(tmpdir(), 'vb-allowlist-empty-'));
-    try {
-      expect(buildGitAddArgv(tmp)).toEqual(['git', 'add', '--']);
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    const tmp = createTempDir('vb-allowlist-empty-');
+    expect(buildGitAddArgv(tmp)).toEqual(['git', 'add', '--']);
   });
 
   it("names the template's Cursor rules, not the whole .cursor directory", () => {
@@ -164,10 +144,9 @@ describe('C-2: buildGitAddArgv never includes .vibecarbon or .env', () => {
 // the operator had changed.
 describe('buildGitAddNamedArgv stages the named files and nothing else', () => {
   async function repo(prefix: string) {
-    const { mkdtempSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { rmSync } = await import('node:fs');
     const { execFileSync } = await import('node:child_process');
-    const tmp = mkdtempSync(join(tmpdir(), prefix));
+    const tmp = createTempDir(prefix);
     const git = (...args: string[]) =>
       execFileSync('git', args, {
         env: gitScrubbedEnv(),

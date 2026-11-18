@@ -18,10 +18,9 @@
  * mocking node: builtins is flaky under the parallel unit run.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
 import {
   installCiFiles,
@@ -30,6 +29,7 @@ import {
 } from '../../../src/lib/ci-setup.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const WORKFLOW_REL = '.github/workflows/vibecarbon-build.yml';
 const NVMRC_REL = '.nvmrc';
@@ -40,10 +40,7 @@ describe('ci-setup: .nvmrc install + commit gating', () => {
   let project: string;
 
   beforeEach(() => {
-    project = mkdtempSync(join(tmpdir(), 'vc-ci-setup-'));
-  });
-  afterEach(() => {
-    rmSync(project, { recursive: true, force: true });
+    project = createTempDir('vc-ci-setup-');
   });
 
   /** Simulate a project that already has the build workflow committed. */

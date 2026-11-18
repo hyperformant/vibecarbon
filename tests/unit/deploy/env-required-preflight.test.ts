@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK, findMissingRequiredEnv } from '../../../src/lib/project.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // vibecarbon-web prod move, 2026-09-15: the deploy ran from a fresh worktree
 // with no `.env` (gitignored). Step 0d WARNED that the required secrets were
@@ -14,7 +14,7 @@ import { readRepoFile } from '../../_shared/source-files.js';
 // preflight that turns that warning into a stop at second zero: it reads
 // the same `${KEY:?}` markers compose itself enforces.
 function makeProjectDir(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-env-required-test-'));
+  const dir = createTempDir('vc-env-required-test-');
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(dir, name), content);
   }

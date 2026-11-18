@@ -8,11 +8,11 @@
  * deployResult; and the final save spreads `haSeedRecord(deployResult)` into
  * the persisted `ha` block.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/deploy/compose/index.js')>()),
@@ -104,7 +104,7 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
   const RECORD = { ip: '2.2.2.1', systemIdentifier: SYSID, timeline: 3, at: 'x' };
   let dir: string;
   const seed = () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-discard-'));
+    dir = createTempDir('vc-discard-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({
@@ -126,7 +126,6 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
     }) as Record<string, unknown>;
   afterEach(() => {
     vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('hands the record on disk to the reseed, and clears it once the reseed swapped', async () => {

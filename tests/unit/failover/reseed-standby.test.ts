@@ -20,10 +20,10 @@
  * ssh.js is mocked so the logic is exercised without a real cluster.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/ssh.js', async () => {
   // The real argv contract (tests/_shared/ssh-contract.ts).
@@ -624,7 +624,7 @@ describe('reseedStandbyOrAbort: skip re-seed when standby already streaming', ()
 
 describe('reseedStandbyOrAbort: a busy stage aborts before promotion, naming the rerun', () => {
   it('says the earlier stage still runs and names `vibecarbon failover <env>` to rerun once it finishes', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-reseed-busy-'));
+    const dir = createTempDir('vc-reseed-busy-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({ projectName: 'p', environments: { prod: ENV } }),
@@ -656,7 +656,6 @@ describe('reseedStandbyOrAbort: a busy stage aborts before promotion, naming the
       expect(err.message).not.toMatch(/redeploy/);
     } finally {
       cwd.mockRestore();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

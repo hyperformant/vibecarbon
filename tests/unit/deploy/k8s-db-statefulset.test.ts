@@ -19,13 +19,13 @@
  * mocked; `spawnSync` stays real for the kustomize builds.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -290,7 +290,7 @@ describe('k8s/base renders the db StatefulSet', () => {
     };
     // The sha is a hash of the walg ConfigMap file alone, so two deploys of
     // the same tree carry the same one.
-    const projectDir = mkdtempSync(join(tmpdir(), 'vc-sha-'));
+    const projectDir = createTempDir('vc-sha-');
     try {
       cpSync(join(REPO_ROOT, 'carbon/k8s'), join(projectDir, 'k8s'), { recursive: true });
       const sha = walArchiveConfigSha(projectDir);
@@ -747,33 +747,29 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
     });
 
     it(`${cluster}: a kustomize build with that patch drops StatefulSet/db and keeps Service/db`, () => {
-      const dir = mkdtempSync(join(tmpdir(), `vc-flux-${cluster}-`));
-      try {
-        cpSync(BASE, join(dir, 'base'), { recursive: true });
-        const { patch, target } = base().spec.patches[0];
-        writeFileSync(join(dir, 'patch.yaml'), patch);
-        writeFileSync(
-          join(dir, 'kustomization.yaml'),
-          [
-            'apiVersion: kustomize.config.k8s.io/v1beta1',
-            'kind: Kustomization',
-            'resources:',
-            '  - base',
-            'patches:',
-            '  - path: patch.yaml',
-            '    target:',
-            `      kind: ${target.kind}`,
-            `      name: ${target.name}`,
-            '',
-          ].join('\n'),
-        );
-        const docs = kustomize(dir);
-        expect(docs.some((d) => d.kind === 'StatefulSet')).toBe(false);
-        expect(docs.some((d) => d.kind === 'Service' && d.metadata.name === 'db')).toBe(true);
-        expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+      const dir = createTempDir(`vc-flux-${cluster}-`);
+      cpSync(BASE, join(dir, 'base'), { recursive: true });
+      const { patch, target } = base().spec.patches[0];
+      writeFileSync(join(dir, 'patch.yaml'), patch);
+      writeFileSync(
+        join(dir, 'kustomization.yaml'),
+        [
+          'apiVersion: kustomize.config.k8s.io/v1beta1',
+          'kind: Kustomization',
+          'resources:',
+          '  - base',
+          'patches:',
+          '  - path: patch.yaml',
+          '    target:',
+          `      kind: ${target.kind}`,
+          `      name: ${target.name}`,
+          '',
+        ].join('\n'),
+      );
+      const docs = kustomize(dir);
+      expect(docs.some((d) => d.kind === 'StatefulSet')).toBe(false);
+      expect(docs.some((d) => d.kind === 'Service' && d.metadata.name === 'db')).toBe(true);
+      expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
     }, 60_000);
   }
 

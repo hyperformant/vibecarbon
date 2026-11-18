@@ -4,10 +4,10 @@
  * (written before the writers stop, scale-cutover.js) is what deploy's entry
  * lift reads, so single-server compose recovers the way the HA tiers do.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const { liftStrandedFenceAtEntry } = await import('../../../src/lib/deploy/orchestrator.js');
 const {
@@ -27,7 +27,7 @@ afterEach(() => {
 const MARKER = { ip: '1.1.1.1', source: 'scale', at: '2026-10-21T00:00:00.000Z' };
 
 function seed(env: Record<string, unknown>) {
-  dir = mkdtempSync(join(tmpdir(), 'vc-scale-fence-'));
+  dir = createTempDir('vc-scale-fence-');
   writeFileSync(
     join(dir, '.vibecarbon.json'),
     JSON.stringify({ projectName: 'myapp', environments: { prod: env } }),

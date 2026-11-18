@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,7 +36,7 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-gate-'));
+    dir = createTempDir('vc-k3s-gate-');
     mkdirSync(join(dir, 'k8s', 'base'), { recursive: true });
     writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: []\n');
     // StateTracker keys its state file off process.cwd()/.vibecarbon.
@@ -44,7 +44,6 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const baseArgs = () => ({
@@ -211,12 +210,11 @@ describe('buildK3sApplyInputs: where the buckets are is part of the gate', () =>
   let dir: string;
   let cwdSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-gate-storage-'));
+    dir = createTempDir('vc-k3s-gate-storage-');
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('names each bucket with its region and endpoint', () => {

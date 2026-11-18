@@ -14,12 +14,12 @@
  * "changeme" hash, written with compose's `$$` escaping.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SCRIPT = 'services/n8n/scripts/setup.sh';
 const OVERRIDE = 'services/n8n/compose/docker-compose.override.yml';
@@ -65,7 +65,7 @@ describe('n8n owner setup, run against a fake psql', () => {
 
   /** A psql that sees the user table at once, then fails or records the hash it was given. */
   function run(env: Record<string, string>, failSetup: boolean) {
-    const dir = mkdtempSync(join(tmpdir(), 'vctest-n8n-setup-'));
+    const dir = createTempDir('vctest-n8n-setup-');
     dirs.push(dir);
     const seen = join(dir, 'seen');
     writeFileSync(

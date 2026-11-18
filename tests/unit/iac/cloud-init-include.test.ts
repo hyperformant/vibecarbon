@@ -19,15 +19,15 @@
  * `${private_ip}` into a `set -u` script — a fatal unbound-variable abort on
  * a node nobody is watching.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { loadCloudInit, resolveIncludes } from '../../../src/lib/iac/cloud-init.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const tmpDirs: string[] = [];
 function scratch(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-cloud-init-'));
+  const dir = createTempDir('vc-cloud-init-');
   tmpDirs.push(dir);
   return dir;
 }

@@ -3,13 +3,11 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -34,6 +32,7 @@ import {
   composeConfigStub,
 } from '../../_shared/compose-config-stub.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 const servicesOf = (path: string): Record<string, any> =>
@@ -145,7 +144,7 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 function tempDir() {
-  const d = mkdtempSync(join(tmpdir(), 'vc-addon-job-'));
+  const d = createTempDir('vc-addon-job-');
   dirs.push(d);
   return d;
 }

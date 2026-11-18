@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { generateEnvLocal } from '../../../src/create.js';
@@ -8,6 +7,7 @@ import { resolveDbImageTag } from '../../../src/lib/deploy/k8s/k3s.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { DB_IMAGE, DB_IMAGE_TAG, DEV_DB_IMAGE } from '../../../src/lib/images.js';
 import { ensureDbImageEnv } from '../../../src/upgrade.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * carbon/docker-compose.yml's db service is `image: ${DB_IMAGE}:${DB_IMAGE_TAG}`
@@ -17,7 +17,7 @@ import { ensureDbImageEnv } from '../../../src/upgrade.js';
  */
 const dirs: string[] = [];
 const scratch = (body: string) => {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-db-image-env-'));
+  const dir = createTempDir('vc-db-image-env-');
   dirs.push(dir);
   writeFileSync(join(dir, '.env.local'), body);
   writeFileSync(join(dir, '.env'), body);

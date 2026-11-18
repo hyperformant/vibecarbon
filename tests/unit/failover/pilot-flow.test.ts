@@ -15,8 +15,7 @@
  * These tests drive the exported building blocks directly with injected deps
  * (`converge`, `kubectl`, `sleep`) so no Pulumi/SSH ever runs.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -50,6 +49,7 @@ import {
   getNodesOutput,
   MASTER_LABELS,
 } from '../../_shared/fake-nodes.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { STATE_ERROR_CORPUS } from '../iac/fixtures/state-error-corpus.js';
 
 /**
@@ -1520,7 +1520,7 @@ describe('swapHaRoles', () => {
   });
 
   it('swaps stacks + regions wholesale, flags degraded, preserves scale config', () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-swap-'));
+    dir = createTempDir('vc-swap-');
     const config = {
       projectName: 'proj',
       environments: {

@@ -24,10 +24,10 @@
  * (compose: wal-g only, then `docker compose start`; k8s: a merge patch of
  * RESTORE_TARGET alone), so nothing after this chain can move the name.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const store = projectConfigStore();
@@ -107,7 +107,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
   beforeEach(() => {
     store.reset();
     cwdBackup = process.cwd();
-    projectDir = mkdtempSync(join(tmpdir(), 'vc-bucket-flow-'));
+    projectDir = createTempDir('vc-bucket-flow-');
   });
 
   afterEach(() => {

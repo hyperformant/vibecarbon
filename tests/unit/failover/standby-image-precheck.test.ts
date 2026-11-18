@@ -8,8 +8,7 @@
  * skips the check (R6): a half-done failover must be finishable.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +18,7 @@ import {
   buildStandbyImageCheckScript,
 } from '../../../src/lib/deploy/k8s/ha/image-copy.js';
 import { MANIFEST_DIGEST_SH } from '../../../src/lib/deploy/k8s/image-delivery.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 describe('assertStandbyHasAppImage', () => {
@@ -84,7 +84,7 @@ describe('buildStandbyImageCheckScript (executed against stub kubectl and curl)'
   });
 
   function runScript(kubectl: string, curl: string) {
-    dir = mkdtempSync(join(tmpdir(), 'image-check-stub-'));
+    dir = createTempDir('image-check-stub-');
     for (const [name, body] of [
       ['kubectl', kubectl],
       ['curl', curl],

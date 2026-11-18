@@ -23,21 +23,13 @@
  * signalling.
  */
 import { spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { WALG_ROLE_PARSE_SH, walgRoleReadFragment } from '../../../src/lib/deploy/walg-role.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const COMPOSE_SCRIPT = 'carbon/volumes/db/wal-archive.sh';
 const WALG_ENV_SCRIPT = 'carbon/volumes/db/walg-env.sh';
@@ -51,8 +43,7 @@ const k8sBody = configMap.data['wal-archive.sh'];
 const k8sWalgEnvBody = configMap.data['walg-env.sh'];
 
 const SYSID = '7699032860122738725';
-const work = mkdtempSync(join(tmpdir(), 'vc-walg-env-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-walg-env-');
 /** A bin dir whose pg_controldata prints SYSID, or fails like an unreadable PGDATA. */
 function controldataBin(name: string, readable = true) {
   const bin = join(work, name);

@@ -9,14 +9,14 @@
  * run() is driven end to end: the listing, the restore and the push are
  * stubs; the lineage record is the real one, written to a scratch project.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const LINEAGE = '7699032860122738725';
-const dir = mkdtempSync(join(tmpdir(), 'vc-restore-run-'));
+const dir = createTempDir('vc-restore-run-');
 const keyPath = join(dir, 'id_ed25519');
 writeFileSync(keyPath, 'not-a-key');
 const envConfig = { deployMode: 'compose', provider: 'hetzner', servers: [{ ip: '10.0.0.1' }] };
@@ -106,8 +106,6 @@ vi.mock('../../../src/lib/walg/post-promote-backup.js', async (orig) => ({
 
 const { run } = await import('../../../src/restore.js');
 const { PostPromoteBackupError } = await import('../../../src/lib/walg/post-promote-backup.js');
-
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 beforeEach(() => {
   vi.restoreAllMocks();

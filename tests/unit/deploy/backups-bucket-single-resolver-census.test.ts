@@ -40,11 +40,11 @@
  * These walk the tree rather than list sites, so a new site is caught; the
  * bite test plants each violation in a temporary tree and proves it fails.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SCANNED = ['src', 'tests/e2e'];
 const S3_BASE = 'src/lib/providers/s3-base.js';
@@ -348,7 +348,7 @@ describe('backups bucket single resolver census', () => {
     };
 
     it('catches a backups name derived outside the owners, and lets the owners and the app/state names be', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      tmp = createTempDir('backups-census-');
       plant(
         'src/lib/deploy/prompts.js',
         "const b = deriveProjectBucketName(projectConfig, 'backups');\n",
@@ -364,7 +364,7 @@ describe('backups bucket single resolver census', () => {
     });
 
     it('catches a swapped-bucket spread under src/, whatever the config is called', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      tmp = createTempDir('backups-census-');
       plant(
         'src/a.js',
         'snapshot({ s3Config: { ...s3Config, bucket: backupS3Config?.bucket } });\n',
@@ -411,7 +411,7 @@ describe('backups bucket single resolver census', () => {
     });
 
     it('catches a raw read of the backupS3 record outside backups-bucket.js, and lets writers and comments be', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      tmp = createTempDir('backups-census-');
       plant('src/destroy.js', "const region = envConfig.backupS3.region || 'fsn1';\n");
       plant('src/lib/x.js', 'const b = e?.backupS3?.bucket;\n');
       plant('src/lib/y.js', "const b = env['backupS3'].bucket;\n");
@@ -435,7 +435,7 @@ describe('backups bucket single resolver census', () => {
     });
 
     it('catches the record destructured out of an object, and lets env-identity drop it by name', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      tmp = createTempDir('backups-census-');
       plant('src/lib/a.js', 'const { backupS3 } = envConfig;\n');
       plant('src/lib/b.js', 'const {\n  s3,\n  backupS3: record,\n} = env;\n');
       plant('src/lib/c.js', 'let record;\n({ backupS3: record } = cfg);\n');
@@ -482,7 +482,7 @@ describe('backups bucket single resolver census', () => {
     });
 
     it('catches a k8s-ha side with its own storage target, and backupBucketName anywhere in src/', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      tmp = createTempDir('backups-census-');
       const side = (extra: string) =>
         `deployK3s({\n  ...options,\n  // backupTarget: comes from options\n  role: 'x',${extra}\n})`;
       plant(K8S_HA, `${side('')}\n${side('')}\n`);
@@ -502,7 +502,7 @@ describe('backups bucket single resolver census', () => {
     });
 
     it('catches a chooser call outside the deploy', () => {
-      tmp = mkdtempSync(join(tmpdir(), 'backups-census-'));
+      tmp = createTempDir('backups-census-');
       plant('src/restore.js', 'const plan = chooseBackupsBucket({ environment });\n');
       plant(DEPLOY, 'const plan = chooseBackupsBucket({ environment });\n');
       expect(chooserCallers(tmp)).toEqual(['src/restore.js']);

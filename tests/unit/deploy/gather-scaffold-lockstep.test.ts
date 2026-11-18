@@ -7,8 +7,7 @@
  * shipped scaffold (current) and one whose walg-env.sh predates the role file.
  * Harness as in compose-default-size.test.ts.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
@@ -62,6 +61,7 @@ import { gatherDeploymentConfig } from '../../../src/lib/deploy/prompts.js';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { S3CompatibleProvider } from '../../../src/lib/providers/s3-base.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const REFUSAL =
   "This project's scaffold predates the wal-g role file. Run `vibecarbon upgrade`, then deploy again.";
@@ -70,7 +70,7 @@ afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 function project(stale: boolean) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-gather-scaffold-'));
+  const dir = createTempDir('vc-gather-scaffold-');
   dirs.push(dir);
   copyTemplate(dir);
   if (stale) {

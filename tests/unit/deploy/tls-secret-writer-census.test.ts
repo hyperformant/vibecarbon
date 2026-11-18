@@ -30,11 +30,11 @@
  *      restoreK8sTlsSecret is called only by the deploy (k3s.js) and the
  *      failover promotion (failover.js).
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const ROOTS = ['src', 'carbon', 'scripts', 'services'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.git', 'coverage']);
@@ -210,42 +210,38 @@ describe('Secret/vibecarbon-tls writer census', () => {
   });
 
   it('bites: a planted writer in a scanned tree fails the census', () => {
-    const root = mkdtempSync(join(tmpdir(), 'tls-writer-census-'));
+    const root = createTempDir('tls-writer-census-');
     const plant = (path: string, text: string) => {
       mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), text);
     };
-    try {
-      plant(
-        BUILDER_FILE,
-        "const K = 'vibecarbon-tls';\nexport const m = { kind: 'Secret', metadata: { name: K } };\n",
-      );
-      plant('src/clean.js', "run(['get', 'secret', 'vibecarbon-tls']);\n");
-      expect(censusViolations(root)).toEqual([]);
-      plant(
-        'src/lib/rogue.js',
-        "const NAME = 'vibecarbon-tls';\nawait kubectl([\n  'label',\n  'secret',\n  NAME,\n  'a=b',\n]);\n",
-      );
-      plant(
-        'carbon/k8s/rogue.json',
-        '{ "kind": "Secret", "metadata": { "name": "vibecarbon-tls" } }\n',
-      );
-      plant('scripts/rogue.sh', 'kubectl create secret tls vibecarbon-tls --cert=c --key=k\n');
-      plant(
-        'services/x/rogue.yaml',
-        'apiVersion: v1\nkind: Secret\nmetadata:\n  name: vibecarbon-tls\n',
-      );
-      expect(censusViolations(root).sort()).toEqual(
-        [
-          'carbon/k8s/rogue.json:1',
-          'scripts/rogue.sh:1',
-          'services/x/rogue.yaml:2',
-          'src/lib/rogue.js:3',
-        ].sort(),
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    plant(
+      BUILDER_FILE,
+      "const K = 'vibecarbon-tls';\nexport const m = { kind: 'Secret', metadata: { name: K } };\n",
+    );
+    plant('src/clean.js', "run(['get', 'secret', 'vibecarbon-tls']);\n");
+    expect(censusViolations(root)).toEqual([]);
+    plant(
+      'src/lib/rogue.js',
+      "const NAME = 'vibecarbon-tls';\nawait kubectl([\n  'label',\n  'secret',\n  NAME,\n  'a=b',\n]);\n",
+    );
+    plant(
+      'carbon/k8s/rogue.json',
+      '{ "kind": "Secret", "metadata": { "name": "vibecarbon-tls" } }\n',
+    );
+    plant('scripts/rogue.sh', 'kubectl create secret tls vibecarbon-tls --cert=c --key=k\n');
+    plant(
+      'services/x/rogue.yaml',
+      'apiVersion: v1\nkind: Secret\nmetadata:\n  name: vibecarbon-tls\n',
+    );
+    expect(censusViolations(root).sort()).toEqual(
+      [
+        'carbon/k8s/rogue.json:1',
+        'scripts/rogue.sh:1',
+        'services/x/rogue.yaml:2',
+        'src/lib/rogue.js:3',
+      ].sort(),
+    );
   });
 
   it('calls buildRestoredTlsSecret only from restoreK8sTlsSecret, which sends its manifest', () => {

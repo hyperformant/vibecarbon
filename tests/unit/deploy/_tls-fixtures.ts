@@ -1,8 +1,8 @@
 // Certificates are generated at runtime so no PEM private key is ever committed.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -31,69 +31,65 @@ export function makeCert(
     subject = `/CN=${dnsNames[0]}`,
     extraSans = [],
   } = typeof opts === 'number' ? { days: opts } : opts;
-  const dir = mkdtempSync(join(tmpdir(), 'tls-fixture-'));
+  const dir = createTempDir('tls-fixture-');
   const p = (f: string) => join(dir, f);
   const san = `subjectAltName=${[...dnsNames.map((n) => `DNS:${n}`), ...extraSans].join(',')}`;
   const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes'];
-  try {
-    if (selfSigned) {
-      openssl([
-        'req',
-        '-x509',
-        ...ec,
-        '-keyout',
-        p('k.pem'),
-        '-out',
-        p('c.pem'),
-        '-days',
-        String(days),
-        '-subj',
-        subject,
-        '-addext',
-        san,
-      ]);
-    } else {
-      openssl([
-        'req',
-        '-x509',
-        ...ec,
-        '-keyout',
-        p('ca.key'),
-        '-out',
-        p('ca.pem'),
-        '-days',
-        '365',
-        '-subj',
-        '/CN=fixture-ca',
-      ]);
-      openssl(['req', '-new', ...ec, '-keyout', p('k.pem'), '-out', p('c.csr'), '-subj', subject]);
-      writeFileSync(p('ext.cnf'), `${san}\n`);
-      openssl([
-        'x509',
-        '-req',
-        '-in',
-        p('c.csr'),
-        '-CA',
-        p('ca.pem'),
-        '-CAkey',
-        p('ca.key'),
-        '-CAcreateserial',
-        '-out',
-        p('c.pem'),
-        '-days',
-        String(days),
-        '-extfile',
-        p('ext.cnf'),
-      ]);
-    }
-    return {
-      cert: readFileSync(p('c.pem'), 'utf8'),
-      key: readFileSync(p('k.pem'), 'utf8'),
-      ...(selfSigned ? {} : { ca: readFileSync(p('ca.pem'), 'utf8') }),
-    };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+  if (selfSigned) {
+    openssl([
+      'req',
+      '-x509',
+      ...ec,
+      '-keyout',
+      p('k.pem'),
+      '-out',
+      p('c.pem'),
+      '-days',
+      String(days),
+      '-subj',
+      subject,
+      '-addext',
+      san,
+    ]);
+  } else {
+    openssl([
+      'req',
+      '-x509',
+      ...ec,
+      '-keyout',
+      p('ca.key'),
+      '-out',
+      p('ca.pem'),
+      '-days',
+      '365',
+      '-subj',
+      '/CN=fixture-ca',
+    ]);
+    openssl(['req', '-new', ...ec, '-keyout', p('k.pem'), '-out', p('c.csr'), '-subj', subject]);
+    writeFileSync(p('ext.cnf'), `${san}\n`);
+    openssl([
+      'x509',
+      '-req',
+      '-in',
+      p('c.csr'),
+      '-CA',
+      p('ca.pem'),
+      '-CAkey',
+      p('ca.key'),
+      '-CAcreateserial',
+      '-out',
+      p('c.pem'),
+      '-days',
+      String(days),
+      '-extfile',
+      p('ext.cnf'),
+    ]);
   }
+  return {
+    cert: readFileSync(p('c.pem'), 'utf8'),
+    key: readFileSync(p('k.pem'), 'utf8'),
+    ...(selfSigned ? {} : { ca: readFileSync(p('ca.pem'), 'utf8') }),
+  };
 }
 
 const b64 = (s: string) => Buffer.from(s).toString('base64');
@@ -206,60 +202,56 @@ export function k8sSecretJsonWithCa(opts: K8sSecretOpts): { json: string; ca?: s
 
 /** A leaf signed by an intermediate signed by a root, as PEM text each. */
 export function makeChain(): { leaf: string; intermediate: string; root: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'tls-chain-'));
+  const dir = createTempDir('tls-chain-');
   const p = (f: string) => join(dir, f);
   const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes'];
-  try {
-    openssl(
-      ['req', '-x509', ...ec, '-keyout', p('root.key'), '-out', p('root.pem')].concat([
-        '-days',
-        '365',
-        '-subj',
-        '/CN=fixture-root',
-      ]),
-    );
-    writeFileSync(p('ca.cnf'), 'basicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n');
-    openssl(
-      ['req', '-new', ...ec, '-keyout', p('int.key'), '-out', p('int.csr')].concat([
-        '-subj',
-        '/CN=fixture-intermediate',
-      ]),
-    );
-    openssl(
-      ['x509', '-req', '-in', p('int.csr'), '-CA', p('root.pem'), '-CAkey', p('root.key')].concat([
-        '-CAcreateserial',
-        '-out',
-        p('int.pem'),
-        '-days',
-        '365',
-        '-extfile',
-        p('ca.cnf'),
-      ]),
-    );
-    openssl(
-      ['req', '-new', ...ec, '-keyout', p('leaf.key'), '-out', p('leaf.csr')].concat([
-        '-subj',
-        '/CN=app.example.com',
-      ]),
-    );
-    writeFileSync(p('leaf.cnf'), 'subjectAltName=DNS:app.example.com\n');
-    openssl(
-      ['x509', '-req', '-in', p('leaf.csr'), '-CA', p('int.pem'), '-CAkey', p('int.key')].concat([
-        '-CAcreateserial',
-        '-out',
-        p('leaf.pem'),
-        '-days',
-        '60',
-        '-extfile',
-        p('leaf.cnf'),
-      ]),
-    );
-    return {
-      leaf: readFileSync(p('leaf.pem'), 'utf8'),
-      intermediate: readFileSync(p('int.pem'), 'utf8'),
-      root: readFileSync(p('root.pem'), 'utf8'),
-    };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  openssl(
+    ['req', '-x509', ...ec, '-keyout', p('root.key'), '-out', p('root.pem')].concat([
+      '-days',
+      '365',
+      '-subj',
+      '/CN=fixture-root',
+    ]),
+  );
+  writeFileSync(p('ca.cnf'), 'basicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n');
+  openssl(
+    ['req', '-new', ...ec, '-keyout', p('int.key'), '-out', p('int.csr')].concat([
+      '-subj',
+      '/CN=fixture-intermediate',
+    ]),
+  );
+  openssl(
+    ['x509', '-req', '-in', p('int.csr'), '-CA', p('root.pem'), '-CAkey', p('root.key')].concat([
+      '-CAcreateserial',
+      '-out',
+      p('int.pem'),
+      '-days',
+      '365',
+      '-extfile',
+      p('ca.cnf'),
+    ]),
+  );
+  openssl(
+    ['req', '-new', ...ec, '-keyout', p('leaf.key'), '-out', p('leaf.csr')].concat([
+      '-subj',
+      '/CN=app.example.com',
+    ]),
+  );
+  writeFileSync(p('leaf.cnf'), 'subjectAltName=DNS:app.example.com\n');
+  openssl(
+    ['x509', '-req', '-in', p('leaf.csr'), '-CA', p('int.pem'), '-CAkey', p('int.key')].concat([
+      '-CAcreateserial',
+      '-out',
+      p('leaf.pem'),
+      '-days',
+      '60',
+      '-extfile',
+      p('leaf.cnf'),
+    ]),
+  );
+  return {
+    leaf: readFileSync(p('leaf.pem'), 'utf8'),
+    intermediate: readFileSync(p('int.pem'), 'utf8'),
+    root: readFileSync(p('root.pem'), 'utf8'),
+  };
 }

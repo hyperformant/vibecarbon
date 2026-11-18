@@ -9,9 +9,6 @@
  * to refresh that result: the stack's reserved IP leaves state by surgery
  * (lib/iac/retired-resources.js), never by an up that deletes it.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clusterIngressIp, infraFloatingIp } from '../../../src/lib/deploy/k8s/ingress-ip.js';
 // @ts-expect-error — JS module without types
@@ -20,6 +17,7 @@ import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SAVED = { masterIp: '198.51.100.7', floatingIp: '203.0.113.9' };
 
@@ -48,12 +46,11 @@ describe('a saved DigitalOcean result no longer forces the cluster up', () => {
   let dir: string;
   let cwdSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-infra-'));
+    dir = createTempDir('vc-k3s-infra-');
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('unchanged inputs skip the step even with a reserved IP in the saved result', () => {

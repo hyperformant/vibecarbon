@@ -11,8 +11,7 @@
  * renders: reconcile.sh, the systemd ExecStart and the post-restore recreate.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -27,12 +26,13 @@ import {
 import { WALG_ROLE_PARSE_SH, walgRoleWriteShell } from '../../../src/lib/deploy/walg-role.js';
 import { composeStandbyScaledServices } from '../../../src/lib/services/standby-policy.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const N8N_SCALED = composeStandbyScaledServices(['n8n']);
 
 const dirs: string[] = [];
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-standby-scale-'));
+  const dir = createTempDir('vc-standby-scale-');
   dirs.push(dir);
   return dir;
 }

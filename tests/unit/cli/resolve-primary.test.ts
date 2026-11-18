@@ -2,10 +2,10 @@
  * One primary resolver (backup/restore integrity H4). After a failover the
  * persisted roles say which node is live; array order does not.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -114,7 +114,7 @@ describe('after a failover swap', () => {
   });
 
   const seed = (env: object) => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-resolve-primary-'));
+    dir = createTempDir('vc-resolve-primary-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({ projectName: 'app', environments: { prod: env } }),

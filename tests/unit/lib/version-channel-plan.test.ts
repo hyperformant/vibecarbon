@@ -5,10 +5,9 @@
  * and through its own `write` command for the last check before a publish.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   driverPinsIn,
   k3sAhead,
@@ -27,6 +26,7 @@ import {
   TRAEFIK_MIRROR,
 } from '../../../src/lib/images.js';
 import { CHANNEL_SCHEMA, parseChannelFile, versionOf } from '../../../src/lib/version-channel.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const bundled = bundledImageSet();
 const published = () => ({ schema: CHANNEL_SCHEMA, ...bundled });
@@ -479,8 +479,7 @@ describe('planChannel', () => {
 });
 
 describe('the write command, the last check before a publish', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-channel-write-'));
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = createTempDir('vc-channel-write-');
   const write = (channel: string) => {
     const path = join(dir, 'channel.json');
     return {

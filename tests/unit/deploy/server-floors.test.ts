@@ -8,11 +8,10 @@
  * version it read and knows is too old.
  */
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/perf.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/perf.js')>()),
@@ -31,6 +30,7 @@ import {
   // @ts-expect-error: untyped JS module
 } from '../../../src/lib/deploy/compose/server-floors.js';
 import { perfRecord } from '../../../src/lib/perf.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const run = promisify(execFile);
 const IP = '203.0.113.7';
@@ -168,11 +168,10 @@ esac
 `;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vctest-server-floors-'));
+    dir = createTempDir('vctest-server-floors-');
     writeFileSync(join(dir, 'docker'), fakeDocker);
     chmodSync(join(dir, 'docker'), 0o755);
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const inShell = (shell: string, script: string) =>
     run(shell, ['-c', script], {

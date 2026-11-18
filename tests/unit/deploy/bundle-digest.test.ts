@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
 import { digestDir, digestPaths } from '../../../src/lib/deploy/digest.js';
 // @ts-expect-error — JS module without types
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Regression coverage for the content-blind deploy-gate bug (2026-07-11): a
 // config-only change to the rendered bundle / applied manifests left the coarse
@@ -17,10 +17,7 @@ describe('digestDir', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-digest-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-digest-');
   });
 
   function writeBundle(root: string, files: Record<string, string>) {
@@ -117,13 +114,10 @@ describe('digestPaths', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-digest-paths-'));
+    dir = createTempDir('vc-digest-paths-');
     mkdirSync(join(dir, 'src', 'server'), { recursive: true });
     writeFileSync(join(dir, 'src', 'server', 'index.ts'), 'v1');
     writeFileSync(join(dir, 'package.json'), '{}');
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('covers both files and directories', () => {
@@ -168,13 +162,12 @@ describe('setup-files gate is content-aware via bundleDigest', () => {
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-gate-'));
+    dir = createTempDir('vc-gate-');
     // StateTracker keys its state file off process.cwd()/.vibecarbon.
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('re-runs when only the bundle content (digest) changed', () => {

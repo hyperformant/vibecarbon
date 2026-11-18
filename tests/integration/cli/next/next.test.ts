@@ -7,10 +7,10 @@
  * isn't interactive). That keeps the whole suite hermetic, no clack input
  * to script, no child process to stub beyond docker.
  */
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import {
   assertExitWith,
   assertSuccess,
@@ -71,15 +71,11 @@ describe('vibecarbon ? / vibecarbon next', () => {
   });
 
   it('in an empty directory, points at vibecarbon create and never the generic project-guard message', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-next-empty-'));
-    try {
-      const r = runCli('?', [], { cwd: dir, timeoutMs: 30_000 });
-      assertSuccess(r);
-      expect(r.stdout).toContain('vibecarbon create');
-      expect(r.stdout).not.toContain('Not in a Vibecarbon project directory.');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const dir = createTempDir('vc-next-empty-');
+    const r = runCli('?', [], { cwd: dir, timeoutMs: 30_000 });
+    assertSuccess(r);
+    expect(r.stdout).toContain('vibecarbon create');
+    expect(r.stdout).not.toContain('Not in a Vibecarbon project directory.');
   });
 
   it('a project with docker unreachable points at vibecarbon up', () => {

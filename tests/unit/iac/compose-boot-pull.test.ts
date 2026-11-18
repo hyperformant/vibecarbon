@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BOOT_PULL_PLACEHOLDER, bootPullImages } from '../../../src/lib/iac/compose-cloud-init.js';
@@ -16,6 +15,7 @@ import {
   traefikImageRef,
 } from '../../../src/lib/images.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The boot image pull: every compose server (all five providers) starts
@@ -126,7 +126,7 @@ afterEach(() => {
 });
 
 function runBootPull(failRef = '') {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-boot-pull-'));
+  const dir = createTempDir('vc-boot-pull-');
   dirs.push(dir);
   const script = bootPullScript()
     .replace('out=/var/lib/vibecarbon/boot-pull', `out=${dir}/out`)

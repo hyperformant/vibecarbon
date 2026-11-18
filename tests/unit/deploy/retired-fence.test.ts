@@ -22,11 +22,10 @@
  * costs no writes.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import {
   clearRetiredFence,
@@ -45,6 +44,7 @@ import {
 } from '../../../src/lib/deploy/retired-fence.js';
 import { liftStrandedWriteFence } from '../../../src/lib/deploy/write-fence.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { SERVER_BASE_FLAGS, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const RETIRED_IP = '10.0.0.1';
@@ -962,8 +962,7 @@ describe('the stranded-fence lifter never lifts a retired node', () => {
 // record whether they were invoked.
 // ---------------------------------------------------------------------------
 
-const scratch = mkdtempSync(join(tmpdir(), 'retired-fence-'));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = createTempDir('retired-fence-');
 
 function stubBin(dir: string, names: string[]) {
   mkdirSync(dir, { recursive: true });

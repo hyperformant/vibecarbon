@@ -13,14 +13,12 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -35,6 +33,7 @@ import {
   verifyStreaming,
 } from '../../../src/lib/deploy/replication.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // buildReplicationFirewallRules coverage lives solely in
 // replication-firewall-rules.test.ts (add/no-op/drop-stale/replace-stale-peer)
@@ -583,7 +582,7 @@ describe.skipIf(!hasFlock)(
     const dirs: string[] = [];
 
     function setup() {
-      dir = mkdtempSync(join(tmpdir(), 'vc-inplace-stage-'));
+      dir = createTempDir('vc-inplace-stage-');
       dirs.push(dir);
       pgdata = join(dir, 'data');
       bin = join(dir, 'bin');

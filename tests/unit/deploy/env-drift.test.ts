@@ -1,15 +1,15 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { findEnvDrift } from '../../../src/lib/project.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // Live incident 2026-08-22 (vibecarbon-web): billing + SMTP secrets were
 // hand-copied into .env.local only, deploy shipped the empty .env baseline,
 // and prod answered "Billing is not configured". findEnvDrift is the
 // deploy-time guard that names such keys before the bundle ships.
 function makeProjectDir(files: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-env-drift-test-'));
+  const dir = createTempDir('vc-env-drift-test-');
   for (const [name, content] of Object.entries(files)) {
     writeFileSync(join(dir, name), content);
   }

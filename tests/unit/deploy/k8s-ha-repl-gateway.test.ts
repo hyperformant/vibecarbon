@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // --- Mock the exec + environment seams so setupReplication runs offline. ---
 // The standby's db pod as the in-place reseed reads it (Task A5): the
@@ -556,23 +556,16 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       '-c',
       'kill -QUIT 1',
     ]);
-    const bin = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
-    try {
-      writeFileSync(
-        join(bin, 'kubectl'),
-        '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n',
-      );
-      chmodSync(join(bin, 'kubectl'), 0o755);
-      const seen = spawnSync('sh', ['-c', remote], {
-        encoding: 'utf-8',
-        env: { PATH: `${bin}:${process.env.PATH}` },
-      })
-        .stdout.split('\n')
-        .slice(0, -1);
-      expect(seen.slice(-3)).toEqual(['sh', '-c', 'kill -QUIT 1']);
-    } finally {
-      rmSync(bin, { recursive: true, force: true });
-    }
+    const bin = createTempDir('vc-kubectl-');
+    writeFileSync(join(bin, 'kubectl'), '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n');
+    chmodSync(join(bin, 'kubectl'), 0o755);
+    const seen = spawnSync('sh', ['-c', remote], {
+      encoding: 'utf-8',
+      env: { PATH: `${bin}:${process.env.PATH}` },
+    })
+      .stdout.split('\n')
+      .slice(0, -1);
+    expect(seen.slice(-3)).toEqual(['sh', '-c', 'kill -QUIT 1']);
   });
 
   it('every reseed kubectl the deploy sends survives the remote shell: the stop script is one argument', async () => {
@@ -584,36 +577,29 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       .mock.calls.map(([a]) => a as string[])
       .find((a) => a.join(' ').includes('kill -QUIT 1'));
     const remote = stopCall?.at(-1) ?? '';
-    const bin = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
-    try {
-      writeFileSync(
-        join(bin, 'kubectl'),
-        '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n',
-      );
-      chmodSync(join(bin, 'kubectl'), 0o755);
-      const seen = spawnSync('sh', ['-c', remote], {
-        encoding: 'utf-8',
-        env: { PATH: `${bin}:${process.env.PATH}` },
-      })
-        .stdout.split('\n')
-        .slice(0, -1);
-      expect(seen.slice(0, 9)).toEqual([
-        '-n',
-        'vibecarbon',
-        'exec',
-        'db-0',
-        '-c',
-        'db',
-        '--',
-        'sh',
-        '-c',
-      ]);
-      expect(seen).toHaveLength(10);
-      expect(seen[9]).toMatch(/kill -QUIT 1$/);
-      expect(seen[9]).toContain('vc-reseed-protocol');
-    } finally {
-      rmSync(bin, { recursive: true, force: true });
-    }
+    const bin = createTempDir('vc-kubectl-');
+    writeFileSync(join(bin, 'kubectl'), '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n');
+    chmodSync(join(bin, 'kubectl'), 0o755);
+    const seen = spawnSync('sh', ['-c', remote], {
+      encoding: 'utf-8',
+      env: { PATH: `${bin}:${process.env.PATH}` },
+    })
+      .stdout.split('\n')
+      .slice(0, -1);
+    expect(seen.slice(0, 9)).toEqual([
+      '-n',
+      'vibecarbon',
+      'exec',
+      'db-0',
+      '-c',
+      'db',
+      '--',
+      'sh',
+      '-c',
+    ]);
+    expect(seen).toHaveLength(10);
+    expect(seen[9]).toMatch(/kill -QUIT 1$/);
+    expect(seen[9]).toContain('vc-reseed-protocol');
   }, 20000);
 
   it("a standby pod without the wrapper after this deploy's apply fails by name (R12)", async () => {

@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import https from 'node:https';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import tls from 'node:tls';
 import { afterAll, describe, expect, it } from 'vitest';
 import { stagingProbeCa, stagingRootsPem } from '../../../src/lib/deploy/staging-ca.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The deploy CLI's public health probe used to disable TLS verification
@@ -69,7 +69,7 @@ afterAll(() => {
 });
 
 function mintSelfSignedLocalhost() {
-  const dir = mkdtempSync(join(tmpdir(), 'vibecarbon-staging-probe-ca-'));
+  const dir = createTempDir('vibecarbon-staging-probe-ca-');
   tempDirs.push(dir);
   execFileSync(
     'openssl',

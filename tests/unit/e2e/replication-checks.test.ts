@@ -6,11 +6,11 @@
  * down without a live cluster. We deliberately do NOT fake SSH round-trips.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   buildCreateMarkerSql,
   buildDropProbeTableSql,
@@ -237,10 +237,7 @@ describe('resolveHaDbIps', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'repl-resolve-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('repl-resolve-');
   });
 
   const write = (obj: unknown) =>

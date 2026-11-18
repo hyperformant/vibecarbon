@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { APT_LOCK_TIMEOUT_SECONDS } from '../../../src/lib/deploy/apt.js';
@@ -11,6 +10,7 @@ import {
   parseInspectOutput,
 } from '../../../src/lib/update/inspect.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const FIXTURE = readRepoFile('tests/fixtures/update/inspect-compose.txt');
 
@@ -237,17 +237,14 @@ describe('a failed apt check is never read as nothing pending', () => {
 
 describe('INSPECT_SCRIPT', () => {
   it('is valid sh, and only compose asks about docker', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-inspect-'));
-    try {
-      for (const kind of ['compose', 'k8s'] as const) {
-        const f = join(dir, `${kind}.sh`);
-        writeFileSync(f, INSPECT_SCRIPT(kind));
-        // -n parses only; nothing runs.
-        expect(spawnSync('sh', ['-n', f]).status).toBe(0);
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    const dir = createTempDir('vc-inspect-');
+    for (const kind of ['compose', 'k8s'] as const) {
+      const f = join(dir, `${kind}.sh`);
+      writeFileSync(f, INSPECT_SCRIPT(kind));
+      // -n parses only; nothing runs.
+      expect(spawnSync('sh', ['-n', f]).status).toBe(0);
     }
+
     expect(INSPECT_SCRIPT('compose')).toContain('@@docker');
     expect(INSPECT_SCRIPT('k8s')).not.toContain('@@docker');
     expect(INSPECT_SCRIPT('k8s')).toContain('--print');

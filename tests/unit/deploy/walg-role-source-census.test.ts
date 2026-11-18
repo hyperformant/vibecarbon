@@ -21,20 +21,12 @@
  * Every census here runs over a directory walk, and each has a bite test
  * that plants a violation in a temp tree and proves the census fails on it.
  */
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { COMMENT, enclosingBracket, lex } from '../helpers/js-call-scan.js';
 
 const ROOTS = [
@@ -373,7 +365,7 @@ describe('census bites', () => {
 
   /** A temp tree holding the repo's census-relevant files, plus `files` on top. */
   const fixture = (files: Record<string, string>): string => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-role-census-'));
+    const dir = createTempDir('vc-role-census-');
     dirs.push(dir);
     const keep = [
       ROLE_MODULE,

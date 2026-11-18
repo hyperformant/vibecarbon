@@ -7,10 +7,10 @@
  * reaches operator output or argv.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
 import { acmeJson, acmeJsonWithCas } from './_tls-fixtures.ts';
@@ -373,7 +373,7 @@ exec sh -c "$inner" "\${rest[@]}"
   }
 
   function rig() {
-    const root = mkdtempSync(join(tmpdir(), 'vc-tls-restore-'));
+    const root = createTempDir('vc-tls-restore-');
     const bin = join(root, 'bin');
     const project = join(root, 'project');
     const le = join(root, 'le');

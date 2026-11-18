@@ -10,12 +10,12 @@
  * uplink lock in the real home, with nothing failing.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2E_HOME_DIRNAME, resolveE2EHome } from '../../e2e/utils/e2e-home.js';
 
 const HOME_MODULE = 'tests/e2e/utils/e2e-home.js';
@@ -35,8 +35,7 @@ function imports(text: string): string[] {
 
 const SIDE_EFFECT_HOME_IMPORT = /^import\s+['"][./\w-]*\/e2e-home\.js['"];$/;
 
-const fakeHome = mkdtempSync(join(tmpdir(), 'e2e-home-test-'));
-afterAll(() => rmSync(fakeHome, { recursive: true, force: true }));
+const fakeHome = createTempDir('e2e-home-test-');
 
 /** Run a module script in a fresh node whose home dir is `fakeHome`. */
 function runWithFakeHome(script: string, preset?: string): string {

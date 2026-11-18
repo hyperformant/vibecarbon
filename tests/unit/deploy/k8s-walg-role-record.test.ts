@@ -13,12 +13,12 @@
  * tests read back is what those scripts actually did.
  */
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { load } from 'js-yaml';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { findCalls } from '../helpers/js-call-scan.js';
 
 vi.mock('node:child_process', async () => {
@@ -50,7 +50,7 @@ let binDir: string;
 let pgdata: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-role-record-'));
+  dir = createTempDir('vc-role-record-');
   roleDir = join(dir, 'role');
   binDir = join(dir, 'bin');
   pgdata = join(dir, 'data');
@@ -58,10 +58,6 @@ beforeEach(() => {
   const stub = join(binDir, 'db-entrypoint.sh');
   writeFileSync(stub, '#!/bin/sh\nexit 0\n');
   chmodSync(stub, 0o755);
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 const fileOf = () => {

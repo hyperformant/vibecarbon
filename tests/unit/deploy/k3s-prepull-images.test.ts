@@ -12,8 +12,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -40,6 +39,7 @@ import {
   dbImageRef,
 } from '../../../src/lib/images.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Incident 2026-07-31 (e3 k8s e2e): the cluster-autoscaler rollout wait spent
@@ -167,7 +167,7 @@ describe('pullK3sRuntimeBase', () => {
     pullExit = 0,
     pullErr = 'ctr: failed to resolve reference "x": unauthorized',
   ) {
-    dir = mkdtempSync(join(tmpdir(), 'k3s-base-'));
+    dir = createTempDir('k3s-base-');
     const log = join(dir, 'calls');
     writeFileSync(
       join(dir, 'k3s'),

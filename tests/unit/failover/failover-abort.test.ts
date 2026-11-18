@@ -11,11 +11,11 @@
  * Also the message census: every refusal that fires while a journal is set
  * names `vibecarbon failover <env> -abort`, never a command that refuses.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { argvOver, composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
@@ -250,7 +250,7 @@ describe('recordFailoverAbort: the one save', () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
   const seed = (env: Record<string, unknown>) => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-abort-'));
+    dir = createTempDir('vc-abort-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({ projectName: 'myapp', environments: { prod: env } }),
@@ -374,32 +374,27 @@ describe('compose-ha abort backend', () => {
 
   it('the proof shell, run for real: a missing container is absent, a dead daemon is unknown', async () => {
     const { spawnSync } = await import('node:child_process');
-    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { writeFileSync, chmodSync } = await import('node:fs');
     const { backend, commands } = make({});
     await backend.stopStandbyDb();
-    const dir = mkdtempSync(join(tmpdir(), 'vc-abort-docker-'));
-    try {
-      const run = (stderr: string) => {
-        writeFileSync(
-          join(dir, 'docker'),
-          `#!/bin/bash\n[ "$1" = stop ] && exit 1\necho "${stderr}" >&2\nexit 1\n`,
-        );
-        chmodSync(join(dir, 'docker'), 0o755);
-        return spawnSync('bash', ['-c', commands[0].command], {
-          encoding: 'utf-8',
-          env: { PATH: `${dir}:${process.env.PATH}` },
-        }).stdout.trim();
-      };
-      expect(run('Error response from daemon: No such container: myapp-db')).toBe(
-        'DB_RUNNING=absent',
+    const dir = createTempDir('vc-abort-docker-');
+    const run = (stderr: string) => {
+      writeFileSync(
+        join(dir, 'docker'),
+        `#!/bin/bash\n[ "$1" = stop ] && exit 1\necho "${stderr}" >&2\nexit 1\n`,
       );
-      expect(run('Cannot connect to the Docker daemon at unix:///var/run/docker.sock')).toBe(
-        'DB_RUNNING=unknown',
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      chmodSync(join(dir, 'docker'), 0o755);
+      return spawnSync('bash', ['-c', commands[0].command], {
+        encoding: 'utf-8',
+        env: { PATH: `${dir}:${process.env.PATH}` },
+      }).stdout.trim();
+    };
+    expect(run('Error response from daemon: No such container: myapp-db')).toBe(
+      'DB_RUNNING=absent',
+    );
+    expect(run('Cannot connect to the Docker daemon at unix:///var/run/docker.sock')).toBe(
+      'DB_RUNNING=unknown',
+    );
   });
 
   it('re-arms the wal-g role FILE on the old primary only when it lost it', async () => {

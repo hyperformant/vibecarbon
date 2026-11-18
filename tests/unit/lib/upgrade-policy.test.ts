@@ -5,12 +5,12 @@
  * here silently overwrites user code, so the category rules get pinned.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { getFilePolicy, getUpgradeableFiles } from '../../../src/lib/upgrade-policy.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('getFilePolicy', () => {
   it('classifies infra files as safe', () => {
@@ -90,11 +90,7 @@ describe('getFilePolicy', () => {
 });
 
 describe('getUpgradeableFiles', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-upgrade-policy-'));
-
-  afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
+  const dir = createTempDir('vc-upgrade-policy-');
 
   it('returns only safe + merge files, skipping node_modules and .git', () => {
     const files = [

@@ -4,10 +4,10 @@
  * and once the domain is trusted the deploy saves a fresh snapshot. Neither
  * ever fails the deploy, and no key material reaches operator output or argv.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
 import { k8sSecretJson, k8sSecretJsonWithCa } from './_tls-fixtures.ts';
 
@@ -514,7 +514,7 @@ describe('CERT_MANAGER_MIN_BACKOFF', () => {
 describe('quietKubectl', () => {
   /** A `kubectl` on PATH that prints the snapshot (key included) and exits `code`. */
   function fakeKubectlBin(code: number, stderrLine = '') {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-quiet-kubectl-'));
+    const dir = createTempDir('vc-quiet-kubectl-');
     const payload = join(dir, 'payload.json');
     writeFileSync(payload, SNAP);
     const bin = join(dir, 'kubectl');
@@ -564,7 +564,7 @@ describe('quietKubectl', () => {
 describe('quietSshKubectl', () => {
   /** An `ssh` on PATH that records its argv and stdin, prints the snapshot, exits `code`. */
   function fakeSshBin(code: number, stderrLine = '') {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-quiet-ssh-'));
+    const dir = createTempDir('vc-quiet-ssh-');
     const payload = join(dir, 'payload.json');
     writeFileSync(payload, SNAP);
     const bin = join(dir, 'ssh');
@@ -627,24 +627,20 @@ describe('quietSshKubectl', () => {
 
 describe('quietSshKubectl timeout', () => {
   it('an ssh that outlives its bound is killed and fails with a fixed message', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-quiet-ssh-slow-'));
+    const dir = createTempDir('vc-quiet-ssh-slow-');
     const bin = join(dir, 'ssh');
     writeFileSync(bin, '#!/bin/sh\nexec sleep 5\n');
     chmodSync(bin, 0o755);
     const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
     const started = Date.now();
-    try {
-      const err = await quietSshKubectl('203.0.113.9', '/k', { env, timeoutMs: 200 })([
-        'get',
-        'secret',
-        'vibecarbon-tls',
-      ]).catch((e: unknown) => e);
-      expect((err as Error).message).toBe('kubectl failed');
-      expect((err as { reason?: string }).reason).toBe('failed');
-      expect(Date.now() - started).toBeLessThan(4000);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const err = await quietSshKubectl('203.0.113.9', '/k', { env, timeoutMs: 200 })([
+      'get',
+      'secret',
+      'vibecarbon-tls',
+    ]).catch((e: unknown) => e);
+    expect((err as Error).message).toBe('kubectl failed');
+    expect((err as { reason?: string }).reason).toBe('failed');
+    expect(Date.now() - started).toBeLessThan(4000);
   });
 });
 

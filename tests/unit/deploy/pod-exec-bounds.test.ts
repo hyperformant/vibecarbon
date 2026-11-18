@@ -7,10 +7,9 @@
  * the bound so the test does not wait for it, and records the bound the
  * production call asked for.
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { triggerBackupJob } from '../../../src/backup.js';
 import { runCommandAsync } from '../../../src/lib/command.js';
 import {
@@ -30,6 +29,7 @@ import {
 import { WALG_AUDIT_PROBE_TIMEOUT_MS } from '../../../src/lib/deploy/walg-audit.js';
 import { verifyPostgres } from '../../../src/restore.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const KILL_AFTER_MS = 150;
 
@@ -76,13 +76,9 @@ function boundedExec() {
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-pod-exec-'));
+  dir = createTempDir('vc-pod-exec-');
   mkdirSync(dir, { recursive: true });
   env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 const noSleep = async () => {};

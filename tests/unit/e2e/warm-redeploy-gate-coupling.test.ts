@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
@@ -10,6 +9,7 @@ import {
   // @ts-expect-error — JS module without types
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   mutateAppHealthRoute,
   mutateConfigMapManifest,
@@ -39,7 +39,7 @@ import {
 
 /** Minimal project tree: only what the two gate builders read. */
 function buildFixture(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-warm-coupling-'));
+  const dir = createTempDir('vc-warm-coupling-');
   // The manifest half — a real copy of the template the CLI lays down.
   const manifestDest = join(dir, WARM_REDEPLOY_MANIFEST_FILE);
   mkdirSync(dirname(manifestDest), { recursive: true });

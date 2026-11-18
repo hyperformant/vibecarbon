@@ -20,10 +20,9 @@
  * call either tier makes besides single k8s's own record; it precedes the
  * records' real write, which awaits it.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const run = vi.hoisted(() => ({
@@ -352,7 +351,7 @@ const WARMUP = 'setupSimple 0.0.0.0';
 // <cwd>/.vibecarbon/logs, never the repo's.
 let scratch = '';
 beforeEach(() => {
-  scratch = mkdtempSync(join(tmpdir(), 'vc-k8s-ha-dns-writer-'));
+  scratch = createTempDir('vc-k8s-ha-dns-writer-');
   vi.spyOn(process, 'cwd').mockReturnValue(scratch);
   store.current = projectConfigStore({
     projectName: 'dnsapp',

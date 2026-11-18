@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
 import { COMPOSE_REPLICATION_OVERLAY } from '../../../src/lib/deploy/compose/command.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { SERVER_BASE_FLAGS, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function reconcile({ overlay, isFast }: { overlay: boolean; isFast: boolean }): string[] {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-reconcile-repl-'));
+  const dir = createTempDir('vc-reconcile-repl-');
   dirs.push(dir);
   writeFileSync(join(dir, 'reconcile.sh'), renderReconcileScript('myapp', isFast));
   writeVcCompose(dir);

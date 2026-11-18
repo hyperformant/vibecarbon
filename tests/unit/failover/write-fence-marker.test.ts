@@ -10,13 +10,13 @@
  *     primary and names vibecarbon failover;
  *   - status shows a "database write-fenced" row.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dbPodSnapshots } from '../../_shared/cluster-snapshot.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 import { withSshContract } from '../../_shared/ssh-contract.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -62,7 +62,7 @@ describe('marker persistence', () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
   const seed = (env: Record<string, unknown>) => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-fence-'));
+    dir = createTempDir('vc-fence-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({ projectName: 'myapp', environments: { prod: env } }),

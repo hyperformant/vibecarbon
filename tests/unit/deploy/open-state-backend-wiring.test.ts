@@ -13,10 +13,9 @@
  * write `.pulumi/meta.yaml` together: the race that failed a k8s-ha deploy
  * with `could not list bucket: ... NoSuchKey` (2026-04-28).
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const run = vi.hoisted(() => ({
@@ -242,7 +241,7 @@ describe('every HA deploy opens the state backend before the pair starts', () =>
   // <cwd>/.vibecarbon/logs, never the repo's.
   let scratch = '';
   beforeEach(() => {
-    scratch = mkdtempSync(join(tmpdir(), 'vc-open-state-wiring-'));
+    scratch = createTempDir('vc-open-state-wiring-');
     vi.spyOn(process, 'cwd').mockReturnValue(scratch);
     store.current = projectConfigStore({
       projectName: 'wireapp',

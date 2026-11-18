@@ -8,18 +8,19 @@
  * job installs it, and a missing CLI fails this test instead of skipping it.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { hostname, tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { destroyStack, removeStackState, upStack } from '../../../src/lib/iac/index.js';
 import { LOCK_EXPIRY_MS, StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const hasPulumi = pulumiOnPath();
 
 const PROJECT = 'locktest';
-const dir = mkdtempSync(join(tmpdir(), 'vc-stack-lock-'));
+const dir = createTempDir('vc-stack-lock-');
 const backend = join(dir, 'state');
 // projectDir keeps the passphrase check (and its .vibecarbon.json) in this
 // test's temp dir instead of the repo checkout.
@@ -59,9 +60,6 @@ describe.runIf(hasPulumi || process.env.CI)('stale locks on the real engine', ()
   beforeAll(() => {
     mkdirSync(backend);
     writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
-  });
-  afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('destroy refuses a run on another machine and leaves its lock', async () => {

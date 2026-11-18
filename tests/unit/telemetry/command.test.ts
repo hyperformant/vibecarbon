@@ -1,22 +1,19 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTelemetryState } from '../../../src/lib/telemetry/state.js';
 import { run } from '../../../src/telemetry.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 let logs: string[];
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-tcmd-'));
+  dir = createTempDir('vc-tcmd-');
   logs = [];
   vi.spyOn(console, 'log').mockImplementation((...a) => {
     logs.push(a.join(' '));
   });
 });
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 

@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { setComposeProjectName, setPortOffset } from '../../../src/up.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * DEV_PORT_OFFSET and its client-visible twin VITE_DEV_PORT_OFFSET must be
@@ -20,10 +20,7 @@ import { setComposeProjectName, setPortOffset } from '../../../src/up.js';
 describe('setPortOffset', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-portoffset-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-portoffset-');
   });
 
   const envLocal = () => readFileSync(join(dir, '.env.local'), 'utf-8');
@@ -105,10 +102,7 @@ describe('setPortOffset', () => {
 describe('setComposeProjectName', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-composename-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-composename-');
   });
 
   it('replaces a hand-edited `export` form instead of duplicating the key', () => {

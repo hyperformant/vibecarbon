@@ -21,11 +21,11 @@
  * the ignoreError contract are exercised end to end. No node: builtin is
  * mocked (the unit suite runs in parallel) and no network is touched.
  */
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isTransientSshCommandError, scpWithRetry } from '../../../src/lib/ssh.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /** The exact stderr from the 2026-08-11 merge-walg-role failure. */
 const TONIGHT_STDERR = [
@@ -46,7 +46,7 @@ afterEach(() => {
  * to scpWithRetry plus an attempt counter.
  */
 function fakeScp({ failTimes, stderr }: { failTimes: number; stderr: string }) {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-fake-scp-'));
+  const dir = createTempDir('vc-fake-scp-');
   tempDirs.push(dir);
   const counter = join(dir, 'attempts');
   const script = [

@@ -16,9 +16,9 @@
  * to assert the CLI invoked the expected commands with expected args.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 export interface ExecStubSpec {
   /** Command name as it appears on PATH (e.g. "ssh", "docker", "kubectl"). */
@@ -70,7 +70,7 @@ export interface ExecStubs {
  *     stubs.teardown();
  */
 export function installExecStubs(specs: ExecStubSpec[]): ExecStubs {
-  const dir = mkdtempSync(join(tmpdir(), 'vibecarbon-exec-stubs-'));
+  const dir = createTempDir('vibecarbon-exec-stubs-');
   const binDir = join(dir, 'bin');
   const logPath = join(dir, 'calls.jsonl');
   mkdirSync(binDir, { recursive: true });

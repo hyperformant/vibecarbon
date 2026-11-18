@@ -37,13 +37,12 @@
  * integration job installs the CLI pinned to the SDK version, and a missing
  * CLI there fails this test instead of skipping it.
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as pulumi from '@pulumi/pulumi';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   createDeployDropRetired,
   releaseRetiredReservedIps,
@@ -52,6 +51,7 @@ import { importStackState } from '../../../src/lib/iac/index.js';
 import { dropStackResources } from '../../../src/lib/iac/retired-resources.js';
 import { makeWorkspaceDir } from '../../../src/lib/iac/workspace-dir.js';
 import { pulumiOnPath } from '../../_shared/pulumi-cli.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The fake cloud as a provider, for the deploy's own drop: its retired
 // resources are the fake cloud's reserved IP and assignment, as DigitalOcean's
@@ -83,7 +83,7 @@ vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
 
 const hasPulumi = pulumiOnPath();
 
-const dir = mkdtempSync(join(tmpdir(), 'vc-retired-'));
+const dir = createTempDir('vc-retired-');
 const cloudFile = join(dir, 'cloud.json');
 const backend = join(dir, 'state');
 mkdirSync(backend);
@@ -96,7 +96,6 @@ beforeAll(() => {
   writeFileSync(cloudFile, JSON.stringify({ next: 1, servers: {} }));
   writeFileSync(join(dir, '.vibecarbon.json'), '{}\n');
 });
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 type Thing = Record<string, unknown> & { assignedTo?: string | null };
 type Cloud = {

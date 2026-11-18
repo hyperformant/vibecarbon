@@ -6,9 +6,7 @@
  * standby lists for those tiers omit the two regions. Harness as in
  * gather-scaffold-lockstep.test.ts.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 import { copyTemplate } from '../helpers/copy-template.js';
@@ -54,13 +52,14 @@ vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
 
 import { gatherDeploymentConfig } from '../../../src/lib/deploy/prompts.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const dirs: string[] = [];
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 function project() {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-gather-linode-region-'));
+  const dir = createTempDir('vc-gather-linode-region-');
   dirs.push(dir);
   copyTemplate(dir);
   vi.spyOn(process, 'cwd').mockReturnValue(dir);

@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -9,15 +8,15 @@ import {
   resetFingerprintKeyCache,
   secretHmac,
 } from '../../../src/lib/deploy/secret-fingerprint.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 beforeEach(() => {
   resetFingerprintKeyCache();
-  dir = mkdtempSync(join(tmpdir(), 'vc-fp-'));
+  dir = createTempDir('vc-fp-');
 });
 afterEach(() => {
   resetFingerprintKeyCache();
-  rmSync(dir, { recursive: true, force: true });
 });
 const keyFile = () => join(dir, 'fingerprint.key');
 

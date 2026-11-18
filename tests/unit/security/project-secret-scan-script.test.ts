@@ -7,11 +7,11 @@
  * (repeated letters, the alphabet). None was ever issued by a provider.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const SCRIPT = join(REPO_ROOT, 'carbon', 'scripts', 'secret-scan.mjs');
 
@@ -30,10 +30,7 @@ const PROVIDER_FIXTURES: Array<{ ruleId: string; line: string }> = [
 describe('the generated project pre-commit secret scan', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-project-scan-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-project-scan-');
   });
 
   const scan = (args: string[], input?: string) =>

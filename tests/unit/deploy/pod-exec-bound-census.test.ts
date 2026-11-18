@@ -20,19 +20,11 @@
  * be taught here, never skipped. `kubectl exec` in any other string is text for
  * an operator to read, and those are counted in OPERATOR_TEXT.
  */
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   enclosingBracket,
   enclosingFunctionName,
@@ -305,10 +297,9 @@ describe('census: every kubectl call that reaches a pod has a bound', () => {
 
 describe('the census bites', () => {
   let dir: string;
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const plant = (body: string) => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-pod-exec-census-'));
+    dir = createTempDir('vc-pod-exec-census-');
     const f = join(dir, 'src/lib/deploy/x.js');
     mkdirSync(dirname(f), { recursive: true });
     writeFileSync(f, body);

@@ -16,13 +16,13 @@
  *      pulls the local `.env` into the bundle).
  * Fixture values only.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDotenv, readEnvFiles } from '../../../src/lib/dotenv.js';
 import { loadEnvVariables, repairLegacyEnvQuoting } from '../../../src/lib/project.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('deploy/scale entry heal — the hook the commands call', () => {
   const dirs: string[] = [];
@@ -31,7 +31,7 @@ describe('deploy/scale entry heal — the hook the commands call', () => {
   });
 
   it('after the entry heal, every reader deploy uses sees the decoded value', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'vc-deploy-heal-'));
+    const cwd = createTempDir('vc-deploy-heal-');
     dirs.push(cwd);
     writeFileSync(join(cwd, '.env'), "JWT_SECRET=abc\nSMTP_PASS='pa'\\''ss'\n");
     writeFileSync(join(cwd, '.env.local'), "SMTP_PASS='pa'\\''ss'\nHETZNER_API_TOKEN=t\n");

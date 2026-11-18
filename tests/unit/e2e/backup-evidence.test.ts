@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { resolveEnvStorage } from '../../../src/lib/deploy/prompts.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   buildArchiverEvidenceCommand,
   buildWalSwitchProbe,
@@ -202,9 +202,8 @@ describe('parseWalSwitchOutput', () => {
 describe('resolveBackupS3Target', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-backup-evidence-'));
+    dir = createTempDir('vc-backup-evidence-');
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const write = (config: unknown) =>
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(config));
@@ -317,7 +316,7 @@ describe('runBackupEvidenceChecks', () => {
   ].join('\n');
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-backup-evidence-run-'));
+    dir = createTempDir('vc-backup-evidence-run-');
     mkdirSync(join(dir, '.vibecarbon'), { recursive: true });
     writeFileSync(
       join(dir, '.vibecarbon.json'),
@@ -326,7 +325,6 @@ describe('runBackupEvidenceChecks', () => {
       }),
     );
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const baseOpts = {
     masterIp: '10.0.0.1',

@@ -3,19 +3,14 @@
  * tests/integration/template/create.test.ts (which actually scaffolds
  * a project + lints/builds it). Here: help + flag rejections only.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'vitest';
+import { beforeEach, describe, it } from 'vitest';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 import { assertExitWith, runCli } from '../../_harness/index.js';
 
 describe('vibecarbon create — flag rejections', () => {
   let parent: string;
   beforeEach(() => {
-    parent = mkdtempSync(join(tmpdir(), 'vc-create-flags-'));
-  });
-  afterEach(() => {
-    rmSync(parent, { recursive: true, force: true });
+    parent = createTempDir('vc-create-flags-');
   });
 
   it('rejects --use-npm (CLI sweep replaced with -pm)', () => {

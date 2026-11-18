@@ -1,20 +1,16 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { loadE2EEnvFile, readE2EEnv } from '../../../tests/e2e/utils/e2e-env-file.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 describe('loadE2EEnvFile — A6 operator token file loader', () => {
   let dir: string;
   let filePath: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'e2e-env-file-test-'));
+    dir = createTempDir('e2e-env-file-test-');
     filePath = join(dir, '.env.e2e');
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('missing file is a no-op: target is untouched, empty Set returned', () => {
@@ -96,12 +92,8 @@ describe('readE2EEnv', () => {
   let file: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'read-e2e-env-'));
+    dir = createTempDir('read-e2e-env-');
     file = join(dir, '.env.e2e');
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('the real env wins over the file', () => {

@@ -1,7 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   defaultLedgerPath,
@@ -10,6 +9,7 @@ import {
   readVolumeLedger,
   recordLeakedVolumes,
 } from '../../../src/lib/volume-ledger.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The ledger is the handoff between `vibecarbon destroy` (which can PROVE which
@@ -27,12 +27,8 @@ let dir: string;
 let ledger: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-volume-ledger-'));
+  dir = createTempDir('vc-volume-ledger-');
   ledger = join(dir, 'leaked-volumes.json');
-});
-
-afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
 });
 
 describe('recordLeakedVolumes', () => {

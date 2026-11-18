@@ -8,12 +8,12 @@
  * so a change in how runCommandAsync reports exit codes fails here instead of
  * only on real infrastructure.
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ADMIN_PROBE_EXIT } from '../../../src/lib/deploy/admin-ready.js';
 import { watchAppMigrationFailure } from '../../../src/lib/deploy/k8s/readiness.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 afterEach(() => {
@@ -26,7 +26,7 @@ afterEach(() => {
  * and whose `logs` prints a tail.
  */
 function fakeKubectl(code: number) {
-  dir = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
+  dir = createTempDir('vc-kubectl-');
   const bin = join(dir, 'kubectl');
   const rs = JSON.stringify({
     items: [

@@ -12,14 +12,14 @@
  * substitutions, with the cluster file's `vibecarbon-base` patches applied.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { dump, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { PLACEHOLDERS, SECRET_PLACEHOLDERS } from '../../../src/create.js';
 import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const BASE = join(REPO_ROOT, 'carbon/k8s/base');
 const SERVICES = join(REPO_ROOT, 'services');
@@ -91,25 +91,21 @@ function fluxBasePatches(cluster: string): Doc[] {
  * `addons`) with `patches` applied; returns stdout.
  */
 function fluxBuild(patches: Doc[], { addons = false } = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-flux-census-'));
-  try {
-    createdBase(dir);
-    if (addons) addBaseAddons(dir);
-    writeFileSync(
-      join(dir, 'kustomization.yaml'),
-      dump({
-        apiVersion: 'kustomize.config.k8s.io/v1beta1',
-        kind: 'Kustomization',
-        resources: ['base'],
-        ...(patches.length ? { patches } : {}),
-      }),
-    );
-    const res = spawnSync('kubectl', ['kustomize', dir], { encoding: 'utf-8' });
-    if (res.status !== 0) throw new Error(`kustomize build failed:\n${res.stderr}`);
-    return res.stdout;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const dir = createTempDir('vc-flux-census-');
+  createdBase(dir);
+  if (addons) addBaseAddons(dir);
+  writeFileSync(
+    join(dir, 'kustomization.yaml'),
+    dump({
+      apiVersion: 'kustomize.config.k8s.io/v1beta1',
+      kind: 'Kustomization',
+      resources: ['base'],
+      ...(patches.length ? { patches } : {}),
+    }),
+  );
+  const res = spawnSync('kubectl', ['kustomize', dir], { encoding: 'utf-8' });
+  if (res.status !== 0) throw new Error(`kustomize build failed:\n${res.stderr}`);
+  return res.stdout;
 }
 
 describe('Flux applies no unrendered placeholder from k8s/base', () => {

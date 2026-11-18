@@ -3,10 +3,10 @@
  * to object storage, read them back through the app's 302, compare. These pin
  * the check's own logic with fakes; the live round-trip only runs on real infra.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   CookieJar,
   checkFileUploadRoundtrip,
@@ -393,40 +393,36 @@ describe('presigned URL helpers', () => {
 
 describe('resolveAppStorage', () => {
   it('reads the env provider and s3 block from .vibecarbon.json, null when there is no bucket', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-app-storage-'));
-    try {
-      expect(resolveAppStorage(dir, 'e1')).toBeNull();
-      writeFileSync(
-        join(dir, '.vibecarbon.json'),
-        JSON.stringify({
-          environments: {
-            e1: {
-              provider: 'hetzner',
-              s3: {
-                bucket: 'myapp-storage',
-                keyPrefix: 'e1/',
-                region: 'fsn1',
-                endpoint: 'https://fsn1.your-objectstorage.com',
-              },
+    const dir = createTempDir('vc-app-storage-');
+    expect(resolveAppStorage(dir, 'e1')).toBeNull();
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        environments: {
+          e1: {
+            provider: 'hetzner',
+            s3: {
+              bucket: 'myapp-storage',
+              keyPrefix: 'e1/',
+              region: 'fsn1',
+              endpoint: 'https://fsn1.your-objectstorage.com',
             },
-            e2: { s3: { bucket: 'other', region: 'fsn1', endpoint: 'https://x' } },
           },
-        }),
-      );
-      // A stale keyPrefix on disk is ignored: buckets are per env now.
-      expect(resolveAppStorage(dir, 'e1')).toEqual({
-        providerId: 'hetzner',
-        bucket: 'myapp-storage',
-        envName: 'e1',
-        region: 'fsn1',
-        endpoint: 'https://fsn1.your-objectstorage.com',
-      });
-      const e2 = resolveAppStorage(dir, 'e2');
-      expect(e2).toMatchObject({ providerId: 'hetzner' });
-      expect(e2).not.toHaveProperty('keyPrefix');
-      expect(resolveAppStorage(dir, 'e3')).toBeNull();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+          e2: { s3: { bucket: 'other', region: 'fsn1', endpoint: 'https://x' } },
+        },
+      }),
+    );
+    // A stale keyPrefix on disk is ignored: buckets are per env now.
+    expect(resolveAppStorage(dir, 'e1')).toEqual({
+      providerId: 'hetzner',
+      bucket: 'myapp-storage',
+      envName: 'e1',
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+    });
+    const e2 = resolveAppStorage(dir, 'e2');
+    expect(e2).toMatchObject({ providerId: 'hetzner' });
+    expect(e2).not.toHaveProperty('keyPrefix');
+    expect(resolveAppStorage(dir, 'e3')).toBeNull();
   });
 });

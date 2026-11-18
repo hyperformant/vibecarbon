@@ -14,12 +14,12 @@
 
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // vi.useFakeTimers() does not fake `node:timers/promises` (sinon limitation),
 // so route runWithRetry's sleep through the faked global setTimeout — mirrors
@@ -277,8 +277,7 @@ describe('the audit reads the role file', () => {
   // The probe, run for real with bash against the real walg-env.sh, a stub
   // pg_controldata and a role file in each state.
   describe('run for real', () => {
-    const work = mkdtempSync(join(tmpdir(), 'vc-walg-audit-'));
-    afterAll(() => rmSync(work, { recursive: true, force: true }));
+    const work = createTempDir('vc-walg-audit-');
     writeFileSync(
       join(work, 'pg_controldata'),
       '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',

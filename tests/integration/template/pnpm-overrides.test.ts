@@ -18,12 +18,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { writePnpmWorkspaceSettings } from '../../../src/lib/package-manager.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const CARBON = join(REPO_ROOT, 'carbon');
 
@@ -42,7 +43,7 @@ let resolveError = '';
 
 beforeAll(() => {
   if (!pnpmVersion) return;
-  projectDir = mkdtempSync(join(tmpdir(), 'vc-pnpm-overrides-'));
+  projectDir = createTempDir('vc-pnpm-overrides-');
   copyFileSync(join(CARBON, 'package.json'), join(projectDir, 'package.json'));
 
   // The fix: pins out of package.json (ignored by pnpm 11) and into

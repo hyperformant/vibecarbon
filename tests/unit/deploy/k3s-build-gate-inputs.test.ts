@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
@@ -12,6 +11,7 @@ import {
 // @ts-expect-error — JS module without types
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Regression coverage for the content-blind `k3s-build` skip gate.
@@ -44,14 +44,13 @@ describe('buildK3sBuildInputs — the app source tree is part of the gate', () =
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-build-gate-'));
+    dir = createTempDir('vc-k3s-build-gate-');
     writeProject(dir);
     // StateTracker keys its state file off process.cwd()/.vibecarbon.
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const args = () => ({
@@ -76,13 +75,9 @@ describe('buildK3sBuildInputs — the app source tree is part of the gate', () =
     expect(buildK3sBuildInputs(args())).toEqual(buildK3sBuildInputs(args()));
     // Same content laid down in a DIFFERENT directory digests identically, so
     // redeploying the same tree from another clone/CI checkout cannot false-bust.
-    const twin = mkdtempSync(join(tmpdir(), 'vc-k3s-build-twin-'));
-    try {
-      writeProject(twin);
-      expect(digestAppSource(twin)).toBe(digestAppSource(dir));
-    } finally {
-      rmSync(twin, { recursive: true, force: true });
-    }
+    const twin = createTempDir('vc-k3s-build-twin-');
+    writeProject(twin);
+    expect(digestAppSource(twin)).toBe(digestAppSource(dir));
   });
 
   it('re-runs the build when ONLY an app source file changed (the bug)', () => {
@@ -183,7 +178,7 @@ describe('buildK3sBuildInputs — the docker build args are part of the gate', (
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-build-args-'));
+    dir = createTempDir('vc-k3s-build-args-');
     writeProject(dir);
     writeFileSync(
       join(dir, '.env.local'),
@@ -193,7 +188,6 @@ describe('buildK3sBuildInputs — the docker build args are part of the gate', (
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   const args = () => ({
@@ -243,13 +237,12 @@ describe('a source change cascades build → apply (which delivers)', () => {
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-k3s-cascade-'));
+    dir = createTempDir('vc-k3s-cascade-');
     writeProject(dir);
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
     cwdSpy.mockRestore();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   /**

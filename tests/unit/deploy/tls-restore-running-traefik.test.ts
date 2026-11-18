@@ -12,10 +12,10 @@
  * on PATH that answers `ps -q traefik` and records every other call.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { acmeJson } from './_tls-fixtures.ts';
 
@@ -26,7 +26,7 @@ const S3 = { bucket: 'b', accessKey: 'AK', secretKey: 'SK', region: 'r', endpoin
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-tls-running-'));
+  dir = createTempDir('vc-tls-running-');
   mkdirSync(join(dir, 'bin'));
   writeVcCompose(dir);
   // ps -q traefik prints an id while TRAEFIK_RUNNING=1; exec/run/restart are
@@ -45,7 +45,6 @@ beforeEach(() => {
   );
   chmodSync(join(dir, 'bin', 'docker'), 0o755);
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 /** The scripts restoreComposeTls would send: [liveCheck, write]. */
 async function renderedScripts(restart = true): Promise<string[]> {

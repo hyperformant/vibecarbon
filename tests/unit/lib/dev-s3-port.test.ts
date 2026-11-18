@@ -1,12 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { generateEnvLocal } from '../../../src/create.js';
 import { devS3Endpoint, devS3Port } from '../../../src/lib/dev-s3.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { setPortOffset } from '../../../src/up.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * The dev-only local S3 port follows the DEV_* port contract (explicit
@@ -32,10 +32,7 @@ describe('devS3Port', () => {
 describe('S3_ENDPOINT follows the offset', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-dev-s3-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-dev-s3-');
   });
   const env = () => parseDotenv(readFileSync(join(dir, '.env.local'), 'utf-8'));
 

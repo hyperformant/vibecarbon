@@ -4,13 +4,13 @@
  * Mirrors digitalocean-k8s-user-data.test.ts.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const masterVars = {
   k3s_version: 'v1.37.2+k3s1',
@@ -84,7 +84,7 @@ describe('LinodeProvider k8s user-data statics', () => {
       const end = rendered.indexOf(endMarker);
       expect(start, 'identity block start').toBeGreaterThan(-1);
       expect(end, 'identity block end').toBeGreaterThan(start);
-      const dir = mkdtempSync(join(tmpdir(), 'vc-linode-hostname-'));
+      const dir = createTempDir('vc-linode-hostname-');
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(

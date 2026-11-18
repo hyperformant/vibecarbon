@@ -22,6 +22,7 @@ import {
   renderHetznerFencePolicy,
 } from '../../../src/lib/deploy/hetzner-app-key-fence.js';
 import { envIdentityOf } from '../../../src/lib/env-identity.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const OWNER = 'p1234567';
 
@@ -1579,10 +1580,9 @@ describe('(b) a fenced env whose key is not on this machine', () => {
 
 describe('configure storage -forget', () => {
   it('removes a retired id, refuses one still in use, and the next fence drops it', async () => {
-    const { mkdtempSync, rmSync, writeFileSync, readFileSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
+    const { writeFileSync, readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const dir = mkdtempSync(join(tmpdir(), 'vc-forget-'));
+    const dir = createTempDir('vc-forget-');
     const cwd = process.cwd();
     const cfg = { ...project(), retiredAppKeys: ['AK_OLD', 'AK_OTHER'] };
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(cfg));
@@ -1603,7 +1603,6 @@ describe('configure storage -forget', () => {
     } finally {
       process.chdir(cwd);
       exit.mockRestore();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

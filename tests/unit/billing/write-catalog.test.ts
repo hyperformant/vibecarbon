@@ -6,12 +6,12 @@
  * src/shared is absent — i.e. cwd is not an app project root.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { writeBillingCatalog } from '../../../src/lib/billing/write-catalog.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let projectDir: string;
 
@@ -43,11 +43,7 @@ const SAMPLE = {
 };
 
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'vc-billing-catalog-'));
-});
-
-afterEach(() => {
-  rmSync(projectDir, { recursive: true, force: true });
+  projectDir = createTempDir('vc-billing-catalog-');
 });
 
 describe('writeBillingCatalog', () => {

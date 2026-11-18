@@ -15,11 +15,10 @@
  * against MinIO (final-fix-report.md).
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BACKUP_FENCE_OBJECT,
   BACKUP_FENCE_REFUSAL,
@@ -35,6 +34,7 @@ import {
   writeK8sBackupFence,
 } from '../../../src/lib/deploy/backup-fence.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const ARCHIVE = join(REPO_ROOT, 'carbon/volumes/db/wal-archive.sh');
@@ -223,8 +223,7 @@ describe('the fence record', () => {
 // The push paths, run for real against stubs
 // ---------------------------------------------------------------------------
 
-const work = mkdtempSync(join(tmpdir(), 'vc-bfence-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-bfence-');
 /** Every push path here runs on a primary: the role file walg-env.sh reads says so. */
 const PRIMARY_ROLE_FILE = join(work, 'walg-role');
 writeFileSync(PRIMARY_ROLE_FILE, 'primary\n');
@@ -568,7 +567,7 @@ describe('census: every backup push path checks the fence first', () => {
 // lands replaces it.
 describe('the fence write outcome is persisted and shown', () => {
   const setup = async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-fence-rec-'));
+    const dir = createTempDir('vc-fence-rec-');
     writeFileSync(
       join(dir, '.vibecarbon.json'),
       JSON.stringify({

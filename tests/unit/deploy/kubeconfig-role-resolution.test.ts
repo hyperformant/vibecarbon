@@ -12,11 +12,11 @@
  * reconverge). The serving cluster is whatever stack
  * `envConfig.ha.primary.stack` names.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveKubeconfigPath } from '../../../src/lib/deploy/orchestrator.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let dir: string;
 afterEach(() => {
@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 function makeProject(files: string[]) {
-  dir = mkdtempSync(join(tmpdir(), 'vc-kcfg-'));
+  dir = createTempDir('vc-kcfg-');
   mkdirSync(join(dir, '.vibecarbon'), { recursive: true });
   for (const f of files) writeFileSync(join(dir, '.vibecarbon', f), 'kubeconfig');
   process.chdir(dir);

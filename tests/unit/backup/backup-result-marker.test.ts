@@ -22,12 +22,12 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { parseBackupResult, pushedBackupNames } from '../../../src/lib/walg/backup-result.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const COMPOSE_BACKUP = join(REPO_ROOT, 'carbon/backup/compose-backup.sh');
@@ -76,8 +76,7 @@ describe('parseBackupResult', () => {
 // The scripts, run against stubs
 // ---------------------------------------------------------------------------
 
-const work = mkdtempSync(join(tmpdir(), 'vc-bresult-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const work = createTempDir('vc-bresult-');
 
 type Stub = {
   recovery?: 't' | 'f';

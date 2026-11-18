@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * k8s-ha writes its DNS records as soon as both clusters' ingress IPs (the
@@ -83,7 +83,7 @@ const options = (extra: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vc-k8s-ha-dns-'));
+  dir = createTempDir('vc-k8s-ha-dns-');
   vi.spyOn(process, 'cwd').mockReturnValue(dir);
   writeFileSync(
     join(dir, '.vibecarbon.json'),
@@ -103,7 +103,6 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
-  rmSync(dir, { recursive: true, force: true });
 });
 
 describe('k8s-ha DNS: written once both ingress IPs are known', () => {

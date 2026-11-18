@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -12,6 +11,7 @@ import {
 import { PLATFORM_BUILD_FLAG } from '../../../src/lib/deploy/platform.js';
 import { NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('node:child_process', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -309,10 +309,7 @@ describe('buildLocalImage', () => {
 describe('readRuntimeBaseRef', () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-base-ref-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    dir = createTempDir('vc-base-ref-');
   });
 
   it('reads the ARG RUNTIME_IMAGE default the image builds FROM', () => {

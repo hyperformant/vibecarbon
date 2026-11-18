@@ -5,17 +5,16 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const HOOKS_DIR = resolve(REPO_ROOT, '.claude/hooks');
 
@@ -50,7 +49,7 @@ export interface Rig {
 
 /** A bare origin plus a clone with one commit on `def`, origin/HEAD set. */
 export function makeRig(def = 'main'): Rig {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'vc-hooks-')));
+  const root = realpathSync(createTempDir('vc-hooks-'));
   const origin = join(root, 'origin.git');
   const repo = join(root, 'repo');
   const binDir = join(root, 'bin');

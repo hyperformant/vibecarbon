@@ -8,13 +8,13 @@
  * `run` is driven end to end with a fake S3 client holding zero sentinels; the
  * SSH transports (runCommandAsync for compose, sshKubectl for k8s) are spies.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
-const keyDir = mkdtempSync(join(tmpdir(), 'vc-restore-base-'));
+const keyDir = createTempDir('vc-restore-base-');
 const keyPath = join(keyDir, 'id_ed25519');
 writeFileSync(keyPath, 'not-a-key');
 
@@ -100,10 +100,6 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-afterAll(() => {
-  rmSync(keyDir, { recursive: true, force: true });
-});
-
 describe('restore run(): no restorable base refuses before any stop', () => {
   for (const deployMode of ['compose', 'kubernetes']) {
     it(`${deployMode}: zero sentinels exits 1 naming the bucket, and nothing on the server runs`, async () => {
@@ -186,7 +182,7 @@ describe('restore run(): the real credential lookup with -y', () => {
     // The real resolveS3Config: the backup bucket from .vibecarbon.json in the
     // cwd, the keys from the provider's env vars, skipPrompts from -y.
     envConfig = { deployMode: 'compose', provider: 'hetzner', servers: [{ ip: '10.0.0.1' }] };
-    const projectDir = mkdtempSync(join(tmpdir(), 'vc-restore-creds-'));
+    const projectDir = createTempDir('vc-restore-creds-');
     writeFileSync(
       join(projectDir, '.vibecarbon.json'),
       JSON.stringify({
@@ -216,7 +212,6 @@ describe('restore run(): the real credential lookup with -y', () => {
       noServerTouched();
     } finally {
       for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
-      rmSync(projectDir, { recursive: true, force: true });
     }
   });
 });

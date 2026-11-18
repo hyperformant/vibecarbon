@@ -22,7 +22,6 @@ import {
   chmodSync,
   cpSync,
   existsSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -40,12 +39,13 @@ import {
   VC_COMPOSE_SCRIPT,
 } from '../../../src/lib/deploy/compose/command.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const BASE_FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';
 
 const dirs: string[] = [];
 function tempDir(prefix = 'vc-compose-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = createTempDir(prefix);
   dirs.push(dir);
   return dir;
 }

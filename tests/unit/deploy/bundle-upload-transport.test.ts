@@ -16,10 +16,10 @@
  * so the never-started constraint is belt-and-suspenders — but keeping the
  * same classifier as sshRun means the two retry policies cannot drift.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('node:timers/promises', () => ({
   setTimeout: (ms?: number, value?: unknown) =>
@@ -97,14 +97,13 @@ describe('setupServerFiles bundle-upload transport', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    bundleDir = mkdtempSync(join(tmpdir(), 'vc-bundle-upload-'));
+    bundleDir = createTempDir('vc-bundle-upload-');
     writeFileSync(join(bundleDir, 'docker-compose.yml'), 'services: {}\n');
     runCommandAsync.mockReset().mockResolvedValue('');
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    rmSync(bundleDir, { recursive: true, force: true });
   });
 
   const run = () =>

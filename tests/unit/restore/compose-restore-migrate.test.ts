@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -28,6 +27,7 @@ import {
 } from '../../../src/lib/deploy/compose/command.js';
 import { restoreCompose } from '../../../src/lib/deploy/compose/index.js';
 import { readRepoFile } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 const MIGRATE = `cd /opt/proj && ${VC_COMPOSE} run --rm --no-deps app-migrate`;
 
@@ -103,7 +103,7 @@ describe('the post-restore migrate runs from the server -f set (prod override in
 
     // Run it on a stand-in server dir: the bundle's vc-compose (single compose
     // server: no replication overlay) and a docker that records its argv.
-    const server = mkdtempSync(join(tmpdir(), 'vc-restore-migrate-'));
+    const server = createTempDir('vc-restore-migrate-');
     dirs.push(server);
     writeFileSync(join(server, VC_COMPOSE_SCRIPT), renderComposeCommand(composeFileFlags({})));
     writeFileSync(

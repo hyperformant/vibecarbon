@@ -13,10 +13,10 @@
  * the thing under test.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createTempDir } from '../../../_shared/temp-dir.js';
 
 const LOGGER = resolve('src/lib/deploy-logger.js');
 let home: string;
@@ -27,7 +27,7 @@ afterEach(() => {
 
 describe('withDeployLog', () => {
   it('keeps the last line written before process.exit()', () => {
-    home = mkdtempSync(join(tmpdir(), 'vc-deploylog-'));
+    home = createTempDir('vc-deploylog-');
     const script = `
       const { withDeployLog } = await import(${JSON.stringify(LOGGER)});
       await withDeployLog('prod', async () => {

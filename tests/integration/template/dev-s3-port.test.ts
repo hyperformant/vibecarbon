@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { devS3Port } from '../../../src/lib/dev-s3.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * docker-up.js publishes the local S3 on the port S3_ENDPOINT names: two
@@ -15,20 +15,16 @@ import { REPO_ROOT } from '../../_shared/source-files.js';
 const DOCKER_UP = join(REPO_ROOT, 'carbon', 'scripts', 'docker-up.js');
 
 function publishedS3Port(envLocal: string): number {
-  const dir = mkdtempSync(join(tmpdir(), 'vc-dev-s3-up-'));
-  try {
-    writeFileSync(join(dir, '.env.local'), envLocal);
-    const out = execFileSync('node', [DOCKER_UP, '--dry-run'], {
-      cwd: dir,
-      encoding: 'utf-8',
-      env: { PATH: process.env.PATH ?? '' },
-    });
-    const m = out.match(/DEV_S3_PORT: '(\d+)'/);
-    expect(m, out).not.toBeNull();
-    return Number((m as RegExpMatchArray)[1]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const dir = createTempDir('vc-dev-s3-up-');
+  writeFileSync(join(dir, '.env.local'), envLocal);
+  const out = execFileSync('node', [DOCKER_UP, '--dry-run'], {
+    cwd: dir,
+    encoding: 'utf-8',
+    env: { PATH: process.env.PATH ?? '' },
+  });
+  const m = out.match(/DEV_S3_PORT: '(\d+)'/);
+  expect(m, out).not.toBeNull();
+  return Number((m as RegExpMatchArray)[1]);
 }
 
 describe('docker-up.js publishes DEV_S3_PORT on the shared rule', () => {

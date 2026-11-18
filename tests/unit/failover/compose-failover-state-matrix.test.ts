@@ -17,11 +17,11 @@
  * The guard reads, reseed, journal, promote, fence and swap are injected seams;
  * the post-promote steps run against the mocked compose ssh layer.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 // The first base backup on the new timeline has its own tests
 // (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
@@ -1159,23 +1159,19 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
   describe('the writer stop shell, run for real against a fake docker', () => {
     const fence = async (script: string) => {
       const { spawnSync } = await import('node:child_process');
-      const { chmodSync, mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+      const { chmodSync, writeFileSync } = await import('node:fs');
       const { stopOldPrimaryWriters } = await import('../../../src/lib/deploy/compose/ha.js');
-      const dir = mkdtempSync(join(tmpdir(), 'vc-fence-docker-'));
-      try {
-        writeFileSync(join(dir, 'docker'), `#!/bin/bash\n${script}\n`);
-        chmodSync(join(dir, 'docker'), 0o755);
-        vi.mocked(composeSsh.sshRun).mockImplementationOnce(
-          async (_ip: string, _k: string, command: unknown) =>
-            spawnSync('bash', ['-c', String(command)], {
-              encoding: 'utf-8',
-              env: { PATH: `${dir}:${process.env.PATH}` },
-            }).stdout,
-        );
-        return await stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp', ['app', 'n8n']);
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+      const dir = createTempDir('vc-fence-docker-');
+      writeFileSync(join(dir, 'docker'), `#!/bin/bash\n${script}\n`);
+      chmodSync(join(dir, 'docker'), 0o755);
+      vi.mocked(composeSsh.sshRun).mockImplementationOnce(
+        async (_ip: string, _k: string, command: unknown) =>
+          spawnSync('bash', ['-c', String(command)], {
+            encoding: 'utf-8',
+            env: { PATH: `${dir}:${process.env.PATH}` },
+          }).stdout,
+      );
+      return await stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp', ['app', 'n8n']);
     };
     const inspectAs = (n8n: string) =>
       `if [ "$1" = container ]; then case "$5" in myapp-app) echo running; exit 0;; *) ${n8n};; esac; fi\n` +
@@ -1378,7 +1374,7 @@ describe('swapComposeHaRoles (the terminal save)', () => {
   });
 
   it('flips the roles in place, marks replication degraded and clears the journal in one save', () => {
-    dir = mkdtempSync(join(tmpdir(), 'vc-compose-swap-'));
+    dir = createTempDir('vc-compose-swap-');
     const env = baseEnvConfig({
       ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
     });

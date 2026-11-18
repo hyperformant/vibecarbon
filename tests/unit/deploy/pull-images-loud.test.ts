@@ -20,11 +20,11 @@
  *   - `--ignore-buildable` stays (db/app are built, never pulled)
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ComposeConfigFixture } from '../../_shared/compose-config-stub.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 vi.mock('../../../src/lib/command.js', async (orig) => {
@@ -88,7 +88,7 @@ describe('the stack pull never asks a registry for the app image', () => {
   // images of app's dependencies too, which the #278 filter compared against
   // one image and so never matched (DO e2e, 2026-11-01).
   function runPull(fixture: ComposeConfigFixture, deferred: string[] = []) {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-stack-pull-'));
+    const dir = createTempDir('vc-stack-pull-');
     writeVcCompose(dir, '-f a.yml -f b.yml');
     if (deferred.length) {
       writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));

@@ -7,23 +7,19 @@
  * browser bundle shipped with empty VITE_* values.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   buildArgFlags,
   collectComposeBuildArgs,
 } from '../../../src/lib/deploy/compose/build-args.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'vc-build-args-'));
-});
-
-afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+  tmpDir = createTempDir('vc-build-args-');
 });
 
 function writeEnvLocal(content: string) {

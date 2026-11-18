@@ -14,8 +14,7 @@
  *
  * Every value here is a SENTINEL_<NAME> stand-in, never a real secret.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { featureConfigKeys, featureSecretKeys } from '../../../src/lib/config-registry.js';
@@ -35,6 +34,7 @@ import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /** Keys of the zod object in carbon/src/server/lib/env.ts, read from the source. */
 function envSchemaKeys(): string[] {
@@ -298,7 +298,7 @@ describe('compose bundle: app.env', () => {
 
   beforeEach(() => {
     cwdBackup = process.cwd();
-    projectDir = mkdtempSync(join(tmpdir(), 'vc-app-env-'));
+    projectDir = createTempDir('vc-app-env-');
     writeFileSync(
       join(projectDir, '.env'),
       [
@@ -315,7 +315,6 @@ describe('compose bundle: app.env', () => {
 
   afterEach(() => {
     process.chdir(cwdBackup);
-    rmSync(projectDir, { recursive: true, force: true });
     if (stage) rmSync(stage, { recursive: true, force: true });
     stage = undefined;
   });

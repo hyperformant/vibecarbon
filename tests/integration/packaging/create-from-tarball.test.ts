@@ -1,10 +1,10 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateGitignore } from '../../../src/lib/project.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { createTempDir } from '../../_shared/temp-dir.js';
 
 /**
  * Runs `vibecarbon create` from a freshly PACKED tarball — the artifact
@@ -32,7 +32,7 @@ let scratch: string;
 let packageDir: string;
 
 beforeAll(() => {
-  scratch = mkdtempSync(join(tmpdir(), 'vc-create-from-tarball-'));
+  scratch = createTempDir('vc-create-from-tarball-');
   const packDest = join(scratch, 'pack');
   mkdirSync(packDest);
 
