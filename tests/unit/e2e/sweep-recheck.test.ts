@@ -75,7 +75,7 @@ describe('sweep recheck coverage', () => {
     );
     expect(hetznerFnMatch, 'checkHetznerProjectClean not found in preflight.ts').toBeTruthy();
     const preflightKinds = [
-      ...(hetznerFnMatch as RegExpMatchArray)[0].matchAll(/url: '([a-z_]+)\?per_page=\d+'/g),
+      ...(hetznerFnMatch as RegExpMatchArray)[0].matchAll(/\{ path: '([a-z_]+)', key:/g),
     ].map((m) => m[1]);
     expect(preflightKinds.length).toBeGreaterThanOrEqual(7); // servers … volumes today
     const sweepKinds = new Set(CLOUD_KINDS.map(([type]: [string]) => type));

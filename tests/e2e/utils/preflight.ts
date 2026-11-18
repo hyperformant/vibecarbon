@@ -1,4 +1,5 @@
 import { scratchNamePrefix } from './namespace.js';
+import { describeIncomplete, type PageDialect, walkProviderPages } from './provider-pages.js';
 
 export type PreflightStatus = 'ok' | 'slow' | 'failed';
 
@@ -311,6 +312,33 @@ async function checkDigitalOceanSpaces(): Promise<PreflightCheck> {
 }
 
 /**
+ * Count one listing's leftover rows across EVERY page.
+ *
+ * Until 2026-11-17 each project-clean check read one page per resource kind
+ * (50 or 100 rows) and matched the scratch prefix client-side, so a leftover
+ * past the first page was never seen and the check said clean on an account
+ * with more rows than one page holds. These accounts are shared by every
+ * run, so that is the normal case for ssh keys and volumes, not a corner.
+ *
+ * `error` is set when the listing could not be read to its end (a failed
+ * page, a throw, or the page guard): the rows read before that still count,
+ * and the caller reports the listing as partial. Each request keeps the 5 s
+ * budget the single read had.
+ */
+async function countLeftovers<T>(
+  dialect: PageDialect,
+  url: string,
+  opts: { key?: string; perPage: number; headers: Record<string, string> },
+  isLeftover: (row: T) => boolean | undefined,
+): Promise<{ count: number; error?: string }> {
+  const walk = await walkProviderPages<T>(dialect, url, { ...opts, timeoutMs: 5_000 });
+  return {
+    count: walk.items.filter((row) => isLeftover(row)).length,
+    error: walk.complete ? undefined : describeIncomplete(walk),
+  };
+}
+
+/**
  * DigitalOcean project quota state — count residual `testapp-*` resources
  * (droplets/firewalls/ssh-keys/volumes) so a leaked prior d1/d2 run aborts
  * the matrix before provisioning rather than tripping a mid-run `422` or
@@ -325,32 +353,24 @@ async function checkDigitalOceanProjectClean(token?: string): Promise<PreflightC
   }
   const t0 = Date.now();
   const prefix = scratchNamePrefix();
-  const endpoints: Array<{ url: string; key: string; label: string }> = [
-    { url: 'droplets?per_page=50', key: 'droplets', label: 'droplet' },
-    { url: 'firewalls?per_page=50', key: 'firewalls', label: 'firewall' },
-    { url: 'account/keys?per_page=50', key: 'ssh_keys', label: 'ssh_key' },
-    { url: 'volumes?per_page=50', key: 'volumes', label: 'volume' },
+  const endpoints: Array<{ path: string; key: string; label: string }> = [
+    { path: 'droplets', key: 'droplets', label: 'droplet' },
+    { path: 'firewalls', key: 'firewalls', label: 'firewall' },
+    { path: 'account/keys', key: 'ssh_keys', label: 'ssh_key' },
+    { path: 'volumes', key: 'volumes', label: 'volume' },
   ];
   const counts: Record<string, number> = {};
   const errors: string[] = [];
   await Promise.all(
-    endpoints.map(async ({ url, key, label }) => {
-      try {
-        const res = await fetch(`https://api.digitalocean.com/v2/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as Record<string, Array<{ name?: string }>>;
-        const items = body[key] ?? [];
-        const matching = items.filter((i) => i.name?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
+    endpoints.map(async ({ path, key, label }) => {
+      const { count, error } = await countLeftovers<{ name?: string }>(
+        'digitalocean',
+        `https://api.digitalocean.com/v2/${path}`,
+        { key, perPage: 50, headers: { Authorization: `Bearer ${token}` } },
+        (i) => i.name?.startsWith(prefix),
+      );
+      if (count > 0) counts[label] = count;
+      if (error) errors.push(`${label}: ${error}`);
     }),
   );
   const latencyMs = Date.now() - t0;
@@ -439,31 +459,23 @@ async function checkLinodeProjectClean(token?: string): Promise<PreflightCheck> 
   }
   const t0 = Date.now();
   const prefix = scratchNamePrefix();
-  const endpoints: Array<{ url: string; label: string }> = [
-    { url: 'linode/instances?page_size=100', label: 'instance' },
-    { url: 'networking/firewalls?page_size=100', label: 'firewall' },
-    { url: 'volumes?page_size=100', label: 'volume' },
+  const endpoints: Array<{ path: string; label: string }> = [
+    { path: 'linode/instances', label: 'instance' },
+    { path: 'networking/firewalls', label: 'firewall' },
+    { path: 'volumes', label: 'volume' },
   ];
   const counts: Record<string, number> = {};
   const errors: string[] = [];
   await Promise.all(
-    endpoints.map(async ({ url, label }) => {
-      try {
-        const res = await fetch(`https://api.linode.com/v4/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as { data?: Array<{ label?: string }> };
-        const items = body.data ?? [];
-        const matching = items.filter((i) => i.label?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
+    endpoints.map(async ({ path, label }) => {
+      const { count, error } = await countLeftovers<{ label?: string }>(
+        'linode',
+        `https://api.linode.com/v4/${path}`,
+        { perPage: 100, headers: { Authorization: `Bearer ${token}` } },
+        (i) => i.label?.startsWith(prefix),
+      );
+      if (count > 0) counts[label] = count;
+      if (error) errors.push(`${label}: ${error}`);
     }),
   );
   const latencyMs = Date.now() - t0;
@@ -557,36 +569,23 @@ async function checkVultrProjectClean(token?: string): Promise<PreflightCheck> {
   }
   const t0 = Date.now();
   const prefix = scratchNamePrefix();
-  const endpoints: Array<{ url: string; key: string; field: string; label: string }> = [
-    { url: 'instances?per_page=100', key: 'instances', field: 'label', label: 'instance' },
-    {
-      url: 'firewalls?per_page=100',
-      key: 'firewall_groups',
-      field: 'description',
-      label: 'firewall',
-    },
-    { url: 'ssh-keys?per_page=100', key: 'ssh_keys', field: 'name', label: 'ssh_key' },
+  const endpoints: Array<{ path: string; key: string; field: string; label: string }> = [
+    { path: 'instances', key: 'instances', field: 'label', label: 'instance' },
+    { path: 'firewalls', key: 'firewall_groups', field: 'description', label: 'firewall' },
+    { path: 'ssh-keys', key: 'ssh_keys', field: 'name', label: 'ssh_key' },
   ];
   const counts: Record<string, number> = {};
   const errors: string[] = [];
   await Promise.all(
-    endpoints.map(async ({ url, key, field, label }) => {
-      try {
-        const res = await fetch(`https://api.vultr.com/v2/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as Record<string, Array<Record<string, string>>>;
-        const items = body[key] ?? [];
-        const matching = items.filter((i) => i[field]?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
+    endpoints.map(async ({ path, key, field, label }) => {
+      const { count, error } = await countLeftovers<Record<string, string>>(
+        'vultr',
+        `https://api.vultr.com/v2/${path}`,
+        { key, perPage: 100, headers: { Authorization: `Bearer ${token}` } },
+        (i) => i[field]?.startsWith(prefix),
+      );
+      if (count > 0) counts[label] = count;
+      if (error) errors.push(`${label}: ${error}`);
     }),
   );
   const latencyMs = Date.now() - t0;
@@ -685,96 +684,62 @@ async function checkScalewayProjectClean(token?: string): Promise<PreflightCheck
   const bump = (label: string, n: number) => {
     if (n > 0) counts[label] = (counts[label] ?? 0) + n;
   };
+  const headers = { 'X-Auth-Token': token };
+  type Named = { name?: string };
+  type Ip = { server?: { id?: string } | null; tags?: string[] };
+  const named = (row: Named) => row.name?.startsWith(prefix);
+  const arm = async <T>(
+    label: string,
+    zone: string,
+    dialect: PageDialect,
+    url: string,
+    key: string,
+    isLeftover: (row: T) => boolean | undefined,
+  ) => {
+    const { count, error } = await countLeftovers<T>(
+      dialect,
+      url,
+      { key, perPage: 100, headers },
+      isLeftover,
+    );
+    bump(label, count);
+    if (error) errors.push(`${label}(${zone}): ${error}`);
+  };
+  const instance = (zone: string) => `https://api.scaleway.com/instance/v1/zones/${zone}`;
   await Promise.all(
     zones.flatMap((zone) => [
-      (async () => {
-        try {
-          const res = await fetch(
-            `https://api.scaleway.com/instance/v1/zones/${zone}/servers?per_page=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`server(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as { servers?: Array<{ name?: string }> };
-          bump('server', (body.servers ?? []).filter((s) => s.name?.startsWith(prefix)).length);
-        } catch (err) {
-          errors.push(
-            `server(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-      (async () => {
-        try {
-          const res = await fetch(
-            `https://api.scaleway.com/instance/v1/zones/${zone}/security_groups?per_page=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`security_group(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as { security_groups?: Array<{ name?: string }> };
-          bump(
-            'security_group',
-            (body.security_groups ?? []).filter((g) => g.name?.startsWith(prefix)).length,
-          );
-        } catch (err) {
-          errors.push(
-            `security_group(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-      (async () => {
-        try {
-          // Block Storage API — where every SBS root volume lives
-          // (terminate only DETACHES sbs_volume, the audited leak class).
-          const res = await fetch(
-            `https://api.scaleway.com/block/v1/zones/${zone}/volumes?page_size=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`volume(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as { volumes?: Array<{ name?: string }> };
-          bump('volume', (body.volumes ?? []).filter((v) => v.name?.startsWith(prefix)).length);
-        } catch (err) {
-          errors.push(
-            `volume(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
-      (async () => {
-        try {
-          const res = await fetch(
-            `https://api.scaleway.com/instance/v1/zones/${zone}/ips?per_page=100`,
-            { headers: { 'X-Auth-Token': token }, signal: AbortSignal.timeout(5_000) },
-          );
-          if (!res.ok) {
-            errors.push(`flexible_ip(${zone}): HTTP ${res.status}`);
-            return;
-          }
-          const body = (await res.json()) as {
-            ips?: Array<{ server?: { id?: string } | null; tags?: string[] }>;
-          };
-          // IPs have no name — ownership is the `project:<name>` tag the
-          // compose program stamps. Namespace-scoped like every other arm:
-          // only UNATTACHED IPs tagged with this namespace's prefix count
-          // (a concurrent laptop run's rigs must never abort a CI matrix).
-          bump(
-            'flexible_ip',
-            (body.ips ?? []).filter(
-              (ip) => !ip.server && (ip.tags ?? []).some((t) => t.startsWith(`project:${prefix}`)),
-            ).length,
-          );
-        } catch (err) {
-          errors.push(
-            `flexible_ip(${zone}): ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`,
-          );
-        }
-      })(),
+      arm<Named>('server', zone, 'scaleway', `${instance(zone)}/servers`, 'servers', named),
+      arm<Named>(
+        'security_group',
+        zone,
+        'scaleway',
+        `${instance(zone)}/security_groups`,
+        'security_groups',
+        named,
+      ),
+      // Block Storage API — where every SBS root volume lives (terminate
+      // only DETACHES sbs_volume, the audited leak class). It pages with
+      // `page_size`, not the Instance API's `per_page`.
+      arm<Named>(
+        'volume',
+        zone,
+        'scaleway-page-size',
+        `https://api.scaleway.com/block/v1/zones/${zone}/volumes`,
+        'volumes',
+        named,
+      ),
+      // IPs have no name — ownership is the `project:<name>` tag the
+      // compose program stamps. Namespace-scoped like every other arm:
+      // only UNATTACHED IPs tagged with this namespace's prefix count
+      // (a concurrent laptop run's rigs must never abort a CI matrix).
+      arm<Ip>(
+        'flexible_ip',
+        zone,
+        'scaleway',
+        `${instance(zone)}/ips`,
+        'ips',
+        (ip) => !ip.server && (ip.tags ?? []).some((t) => t.startsWith(`project:${prefix}`)),
+      ),
     ]),
   );
   const latencyMs = Date.now() - t0;
@@ -1027,35 +992,27 @@ async function checkHetznerProjectClean(token?: string): Promise<PreflightCheck>
   // A hard 5s timeout per endpoint keeps the whole check under ~10s in the
   // worst case. Per-endpoint failures are non-fatal — a single 5xx shouldn't
   // block the matrix, but we surface them in the detail.
-  const endpoints: Array<{ url: string; key: string; label: string }> = [
-    { url: 'servers?per_page=50', key: 'servers', label: 'server' },
-    { url: 'placement_groups?per_page=50', key: 'placement_groups', label: 'placement_group' },
-    { url: 'firewalls?per_page=50', key: 'firewalls', label: 'firewall' },
-    { url: 'floating_ips?per_page=50', key: 'floating_ips', label: 'floating_ip' },
-    { url: 'networks?per_page=50', key: 'networks', label: 'network' },
-    { url: 'ssh_keys?per_page=50', key: 'ssh_keys', label: 'ssh_key' },
-    { url: 'volumes?per_page=50', key: 'volumes', label: 'volume' },
+  const endpoints: Array<{ path: string; key: string; label: string }> = [
+    { path: 'servers', key: 'servers', label: 'server' },
+    { path: 'placement_groups', key: 'placement_groups', label: 'placement_group' },
+    { path: 'firewalls', key: 'firewalls', label: 'firewall' },
+    { path: 'floating_ips', key: 'floating_ips', label: 'floating_ip' },
+    { path: 'networks', key: 'networks', label: 'network' },
+    { path: 'ssh_keys', key: 'ssh_keys', label: 'ssh_key' },
+    { path: 'volumes', key: 'volumes', label: 'volume' },
   ];
   const counts: Record<string, number> = {};
   const errors: string[] = [];
   await Promise.all(
-    endpoints.map(async ({ url, key, label }) => {
-      try {
-        const res = await fetch(`https://api.hetzner.cloud/v1/${url}`, {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!res.ok) {
-          errors.push(`${label}: HTTP ${res.status}`);
-          return;
-        }
-        const body = (await res.json()) as Record<string, Array<{ name?: string }>>;
-        const items = body[key] ?? [];
-        const matching = items.filter((i) => i.name?.startsWith(prefix));
-        if (matching.length > 0) counts[label] = matching.length;
-      } catch (err) {
-        errors.push(`${label}: ${err instanceof Error ? err.message.split('\n')[0] : 'unknown'}`);
-      }
+    endpoints.map(async ({ path, key, label }) => {
+      const { count, error } = await countLeftovers<{ name?: string }>(
+        'hetzner',
+        `https://api.hetzner.cloud/v1/${path}`,
+        { key, perPage: 50, headers: { Authorization: `Bearer ${token}` } },
+        (i) => i.name?.startsWith(prefix),
+      );
+      if (count > 0) counts[label] = count;
+      if (error) errors.push(`${label}: ${error}`);
     }),
   );
   const latencyMs = Date.now() - t0;
