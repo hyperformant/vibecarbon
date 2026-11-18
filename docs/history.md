@@ -1318,14 +1318,13 @@ no-session-token invariant, which is unbounded on purpose.
 
 #### 2026-11-18: Template tests test the template
 
-Eleven files under `tests/unit/template/` re-implemented template logic inside
+Twelve files under `tests/unit/template/` re-implemented template logic inside
 the test and tested that copy. Their cases now run against the real modules
 under `carbon/tests/`, and the copies are deleted. Several copies asserted
 behaviour the template does not have (plan names and prices, trust in a
 forwarded-IP header the real code refuses).
 
-**Do not undo:** a template test imports the module it tests. One mirror
-remains to port: `billing-routes`.
+**Do not undo:** a template test imports the module it tests.
 
 #### 2026-11-17: Agent sessions cannot open an SSH password dialog
 
