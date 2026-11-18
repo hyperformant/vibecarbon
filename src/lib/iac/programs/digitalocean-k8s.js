@@ -71,7 +71,8 @@
  *   - Tag (pre-created `cluster:<name>` tag — see Task 9b note below)
  *   - Firewall (tag-attached)
  *   - Master droplet (cloud-init: do-master-init.sh via the provider static)
- *   - database droplet (cloud-init: do-db-init.sh via the provider static)
+ *   - database droplet (cloud-init: do-worker-init.sh as the db role, via the
+ *     provider static)
  *   - Worker droplets × N (cloud-init: do-worker-init.sh via the provider static)
  *
  * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp,
@@ -362,7 +363,7 @@ export function buildDigitalOceanK8sProgram(config) {
 
     // Database droplet — joins master via k3s agent, pinned to the
     // dedicated database node-pool (label + NoSchedule taint baked into
-    // do-db-init.sh's k3s agent argv). master_ip MUST be the
+    // the db role's k3s agent argv). master_ip MUST be the
     // master's REAL private IP, only known once Pulumi has created it —
     // unlike Hetzner's hardcoded '10.0.1.1', DO has no static-IP
     // assignment to pin this to ahead of time (M3 dossier §4-repo).

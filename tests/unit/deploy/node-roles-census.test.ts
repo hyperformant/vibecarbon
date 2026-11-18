@@ -23,6 +23,7 @@ import {
   isWorkerNode,
   WORKER_NODE_SELECTOR,
 } from '../../../src/lib/deploy/k8s/node-roles.js';
+import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import {
   DB_LABELS,
   type FakeNode,
@@ -76,8 +77,8 @@ describe('worker nodes are picked by label', () => {
     expect(files.length).toBeGreaterThan(300);
   });
 
-  // The cluster's three kinds of node, labelled the way k3s and the db-init
-  // scripts label them. A worker has no role label of its own, so the
+  // The cluster's three kinds of node, labelled the way k3s and the db
+  // node's k3s agent label them. A worker has no role label of its own, so the
   // selector is "neither of the other two".
   const nodes: FakeNode[] = [
     { name: 'p-l4-st-2dda9ed1', labels: MASTER_LABELS },
@@ -119,8 +120,9 @@ describe('worker nodes are picked by label', () => {
     // it always carries the label the selector excludes.
     const sts = readFileSync(join(ROOT, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8');
     expect(sts).toMatch(/nodeSelector:\s*\n\s+dedicated: db/);
-    for (const script of ['db-init.sh', 'do-db-init.sh', 'linode-db-init.sh']) {
-      const text = readFileSync(join(ROOT, 'carbon/cloud-init/k3s', script), 'utf-8');
+    // Every provider's db node: its worker script loaded as the db role.
+    for (const script of ['worker-init.sh', 'do-worker-init.sh', 'linode-worker-init.sh']) {
+      const text = loadCloudInit(script, { role: 'db' });
       expect(text, script).toContain('--node-label="dedicated=db"');
     }
     expect(WORKER_NODE_SELECTOR).toContain('dedicated!=db');

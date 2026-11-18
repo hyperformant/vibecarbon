@@ -25,6 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { k3sVersion } from '../../../src/lib/images.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
 
@@ -160,7 +161,8 @@ describe.skipIf(SKIPPED)(`the k3s token joins agents only (k3s ${VERSION})`, () 
     'an agent joins with it, as worker-init.sh joins, and goes Ready',
     () => {
       const agentFlags = k3sServerFlags(
-        script('worker-init.sh'),
+        // Loaded, not read raw: its install line ends in a role slot.
+        loadCloudInit('worker-init.sh'),
         { PUBLIC_IP: AGENT_IP, PRIVATE_IFACE: 'eth0' },
         'agent',
       );

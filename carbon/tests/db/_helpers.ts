@@ -118,3 +118,41 @@ export async function cleanupTestData(
     await client.query('delete from public."user" where id = any($1::uuid[])', [data.userIds]);
   }
 }
+
+/**
+ * A browser's cookie store, enough for the auth flows these suites drive
+ * (one host, no paths). `take` records a response's Set-Cookie headers (an
+ * empty value or max-age=0 removes the cookie), `header` is the Cookie header
+ * a browser would send back, and `only` sends just the named cookies.
+ */
+export class CookieJar {
+  cookies = new Map<string, string>();
+
+  take(res: Response): Response {
+    for (const line of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = line.split(';');
+      const at = pair.indexOf('=');
+      const name = pair.slice(0, at).trim();
+      const value = pair.slice(at + 1);
+      const expired = value === '' || attrs.some((a) => /^\s*max-age=0\s*$/i.test(a));
+      if (expired) this.cookies.delete(name);
+      else this.cookies.set(name, value);
+    }
+    return res;
+  }
+
+  get header(): string {
+    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+
+  has(name: string): boolean {
+    return this.cookies.has(name);
+  }
+
+  only(...names: string[]): string {
+    return names
+      .filter((n) => this.cookies.has(n))
+      .map((n) => `${n}=${this.cookies.get(n)}`)
+      .join('; ');
+  }
+}

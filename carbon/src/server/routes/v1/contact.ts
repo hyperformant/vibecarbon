@@ -6,8 +6,10 @@ import { contactSubmissions } from '../../db/schema';
 import { sendEmail } from '../../lib/email';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
+import { escapeHtml } from '../../lib/html';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
+import { parseJsonBody } from '../../lib/validation';
 import type { HonoVariables } from '../../types';
 
 const contactRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -28,18 +30,9 @@ const contactSchema = z.object({
  * Submit a contact form (public, rate-limited)
  */
 contactRoutes.post('/submit', async (c) => {
-  let body: z.infer<typeof contactSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = contactSchema.safeParse(rawBody);
-    if (!result.success) {
-      const errors = result.error.issues.map((e) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, contactSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   // Honeypot check - if website field is filled, it's likely a bot
   if (body.website) {
@@ -62,15 +55,15 @@ contactRoutes.post('/submit', async (c) => {
 
     // Notify admin via email (non-blocking)
     if (env.SMTP_ADMIN_EMAIL) {
-      const escapeHtml = (s: string) =>
-        s
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;');
+      // SECURITY: the Subject is a mail header, not HTML, so it is not
+      // entity-escaped (the reader would see `&amp;`). What a header must not
+      // carry is a line break, which would start a header of the sender's
+      // choosing. nodemailer folds them too; this keeps it true whatever
+      // transport sends the mail.
+      const subjectLine = body.subject.replace(/[\r\n]+/g, ' ');
       sendEmail({
         to: env.SMTP_ADMIN_EMAIL,
-        subject: `New contact form: ${escapeHtml(body.subject)}`,
+        subject: `New contact form: ${subjectLine}`,
         html: `<h2>New Contact Form Submission</h2>
 <p><strong>From:</strong> ${escapeHtml(body.name)} (${escapeHtml(body.email)})</p>
 <p><strong>Subject:</strong> ${escapeHtml(body.subject)}</p>

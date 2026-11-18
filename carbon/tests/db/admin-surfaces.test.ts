@@ -14,7 +14,7 @@ import { verifyRoleRoutes } from '@server/routes/_internal/verify-role';
 import { authRoutes } from '@server/routes/v1/auth';
 import { statsRoutes } from '@server/routes/v1/stats';
 import type { HonoVariables } from '@server/types';
-import { connectTestDb, dbTestsEnabled } from './_helpers';
+import { CookieJar, connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
  * The admin surfaces on the in-process auth, against a real database:
@@ -51,35 +51,6 @@ async function buildApp() {
   app.route('/api/v1/auth', authRoutes);
   app.route('/api/v1/admin/stats', statsRoutes);
   return app;
-}
-
-/** A browser's cookie store, enough for these flows (one host, no paths). */
-class CookieJar {
-  cookies = new Map<string, string>();
-
-  take(res: Response): Response {
-    for (const line of res.headers.getSetCookie()) {
-      const [pair, ...attrs] = line.split(';');
-      const at = pair.indexOf('=');
-      const name = pair.slice(0, at).trim();
-      const value = pair.slice(at + 1);
-      const expired = value === '' || attrs.some((a) => /^\s*max-age=0\s*$/i.test(a));
-      if (expired) this.cookies.delete(name);
-      else this.cookies.set(name, value);
-    }
-    return res;
-  }
-
-  get header(): string {
-    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
-  }
-
-  only(...names: string[]): string {
-    return names
-      .filter((n) => this.cookies.has(n))
-      .map((n) => `${n}=${this.cookies.get(n)}`)
-      .join('; ');
-  }
 }
 
 describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {

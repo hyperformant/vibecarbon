@@ -67,4 +67,14 @@ describe('PATCH /admin/theme color/radius validation (stored XSS / CSS injection
     });
     expect(res.status).toBe(200);
   });
+
+  it('answers malformed JSON with 400, like every other route, not 500', async () => {
+    const res = await adminApp().request('/api/v1/admin/theme', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: '{not valid',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Invalid JSON body' });
+  });
 });

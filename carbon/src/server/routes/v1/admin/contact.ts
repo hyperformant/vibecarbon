@@ -5,6 +5,7 @@ import { adminDb } from '../../../db/client';
 import { contactSubmissions } from '../../../db/schema';
 import { isoTimestamp, isUuid } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
+import { parseJsonBody } from '../../../lib/validation';
 import { requireSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
@@ -66,17 +67,9 @@ const updateStatusSchema = z.object({
 adminContactRoutes.patch('/:id', async (c) => {
   const id = c.req.param('id');
 
-  let body: z.infer<typeof updateStatusSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = updateStatusSchema.safeParse(rawBody);
-    if (!result.success) {
-      return c.json({ error: result.error.issues.map((e) => e.message).join(', ') }, 400);
-    }
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, updateStatusSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   if (!isUuid(id)) {
     return c.json({ error: 'Submission not found' }, 404);

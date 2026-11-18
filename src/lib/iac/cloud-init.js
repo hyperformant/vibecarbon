@@ -1,7 +1,7 @@
 /**
  * Shared helpers for loading + rendering the k3s cloud-init scripts in
- * `carbon/cloud-init/k3s/` (master-init.sh / db-init.sh /
- * worker-init.sh).
+ * `carbon/cloud-init/k3s/` (master-init.sh / worker-init.sh; the database
+ * node boots from its provider's worker template, see loadCloudInit).
  *
  * Used by:
  *   - `src/lib/iac/programs/hetzner-k8s.js` to render user_data baked
@@ -53,13 +53,27 @@ const INCLUDE_DIRECTIVE = /^#[ \t]*@include[ \t]+(\S+)[ \t]*$/gm;
  * is all the duplication problem needs, and it keeps the contract
  * trivially cycle-free.
  *
+ * `omit` names snippets to leave out: each one's directive line goes, with
+ * the blank line after it, so the script reads as if the include had never
+ * been written. A template without that directive throws, so a renamed
+ * snippet cannot quietly start shipping where it was left out.
+ *
  * @param {string} name  Basename of the template inside `dir`.
  * @param {string} [dir] Directory to resolve from (defaults to the shipped
  *   carbon/cloud-init/k3s/; parameterised for tests).
+ * @param {{ omit?: string[] }} [options]
  * @returns {string}     Template with all directives resolved.
  */
-export function resolveIncludes(name, dir = CLOUD_INIT_DIR) {
-  const template = readFileSync(join(dir, name), 'utf-8');
+export function resolveIncludes(name, dir = CLOUD_INIT_DIR, { omit = [] } = {}) {
+  let template = readFileSync(join(dir, name), 'utf-8');
+  for (const target of omit) {
+    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const directive = new RegExp(`^#[ \\t]*@include[ \\t]+${escaped}[ \\t]*\\n(?:\\n)?`, 'm');
+    if (!directive.test(template)) {
+      throw new Error(`cloud-init: "${name}" has no @include ${target} to leave out`);
+    }
+    template = template.replace(directive, '');
+  }
   return template.replace(INCLUDE_DIRECTIVE, (_line, target) => {
     // SECURITY: directives are repo-authored, never user input. The
     // basename-only contract keeps it that way by construction, so a
@@ -88,16 +102,96 @@ export function resolveIncludes(name, dir = CLOUD_INIT_DIR) {
 }
 
 /**
+ * The roles a k3s agent template (a provider's worker-init.sh) boots as,
+ * filled into the template's role slots by loadCloudInit: `@{role_flags}` ends
+ * the k3s agent's argument list, and `@{role_label}` / `@{role_name}` name the
+ * node in its install log lines. A slot left unfilled would ship as literal
+ * text, so loading checks that none remains.
+ *
+ * The dedicated database node runs its provider's worker bootstrap with three
+ * differences:
+ *  - k3s agent flags that pin database workloads to it and repel everything
+ *    else (dedicated=db, which the db StatefulSet's nodeSelector requires and
+ *    WORKER_NODE_SELECTOR in src/lib/deploy/k8s/node-roles.js excludes). They
+ *    are boot-time flags rather than a post-join `kubectl label`/`kubectl
+ *    taint`, so the node is never briefly schedulable for general workloads
+ *    between join and label.
+ *  - its name in the install log lines.
+ *  - no host reporter. The deploy installs it on the db node and the master
+ *    over SSH on every run (prePullImages in src/lib/deploy/k8s/k3s.js); only
+ *    autoscaler-spawned workers, which no deploy session reaches, need it in
+ *    their user data.
+ */
+const AGENT_ROLES = {
+  worker: {
+    slots: { role_flags: '', role_label: 'worker', role_name: 'worker' },
+    omit: [],
+  },
+  db: {
+    slots: {
+      role_flags: [
+        ' \\',
+        '      --node-label="dedicated=db" \\',
+        '      --node-label="node-pool=db-pool" \\',
+        '      --node-taint="dedicated=db:NoSchedule"',
+      ].join('\n'),
+      role_label: 'database-node',
+      role_name: 'database node',
+    },
+    omit: ['_host-reporter.sh'],
+  },
+};
+
+const ROLE_SLOT = /@\{(role_[a-z_]+)\}/g;
+
+/**
+ * Fill a template's role slots for `role`. A template with no slots (a
+ * master) loads only as a worker, unchanged; any other template must carry
+ * every slot the role fills.
+ *
+ * @param {string} template
+ * @param {keyof typeof AGENT_ROLES} role
+ * @param {string} name  For error messages.
+ * @returns {string}
+ */
+function fillRoleSlots(template, role, name) {
+  const { slots } = AGENT_ROLES[role];
+  const present = new Set(Array.from(template.matchAll(ROLE_SLOT), (m) => m[1]));
+  if (present.size > 0 || role !== 'worker') {
+    const missing = Object.keys(slots).filter((slot) => !present.has(slot));
+    if (missing.length > 0) {
+      throw new Error(`cloud-init: "${name}" lacks the role slot(s) ${missing.join(', ')}`);
+    }
+  }
+  // A replacement function, so a `$` in a slot value is never a pattern.
+  return template.replace(ROLE_SLOT, (token, slot) => {
+    if (!Object.hasOwn(slots, slot)) {
+      throw new Error(`cloud-init: "${name}" has an unknown role slot ${token}`);
+    }
+    return slots[slot];
+  });
+}
+
+/**
  * Read a cloud-init script template by basename (e.g. 'master-init.sh'),
- * with `# @include` directives resolved. Returns the raw template —
- * `${var}` placeholders are NOT yet substituted; pass to `renderScript()`
- * to substitute.
+ * with `# @include` directives resolved and role slots filled. Returns the
+ * raw template: `${var}` placeholders are NOT yet substituted; pass to
+ * `renderScript()` to substitute.
+ *
+ * The database node has no template of its own: its provider's static loads
+ * the worker template with `{ role: 'db' }` (AGENT_ROLES.db), so the two
+ * cannot drift.
  *
  * @param {string} name  Basename inside carbon/cloud-init/k3s/.
+ * @param {{ role?: keyof typeof AGENT_ROLES }} [options]
  * @returns {string}     UTF-8 contents of the script.
  */
-export function loadCloudInit(name) {
-  return resolveIncludes(name);
+export function loadCloudInit(name, { role = 'worker' } = {}) {
+  if (!Object.hasOwn(AGENT_ROLES, role)) {
+    throw new Error(`cloud-init: unknown role "${role}"`);
+  }
+  const template = resolveIncludes(name, CLOUD_INIT_DIR, { omit: AGENT_ROLES[role].omit });
+  return fillRoleSlots(template, role, name);
 }
 
 /**

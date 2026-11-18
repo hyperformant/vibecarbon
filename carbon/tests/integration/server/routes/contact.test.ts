@@ -157,4 +157,47 @@ describe('POST /api/v1/contact/submit', () => {
     expect(html).toContain('&lt;script&gt;');
     expect(html).toContain('hi &amp; bye &lt;b&gt;bold&lt;/b&gt;');
   });
+
+  it('escapes a single quote in the notification email body', async () => {
+    fakeEnv.SMTP_ADMIN_EMAIL = 'admin@example.test';
+    insertMock.mockResolvedValueOnce(undefined);
+
+    await app.request('/api/v1/contact/submit', jsonPost(makeContactSubmission({ name: "O'Brien" })));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const html = sendEmailMock.mock.calls[0][0].html as string;
+    expect(html).toContain('O&#39;Brien');
+    expect(html).not.toContain("O'Brien");
+  });
+
+  it('sends the subject as plain text, not HTML-escaped', async () => {
+    fakeEnv.SMTP_ADMIN_EMAIL = 'admin@example.test';
+    insertMock.mockResolvedValueOnce(undefined);
+
+    await app.request(
+      '/api/v1/contact/submit',
+      jsonPost(makeContactSubmission({ subject: 'Q&A about "pricing" <plans>' })),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A Subject header is not HTML: an escaped `&amp;` would reach the reader.
+    expect(sendEmailMock.mock.calls[0][0].subject).toBe(
+      'New contact form: Q&A about "pricing" <plans>',
+    );
+  });
+
+  it('SECURITY: keeps the subject on one line (no header injection)', async () => {
+    fakeEnv.SMTP_ADMIN_EMAIL = 'admin@example.test';
+    insertMock.mockResolvedValueOnce(undefined);
+
+    await app.request(
+      '/api/v1/contact/submit',
+      jsonPost(makeContactSubmission({ subject: 'Hello\r\nBcc: victim@example.test\nX: y' })),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const subject = sendEmailMock.mock.calls[0][0].subject as string;
+    expect(subject).not.toMatch(/[\r\n]/);
+    expect(subject).toBe('New contact form: Hello Bcc: victim@example.test X: y');
+  });
 });

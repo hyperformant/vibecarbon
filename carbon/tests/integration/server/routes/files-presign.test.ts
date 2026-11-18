@@ -1,7 +1,6 @@
-import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { HonoVariables } from '@server/types';
-import { jsonPost } from '../../../_helpers/app';
+import { appWithUser, jsonPost } from '../../../_helpers/app';
+import { setFakeS3 } from '../../../_helpers/env';
 
 const { fakeEnv } = vi.hoisted(() => ({
   fakeEnv: {} as Record<string, unknown>,
@@ -19,24 +18,9 @@ vi.mock('@server/lib/logger', () => ({
 
 const { filesRoutes } = await import('@server/routes/v1/files');
 
-function setS3(on: boolean) {
-  fakeEnv.S3_ENDPOINT = on ? 'https://s3.example.test' : undefined;
-  fakeEnv.S3_REGION = on ? 'eu-central' : undefined;
-  fakeEnv.S3_BUCKET = on ? 'bucket' : undefined;
-  fakeEnv.S3_ACCESS_KEY = on ? 'AKIATEST' : undefined;
-  fakeEnv.S3_SECRET_KEY = on ? 'secret' : undefined;
-}
-
-function appFor(userId: string | null) {
-  const app = new Hono<{ Variables: HonoVariables }>();
-  app.use('*', async (c, next) => {
-    // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-    c.set('user', userId ? ({ id: userId } as any) : null);
-    await next();
-  });
-  app.route('/api/v1/files', filesRoutes);
-  return app;
-}
+const setS3 = (on: boolean) => setFakeS3(fakeEnv, on);
+const appFor = (userId: string | null) =>
+  appWithUser(userId ? { id: userId } : null, '/api/v1/files', filesRoutes);
 
 const URL_PATH = '/api/v1/files/presign';
 

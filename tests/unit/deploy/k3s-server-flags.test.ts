@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { bootScriptFiles, k8sBootScripts, type Role } from '../../_shared/k3s-boot-scripts.js';
+import {
+  bootScriptFiles,
+  k8sBootScripts,
+  loadBootScript,
+  type Role,
+} from '../../_shared/k3s-boot-scripts.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
 
 /** Each k8s provider's boot script for each node role, from the providers. */
@@ -53,8 +58,10 @@ describe('k3sServerFlags', () => {
       PRIVATE_IP: '10.0.1.2',
       NODE_ID: '777',
     };
-    const linode = (role: string) =>
-      readFileSync(`carbon/cloud-init/k3s/linode-${role}-init.sh`, 'utf8');
+    // Loaded, not read raw: the worker script's install line ends in a role
+    // slot, which the db role fills with its labels and taint.
+    const linode = (role: Role) =>
+      loadBootScript(`linode-${role === 'master' ? 'master' : 'worker'}-init.sh`, role) ?? '';
     const flagArg = (flags: string[], flag: string) => flags[flags.indexOf(flag) + 1];
 
     it.each([
@@ -79,7 +86,7 @@ describe('k3sServerFlags', () => {
       expect(flagArg(flags, '--advertise-address')).toBe('10.0.1.2');
       expect(flags).toContain('--write-kubeconfig-mode=600');
       expect(flagArg(flags, '--system-default-registry')).toBe('vibecarbon-system.invalid');
-      for (const role of ['worker', 'db']) {
+      for (const role of ['worker', 'db'] as const) {
         const agent = k3sServerFlags(linode(role), LINODE_VARS, 'agent');
         expect(agent).not.toContain('--advertise-address');
       }

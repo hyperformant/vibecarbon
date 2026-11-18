@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
 import { matchesRoute, PRIVATE_ROUTES } from '../../shared/routes';
+import { escapeHtml } from './html';
 import { logger } from './logger';
 
 export interface RouteSeo {
@@ -27,15 +28,6 @@ export interface RouteSeo {
   /** Build-time rendered HTML from repo-controlled MDX — trusted, injected verbatim. */
   html?: string;
   jsonLd?: Record<string, unknown>;
-}
-
-export function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 /** Serialize JSON-LD so `</script>` (or any tag) in data can't break out of the script element. */

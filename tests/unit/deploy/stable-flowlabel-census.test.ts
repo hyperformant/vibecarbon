@@ -63,8 +63,9 @@ function commandText(entry: unknown): string {
 
 describe('stable flow label: every k3s node sets it before the k3s install', () => {
   it('walks every k3s boot script (never vacuously green)', () => {
-    // master, db and worker for Hetzner, DigitalOcean and Linode.
-    expect(entrypoints.length).toBeGreaterThanOrEqual(9);
+    // master and worker for Hetzner, DigitalOcean and Linode; each db node
+    // boots its provider's worker script.
+    expect(entrypoints.length).toBeGreaterThanOrEqual(6);
   });
 
   it.each(entrypoints)('%s embeds the snippet before any download', (name) => {

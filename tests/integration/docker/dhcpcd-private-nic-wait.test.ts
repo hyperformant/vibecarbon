@@ -135,7 +135,8 @@ describeDocker('private-NIC wait loop against real dhcpcd', () => {
     return { status, out, addr, seconds: (Date.now() - started) / 1000 };
   }
 
-  it.each(['master-init.sh', 'worker-init.sh', 'db-init.sh'])(
+  // The database node boots worker-init.sh as the db role.
+  it.each(['master-init.sh', 'worker-init.sh'])(
     '%s: leases the private address',
     (f) => {
       const r = runLoop(loopOf(f), 12);

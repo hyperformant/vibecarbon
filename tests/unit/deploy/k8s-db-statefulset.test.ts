@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
@@ -184,8 +185,9 @@ describe('k8s/base renders the db StatefulSet', () => {
       value: 'db',
       effect: 'NoSchedule',
     });
-    // The cloud-init that labels and taints that node.
-    const dbInit = readFileSync(join(ROOT, 'carbon/cloud-init/k3s/db-init.sh'), 'utf-8');
+    // The cloud-init that labels and taints that node: the worker script
+    // loaded as the db role.
+    const dbInit = loadCloudInit('worker-init.sh', { role: 'db' });
     expect(dbInit).toContain('--node-label="dedicated=db"');
     expect(dbInit).toContain('--node-taint="dedicated=db:NoSchedule"');
   });

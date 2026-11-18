@@ -88,8 +88,9 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       # Pin postgres to the dedicated database node: cloud-init labels it
-      # dedicated=db and taints it dedicated=db:NoSchedule
-      # (carbon/cloud-init/k3s/db-init.sh, do-db-init.sh), so the selector
+      # dedicated=db and taints it dedicated=db:NoSchedule (k3s agent flags
+      # in the node's boot script, cloud-init/k3s/*worker-init.sh loaded for
+      # the database node), so the selector
       # attracts this pod and the toleration lets it through the taint.
       nodeSelector:
         dedicated: db

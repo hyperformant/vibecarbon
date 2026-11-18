@@ -97,8 +97,14 @@ themeRoutes.patch('/', async (c) => {
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  // Validate request body
-  const body = await c.req.json();
+  // Validate request body. A body that is not JSON is the caller's mistake:
+  // 400, as every other route answers it, not a 500 from the thrown parse.
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
   const parsed = themeSchema.safeParse(body);
 
   if (!parsed.success) {

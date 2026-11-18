@@ -11,10 +11,10 @@
  *
  * A cluster has three kinds of node. The k3s server carries
  * node-role.kubernetes.io/control-plane, which k3s sets itself. The database
- * node carries dedicated=db, which every db-init script sets
- * (carbon/cloud-init/k3s/*db-init.sh), and the db StatefulSet's nodeSelector
- * requires it, so the node running the database always has it. Every other
- * node is a worker.
+ * node carries dedicated=db, which its k3s agent sets at join (the worker
+ * template loaded as the db role, AGENT_ROLES in src/lib/iac/cloud-init.js),
+ * and the db StatefulSet's nodeSelector requires it, so the node running the
+ * database always has it. Every other node is a worker.
  *
  * tests/unit/deploy/node-roles-census.test.ts keeps every worker lookup on
  * this selector.

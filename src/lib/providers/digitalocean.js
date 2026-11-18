@@ -557,16 +557,14 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s database-node boot user-data — wraps the new
-   * `carbon/cloud-init/k3s/do-db-init.sh` template (M3 Task 5) via
-   * loadCloudInit/renderScript. do-db-init.sh is do-worker-init.sh
-   * plus boot-time `--node-label`/`--node-taint` k3s agent flags (dedicated
-   * Database node-pool isolation, applied at join time rather than a
-   * post-join `kubectl label`/`kubectl taint` step) and an async
-   * containerd image-prewarm block — see the template's own comments. Same
-   * var set as getK8sWorkerUserData (master_ip is a template var here too,
-   * since this node is always created after the master, unlike the master
-   * template).
+   * Render this provider's k3s database-node boot user-data: the worker
+   * template `carbon/cloud-init/k3s/do-worker-init.sh` loaded as the db role,
+   * which adds boot-time `--node-label`/`--node-taint` k3s agent flags
+   * (dedicated database node-pool isolation, applied at join time rather
+   * than a post-join `kubectl label`/`kubectl taint` step; AGENT_ROLES in
+   * cloud-init.js). Same var set as getK8sWorkerUserData (master_ip is a
+   * template var here too, since this node is always created after the
+   * master, unlike the master template).
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
@@ -579,7 +577,7 @@ export class DigitalOceanProvider extends BaseProvider {
    */
   static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('do-db-init.sh'), vars);
+    return renderScript(loadCloudInit('do-worker-init.sh', { role: 'db' }), vars);
   }
 
   // ── Compose-tier replacement-server identity — see base.js's doc block ──

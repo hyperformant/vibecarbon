@@ -7,10 +7,10 @@
  * down). A network error is Traefik not running.
  */
 
-import type { AuthUser as User } from '@server/auth';
 import type { HonoVariables } from '@server/types';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SUPER_ADMIN } from '../../../_helpers/factories';
 
 // These routes sit behind the aal2 gate; the MFA setting is not under test here.
 vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: async () => false }));
@@ -26,7 +26,6 @@ const { servicesStatusRoutes } = await import('@server/routes/_internal/services
 const { performanceRoutes } = await import('@server/routes/v1/performance');
 const { TRAEFIK_HEALTH_URL } = await import('@server/lib/traefik-probe');
 
-const SUPER_ADMIN: Partial<User> = { id: 'admin-1', role: 'super_admin' };
 
 function appWithAdmin() {
   const app = new Hono<{ Variables: HonoVariables }>();

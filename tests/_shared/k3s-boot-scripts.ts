@@ -1,11 +1,13 @@
 /**
  * Which file in carbon/cloud-init/k3s/ each k8s provider boots each node
  * role from, found by asking the providers rather than by a hand list. A
- * provider's getK8s<Role>UserData({}) is its template with the includes
- * resolved (loadCloudInit) and nothing substituted, so it equals exactly
- * one file's loadCloudInit. The censuses walk this, so a new provider, role
- * or script is checked the day it lands, and a script no provider boots
- * from is one they would never see.
+ * provider's getK8s<Role>UserData({}) is its template loaded for the role
+ * (loadCloudInit: includes resolved, role slots filled) and nothing
+ * substituted, so it equals exactly one file loaded that way. The db node
+ * has no script of its own: it loads its provider's worker script as the db
+ * role. The censuses walk this, so a new provider, role or script is checked
+ * the day it lands, and a script no provider boots from is one they would
+ * never see.
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -33,6 +35,19 @@ export const bootScriptFiles = (): string[] =>
     .filter((f) => f.endsWith('.sh') && !f.startsWith('_'))
     .sort();
 
+/**
+ * `file` loaded the way a node of `role` boots it: the db node's role fills
+ * the worker script's role slots with its labels and taint. Null when the
+ * file cannot load that way (a master script has no role slots).
+ */
+export function loadBootScript(file: string, role: Role): string | null {
+  try {
+    return loadCloudInit(file, { role: role === 'db' ? 'db' : 'worker' });
+  } catch {
+    return null;
+  }
+}
+
 /** The providers with a k8s tier, by id. */
 export const k8sProviderIds = (): string[] =>
   Object.entries(PROVIDERS)
@@ -40,23 +55,20 @@ export const k8sProviderIds = (): string[] =>
     .map(([id]) => id);
 
 /**
- * Every k8s provider and node role, with the files whose template its user
- * data is: exactly one each, or a census over them would miss one.
+ * Every k8s provider and node role, with its user data (nothing
+ * substituted) and the files whose template it is: exactly one each, or a
+ * census over them would miss one.
  */
 export async function k8sBootScripts(): Promise<
-  { provider: string; role: Role; files: string[] }[]
+  { provider: string; role: Role; files: string[]; userData: string }[]
 > {
-  const templates = bootScriptFiles().map((file) => [file, loadCloudInit(file)] as const);
-  const out: { provider: string; role: Role; files: string[] }[] = [];
+  const out: { provider: string; role: Role; files: string[]; userData: string }[] = [];
   for (const provider of k8sProviderIds()) {
     const P = PROVIDERS[provider] as unknown as UserDataGetters;
     for (const role of ROLES) {
       const userData = await P[GETTER[role]]({});
-      out.push({
-        provider,
-        role,
-        files: templates.filter(([, text]) => text === userData).map(([file]) => file),
-      });
+      const files = bootScriptFiles().filter((file) => loadBootScript(file, role) === userData);
+      out.push({ provider, role, files, userData });
     }
   }
   return out;

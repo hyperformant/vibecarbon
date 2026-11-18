@@ -1,7 +1,8 @@
 /**
  * HetznerProvider.getK8sMasterUserData / getK8sWorkerUserData /
  * getK8sDbUserData are a wrap around the
- * `carbon/cloud-init/k3s/{master,worker,db}-init.sh` templates. The wrap must
+ * `carbon/cloud-init/k3s/{master,worker}-init.sh` templates (the db node
+ * loads worker-init.sh as the db role). The wrap must
  * add nothing of its own: each static renders exactly what
  * loadCloudInit/renderScript render for the same vars, and a full vars
  * object leaves no placeholder behind.
@@ -57,7 +58,7 @@ describe('HetznerProvider k8s user-data statics (the wrap adds nothing)', () => 
   });
 
   it('getK8sDbUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds nothing)', async () => {
-    const direct = renderScript(loadCloudInit('db-init.sh'), dbVars);
+    const direct = renderScript(loadCloudInit('worker-init.sh', { role: 'db' }), dbVars);
     const wrapped = await HetznerProvider.getK8sDbUserData(dbVars);
     expect(wrapped).toBe(direct);
   });

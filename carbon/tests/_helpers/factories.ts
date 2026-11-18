@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { AuthUser } from '../../src/server/auth';
 
 /**
  * Lightweight factories that produce plausible domain objects for tests.
@@ -13,6 +14,9 @@ import { randomBytes } from 'node:crypto';
 function rid(prefix: string): string {
   return `${prefix}-${randomBytes(4).toString('hex')}`;
 }
+
+/** A platform super admin, as the session middleware sets `c.get('user')`. */
+export const SUPER_ADMIN: Partial<AuthUser> = { id: 'admin-1', role: 'super_admin' };
 
 export interface TestUser {
   id: string;

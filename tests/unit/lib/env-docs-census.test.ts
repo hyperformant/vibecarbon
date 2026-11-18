@@ -132,9 +132,9 @@ describe('env docs census — forward: every registry entry is documented with i
 // process.env), so it is not a read of anything.
 const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   VITE_PUBLIC_URL:
-    'carbon/scripts/generate-sitemap.ts:39, generate-rss.ts:32, generate-seo.ts:94 ' +
-    "(getEnvValue('VITE_PUBLIC_URL'), which reads process.env then the layered .env files) " +
-    '— build-time SEO scripts, not carbon/src.',
+    "carbon/scripts/lib/seo-content.ts loadSiteUrl (getEnvValue('VITE_PUBLIC_URL'), which " +
+    'reads process.env then the layered .env files), called by generate-sitemap.ts, ' +
+    'generate-rss.ts and generate-seo.ts — build-time SEO scripts, not carbon/src.',
   GRAFANA_URL:
     'services/observability/compose/docker-compose.yml:49 — GF_SERVER_ROOT_URL falls back ' +
     'to the operator GRAFANA_URL. The observability module lives outside carbon/, copied in ' +
@@ -230,12 +230,17 @@ function composeSources(): string[] {
   return [...carbonComposeFiles, ...outOfTree].map((f) => readFileSync(f, 'utf-8'));
 }
 
-/** Every `.ts`/`.js` file directly under carbon/scripts (build-time Node scripts, not carbon/src). */
+/**
+ * Every `.ts`/`.js` file directly under carbon/scripts or carbon/scripts/lib
+ * (build-time Node scripts and their shared helpers, not carbon/src).
+ */
 function scriptSources(): string[] {
-  const dir = join(ROOT, 'carbon', 'scripts');
-  const files = readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isFile() && /\.(ts|js)$/.test(e.name))
-    .map((e) => join(dir, e.name));
+  const files = ['scripts', 'scripts/lib'].flatMap((sub) => {
+    const dir = join(ROOT, 'carbon', sub);
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && /\.(ts|js)$/.test(e.name))
+      .map((e) => join(dir, e.name));
+  });
   return files.map((f) => readFileSync(f, 'utf-8'));
 }
 

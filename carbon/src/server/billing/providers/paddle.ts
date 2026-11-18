@@ -8,9 +8,12 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { planIdFromPriceId } from '../../../shared/pricing';
 import { env } from '../../lib/env';
 import { logger } from '../../lib/logger';
+import { priceIdsFor } from '../price-ids';
 import type { BillingProvider, CheckoutResult, PortalResult, SubscriptionInfo } from '../provider';
+import { assertFreshWebhookTimestamp } from '../webhook-timestamp';
 
 // Paddle API v2 base URLs
 const PADDLE_API_URLS = {
@@ -99,7 +102,7 @@ export class PaddleProvider implements BillingProvider {
       return {
         id: sub.id as string,
         status: this.normalizePaddleStatus(String(sub.status ?? '')),
-        planId: this.resolvePlanId(String(price?.id ?? '')),
+        planId: planIdFromPriceId(String(price?.id ?? ''), priceIdsFor('paddle')),
         priceId: String(price?.id ?? ''),
         currentPeriodEnd: (sub.current_billing_period?.ends_at as string) ?? null,
         cancelAtPeriodEnd: sub.scheduled_change?.action === 'cancel',
@@ -157,6 +160,26 @@ export class PaddleProvider implements BillingProvider {
     // Paddle does not support customer deletion via API.
     // Customers can be archived but not removed. Log and no-op.
     logger.info({ customerId: _customerId }, 'Paddle does not support customer deletion; skipping');
+  }
+
+  async cancelActiveSubscriptions(customerId: string): Promise<void> {
+    // List Subscriptions, filtered to this customer's active ones. One page of
+    // up to 200, Paddle's maximum: one person's subscriptions fit in it.
+    const query = new URLSearchParams({
+      customer_id: customerId,
+      status: 'active',
+      per_page: '200',
+    });
+    const response = await this.request('GET', `/subscriptions?${query}`);
+    const subscriptions = Array.isArray(response.data) ? (response.data as { id: string }[]) : [];
+
+    // Cancel Subscription. Without effective_from Paddle cancels at the end
+    // of the billing period, which would bill a deleted account once more.
+    for (const sub of subscriptions) {
+      await this.request('POST', `/subscriptions/${encodeURIComponent(sub.id)}/cancel`, {
+        effective_from: 'immediately',
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -234,18 +257,8 @@ export class PaddleProvider implements BillingProvider {
       throw new Error('Invalid Paddle webhook signature');
     }
 
-    // SECURITY: reject stale events to blunt replay attacks. A captured, validly
-    // signed payload can otherwise be resent forever. Mirror Stripe/Polar's
-    // 5-minute tolerance. Paddle's `ts` is a Unix timestamp in seconds.
-    const timestampSec = Number.parseInt(timestamp, 10);
-    if (!Number.isFinite(timestampSec)) {
-      throw new Error('Invalid Paddle webhook timestamp');
-    }
-    const ageSec = Math.abs(Date.now() / 1000 - timestampSec);
-    const TOLERANCE_SEC = 5 * 60;
-    if (ageSec > TOLERANCE_SEC) {
-      throw new Error('Paddle webhook timestamp outside tolerance');
-    }
+    // SECURITY: reject stale events (replay). Paddle's `ts` is Unix seconds.
+    assertFreshWebhookTimestamp(timestamp, 'Paddle');
   }
 
   /** Map Paddle event types to normalized billing event names. */
@@ -271,13 +284,6 @@ export class PaddleProvider implements BillingProvider {
       trialing: 'trialing',
     };
     return map[paddleStatus] ?? paddleStatus;
-  }
-
-  /** Map a Paddle price ID to a plan ID using configured env vars. */
-  private resolvePlanId(priceId: string): string {
-    if (priceId === env.PADDLE_PRICE_STARTER) return 'starter';
-    if (priceId === env.PADDLE_PRICE_PRO) return 'pro';
-    return 'free';
   }
 
   /** Extract relevant data from a Paddle webhook event payload. */

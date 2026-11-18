@@ -9,6 +9,7 @@ import { appSettings } from '../../db/schema';
 import { isoTimestamp } from '../../db/values';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { parseJsonBody } from '../../lib/validation';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
@@ -61,20 +62,9 @@ authRoutes.post('/admin/unlock-account', async (c) => {
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  let body: z.infer<typeof unlockAccountSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = unlockAccountSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, unlockAccountSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     await adminDb.execute(sql`select admin_unlock_account(${body.email.toLowerCase()})`);
@@ -193,20 +183,9 @@ authRoutes.patch('/admin/settings', async (c) => {
   const blocked = await checkSuperAdmin(c);
   if (blocked) return blocked;
 
-  let body: z.infer<typeof updateSettingsSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = updateSettingsSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+  const parsed = await parseJsonBody(c, updateSettingsSchema);
+  if ('response' in parsed) return parsed.response;
+  const body = parsed.data;
 
   try {
     // Update MFA setting if provided

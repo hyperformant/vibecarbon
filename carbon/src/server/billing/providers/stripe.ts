@@ -7,8 +7,9 @@
  */
 
 import type Stripe from 'stripe';
-import { env } from '../../lib/env';
+import { planIdFromPriceId } from '../../../shared/pricing';
 import { getStripe, isStripeConfigured, verifyWebhookSignature } from '../../lib/stripe';
+import { priceIdsFor } from '../price-ids';
 import type { BillingProvider, CheckoutResult, PortalResult, SubscriptionInfo } from '../provider';
 
 export class StripeProvider implements BillingProvider {
@@ -85,7 +86,7 @@ export class StripeProvider implements BillingProvider {
       return {
         id: subscription.id,
         status: subscription.status,
-        planId: this.resolvePlanId(price.id),
+        planId: planIdFromPriceId(price.id, priceIdsFor('stripe')),
         priceId: price.id,
         currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd * 1000).toISOString() : null,
         cancelAtPeriodEnd: subscription.cancel_at_period_end,
@@ -143,16 +144,20 @@ export class StripeProvider implements BillingProvider {
     await stripe.customers.del(customerId);
   }
 
+  async cancelActiveSubscriptions(customerId: string): Promise<void> {
+    const stripe = getStripe();
+    const subscriptions = await stripe.subscriptions.list({
+      customer: customerId,
+      status: 'active',
+    });
+    for (const sub of subscriptions.data) {
+      await stripe.subscriptions.cancel(sub.id);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
-
-  /** Map a Stripe price ID to a plan ID using configured env vars. */
-  private resolvePlanId(priceId: string): string {
-    if (priceId === env.STRIPE_PRICE_STARTER) return 'starter';
-    if (priceId === env.STRIPE_PRICE_PRO) return 'pro';
-    return 'free';
-  }
 
   /**
    * Map Stripe webhook event types to normalized billing event names.
