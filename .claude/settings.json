@@ -1,4 +1,7 @@
 {
+  "env": {
+    "SSH_ASKPASS_REQUIRE": "never"
+  },
   "permissions": {
     "allow": [
       "Bash(kubectl get:*)",

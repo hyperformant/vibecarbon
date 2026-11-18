@@ -453,6 +453,8 @@ export function loadGlobalRegistry(configDir = vibecarbonHome()) {
     // The file is on the operator's disk, so an entry may be anything. Keep
     // only project records: a registry once held 610 `null` entries, and
     // every caller reads `.path`. The next write saves the healed list.
+    // (Nothing here wrote them: a hand-run cleanup script used `delete` on
+    // the array, and JSON writes the holes that leaves as `null`.)
     return { ...data, projects: data.projects.filter(isProjectRecord) };
   } catch {
     return { projects: [] };
