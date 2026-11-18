@@ -8,8 +8,8 @@
  * lands in every provider at once:
  *
  *   - checkApiToken: the live token probe and how its status codes are read
- *   - verifiedEnvToken: the env-first lookup of an API token
- *   - promptForVerifiedToken: the paste, verify, retry loop
+ *   - verifiedEnvToken (private): the env-first lookup of an API token
+ *   - promptForVerifiedToken (private): the paste, verify, retry loop
  *   - resolveApiToken: the whole getApiToken flow built from the three above
  *   - promptS3KeyPair: the access key and secret key prompts
  *   - resolveS3KeyPair: the whole getS3Credentials flow for a provider whose
@@ -88,7 +88,7 @@ function warnIfBadTokenFormat(token, { provider, noun = 'token', format }) {
  * @returns {Promise<string|null>} the token, or null when it is unset or the
  *   provider rejected it (the caller then falls through to the prompt)
  */
-export async function verifiedEnvToken(spec) {
+async function verifiedEnvToken(spec) {
   const { envKey, provider, noun = 'token', verify } = spec;
   const envToken = readOperatorVar(envKey).value;
   if (!envToken) return null;
@@ -120,7 +120,7 @@ export async function verifiedEnvToken(spec) {
  * @param {object} spec - see the module doc
  * @returns {Promise<string>} the normalized, verified token
  */
-export async function promptForVerifiedToken(spec) {
+async function promptForVerifiedToken(spec) {
   const { envKey, provider, noun = 'token', verify, shapeProblem } = spec;
   assertInteractiveStdin({ what: `the ${provider} API ${noun}`, envVar: envKey });
   const Noun = noun[0].toUpperCase() + noun.slice(1);
