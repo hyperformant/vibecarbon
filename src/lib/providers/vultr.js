@@ -23,8 +23,8 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
-import { pollUntil } from '../retry.js';
 import { BaseProvider, replaceWireguardPeerRules, standbyPairOrNeighbour } from './base.js';
+import { deleteServerAt } from './delete-server.js';
 import { decodeLabels } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
@@ -563,36 +563,13 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<void|boolean>}
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    const response = await fetchWithRetry(`${VultrProvider.API_BASE}/instances/${serverId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
+    // Bare DELETE in both modes: Vultr's no-wait path never went through
+    // apiRequest.
+    return deleteServerAt(this, `/instances/${serverId}`, serverId, {
+      waitUntilGone,
+      bareDelete: true,
+      reason: (error) => error.error,
     });
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to delete server: ${error.error || 'Unknown error'}`);
-    }
-
-    if (!waitUntilGone) return;
-
-    if (response.status !== 404) {
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${VultrProvider.API_BASE}/instances/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 60_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
   }
 
   /**

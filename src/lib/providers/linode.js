@@ -15,7 +15,6 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
-import { pollUntil } from '../retry.js';
 import {
   BaseProvider,
   deleteFailure,
@@ -24,6 +23,7 @@ import {
   standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
+import { deleteServerAt } from './delete-server.js';
 import { decodeLabels } from './tag-labels.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
@@ -929,50 +929,10 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<void|boolean>}
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    if (!waitUntilGone) {
-      const response = await this.apiRequest(`/linode/instances/${serverId}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok && response.status !== 404) {
-        const error = await response.json().catch(() => ({}));
-        const reason = error.errors?.map((e) => e.reason).join('; ') || 'Unknown error';
-        throw new Error(`Failed to delete server: ${reason}`);
-      }
-      return;
-    }
-
-    const response = await fetchWithRetry(
-      `${LinodeProvider.API_BASE}/linode/instances/${serverId}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      },
-    );
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json().catch(() => ({}));
-      const reason = error.errors?.map((e) => e.reason).join('; ') || 'Unknown error';
-      throw new Error(`Failed to delete server: ${reason}`);
-    }
-
-    if (response.status !== 404) {
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${LinodeProvider.API_BASE}/linode/instances/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 60_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
+    return deleteServerAt(this, `/linode/instances/${serverId}`, serverId, {
+      waitUntilGone,
+      reason: (error) => error.errors?.map((e) => e.reason).join('; '),
+    });
   }
 
   /**

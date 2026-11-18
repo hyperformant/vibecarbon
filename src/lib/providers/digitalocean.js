@@ -22,13 +22,13 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { describeSizeUnavailable, SIZE_UNAVAILABLE_MESSAGE } from '../iac/size-unavailable.js';
 import { readOperatorVar } from '../operator-env.js';
-import { pollUntil } from '../retry.js';
 import {
   BaseProvider,
   deleteFailure,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
 } from './base.js';
+import { deleteServerAt } from './delete-server.js';
 import { decodeLabels } from './tag-labels.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
@@ -921,43 +921,10 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<void|boolean>}
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    if (!waitUntilGone) {
-      const response = await this.apiRequest(`/droplets/${serverId}`, { method: 'DELETE' });
-      if (!response.ok && response.status !== 404) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
-      }
-      return;
-    }
-
-    const response = await fetchWithRetry(`${DigitalOceanProvider.API_BASE}/droplets/${serverId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
+    return deleteServerAt(this, `/droplets/${serverId}`, serverId, {
+      waitUntilGone,
+      reason: (error) => error.message,
     });
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to delete server: ${error.message || 'Unknown error'}`);
-    }
-
-    if (response.status !== 404) {
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${DigitalOceanProvider.API_BASE}/droplets/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 60_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
   }
 
   /**

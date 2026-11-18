@@ -18,6 +18,7 @@ import {
   standbyPairOrNeighbour,
   sweepLabels,
 } from './base.js';
+import { deleteServerAt } from './delete-server.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
 // C9 — operator firewall access. Verbatim value-move of operator-ip.js's old
@@ -1129,53 +1130,15 @@ export class HetznerProvider extends BaseProvider {
    *   `false` if it was already gone.
    */
   async deleteServer(serverId, { waitUntilGone = false } = {}) {
-    if (!waitUntilGone) {
-      const response = await this.apiRequest(`/servers/${serverId}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok && response.status !== 404) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(`Failed to delete server: ${error.error?.message || 'Unknown error'}`);
-      }
-      return;
-    }
-
-    const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/servers/${serverId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${this.apiToken}` },
-    });
-
-    if (!response.ok && response.status !== 404) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(`Failed to delete server: ${error.error?.message || 'Unknown error'}`);
-    }
-
     // Hetzner's DELETE is async — it returns 202 and the actual VM teardown
-    // continues for several seconds. Poll GET /servers/{id} until it returns
-    // 404, with a 90s deadline (empirical delete time on cx23 is well under
-    // that). Observed during compose restore. The same delete-then-poll fix is
-    // applied in destroyComposeHA.
-    if (response.status !== 404) {
-      // A throwing probe (transient) is treated as falsy and retried; on budget
-      // exhaustion we simply stop waiting — the return value below is unaffected.
-      await pollUntil(
-        async () => {
-          const probe = await fetch(`${HetznerProvider.API_BASE}/servers/${serverId}`, {
-            headers: { Authorization: `Bearer ${this.apiToken}` },
-          });
-          return probe.status === 404;
-        },
-        {
-          budgetMs: 90_000,
-          initialDelayMs: 2_000,
-          backoffFactor: 1,
-          description: `server ${serverId} deletion`,
-        },
-      ).catch(() => {});
-    }
-
-    return response.status !== 404;
+    // continues for several seconds, hence the poll (90s: empirical delete
+    // time on cx23 is well under that; observed during compose restore). The
+    // same delete-then-poll fix is applied in destroyComposeHA.
+    return deleteServerAt(this, `/servers/${serverId}`, serverId, {
+      waitUntilGone,
+      budgetMs: 90_000,
+      reason: (error) => error.error?.message,
+    });
   }
 
   /**
