@@ -127,6 +127,26 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     vi.restoreAllMocks();
   });
 
+  /**
+   * Where a rerun's wizard runs: the catalog in which cx23 is now in stock in
+   * hel1, and the cheapest there (undone after the case), and the operator's
+   * answers: an API token, the S3 keys, both accepted.
+   */
+  function rerunWizardOnCx23Catalog() {
+    restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    vi.spyOn(console, 'clear').mockImplementation(() => {});
+    vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64));
+    vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
+      accessKey: S3.accessKey,
+      secretKey: S3.secretKey,
+      source: 'prompt',
+    } as never);
+    vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
+      valid: true,
+    });
+  }
+
   it('compose: serverType survives a failure after the skeleton save', async () => {
     const env = await deployUntilFailure(
       gathered('compose', false, {
@@ -239,18 +259,7 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     });
     expect(env.region).toBe('nbg1');
 
-    restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
-    vi.spyOn(console, 'clear').mockImplementation(() => {});
-    vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64));
-    vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
-    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
-      accessKey: S3.accessKey,
-      secretKey: S3.secretKey,
-      source: 'prompt',
-    } as never);
-    vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
-      valid: true,
-    });
+    rerunWizardOnCx23Catalog();
     // Positive control: a new project would preselect hel1 here.
     const fresh = await gatherDeploymentConfig({
       env: 'staging',
@@ -266,19 +275,8 @@ describe('the skeleton save records the sizes the deploy picked', () => {
   it('a rerun of the failed deploy keeps the recorded type, though another is now cheaper', async () => {
     await deployUntilFailure(gathered('compose', false, { serverType: 'cpx22' }));
 
-    restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    rerunWizardOnCx23Catalog();
     expect(HetznerProvider.getRegionDefaults('hel1').composeType).toBe('cx23');
-    vi.spyOn(console, 'clear').mockImplementation(() => {});
-    vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64));
-    vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
-    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
-      accessKey: S3.accessKey,
-      secretKey: S3.secretKey,
-      source: 'prompt',
-    } as never);
-    vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
-      valid: true,
-    });
     const rerun = await gatherDeploymentConfig({ env: 'prod', yes: true });
     expect(rerun.resuming).toBe(true);
     expect(rerun.region).toBe('hel1');
@@ -296,19 +294,8 @@ describe('the skeleton save records the sizes the deploy picked', () => {
       prod.servers = [{ id: 7, ip: '203.0.113.10', serverType: 'cpx32' }];
     });
 
-    restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    rerunWizardOnCx23Catalog();
     expect(HetznerProvider.getRegionDefaults('hel1').composeType).toBe('cx23');
-    vi.spyOn(console, 'clear').mockImplementation(() => {});
-    vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64));
-    vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
-    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
-      accessKey: S3.accessKey,
-      secretKey: S3.secretKey,
-      source: 'prompt',
-    } as never);
-    vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
-      valid: true,
-    });
     const rerun = await gatherDeploymentConfig({ env: 'prod', yes: true });
     expect(rerun.serverType).toBe('cpx32');
     const env = await deployUntilFailure(rerun as never);
