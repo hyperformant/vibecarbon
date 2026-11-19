@@ -180,7 +180,9 @@ spec:
               fi
               . /etc/postgresql/walg-env.sh
               echo "walg-restore: restoring ${RESTORE_BACKUP} (target ${RESTORE_TARGET:-latest})."
-              VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf
+              # TMPDIR is unset in this container, so these are /tmp; a test runs
+              # the script on a shared host and gives each run its own.
+              VC_RECOVERY_CONF_FILE="${TMPDIR:-/tmp}/vc-recovery.conf"
               printf '%s\n' "$RESTORE_RECOVERY_CONF" > "$VC_RECOVERY_CONF_FILE"
 
               # --- prelude ---
@@ -223,7 +225,7 @@ spec:
               # staging dir, never PGDATA. Anything that is not a storage 404 fails on
               # attempt 1.
               WALG_FETCH_ATTEMPTS=5
-              WALG_FETCH_LOG=/tmp/walg-restore-fetch.log
+              WALG_FETCH_LOG="${TMPDIR:-/tmp}/walg-restore-fetch.log"
               walg_attempt=1
               walg_delay=2
               rm -rf "$PGDATA/.vc-restore"

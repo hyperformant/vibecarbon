@@ -156,6 +156,9 @@ function run(argv: string[], env: Record<string, string> = {}) {
     encoding: 'utf-8',
     env: {
       PATH: `${bin}:${process.env.PATH}`,
+      // The scripts keep scratch files under TMPDIR: each run gets its own, so
+      // concurrent runs on this host cannot overwrite one another's.
+      TMPDIR: dir,
       PGDATA: pgdata,
       RESTORE_BACKUP: BACKUP,
       RESTORE_RECOVERY_CONF: CONF,
@@ -220,6 +223,15 @@ for (const [tier, build] of TIERS) {
       expect(read('base/marker')).toBe('restored');
       expect(read('.vc-prev/base/marker')).toBe('live');
       expect(read('postgresql.auto.conf')).toContain("recovery_target_timeline = 'current'");
+    });
+
+    it('keeps its scratch files under TMPDIR, not a path shared by every run', () => {
+      seedLive();
+      stubWalg('ok');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(dir, 'vc-recovery.conf'), 'utf-8').trim()).toBe(CONF.trim());
+      if (tier === 'k8s') expect(existsSync(join(dir, 'walg-restore-fetch.log'))).toBe(true);
     });
 
     it('a good swap records the base the volume now holds', () => {
