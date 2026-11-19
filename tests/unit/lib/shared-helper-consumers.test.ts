@@ -95,6 +95,8 @@ const REGISTRY = [
       'tests/e2e/utils/sweep-scaleway.ts', // Object Storage bucket delete
     ],
     deepTests: [
+      // Every sweep's buckets, through its own entry point.
+      'tests/unit/e2e/sweep-shared-cases.test.ts',
       'tests/unit/e2e/sweep-hetzner.test.ts',
       'tests/unit/e2e/bucket-gone-census.test.ts',
     ],
@@ -557,6 +559,7 @@ const REGISTRY = [
       'tests/unit/lib/token-source-message.test.ts',
       'tests/unit/lib/vultr-guided-setup.test.ts',
       'tests/unit/next/run.test.ts',
+      'tests/unit/providers/guided-setup-credentials.test.ts',
     ],
     deepTests: ['tests/unit/lib/clack-fake.test.ts'],
   },

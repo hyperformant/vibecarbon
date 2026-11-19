@@ -144,8 +144,8 @@ describe('resolveDestroyS3Config', () => {
   describe('TTY gating (fix round 1 — non-TTY must never reach the interactive prompt)', () => {
     it('passes skipPrompts:true off-TTY, so a missing-credentials result never touched a prompt', async () => {
       // The mock stands in for getS3Credentials' own skipPrompts branch
-      // (covered directly, with the real clack mock, in
-      // hetzner-guided-setup.test.ts / digitalocean-guided-setup.test.ts) —
+      // (covered directly for every provider, with the clack mock, in
+      // tests/unit/providers/guided-setup-credentials.test.ts) —
       // this test pins that resolveDestroyS3Config computes and forwards
       // skipPrompts correctly from the injected stdin.
       hetznerGetS3CredentialsMock.mockResolvedValue(null);

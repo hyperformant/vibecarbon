@@ -214,7 +214,7 @@ describe('DigitalOceanProvider dispatch statics — declared, lazy', () => {
     // provider with `k8s` in SUPPORTED_TIERS since M3 Task 6 (k8s-ha
     // remains Hetzner-only). Dispatch-identity coverage (forwards config
     // verbatim, propagates throws) lives in
-    // tests/unit/providers/digitalocean-iac-dispatch.test.ts.
+    // tests/unit/providers/iac-dispatch.test.ts.
     expect(DigitalOceanProvider.getK8sProgram.constructor.name).toBe('AsyncFunction');
     expect(DigitalOceanProvider.promptApiToken.constructor.name).toBe('AsyncFunction');
     expect(DigitalOceanProvider.promptObjectStorageCredentials.constructor.name).toBe(

@@ -21,6 +21,10 @@
  * Like Linode/Vultr, Scaleway has no anchor-bucket equivalent of DO's
  * vc-local-e2e (pure usage billing, no subscription), so the PROTECTED set
  * is pinned empty for structural parity.
+ *
+ * The cases every sweep shares (the empty project name, an unreadable
+ * bucket listing, a "no such bucket" answer) run once per provider in
+ * sweep-shared-cases.test.ts.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
@@ -87,27 +91,10 @@ function fakeFetch(pages: Record<string, unknown>): typeof fetch {
 
 const TAG = '[test]';
 
-/** What the sweep's delete threw in run 43757126064 (real SDK shape). */
-const STALE_LISTING_ERROR = Object.assign(new Error('UnknownError'), {
-  name: 'NoSuchBucket',
-  Code: 'NoSuchBucket',
-  $metadata: { httpStatusCode: 404 },
-});
-
 describe('sweepOrphanedScalewayResources', () => {
   it('zone/region constants stay in lockstep with the live provider classes', () => {
     expect([...SWEEP_ZONES]).toEqual(Object.keys(ScalewayProvider.REGIONS));
     expect([...SWEEP_S3_REGIONS]).toEqual(Object.keys(ScalewayObjectStorageProvider.REGIONS));
-  });
-
-  it('refuses to sweep with an empty project name (an empty prefix matches everything)', async () => {
-    await expect(
-      sweepOrphanedScalewayResources(TAG, '', {
-        provider: fakeProvider(),
-        objectStorageByRegion: fakeStores(),
-        fetchImpl: fakeFetch({}),
-      }),
-    ).rejects.toThrow(/project name/i);
   });
 
   it('deletes prefix-matching instances via the full teardown chain and leaves foreign ones', async () => {
@@ -288,77 +275,6 @@ describe('sweepOrphanedScalewayResources', () => {
     expect(frDelete).toHaveBeenCalledWith('testapp-s1-backups');
     expect(amsDelete).toHaveBeenCalledWith('testapp-s1-state');
     expect(counts.s3Buckets).toBe(2);
-  });
-
-  it('a bucket destroy removed seconds earlier reads clean once no region holds it and a second listing has dropped it', async () => {
-    const locateBucket = vi.fn().mockResolvedValue(null);
-    const stores: NonNullable<StoresLike> = {
-      'fr-par': fakeStore({
-        listBuckets: vi.fn().mockResolvedValueOnce(['testapp-s1-backups']).mockResolvedValue([]),
-        emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
-        locateBucket,
-      }),
-      'nl-ams': fakeStore(),
-    };
-    const { counts, enumFailed } = await sweepOrphanedScalewayResources(TAG, 'testapp-s1', {
-      provider: fakeProvider(),
-      objectStorageByRegion: stores,
-      fetchImpl: fakeFetch({}),
-    });
-    expect(locateBucket).toHaveBeenCalledWith('testapp-s1-backups');
-    // Read once to enumerate and once more after the search, never again.
-    expect(stores['fr-par'].listBuckets).toHaveBeenCalledTimes(2);
-    expect(enumFailed).toBe(false);
-    expect(counts.s3Buckets).toBe(0);
-  });
-
-  it('the 2026-11-16 leak: no such bucket and no region holds it, but the listing still shows it, so the sweep FAILS and never says gone', async () => {
-    // A new Hetzner bucket answered this way for 20 minutes while it existed
-    // and billed. The listing was the one answer that told the truth.
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const locateBucket = vi.fn().mockResolvedValue(null);
-    const stores: NonNullable<StoresLike> = {
-      'fr-par': fakeStore({
-        listBuckets: vi.fn().mockResolvedValue(['testapp-s1-backups']),
-        emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
-        locateBucket,
-      }),
-      'nl-ams': fakeStore(),
-    };
-    const { counts, enumFailed } = await sweepOrphanedScalewayResources(TAG, 'testapp-s1', {
-      provider: fakeProvider(),
-      objectStorageByRegion: stores,
-      fetchImpl: fakeFetch({}),
-    });
-    expect(locateBucket).toHaveBeenCalledWith('testapp-s1-backups');
-    const said = (spy: typeof log) => spy.mock.calls.map((c) => String(c[0])).join('\n');
-    const logged = said(log);
-    const warned = said(warn);
-    log.mockRestore();
-    warn.mockRestore();
-    expect(enumFailed).toBe(true);
-    expect(counts.s3Buckets).toBe(0);
-    expect(logged).not.toMatch(/already gone/);
-    expect(warned).toMatch(/FAILED testapp-s1-backups: .*listing still shows it/);
-    expect(stores['fr-par'].listBuckets).toHaveBeenCalledTimes(2);
-  });
-
-  it('a NoSuchBucket for a bucket some region still holds FAILS the sweep', async () => {
-    const stores: NonNullable<StoresLike> = {
-      'fr-par': fakeStore({
-        listBuckets: vi.fn().mockResolvedValue(['testapp-s1-backups']),
-        emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
-        locateBucket: vi.fn().mockResolvedValue('nl-ams'),
-      }),
-      'nl-ams': fakeStore(),
-    };
-    const { enumFailed } = await sweepOrphanedScalewayResources(TAG, 'testapp-s1', {
-      provider: fakeProvider(),
-      objectStorageByRegion: stores,
-      fetchImpl: fakeFetch({}),
-    });
-    expect(enumFailed).toBe(true);
   });
 
   it('marks enumeration incomplete (enumFailed) when a listing cannot be walked', async () => {

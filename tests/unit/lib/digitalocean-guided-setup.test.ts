@@ -1,56 +1,20 @@
 import { stripVTControlCharacters } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// A3 sweep: getApiToken/getS3Credentials/saveIfWanted dropped the
-// credentials-file leg entirely (env-only lookup) and saveIfWanted now
-// persists via setEnvVar({localOnly:true}) instead of the nested-merge
-// saveCredentials — mirrors tests/unit/lib/hetzner-guided-setup.test.ts.
+// What the DigitalOcean guides say. That each guide is one note box and
+// never p.log.info dot spam, and the token and Spaces credential flows, are
+// pinned for every provider in
+// tests/unit/providers/guided-setup-credentials.test.ts.
 const clackMock = await vi.hoisted(async () => {
   const { clackFake } = await import('../../_shared/clack-fake.js');
-  return clackFake({
-    fns: ['password', 'text', 'confirm', 'cancel', 'note'],
-    log: ['info', 'warn', 'success'],
-    with: { isCancel: vi.fn((v: unknown) => v === Symbol.for('cancel')) },
-  });
+  return clackFake({ fns: ['note'], log: ['info'] });
 });
 vi.mock('@clack/prompts', () => clackMock);
-// This suite drives the INTERACTIVE prompt flow, so it declares an interactive
-// terminal. The off-TTY behaviour (prompts must throw, never hang into a silent
-// exit 0) is pinned in tests/unit/lib/cli/interactive-prompt-guard.test.ts.
-vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));
-
-const setEnvVarMock = vi.hoisted(() => vi.fn());
-vi.mock('../../../src/lib/project.js', () => ({
-  setEnvVar: setEnvVarMock,
-  describeCredentialSource: (keys: string[]) => ({
-    source: 'shell',
-    label: `your shell environment (${keys.join(', ')})`,
-    where: 'your shell environment',
-  }),
-}));
-
-const fetchMock = vi.hoisted(() => vi.fn());
-vi.stubGlobal('fetch', fetchMock);
 
 import {
   displayApiTokenGuide,
   displayS3CredentialsGuide,
 } from '../../../src/lib/digitalocean-guided-setup.js';
-
-// getApiToken/getS3Credentials share a module-level save preference (its `saveIfWanted`)
-// (see hetzner-guided-setup.test.ts's identical note) — fresh-import per
-// test so one test's save answer can't leak into the next.
-async function freshGuidedSetup() {
-  vi.resetModules();
-  return import('../../../src/lib/digitalocean-guided-setup.js');
-}
-
-// Matches digitalocean-guided-setup.js's TOKEN_FORMAT: do[por]_v1_ + 64 hex.
-const VALID_TOKEN = `dop_v1_${'a'.repeat(64)}`;
-
-function mockTokenValid() {
-  fetchMock.mockResolvedValue({ ok: true, status: 200 });
-}
 
 const strip = (s: unknown) => stripVTControlCharacters(String(s));
 
@@ -75,11 +39,6 @@ describe('digitalocean-guided-setup guides', () => {
       expect(text).toContain('my-project');
       expect(text).toContain('Full Access');
       expect(text).toContain('Copy the token immediately');
-    });
-
-    it('does not emit per-line log.info output (the ● dot-spam pattern)', () => {
-      displayApiTokenGuide('my-project');
-      expect(clackMock.log.info).not.toHaveBeenCalled();
     });
 
     it('has at most 3 numbered steps', () => {
@@ -151,11 +110,6 @@ describe('digitalocean-guided-setup guides', () => {
       expect(text).toContain('bucket');
     });
 
-    it('does not emit per-line log.info output (the ● dot-spam pattern)', () => {
-      displayS3CredentialsGuide('my-project');
-      expect(clackMock.log.info).not.toHaveBeenCalled();
-    });
-
     it('has at most 3 numbered steps', () => {
       displayS3CredentialsGuide('my-project');
       const text = strip(clackMock.note.mock.calls[0][0]);
@@ -169,177 +123,5 @@ describe('digitalocean-guided-setup guides', () => {
       expect(text).toContain('dedicated');
       expect(text).toContain('project');
     });
-  });
-});
-
-describe('getApiToken — env-only lookup (A3: credentials-file leg removed)', () => {
-  const ambientToken = process.env.DIGITALOCEAN_API_TOKEN;
-
-  beforeEach(() => {
-    delete process.env.DIGITALOCEAN_API_TOKEN;
-    clackMock.password.mockReset();
-    clackMock.confirm.mockReset();
-    clackMock.log.info.mockReset();
-    clackMock.log.warn.mockReset();
-    setEnvVarMock.mockReset();
-    fetchMock.mockReset();
-  });
-
-  afterEach(() => {
-    if (ambientToken === undefined) delete process.env.DIGITALOCEAN_API_TOKEN;
-    else process.env.DIGITALOCEAN_API_TOKEN = ambientToken;
-  });
-
-  it('returns the env var verbatim when set and valid, never prompting', async () => {
-    process.env.DIGITALOCEAN_API_TOKEN = VALID_TOKEN;
-    mockTokenValid();
-    const { getApiToken } = await freshGuidedSetup();
-
-    const result = await getApiToken('my-project');
-
-    expect(result).toBe(VALID_TOKEN);
-    expect(clackMock.password).not.toHaveBeenCalled();
-  });
-
-  it('force:true skips the env lookup and goes straight to the prompt', async () => {
-    process.env.DIGITALOCEAN_API_TOKEN = VALID_TOKEN;
-    mockTokenValid();
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(false);
-    const { getApiToken } = await freshGuidedSetup();
-
-    const result = await getApiToken('my-project', { force: true, save: false });
-
-    expect(clackMock.password).toHaveBeenCalledTimes(1);
-    expect(result).toBe(VALID_TOKEN);
-  });
-
-  it('prompts when the env var is unset, then sets process.env for in-process coherence', async () => {
-    mockTokenValid();
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(false); // decline save
-    const { getApiToken } = await freshGuidedSetup();
-
-    const result = await getApiToken('my-project');
-
-    expect(result).toBe(VALID_TOKEN);
-    expect(process.env.DIGITALOCEAN_API_TOKEN).toBe(VALID_TOKEN);
-    expect(setEnvVarMock).not.toHaveBeenCalled();
-  });
-
-  it('save acceptance persists via setEnvVar with localOnly:true (never plain .env, no nested object)', async () => {
-    mockTokenValid();
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(true); // accept save
-    const { getApiToken } = await freshGuidedSetup();
-
-    await getApiToken('my-project');
-
-    expect(setEnvVarMock).toHaveBeenCalledWith(
-      'DIGITALOCEAN_API_TOKEN',
-      VALID_TOKEN,
-      expect.any(String),
-      { localOnly: true },
-    );
-  });
-});
-
-describe('getS3Credentials (Spaces) — env-only lookup (A3: credentials-file leg removed)', () => {
-  const ambient = {
-    key: process.env.DIGITALOCEAN_ACCESS_KEY,
-    secret: process.env.DIGITALOCEAN_SECRET_KEY,
-  };
-
-  beforeEach(() => {
-    delete process.env.DIGITALOCEAN_ACCESS_KEY;
-    delete process.env.DIGITALOCEAN_SECRET_KEY;
-    clackMock.text.mockReset();
-    clackMock.password.mockReset();
-    clackMock.confirm.mockReset();
-    clackMock.log.info.mockReset();
-    setEnvVarMock.mockReset();
-  });
-
-  afterEach(() => {
-    if (ambient.key === undefined) delete process.env.DIGITALOCEAN_ACCESS_KEY;
-    else process.env.DIGITALOCEAN_ACCESS_KEY = ambient.key;
-    if (ambient.secret === undefined) delete process.env.DIGITALOCEAN_SECRET_KEY;
-    else process.env.DIGITALOCEAN_SECRET_KEY = ambient.secret;
-  });
-
-  it('returns env values verbatim when both are set, never prompting', async () => {
-    process.env.DIGITALOCEAN_ACCESS_KEY = 'AK123456789';
-    process.env.DIGITALOCEAN_SECRET_KEY = 'SK987654321';
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    const result = await getS3Credentials('my-project');
-
-    expect(result).toMatchObject({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
-    expect(clackMock.text).not.toHaveBeenCalled();
-  });
-
-  it('force:true skips the env lookup and goes straight to the prompt', async () => {
-    process.env.DIGITALOCEAN_ACCESS_KEY = 'AK123456789';
-    process.env.DIGITALOCEAN_SECRET_KEY = 'SK987654321';
-    clackMock.text.mockResolvedValue('AK-fresh-1234');
-    clackMock.password.mockResolvedValue('SK-fresh-1234');
-    clackMock.confirm.mockResolvedValue(false);
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    const result = await getS3Credentials('my-project', { force: true, save: false });
-
-    expect(clackMock.text).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ accessKey: 'AK-fresh-1234', secretKey: 'SK-fresh-1234' });
-  });
-
-  it('save acceptance persists both keys via setEnvVar with localOnly:true (no nested digitalocean.spaces object)', async () => {
-    clackMock.text.mockResolvedValue('AK-fresh-1234');
-    clackMock.password.mockResolvedValue('SK-fresh-1234');
-    clackMock.confirm.mockResolvedValue(true);
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    await getS3Credentials('my-project');
-
-    expect(setEnvVarMock).toHaveBeenCalledWith(
-      'DIGITALOCEAN_ACCESS_KEY',
-      'AK-fresh-1234',
-      expect.any(String),
-      { localOnly: true },
-    );
-    expect(setEnvVarMock).toHaveBeenCalledWith(
-      'DIGITALOCEAN_SECRET_KEY',
-      'SK-fresh-1234',
-      expect.any(String),
-      { localOnly: true },
-    );
-    expect(process.env.DIGITALOCEAN_ACCESS_KEY).toBe('AK-fresh-1234');
-    expect(process.env.DIGITALOCEAN_SECRET_KEY).toBe('SK-fresh-1234');
-  });
-
-  // M3 Task 9g fix round 1: destroy's resolveDestroyS3Config passes
-  // skipPrompts:true off a TTY, because clack's prompt primitives have no
-  // isTTY/stdin-close handling of their own — on non-TTY stdin with no data
-  // the prompt promise never resolves. This is the direct proof that the
-  // skipPrompts branch actually short-circuits BEFORE any clack call, not
-  // just that the caller intended it to.
-  it('skipPrompts:true returns null without prompting when env vars are missing', async () => {
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    const result = await getS3Credentials('my-project', { skipPrompts: true });
-
-    expect(result).toBeNull();
-    expect(clackMock.text).not.toHaveBeenCalled();
-    expect(clackMock.password).not.toHaveBeenCalled();
-  });
-
-  it('skipPrompts:true is ignored when env vars ARE present — still returns them, never prompting', async () => {
-    process.env.DIGITALOCEAN_ACCESS_KEY = 'AK123456789';
-    process.env.DIGITALOCEAN_SECRET_KEY = 'SK987654321';
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    const result = await getS3Credentials('my-project', { skipPrompts: true });
-
-    expect(result).toMatchObject({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
-    expect(clackMock.text).not.toHaveBeenCalled();
   });
 });
