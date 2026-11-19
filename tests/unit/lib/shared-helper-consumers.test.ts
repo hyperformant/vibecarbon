@@ -709,6 +709,45 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/ast-walk.test.ts'],
   },
+  {
+    // The run row the metrics tests seed a results database with. Each file
+    // wrote the same nine lines, differing only in the git sha.
+    helper: 'createTestRun',
+    definition: 'tests/_shared/e2e-db-seed.ts',
+    consumers: [
+      'tests/unit/metrics/last-green-baseline.test.ts',
+      'tests/unit/metrics/perf-data.test.ts',
+      'tests/unit/metrics/perf-table.test.ts',
+      'tests/unit/metrics/publish-perf-pr.test.ts',
+      'tests/unit/metrics/rto-rpo.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
+  },
+  {
+    // A scenario with the six curated steps, for the perf data, the perf
+    // table guard and the publisher. Three copies, two of them missing an
+    // option the third had.
+    helper: 'seedCuratedScenario',
+    definition: 'tests/_shared/e2e-db-seed.ts',
+    consumers: [
+      'tests/unit/metrics/perf-data.test.ts',
+      'tests/unit/metrics/perf-table.test.ts',
+      'tests/unit/metrics/publish-perf-pr.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
+  },
+  {
+    // A run holding one stepless scenario, for the tests that add their own
+    // steps (cold/warm, substeps, orphan counts).
+    helper: 'seedRunAndScenario',
+    definition: 'tests/_shared/e2e-db-seed.ts',
+    consumers: [
+      'tests/unit/metrics/cold-warm.test.ts',
+      'tests/unit/metrics/orphans-swept.test.ts',
+      'tests/unit/metrics/perf-substep.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
+  },
 ] as const;
 
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {

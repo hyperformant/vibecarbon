@@ -11,35 +11,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { seedRunAndScenario } from '../../_shared/e2e-db-seed.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
-
-function seedRunAndScenario(
-  db: E2EDb,
-  projectName: string,
-  envPrefix: string,
-  mode = 'compose',
-): { runId: string; scenarioId: string } {
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: 'sha',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
-  const scenarioId = randomUUID();
-  db.createScenario({
-    id: scenarioId,
-    runId,
-    mode,
-    dnsProvider: 'manual',
-    domain: 'example.test',
-    features: [],
-    projectName,
-    envPrefix,
-  });
-  return { runId, scenarioId };
-}
 
 describe('E2EDb cold/warm classification', () => {
   it('tags first deploy as cold', () => {

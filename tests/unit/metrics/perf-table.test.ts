@@ -11,71 +11,10 @@
  * convention).
  */
 
-import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { createTestRun, seedCuratedScenario } from '../../_shared/e2e-db-seed.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import { detectPerfAnomalies } from '../../e2e/metrics/reporter.js';
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-const CURATED_STEPS = ['deploy', 'warm-deploy', 'backup', 'restore', 'scale', 'destroy'] as const;
-
-function createTestRun(db: E2EDb): string {
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: 'deadbee',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
-  return runId;
-}
-
-/**
- * Seed one scenario (provider/mode) with the six curated steps. Each step
- * defaults to 'pass' at 60s; pass overrides to flip individual steps to a
- * different status/duration or omit them entirely.
- */
-function seedScenario(
-  db: E2EDb,
-  runId: string,
-  provider: string,
-  mode: string,
-  opts: {
-    status?: string;
-    stepDurationMs?: Partial<Record<string, number>>;
-    stepStatus?: Partial<Record<string, string>>;
-    missingSteps?: Set<string>;
-  } = {},
-): void {
-  const scenarioId = randomUUID();
-  db.createScenario({
-    id: scenarioId,
-    runId,
-    mode,
-    dnsProvider: 'manual',
-    domain: `${mode}.example.test`,
-    features: [],
-    projectName: `${provider}-${mode}`,
-    envPrefix: 'e1',
-    provider,
-  });
-
-  for (const step of CURATED_STEPS) {
-    if (opts.missingSteps?.has(step)) continue;
-    const stepId = randomUUID();
-    db.createStep({ id: stepId, scenarioId, name: step, command: step });
-    db.startStep(stepId);
-    const status = opts.stepStatus?.[step] ?? 'pass';
-    const duration = opts.stepDurationMs?.[step] ?? 60_000;
-    db.completeStep(stepId, status, duration);
-  }
-
-  db.updateScenarioStatus(scenarioId, opts.status ?? 'pass');
-}
 
 // ---------------------------------------------------------------------------
 // detectPerfAnomalies — scoped per provider
@@ -95,11 +34,11 @@ describe('detectPerfAnomalies (per-provider baseline)', () => {
   ): string {
     for (let i = 0; i < n; i++) {
       const runId = createTestRun(db);
-      seedScenario(db, runId, provider, mode, { stepDurationMs: { deploy: baselineMs } });
+      seedCuratedScenario(db, runId, provider, mode, { stepDurationMs: { deploy: baselineMs } });
       db.completeRun(runId, 'pass');
     }
     const runId = createTestRun(db);
-    seedScenario(db, runId, provider, mode, { stepDurationMs: { deploy: currentMs } });
+    seedCuratedScenario(db, runId, provider, mode, { stepDurationMs: { deploy: currentMs } });
     db.completeRun(runId, 'pass');
     return runId;
   }
@@ -124,20 +63,22 @@ describe('detectPerfAnomalies (per-provider baseline)', () => {
     // Hetzner k8s history: 60s baseline.
     for (let i = 0; i < 3; i++) {
       const runId = createTestRun(db);
-      seedScenario(db, runId, 'hetzner', 'k8s', { stepDurationMs: { deploy: 60_000 } });
+      seedCuratedScenario(db, runId, 'hetzner', 'k8s', { stepDurationMs: { deploy: 60_000 } });
       db.completeRun(runId, 'pass');
     }
     // DigitalOcean k8s history: legitimately much slower baseline (200s).
     for (let i = 0; i < 3; i++) {
       const runId = createTestRun(db);
-      seedScenario(db, runId, 'digitalocean', 'k8s', { stepDurationMs: { deploy: 200_000 } });
+      seedCuratedScenario(db, runId, 'digitalocean', 'k8s', {
+        stepDurationMs: { deploy: 200_000 },
+      });
       db.completeRun(runId, 'pass');
     }
     // Current run: DO k8s at 210s — within ITS OWN baseline (not an
     // anomaly); Hetzner k8s at 90s — 1.5x ITS OWN baseline (an anomaly).
     const runId = createTestRun(db);
-    seedScenario(db, runId, 'hetzner', 'k8s', { stepDurationMs: { deploy: 90_000 } });
-    seedScenario(db, runId, 'digitalocean', 'k8s', { stepDurationMs: { deploy: 210_000 } });
+    seedCuratedScenario(db, runId, 'hetzner', 'k8s', { stepDurationMs: { deploy: 90_000 } });
+    seedCuratedScenario(db, runId, 'digitalocean', 'k8s', { stepDurationMs: { deploy: 210_000 } });
     db.completeRun(runId, 'pass');
 
     const anomalies = detectPerfAnomalies(db, runId);

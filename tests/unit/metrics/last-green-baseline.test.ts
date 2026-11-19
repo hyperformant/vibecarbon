@@ -16,6 +16,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { createTestRun } from '../../_shared/e2e-db-seed.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 
 /** Seed one finished scenario with a single green `deploy` step of `durationMs`. */
@@ -23,14 +24,7 @@ function seedGreenScenario(
   db: E2EDb,
   opts: { provider: string; mode: string; dnsProvider: string; durationMs: number },
 ): { runId: string } {
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: 'sha',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
+  const runId = createTestRun(db, 'sha');
   const scenarioId = randomUUID();
   db.createScenario({
     id: scenarioId,

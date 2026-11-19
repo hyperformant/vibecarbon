@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createTestRun } from '../../_shared/e2e-db-seed.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
@@ -51,14 +52,7 @@ function seed(db: E2EDb, opts: SeedOptions = {}) {
     promoteMs = 8_101,
   } = opts;
 
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: '403149a',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
+  const runId = createTestRun(db, '403149a');
   const scenarioId = randomUUID();
   db.createScenario({
     id: scenarioId,
