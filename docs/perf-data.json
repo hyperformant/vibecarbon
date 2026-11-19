@@ -131,53 +131,53 @@
     },
     "vultr": {
       "run": {
-        "id": "b934fe8",
-        "date": "2026-11-15",
+        "id": "529a611",
+        "date": "2026-11-19",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 151199,
-          "warm-deploy": 13623,
-          "scale": 204264,
-          "backup": 6426,
-          "destroy": 15577,
-          "restore": 153221
+          "deploy": 141821,
+          "warm-deploy": 16378,
+          "scale": 127408,
+          "backup": 4905,
+          "destroy": 11486,
+          "restore": 182934
         },
         "compose-ha": {
-          "deploy": 201697,
-          "warm-deploy": 31917,
-          "scale": 198955,
-          "backup": 5552,
-          "destroy": 18227,
-          "restore": 203169,
-          "failover": 33154
+          "deploy": 203222,
+          "warm-deploy": 30003,
+          "scale": 165919,
+          "backup": 4059,
+          "destroy": 16111,
+          "restore": 229498,
+          "failover": 33297
         }
       }
     },
     "scaleway": {
       "run": {
-        "id": "6eda650",
-        "date": "2026-11-15",
+        "id": "dd2662b",
+        "date": "2026-11-19",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 148279,
-          "warm-deploy": 14865,
-          "scale": 151920,
-          "backup": 5497,
-          "destroy": 34016,
-          "restore": 140204
+          "deploy": 137987,
+          "warm-deploy": 18291,
+          "scale": 168242,
+          "backup": 9956,
+          "destroy": 23510,
+          "restore": 149758
         },
         "compose-ha": {
-          "deploy": 213729,
-          "warm-deploy": 37917,
-          "scale": 192842,
-          "backup": 5426,
-          "destroy": 35314,
-          "restore": 256433,
-          "failover": 54427
+          "deploy": 302401,
+          "warm-deploy": 55444,
+          "scale": 231753,
+          "backup": 6102,
+          "destroy": 42911,
+          "restore": 194514,
+          "failover": 41869
         }
       }
     }
