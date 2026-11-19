@@ -9,6 +9,10 @@
  * Storage cancellation is explicit on Linode, never a side effect of
  * deleting the last bucket) — the PROTECTED set exists for structural
  * parity and is pinned empty.
+ *
+ * The cases every sweep shares (the empty project name, an unreadable
+ * bucket listing, a "no such bucket" answer) run once per provider in
+ * sweep-shared-cases.test.ts.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
@@ -107,24 +111,7 @@ function linodeTagFetch(
 
 const TAG = '[test]';
 
-/** What the sweep's delete threw in run 43757126064 (real SDK shape). */
-const STALE_LISTING_ERROR = Object.assign(new Error('UnknownError'), {
-  name: 'NoSuchBucket',
-  Code: 'NoSuchBucket',
-  $metadata: { httpStatusCode: 404 },
-});
-
 describe('sweepOrphanedLinodeResources', () => {
-  it('refuses to sweep with an empty project name (an empty prefix matches everything)', async () => {
-    await expect(
-      sweepOrphanedLinodeResources(TAG, '', {
-        provider: fakeProvider(),
-        objectStorage: fakeStorage(),
-        fetchImpl: fakeFetch({}),
-      }),
-    ).rejects.toThrow(/project name/i);
-  });
-
   it('deletes prefix-matching instances (settled) and leaves foreign ones', async () => {
     const deleteServer = vi.fn().mockResolvedValue(undefined);
     const provider = fakeProvider({
@@ -348,75 +335,6 @@ describe('sweepOrphanedLinodeResources', () => {
     expect(counts.s3Buckets).toBe(1);
   });
 
-  it('a bucket destroy removed seconds earlier reads clean once its cluster has none and a second listing has dropped it', async () => {
-    const locateBucket = vi.fn().mockResolvedValue(null);
-    const storage = fakeStorage({
-      listAllBuckets: vi
-        .fn()
-        .mockResolvedValueOnce([{ name: 'testapp-l1-backups', cluster: 'us-iad-10' }])
-        .mockResolvedValue([]),
-      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
-      locateBucket,
-    });
-    const { counts, enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
-      provider: fakeProvider(),
-      objectStorage: storage,
-      fetchImpl: fakeFetch({}),
-    });
-    expect(locateBucket).toHaveBeenCalledWith('us-iad-10', 'testapp-l1-backups');
-    // Read once to enumerate and once more after the search, never again.
-    expect(storage.listAllBuckets).toHaveBeenCalledTimes(2);
-    expect(enumFailed).toBe(false);
-    expect(counts.s3Buckets).toBe(0);
-  });
-
-  it('the 2026-11-16 leak: no such bucket and no region holds it, but the listing still shows it, so the sweep FAILS and never says gone', async () => {
-    // A new Hetzner bucket answered this way for 20 minutes while it existed
-    // and billed. The listing was the one answer that told the truth.
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const locateBucket = vi.fn().mockResolvedValue(null);
-    const storage = fakeStorage({
-      listAllBuckets: vi
-        .fn()
-        .mockResolvedValue([{ name: 'testapp-l1-backups', cluster: 'us-iad-10' }]),
-      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
-      locateBucket,
-    });
-    const { counts, enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
-      provider: fakeProvider(),
-      objectStorage: storage,
-      fetchImpl: fakeFetch({}),
-    });
-    expect(locateBucket).toHaveBeenCalledWith('us-iad-10', 'testapp-l1-backups');
-    const said = (spy: typeof log) => spy.mock.calls.map((c) => String(c[0])).join('\n');
-    const logged = said(log);
-    const warned = said(warn);
-    log.mockRestore();
-    warn.mockRestore();
-    expect(enumFailed).toBe(true);
-    expect(counts.s3Buckets).toBe(0);
-    expect(logged).not.toMatch(/already gone/);
-    expect(warned).toMatch(/FAILED testapp-l1-backups: .*listing still shows it/);
-    expect(storage.listAllBuckets).toHaveBeenCalledTimes(2);
-  });
-
-  it('a NoSuchBucket for a bucket the cluster still holds FAILS the sweep', async () => {
-    const storage = fakeStorage({
-      listAllBuckets: vi
-        .fn()
-        .mockResolvedValue([{ name: 'testapp-l1-backups', cluster: 'us-iad-10' }]),
-      emptyAndDeleteBucket: vi.fn().mockRejectedValue(STALE_LISTING_ERROR),
-      locateBucket: vi.fn().mockResolvedValue('us-iad-10'),
-    });
-    const { enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
-      provider: fakeProvider(),
-      objectStorage: storage,
-      fetchImpl: fakeFetch({}),
-    });
-    expect(enumFailed).toBe(true);
-  });
-
   it('marks enumeration incomplete (enumFailed) when a listing cannot be walked', async () => {
     const provider = fakeProvider({
       listServersDetailed: vi.fn().mockResolvedValue({ items: [], complete: false, status: 403 }),
@@ -425,20 +343,6 @@ describe('sweepOrphanedLinodeResources', () => {
     const { enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
       provider,
       objectStorage: fakeStorage(),
-      fetchImpl: fakeFetch({}),
-    });
-
-    expect(enumFailed).toBe(true);
-  });
-
-  it('marks enumFailed when the bucket listing is unreadable', async () => {
-    const storage = fakeStorage({
-      listAllBuckets: vi.fn().mockResolvedValue(null),
-    });
-
-    const { enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
-      provider: fakeProvider(),
-      objectStorage: storage,
       fetchImpl: fakeFetch({}),
     });
 
