@@ -748,6 +748,25 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
   },
+  {
+    // The Proxy provider destroy's real teardown effects run against. Each
+    // file wrote its own; they differed in which verbs count as a delete,
+    // what a delete answers and whether the server id readers answer [], and
+    // those differences are now options a reader can see.
+    helper: 'teardownProvider',
+    definition: 'tests/_shared/teardown-provider.ts',
+    consumers: [
+      'tests/unit/destroy/dns-after-compute-census.test.ts',
+      'tests/unit/destroy/entry-keep-class-table.test.ts',
+      'tests/unit/destroy/failed-stack-second-pass.test.ts',
+      'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
+      'tests/unit/destroy/reserved-ip-label-backstop-wiring.test.ts',
+      'tests/unit/destroy/retry-hints-carry-purge.test.ts',
+      'tests/unit/destroy/state-passphrase-teardown.test.ts',
+      'tests/unit/destroy/unreadable-stack-purge-buckets.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/teardown-provider.test.ts'],
+  },
 ] as const;
 
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {

@@ -149,23 +149,13 @@ const SPECIFIC: Record<string, (...args: unknown[]) => unknown> = {
 };
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
+  const { teardownProvider } = await import('../../_shared/teardown-provider.js');
   function FakeProvider() {
-    return new Proxy(
-      {},
-      {
-        get: (_t, prop) => {
-          if (typeof prop !== 'string' || prop === 'then') return undefined;
-          if (prop === 'constructor') return FakeProvider;
-          if (prop in SPECIFIC) return SPECIFIC[prop];
-          if (prop === 'reservedIpLabelMatch') return undefined;
-          if (/^(delete|remove|destroy|detach|release)/.test(prop)) {
-            return async () => ({ deleted: true, everExisted: true, apiError: null });
-          }
-          if (/^(list|find|get)/.test(prop)) return async () => [];
-          return () => undefined;
-        },
-      },
-    );
+    return teardownProvider({
+      ctor: FakeProvider,
+      methods: { ...SPECIFIC, reservedIpLabelMatch: undefined },
+      deleted: () => ({ deleted: true, everExisted: true, apiError: null }),
+    });
   }
   Object.assign(FakeProvider, {
     NAME: 'Hetzner',

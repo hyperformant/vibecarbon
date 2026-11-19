@@ -90,23 +90,15 @@ const SPECIFIC: Record<string, (...args: unknown[]) => unknown> = {
 };
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
+  const { teardownProvider } = await import('../../_shared/teardown-provider.js');
   function FakeProvider() {
-    return new Proxy(
-      {},
-      {
-        get: (_t, prop) => {
-          if (typeof prop !== 'string' || prop === 'then') return undefined;
-          if (prop === 'constructor') return FakeProvider;
-          if (prop in SPECIFIC) return SPECIFIC[prop];
-          if (prop === 'reservedIpLabelMatch' || prop === 'detachVolume') return undefined;
-          if (/^(delete|remove|destroy|release)/.test(prop)) {
-            return async () => ({ deleted: false, apiError: null });
-          }
-          if (/^(list|find|get)/.test(prop)) return async () => [];
-          return () => undefined;
-        },
-      },
-    );
+    return teardownProvider({
+      ctor: FakeProvider,
+      methods: { ...SPECIFIC, reservedIpLabelMatch: undefined, detachVolume: undefined },
+      // No detach: detachVolume is absent, and any other detach answers nothing.
+      deleteVerbs: /^(delete|remove|destroy|release)/,
+      deleted: () => ({ deleted: false, apiError: null }),
+    });
   }
   Object.assign(FakeProvider, {
     NAME: 'Hetzner',

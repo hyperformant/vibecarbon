@@ -18,34 +18,28 @@
  * the calls (the same driving as dns-after-compute-census.test.ts).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { teardownProvider } from '../../_shared/teardown-provider.js';
 
 const labelCalls: Array<Record<string, string>> = [];
 const holder: { Provider: unknown } = { Provider: null };
 
 /** A provider whose every teardown call succeeds and finds nothing. */
 function fakeProvider(statics: Record<string, unknown>, withSweep: boolean) {
-  const handler: ProxyHandler<object> = {
-    get: (_t, prop) => {
-      if (typeof prop !== 'string' || prop === 'then') return undefined;
-      if (prop === 'constructor') return FakeProvider;
-      if (prop === 'deleteReservedIpsByLabels') {
-        if (!withSweep) return undefined;
-        return async (labels: Record<string, string>) => {
-          labelCalls.push(labels);
-          return { deleted: [], failed: [] };
-        };
-      }
-      if (/^(delete|remove|destroy|detach|release)/.test(prop)) {
-        return async () => ({ deleted: false, everExisted: false, apiError: null, removed: true });
-      }
-      if (prop === 'listServersDetailed') return async () => ({ items: [], complete: true });
-      if (/^(list|find|get)/.test(prop)) return async () => [];
-      if (/^(serverNetworkIds|serverVolumeIds)$/.test(prop)) return () => [];
-      return () => undefined;
-    },
-  };
   function FakeProvider() {
-    return new Proxy({}, handler);
+    return teardownProvider({
+      ctor: FakeProvider,
+      methods: {
+        deleteReservedIpsByLabels: withSweep
+          ? async (labels: Record<string, string>) => {
+              labelCalls.push(labels);
+              return { deleted: [], failed: [] };
+            }
+          : undefined,
+        listServersDetailed: async () => ({ items: [], complete: true }),
+      },
+      serverIdsEmpty: true,
+      deleted: () => ({ deleted: false, everExisted: false, apiError: null, removed: true }),
+    });
   }
   Object.assign(FakeProvider, { NAME: 'FakeCloud', ...statics });
   return FakeProvider;
