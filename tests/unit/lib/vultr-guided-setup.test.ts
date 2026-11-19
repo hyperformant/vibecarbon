@@ -1,11 +1,14 @@
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mirrors tests/unit/lib/digitalocean-guided-setup.test.ts. Vultr-specific
-// coverage concentrates on the one place this module is NOT a copy of its
-// siblings: object-storage keys are minted per subscription, so the cluster
-// slug is collected as a third credential value (see the module doc and
-// the vultr-provider-step0-audit plan).
+// What only Vultr does. The token and storage flows every provider shares
+// (env first, force, save, skipPrompts, the 401 and unreachable paths, the
+// cluster saved and exported with the pair) are pinned for every provider in
+// tests/unit/providers/guided-setup-credentials.test.ts. Here: the guides,
+// the account probe and its 403, the key format, and the one place this
+// module is NOT a copy of its siblings: object-storage keys are minted per
+// subscription, so the cluster slug is collected as a third credential value
+// (see the module doc and the vultr-provider-step0-audit plan).
 const clackMock = await vi.hoisted(async () => {
   const { clackFake } = await import('../../_shared/clack-fake.js');
   return clackFake({
@@ -135,17 +138,6 @@ describe('getApiToken', () => {
     else process.env.VULTR_API_TOKEN = ambientToken;
   });
 
-  it('returns the env var verbatim when set and valid, never prompting', async () => {
-    process.env.VULTR_API_TOKEN = VALID_TOKEN;
-    mockTokenValid();
-    const { getApiToken } = await freshGuidedSetup();
-
-    const result = await getApiToken('my-project');
-
-    expect(result).toBe(VALID_TOKEN);
-    expect(clackMock.password).not.toHaveBeenCalled();
-  });
-
   it('verifies against GET /v2/account with a Bearer header', async () => {
     process.env.VULTR_API_TOKEN = VALID_TOKEN;
     mockTokenValid();
@@ -156,33 +148,6 @@ describe('getApiToken', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://api.vultr.com/v2/account', {
       headers: { Authorization: `Bearer ${VALID_TOKEN}` },
     });
-  });
-
-  it('force:true skips the env lookup and goes straight to the prompt', async () => {
-    process.env.VULTR_API_TOKEN = VALID_TOKEN;
-    mockTokenValid();
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(false);
-    const { getApiToken } = await freshGuidedSetup();
-
-    const result = await getApiToken('my-project', { force: true, save: false });
-
-    expect(clackMock.password).toHaveBeenCalledTimes(1);
-    expect(result).toBe(VALID_TOKEN);
-  });
-
-  it('falls through to the prompt when the env var is set but 401s', async () => {
-    process.env.VULTR_API_TOKEN = VALID_TOKEN;
-    fetchMock.mockResolvedValueOnce({ ok: false, status: 401 });
-    fetchMock.mockResolvedValue({ ok: true, status: 200 });
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(false);
-    const { getApiToken } = await freshGuidedSetup();
-
-    await getApiToken('my-project', { save: false });
-
-    expect(clackMock.log.warn).toHaveBeenCalledWith(expect.stringContaining('VULTR_API_TOKEN'));
-    expect(clackMock.password).toHaveBeenCalledTimes(1);
   });
 
   it('points a 403 at the Access Control allowlist rather than calling the key invalid', async () => {
@@ -210,41 +175,6 @@ describe('getApiToken', () => {
       expect.stringContaining('36 uppercase alphanumeric'),
     );
     expect(result).toBe('lowercase-and-too-short-but-valid');
-  });
-
-  it('treats an unreachable API as verified rather than stranding the operator', async () => {
-    fetchMock.mockRejectedValue(new Error('ENOTFOUND'));
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(false);
-    const { getApiToken } = await freshGuidedSetup();
-
-    expect(await getApiToken('my-project', { save: false })).toBe(VALID_TOKEN);
-  });
-
-  it('prompts when the env var is unset, then sets process.env for in-process coherence', async () => {
-    mockTokenValid();
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(false); // decline save
-    const { getApiToken } = await freshGuidedSetup();
-
-    const result = await getApiToken('my-project');
-
-    expect(result).toBe(VALID_TOKEN);
-    expect(process.env.VULTR_API_TOKEN).toBe(VALID_TOKEN);
-    expect(setEnvVarMock).not.toHaveBeenCalled();
-  });
-
-  it('save acceptance persists via setEnvVar with localOnly:true', async () => {
-    mockTokenValid();
-    clackMock.password.mockResolvedValue(VALID_TOKEN);
-    clackMock.confirm.mockResolvedValue(true); // accept save
-    const { getApiToken } = await freshGuidedSetup();
-
-    await getApiToken('my-project');
-
-    expect(setEnvVarMock).toHaveBeenCalledWith('VULTR_API_TOKEN', VALID_TOKEN, expect.any(String), {
-      localOnly: true,
-    });
   });
 });
 
@@ -318,13 +248,6 @@ describe('getS3Credentials (per-subscription keys + cluster)', () => {
     );
   });
 
-  it('skipPrompts returns null instead of prompting when env is incomplete', async () => {
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    expect(await getS3Credentials('my-project', { skipPrompts: true })).toBeNull();
-    expect(clackMock.text).not.toHaveBeenCalled();
-  });
-
   it('collects the cluster as a third value and returns it alongside the pair', async () => {
     mockFreshPrompts();
     clackMock.confirm.mockResolvedValue(false);
@@ -339,37 +262,6 @@ describe('getS3Credentials (per-subscription keys + cluster)', () => {
       source: 'what you pasted',
     });
     expect(clackMock.text).toHaveBeenCalledTimes(2);
-  });
-
-  it('sets all three env vars for in-process coherence even when save is declined', async () => {
-    mockFreshPrompts();
-    clackMock.confirm.mockResolvedValue(false);
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    await getS3Credentials('my-project');
-
-    expect(process.env.VULTR_ACCESS_KEY).toBe('AK123456789');
-    expect(process.env.VULTR_SECRET_KEY).toBe('SK987654321');
-    expect(process.env.VULTR_STORAGE_REGION).toBe('sjc1');
-    expect(setEnvVarMock).not.toHaveBeenCalled();
-  });
-
-  it('save acceptance persists the cluster with the pair — all localOnly', async () => {
-    mockFreshPrompts();
-    clackMock.confirm.mockResolvedValue(true);
-    const { getS3Credentials } = await freshGuidedSetup();
-
-    await getS3Credentials('my-project');
-
-    for (const [key, value] of [
-      ['VULTR_ACCESS_KEY', 'AK123456789'],
-      ['VULTR_SECRET_KEY', 'SK987654321'],
-      ['VULTR_STORAGE_REGION', 'sjc1'],
-    ]) {
-      expect(setEnvVarMock).toHaveBeenCalledWith(key, value, expect.any(String), {
-        localOnly: true,
-      });
-    }
   });
 
   describe('cluster validation', () => {

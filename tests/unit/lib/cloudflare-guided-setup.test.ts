@@ -1,9 +1,11 @@
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mirrors hetzner-guided-setup.test.ts's structure exactly (see its header
-// comment for the shared rationale): single bordered p.note() guide, env-only
-// lookup (no credentials.json leg), saveIfWanted persists via
+// The compute providers' flows are one table in
+// tests/unit/providers/guided-setup-credentials.test.ts. Cloudflare is a DNS
+// provider, not in that registry, and verifies through cloudflare-dns.js, so
+// its copy of the same contract stays here: single bordered p.note() guide,
+// env-only lookup (no credentials.json leg), saveIfWanted persists via
 // setEnvVar({localOnly:true}). Cloudflare has only one credential (the API
 // token) so there's no S3-equivalent describe block here.
 const clackMock = await vi.hoisted(async () => {
