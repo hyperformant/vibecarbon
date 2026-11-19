@@ -96,7 +96,7 @@ async function renderDetails() {
   await screen.findByRole('heading', { name: 'Acme' });
 }
 
-const nameInput = () => screen.getByLabelText('Name') as HTMLInputElement;
+const nameInput = () => screen.getByLabelText('orgSettings.name') as HTMLInputElement;
 
 /** Open edit mode and type a name. */
 function typeName(name: string) {
@@ -104,7 +104,7 @@ function typeName(name: string) {
   fireEvent.change(nameInput(), { target: { value: name } });
 }
 
-const save = () => fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+const save = () => fireEvent.click(screen.getByRole('button', { name: 'common.save' }));
 
 describe('organization settings: the name', () => {
   it('Save Changes sends the new name, and the page shows it once saved', async () => {
@@ -120,7 +120,7 @@ describe('organization settings: the name', () => {
     expect(server.requests.at(-1)?.request).toBe('GET /api/v1/me');
     expect(toast.success).toHaveBeenCalledExactlyOnceWith('orgSettings.renamed');
     // Edit mode is closed, with the saved name in the field.
-    expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'common.save' })).not.toBeInTheDocument();
     expect(nameInput()).toBeDisabled();
     expect(nameInput().value).toBe('Acme Labs');
   });
@@ -147,7 +147,7 @@ describe('organization settings: the name', () => {
     );
     expect(toast.success).not.toHaveBeenCalled();
     expect(nameInput().value).toBe('Acme Labs');
-    expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'common.save' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Acme' })).toBeInTheDocument();
   });
 
@@ -167,7 +167,7 @@ describe('organization settings: the name', () => {
     typeName('Acme');
     save();
 
-    expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'common.save' })).not.toBeInTheDocument();
     expect(renames()).toEqual([]);
   });
 
@@ -175,7 +175,7 @@ describe('organization settings: the name', () => {
     await renderDetails();
     typeName('   ');
 
-    expect(screen.getByRole('button', { name: 'Save Changes' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'common.save' })).toBeDisabled();
     save();
     expect(renames()).toEqual([]);
   });
@@ -183,7 +183,7 @@ describe('organization settings: the name', () => {
   it('Cancel drops the typed name without a request', async () => {
     await renderDetails();
     typeName('Acme Labs');
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
 
     expect(nameInput().value).toBe('Acme');
     expect(nameInput()).toBeDisabled();
@@ -199,5 +199,73 @@ describe('organization settings: the name', () => {
 
     expect(screen.queryByRole('button', { name: 'orgSettings.editName' })).not.toBeInTheDocument();
     expect(nameInput()).toBeDisabled();
+  });
+});
+
+/**
+ * Every word the page shows goes through t() (carbon/AGENTS.md, Localization),
+ * so enabling a language translates all of it. With t returning the key path,
+ * any text that is neither a key nor the organization's own data is a
+ * hardcoded string.
+ */
+describe('organization settings: every string goes through t()', () => {
+  const KEY = /^[a-z][A-Za-z]*(\.[A-Za-z]+)+$/;
+  /** The organization's own data, which is shown as it is. */
+  const DATA = new Set(['Acme', 'acme', 'o1', 'FREE']);
+
+  /** Text nodes and labelling attributes under `root` that are not a key or data. */
+  function hardcoded(root: HTMLElement): string[] {
+    const found: string[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent?.trim();
+      if (text) found.push(text);
+    }
+    for (const el of root.querySelectorAll('[aria-label],[placeholder],[title]')) {
+      for (const attr of ['aria-label', 'placeholder', 'title']) {
+        const value = el.getAttribute(attr)?.trim();
+        if (value) found.push(value);
+      }
+    }
+    return found.filter((text) => !KEY.test(text) && !DATA.has(text));
+  }
+
+  it('the page, in edit mode, shows no hardcoded text', async () => {
+    await renderDetails();
+    fireEvent.click(screen.getByRole('button', { name: 'orgSettings.editName' }));
+    expect(hardcoded(document.body)).toEqual([]);
+  });
+
+  it.each([
+    ['the last organization', 1],
+    ['one of several organizations', 2],
+  ])('the delete dialog for %s shows no hardcoded text', async (_name, count) => {
+    const memberships = Array.from({ length: count }, (_, i) => ({
+      id: `m${i}`,
+      role: 'OWNER',
+      organization: { ...organization(), id: `o${i + 1}`, slug: `acme-${i}` },
+    }));
+    fetchMock.mockImplementationOnce(async () => json({ memberships }));
+    await renderDetails();
+    fireEvent.click(screen.getByRole('button', { name: 'common.delete' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(hardcoded(dialog)).toEqual([]);
+  });
+
+  it('the loading state shows no hardcoded text', () => {
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(() => {}));
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <OrganizationsProvider>
+          <MemoryRouter initialEntries={['/organizations/o1']}>
+            <Routes>
+              <Route path="/organizations/:orgId" element={<OrgDetails />} />
+            </Routes>
+          </MemoryRouter>
+        </OrganizationsProvider>
+      </QueryClientProvider>
+    );
+    expect(hardcoded(document.body)).toEqual([]);
   });
 });
