@@ -80,7 +80,7 @@
  */
 
 import {
-  aTargetsAt,
+  aRecordsAt,
   matching,
   namesPointingAt,
   pairDeleteResult,
@@ -89,6 +89,8 @@ import {
   setupHaRecords,
   toRelativeName,
   wholeZone,
+  writeARecords,
+  writtenARecords,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -340,27 +342,35 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   }
 
   // The response carries records (which ones depends on `return_all_records`,
-  // whose default we do not rely on), so pick ours out of whatever came back
-  // and fall back to what we wrote.
+  // whose default we do not rely on), so pick ours out of whatever came back:
+  // the record we set, by its id, else the one at our name and type. With none
+  // in the body, a 2xx `set` is Scaleway's word that the record it addressed by
+  // id holds what was sent; an `add` with none has no id to name, so the
+  // failover flip, which needs one, fails rather than guess.
   const body = await response.json().catch(() => ({}));
-  const written = Array.isArray(body.records)
-    ? body.records.find((r) => r.type === type && r.name === relativeName)
-    : null;
-  return written ?? record;
+  const returned = Array.isArray(body.records) ? body.records : [];
+  const written =
+    (match && returned.find((r) => r.id === match.id)) ||
+    returned.find((r) => r.type === type && r.name === relativeName);
+  return written ?? (match ? { ...record, id: match.id } : record);
 }
 
+/** @typedef {import('./dns-backend-helpers.js').ARecord} ARecord */
+
 /**
- * Read every A record target at a name, for verifying a flip. Empty when the
- * name has no A record; a stale second value must stay visible.
+ * Every A record at a name, with its id, as the zone's record list shows it.
+ * Empty when the name has no A record; a stale second record must stay
+ * visible. A list can lag a write, so the failover flip uses it only to find
+ * records other than the ones it wrote (flipAndVerifyDns).
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string[]>}
+ * @returns {Promise<ARecord[]>}
  */
-export async function readARecord(apiToken, zoneId, name) {
+export async function readARecords(apiToken, zoneId, name) {
   const records = await getRecords(apiToken, zoneId);
-  return aTargetsAt(records, fqdnToRelative(name, zoneId), name);
+  return aRecordsAt(records, fqdnToRelative(name, zoneId), name);
 }
 
 /**
@@ -473,23 +483,29 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
  * the same IP (ttl 60). This is the failover flip primitive — scale.js's
  * post-scale DNS update and failover.js's `updateDns` both repoint every
  * subdomain (api, registry, ...) at whichever server IP is currently primary.
+ * Sequential, as writeARecords always is: two in-flight PATCHes race on the
+ * zone's serial.
+ *
+ * Returns what each write's response says the record now holds: the PATCH
+ * answers with records (`id`, `data`), and createDNSRecord picks ours out.
+ * The failover flip judges the records it wrote by this, not by the list.
  *
  * @param {object} auth
  * @param {string} auth.token - Scaleway secret key
  * @param {string} auth.zoneId - Zone identity — the zone NAME on Scaleway
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string} ip - Target IP address
- * @returns {Promise<void>}
+ * @returns {Promise<Record<string, ARecord[]>>} by name: the apex, then the wildcard
  */
 export async function upsertApexAndWildcard(auth, domain, ip) {
   const { token, zoneId } = auth;
-  await createDNSRecord(token, zoneId, { type: 'A', name: domain, value: ip, ttl: HA_TTL });
-  await createDNSRecord(token, zoneId, {
-    type: 'A',
-    name: `*.${domain}`,
-    value: ip,
-    ttl: HA_TTL,
-  });
+  return writeARecords(
+    [
+      { type: 'A', name: domain, value: ip, ttl: HA_TTL },
+      { type: 'A', name: `*.${domain}`, value: ip, ttl: HA_TTL },
+    ],
+    async (config) => writtenARecords(await createDNSRecord(token, zoneId, config)),
+  );
 }
 
 // ============================================================================

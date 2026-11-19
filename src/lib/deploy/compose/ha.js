@@ -1820,9 +1820,10 @@ export function swapComposeHaRoles(envName, { override, attemptId } = {}) {
 /**
  * The managed-DNS flip: every backend's upsertApexAndWildcard repoints apex +
  * wildcard at the promoted node (per-provider wire details live with the
- * backends), then the provider's own API reads both back. No compute token is
- * in scope (failover is DNS-only), so resolveDnsToken resolves env-first. A
- * missing token is a failed flip, never a silent skip.
+ * backends), and flipAndVerifyDns judges each record by the write's own
+ * response, listing the names only for records it did not write. No compute
+ * token is in scope (failover is DNS-only), so resolveDnsToken resolves
+ * env-first. A missing token is a failed flip, never a silent skip.
  *
  * @param {object} envConfig
  * @param {string} ip - promoted node
@@ -1848,7 +1849,7 @@ export async function flipComposeDns(envConfig, ip) {
 
 /**
  * The managed-DNS flip with resolved credentials (deploy has them in hand):
- * apex + wildcard upserted at `ip`, then read back through the provider's API.
+ * apex + wildcard upserted at `ip`, proven by flipAndVerifyDns.
  *
  * @param {{ dnsProvider: string, token: string, zoneId: string, domain: string, ip: string }} args
  * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
@@ -1858,7 +1859,7 @@ export async function flipComposeDnsWith({ dnsProvider, token, zoneId, domain, i
   const dns = await getDnsProvider(dnsProvider);
   return flipAndVerifyDns({
     update: () => dns.upsertApexAndWildcard(auth, domain, ip),
-    read: (name) => dns.readARecord(token, zoneId, name),
+    read: (name) => dns.readARecords(token, zoneId, name),
     domain,
     ip,
   });

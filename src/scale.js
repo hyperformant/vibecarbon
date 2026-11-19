@@ -88,6 +88,7 @@ import {
   scaleCutoverNextStep,
   writeScaleCutoverJournal,
 } from './lib/deploy/write-fence.js';
+import { otherARecords } from './lib/dns-backend-helpers.js';
 import { waitForDNSPropagation } from './lib/dns-propagation.js';
 import {
   DNS_PROVIDERS,
@@ -2044,6 +2045,13 @@ async function scaleFinishComposeOutro(ctx) {
  *     (the provider may still apply it), where it would otherwise read `old`.
  * `pending` names each record not yet on the new IP.
  *
+ * A record the failed update did write is judged by that write's response
+ * (`dnsError.written`, from writeARecords), not by the list, which can lag it
+ * for a moment: read as `old`, an apex that had moved would be rolled back
+ * with the record left at the new server this rollback deletes. The resume's
+ * re-read after its own re-point passes no `dnsError` on purpose: that read
+ * looks for a late write from the stopped run, which only the list can show.
+ *
  * @returns {Promise<{ state: 'old'|'moved'|'partial'|'unknown', pending: string[] }>}
  */
 export async function readDnsMove(
@@ -2063,14 +2071,19 @@ export async function readDnsMove(
     computeToken: apiToken,
   });
   if (!token) return unread;
-  let targets;
+  let listed;
   try {
     const { getDnsProvider: load = getDnsProvider } = deps;
     const dns = await load(dnsProvider);
-    targets = await Promise.all(names.map((n) => dns.readARecord(token, zoneId, n)));
+    listed = await Promise.all(names.map((n) => dns.readARecords(token, zoneId, n)));
   } catch {
     return unread;
   }
+  const written = dnsError?.written ?? {};
+  const targets = names.map((n, i) => {
+    const ours = written[n] ?? [];
+    return [...ours, ...otherARecords(listed[i], ours)].map((r) => r.value);
+  });
   const pending = names.flatMap((n, i) =>
     targets[i].length === 1 && targets[i][0] === newIp
       ? []

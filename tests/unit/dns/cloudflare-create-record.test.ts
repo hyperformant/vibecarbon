@@ -28,7 +28,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const { createDNSRecord, readARecord, setupSimple, setupHA } = await import(
+const { createDNSRecord, readARecords, setupSimple, setupHA } = await import(
   '../../../src/lib/cloudflare-dns.js'
 );
 
@@ -145,24 +145,26 @@ describe('Cloudflare setup never reports success past a refused write', () => {
   });
 });
 
-describe('Cloudflare readARecord', () => {
-  it('returns the A record target', async () => {
+describe('Cloudflare readARecords', () => {
+  it('returns the A record with its id', async () => {
     fetchMock.mockResolvedValueOnce(
       json(200, {
         success: true,
         result: [{ id: 'r1', name: 'app.example.com', type: 'A', content: '203.0.113.9' }],
       }),
     );
-    await expect(readARecord('t', 'zone', 'app.example.com')).resolves.toEqual(['203.0.113.9']);
+    await expect(readARecords('t', 'zone', 'app.example.com')).resolves.toEqual([
+      { id: 'r1', value: '203.0.113.9' },
+    ]);
   });
 
-  it('returns null when there is no A record', async () => {
+  it('returns nothing when there is no A record', async () => {
     fetchMock.mockResolvedValueOnce(listEmpty());
-    await expect(readARecord('t', 'zone', 'app.example.com')).resolves.toEqual([]);
+    await expect(readARecords('t', 'zone', 'app.example.com')).resolves.toEqual([]);
   });
 
   it('throws when the read is refused', async () => {
     fetchMock.mockResolvedValueOnce(forbidden());
-    await expect(readARecord('t', 'zone', 'app.example.com')).rejects.toThrow(/403/);
+    await expect(readARecords('t', 'zone', 'app.example.com')).rejects.toThrow(/403/);
   });
 });

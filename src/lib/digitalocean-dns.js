@@ -27,7 +27,7 @@
  */
 
 import {
-  aTargetsAt,
+  aRecordsAt,
   bearerHeaders,
   bearerJsonHeaders,
   deleteOwnedRecords,
@@ -38,6 +38,8 @@ import {
   setupHaRecords,
   toRelativeName,
   wholeZone,
+  writeARecords,
+  writtenARecords,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -209,18 +211,22 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   return data.domain_record;
 }
 
+/** @typedef {import('./dns-backend-helpers.js').ARecord} ARecord */
+
 /**
- * Read every A record target at a name, for verifying a flip. Empty when the
- * name has no A record; a stale second value must stay visible.
+ * Every A record at a name, with its id, as the zone's record list shows it.
+ * Empty when the name has no A record; a stale second record must stay
+ * visible. A list can lag a write, so the failover flip uses it only to find
+ * records other than the ones it wrote (flipAndVerifyDns).
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string[]>}
+ * @returns {Promise<ARecord[]>}
  */
-export async function readARecord(apiToken, zoneId, name) {
+export async function readARecords(apiToken, zoneId, name) {
   const records = await getRecords(apiToken, zoneId);
-  return aTargetsAt(records, fqdnToRelative(name, zoneId), name);
+  return aRecordsAt(records, fqdnToRelative(name, zoneId), name);
 }
 
 /**
@@ -314,22 +320,27 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
  * post-scale DNS update and failover.js's `updateDns` both repoint every
  * subdomain (api, registry, ...) at whichever server IP is currently primary.
  *
+ * Returns what each write's response says the record now holds: the
+ * PUT and the POST both answer with the record under `domain_record` (`id`,
+ * `data`). The failover flip judges the records it wrote by this, not by
+ * the list.
+ *
  * @param {object} auth
  * @param {string} auth.token - DigitalOcean API token
  * @param {string} auth.zoneId - Zone identity — the domain NAME on DO
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string} ip - Target IP address
- * @returns {Promise<void>}
+ * @returns {Promise<Record<string, ARecord[]>>} by name: the apex, then the wildcard
  */
 export async function upsertApexAndWildcard(auth, domain, ip) {
   const { token, zoneId } = auth;
-  await createDNSRecord(token, zoneId, { type: 'A', name: domain, value: ip, ttl: HA_TTL });
-  await createDNSRecord(token, zoneId, {
-    type: 'A',
-    name: `*.${domain}`,
-    value: ip,
-    ttl: HA_TTL,
-  });
+  return writeARecords(
+    [
+      { type: 'A', name: domain, value: ip, ttl: HA_TTL },
+      { type: 'A', name: `*.${domain}`, value: ip, ttl: HA_TTL },
+    ],
+    async (config) => writtenARecords(await createDNSRecord(token, zoneId, config)),
+  );
 }
 
 // ============================================================================

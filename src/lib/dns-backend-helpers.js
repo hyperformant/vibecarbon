@@ -9,6 +9,10 @@
  * backend keeps its own requests (page walk, error envelope, upsert,
  * delete): those differ per provider, and the source censuses under
  * tests/unit/dns/ read them per backend file.
+ *
+ * It also holds the A record shape the failover flip judges (ARecord), the
+ * apex-and-wildcard write that returns it, and the one rule its callers share
+ * for which listed records a write did not name (otherARecords).
  */
 
 import { spinner } from './cli/progress.js';
@@ -112,17 +116,90 @@ export function wholeZone(whole, limit) {
 }
 
 /**
- * Every A record target at a name, for readARecord's flip check. Empty when
- * the name has no A record; a stale second value stays visible.
+ * An A record as the failover flip judges it: the provider's id for the
+ * record and the address it holds.
+ *
+ * Every backend but Hetzner stores one row per record, and the id is that
+ * row's. Hetzner stores every value at a (name, type) as one rrset that a
+ * write replaces whole, so each value carries the rrset's key, `<name>/<type>`:
+ * the set a write's response returns is then the whole truth at the name, and
+ * the list can show no record there that the write did not name. One shape,
+ * so flipAndVerifyDns has one rule for every backend.
+ *
+ * @typedef {{ id: string, value: string }} ARecord
+ */
+
+/**
+ * The A record a backend's write response returned, as ARecords: the record
+ * the provider says it now holds. Empty when the response names no id or no
+ * address; the flip then fails, since nothing proves what the record holds.
+ * @param {object|null|undefined} record - the record from the write's response
+ * @param {string} [field='data'] - the record field that holds the address
+ * @returns {ARecord[]}
+ */
+export function writtenARecords(record, field = 'data') {
+  const id = record?.id;
+  const value = record?.[field];
+  if (id == null || id === '' || typeof value !== 'string') return [];
+  return [{ id: String(id), value }];
+}
+
+/**
+ * Every A record at a name, with its id, for readARecords: what the zone's
+ * list shows. Empty when the name has no A record; a stale second record
+ * stays visible.
  * @param {object[]} records - the zone's records
  * @param {string} relativeName - the name as the backend stores it
  * @param {string} name - the name, fully qualified
  * @param {string} [field='data'] - the record field that holds the address
- * @returns {string[]}
+ * @returns {ARecord[]}
  */
-export function aTargetsAt(records, relativeName, name, field = 'data') {
+export function aRecordsAt(records, relativeName, name, field = 'data') {
   const fqdn = String(name).replace(/\.$/, '');
-  return matching(records, relativeName, fqdn, 'A').map((r) => r[field]);
+  return matching(records, relativeName, fqdn, 'A').map((r) => ({
+    id: String(r.id),
+    value: r[field],
+  }));
+}
+
+/**
+ * The listed A records a write did not name. The list can lag the write (on
+ * 2026-11-19 Linode's record list served a record's old value in the same
+ * second its event log recorded the update to the new one), so a record the
+ * write named is judged by the write's response, never by the list; the list
+ * only finds the others, such as a stale second record that keeps traffic on
+ * a retired node.
+ * @param {ARecord[]|null|undefined} listed - the list's A records at the name
+ * @param {ARecord[]|null|undefined} written - what the write's response returned there
+ * @returns {ARecord[]}
+ */
+export function otherARecords(listed, written) {
+  const ours = new Set((written ?? []).map((r) => r.id));
+  return (listed ?? []).filter((r) => !ours.has(r.id));
+}
+
+/**
+ * upsertApexAndWildcard's shared body: each record through the backend's own
+ * `write`, one after the other (Scaleway's zone serial forbids two in flight),
+ * which returns the ARecords its response holds. Returns them by name. A write
+ * that throws carries what the writes before it returned as `error.written`:
+ * scale reads the records back after a failed update (readDnsMove), and a
+ * record that landed is judged by its own response there too.
+ * @param {Array<{type: string, name: string, value: string, ttl?: number}>} records - the apex, then the wildcard
+ * @param {(config: {type: string, name: string, value: string, ttl?: number}) => Promise<ARecord[]>} write
+ * @returns {Promise<Record<string, ARecord[]>>}
+ */
+export async function writeARecords(records, write) {
+  const written = {};
+  for (const config of records) {
+    try {
+      written[config.name] = await write(config);
+    } catch (error) {
+      if (error && typeof error === 'object') error.written = { ...written };
+      throw error;
+    }
+  }
+  return written;
 }
 
 /**

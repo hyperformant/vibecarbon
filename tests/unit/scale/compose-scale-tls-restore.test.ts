@@ -179,8 +179,8 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
     getDnsProvider: async () => ({
       upsertApexAndWildcard: async () => {},
       // The resume reads DNS part way moved: it adopts the new server.
-      readARecord: async (_t: string, _z: string, name: string) =>
-        name.startsWith('*.') ? ['1.1.1.1'] : ['9.9.9.9'],
+      readARecords: async (_t: string, _z: string, name: string) =>
+        name.startsWith('*.') ? [{ id: 'w', value: '1.1.1.1' }] : [{ id: 'a', value: '9.9.9.9' }],
     }),
   };
 });

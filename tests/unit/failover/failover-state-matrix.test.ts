@@ -22,6 +22,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { listedFlip, writtenFlip } from '../../_shared/dns-flip-fake.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
@@ -125,10 +126,14 @@ interface RunOpts {
   standbyFenced?: boolean;
   /** The provider write throws. */
   dnsUpdateThrows?: boolean;
-  /** What the provider reads back after the write (default: the flipped IP). */
-  dnsReadsBack?: string[];
-  /** What the wildcard reads back, when it differs from the apex. */
-  wildcardReadsBack?: string[];
+  /** What the apex write's response says it holds (default: the flipped IP; null: nothing). */
+  apexWriteSays?: string | null;
+  /** What the wildcard write's response says it holds, when it differs. */
+  wildcardWriteSays?: string;
+  /** The record list still shows the written records at this (older) address. */
+  listLagsAt?: string;
+  /** Other A records the list holds at each name, besides the written one. */
+  alsoListed?: string[];
 }
 
 /**
@@ -157,8 +162,10 @@ async function run(opts: RunOpts = {}) {
     fenceThrows = false,
     standbyFenced = false,
     dnsUpdateThrows = false,
-    dnsReadsBack,
-    wildcardReadsBack,
+    apexWriteSays,
+    wildcardWriteSays,
+    listLagsAt,
+    alsoListed = [],
   } = opts;
   const order: string[] = [];
   const captured: Record<string, unknown> = {};
@@ -311,15 +318,22 @@ async function run(opts: RunOpts = {}) {
   let flippedTo: string | null = null;
   const strategy = {
     getAuth: async () => ({ token: 't', zoneId: 'z' }),
-    updateDns: async (_auth: unknown, _domain: string, ip: string) => {
+    updateDns: async (_auth: unknown, domain: string, ip: string) => {
       order.push('dns');
       if (dnsUpdateThrows) throw new Error('Failed to create DNS record (HTTP 403)');
       flippedTo = ip;
+      const written = writtenFlip(domain, ip);
+      if (apexWriteSays !== undefined) {
+        written[domain] = apexWriteSays === null ? [] : [{ id: 'apex', value: apexWriteSays }];
+      }
+      if (wildcardWriteSays)
+        written[`*.${domain}`] = [{ id: 'wildcard', value: wildcardWriteSays }];
+      return written;
     },
-    readDns: async (_auth: unknown, name: string) => {
-      if (name.startsWith('*.') && wildcardReadsBack) return wildcardReadsBack;
-      return dnsReadsBack === undefined ? (flippedTo ? [flippedTo] : []) : dnsReadsBack;
-    },
+    readDns: async (_auth: unknown, name: string) => [
+      ...listedFlip(name, listLagsAt ?? flippedTo),
+      ...alsoListed.map((value, i) => ({ id: `other-${i}`, value })),
+    ],
   };
   const parsed = { dryRun: false, yes: true, serverType: null, ...flags };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
@@ -1039,27 +1053,33 @@ describe('failoverHA DNS flip is verified (R5)', () => {
     expect(order.indexOf('saveConfig')).toBeGreaterThan(order.indexOf('dns'));
   });
 
-  it('a read-back that disagrees with the promoted IP counts as not flipped', async () => {
-    const { order, thrown } = await run({ dnsReadsBack: ['10.0.0.1'] });
+  it('a write whose response holds another address counts as not flipped', async () => {
+    const { order, thrown } = await run({ apexWriteSays: '10.0.0.1' });
     expect(thrown?.message).toMatch(/DNS DID NOT/);
-    expect(thrown?.message).toContain('reads back as 10.0.0.1');
+    expect(thrown?.message).toContain('app.example.com now holds 10.0.0.1');
     expect(order).toContain('saveConfig');
   });
 
-  it('an apex that is right but a wildcard that is wrong counts as not flipped', async () => {
-    const { thrown } = await run({ wildcardReadsBack: ['10.0.0.1'] });
+  it('an apex that is right but a wildcard write that says otherwise counts as not flipped', async () => {
+    const { thrown } = await run({ wildcardWriteSays: '10.0.0.1' });
     expect(thrown?.message).toMatch(/DNS DID NOT/);
-    expect(thrown?.message).toContain('*.app.example.com reads back as 10.0.0.1');
+    expect(thrown?.message).toContain('*.app.example.com now holds 10.0.0.1');
   });
 
   it('a stale second A record counts as not flipped', async () => {
-    const { thrown } = await run({ dnsReadsBack: ['10.0.0.99', '10.0.0.1'] });
+    const { thrown } = await run({ alsoListed: ['10.0.0.1'] });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
+    expect(thrown?.message).toContain('10.0.0.1 (record other-0)');
+  });
+
+  it('a write whose response says nothing counts as not flipped', async () => {
+    const { thrown } = await run({ apexWriteSays: null });
     expect(thrown?.message).toMatch(/DNS DID NOT/);
   });
 
-  it('a record that reads back as nothing counts as not flipped', async () => {
-    const { thrown } = await run({ dnsReadsBack: [] });
-    expect(thrown?.message).toMatch(/DNS DID NOT/);
+  it('a record list that still shows the old primary on the written records is flipped (2026-11-19)', async () => {
+    const { thrown } = await run({ listLagsAt: '10.0.0.1' });
+    expect(thrown).toBeUndefined();
   });
 
   it('rerunning failover after a DNS-failed (swap-persisted) failover is refused before any mutation', async () => {
@@ -1107,7 +1127,7 @@ describe('failoverHA promotes the ACME issuer only where DNS points (HTTP-01)', 
 
   it.each([
     ['a rejected DNS update', { dnsUpdateThrows: true }],
-    ['a read-back at the old primary', { dnsReadsBack: ['10.0.0.1'] }],
+    ['a stale record at the old primary', { alsoListed: ['10.0.0.1'] }],
   ])('%s still promotes the issuer, after the flip step', async (_l, over) => {
     // cert-manager self-checks the challenge before it asks Let's Encrypt to
     // validate, so while DNS points elsewhere the order waits and spends no

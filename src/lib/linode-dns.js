@@ -20,6 +20,12 @@
  * same number. Net effect: Linode zones propagate a failover flip in up to
  * 300s rather than 60s.
  *
+ * LIST LAG: `GET /domains/{id}/records` can serve a record's old target right
+ * after a PUT changed it (2026-11-19, run 44463077640: the account event log
+ * shows the update landing in the second the list still read the old value).
+ * So the failover flip judges a record it wrote by the write's own response,
+ * and reads the list only for records it did not write (readARecords).
+ *
  * API documentation verified against (2026-08-08):
  *   - https://techdocs.akamai.com/linode-api/reference/get-domain-records
  *     (A-record IP is `target`; TTL field is `ttl_sec`; apex `name` is the
@@ -34,7 +40,7 @@
  */
 
 import {
-  aTargetsAt,
+  aRecordsAt,
   bearerHeaders,
   bearerJsonHeaders,
   deleteOwnedRecords,
@@ -45,6 +51,8 @@ import {
   setupHaRecords,
   toRelativeName,
   wholeZone,
+  writeARecords,
+  writtenARecords,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -304,19 +312,25 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   return putRecord(apiToken, zoneId, zoneName, config);
 }
 
+/** @typedef {import('./dns-backend-helpers.js').ARecord} ARecord */
+
 /**
- * Read every A record target at a name, for verifying a flip. Empty when the
- * name has no A record; a stale second value must stay visible.
+ * Every A record at a name, with its id, as the zone's record list shows it.
+ * Empty when the name has no A record; a stale second record must stay
+ * visible. The list can lag a write by a moment (2026-11-19: it served a
+ * record's old target in the same second the event log recorded the update),
+ * so the failover flip uses it only to find records other than the ones it
+ * wrote (flipAndVerifyDns).
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string[]>}
+ * @returns {Promise<ARecord[]>}
  */
-export async function readARecord(apiToken, zoneId, name) {
+export async function readARecords(apiToken, zoneId, name) {
   const zoneName = await getZoneName(apiToken, zoneId);
   const records = await getRecords(apiToken, zoneId);
-  return aTargetsAt(records, fqdnToRelative(name, zoneName), name, 'target');
+  return aRecordsAt(records, fqdnToRelative(name, zoneName), name, 'target');
 }
 
 /**
@@ -397,23 +411,27 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
  * DNS update and failover.js's `updateDns` both repoint every subdomain
  * (api, registry, ...) at whichever server IP is currently primary.
  *
+ * Returns what each write's response says the record now holds: the PUT and
+ * the POST both answer with the record at the top level (`id`, `target`).
+ * The failover flip judges the records it wrote by this, not by the list.
+ *
  * @param {object} auth
  * @param {string} auth.token - Linode personal access token
  * @param {string} auth.zoneId - Numeric Linode domain id
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string} ip - Target IP address
- * @returns {Promise<void>}
+ * @returns {Promise<Record<string, ARecord[]>>} by name: the apex, then the wildcard
  */
 export async function upsertApexAndWildcard(auth, domain, ip) {
   const { token, zoneId } = auth;
   const zoneName = await getZoneName(token, zoneId);
-  await putRecord(token, zoneId, zoneName, { type: 'A', name: domain, value: ip, ttl: HA_TTL });
-  await putRecord(token, zoneId, zoneName, {
-    type: 'A',
-    name: `*.${domain}`,
-    value: ip,
-    ttl: HA_TTL,
-  });
+  return writeARecords(
+    [
+      { type: 'A', name: domain, value: ip, ttl: HA_TTL },
+      { type: 'A', name: `*.${domain}`, value: ip, ttl: HA_TTL },
+    ],
+    async (config) => writtenARecords(await putRecord(token, zoneId, zoneName, config), 'target'),
+  );
 }
 
 // ============================================================================
