@@ -798,8 +798,8 @@ What your users notice depends on the server:
 | A compose server | The app is offline for about 1 to 3 minutes |
 | Docker on a compose server | The app is offline for about 30 to 60 seconds |
 | Docker, then a restart, on a compose server | The app is offline for about 1 to 4 minutes |
-| A Kubernetes master | The app is offline for about 1 to 3 minutes, since Traefik runs only on the master |
-| A Kubernetes database node | Requests that need the database fail for about 1 to 3 minutes |
+| A Kubernetes master | The app is offline for about 1 to 4 minutes, since Traefik runs only on the master |
+| A Kubernetes database node | Requests that need the database fail for about 1 to 4 minutes |
 | A Kubernetes worker | Nothing, the node is drained first and the app keeps running elsewhere |
 | A standby side | Nothing, it takes no traffic |
 

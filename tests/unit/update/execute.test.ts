@@ -652,7 +652,7 @@ const UPGRADE = [
   'DEBIAN_FRONTEND=noninteractive',
   'sh',
   '-c',
-  `${aptWaitForDailyUnits()}; unattended-upgrade --verbose`,
+  `${aptWaitForDailyUnits()}; unattended-upgrade --no-minimal-upgrade-steps --verbose`,
 ];
 const CORDONED_HINT =
   'it is still cordoned, run vibecarbon update prod again once it is Ready, which uncordons it';

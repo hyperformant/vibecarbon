@@ -317,10 +317,10 @@ describe('fixed lines', () => {
       unexpectedRestartPrompt({ target: t as never, pkg });
     const head = (n: string) => `${n} now needs a restart for libc6, which the plan did not show. `;
     expect(prompt(target('m', '1.1.1.1', { kind: 'k8s', role: 'master' }))).toBe(
-      `${head('m')}The app is offline for about 1 to 3 minutes while it restarts, since Traefik runs only on the master. Restart it now?`,
+      `${head('m')}The app is offline for about 1 to 4 minutes while it restarts, since Traefik runs only on the master. Restart it now?`,
     );
     expect(prompt(target('d', '1.1.1.1', { kind: 'k8s', role: 'db' }))).toBe(
-      `${head('d')}Requests that need the database fail for about 1 to 3 minutes while it restarts. Restart it now?`,
+      `${head('d')}Requests that need the database fail for about 1 to 4 minutes while it restarts. Restart it now?`,
     );
     expect(prompt(target('w', '1.1.1.1', { kind: 'k8s', role: 'worker' }))).toBe(
       `${head('w')}Users notice nothing: the node is drained first and the app keeps running elsewhere. Restart it now?`,

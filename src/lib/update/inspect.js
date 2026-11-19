@@ -3,7 +3,12 @@
  * session. The script it sends changes apt state (apt-get update), so it only
  * ever runs on a server or inside a container.
  */
-import { APT_LOCK_TIMEOUT_SECONDS, aptGet, aptQuietUpdate } from '../deploy/apt.js';
+import {
+  APT_LOCK_TIMEOUT_SECONDS,
+  aptGet,
+  aptQuietUpdate,
+  UNATTENDED_UPGRADE,
+} from '../deploy/apt.js';
 import { hostReporterScript } from '../host-reporter.js';
 import { PACKAGE_PATTERN, parseHostState } from '../host-state.js';
 import { DOCKER_PACKAGES, DOCKER_SOURCE_ONLY } from '../iac/docker-install.js';
@@ -53,7 +58,7 @@ export function INSPECT_SCRIPT(kind) {
     'echo @@ubuntu',
     `${aptGet('update -qq')} >/dev/null 2>&1 </dev/null || ${stopWith('apt-get update exited $?')}`,
     'if command -v unattended-upgrade >/dev/null 2>&1 </dev/null; then',
-    '  out=$(unattended-upgrade --dry-run --verbose 2>&1 </dev/null); rc=$?',
+    `  out=$(${UNATTENDED_UPGRADE} --dry-run --verbose 2>&1 </dev/null); rc=$?`,
     '  if [ "$rc" -ne 0 ]; then',
     `    ${stopWith('unattended-upgrade exited $rc')}`,
     '  fi',

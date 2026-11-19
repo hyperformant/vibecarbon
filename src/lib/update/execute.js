@@ -31,6 +31,7 @@ import {
   aptGet,
   aptQuietUpdate,
   aptWaitForDailyUnits,
+  UNATTENDED_UPGRADE,
 } from '../deploy/apt.js';
 import { waitForKubeletsRenewing } from '../deploy/k8s/kubelet-liveness.js';
 import { fetchPublicDomain } from '../deploy/public-domain-probe.js';
@@ -106,7 +107,7 @@ const UPGRADE_ARGV = [
   'DEBIAN_FRONTEND=noninteractive',
   'sh',
   '-c',
-  `${aptWaitForDailyUnits()}; unattended-upgrade --verbose`,
+  `${aptWaitForDailyUnits()}; ${UNATTENDED_UPGRADE} --verbose`,
 ];
 /**
  * The reboot starts 2 s after ssh returns, so the command itself never hangs.

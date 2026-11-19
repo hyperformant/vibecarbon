@@ -280,7 +280,7 @@ Your environment's servers keep themselves patched, but only up to a point. Some
 
 `update` shows its plan first: each server in the order it will go, whether it restarts, and how long people using your app should expect it to be offline. It changes nothing until you confirm (`-y` confirms for you). It then goes one server at a time, standby side first, and stops at the first failure. See the `update` section of the CLI docs for the plan and the downtime for each mode.
 
-**Why nothing restarts on its own.** A restart takes the app offline for 60 to 180 seconds when it is the single server on Docker Compose or the master on Kubernetes, and requests that need the database fail while the database node restarts. A Kubernetes worker is drained first, so restarting one causes no outage. A Docker-only update takes 30 to 60 seconds. You should pick that moment, not a timer. If a package you did not expect asks for a restart during a run, `update` asks first. With `-y` it does not restart that server, and tells you to run `update` again.
+**Why nothing restarts on its own.** A restart takes the app offline for 60 to 180 seconds when it is the single server on Docker Compose, and for 60 to 240 seconds when it is the master on Kubernetes, since k3s and the pods on it have to start again. Requests that need the database fail for as long while the database node restarts. A Kubernetes worker is drained first, so restarting one causes no outage. A Docker-only update takes 30 to 60 seconds. You should pick that moment, not a timer. If a package you did not expect asks for a restart during a run, `update` asks first. With `-y` it does not restart that server, and tells you to run `update` again.
 
 **Where a due restart shows up.**
 
