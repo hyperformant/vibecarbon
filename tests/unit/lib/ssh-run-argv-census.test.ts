@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { type AstNode as Node, walkAst } from '../../_shared/ast-walk.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 /**
@@ -17,19 +18,6 @@ import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
  * modules importing that one are not walked.)
  */
 const SRC = join(REPO_ROOT, 'src');
-
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
-
-function walk(node: Node, fn: (n: Node) => void) {
-  fn(node);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') walk(child, fn);
-    }
-  }
-}
 
 const isStringy = (n: Node): boolean =>
   (n?.type === 'Literal' && typeof n.value === 'string') ||
@@ -49,7 +37,7 @@ const isStringy = (n: Node): boolean =>
 function stringArgvCalls(file: string, text: string): string[] {
   const ast = parseAst(text);
   let localName: string | null = null;
-  walk(ast, (n) => {
+  walkAst(ast, (n) => {
     if (n.type !== 'ImportDeclaration' || !/(^|\/)ssh\.js$/.test(n.source?.value ?? '')) return;
     for (const sp of n.specifiers ?? []) {
       if (sp.type === 'ImportSpecifier' && (sp.imported?.name ?? sp.imported?.value) === 'sshRun') {
@@ -59,7 +47,7 @@ function stringArgvCalls(file: string, text: string): string[] {
   });
   if (!localName) return [];
   const out: string[] = [];
-  walk(ast, (n) => {
+  walkAst(ast, (n) => {
     if (n.type !== 'CallExpression' || n.callee?.type !== 'Identifier') return;
     if (n.callee.name !== localName) return;
     const argv = n.arguments?.[2];

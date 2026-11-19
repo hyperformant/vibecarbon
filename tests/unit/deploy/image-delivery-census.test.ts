@@ -29,13 +29,16 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import {
+  calleeName,
+  isFunctionNode,
+  type AstNode as Node,
+  walkAst,
+} from '../../_shared/ast-walk.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(REPO_ROOT, 'src');
 const PRIMITIVES = new Set(['deliverImage', 'buildAppImage', 'copyAppImageToStandby']);
-
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
 
 /** file:fn site -> primitives called there, with the reason a standby cannot (or does) reach it. */
 const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> = {
@@ -64,23 +67,6 @@ const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> =
   },
 };
 
-function walk(node: Node, fn: (n: Node, ancestors: Node[]) => void, ancestors: Node[] = []) {
-  fn(node, ancestors);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') {
-        walk(child, fn, [...ancestors, node]);
-      }
-    }
-  }
-}
-
-const isFn = (n: Node) =>
-  n.type === 'FunctionDeclaration' ||
-  n.type === 'FunctionExpression' ||
-  n.type === 'ArrowFunctionExpression';
-
 function nameOfFn(fnNode: Node, parent: Node): string | null {
   if (fnNode.id?.name) return fnNode.id.name;
   if (parent?.type === 'VariableDeclarator' && parent.id?.name) return parent.id.name;
@@ -90,27 +76,18 @@ function nameOfFn(fnNode: Node, parent: Node): string | null {
   return null;
 }
 
-function calleeName(call: Node): string | null {
-  const c = call.callee;
-  if (c.type === 'Identifier') return c.name;
-  if (c.type === 'MemberExpression' && !c.computed && c.property?.type === 'Identifier') {
-    return c.property.name;
-  }
-  return null;
-}
-
 type Site = { key: string; call: string; fnNode: Node | null };
 
 function findSites(path: string, text: string): Site[] {
   const out: Site[] = [];
-  walk(parseAst(text), (n, ancestors) => {
+  walkAst(parseAst(text), (n, ancestors) => {
     if (n.type !== 'CallExpression') return;
     const name = calleeName(n);
     if (!name || !PRIMITIVES.has(name)) return;
     let fnName = '<module>';
     let fnNode: Node | null = null;
     for (let i = ancestors.length - 1; i >= 0; i--) {
-      if (!isFn(ancestors[i])) continue;
+      if (!isFunctionNode(ancestors[i])) continue;
       const nm = nameOfFn(ancestors[i], ancestors[i - 1]);
       if (nm) {
         fnName = nm;
@@ -134,7 +111,7 @@ function findAliasedImports(path: string, text: string): string[] {
       out.push(`${path}: ${imported} imported as ${local}`);
     }
   };
-  walk(parseAst(text), (n) => {
+  walkAst(parseAst(text), (n) => {
     if (n.type === 'ImportSpecifier') {
       flag(n.imported?.name ?? n.imported?.value, n.local?.name);
       return;
@@ -193,7 +170,7 @@ describe('image-delivery call-site census', () => {
       const site = sites.find((s) => s.key === key);
       expect(site?.fnNode, `${key} not found`).toBeTruthy();
       let gated = false;
-      walk(site?.fnNode, (n) => {
+      walkAst(site?.fnNode, (n) => {
         if (n.type === 'CallExpression' && calleeName(n) === 'planImageDelivery') gated = true;
       });
       expect(gated, `${key} must call planImageDelivery( to keep a standby off this path`).toBe(
@@ -232,7 +209,7 @@ const WHOLE_IMAGE_EXEMPT = new Set(['lib/deploy/layer-delta.js']);
 function enclosingFnNames(ancestors: Node[]): string[] {
   const names: string[] = [];
   for (let i = ancestors.length - 1; i >= 0; i--) {
-    if (!isFn(ancestors[i])) continue;
+    if (!isFunctionNode(ancestors[i])) continue;
     const nm = nameOfFn(ancestors[i], ancestors[i - 1]);
     if (nm) names.push(nm);
   }
@@ -266,7 +243,7 @@ const stringValue = (n: Node): string | null => {
  */
 function findWholeImageStrings(path: string, text: string): string[] {
   const out: string[] = [];
-  walk(parseAst(text), (n, ancestors) => {
+  walkAst(parseAst(text), (n, ancestors) => {
     const value = stringValue(n);
     if (value === null || !WHOLE_IMAGE.test(value)) return;
     const names = enclosingFnNames(ancestors);
@@ -288,7 +265,7 @@ describe('only the layer delta ships a whole image', () => {
   it('positive control: the layer delta itself spells one, so the walk can see it', () => {
     const delta = readFileSync(join(SRC, 'lib/deploy/layer-delta.js'), 'utf-8');
     const chains: string[][] = [];
-    walk(parseAst(delta), (n, ancestors) => {
+    walkAst(parseAst(delta), (n, ancestors) => {
       const v = stringValue(n);
       if (v !== null && WHOLE_IMAGE.test(v)) chains.push(enclosingFnNames(ancestors));
     });
@@ -431,7 +408,7 @@ const passesGate = (gate: string | undefined, gates: string[]) =>
 /** Every buildRemote( call: its site key and whether a gating `if` holds it. */
 function findRemoteBuilds(path: string, text: string): { key: string; gates: string[] }[] {
   const out: { key: string; gates: string[] }[] = [];
-  walk(parseAst(text), (n, ancestors) => {
+  walkAst(parseAst(text), (n, ancestors) => {
     if (n.type !== 'CallExpression' || calleeName(n) !== 'buildRemote') return;
     const gates: string[] = [];
     // Each `if` this call sits in the consequent of: its test, as spelled

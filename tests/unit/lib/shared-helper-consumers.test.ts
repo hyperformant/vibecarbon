@@ -668,6 +668,47 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/pulumi-cli.test.ts'],
   },
+  {
+    // The walk the parseAst censuses run over src/, eight copies of the same
+    // body. A census whose own copy stopped reaching a kind of node would
+    // pass while missing the sites under it.
+    helper: 'walkAst',
+    definition: 'tests/_shared/ast-walk.ts',
+    consumers: [
+      'tests/unit/deploy/compose-ha-primary-address-census.test.ts',
+      'tests/unit/deploy/core-images-from-mirror-census.test.ts',
+      'tests/unit/deploy/image-delivery-census.test.ts',
+      'tests/unit/deploy/k8s-image-delivery-order.test.ts',
+      'tests/unit/deploy/public-domain-probe-census.test.ts',
+      'tests/unit/deploy/stable-flowlabel-deploy-census.test.ts',
+      'tests/unit/lib/printed-url-link-census.test.ts',
+      'tests/unit/lib/ssh-run-argv-census.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/ast-walk.test.ts'],
+  },
+  {
+    // Which nodes are functions, for the censuses that name a call's
+    // enclosing function.
+    helper: 'isFunctionNode',
+    definition: 'tests/_shared/ast-walk.ts',
+    consumers: [
+      'tests/unit/deploy/image-delivery-census.test.ts',
+      'tests/unit/deploy/public-domain-probe-census.test.ts',
+      'tests/unit/lib/printed-url-link-census.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/ast-walk.test.ts'],
+  },
+  {
+    // The name a call is made by. public-domain-probe-census.test.ts keeps
+    // its own: it also names a call through a private member.
+    helper: 'calleeName',
+    definition: 'tests/_shared/ast-walk.ts',
+    consumers: [
+      'tests/unit/deploy/image-delivery-census.test.ts',
+      'tests/unit/lib/printed-url-link-census.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/ast-walk.test.ts'],
+  },
 ] as const;
 
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {

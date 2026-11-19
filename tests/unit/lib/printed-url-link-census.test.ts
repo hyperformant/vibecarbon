@@ -27,10 +27,13 @@
 import { execFileSync } from 'node:child_process';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import {
+  calleeName,
+  isFunctionNode,
+  type AstNode as Node,
+  walkAst,
+} from '../../_shared/ast-walk.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
-
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
 
 /** A real, clickable https URL: a host (or a `${...}` host) right after the scheme. */
 const URL_RE = /https:\/\/(?:[A-Za-z0-9]|\{\*\})[^\s'"`)<>\]]*/g;
@@ -110,32 +113,6 @@ const ALLOW: { why: string; sites: string[] }[] = [
 ];
 
 const ALLOWED = new Map(ALLOW.flatMap((g) => g.sites.map((s) => [s, g.why] as const)));
-
-function walk(node: Node, fn: (n: Node, ancestors: Node[]) => void, ancestors: Node[] = []) {
-  fn(node, ancestors);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') {
-        walk(child, fn, [...ancestors, node]);
-      }
-    }
-  }
-}
-
-function calleeName(call: Node): string | null {
-  const c = call.callee;
-  if (c.type === 'Identifier') return c.name;
-  if (c.type === 'MemberExpression' && !c.computed && c.property?.type === 'Identifier') {
-    return c.property.name;
-  }
-  return null;
-}
-
-const isFn = (n: Node) =>
-  n.type === 'FunctionDeclaration' ||
-  n.type === 'FunctionExpression' ||
-  n.type === 'ArrowFunctionExpression';
 
 const isLinkCall = (n: Node) => n.type === 'CallExpression' && calleeName(n) === 'link';
 const insideLink = (ancestors: Node[]) => ancestors.some(isLinkCall);
@@ -228,7 +205,7 @@ function scan(file: string, text: string): Scan {
   const out: Scan = { raw: [], allowedHit: [], constants: [], interpolated: [] };
   const lineOf = (n: Node) => text.slice(0, n.start).split('\n').length;
 
-  walk(parseAst(text), (n, ancestors) => {
+  walkAst(parseAst(text), (n, ancestors) => {
     // Rule 2's read side: a name interpolated into printed text.
     const parent = ancestors[ancestors.length - 1];
     if (parent && !insideLink(ancestors)) {
@@ -265,7 +242,8 @@ function scan(file: string, text: string): Scan {
       // Only a literal that is the URL and nothing else is data; a message
       // held in a constant (`const TERMS_LINE = 'Terms: ... https://...'`)
       // is still a message.
-      const name = value.trim() === url && !ancestors.some(isFn) ? constantName(parent, n) : null;
+      const name =
+        value.trim() === url && !ancestors.some(isFunctionNode) ? constantName(parent, n) : null;
       if (name) {
         out.constants.push({ name, site: `${file}:${lineOf(n)}` });
         continue;

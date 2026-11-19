@@ -22,6 +22,7 @@
 import { execFileSync } from 'node:child_process';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { walkAst } from '../../_shared/ast-walk.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const NAMES = new Set(['WG_PRIMARY_IP', 'WG_STANDBY_IP']);
@@ -31,25 +32,12 @@ const ALLOWED = new Map([
   ['src/lib/deploy/k8s/ha/index.js', "k8s-ha's pilot-light gateway, its own role model (#232)"],
 ]);
 
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
-
-function walk(node: Node, fn: (n: Node) => void) {
-  fn(node);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') walk(child, fn);
-    }
-  }
-}
-
 /** Every place a file names a tunnel-address constant or spells a tunnel literal. */
 function findTunnelAddressUses(path: string, text: string): string[] {
   const ast = parseAst(text);
   const lineOf = (offset: number) => text.slice(0, offset).split('\n').length;
   const out: string[] = [];
-  walk(ast, (n) => {
+  walkAst(ast, (n) => {
     const named = n.type === 'Identifier' && NAMES.has(n.name);
     const literal =
       (n.type === 'Literal' && typeof n.value === 'string' && TUNNEL_LITERAL.test(n.value)) ||
