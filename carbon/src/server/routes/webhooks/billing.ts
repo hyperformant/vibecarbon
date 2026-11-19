@@ -141,18 +141,17 @@ async function handleCheckoutCompleted(data: Record<string, unknown>): Promise<v
   if (data.status && data.priceId) {
     await upsertSubscriptionFromData(customer.id, data);
   } else {
-    // For providers like Stripe that require a separate fetch, get the full subscription
-    try {
-      const provider = getBillingProvider();
-      const subInfo = await provider.getSubscription({ customerId, subscriptionId });
-      if (subInfo) {
-        await upsertSubscriptionFromInfo(customer.id, subscriptionId, subInfo);
-      }
-    } catch (error) {
-      logger.warn(
-        { err: dbErrorForLog(error), subscriptionId },
-        'Could not fetch subscription details after checkout'
-      );
+    // For providers like Stripe that require a separate fetch, get the full
+    // subscription. A fetch that failed throws out of here, so the webhook
+    // answers 500 and the provider delivers the event again (the upsert is
+    // keyed on the subscription id, and the email below waits for it). Not
+    // found is an answer, logged and acknowledged.
+    const provider = getBillingProvider();
+    const subInfo = await provider.getSubscription({ customerId, subscriptionId });
+    if (subInfo) {
+      await upsertSubscriptionFromInfo(customer.id, subscriptionId, subInfo);
+    } else {
+      logger.warn({ subscriptionId }, 'Subscription not found after checkout; nothing stored');
     }
   }
 

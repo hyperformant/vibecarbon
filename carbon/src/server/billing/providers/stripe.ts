@@ -8,6 +8,7 @@
 
 import type Stripe from 'stripe';
 import { planIdFromPriceId } from '../../../shared/pricing';
+import { logger } from '../../lib/logger';
 import { getStripe, isStripeConfigured, verifyWebhookSignature } from '../../lib/stripe';
 import { priceIdsFor } from '../price-ids';
 import type { BillingProvider, CheckoutResult, PortalResult, SubscriptionInfo } from '../provider';
@@ -82,45 +83,57 @@ export class StripeProvider implements BillingProvider {
     return { url: session.url };
   }
 
+  /**
+   * Null when Stripe has no such subscription (or it has no item), which a
+   * second request would answer the same way. Any other failure is logged
+   * with the subscription id and thrown, so the checkout webhook answers 500
+   * and Stripe delivers the event again instead of the app storing nothing.
+   */
   async getSubscription(params: {
     customerId: string;
     subscriptionId: string;
   }): Promise<SubscriptionInfo | null> {
     const stripe = getStripe();
 
+    let subscription: Stripe.Subscription;
     try {
-      const subscription = await stripe.subscriptions.retrieve(params.subscriptionId, {
+      subscription = await stripe.subscriptions.retrieve(params.subscriptionId, {
         expand: ['items.data.price.product'],
       });
-
-      const item = subscription.items.data[0];
-      if (!item) return null;
-
-      const price = item.price;
-      const product = price.product as Stripe.Product;
-
-      const currentPeriodEnd = billingPeriod(subscription).end;
-
-      return {
-        id: subscription.id,
-        status: subscription.status,
-        planId: planIdFromPriceId(price.id, priceIdsFor('stripe')),
-        priceId: price.id,
-        currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd * 1000).toISOString() : null,
-        cancelAtPeriodEnd: subscription.cancel_at_period_end,
-        price: {
-          unitAmount: price.unit_amount ?? 0,
-          currency: price.currency,
-          interval: price.recurring?.interval ?? 'month',
-        },
-        product: {
-          id: product.id,
-          name: product.name,
-        },
-      };
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as { code?: string }).code === 'resource_missing') return null;
+      logger.error(
+        { err: error, subscriptionId: params.subscriptionId },
+        'Failed to fetch Stripe subscription'
+      );
+      throw error;
     }
+
+    const item = subscription.items.data[0];
+    if (!item) return null;
+
+    const price = item.price;
+    const product = price.product as Stripe.Product;
+
+    const currentPeriodEnd = billingPeriod(subscription).end;
+
+    return {
+      id: subscription.id,
+      status: subscription.status,
+      planId: planIdFromPriceId(price.id, priceIdsFor('stripe')),
+      priceId: price.id,
+      currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd * 1000).toISOString() : null,
+      cancelAtPeriodEnd: subscription.cancel_at_period_end,
+      price: {
+        unitAmount: price.unit_amount ?? 0,
+        currency: price.currency,
+        interval: price.recurring?.interval ?? 'month',
+      },
+      product: {
+        id: product.id,
+        name: product.name,
+      },
+    };
   }
 
   async handleWebhook(params: {
