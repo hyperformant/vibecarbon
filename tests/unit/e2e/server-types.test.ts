@@ -69,7 +69,7 @@ describe('fetchServerTypes', () => {
       // Truncated-listing guard (2026-07-30 failure class): a server that
       // lives on page 2 must still be snapshotted — the old single-GET path
       // made it unmatchable and silently degraded verify-scale to its weaker
-      // stdout-grep fallback.
+      // fallback.
       const fetchFn = vi
         .fn()
         .mockResolvedValueOnce(

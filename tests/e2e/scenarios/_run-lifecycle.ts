@@ -144,6 +144,7 @@ import {
   deployedScaleTarget,
 } from '../utils/region-resolver.js';
 import { autoscalerRepatchProblem } from '../utils/scale-output.js';
+import { type Hardware, hardwareVerdict, readHardware } from '../utils/server-hardware.js';
 import { fetchServerTypes } from '../utils/server-types.js';
 import {
   e2eSshOpts,
@@ -886,6 +887,10 @@ export async function runLifecycle(
   // in closure scope so verify-scale doesn't have to re-derive them.
   let preScaleTypes: Record<string, string> | null = null;
   let postScaleTypes: Record<string, string> | null = null;
+  // Each server's own vCPUs and memory, read over ssh around the scale: the
+  // proof verify-scale uses when the provider's API could not give the types.
+  let preScaleHardware: Record<string, Hardware> = {};
+  let postScaleHardware: Record<string, Hardware> = {};
   let scaleStdout = '';
   let scaleStderr = '';
   // The scale target: the ladder entry (config.scaleTo) for the type the
@@ -3131,9 +3136,11 @@ EOF`;
           });
           if (Object.keys(preScaleTypes).length === 0) {
             console.warn(
-              `${tag} [scale] could not capture pre-scale types — verify-scale will fall back to stdout grep`,
+              `${tag} [scale] could not capture pre-scale types; verify-scale will compare each server's own size instead`,
             );
           }
+          const scaleKey = sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix);
+          preScaleHardware = readHardware(serverIps, scaleKey);
 
           const result = await runScale(config.envPrefix, {
             cwd: config.projectDir,
@@ -3141,9 +3148,9 @@ EOF`;
             env: hcloudEnv,
             scaleToType,
           });
-          // Stash the scale CLI's output for verify-scale's grep-based fallback.
-          // ANSI stripping happens inside the assertion (it's also useful to
-          // surface raw output on failure for post-mortem).
+          // Stash the scale CLI's output for verify-scale's no-op and
+          // autoscaler checks, and to show on failure. ANSI stripping happens
+          // inside the assertion.
           scaleStdout = result.stdout || '';
           scaleStderr = result.stderr || '';
 
@@ -3172,12 +3179,14 @@ EOF`;
             provider: typeSnapshotProvider,
             tag,
           });
+          postScaleHardware = readHardware(serverIps, scaleKey);
         }),
     },
 
     // 6. Verify scale — real assertion: types must have changed (or, if the
-    //    Hetzner API was unreachable, the CLI stdout must contain a positive
-    //    confirmation token). Without this, silent scale no-ops slip past.
+    //    provider's API could not give the types, every server must report
+    //    more vCPUs or memory over ssh). Without this, silent scale no-ops
+    //    slip past.
     {
       name: 'verify-scale',
       run: () =>
@@ -3278,25 +3287,18 @@ EOF`;
               `${tag} [verify-scale] type-change confirmed: ${JSON.stringify(preScaleTypes)} -> ${JSON.stringify(postScaleTypes)}`,
             );
           } else {
-            // 3. Fallback: grep stdout for positive-confirmation tokens that
-            //    scale.js emits on a successful resize. Without these AND
-            //    without type snapshots we have no way to tell apart "scaled"
-            //    from "did nothing", so fail loud.
-            //
-            //    "Scale complete! <from> → <to>" is compose path's success
-            //    line; "Resized server" / "New server type" / "Scaled to"
-            //    are k8s path tokens. The arrow is encoded as the unicode
-            //    `→` (U+2192) in chalk output but ASCII `->` after our ANSI
-            //    strip on some terminals — match either.
-            const positiveRe =
-              /Resized\s+server|New server type:|Scaled to\s+\S+|Server (?:resized|scaled) successfully|Scale complete!.*(?:→|->)/;
-            if (!positiveRe.test(combined)) {
+            // 3. The provider's API could not give the types (a 503 on
+            //    Hetzner, 2026-11-19): ask the servers themselves. Every
+            //    server must be bigger after the scale than every server
+            //    was before it, so a partial scale still fails.
+            const why = hardwareVerdict(preScaleHardware, postScaleHardware);
+            if (why) {
               throw new Error(
-                `verify-scale: no type snapshots and no positive confirmation in stdout — assume no-op.\n--- scale stdout tail ---\n${stdoutClean.slice(-500)}`,
+                `verify-scale: the provider gave no server types, and ${why}.\n--- scale stdout tail ---\n${stdoutClean.slice(-500)}`,
               );
             }
             console.log(
-              `${tag} [verify-scale] type snapshots unavailable; passed via stdout-grep on positive token`,
+              `${tag} [verify-scale] type snapshots unavailable; every server is bigger by its own count: ${JSON.stringify(preScaleHardware)} -> ${JSON.stringify(postScaleHardware)}`,
             );
           }
 
