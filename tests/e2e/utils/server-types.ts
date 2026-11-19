@@ -5,7 +5,8 @@
  * `ips`. Returns `{ ip: typeName }`. Best-effort: an unreachable API or IPs
  * that don't match any project server fall back to an empty record so the
  * verify-scale assertion (`tests/e2e/scenarios/_run-lifecycle.ts`) can
- * degrade gracefully to the stdout-grep path rather than hard-failing.
+ * degrade to comparing each server's own size over ssh
+ * (./server-hardware.ts) rather than hard-failing.
  *
  * Extracted from a `_run-lifecycle.ts`-local closure (M3 Task 9e) so it's
  * independently unit-testable with a mocked `fetch` — same rationale as
@@ -43,7 +44,10 @@ export interface FetchServerTypesOptions {
 // then has to grep stdout — and compose scale.js's "Scale complete!"
 // tokens didn't match the old grep regex, so an upstream transient
 // cascaded into a confusing verify-scale "no-op" failure observed
-// 2026-04-28. Shared verbatim by both providers (M3 Task 9e).
+// 2026-04-28. Shared verbatim by both providers (M3 Task 9e). Since
+// 2026-11-19 that fallback asks each server its own size over ssh
+// (./server-hardware.ts) instead of grepping the scale's output. A non-ok
+// HTTP status is not retried here: it degrades to that fallback.
 const MAX_ATTEMPTS = 6;
 const TIMEOUT_MS = 15_000;
 
@@ -52,7 +56,7 @@ const TIMEOUT_MS = 15_000;
 // findServersByName). The account behind the shared token can hold more
 // servers/droplets than one page (parallel local + CI matrices share it),
 // and a truncated listing here doesn't fail — it silently pushes
-// verify-scale onto its weaker stdout-grep fallback.
+// verify-scale onto its weaker fallback.
 const MAX_PAGES = 20;
 
 interface HetznerServer {
@@ -104,8 +108,8 @@ interface TypeListing {
  *
  * The account behind the shared token can hold more servers than one page
  * (parallel local + CI matrices share it), and a truncated listing here
- * doesn't fail: it silently pushes verify-scale onto its weaker stdout-grep
- * fallback. So every listing is walked (tests/e2e/utils/provider-pages.ts).
+ * doesn't fail: it silently pushes verify-scale onto its weaker fallback.
+ * So every listing is walked (tests/e2e/utils/provider-pages.ts).
  *
  * Multiple parallel e2e scenarios share the same token, so each listing
  * pulls every project's servers; fine, because rows are then indexed by IP,
