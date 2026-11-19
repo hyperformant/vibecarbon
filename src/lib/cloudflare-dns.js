@@ -5,7 +5,12 @@
 
 import * as p from '@clack/prompts';
 import { spinner } from './cli/progress.js';
-import { bearerJsonHeaders, pairDeleteResult } from './dns-backend-helpers.js';
+import {
+  bearerJsonHeaders,
+  pairDeleteResult,
+  writeARecords,
+  writtenARecords,
+} from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
 // ============================================================================
@@ -189,22 +194,28 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   return readCloudflareJson(response, 'Failed to create DNS record');
 }
 
+/** @typedef {import('./dns-backend-helpers.js').ARecord} ARecord */
+
 /**
- * Read every A record target at a name, for verifying a flip. Empty when the
- * name has no A record; a stale second value must stay visible.
+ * Every A record at a name, with its id, as the zone's record list shows it.
+ * Empty when the name has no A record; a stale second record must stay
+ * visible. A list can lag a write, so the failover flip uses it only to find
+ * records other than the ones it wrote (flipAndVerifyDns).
  *
  * @param {string} apiToken - Cloudflare API token
  * @param {string} zoneId - Zone ID
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string[]>}
+ * @returns {Promise<ARecord[]>}
  */
-export async function readARecord(apiToken, zoneId, name) {
+export async function readARecords(apiToken, zoneId, name) {
   const response = await fetchWithRetry(
     `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${name}`,
     { headers: bearerJsonHeaders(apiToken) },
   );
   const body = await readCloudflareJson(response, 'Failed to read DNS record');
-  return (body.result ?? []).filter((r) => r.name === name && r.type === 'A').map((r) => r.content);
+  return (body.result ?? [])
+    .filter((r) => r.name === name && r.type === 'A')
+    .map((r) => ({ id: String(r.id), value: r.content }));
 }
 
 /**
@@ -367,27 +378,27 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
  * 2026-03-26 — orange cloud no longer needed; see setupSimple's comment for
  * the full RCA on why proxied must stay false).
  *
+ * Returns what each write's response says the record now holds: the PATCH
+ * and the POST both answer with the record under `result` (`id`, `content`).
+ * The failover flip judges the records it wrote by this, not by the list.
+ *
  * @param {object} auth
  * @param {string} auth.token - Cloudflare API token
  * @param {string} auth.zoneId - Zone ID
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string} ip - Target IP address
- * @returns {Promise<void>}
+ * @returns {Promise<Record<string, ARecord[]>>} by name: the apex, then the wildcard
  */
 export async function upsertApexAndWildcard(auth, domain, ip) {
   const { token, zoneId } = auth;
-  await createDNSRecord(token, zoneId, {
-    type: 'A',
-    name: domain,
-    value: ip,
-    proxied: false,
-  });
-  await createDNSRecord(token, zoneId, {
-    type: 'A',
-    name: `*.${domain}`,
-    value: ip,
-    proxied: false,
-  });
+  return writeARecords(
+    [
+      { type: 'A', name: domain, value: ip, proxied: false },
+      { type: 'A', name: `*.${domain}`, value: ip, proxied: false },
+    ],
+    async (config) =>
+      writtenARecords((await createDNSRecord(token, zoneId, config)).result, 'content'),
+  );
 }
 
 // ============================================================================

@@ -14,6 +14,7 @@
  * runs offline without touching disk.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { listedFlip, writtenFlip } from '../../_shared/dns-flip-fake.js';
 
 // The first base backup on the new timeline has its own tests
 // (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
@@ -161,10 +162,11 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
     ...actual,
     resolveDnsToken: () => 'dns-token',
     getDnsProvider: async () => ({
-      upsertApexAndWildcard: async (_auth: unknown, _domain: string, ip: string) => {
+      upsertApexAndWildcard: async (_auth: unknown, domain: string, ip: string) => {
         dnsHeld = ip;
+        return writtenFlip(domain, ip);
       },
-      readARecord: async () => (dnsHeld ? [dnsHeld] : []),
+      readARecords: async (_t: string, _z: string, name: string) => listedFlip(name, dnsHeld),
     }),
   };
 });

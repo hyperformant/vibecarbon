@@ -1535,6 +1535,85 @@ The exact-type check through the API stays the first proof.
 `execute.test.ts`; the ranges in `plan.test.ts` and `text.test.ts`;
 `tests/unit/e2e/server-hardware.test.ts`.
 
+#### 2026-11-19: The failover DNS flip trusts the provider's answer to its write
+
+At 05:45:33 UTC (run 44463077640, linode/compose-ha) a failover promoted the
+standby, wrote the apex and wildcard A records, and exited 1 with "FAILOVER
+COMPLETED, DNS DID NOT ... cil2-df3bd3.linode.appcarbon.dev reads back as
+172.234.39.68, not only 172.238.167.61". The write, the read and the failure
+fell in one second. Linode's account event log shows the write landed:
+`domain_record_update` for both records with target 172.238.167.61 at
+05:45:33, and the destroy at 05:45:45 deleted both records still holding it.
+`GET /domains/{id}/records` had served a stale copy right after the PUT, so
+this was a stale read, not a lost write: the Linode failover the entry above
+left open. It is rare: a probe that wrote a record and read it back ran 100
+rounds with no mismatch. But a false "DNS DID NOT" during a real incident
+tells the user the site is down and sends them to redeploy.
+
+`flipAndVerifyDns` now judges each record it wrote by the provider's response
+to the write. Every backend's `upsertApexAndWildcard` returns, by name, the
+records that response holds as `{id, value}`: the record in the PUT, PATCH or
+POST body on Cloudflare, DigitalOcean, Linode and Scaleway; on Vultr's PATCH
+(204, no body) and Hetzner's `set_records` (an Action), the record it addressed
+with the value sent, which the 2xx or the Action's `success` confirms.
+Hetzner's rrsets give each value the set's key, `<name>/<type>`, as its id, so
+the set a write returns is all that is at the name. The record list
+(`readARecords`, which replaced `readARecord` and returns ids) still runs, for
+one thing: an A record at the name that the write did not name, at an address
+other than the promoted one. A missing or different answer, another record, or
+a write or list that throws still fails the flip, which never throws.
+
+The class, "a read of a provider's DNS record list right after our own write,
+treated as fresher than the write", had these members (lines as of this
+change):
+- `flipAndVerifyDns` (`src/lib/deploy/failover-guard.js:674`), behind
+  `failoverHA`'s DNS step (`src/failover.js:3021`), the k8s-ha failover
+  abort's repoint (`src/failover.js:2070`), the compose-ha failover
+  (`src/lib/deploy/compose/ha.js:1841`) and the compose-ha reconverge deploy
+  (`src/lib/deploy/orchestrator.js:1269`), the last two through
+  `flipComposeDnsWith`: fixed as above.
+- scale's `readDnsMove` after a failed `updateDNS` (`src/scale.js:1716`): an
+  apex write that landed before the wildcard write failed could read as
+  `old` in a lagging list, and the rollback would delete the new server with
+  the apex pointing at it. A write that throws now carries the answers of the
+  writes before it (`error.written`, from `writeARecords`), and `readDnsMove`
+  judges those records by them. Fixed.
+- The scale resume's re-read after pointing DNS back at the old server
+  (`src/scale.js:956`): list only on purpose, 15 s after the write
+  (`DNS_RESETTLE_MS`, `src/scale.js:688`). It looks for a late write by the
+  stopped run, which only the list can show.
+- Every backend's create-or-update lists the zone before it writes
+  (`putRecord` in `src/lib/linode-dns.js:210`, `createDNSRecord` in the
+  others). A list that missed a record created moments earlier would POST a
+  duplicate (Hetzner refuses one instead). Not changed: the only create
+  followed by a write to the same name is the deploy's 0.0.0.0 warm-up
+  (`src/lib/deploy/orchestrator.js:2118`) and then the real-IP write, which
+  awaits it after the servers are provisioned (`effects/index.js:422`,
+  `k8s/dns-record.js:68`, `effects/compose-ha.js:947`,
+  `effects/k8s-ha.js:849` under `src/lib/deploy/`): tens of seconds against
+  a lag seen inside one second. A duplicate at another address now fails the
+  next failover's flip, by name.
+- `findARecordsAt` before a retired reserved IP is released
+  (`src/lib/deploy/orchestrator.js:2775`), destroy's `deleteApexAndWildcard`
+  (`src/destroy.js:2847`, `src/lib/deploy/compose/ha.js:1229`), and the e2e
+  `dns_flip_verified` check (`tests/e2e/checks/ha-integrity.ts:1233`) read
+  minutes after any write of ours, and a stale answer errs safe: the address
+  is kept, a record is kept and reported, a check fails. Not changed.
+
+**Do not undo:**
+- The flip is judged by the write's response; the list only finds other
+  records. Never re-read the list until it agrees: that is a retry ladder
+  around a read the check does not need.
+- Every backend's `upsertApexAndWildcard` returns `{id, value}[]` by name from
+  its write's response, with the ids its `readARecords` lists.
+
+**Guard:** `tests/unit/failover/flip-and-verify-dns.test.ts` (a lagging list,
+another record named, and the 2026-11-19 replay through the Linode backend);
+`tests/unit/dns/write-response-shape.test.ts`, which walks `DNS_PROVIDERS`
+(each backend's answer, its ids against its list, and what a failed wildcard
+write carries); the lagging-list case in `failover-state-matrix.test.ts` and
+the partial-write case in `compose-scale-fence.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

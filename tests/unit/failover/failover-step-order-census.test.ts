@@ -39,6 +39,7 @@
  * push fails the command once the roles are saved.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { listedFlip, writtenFlip } from '../../_shared/dns-flip-fake.js';
 import { argvOver, composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
@@ -89,11 +90,14 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
     ...actual,
     resolveDnsToken: () => 'dns-token',
     getDnsProvider: async () => ({
-      upsertApexAndWildcard: async (_auth: unknown, _domain: string, ip: string) => {
+      upsertApexAndWildcard: async (_auth: unknown, domain: string, ip: string) => {
         order.push('dns');
         composeFlippedTo = ip;
+        // A write the provider refused to make: its answer names no record.
+        return dnsFails ? {} : writtenFlip(domain, ip);
       },
-      readARecord: async () => (composeFlippedTo && !dnsFails ? [composeFlippedTo] : []),
+      readARecords: async (_t: string, _z: string, name: string) =>
+        listedFlip(name, composeFlippedTo),
     }),
   };
 });
@@ -329,11 +333,12 @@ async function runK8s(
   let flippedTo: string | null = null;
   const strategy = {
     getAuth: async () => ({ token: 't', zoneId: 'z' }),
-    updateDns: async (_auth: unknown, _domain: string, ip: string) => {
+    updateDns: async (_auth: unknown, domain: string, ip: string) => {
       order.push('dns');
       flippedTo = ip;
+      return dnsFails ? {} : writtenFlip(domain, ip);
     },
-    readDns: async () => (flippedTo && !dnsFails ? [flippedTo] : []),
+    readDns: async (_auth: unknown, name: string) => listedFlip(name, flippedTo),
   };
   // The real waitForAppTierGone reads the quiesced Deployment's selector, then
   // its pods: none left is the proof (writersGone).

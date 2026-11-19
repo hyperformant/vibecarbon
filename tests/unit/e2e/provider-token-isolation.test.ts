@@ -10,11 +10,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { readARecord, getDnsProvider } = vi.hoisted(() => {
-  const readARecord = vi.fn(async (_token: string, _zone: string, _name: string) => [
-    '203.0.113.9',
+const { readARecords, getDnsProvider } = vi.hoisted(() => {
+  const readARecords = vi.fn(async (_token: string, _zone: string, _name: string) => [
+    { id: '1', value: '203.0.113.9' },
   ]);
-  return { readARecord, getDnsProvider: vi.fn(async (_id: string) => ({ readARecord })) };
+  return { readARecords, getDnsProvider: vi.fn(async (_id: string) => ({ readARecords })) };
 });
 
 vi.mock('../../../src/lib/dns-provider.js', async (importOriginal) => {
@@ -45,7 +45,7 @@ describe('verifyDnsFlip token routing', () => {
         },
       }),
     );
-    readARecord.mockClear();
+    readARecords.mockClear();
   });
 
   it('a DigitalOcean scenario reads the DNS zone with the DO token, never the Hetzner one', async () => {
@@ -57,8 +57,8 @@ describe('verifyDnsFlip token routing', () => {
       computeToken: DO_SENTINEL,
     });
     expect(result.status).toBe('pass');
-    expect(readARecord).toHaveBeenCalled();
-    for (const call of readARecord.mock.calls) {
+    expect(readARecords).toHaveBeenCalled();
+    for (const call of readARecords.mock.calls) {
       expect(call[0]).toBe(DO_SENTINEL);
       expect(call[0]).not.toBe(HETZNER_SENTINEL);
     }

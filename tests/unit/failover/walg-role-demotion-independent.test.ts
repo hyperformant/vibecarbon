@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { listedFlip, writtenFlip } from '../../_shared/dns-flip-fake.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
@@ -235,10 +236,11 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
     let flippedTo: string | null = null;
     const strategy = {
       getAuth: async () => ({ token: 't', zoneId: 'z' }),
-      updateDns: async (_auth: unknown, _domain: string, ip: string) => {
+      updateDns: async (_auth: unknown, domain: string, ip: string) => {
         flippedTo = ip;
+        return writtenFlip(domain, ip);
       },
-      readDns: async () => (flippedTo ? [flippedTo] : []),
+      readDns: async (_auth: unknown, name: string) => listedFlip(name, flippedTo),
     };
     const tracker = { spinner: () => ({ start() {}, stop() {}, message() {} }) };
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {

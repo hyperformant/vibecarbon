@@ -12,8 +12,8 @@
  * walks the source, so a new backend or a new mutating function is covered
  * the day it lands.
  *
- * It also pins the verification half: every backend exports `readARecord`,
- * the read-back that failover compares with the promoted IP.
+ * It also pins the verification half: every backend exports `readARecords`,
+ * the record list failover's flip reads for records its write did not name.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -87,8 +87,8 @@ describe('DNS backends check the status of every mutating request', () => {
       expect(unchecked(source)).toEqual([]);
     });
 
-    it(`${file}: exports readARecord`, () => {
-      expect(source).toMatch(/export\s+async\s+function\s+readARecord\s*\(/);
+    it(`${file}: exports readARecords`, () => {
+      expect(source).toMatch(/export\s+async\s+function\s+readARecords\s*\(/);
     });
   }
 

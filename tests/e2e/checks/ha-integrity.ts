@@ -6,8 +6,9 @@
  *   - dns_flip_verified       apex and wildcard A records read back through the
  *                             DNS provider's API equal the promoted side's IP.
  *                             (dns_failover_flip, checks/dns-flip.ts, asks the
- *                             zone's nameservers; this asks the provider, the
- *                             same read the CLI's flipAndVerifyDns trusts.)
+ *                             zone's nameservers; this asks the provider's
+ *                             record list, the read flipAndVerifyDns uses to
+ *                             find stray records.)
  *   - old_primary_disarmed    the retired side's wal-g role file reads standby
  *                             (k8s: its intent too) and it carries the retired
  *                             marker its backup scripts refuse on
@@ -66,7 +67,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../../../src/lib/dns-provider.js';
-import type { readARecord } from '../../../src/lib/hetzner-dns.js';
+import type { readARecords } from '../../../src/lib/hetzner-dns.js';
 import { getObjectStorageProvider } from '../../../src/lib/providers/index.js';
 import { shEscape } from '../../../src/lib/shell.js';
 import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
@@ -1164,11 +1165,14 @@ export async function checkAppEndpointsReady(opts: {
 // ---------------------------------------------------------------------------
 
 /**
- * The backend read the CLI's flipAndVerifyDns uses, typed from a real backend
- * so a change to its return shape breaks tsc here. Every A target at a name.
+ * The backend's record-list read (the one flipAndVerifyDns uses to find
+ * stray records), typed from a real backend so a change to its return shape
+ * breaks tsc here. This check reads it well after the failover's write, past
+ * the moment a provider's list can lag one, and keeps every A target at a
+ * name.
  */
-type BackendReadARecord = typeof readARecord;
-type ReadA = (name: string) => ReturnType<BackendReadARecord>;
+type BackendReadARecords = typeof readARecords;
+type ReadA = (name: string) => Promise<string[]>;
 
 interface RawEnv {
   lastFailover?: string;
@@ -1223,8 +1227,8 @@ export function readServingIp(projectDir: string, env: string): string | null {
 
 /**
  * A reader for the env's A records through its DNS provider's own API, the
- * same backend call failover's flipAndVerifyDns reads back with. Never throws:
- * a missing zone, token or backend comes back as `error`.
+ * record list failover's flipAndVerifyDns reads for stray records. Never
+ * throws: a missing zone, token or backend comes back as `error`.
  */
 export async function providerApiAReader(
   projectDir: string,
@@ -1247,13 +1251,16 @@ export async function providerApiAReader(
   // getDnsProvider resolves a module typed `object`; the contract surface is
   // uniform across backends (dns-mutation-status-census), so name its reader
   // with the real backend's type rather than a hand-written one.
-  let backend: { readARecord: BackendReadARecord };
+  let backend: { readARecords: BackendReadARecords };
   try {
-    backend = (await getDnsProvider(dns.provider)) as { readARecord: BackendReadARecord };
+    backend = (await getDnsProvider(dns.provider)) as { readARecords: BackendReadARecords };
   } catch (err) {
     return { readA: null, error: `no DNS backend for ${dns.provider}: ${(err as Error).message}` };
   }
-  return { readA: (name) => backend.readARecord(token, dns.zoneId, name) };
+  return {
+    readA: async (name) =>
+      (await backend.readARecords(token, dns.zoneId, name)).map((r) => r.value),
+  };
 }
 
 /** dns_flip_verified: apex and wildcard read back as the promoted side's IP. */
@@ -1286,8 +1293,8 @@ export async function checkDnsFlipVerified(opts: {
       );
     }
   }
-  // Exactly [expectedIp], as flipAndVerifyDns requires: a stale second A
-  // record would keep sending part of the traffic to the retired node.
+  // Exactly [expectedIp]: a stale second A record would keep sending part of
+  // the traffic to the retired node, which flipAndVerifyDns refuses too.
   const wrong = Object.entries(seen).filter(
     ([, ips]) => !Array.isArray(ips) || ips.length !== 1 || ips[0] !== expectedIp,
   );

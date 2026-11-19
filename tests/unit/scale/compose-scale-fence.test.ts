@@ -29,6 +29,8 @@ const h = vi.hoisted(() => {
     dnsReadBack: null as null | string[][],
     // The DNS update's error (null: it succeeds), and a read-back that fails.
     dnsError: null as null | string,
+    // The apex write landed before the update failed: its response's address.
+    dnsApexWrittenBeforeError: null as null | string,
     dnsUnreadable: false,
     dnsReadBackLater: null as null | string[][],
     saved: [] as unknown[],
@@ -253,18 +255,29 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
     hasAutomatedDns: () => true,
     resolveDnsToken: () => 'dns-token',
     getDnsProvider: async () => ({
-      upsertApexAndWildcard: async (_t: unknown, _d: string, ip: string) => {
+      upsertApexAndWildcard: async (_t: unknown, d: string, ip: string) => {
         h.events.push(`dns:${ip}`);
-        if (h.state.dnsError) throw new Error(h.state.dnsError);
+        if (h.state.dnsError) {
+          // writeARecords carries what the writes before the failure returned.
+          const apex = h.state.dnsApexWrittenBeforeError;
+          throw Object.assign(new Error(h.state.dnsError), {
+            written: apex ? { [d]: [{ id: 'apex', value: apex }] } : {},
+          });
+        }
+        return {
+          [d]: [{ id: 'apex', value: ip }],
+          [`*.${d}`]: [{ id: 'wildcard', value: ip }],
+        };
       },
-      readARecord: async (_t: string, _z: string, name: string) => {
+      readARecords: async (_t: string, _z: string, name: string) => {
         if (h.state.dnsUnreadable) throw new Error('dns read 503');
         // After a re-point, a late provider write may show (dnsReadBackLater).
         const table =
           h.state.dnsReadBackLater && h.events.includes('dns:1.1.1.1')
             ? h.state.dnsReadBackLater
             : h.state.dnsReadBack;
-        return table?.[name.startsWith('*.') ? 1 : 0] ?? [];
+        const id = name.startsWith('*.') ? 'wildcard' : 'apex';
+        return (table?.[name.startsWith('*.') ? 1 : 0] ?? []).map((value) => ({ id, value }));
       },
     }),
   };
@@ -355,6 +368,7 @@ function reset(failAt = '') {
   h.state.failAt = failAt;
   h.state.dnsReadBack = null;
   h.state.dnsError = null;
+  h.state.dnsApexWrittenBeforeError = null;
   h.state.dnsUnreadable = false;
   h.state.dnsReadBackLater = null;
   h.state.saved.length = 0;
@@ -602,6 +616,22 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
       environments: Record<string, { servers: Array<{ ip: string }> }>;
     };
     expect(saved.environments.prod.servers.map((sv) => sv.ip)).toEqual(['9.9.9.9']);
+  });
+
+  it('a DNS update whose apex write landed before it failed is past the flip, though the list still shows the old server (2026-11-19)', async () => {
+    reset();
+    h.state.dnsError = 'dns api 500';
+    // The apex PUT answered with the new server; the wildcard write failed;
+    // the record list has not caught up with the apex yet.
+    h.state.dnsApexWrittenBeforeError = '9.9.9.9';
+    h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
+    const { provider, ctx } = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      /the DNS update failed part way \(dns api 500\); still to point at 9\.9\.9\.9: \*\.example\.com \(now 1\.1\.1\.1\)\./,
+    );
+    // Never rolled back: the apex already sends traffic to the new server.
+    expect(h.events).not.toContain('unfence');
+    expect(provider.deleteServer).not.toHaveBeenCalled();
   });
 
   it('a failed restore rolls back the fence', async () => {

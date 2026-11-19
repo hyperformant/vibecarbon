@@ -1534,7 +1534,7 @@ export async function runLifecycle(
             }),
           );
           // The same flip read back through the DNS provider's own API (the
-          // read the CLI's flipAndVerifyDns trusts), on BOTH modes: k8s-ha's
+          // record list the CLI's flipAndVerifyDns reads), on BOTH modes: k8s-ha's
           // record carries the promoted cluster's ingress IP, which
           // .vibecarbon.json does track (ha.primary.ingressIp).
           allResults.push(await runDnsFlipVerified());

@@ -21,6 +21,7 @@ import {
   relativeToFqdn,
   setupApexAndWildcard,
   setupHaRecords,
+  writeARecords,
 } from './dns-backend-helpers.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { HetznerProvider } from './providers/hetzner.js';
@@ -37,8 +38,9 @@ const DEFAULT_TTL = 60;
 // ============================================================================
 
 // Hetzner applies rrset writes asynchronously: the write returns an Action
-// that is still "running" while the old value is served. A read-back (and
-// failover's DNS verification) must wait for it to finish.
+// that is still "running" while the old value is served. A write is done, and
+// what it returns is what the rrset holds (the failover flip judges the rrset
+// by it, upsertApexAndWildcard), only once the Action reads `success`.
 const ACTION_POLL_MS = 500;
 const ACTION_DEADLINE_MS = 60_000;
 
@@ -303,22 +305,43 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   return data.rrset;
 }
 
+/** @typedef {import('./dns-backend-helpers.js').ARecord} ARecord */
+
 /**
- * Read every A record target at a name, for verifying a flip. Empty when the
- * name has no A rrset.
+ * An rrset's values as ARecords. Hetzner keys an rrset by (name, type) (every
+ * endpoint addresses it as `/rrsets/{name}/{type}`) and a write replaces the
+ * set whole, so each value carries that key as its id: the set a write
+ * returned names every record at the name, and the list can hold no other.
+ * @param {{records?: Array<{value?: unknown}>}|null|undefined} rrset
+ * @param {string} relativeName
+ * @param {string} type
+ * @returns {ARecord[]}
+ */
+function rrsetARecords(rrset, relativeName, type) {
+  const id = `${relativeName}/${type}`;
+  return (Array.isArray(rrset?.records) ? rrset.records : [])
+    .filter((rec) => typeof rec?.value === 'string')
+    .map((rec) => ({ id, value: rec.value }));
+}
+
+/**
+ * Every A record at a name as the zone's rrset list shows it (rrsetARecords).
+ * Empty when the name has no A rrset. A list can lag a write, so the failover
+ * flip uses it only to find records other than the ones it wrote
+ * (flipAndVerifyDns); on Hetzner the written set is all of them.
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone ID
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string[]>}
+ * @returns {Promise<ARecord[]>}
  */
-export async function readARecord(apiToken, zoneId, name) {
+export async function readARecords(apiToken, zoneId, name) {
   const zoneName = await zoneNameForId(apiToken, zoneId);
   const relativeName = fqdnToRelative(name, zoneName);
   const rrsets = await getRrsets(apiToken, zoneId);
   return rrsets
     .filter((r) => r.type === 'A' && r.name === relativeName)
-    .flatMap((r) => (r.records ?? []).map((rec) => rec.value));
+    .flatMap((r) => rrsetARecords(r, relativeName, 'A'));
 }
 
 /**
@@ -460,22 +483,34 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
  * primary. Extracted in C6b; behavior is unchanged from the two call
  * sites' former inline copies.
  *
+ * Returns what each write says the rrset now holds (rrsetARecords). Creating
+ * an rrset answers with it under `rrset`. set_records answers with the Action
+ * alone, and createDNSRecord waits for it: `success` is Hetzner's word that
+ * the set holds exactly the records sent, so those are what it returns. The
+ * failover flip judges the records it wrote by this, not by the list.
+ *
  * @param {object} auth
  * @param {string} auth.token - Hetzner Cloud API token
  * @param {string} auth.zoneId - DNS zone ID
  * @param {string} domain - Apex domain (the wildcard record is `*.<domain>`)
  * @param {string} ip - Target IP address
- * @returns {Promise<void>}
+ * @returns {Promise<Record<string, ARecord[]>>} by name: the apex, then the wildcard
  */
 export async function upsertApexAndWildcard(auth, domain, ip) {
   const { token, zoneId } = auth;
-  await createDNSRecord(token, zoneId, { type: 'A', name: domain, value: ip, ttl: HA_TTL });
-  await createDNSRecord(token, zoneId, {
-    type: 'A',
-    name: `*.${domain}`,
-    value: ip,
-    ttl: HA_TTL,
-  });
+  const zoneName = await zoneNameForId(token, zoneId);
+  return writeARecords(
+    [
+      { type: 'A', name: domain, value: ip, ttl: HA_TTL },
+      { type: 'A', name: `*.${domain}`, value: ip, ttl: HA_TTL },
+    ],
+    async (config) =>
+      rrsetARecords(
+        await createDNSRecord(token, zoneId, config),
+        fqdnToRelative(config.name, zoneName),
+        config.type,
+      ),
+  );
 }
 
 // ============================================================================

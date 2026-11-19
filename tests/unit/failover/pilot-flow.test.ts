@@ -43,6 +43,7 @@ import { ConvergeBuildError } from '../../../src/lib/iac/converge-cluster.js';
 import { K3sTokenProbeError } from '../../../src/lib/iac/index.js';
 import { StackHeldError } from '../../../src/lib/iac/stack-lock.js';
 import { StateMigrationError, StateUndecryptableError } from '../../../src/lib/iac/state-error.js';
+import { listedFlip, writtenFlip } from '../../_shared/dns-flip-fake.js';
 import {
   DB_LABELS,
   type FakeNode,
@@ -922,11 +923,12 @@ async function runFailoverHA(opts: RunOpts) {
     ? {}
     : {
         getAuth: async () => ({ token: 't', zoneId: 'z' }),
-        updateDns: async (_auth: unknown, _domain: string, ip: string) => {
+        updateDns: async (_auth: unknown, domain: string, ip: string) => {
           order.push('dns');
           flippedTo = ip;
+          return writtenFlip(domain, ip);
         },
-        readDns: async () => (flippedTo ? [flippedTo] : []),
+        readDns: async (_auth: unknown, name: string) => listedFlip(name, flippedTo),
       };
 
   const envConfig = {

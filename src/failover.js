@@ -1805,8 +1805,11 @@ export async function waitForWorkersReady(
  *     prompt-cancel exits 0) and zone id. Absent for manual DNS.
  *   - updateDns: flip apex + wildcard A records to the promoted IP via the
  *     backend's upsertApexAndWildcard (each backend keeps its own wire
- *     details — Cloudflare's proxied:false RCA, Hetzner's ttl:60). Absent
- *     for manual DNS — the epilogue prints instructions instead.
+ *     details: Cloudflare's proxied:false RCA, Hetzner's ttl:60), returning
+ *     what each write's response says the record holds. Absent for manual
+ *     DNS: the epilogue prints instructions instead.
+ *   - readDns: the A records at a name with their ids (readARecords), which
+ *     flipAndVerifyDns reads only for records the write did not name.
  *
  * The token prompt is deliberately NOT the provider's guided-setup module
  * (B2): those show multi-step onboarding guides, verify tokens against the
@@ -1852,7 +1855,7 @@ export function dnsStrategyFor(dnsProvider) {
     },
     async readDns(auth, name) {
       const dns = await getDnsProvider(dnsProvider);
-      return dns.readARecord(auth.token, auth.zoneId, name);
+      return dns.readARecords(auth.token, auth.zoneId, name);
     },
   };
 }

@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { updateProjectConfig } from '../config.js';
+import { otherARecords } from '../dns-backend-helpers.js';
 import { DEGRADED_CAUSE } from './env-safety-fields.js';
 
 /** Refusal raised before any write. The message names the reason and `vibecarbon deploy`. */
@@ -643,37 +644,72 @@ export function dnsDidNotMessage({ domain, ip, reason, noBaseFor }) {
 }
 
 /**
- * Flip apex + wildcard to `ip`, then read both back through the provider's own
- * API. A provider that accepted the write but holds a different value (or a
- * flip that threw) is "not flipped": success is only ever what the read-back
- * confirms. Never throws.
+ * Flip apex + wildcard to `ip` and prove it, never throwing.
+ *
+ * The records the flip wrote are judged by the provider's answer to the write
+ * (`update` returns it, per name, from each backend's upsertApexAndWildcard):
+ * that answer is the provider's own statement of what the record now holds.
+ * They are never judged by the record list, which can lag the write: on
+ * 2026-11-19 (run 44463077640, linode/compose-ha) Linode's list read the old
+ * target in the same second its event log recorded the update to the new one,
+ * and this check told the user their site was down. The list still runs, for one thing only:
+ * an A record at the name the write did not name (a stale second record keeps
+ * sending traffic to the retired node). One at `ip` itself sends traffic
+ * nowhere else, so it does not fail the flip. Never re-read the list until it
+ * agrees: that is a retry ladder around a read this check no longer needs.
+ *
+ * Not flipped: the update throws, a write's answer is missing or says
+ * anything but exactly `ip`, the list cannot be read, or it holds another
+ * record at an address other than `ip`.
  *
  * @param {object} args
- * @param {() => Promise<unknown>} args.update - writes the apex + wildcard records
- * @param {(name: string) => Promise<string[]>} args.read - every A record target at the name
+ * @param {() => Promise<Record<string, import('../dns-backend-helpers.js').ARecord[]>|undefined>} args.update -
+ *   writes the apex + wildcard records; returns, by name, what each write's response says the record holds
+ * @param {(name: string) => Promise<import('../dns-backend-helpers.js').ARecord[]>} args.read -
+ *   every A record at the name, with its id, as the provider's list shows it
  * @param {string} args.domain
  * @param {string} args.ip
  * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
  */
 export async function flipAndVerifyDns({ update, read, domain, ip }) {
+  let written;
   try {
-    await update();
+    written = await update();
   } catch (error) {
     return { ok: false, reason: `the DNS update failed: ${error.message}` };
   }
   for (const name of [domain, `*.${domain}`]) {
-    let seen;
-    try {
-      seen = await read(name);
-    } catch (error) {
-      return { ok: false, reason: `could not read ${name} back: ${error.message}` };
-    }
-    // Exactly [ip]: a stale second A record would keep sending part of the
-    // traffic to the retired node.
-    if (!Array.isArray(seen) || seen.length !== 1 || seen[0] !== ip) {
+    const ours = written?.[name];
+    if (
+      !Array.isArray(ours) ||
+      ours.length === 0 ||
+      ours.some((r) => r?.id == null || typeof r.value !== 'string')
+    ) {
       return {
         ok: false,
-        reason: `${name} reads back as ${Array.isArray(seen) && seen.length > 0 ? seen.join(', ') : 'nothing'}, not only ${ip}`,
+        reason: `the DNS provider's answer to the ${name} write did not say what the record holds`,
+      };
+    }
+    if (ours.some((r) => r.value !== ip)) {
+      return {
+        ok: false,
+        reason: `the DNS provider says ${name} now holds ${ours.map((r) => r.value).join(', ')}, not only ${ip}`,
+      };
+    }
+    let listed;
+    try {
+      listed = await read(name);
+    } catch (error) {
+      return { ok: false, reason: `could not list the A records at ${name}: ${error.message}` };
+    }
+    if (!Array.isArray(listed)) {
+      return { ok: false, reason: `could not list the A records at ${name}` };
+    }
+    const stale = otherARecords(listed, ours).filter((r) => r.value !== ip);
+    if (stale.length > 0) {
+      return {
+        ok: false,
+        reason: `${name} still has another A record, ${stale.map((r) => `${r.value} (record ${r.id})`).join(', ')}, which keeps sending part of the traffic there`,
       };
     }
   }

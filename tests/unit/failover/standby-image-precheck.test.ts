@@ -18,6 +18,7 @@ import {
   buildStandbyImageCheckScript,
 } from '../../../src/lib/deploy/k8s/ha/image-copy.js';
 import { MANIFEST_DIGEST_SH } from '../../../src/lib/deploy/k8s/image-delivery.js';
+import { listedFlip, writtenFlip } from '../../_shared/dns-flip-fake.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
@@ -270,10 +271,11 @@ async function runFailover({
   let flippedTo: string | null = null;
   const strategy = {
     getAuth: async () => ({ token: 't', zoneId: 'z' }),
-    updateDns: async (_a: unknown, _d: string, ip: string) => {
+    updateDns: async (_a: unknown, domain: string, ip: string) => {
       flippedTo = ip;
+      return writtenFlip(domain, ip);
     },
-    readDns: async () => (flippedTo ? [flippedTo] : []),
+    readDns: async (_a: unknown, name: string) => listedFlip(name, flippedTo),
   };
   const envConfig = {
     domain: 'app.example.com',
