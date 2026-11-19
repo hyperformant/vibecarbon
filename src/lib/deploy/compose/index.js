@@ -1541,7 +1541,10 @@ export function composeRestoreScript(
     // The archive folder of the lineage the backup came from (walg-env.sh).
     `export RESTORE_LINEAGE='${lineage}'`,
     WALG_ENV_SOURCE,
-    'VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf',
+    // TMPDIR is unset in the db container, so this is /tmp there; a test runs
+    // both tiers' scripts side by side on one host and gives each its own.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: ${TMPDIR:-/tmp} is a shell default, not a JS placeholder
+    'VC_RECOVERY_CONF_FILE="${TMPDIR:-/tmp}/vc-recovery.conf"',
     'cat > "$VC_RECOVERY_CONF_FILE" <<\'VC_RECOVERY_CONF_EOF\'',
     recoveryConf,
     'VC_RECOVERY_CONF_EOF',
