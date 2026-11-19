@@ -8,25 +8,41 @@
  * CLI writes a role file nobody reads. Deploy refuses that project before
  * anything is provisioned and names `vibecarbon upgrade`.
  */
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { DB_GUARD_PROTOCOL_MARKER } from '../../../src/lib/deploy/db-workload.js';
 import { assertScaffoldSupportsRoleFile } from '../../../src/lib/deploy/preflight.js';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
-import { copyTemplate } from '../helpers/copy-template.js';
 
 const dirs: string[] = [];
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
-/** A fresh copy of the shipped scaffold. */
+/**
+ * The template files the preflight reads. Only these are copied: the whole
+ * template is about 700 files, and a case that copied it twice ran past the
+ * 5 s test limit on a loaded CI runner. A read the list misses is caught by
+ * the "current scaffold passes" cases, because a missing file is a refusal.
+ */
+const PREFLIGHT_READS = [
+  'volumes/db/walg-env.sh',
+  'docker-compose.prod.yml',
+  'k8s/base/backup/configmap-walg.yaml',
+  'k8s/base/db/statefulset.yaml',
+];
+
+/** A fresh copy of the shipped scaffold's files the preflight reads. */
 function scaffold() {
   const dir = createTempDir('vc-scaffold-');
   dirs.push(dir);
-  copyTemplate(dir);
+  for (const rel of PREFLIGHT_READS) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    cpSync(join(REPO_ROOT, 'carbon', rel), join(dir, rel));
+  }
   return dir;
 }
 function edit(path: string, fn: (s: string) => string) {
