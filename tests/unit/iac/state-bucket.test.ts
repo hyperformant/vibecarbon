@@ -8,7 +8,7 @@ import {
 } from '../../../src/lib/providers/hetzner-s3.js';
 // @ts-expect-error — JS module without types
 import { projectStateBucketBase } from '../../../src/lib/providers/s3-base.js';
-import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // Finding 1: Pulumi state must live in a DEDICATED bucket, not the app storage
 // bucket. These tests pin the naming derivation + that resolveBackendUrl
@@ -168,11 +168,7 @@ describe('state bucket stays per project when the app bucket goes per env', () =
   });
 
   it('deploy hands the resolver the project base, never s3Config.bucket', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(
-      new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url),
-      'utf8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     expect(src).toContain('projectBase: projectStateBucketBase(projectConfig),');
     expect(src).not.toMatch(/appBucket: s3Config\.bucket/);
   });

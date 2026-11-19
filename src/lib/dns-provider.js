@@ -107,6 +107,27 @@ export const DNS_PROVIDERS = {
 };
 
 /**
+ * Every module a row names, behind a literal `import()`. The rows keep their
+ * paths (the registration census and the contract tests walk them), and
+ * dispatch loads through this table, so the code says which modules the
+ * registry can load: a reader sees them, and so does `pnpm unused` (knip
+ * cannot follow `import(row.modulePath)`, and once reported two backends as
+ * unused files). tests/unit/lib/dns-registration-census.test.ts holds every
+ * row path to an entry here that loads that same module.
+ * @type {Record<string, () => Promise<object>>}
+ */
+const ROW_MODULES = {
+  './hetzner-dns.js': () => import('./hetzner-dns.js'),
+  './cloudflare-dns.js': () => import('./cloudflare-dns.js'),
+  './cloudflare-guided-setup.js': () => import('./cloudflare-guided-setup.js'),
+  './digitalocean-dns.js': () => import('./digitalocean-dns.js'),
+  './linode-dns.js': () => import('./linode-dns.js'),
+  './vultr-dns.js': () => import('./vultr-dns.js'),
+  './scaleway-dns.js': () => import('./scaleway-dns.js'),
+  './scaleway-guided-setup.js': () => import('./scaleway-guided-setup.js'),
+};
+
+/**
  * @param {string} dnsProvider
  * @returns {DnsProviderRow}
  * @throws {Error} on manual/unknown/absent ids — callers gate automated
@@ -182,7 +203,7 @@ export function dnsRecordsByHandHint(domain, dnsProviderName) {
  */
 export function getDnsProvider(dnsProvider) {
   const row = dnsRowOrThrow(dnsProvider);
-  return import(row.modulePath);
+  return ROW_MODULES[row.modulePath]();
 }
 
 /**
@@ -292,7 +313,7 @@ export function operatorScopesForProviderAndDns(providerId, dnsProvider) {
  */
 export function getDnsGuidedSetup(dnsProvider) {
   const row = dnsRowOrThrow(dnsProvider);
-  return row.guidedSetupModulePath ? import(row.guidedSetupModulePath) : null;
+  return row.guidedSetupModulePath ? ROW_MODULES[row.guidedSetupModulePath]() : null;
 }
 
 /**

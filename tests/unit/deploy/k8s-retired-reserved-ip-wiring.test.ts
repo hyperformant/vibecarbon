@@ -11,17 +11,12 @@
  * update-dns step). The save must not drop a reserved IP that stayed, or no
  * later deploy or destroy would find it.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { readRepoFile } from '../../_shared/source-files.js';
 
 const { haSidesRecord } = await import('../../../src/lib/deploy/orchestrator.js');
 
-const src = readFileSync(
-  fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-  'utf8',
-);
+const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
 describe('the deploy releases a retired reserved IP between the probe and the save', () => {
   const release = src.indexOf('await releaseRetiredReservedIps({');

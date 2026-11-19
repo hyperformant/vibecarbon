@@ -85,6 +85,7 @@ import {
   providerFor,
   providerIdFor,
   resolveProviderToken,
+  resolveS3RegionFor,
 } from './lib/providers/index.js';
 import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
@@ -630,7 +631,6 @@ async function destroyOrphanPulumiStack(orphan, { apiToken, s3Config, provider, 
     s3Config,
     provider,
     projectName,
-    // Phase B: Provider.DEFAULT_REGION
   });
 }
 
@@ -1240,6 +1240,23 @@ function isNoSuchBucket(err) {
 }
 
 /**
+ * The storage region this environment's buckets live in: the one its record
+ * names. Every deploy records `s3.region` before any remote work, so a record
+ * without one was edited by hand, and destroy then takes the region the
+ * deploy itself would have chosen: the provider's own mapping of the compute
+ * region (`resolveS3Region`, which answers that provider's default for an
+ * unknown or missing one). Never another provider's location: a Hetzner
+ * literal here once sent every provider's destroy to `fsn1`, which every
+ * other provider's S3 client refuses.
+ * @param {{ provider?: string, region?: string, s3?: { region?: string } }} envConfig
+ * @returns {Promise<string>}
+ */
+async function recordedStorageRegion(envConfig) {
+  if (envConfig.s3?.region) return envConfig.s3.region;
+  return resolveS3RegionFor(providerIdFor(envConfig), envConfig.region);
+}
+
+/**
  * Run `op` on a bucket at its recorded region, and when that region says the
  * bucket does not exist, look for it in every region these keys can address
  * before concluding anything (locateBucket; keys made for one cluster, as on
@@ -1690,7 +1707,7 @@ async function retainStateBucket(
     // the delete below succeeds, so the next deploy never resolves to a
     // bucket that is gone (or about to be) and derives a fresh one instead.
     delete projectConfig.retainedStateBucket;
-    const region = envConfig.s3?.stateBucketRegion || envConfig.s3?.region || 'fsn1';
+    const region = envConfig.s3?.stateBucketRegion || (await recordedStorageRegion(envConfig));
     const Provider = providerFor(envConfig);
     spinner.start(`Purging Pulumi state bucket: ${stateBucket}`);
     try {
@@ -2000,7 +2017,7 @@ async function deleteAppBucketEffect(ctx) {
     );
     return;
   }
-  const s3Region = envConfig.s3?.region || 'fsn1';
+  const s3Region = await recordedStorageRegion(envConfig);
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   // Where the delete is running: a failure is reported in that region.
@@ -2138,7 +2155,7 @@ async function revokeAppStorageKeyEffect(ctx) {
       skipPrompts: !process.stdin.isTTY,
     });
     if (s3Creds) {
-      const s3Region = envConfig.s3?.region || 'fsn1';
+      const s3Region = await recordedStorageRegion(envConfig);
       const s3 = await getObjectStorageProvider(
         providerId,
         s3Creds.accessKey,
@@ -4925,7 +4942,6 @@ async function destroyK8sTier({
         environment: stackEnv,
         provider: providerIdFor(envConfig),
         apiToken: providerToken,
-        region: envConfig.region || 'nbg1',
         s3Config: destroyS3Config,
       });
     // HA: tear down primary + standby Pulumi stacks in parallel. Each stack

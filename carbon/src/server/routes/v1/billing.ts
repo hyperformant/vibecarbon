@@ -303,10 +303,6 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
   const organizationId = c.req.query('organizationId');
 
   try {
-    if (type === 'organization' && !organizationId) {
-      return c.json({ error: 'Organization ID is required' }, 400);
-    }
-
     // The customer row for this user (personal) or organization. The org
     // branch is explicit: only type === 'organization' reaches it.
     const owner = customerOwner(type, user.id, organizationId);
@@ -445,8 +441,10 @@ billingRoutes.post('/checkout', requireAal2, requireOrgRole(ORG_BILLING_ROLES), 
       body.organizationId
     );
 
-    // Default URLs - validate user-supplied URLs are same-origin to prevent open redirects
-    const baseUrl = env.NODE_ENV === 'production' ? process.env.SITE_URL : 'http://localhost:5173';
+    // Default URLs on the app's own origin (SITE_URL, which env.ts moves with a
+    // dev port offset); validate user-supplied URLs are same-origin to prevent
+    // open redirects
+    const baseUrl = env.SITE_URL;
     const defaultSuccessUrl = `${baseUrl}/settings/billing?success=true`;
     const defaultCancelUrl = `${baseUrl}/settings/billing?canceled=true`;
     const successUrl =
@@ -531,7 +529,7 @@ billingRoutes.post('/setup', requireAal2, requireOrgRole(ORG_BILLING_ROLES), asy
       body.organizationId
     );
 
-    const baseUrl = env.NODE_ENV === 'production' ? process.env.SITE_URL : 'http://localhost:5173';
+    const baseUrl = env.SITE_URL;
     const returnUrl = `${baseUrl}/settings/billing`;
 
     const session = await stripe.checkout.sessions.create({
@@ -603,7 +601,7 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
     }
 
     const provider = getBillingProvider();
-    const baseUrl = env.NODE_ENV === 'production' ? process.env.SITE_URL : 'http://localhost:5173';
+    const baseUrl = env.SITE_URL;
     const defaultReturnUrl = `${baseUrl}/settings/billing`;
     const returnUrl =
       (body.returnUrl && baseUrl ? validateRedirectUrl(body.returnUrl, baseUrl) : null) ||

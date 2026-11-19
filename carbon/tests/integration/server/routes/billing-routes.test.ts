@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appWithUser, jsonPost } from '../../../_helpers/app';
 import { queryChain } from '../../../_helpers/drizzle-mock';
 
@@ -34,6 +34,20 @@ const db = vi.hoisted(() => ({
   role: null as string | null,
 }));
 const priceRetrieve = vi.hoisted(() => vi.fn());
+const setupSessionCreate = vi.hoisted(() =>
+  vi.fn(async (_params: Record<string, unknown>) => ({
+    id: 'cs_setup_123',
+    url: 'https://checkout.stripe.com/setup/cs_setup_123',
+  }))
+);
+// A dev stack started with a port offset of 10 (`vibecarbon up` picks one when
+// the default ports are taken): env.ts moves SITE_URL to Vite's port, 5183,
+// and the return URLs must follow it there.
+const devOffset = vi.hoisted(() => {
+  const before = process.env.DEV_PORT_OFFSET;
+  process.env.DEV_PORT_OFFSET = '10';
+  return before;
+});
 
 vi.mock('@server/billing', () => ({
   isBillingConfigured: () => billing.configured,
@@ -58,7 +72,12 @@ vi.mock('@server/db/client', () => ({
   withUserDb: (_userId: string | null, fn: (tx: unknown) => unknown) =>
     fn({ select: () => queryChain(() => (db.role ? [{ role: db.role }] : [])) }),
 }));
-vi.mock('@server/lib/stripe', () => ({ getStripe: () => ({ prices: { retrieve: priceRetrieve } }) }));
+vi.mock('@server/lib/stripe', () => ({
+  getStripe: () => ({
+    prices: { retrieve: priceRetrieve },
+    checkout: { sessions: { create: setupSessionCreate } },
+  }),
+}));
 vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: async () => false }));
 // The provider-cost routes allow 20 requests per 15 minutes; this file sends more.
 vi.mock('@server/lib/rate-limiter', () => ({
@@ -69,11 +88,15 @@ vi.mock('@server/lib/logger', () => ({
 }));
 
 const { billingRoutes } = await import('@server/routes/v1/billing');
+afterAll(() => {
+  if (devOffset === undefined) delete process.env.DEV_PORT_OFFSET;
+  else process.env.DEV_PORT_OFFSET = devOffset;
+});
 
 const USER = { id: '00000000-0000-4000-8000-000000000001', email: 'user@example.test' };
 const ORG = '550e8400-e29b-41d4-a716-446655440000';
-// Outside production the routes build their URLs on the dev origin.
-const SITE = 'http://localhost:5173';
+// The routes build their URLs on SITE_URL, which the offset moved.
+const SITE = 'http://localhost:5183';
 
 const signedIn = appWithUser(USER, '/api/v1/billing', billingRoutes);
 const anonymous = appWithUser(null, '/api/v1/billing', billingRoutes);
@@ -92,6 +115,7 @@ beforeEach(() => {
   db.queries = 0;
   db.role = null;
   priceRetrieve.mockReset();
+  setupSessionCreate.mockClear();
 });
 
 describe('GET /billing/status', () => {
@@ -151,6 +175,18 @@ describe('GET /billing/subscription', () => {
     const res = await signedIn.request('/api/v1/billing/subscription');
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'Billing is not configured' });
+    expect(db.queries).toBe(0);
+  });
+
+  // requireOrgRole answers this before the handler runs, so the handler keeps
+  // no check of its own for it.
+  it.each([
+    ['no organization id', '?type=organization'],
+    ['an empty organization id', '?type=organization&organizationId='],
+  ])('answers 400 to organization billing with %s, before any query', async (_name, query) => {
+    const res = await signedIn.request(`/api/v1/billing/subscription${query}`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Organization ID is required for organization billing' });
     expect(db.queries).toBe(0);
   });
 
@@ -306,6 +342,24 @@ describe('POST /billing/checkout', () => {
     expect(await errorOf(res)).toBe('You must be an admin to manage organization billing');
     expect(db.queries).toBe(0);
     expect(billing.provider.createCheckout).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /billing/setup', () => {
+  it('starts a Stripe setup session that returns to the billing page', async () => {
+    db.selects = [[{ id: 'cust_123', stripeCustomerId: 'cus_123' }]];
+    const res = await post('/setup', { type: 'user' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      sessionId: 'cs_setup_123',
+      url: 'https://checkout.stripe.com/setup/cs_setup_123',
+    });
+    expect(setupSessionCreate.mock.calls[0][0]).toMatchObject({
+      customer: 'cus_123',
+      mode: 'setup',
+      success_url: `${SITE}/settings/billing?setup=success`,
+      cancel_url: `${SITE}/settings/billing?setup=canceled`,
+    });
   });
 });
 

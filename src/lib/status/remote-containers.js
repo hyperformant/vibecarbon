@@ -30,7 +30,7 @@ import {
   sshRun as defaultSsh,
 } from '../ssh.js';
 import { createClusterSnapshots, describeSshError, withTimeout } from './cluster-snapshot.js';
-import { classifyContainer, rowsFromDockerPs, SERVICE_DISPLAY_NAMES } from './container-rows.js';
+import { containerStatusRows } from './container-rows.js';
 
 const APP_NAMESPACE = 'vibecarbon';
 
@@ -259,12 +259,7 @@ async function collectCompose(
     }),
     deps.timeoutMs,
   );
-  const rows = rowsFromDockerPs(listing, projectName).map(({ container, state, status }) => ({
-    name: SERVICE_DISPLAY_NAMES[container] || container,
-    container,
-    ...classifyContainer(container, state, status),
-    latencyMs: 0,
-  }));
+  const rows = containerStatusRows(listing, projectName);
   // A compose-ha standby runs its add-ons in its whole-stack up (no job): only
   // the role primary (or the single server) has a status file to read.
   if (expectedAddons.length) {

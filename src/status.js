@@ -53,9 +53,8 @@ import { createClusterSnapshots, dbPod, describeSshError } from './lib/status/cl
 import {
   CORE_SERVICE_ORDER,
   classifyContainer,
+  containerStatusRows,
   formatContainerRow,
-  rowsFromDockerPs,
-  SERVICE_DISPLAY_NAMES,
 } from './lib/status/container-rows.js';
 import { checkHostStates, hostStateRows } from './lib/status/host-states.js';
 import { checkRemoteContainers } from './lib/status/remote-containers.js';
@@ -207,16 +206,7 @@ async function checkDockerContainers(projectName, deps = {}) {
     return [];
   }
 
-  const containers = rowsFromDockerPs(listing, projectName);
-
-  if (containers.length === 0) return [];
-
-  const rows = containers.map(({ container, state, status }) => ({
-    name: SERVICE_DISPLAY_NAMES[container] || container,
-    container,
-    ...classifyContainer(container, state, status),
-    latencyMs: 0,
-  }));
+  const rows = containerStatusRows(listing, projectName);
 
   const rank = (ct) => {
     const i = CORE_SERVICE_ORDER.indexOf(ct);

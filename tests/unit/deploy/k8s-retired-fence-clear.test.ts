@@ -6,14 +6,13 @@
  * deployedAt never runs and the env stays swapped for the rerun; with no retired
  * side at entry nothing is cleared at all.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { swappedSinceLastDeploy } from '../../../src/lib/deploy/failover-guard.js';
 import {
   finishK8sReconvergeRecord,
   finishK8sRetiredFence,
 } from '../../../src/lib/deploy/orchestrator.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const base = { projectName: 'myapp', environment: 'prod', standbyIp: '10.0.0.1' };
 
@@ -59,10 +58,7 @@ describe('finishK8sRetiredFence', () => {
     ).toEqual({ ran: true, kept: true });
     // executeDeployment carries `kept` into reconvergeIncomplete, which keeps
     // deployedAt unstamped (lastFailover > deployedAt: the next deploy retries).
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-      'utf-8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     expect(src).toContain('reconvergeIncomplete: retiredFence.kept');
     expect(src).toMatch(
       /deployedAt: deployResult\.reconvergeIncomplete\s*\?\s*persistedEnvConfig\.deployedAt/,
@@ -96,10 +92,7 @@ describe('finishK8sReconvergeRecord', () => {
   });
 
   it('executeDeployment applies it to the k8s-ha env right before the final save', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-      'utf-8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const call = src.search(
       /if \(tier === 'k8s-ha'\)\s*finishK8sReconvergeRecord\(finalConfig\.environments\[environment\], deployResult\);/,
     );

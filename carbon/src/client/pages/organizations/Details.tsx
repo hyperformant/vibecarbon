@@ -29,12 +29,8 @@ import { type Organization, useOrganizations } from '@/hooks/useOrganizations';
 import { apiJson } from '@/lib/api';
 import { ContentPanel } from '../../components/ContentPanel';
 
-async function deleteOrganization(orgId: string): Promise<void> {
-  await apiJson<void>(
-    `/api/v1/organizations/${orgId}`,
-    { method: 'DELETE' },
-    'Failed to delete organization'
-  );
+async function deleteOrganization(orgId: string, fallback: string): Promise<void> {
+  await apiJson<void>(`/api/v1/organizations/${orgId}`, { method: 'DELETE' }, fallback);
 }
 
 async function renameOrganization(
@@ -90,11 +86,11 @@ export default function OrgDetails() {
   };
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteOrganization(orgId ?? ''),
+    mutationFn: () => deleteOrganization(orgId ?? '', t('orgSettings.deleteError')),
     onSuccess: async () => {
       await refresh();
       navigate('/dashboard');
-      toast.success('Organization deleted');
+      toast.success(t('orgSettings.deleted'));
     },
     onError: (error: Error) => {
       toast.error(error.message);
@@ -104,7 +100,7 @@ export default function OrgDetails() {
   if (orgsLoading) {
     return (
       <>
-        <PageHeader title="Loading..." />
+        <PageHeader title={t('common.loading')} />
         <ContentPanel variant="default" className="flex items-center justify-center">
           <Loader2 className="size-6 animate-spin text-muted-foreground" />
         </ContentPanel>
@@ -118,21 +114,19 @@ export default function OrgDetails() {
 
   return (
     <>
-      <PageHeader title="Organization Settings" />
+      <PageHeader title={t('orgSettings.title')} />
 
       <ContentPanel variant="narrow">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">{organization.name}</h2>
-          <p className="text-muted-foreground">
-            Manage your organization's settings and information
-          </p>
+          <p className="text-muted-foreground">{t('orgSettings.description')}</p>
         </div>
 
         <Card>
           <CardHeader className="flex flex-row items-start justify-between">
             <div>
-              <CardTitle>Organization Information</CardTitle>
-              <CardDescription>Basic details about this organization.</CardDescription>
+              <CardTitle>{t('orgSettings.infoTitle')}</CardTitle>
+              <CardDescription>{t('orgSettings.infoDescription')}</CardDescription>
             </div>
             {canEdit && !isEditing && (
               <Button
@@ -150,7 +144,7 @@ export default function OrgDetails() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-2">
-              <Label htmlFor="name">Name</Label>
+              <Label htmlFor="name">{t('orgSettings.name')}</Label>
               <Input
                 id="name"
                 value={isEditing ? name : organization.name}
@@ -160,28 +154,26 @@ export default function OrgDetails() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="slug">Slug</Label>
+              <Label htmlFor="slug">{t('orgSettings.slug')}</Label>
               <Input id="slug" defaultValue={organization.slug} disabled />
-              <p className="text-xs text-muted-foreground">
-                The slug is used in URLs and cannot be changed.
-              </p>
+              <p className="text-xs text-muted-foreground">{t('orgSettings.slugHint')}</p>
             </div>
             <div className="grid gap-2">
-              <Label>Plan</Label>
+              <Label>{t('orgSettings.plan')}</Label>
               <p className="text-sm font-medium">{organization.plan}</p>
             </div>
             {isEditing && (
               <div className="flex gap-2">
                 <Button onClick={saveName} disabled={!trimmedName || renameMutation.isPending}>
                   {renameMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
-                  Save Changes
+                  {t('common.save')}
                 </Button>
                 <Button
                   variant="outline"
                   disabled={renameMutation.isPending}
                   onClick={() => setIsEditing(false)}
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
               </div>
             )}
@@ -190,8 +182,8 @@ export default function OrgDetails() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Organization ID</CardTitle>
-            <CardDescription>Your unique organization identifier.</CardDescription>
+            <CardTitle>{t('orgSettings.idTitle')}</CardTitle>
+            <CardDescription>{t('orgSettings.idDescription')}</CardDescription>
           </CardHeader>
           <CardContent>
             <code className="text-sm text-muted-foreground">{organization.id}</code>
@@ -200,20 +192,19 @@ export default function OrgDetails() {
 
         <Card className="border-destructive">
           <CardHeader>
-            <CardTitle className="text-destructive">Danger Zone</CardTitle>
-            <CardDescription>Irreversible and destructive actions.</CardDescription>
+            <CardTitle className="text-destructive">{t('orgSettings.dangerTitle')}</CardTitle>
+            <CardDescription>{t('orgSettings.dangerDescription')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="font-medium">Delete Organization</p>
+                <p className="font-medium">{t('orgSettings.deleteTitle')}</p>
                 <p className="text-sm text-muted-foreground">
-                  Permanently delete this organization and all its data. This action cannot be
-                  undone.
+                  {t('orgSettings.deleteDescription')}
                 </p>
               </div>
               <Button variant="destructive" size="sm" onClick={() => setDeleteDialogOpen(true)}>
-                Delete
+                {t('common.delete')}
               </Button>
             </div>
           </CardContent>
@@ -226,15 +217,15 @@ export default function OrgDetails() {
             <AlertDialogMedia className="bg-destructive/10">
               <TriangleAlert className="text-destructive" />
             </AlertDialogMedia>
-            <AlertDialogTitle>Delete "{organization.name}"?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {t('orgSettings.deleteConfirmTitle', { name: organization.name })}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {isLastOrg
-                ? 'You cannot delete your only organization. Create another organization first.'
-                : 'This action cannot be undone. All members will be removed and all organization data will be permanently deleted.'}
+              {isLastOrg ? t('orgSettings.deleteOnlyOrg') : t('orgSettings.deleteWarning')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
             {!isLastOrg && (
               <AlertDialogAction
                 variant="destructive"
@@ -242,7 +233,7 @@ export default function OrgDetails() {
                 onClick={() => deleteMutation.mutate()}
               >
                 {deleteMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
-                Delete organization
+                {t('orgSettings.deleteConfirm')}
               </AlertDialogAction>
             )}
           </AlertDialogFooter>

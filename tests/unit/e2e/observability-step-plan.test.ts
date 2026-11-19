@@ -11,8 +11,6 @@
  * and the post-reconverge path runs them and surfaces any failure.
  */
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { readRepoFile } from '../../_shared/source-files.js';
 import {
@@ -79,10 +77,7 @@ describe('observabilitySkipResults', () => {
   });
 
   it('names the same checks runObservabilityChecks reports', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../e2e/checks/feature-observability.ts', import.meta.url)),
-      'utf-8',
-    );
+    const src = readRepoFile('tests/e2e/checks/feature-observability.ts');
     for (const name of OBSERVABILITY_CHECK_NAMES) expect(src).toContain(`'${name}'`);
   });
 });

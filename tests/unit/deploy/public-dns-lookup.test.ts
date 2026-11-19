@@ -6,6 +6,7 @@ import {
   PUBLIC_DNS_SERVERS,
   resolvePublicA,
 } from '../../../src/lib/deploy/public-dns-lookup.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 // The deploy's public health probe must not trust the operator's system
 // resolver for a record it just created: a stale negative entry (NXDOMAIN
@@ -90,11 +91,7 @@ describe('probePublicHealth wiring', () => {
   // lookup on the socket (public-domain-probe-census.test.ts covers every
   // other probe of the domain).
   it('orchestrator probes through fetchPublicDomain, not dns.setServers', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(
-      new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url),
-      'utf8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     expect(src).toContain('fetchPublicDomain(');
     expect(src).not.toMatch(/dns\.setServers\(/);
   });

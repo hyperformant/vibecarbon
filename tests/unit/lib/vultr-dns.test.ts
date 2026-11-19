@@ -15,9 +15,8 @@
  *     or fully qualified (`foo.example.com`, as the list example shows), so
  *     the module matches either spelling. Both are covered below.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({
   spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
@@ -414,10 +413,7 @@ describe('vultr-dns setupSimple', () => {
   // Structural pin: setupSimple runs the shared flow, whose concurrent-spinner
   // guard tests/unit/deploy/preplan-spinner-coverage.test.ts pins.
   it('hands setupSimple to the shared setupApexAndWildcard flow', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/vultr-dns.js', import.meta.url)),
-      'utf8',
-    );
+    const src = readRepoFile('src/lib/vultr-dns.js');
     expect(src).toMatch(/return setupApexAndWildcard\(/);
   });
 });

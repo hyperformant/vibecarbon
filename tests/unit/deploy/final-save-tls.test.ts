@@ -6,14 +6,13 @@
  * keeps the record on disk. `tls` is a safety field the final save owns: every
  * other whole-env writer keeps it as it is on disk.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   ENV_SAFETY_FIELDS,
   preserveSafetyFields,
 } from '../../../src/lib/deploy/env-safety-fields.js';
 import { finalSaveSafetyOwns, finalSaveTls } from '../../../src/lib/deploy/orchestrator.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const ON_DISK = { state: 'trusted', checkedAt: '2026-10-01T00:00:00.000Z', ca: 'prod' };
 const PENDING = {
@@ -62,10 +61,7 @@ describe('tls ownership', () => {
 });
 
 describe('the orchestrator wiring', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-    'utf-8',
-  );
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
   it('the compose and compose-ha deployResults carry the effect verdict', () => {
     expect(src).toContain('...(composeCtx.tlsState && { tls: composeCtx.tlsState })');

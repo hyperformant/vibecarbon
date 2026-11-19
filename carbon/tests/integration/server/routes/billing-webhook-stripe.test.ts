@@ -106,6 +106,9 @@ async function load(settings: { STRIPE_SECRET_KEY?: string; STRIPE_WEBHOOK_SECRE
 
 const { app, stripe } = await load({ STRIPE_SECRET_KEY: SECRET_KEY, STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET });
 if (!stripe) throw new Error('the Stripe client did not load');
+// The logger the route loaded above (load() resets the module registry).
+const { logger } = await import('@server/lib/logger');
+const { default: StripeSdk } = await import('stripe');
 
 /** A Stripe event as Stripe posts it: JSON, signed with the webhook secret. */
 function signed(type: string, object: unknown, secret = WEBHOOK_SECRET): RequestInit {
@@ -174,6 +177,8 @@ beforeEach(() => {
   db.writes = [];
   db.fail = undefined;
   sendEmail.mockClear();
+  vi.mocked(logger.error).mockClear();
+  vi.mocked(logger.warn).mockClear();
   retrieve.mockReset();
   // biome-ignore lint/suspicious/noExplicitAny: a subscription with only the fields the provider reads
   retrieve.mockResolvedValue(subscription({ current_period_end: END }) as any);
@@ -315,6 +320,47 @@ describe('checkout.session.completed', () => {
     );
     expect(res.status).toBe(200);
     expect(sendEmail).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ to: 'buyer@example.test' }));
+  });
+
+  // The checkout event is where the subscription is first stored, so a fetch
+  // Stripe could not answer must not be acknowledged: a 500 makes Stripe
+  // deliver the event again, and the confirmation waits for that delivery.
+  it('answers 500 when Stripe cannot be read, logs the subscription, and stores and sends nothing', async () => {
+    db.selects = [CUSTOMER_ROW];
+    retrieve.mockRejectedValue(
+      new StripeSdk.errors.StripeAPIError({ message: 'An unknown error occurred', statusCode: 500 })
+    );
+    const res = await post(
+      'checkout.session.completed',
+      session({ customer_details: { email: 'buyer@example.test' } })
+    );
+    await expectHandlerFailed(res);
+    expect(db.writes).toEqual([]);
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ subscriptionId: 'sub_123' }),
+      'Failed to fetch Stripe subscription'
+    );
+  });
+
+  // Not found is an answer, not a failure: a redelivery would find nothing
+  // either. Acknowledged, and logged with the id.
+  it('acknowledges a subscription Stripe no longer has, logs it, and stores nothing', async () => {
+    db.selects = [CUSTOMER_ROW];
+    retrieve.mockRejectedValue(
+      new StripeSdk.errors.StripeInvalidRequestError({
+        message: "No such subscription: 'sub_123'",
+        code: 'resource_missing',
+        statusCode: 404,
+      })
+    );
+    const res = await post('checkout.session.completed', session());
+    expect(res.status).toBe(200);
+    expect(db.writes).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ subscriptionId: 'sub_123' }),
+      'Subscription not found after checkout; nothing stored'
+    );
   });
 });
 

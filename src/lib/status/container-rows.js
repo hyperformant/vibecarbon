@@ -10,7 +10,7 @@ import { c } from '../colors.js';
 // Display names for the core compose services. Anything not listed here
 // (vibecarbon add add-ons such as redis, grafana, n8n) renders under its
 // compose service name so nothing in the project's stack is ever hidden.
-export const SERVICE_DISPLAY_NAMES = {
+const SERVICE_DISPLAY_NAMES = {
   traefik: 'Traefik',
   app: 'App',
   db: 'PostgreSQL',
@@ -80,6 +80,25 @@ export function rowsFromDockerPs(listing, projectName) {
       const [fullName, state = '', status = ''] = line.split('\t');
       return { container: fullName.slice(prefix.length), state, status };
     });
+}
+
+/**
+ * The status rows for a `docker ps` listing in rowsFromDockerPs's format:
+ * each of this project's containers under its display name, classified, in
+ * listing order. The local Docker block and the remote per-server tables both
+ * build their rows here.
+ *
+ * @param {string|null|undefined} listing
+ * @param {string} projectName
+ * @returns {Array<{name: string, container: string, health: string, label: string, detail: string, latencyMs: number}>}
+ */
+export function containerStatusRows(listing, projectName) {
+  return rowsFromDockerPs(listing, projectName).map(({ container, state, status }) => ({
+    name: SERVICE_DISPLAY_NAMES[container] || container,
+    container,
+    ...classifyContainer(container, state, status),
+    latencyMs: 0,
+  }));
 }
 
 /**

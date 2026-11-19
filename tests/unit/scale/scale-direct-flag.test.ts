@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { parseFlags } from '../../../src/lib/cli/parse-flags.js';
 import { imageBuildRecord } from '../../../src/lib/deploy/compose/app-image.js';
 import { replacementImagePlan, SPEC } from '../../../src/scale.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 describe('scale -direct', () => {
   it('is a documented boolean flag', () => {
@@ -53,11 +54,7 @@ describe('imageBuildRecord: the deploy records its build mode on compose tiers',
     expect(imageBuildRecord('k8s-ha', 'local')).toEqual({});
   });
   it("is spread into the orchestrator's final env save", async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(
-      new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url),
-      'utf-8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const save = src.slice(src.indexOf("status: 'deployed',\n      deployMode,"));
     expect(save.slice(0, 400)).toMatch(/\.\.\.imageBuildRecord\(tier, buildMode\)/);
   });

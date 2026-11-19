@@ -325,10 +325,9 @@ describe('checkStatusHealth', () => {
   });
 
   it('the window after a compose-ha failover is past the longest TTL a provider allows', async () => {
-    const { readFileSync } = await import('node:fs');
     const src = readRepoFile('tests/e2e/scenarios/_run-lifecycle.ts');
     expect(src).toContain('timeoutMs: recordJustMoved ? 360_000 : 180_000');
-    const linode = readFileSync(new URL('../../../src/lib/linode-dns.js', import.meta.url), 'utf8');
+    const linode = readRepoFile('src/lib/linode-dns.js');
     expect(linode).toMatch(/ALLOWED_TTL_SEC = \[\s*300,/);
   });
 

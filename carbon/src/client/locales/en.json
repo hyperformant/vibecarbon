@@ -54,9 +54,29 @@
     "namePlaceholder": "Enter organization name"
   },
   "orgSettings": {
+    "title": "Organization Settings",
+    "description": "Manage your organization's settings and information",
+    "infoTitle": "Organization Information",
+    "infoDescription": "Basic details about this organization.",
+    "name": "Name",
+    "slug": "Slug",
+    "slugHint": "The slug is used in URLs and cannot be changed.",
+    "plan": "Plan",
     "editName": "Edit organization name",
     "renamed": "Organization renamed",
-    "renameError": "Failed to rename organization"
+    "renameError": "Failed to rename organization",
+    "idTitle": "Organization ID",
+    "idDescription": "Your unique organization identifier.",
+    "dangerTitle": "Danger Zone",
+    "dangerDescription": "Irreversible and destructive actions.",
+    "deleteTitle": "Delete Organization",
+    "deleteDescription": "Permanently delete this organization and all its data. This action cannot be undone.",
+    "deleteConfirmTitle": "Delete \"{{name}}\"?",
+    "deleteOnlyOrg": "You cannot delete your only organization. Create another organization first.",
+    "deleteWarning": "This action cannot be undone. All members will be removed and all organization data will be permanently deleted.",
+    "deleteConfirm": "Delete organization",
+    "deleted": "Organization deleted",
+    "deleteError": "Failed to delete organization"
   },
   "auth": {
     "checkYourEmail": "Check your email",

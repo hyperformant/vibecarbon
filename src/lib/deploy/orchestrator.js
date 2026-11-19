@@ -272,7 +272,7 @@ async function probePublicHealth(
  * @param {string} [domain]
  * @returns {string[]}
  */
-export function envCorsOrigins(domain) {
+function envCorsOrigins(domain) {
   return domain ? [`https://${domain}`] : ['http://localhost:3000', 'http://localhost:5173'];
 }
 

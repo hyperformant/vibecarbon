@@ -197,7 +197,26 @@ export function assertScaleNotRetired({ environment, envConfig, targetIps }) {
   );
 }
 
-/** Run an HA gate: its refusal is one error line and exit 1, before any prompt or cloud call. */
+/**
+ * Refuse a scale of an environment whose record names no region. Every deploy
+ * records the region before any remote work, so a record without one was
+ * edited by hand, and no region is right to guess: a compose scale places the
+ * replacement server there and a k8s scale hands it to the cluster's Pulumi
+ * program, so a wrong one builds servers where the environment is not. (It
+ * once guessed `fsn1`, a Hetzner location, for every provider.)
+ *
+ * @param {{ environment: string, envConfig: { region?: string } }} args
+ */
+export function assertRecordedRegion({ environment, envConfig }) {
+  if (envConfig.region) return;
+  throw new Error(
+    `Refusing to scale "${environment}": its entry in .vibecarbon.json records no region, and a ` +
+      'guessed one would build servers where the environment is not. add "region" (the region it ' +
+      `was deployed in) to environments.${environment} in .vibecarbon.json, then scale again`,
+  );
+}
+
+/** Run a gate: its refusal is one error line and exit 1, before any prompt or cloud call. */
 function refuseOrContinue(gate) {
   try {
     gate();
@@ -324,11 +343,12 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   await Provider.fetchServerTypes(apiToken);
   typesSpinner.stop('Server types loaded');
 
-  const region = envConfig.region || 'fsn1';
-  // Region-aware rather than a hardcoded SKU: the default region here is fsn1,
-  // where `cpx21` (the previous literal) stopped being orderable on 2026-01-01,
-  // so it seeded the picker's initialValue with a type the region no longer
-  // sells. getRegionDefaults tracks the live catalog and the EU/US split.
+  // Recorded by every deploy; run() refuses a record without it.
+  const region = envConfig.region;
+  // Region-aware rather than a hardcoded SKU: `cpx21` (the previous literal)
+  // stopped being orderable in fsn1 on 2026-01-01, so it seeded the picker's
+  // initialValue with a type the region no longer sells. getRegionDefaults
+  // tracks the live catalog and the EU/US split.
   // composeType, never dbType: the k8s db is a 2 GB role, and a default-sized
   // compose box (no persisted serverType) was deployed on composeType. An env
   // deployed before the top-level record keeps its size on the server entry.
@@ -1047,19 +1067,6 @@ function formatPause(ms) {
   return total < 60 ? `${total}s` : `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
-/** A promise with its resolve/reject in hand: the standby arm waits on the primary arm. */
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  // The standby arm may never await it (it failed first); no unhandled rejection.
-  promise.catch(() => {});
-  return { promise, resolve, reject };
-}
-
 /**
  * Create a replacement server for `server` (step 2): user_data front-loads
  * ufw + unattended-upgrades during boot so setupServer below is a ~2s marker
@@ -1550,7 +1557,9 @@ async function scaleServers(ctx) {
     services: { ...(envConfig.services ?? {}), ...(services ?? {}) },
   });
   // The standby arm waits on this: the new primary, once it serves.
-  const primaryReady = primaryTarget && standbyTarget ? deferred() : null;
+  const primaryReady = primaryTarget && standbyTarget ? Promise.withResolvers() : null;
+  // The standby arm may never await it (it failed first); no unhandled rejection.
+  primaryReady?.promise.catch(() => {});
 
   const scalePrimaryArm = async (server) => {
     const label = ha ? `${server.role} (${server.ip})` : server.ip;
@@ -2205,6 +2214,8 @@ export async function run(args) {
     p.log.error(`Environment "${environment}" not found in .vibecarbon.json`);
     process.exit(1);
   }
+  // Both strategies work in the recorded region; there is no default to guess.
+  refuseOrContinue(() => assertRecordedRegion({ environment, envConfig }));
   // This environment's recorded versions, never the channel: only a deploy
   // takes new ones (src/lib/version-channel.js).
   useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
@@ -2258,7 +2269,8 @@ export async function run(args) {
 async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
-  const region = envConfig.region || 'fsn1'; // Phase B: Provider.DEFAULT_REGION
+  // Recorded by every deploy; run() refuses a record without it.
+  const region = envConfig.region;
 
   // Pre-fetch live server types (non-blocking, uses saved credentials if available)
   {
