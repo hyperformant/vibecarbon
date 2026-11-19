@@ -261,25 +261,20 @@ async function haK8sProvisionClusters(ctx) {
   // finishes). Also resolved from the deploy's own settlement (result or
   // null) so the early-prep task below can never deadlock on a cluster that
   // failed before its infra came up.
-  const deferInfra = () => {
-    let resolve;
-    const promise = new Promise((r) => {
-      resolve = r;
-    });
-    return { promise, resolve };
-  };
-  const primaryInfra = deferInfra();
-  const standbyInfra = deferInfra();
+  const primaryInfra = Promise.withResolvers();
+  const standbyInfra = Promise.withResolvers();
   // The `vibecarbon` namespace, signalled by each cluster's onNamespaceReady
   // (right after applyVibecarbonSecrets creates it). The transport's gateways
   // are applied into it, so early prep starts once both have fired. Settled
   // by the deploy's own settlement too, like the infra signals.
-  const namespaceReady = { primary: deferInfra(), standby: deferInfra() };
+  const namespaceReady = { primary: Promise.withResolvers(), standby: Promise.withResolvers() };
   // The primary's built image ref, handed to the standby's deployK3s, which
   // waits for it and runs that image from its own registry. Rejected when the
   // primary deploy fails, so the standby never waits on an image that will not
   // come; the standby's own rejection is then reported beside the primary's.
-  const primaryImage = deferValue();
+  const primaryImage = Promise.withResolvers();
+  // Nobody may be waiting yet when it rejects; the awaiting side still sees it.
+  primaryImage.promise.catch(() => {});
 
   const primaryPromise = perfAsync('deploy.ha.k8s.primary', () =>
     deployK3s({
@@ -554,19 +549,6 @@ async function haK8sProvisionClusters(ctx) {
     ctx.standbyImageCopy.catch(() => {});
   }
   ctx.primaryReplicationConfigured = await primaryConfig;
-}
-
-/** A promise with its resolve and reject, for a value another task produces. */
-function deferValue() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  // Nobody may be waiting yet when it rejects; the awaiting side still sees it.
-  promise.catch(() => {});
-  return { promise, resolve, reject };
 }
 
 /**

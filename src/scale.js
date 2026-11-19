@@ -1067,19 +1067,6 @@ function formatPause(ms) {
   return total < 60 ? `${total}s` : `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
-/** A promise with its resolve/reject in hand: the standby arm waits on the primary arm. */
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  // The standby arm may never await it (it failed first); no unhandled rejection.
-  promise.catch(() => {});
-  return { promise, resolve, reject };
-}
-
 /**
  * Create a replacement server for `server` (step 2): user_data front-loads
  * ufw + unattended-upgrades during boot so setupServer below is a ~2s marker
@@ -1570,7 +1557,9 @@ async function scaleServers(ctx) {
     services: { ...(envConfig.services ?? {}), ...(services ?? {}) },
   });
   // The standby arm waits on this: the new primary, once it serves.
-  const primaryReady = primaryTarget && standbyTarget ? deferred() : null;
+  const primaryReady = primaryTarget && standbyTarget ? Promise.withResolvers() : null;
+  // The standby arm may never await it (it failed first); no unhandled rejection.
+  primaryReady?.promise.catch(() => {});
 
   const scalePrimaryArm = async (server) => {
     const label = ha ? `${server.role} (${server.ip})` : server.ip;
