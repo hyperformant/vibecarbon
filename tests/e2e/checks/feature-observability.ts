@@ -41,7 +41,7 @@ const FETCH_TIMEOUT_MS = 10_000;
 export const FORWARDAUTH_COOKIE = 'vc-admin-token';
 
 /** The provisioned Prometheus datasource uid. */
-export const PROMETHEUS_DATASOURCE_UID = 'prometheus';
+const PROMETHEUS_DATASOURCE_UID = 'prometheus';
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -125,7 +125,7 @@ export async function runObservabilityChecks(
  * MFA is globally on and the session is aal1 (requireAal2): the harness signs
  * in with a password only, so that case is reported, never worked around.
  */
-export async function mintForwardAuthCookie(
+async function mintForwardAuthCookie(
   appDomain: string,
   adminJar: CookieJar,
   fetcher: Fetcher,
@@ -173,7 +173,7 @@ export async function mintForwardAuthCookie(
  * fall-through still fails when the wait runs out, so the app's page can never
  * pass as Grafana.
  */
-export async function checkGrafanaRouteProtected(
+async function checkGrafanaRouteProtected(
   base: string,
   appDomain: string,
   fetcher: Fetcher,
@@ -293,11 +293,7 @@ function parseJson(contentType: string, body: string): unknown {
 }
 
 /** Null when the response is Grafana's own healthy `/api/health`, else why not. */
-export function grafanaHealthError(
-  status: number,
-  contentType: string,
-  body: string,
-): string | null {
+function grafanaHealthError(status: number, contentType: string, body: string): string | null {
   if (status !== 200) return `status=${status}`;
   const json = parseJson(contentType, body) as { database?: unknown } | undefined;
   if (json === undefined)
@@ -310,7 +306,7 @@ export function grafanaHealthError(
  * Verify Grafana is running and its database connection is healthy:
  * GET {base}/api/health with the cookie -> 200 `{"database":"ok"}`.
  */
-export async function checkGrafanaHealth(
+async function checkGrafanaHealth(
   base: string,
   cookie: string,
   fetcher: Fetcher,
@@ -336,11 +332,7 @@ interface PrometheusTarget {
 }
 
 /** Null when the body is Prometheus' targets JSON with an `up` target, else why not. */
-export function prometheusTargetsError(
-  status: number,
-  contentType: string,
-  body: string,
-): string | null {
+function prometheusTargetsError(status: number, contentType: string, body: string): string | null {
   if (status !== 200) return `status=${status}`;
   const json = parseJson(contentType, body) as
     | { status?: unknown; data?: { activeTargets?: unknown } }
@@ -363,7 +355,7 @@ export function prometheusTargetsError(
  * route to it): GET {base}/api/datasources/proxy/uid/prometheus/api/v1/targets
  * with the cookie -> Prometheus' targets JSON, at least one active target up.
  */
-export async function checkPrometheusTargets(
+async function checkPrometheusTargets(
   base: string,
   cookie: string,
   fetcher: Fetcher,

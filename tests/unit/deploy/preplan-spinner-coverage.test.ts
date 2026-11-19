@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { readRepoFile } from '../../_shared/source-files.js';
 
@@ -16,10 +14,7 @@ import { readRepoFile } from '../../_shared/source-files.js';
  * exercised in e2e, which doesn't look at TTY output).
  */
 describe('deploy pre-plan phase keeps a spinner over its network waits', () => {
-  const src = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-    'utf8',
-  );
+  const src = readRepoFile('src/lib/deploy/orchestrator.js');
 
   it('starts a spinner before awaiting ensureOperatorIpAccess', () => {
     const start = src.indexOf('accessSpinner.start(');
@@ -65,10 +60,7 @@ describe('deploy pre-plan phase keeps a spinner over its network waits', () => {
  * internal spinner — do NOT require onProgress there.
  */
 describe('deploy DNS writes never run a second spinner concurrently', () => {
-  const orch = readFileSync(
-    fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-    'utf8',
-  );
+  const orch = readRepoFile('src/lib/deploy/orchestrator.js');
   const effects = readRepoFile('src/lib/deploy/effects/index.js');
 
   it('the background DNS warm-up suppresses setupSimple’s internal spinner', () => {
@@ -117,8 +109,7 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
   it('setupHA honors onProgress by skipping its internal spinner (EVERY registered backend)', async () => {
     const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
     for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
-      const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
-      const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const provider = readRepoFile('src/lib', row.modulePath.replace(/^\.\//, ''));
       const body = runningBody(provider, 'setupHA', 'setupHaRecords');
       expect(body, id).toMatch(/const s = onProgress \? null : spinner\(\)/);
       expect(body, id).not.toMatch(/\bs\.(start|stop|message)\(/);
@@ -131,8 +122,7 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
     // the caller-owned line, and a hand-list would never see it.
     const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
     for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
-      const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
-      const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const provider = readRepoFile('src/lib', row.modulePath.replace(/^\.\//, ''));
       const body = runningBody(provider, 'setupSimple', 'setupApexAndWildcard');
       expect(body, id).toMatch(/const s = (?:options\.)?onProgress \? null : spinner\(\)/);
       expect(body, id).not.toMatch(/\bs\.(start|stop|message)\(/);
@@ -142,8 +132,7 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
   it('the shared setup flows are the ones the backends hand off to (the walk reads real code)', async () => {
     const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
     const delegating = Object.entries(DNS_PROVIDERS).filter(([, row]) => {
-      const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
-      const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const provider = readRepoFile('src/lib', row.modulePath.replace(/^\.\//, ''));
       return /return setupApexAndWildcard\(/.test(bodyOf(provider, 'setupSimple'));
     });
     expect(delegating.map(([id]) => id).sort()).toEqual([

@@ -18,9 +18,8 @@
  *      error carries the pointer that says so — and the external-domain
  *      primitives that close the gap live in this module.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({
   spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
@@ -619,10 +618,7 @@ describe('scaleway-dns setupSimple', () => {
   // Structural pin: setupSimple runs the shared flow, whose concurrent-spinner
   // guard tests/unit/deploy/preplan-spinner-coverage.test.ts pins.
   it('hands setupSimple to the shared setupApexAndWildcard flow', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/scaleway-dns.js', import.meta.url)),
-      'utf8',
-    );
+    const src = readRepoFile('src/lib/scaleway-dns.js');
     expect(src).toMatch(/return setupApexAndWildcard\(/);
   });
 });

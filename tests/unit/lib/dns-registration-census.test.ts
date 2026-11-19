@@ -58,6 +58,19 @@ describe('DNS backend registration census', () => {
       expect(row.modulePath, id).toBe(`./${id}-dns.js`);
     }
   });
+
+  // Dispatch loads through a table of literal import()s (ROW_MODULES in
+  // dns-provider.js), so the modules it can load are visible in the code and
+  // to `pnpm unused`. Each row's path must load exactly the module it names.
+  it.each(Object.keys(DNS_PROVIDERS))('%s dispatches to the module its row names', async (id) => {
+    const row = DNS_PROVIDERS[id];
+    const { getDnsGuidedSetup } = await import('../../../src/lib/dns-provider.js');
+    const named = (path: string) => import(join(LIB_DIR, path.replace(/^\.\//, '')));
+    expect(await getDnsProvider(id)).toBe(await named(row.modulePath));
+    if (row.guidedSetupModulePath) {
+      expect(await getDnsGuidedSetup(id)).toBe(await named(row.guidedSetupModulePath));
+    }
+  });
 });
 
 describe('providers manage A records only', () => {

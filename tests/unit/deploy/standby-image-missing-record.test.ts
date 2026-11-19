@@ -4,8 +4,6 @@
  * it beside the replication markers and clears it once a deploy copies the
  * image; failover refuses on it and status shows it.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
 import { describe, expect, it, vi } from 'vitest';
 import { DEGRADED_CAUSE, preserveSafetyFields } from '../../../src/lib/deploy/env-safety-fields.js';
@@ -19,6 +17,7 @@ import {
   k8sHaDegradedVerdict,
 } from '../../../src/lib/deploy/orchestrator.js';
 import { standbyImageRow } from '../../../src/status.js';
+import { readRepoFile } from '../../_shared/source-files.js';
 
 const SYSID = '7412345678901234567';
 
@@ -94,10 +93,7 @@ describe('k8sHaDegradedVerdict (the k8s-ha deployResult from the plan ctx)', () 
   });
 
   it('the orchestrator builds the k8s-ha deployResult from it', () => {
-    const src = readFileSync(
-      fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
-      'utf-8',
-    );
+    const src = readRepoFile('src/lib/deploy/orchestrator.js');
     const after = src.slice(src.indexOf('const k8sHaCtx = {'));
     const block = after.slice(after.indexOf('deployResult = {'));
     expect(block.slice(0, block.indexOf('};'))).toContain('...k8sHaDegradedVerdict(k8sHaCtx),');
