@@ -14,17 +14,27 @@ import { perfRecord } from '../perf.js';
 
 const TIMED_OPS = new Set(['create', 'update', 'replace', 'create-replacement']);
 
-/** `urn:pulumi:stack::project::a:b$c:d:Type::name` -> the Type segment and the name. */
-function describeUrn(urn, type) {
-  const parts = String(urn).split('::');
-  const name = (parts.at(-1) ?? '').replace(/[^A-Za-z0-9_-]/g, '');
-  const typeToken = String(type || parts.at(-2) || '')
+/**
+ * The `<Type>` segment of a timing line for a Pulumi type token:
+ * `hcloud:index/server:Server` -> `Server`, `a:b$c:d:Type` -> `Type`. The e2e
+ * deploy budget finds a provider's server creates by it, from the type the
+ * provider declares (SERVER_RESOURCE_TYPE, providers/base.js).
+ * @param {string} type
+ */
+export function timedTypeName(type) {
+  return String(type)
     .split('$')
     .at(-1)
     .split(':')
     .at(-1)
     .replace(/[^A-Za-z0-9]/g, '');
-  return { type: typeToken, name };
+}
+
+/** `urn:pulumi:stack::project::a:b$c:d:Type::name` -> the Type segment and the name. */
+function describeUrn(urn, type) {
+  const parts = String(urn).split('::');
+  const name = (parts.at(-1) ?? '').replace(/[^A-Za-z0-9_-]/g, '');
+  return { type: timedTypeName(type || parts.at(-2) || ''), name };
 }
 
 /**

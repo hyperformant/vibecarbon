@@ -7,9 +7,11 @@ import {
   SERVER_OWNER_LABELS,
   SERVER_RESOURCE_TYPES,
 } from '../../../src/lib/iac/create-timeout.js';
+import { createResourceTimer } from '../../../src/lib/iac/resource-timing.js';
 import { OWNERSHIP_KEYS, recordedOwnership } from '../../../src/lib/iac/state-pending.js';
-import { getProvider } from '../../../src/lib/providers/index.js';
+import { getProvider, getProviderClass, PROVIDERS } from '../../../src/lib/providers/index.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
+import { serverCreatePattern } from '../../e2e/utils/deploy-time.js';
 
 /**
  * Census: every server-class resource in every provider IaC program carries
@@ -478,6 +480,87 @@ describe('server-class create timeouts (census)', () => {
         .filter((r) => !(r.token in SERVER_RESOURCE_TYPES))
         .map((r) => r.token);
       expect(unknown, 'add these to SERVER_RESOURCE_TYPES in create-timeout.js').toEqual([]);
+    },
+  );
+});
+
+/**
+ * Census: every registered provider declares the server type its IaC programs
+ * create (SERVER_RESOURCE_TYPE, providers/base.js), and it is that type.
+ *
+ * The e2e deploy budget takes the provider's server create out of a deploy's
+ * time, finding it among the per-resource timings by this declaration
+ * (tests/e2e/utils/deploy-time.js). A declaration that named the wrong type
+ * would find no server create, and the check would fail every cold deploy of
+ * that provider; one that named a non-server type would take the wrong wait
+ * out. So each provider's programs run on the recorder as above, and the
+ * server class they build must be exactly the one declared.
+ */
+describe('every provider declares the server type its programs create (census)', () => {
+  const providers = Object.keys(PROVIDERS).sort();
+  const programsOf = (provider: string) =>
+    Object.keys(PROGRAMS).filter((file) => file.startsWith(`${provider}-`));
+
+  it.each(providers)('%s declares a known server class', (provider) => {
+    const declared = getProviderClass(provider).SERVER_RESOURCE_TYPE;
+    expect(Object.keys(SERVER_RESOURCE_TYPES), `${provider}.SERVER_RESOURCE_TYPE`).toContain(
+      declared,
+    );
+  });
+
+  it.each(providers)('%s has a program for every mode it supports', (provider) => {
+    const tiers = getProviderClass(provider).SUPPORTED_TIERS;
+    expect(tiers.length).toBeGreaterThan(0);
+    const files = programsOf(provider);
+    if (tiers.some((t) => t.startsWith('compose')))
+      expect(files).toContain(`${provider}-compose.js`);
+    if (tiers.some((t) => t.startsWith('k8s'))) expect(files).toContain(`${provider}-k8s.js`);
+  });
+
+  it.each(providers)(
+    '%s: every one of its programs builds its servers as the declared type, and no other',
+    async (provider) => {
+      const declared = getProviderClass(provider).SERVER_RESOURCE_TYPE;
+      const files = programsOf(provider);
+      expect(files.length, `${provider} has no program`).toBeGreaterThan(0);
+      for (const file of files) {
+        const resources = await runProgram(file);
+        const servers = resources.filter(
+          (r) =>
+            r.token in SERVER_RESOURCE_TYPES || VM_CLASS.test(r.type.split('.').pop() as string),
+        );
+        expect(servers.length, `${file} registered no server`).toBeGreaterThan(0);
+        expect([...new Set(servers.map((r) => r.token))], file).toEqual([declared]);
+      }
+    },
+  );
+
+  it.each(providers)(
+    "%s: a server create's timing line is what the deploy budget reads as the provider's wait",
+    (provider) => {
+      const declared = getProviderClass(provider).SERVER_RESOURCE_TYPE;
+      const timed: string[] = [];
+      const timer = createResourceTimer({
+        stem: 'deploy.k3s.primary.iac.upStack',
+        now: () => 0,
+        record: (name) => timed.push(name),
+      });
+      // The declared server, and a resource of another type beside it.
+      timer.begin();
+      for (const [type, name] of [
+        [declared, 'master'],
+        ['pulumi:providers:cloud', 'default'],
+      ]) {
+        const urn = `urn:pulumi:e-primary::p::${type}::${name}`;
+        timer.onEvent({ resourcePreEvent: { metadata: { op: 'create', urn, type } } });
+        timer.onEvent({ resOutputsEvent: { metadata: { op: 'create', urn, type } } });
+      }
+      const pattern = serverCreatePattern(provider);
+      expect(timed.filter((l) => pattern.test(l))).toEqual([
+        expect.stringMatching(/^deploy\.k3s\.primary\.iac\.upStack\.resource\.\w+\.master$/),
+      ]);
+      // Non-vacuous: the other resource was timed too, and is not matched.
+      expect(timed).toContain('deploy.k3s.primary.iac.upStack.resource.cloud.default');
     },
   );
 });

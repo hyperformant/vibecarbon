@@ -1,5 +1,5 @@
 {
-  "rule": "owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled; endToEnd = owned + tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A class with no stock sample keeps its row from the table this one replaced (carriedOver, with carriedFromSince, the since it was calibrated from) until a stock sample replaces it. A provider + mode with no row is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers, never a carried row. Regenerate with scripts/calibrate-deploy-budgets.js.",
+  "rule": "owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled, of deploy.total minus the TLS first look and minus the provider's server create (the longest server-create timing, tests/e2e/utils/deploy-time.js); endToEnd = owned + tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A class with no stock sample keeps its row from the table this one replaced (carriedOver, with carriedFromSince, the since it was calibrated from) until a stock sample replaces it. A provider + mode with no row is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the other providers, never a carried row. Regenerate with scripts/calibrate-deploy-budgets.js.",
   "since": "2026-11-15T20:06:33.000Z",
   "budgets": {
     "digitalocean": {
@@ -29,10 +29,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 285,
-          "endToEndS": 345,
+          "ownedS": 260,
+          "endToEndS": 320,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 4
         }
       },
       "compose": {
@@ -45,10 +45,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 255,
-          "endToEndS": 315,
+          "ownedS": 205,
+          "endToEndS": 265,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 3
         }
       },
       "k8s-ha": {
@@ -69,18 +69,16 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "intel": {
-          "ownedS": 390,
-          "endToEndS": 450,
+          "ownedS": 490,
+          "endToEndS": 550,
           "tlsAllowanceS": 60,
-          "samples": 6,
-          "carriedOver": true,
-          "carriedFromSince": "2026-11-05T12:00:00.000Z"
+          "samples": 1
         },
         "regular": {
-          "ownedS": 415,
-          "endToEndS": 475,
+          "ownedS": 375,
+          "endToEndS": 435,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 3
         }
       },
       "k8s": {
@@ -101,10 +99,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "regular": {
-          "ownedS": 405,
-          "endToEndS": 465,
+          "ownedS": 355,
+          "endToEndS": 415,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 3
         }
       }
     },
@@ -119,18 +117,16 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 275,
-          "endToEndS": 335,
+          "ownedS": 255,
+          "endToEndS": 315,
           "tlsAllowanceS": 60,
           "samples": 1
         },
         "cx": {
-          "ownedS": 405,
-          "endToEndS": 465,
+          "ownedS": 315,
+          "endToEndS": 375,
           "tlsAllowanceS": 60,
-          "samples": 5,
-          "carriedOver": true,
-          "carriedFromSince": "2026-11-05T12:00:00.000Z"
+          "samples": 1
         }
       },
       "compose": {
@@ -143,18 +139,16 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
+          "ownedS": 185,
+          "endToEndS": 245,
+          "tlsAllowanceS": 60,
+          "samples": 2
+        },
+        "cx": {
           "ownedS": 200,
           "endToEndS": 260,
           "tlsAllowanceS": 60,
           "samples": 1
-        },
-        "cx": {
-          "ownedS": 245,
-          "endToEndS": 305,
-          "tlsAllowanceS": 60,
-          "samples": 5,
-          "carriedOver": true,
-          "carriedFromSince": "2026-11-05T12:00:00.000Z"
         }
       },
       "k8s-ha": {
@@ -167,10 +161,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 375,
-          "endToEndS": 435,
+          "ownedS": 330,
+          "endToEndS": 390,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 4
         },
         "cx": {
           "ownedS": 440,
@@ -191,52 +185,50 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "cpx": {
-          "ownedS": 320,
-          "endToEndS": 380,
+          "ownedS": 325,
+          "endToEndS": 385,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 3
         },
         "cx": {
-          "ownedS": 410,
-          "endToEndS": 470,
+          "ownedS": 380,
+          "endToEndS": 440,
           "tlsAllowanceS": 60,
-          "samples": 7,
-          "carriedOver": true,
-          "carriedFromSince": "2026-11-05T12:00:00.000Z"
+          "samples": 1
         }
       }
     },
     "linode": {
       "compose-ha": {
         "standard": {
-          "ownedS": 325,
-          "endToEndS": 385,
+          "ownedS": 220,
+          "endToEndS": 280,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 4
         }
       },
       "compose": {
         "standard": {
-          "ownedS": 325,
-          "endToEndS": 385,
+          "ownedS": 205,
+          "endToEndS": 265,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 3
         }
       },
       "k8s-ha": {
         "standard": {
-          "ownedS": 530,
-          "endToEndS": 590,
+          "ownedS": 440,
+          "endToEndS": 500,
           "tlsAllowanceS": 60,
-          "samples": 2
+          "samples": 3
         }
       },
       "k8s": {
         "standard": {
-          "ownedS": 505,
-          "endToEndS": 570,
+          "ownedS": 370,
+          "endToEndS": 435,
           "tlsAllowanceS": 65,
-          "samples": 2
+          "samples": 4
         }
       }
     },
@@ -251,10 +243,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "DEV1": {
-          "ownedS": 375,
-          "endToEndS": 435,
+          "ownedS": 355,
+          "endToEndS": 415,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 2
         }
       },
       "compose": {
@@ -267,10 +259,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "BASIC3": {
-          "ownedS": 260,
-          "endToEndS": 320,
+          "ownedS": 240,
+          "endToEndS": 300,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 2
         }
       }
     },
@@ -285,10 +277,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "vc2": {
-          "ownedS": 360,
-          "endToEndS": 420,
+          "ownedS": 280,
+          "endToEndS": 340,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 2
         }
       },
       "compose": {
@@ -301,10 +293,10 @@
           "carriedFromSince": "2026-11-05T12:00:00.000Z"
         },
         "vc2": {
-          "ownedS": 270,
-          "endToEndS": 330,
+          "ownedS": 190,
+          "endToEndS": 250,
           "tlsAllowanceS": 60,
-          "samples": 1
+          "samples": 2
         }
       }
     }

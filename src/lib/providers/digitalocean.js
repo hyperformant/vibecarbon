@@ -180,6 +180,8 @@ export class DigitalOceanProvider extends BaseProvider {
   // as a pure DNS flip between the two clusters' master addresses.
   static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
+  static SERVER_RESOURCE_TYPE = 'digitalocean:index/droplet:Droplet';
+
   /**
    * No reserved IP: a k8s cluster's domain points at its master droplet's
    * own address, as compose's does. The reserved IP never moved here

@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { seedClass, seededRow } from '../../../scripts/calibrate-deploy-budgets.js';
+import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import {
   type BudgetKey,
   type BudgetTable,
@@ -36,9 +37,17 @@ const state = (stack: string, backpressure: string, lockWaits: string) =>
   `lock-waits ${lockWaits} | documented ceilings (hetzner): none published`;
 
 interface LogOpts {
+  /** deploy.total, which holds the longest server create (`serverCreate`, 30 s by default). */
   total?: number;
   tlsReady?: number;
   tlsSnapshot?: number;
+  /**
+   * The longest server create (the provider's wait); every other server the
+   * mode creates takes a fraction of it. `null` leaves every server create out.
+   */
+  serverCreate?: number | null;
+  /** The provider's server type as timed: Hetzner's `Server` by default. */
+  serverType?: string;
   deltaBytes?: number | null;
   standbyLock?: string;
   standbyBackpressure?: string;
@@ -49,15 +58,31 @@ interface LogOpts {
   state?: boolean;
 }
 
-/** A passing cold deploy log for each mode; opts bend one number. */
+/**
+ * A passing cold deploy log for each mode (Hetzner's unless `serverType` says
+ * otherwise); opts bend one number. Each default deploy.total holds a 30 s
+ * server create, which the budget does not count.
+ */
 function fixture(mode: DeployMode, o: LogOpts = {}): string {
   const lines: string[] = ['◇  Provisioning infrastructure', 'some spinner text'];
   const delta = (bytes: number | null | undefined) =>
     bytes === null
       ? []
       : [perf('deploy.image.delta', 21_000, `bytes=${bytes ?? 4_800_000} sent=3 reused=9`)];
+  // Each server's create as a share of the longest (`serverCreate`): they run
+  // alongside each other. A firewall is a resource too, never a server create.
+  const longest = o.serverCreate ?? 30_000;
+  const servers = (stem: string, shares: Record<string, number>) => [
+    perf(`${stem}.resource.Firewall.firewall`, 1_500),
+    ...(o.serverCreate === null
+      ? []
+      : Object.entries(shares).map(([name, share]) =>
+          perf(`${stem}.resource.${o.serverType ?? 'Server'}.${name}`, Math.round(longest * share)),
+        )),
+  ];
   if (mode === 'compose') {
     lines.push(
+      ...servers('deploy.iac.upStack', { server: 1 }),
       perf('deploy.iac.upStack', 70_000),
       perf('deploy.image.basePull', 18_000),
       ...delta(o.deltaBytes),
@@ -67,10 +92,12 @@ function fixture(mode: DeployMode, o: LogOpts = {}): string {
       perf('deploy.tls.ready', o.tlsReady ?? 90_000),
       perf('deploy.tls.snapshot', o.tlsSnapshot ?? 3_000),
       perf('deploy.storage.finish', 1_200),
-      perf('deploy.total', o.total ?? 250_000),
+      perf('deploy.total', o.total ?? 280_000),
     );
   } else if (mode === 'compose-ha') {
     lines.push(
+      ...servers('deploy.ha.compose.iac.upStack.primary', { server: 0.9 }),
+      ...servers('deploy.ha.compose.iac.upStack.standby', { server: 1 }),
       perf('deploy.ha.compose.iac.upStack.primary', 95_000),
       ...(o.state === false
         ? []
@@ -91,10 +118,11 @@ function fixture(mode: DeployMode, o: LogOpts = {}): string {
       perf('deploy.ha.compose.imageTransfer.await', 1_000),
       perf('deploy.tls.ready', o.tlsReady ?? 50_000),
       perf('deploy.ha.compose.full', 280_000),
-      perf('deploy.total', o.total ?? 340_000),
+      perf('deploy.total', o.total ?? 370_000),
     );
   } else if (mode === 'k8s') {
     lines.push(
+      ...servers('deploy.k3s.iac.upStack', { master: 1, db: 0.9, 'worker-1': 0.8 }),
       perf('deploy.k3s.iac.upStack', 96_000),
       perf('deploy.k3s.certManager.wait', 36_000),
       ...delta(o.deltaBytes),
@@ -102,10 +130,12 @@ function fixture(mode: DeployMode, o: LogOpts = {}): string {
       perf('deploy.k3s.applyBase', 30_000),
       perf('deploy.k3s.full', 260_000),
       perf('deploy.tls.ready', o.tlsReady ?? 85_000),
-      perf('deploy.total', o.total ?? 380_000),
+      perf('deploy.total', o.total ?? 410_000),
     );
   } else {
     lines.push(
+      ...servers('deploy.k3s.primary.iac.upStack', { master: 0.9, db: 0.8, 'worker-1': 0.7 }),
+      ...servers('deploy.k3s.standby.iac.upStack', { master: 1, db: 0.8 }),
       perf('deploy.k3s.primary.iac.upStack', 100_000),
       ...(o.state === false
         ? []
@@ -123,7 +153,7 @@ function fixture(mode: DeployMode, o: LogOpts = {}): string {
       perf('deploy.ha.image.copyToStandby', 25_000),
       perf('deploy.ha.k8s.full', 380_000),
       perf('deploy.tls.ready', o.tlsReady ?? 60_000),
-      perf('deploy.total', o.total ?? 470_000),
+      perf('deploy.total', o.total ?? 500_000),
     );
   }
   lines.push('◆  Deployment to e1 complete! (4m 10s)');
@@ -141,10 +171,15 @@ describe('budgets are keyed on provider + mode + class', () => {
         },
       },
     };
-    const log = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const opts = { total: 280_000, tlsReady: 5_000, tlsSnapshot: 0 };
     // 245 s owned: over DO amd's 120, inside DO intel's 400, over Hetzner cx's 180.
     const run = (provider: string, cpuClass: string) =>
-      judge(log, 'compose', { provider, cpuClass }, table);
+      judge(
+        fixture('compose', { ...opts, serverType: provider === 'hetzner' ? 'Server' : 'Droplet' }),
+        'compose',
+        { provider, cpuClass },
+        table,
+      );
     expect(run('digitalocean', 'amd').message).toMatch(/deploy-owned 245s > 120s/);
     expect(run('digitalocean', 'intel').ok).toBe(true);
     expect(run('hetzner', 'cx').message).toMatch(/deploy-owned 245s > 180s/);
@@ -174,7 +209,7 @@ describe('budgets are keyed on provider + mode + class', () => {
         },
       },
     };
-    const log = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const log = fixture('compose', { total: 280_000, tlsReady: 5_000, tlsSnapshot: 0 });
     const viaAny = judge(log, 'compose', { provider: 'hetzner', cpuClass: 'cx' }, table);
     expect(viaAny.message).toMatch(/deploy-owned 245s > 180s/);
     expect(viaAny.details).toMatchObject({ budgetRow: 'hetzner/compose/any' });
@@ -262,7 +297,7 @@ describe('budgets are keyed on provider + mode + class', () => {
     const table: BudgetTable = {
       hetzner: { compose: { cpx: { ownedS: 150, endToEndS: 210, samples: 1 }, cx: carried } },
     };
-    const fast = fixture('compose', { total: 150_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const fast = fixture('compose', { total: 180_000, tlsReady: 5_000, tlsSnapshot: 0 });
     const pass = judge(fast, 'compose', KEY, table);
     expect(pass.ok).toBe(true);
     expect(pass.message).toMatch(
@@ -272,7 +307,7 @@ describe('budgets are keyed on provider + mode + class', () => {
       budgetRow: 'hetzner/compose/cx',
       budgetCarriedFromSince: carried.carriedFromSince,
     });
-    const slow = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const slow = fixture('compose', { total: 280_000, tlsReady: 5_000, tlsSnapshot: 0 });
     const fail = judge(slow, 'compose', KEY, table);
     expect(fail.ok).toBe(false);
     expect(fail.message).toMatch(
@@ -293,14 +328,15 @@ describe('budgets are keyed on provider + mode + class', () => {
     };
     const table: BudgetTable = { linode: { compose: { standard: seed } } };
     const key = { provider: 'linode', cpuClass: 'standard' };
-    const fast = fixture('compose', { total: 150_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const linode = { tlsReady: 5_000, tlsSnapshot: 0, serverType: 'Instance' };
+    const fast = fixture('compose', { ...linode, total: 180_000 });
     const pass = judge(fast, 'compose', key, table);
     expect(pass.ok).toBe(true);
     expect(pass.message).toMatch(
       /seeded budget: linode\/compose\/standard has no samples yet, so it is the mean of hetzner\/compose\/cx, vultr\/compose\/vc2/,
     );
     expect(pass.details).toMatchObject({ budgetSeededFrom: seed.seededFrom });
-    const slow = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const slow = fixture('compose', { ...linode, total: 280_000 });
     const fail = judge(slow, 'compose', key, table);
     expect(fail.ok).toBe(false);
     expect(fail.message).toMatch(
@@ -350,9 +386,12 @@ describe('checkDeployBudget: each mode passes inside its budgets', () => {
     const r = checkDeployBudget(fixture('compose'), 'compose');
     expect(r.details).toMatchObject({
       mode: 'compose',
-      totalS: 250,
+      totalS: 280,
       tlsFirstLookS: 93,
-      ownedS: 157,
+      serverCreateS: 30,
+      serverCreateMarker: 'deploy.iac.upStack.resource.Server.server',
+      ownedS: 157, // 280 - 93 - 30
+      endToEndS: 250, // 280 - 30
       ownedBudgetS: 180,
       endToEndBudgetS: 300,
       deltaBytes: [4_800_000],
@@ -401,16 +440,17 @@ describe('checkDeployBudget: budgets are for stock deploys', () => {
 
 describe('checkDeployBudget: time budgets', () => {
   const cases = [
-    // owned only: total - TLS over, total itself inside end-to-end
-    ['compose', { total: 290_000, tlsReady: 5_000, tlsSnapshot: 0 }, /deploy-owned 285s > 180s/],
-    ['compose-ha', { total: 350_000, tlsReady: 10_000 }, /deploy-owned 340s > 300s/],
-    ['k8s', { total: 385_000, tlsReady: 20_000 }, /deploy-owned 365s > 300s/],
-    ['k8s-ha', { total: 470_000, tlsReady: 30_000 }, /deploy-owned 440s > 420s/],
-    // end-to-end only: owned inside, total over
-    ['compose', { total: 310_000, tlsReady: 200_000 }, /end-to-end 310s > 300s/],
-    ['compose-ha', { total: 370_000, tlsReady: 100_000 }, /end-to-end 370s > 360s/],
-    ['k8s', { total: 400_000, tlsReady: 150_000 }, /end-to-end 400s > 390s/],
-    ['k8s-ha', { total: 490_000, tlsReady: 100_000 }, /end-to-end 490s > 480s/],
+    // owned only: total - TLS - server create over, total - server create inside
+    // end-to-end (each total holds the fixture's 30 s server create)
+    ['compose', { total: 320_000, tlsReady: 5_000, tlsSnapshot: 0 }, /deploy-owned 285s > 180s/],
+    ['compose-ha', { total: 380_000, tlsReady: 10_000 }, /deploy-owned 340s > 300s/],
+    ['k8s', { total: 415_000, tlsReady: 20_000 }, /deploy-owned 365s > 300s/],
+    ['k8s-ha', { total: 500_000, tlsReady: 30_000 }, /deploy-owned 440s > 420s/],
+    // end-to-end only: owned inside, total - server create over
+    ['compose', { total: 340_000, tlsReady: 200_000 }, /end-to-end 310s > 300s/],
+    ['compose-ha', { total: 400_000, tlsReady: 100_000 }, /end-to-end 370s > 360s/],
+    ['k8s', { total: 430_000, tlsReady: 150_000 }, /end-to-end 400s > 390s/],
+    ['k8s-ha', { total: 520_000, tlsReady: 100_000 }, /end-to-end 490s > 480s/],
   ] as const;
 
   it.each(cases)('fails %s %o', (mode, opts, re) => {
@@ -451,7 +491,7 @@ describe('checkDeployBudget: time budgets', () => {
     const extra = [
       '[perf] cli.deploy.total 999000ms',
       '[perf] deploy.iac.upStack.prepare 800000ms',
-      '[perf] deploy.iac.upStack.resource.Server.web 700000ms',
+      '[perf] deploy.iac.upStack.resource.Network.web 700000ms',
       '[perf] deploy.k3s.primary.iac.upStack.resource.Firewall.fw 600000ms',
       '[perf] deploy.preamble.s3Setup.stateSeed 500000ms',
       '[perf] deploy.iac.upStack.seal 450000ms',
@@ -483,6 +523,102 @@ describe('checkDeployBudget: time budgets', () => {
   it('fails an empty log', () => {
     expect(checkDeployBudget('', 'k8s').ok).toBe(false);
   });
+});
+
+describe("checkDeployBudget: the provider's server create is not counted", () => {
+  const MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
+
+  it('a slow provider passes a deploy whose own work is inside budget, and the verdict names the wait', () => {
+    // DigitalOcean's 558 s standby droplet (run 44463077640), on the
+    // compose-ha fixture: 340 s of the deploy's own, 558 s of the provider's.
+    const r = checkDeployBudget(
+      fixture('compose-ha', { serverCreate: 558_000, total: 898_000 }),
+      'compose-ha',
+    );
+    expect(r.status, r.message).toBe('pass');
+    expect(r.message).toBe(
+      "deploy-owned 290s ≤ 300s, end-to-end 340s ≤ 360s (not counted: server create 558s, the provider's)",
+    );
+    expect(r.details).toMatchObject({
+      totalS: 898,
+      serverCreateS: 558,
+      serverCreateMarker: 'deploy.ha.compose.iac.upStack.standby.resource.Server.server',
+      ownedS: 290,
+      endToEndS: 340,
+    });
+  });
+
+  it('takes out only the longest server create, so creates our code serialized still count', () => {
+    // master 100 s, db 90 s, worker 80 s: one after another they would be
+    // 270 s, and only the 100 s a parallel create costs is the provider's.
+    const r = checkDeployBudget(fixture('k8s', { serverCreate: 100_000, total: 500_000 }), 'k8s');
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(
+      /^deploy-owned 315s > 300s \(deploy\.total 500s − TLS first look 85s − server create 100s, the provider's\)/,
+    );
+    expect(r.details).toMatchObject({
+      serverCreateS: 100,
+      serverCreateMarker: 'deploy.k3s.iac.upStack.resource.Server.master',
+    });
+  });
+
+  it('names the server create in an end-to-end miss too', () => {
+    const r = checkDeployBudget(fixture('k8s', { total: 430_000, tlsReady: 150_000 }), 'k8s');
+    expect(r.message).toMatch(
+      /^end-to-end 400s > 390s \(deploy\.total 430s − server create 30s, the provider's\)/,
+    );
+  });
+
+  it.each(MODES)('%s fails a log with no server create for its provider, and says why', (mode) => {
+    const r = checkDeployBudget(fixture(mode, { serverCreate: null }), mode);
+    expect(r.status).toBe('fail');
+    // The only failure: the fixture passes otherwise (the each-mode test above).
+    expect(r.message).toMatch(
+      /^no \[perf\] deploy\.<stem>\.resource\.Server\.<name> marker: a cold deploy always creates its servers, so the provider's server-create wait cannot be told from the deploy's own time \| slowest: /,
+    );
+    expect(r.details).toMatchObject({ serverCreateS: null, ownedS: null, endToEndS: null });
+  });
+
+  // What each provider's servers are timed as. Explicit, so a changed
+  // declaration shows here; the IaC census proves each is what its programs
+  // create (tests/unit/iac/server-create-timeouts-census.test.ts).
+  const TIMED_AS: Record<string, string> = {
+    hetzner: 'Server',
+    digitalocean: 'Droplet',
+    linode: 'Instance',
+    vultr: 'Instance',
+    scaleway: 'Server',
+  };
+
+  it('knows the timed server type of every registered provider', () => {
+    expect(Object.keys(TIMED_AS).sort()).toEqual(Object.keys(PROVIDERS).sort());
+  });
+
+  it.each(Object.entries(TIMED_AS))(
+    '%s: counts only its own server type (%s) as the server create',
+    (provider, type) => {
+      const table: BudgetTable = { [provider]: { compose: { c: TABLE.hetzner.compose?.cx } } };
+      const key = { provider, cpuClass: 'c' };
+      const own = judge(fixture('compose', { serverType: type }), 'compose', key, table);
+      expect(own.status, own.message).toBe('pass');
+      expect(own.details).toMatchObject({ serverCreateS: 30 });
+      // Another provider's server type, or this one's from outside the
+      // deploy (a scale's stem), is not this deploy's server create.
+      const other = type === 'Server' ? 'Droplet' : 'Server';
+      const foreign = [
+        fixture('compose', { serverType: other }),
+        fixture('compose', { serverType: type }).replace(
+          `[perf] deploy.iac.upStack.resource.${type}.`,
+          `[perf] scale.k8s.ci3.upStack.resource.${type}.`,
+        ),
+      ];
+      for (const log of foreign) {
+        const r = judge(log, 'compose', key, table);
+        expect(r.status).toBe('fail');
+        expect(r.message).toContain(`no [perf] deploy.<stem>.resource.${type}.<name> marker`);
+      }
+    },
+  );
 });
 
 describe('checkDeployBudget: cold image bytes', () => {

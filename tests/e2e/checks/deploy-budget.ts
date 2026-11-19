@@ -6,10 +6,25 @@
  * two budgets (ruling D1):
  *
  * - DEPLOY-OWNED: `deploy.total` minus the TLS first look (`deploy.tls.ready`
- *   plus `deploy.tls.snapshot`), the work the deploy controls. A first-ever
- *   deploy waits up to 180 s for Let's Encrypt's HTTP-01 validation (the CA
- *   fetching the challenge from the new server); that wait is the CA's, not ours.
- * - END-TO-END: `deploy.total` itself, a first-ever deploy with TLS issued.
+ *   plus `deploy.tls.snapshot`) and minus the provider's server create, the
+ *   work the deploy controls. A first-ever deploy waits up to 180 s for Let's
+ *   Encrypt's HTTP-01 validation (the CA fetching the challenge from the new
+ *   server); that wait is the CA's, not ours.
+ * - END-TO-END: `deploy.total` minus the provider's server create, a
+ *   first-ever deploy with TLS issued.
+ *
+ * The provider's server create is the single longest server-create timing in
+ * the deploy (`[perf] deploy.<stem>.resource.<Type>.<name>`, `<Type>` from the
+ * provider's SERVER_RESOURCE_TYPE). How long a cloud takes to make a server is
+ * nothing our code can change: Hetzner server creates took 29-52 s on most
+ * runs and 173-192 s on a slow day for the same deploy, and a DigitalOcean
+ * incident held one droplet 558 s, each failing a budget the rest of the deploy
+ * was well inside. Only the longest is taken out, because creates run in
+ * parallel: if our code ever serialized them, the extra time still counts.
+ * tests/e2e/utils/deploy-time.js measures it, for this check and for the
+ * calibration alike. A cold deploy always creates servers, so a log without
+ * a server create for its provider fails. The verdict names the server
+ * create, so a slow provider still shows.
  *
  * `deploy.total` starts when executeDeployment does (after config gathering
  * and the local preflight) and ends at the success outro.
@@ -51,6 +66,7 @@ import { readFileSync } from 'node:fs';
 import { getProviderClass } from '../../../src/lib/providers/index.js';
 import { parsePerfLines } from '../metrics/reporter.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
+import { deployTimes, serverTimingType } from '../utils/deploy-time.js';
 import { isStockFeatures } from '../utils/feature-set.js';
 import { stripAnsi } from '../utils/strip-ansi.js';
 
@@ -215,31 +231,36 @@ export function checkDeployBudget(
   const all = (name: string) => perf.filter((p) => p.name === name);
   const failures: string[] = [];
 
-  const totals = all('deploy.total');
-  const totalMs = totals.length ? Math.max(...totals.map((p) => p.ms)) : null;
-  const tlsMs = [...all('deploy.tls.ready'), ...all('deploy.tls.snapshot')].reduce(
-    (sum, p) => sum + p.ms,
-    0,
-  );
-  const ownedMs = totalMs === null ? null : totalMs - tlsMs;
+  const { totalMs, tlsMs, serverCreate, ownedMs, endToEndMs } = deployTimes(perf, key.provider);
   if (!budget) {
     failures.push(
       `no budget yet for ${key.provider}/${mode}/${key.cpuClass} (nor ${key.provider}/${mode}/${ANY_CLASS}): no passing cold deploy calibrated it ` +
         '(scripts/calibrate-deploy-budgets.js writes the row after one)',
     );
   }
-  if (totalMs === null || ownedMs === null) {
+  if (totalMs === null) {
     failures.push(
       'no [perf] deploy.total marker (VIBECARBON_PERF off, or the deploy never reached its outro)',
     );
-  } else if (budget) {
+  }
+  if (serverCreate === null) {
+    failures.push(
+      `no [perf] deploy.<stem>.resource.${serverTimingType(key.provider)}.<name> marker: a cold ` +
+        "deploy always creates its servers, so the provider's server-create wait cannot be told " +
+        "from the deploy's own time",
+    );
+  }
+  const server = serverCreate ? `server create ${s(serverCreate.ms)}s, the provider's` : '';
+  if (budget && totalMs !== null && ownedMs !== null && endToEndMs !== null) {
     if (s(ownedMs) > budget.ownedS) {
       failures.push(
-        `deploy-owned ${s(ownedMs)}s > ${budget.ownedS}s (deploy.total ${s(totalMs)}s − TLS first look ${s(tlsMs)}s)`,
+        `deploy-owned ${s(ownedMs)}s > ${budget.ownedS}s (deploy.total ${s(totalMs)}s − TLS first look ${s(tlsMs)}s − ${server})`,
       );
     }
-    if (s(totalMs) > budget.endToEndS) {
-      failures.push(`end-to-end ${s(totalMs)}s > ${budget.endToEndS}s`);
+    if (s(endToEndMs) > budget.endToEndS) {
+      failures.push(
+        `end-to-end ${s(endToEndMs)}s > ${budget.endToEndS}s (deploy.total ${s(totalMs)}s − ${server})`,
+      );
     }
   }
 
@@ -336,7 +357,11 @@ export function checkDeployBudget(
     cpuClass: key.cpuClass,
     totalS: totalMs === null ? null : s(totalMs),
     tlsFirstLookS: s(tlsMs),
+    // The provider's wait: the longest server create, taken out of both times.
+    serverCreateS: serverCreate === null ? null : s(serverCreate.ms),
+    serverCreateMarker: serverCreate?.name ?? null,
     ownedS: ownedMs === null ? null : s(ownedMs),
+    endToEndS: endToEndMs === null ? null : s(endToEndMs),
     budgetRow: budget?.row ?? null,
     budgetSeededFrom: budget?.seededFrom ?? null,
     budgetCarriedFromSince: (budget?.carriedOver && budget.carriedFromSince) || null,
@@ -361,6 +386,6 @@ export function checkDeployBudget(
   }
   const message =
     `deploy-owned ${details.ownedS}s ≤ ${budget?.ownedS}s, ` +
-    `end-to-end ${details.totalS}s ≤ ${budget?.endToEndS}s${seedNote}`;
+    `end-to-end ${details.endToEndS}s ≤ ${budget?.endToEndS}s (not counted: ${server})${seedNote}`;
   return { checkName, status: 'pass', ok: true, message, details };
 }

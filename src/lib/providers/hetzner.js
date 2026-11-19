@@ -350,6 +350,8 @@ export class HetznerProvider extends BaseProvider {
 
   static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
+  static SERVER_RESOURCE_TYPE = 'hcloud:index/server:Server';
+
   static RESERVED_IP_NAME = 'Floating IP';
 
   static US_REGIONS = ['ash', 'hil'];

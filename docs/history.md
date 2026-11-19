@@ -1522,6 +1522,24 @@ and memory over ssh before and after the scale
 requires every server to be bigger afterwards than every server was before.
 The exact-type check through the API stays the first proof.
 
+The deploy budget no longer counts the provider's server create. Three budget
+misses were the cloud's time, not the deploy's: the DigitalOcean compose-ha
+above (742 s owned against 285, with its 558 s droplet), the rerun's Hetzner
+k8s-ha (411 s against 375, server creates of 100 to 238 s) and a later Hetzner
+k8s (44515679264: 374 s against 320, server creates of 173 to 192 s, 29 to 52 s
+on other runs). The check and the calibrator now take the single longest
+server-create timing out of both the owned and the end-to-end time, through
+one function (`tests/e2e/utils/deploy-time.js`), and each provider declares
+its server type once (`SERVER_RESOURCE_TYPE`). Only the longest, because
+creates run in parallel: creates our code serialized would still count. The
+three deploys then measure 184, 173 and 182 s. Recalibrated from the 49 stock
+cold deploys since 2026-11-15, leave-one-out misses fell from 3 of 44 (exactly
+those three) to none, and the check replayed on all 48 GitHub cold deploys
+passes each one. A cold deploy log with no server create fails, and the
+verdict names the provider's wait. The cost: the rule's +60 pads a smaller
+number, so 8 of the 20 calibrated rows (all compose) would let a deploy that
+doubles still pass, against 3 before.
+
 **Do not undo:**
 - `update` runs unattended-upgrade in one transaction. Minimal steps exist
   for a job that may be stopped by a shutdown; `update` restarts the server
@@ -1530,10 +1548,15 @@ The exact-type check through the API stays the first proof.
 
 - verify-scale's fallback asks the servers, not the provider and not the
   scale's own output.
+- The deploy budget takes out the longest server create, never the sum, and
+  fails a cold deploy that recorded none.
 
 **Guard:** the one-transaction pins in `tests/unit/update/inspect.test.ts` and
 `execute.test.ts`; the ranges in `plan.test.ts` and `text.test.ts`;
-`tests/unit/e2e/server-hardware.test.ts`.
+`tests/unit/e2e/server-hardware.test.ts`; the server-create cases in
+`tests/unit/e2e/deploy-budget.test.ts`, `calibrate-deploy-budgets.test.ts` and
+`hollow-pass-census.test.ts`; the provider server-type census in
+`tests/unit/iac/server-create-timeouts-census.test.ts`.
 
 ## Added and later removed
 

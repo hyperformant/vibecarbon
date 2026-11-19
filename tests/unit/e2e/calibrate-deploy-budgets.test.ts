@@ -14,6 +14,7 @@ import {
   seededRow,
 } from '../../../scripts/calibrate-deploy-budgets.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
+import { checkDeployBudget } from '../../e2e/checks/deploy-budget.js';
 
 const s = (ownedS: number, tlsS = 5) => ({ ownedS, tlsS });
 
@@ -70,6 +71,12 @@ describe('reading the results db', () => {
     CREATE TABLE verifications (id TEXT PRIMARY KEY, step_id TEXT, check_name TEXT, details TEXT);
   `);
   let n = 0;
+  /** How each provider's server creates are timed (SERVER_RESOURCE_TYPE). */
+  const SERVER: Record<string, string> = {
+    hetzner: 'Server',
+    linode: 'Instance',
+    vultr: 'Instance',
+  };
   const deploy = (o: {
     run: string;
     started: string;
@@ -77,8 +84,11 @@ describe('reading the results db', () => {
     mode: string;
     status?: string;
     coldWarm?: string;
+    /** deploy.total, which holds the server creates (30 s by default). */
     totalS: number;
     tlsS?: number;
+    /** Each server create's seconds; `[]` records none. */
+    serversS?: number[];
     cpuClass?: string;
     /** scenarios.features as recorded: stock (`[]`) by default. */
     features?: string | null;
@@ -104,6 +114,10 @@ describe('reading the results db', () => {
     );
     perf.run(`st${n}`, 'deploy.total', o.totalS * 1000);
     perf.run(`st${n}`, 'deploy.tls.ready', (o.tlsS ?? 0) * 1000);
+    perf.run(`st${n}`, 'deploy.iac.upStack.resource.Firewall.firewall', 1500);
+    for (const [i, sec] of (o.serversS ?? [30]).entries()) {
+      perf.run(`st${n}`, `deploy.iac.upStack.resource.${SERVER[o.provider]}.s${i}`, sec * 1000);
+    }
     if (o.cpuClass) {
       db.prepare('INSERT INTO verifications VALUES (?, ?, ?, ?)').run(
         `v${n}`,
@@ -114,14 +128,14 @@ describe('reading the results db', () => {
     }
   };
   const base = { run: 'r2', started: '2026-11-05T14:00:00Z', provider: 'hetzner', mode: 'compose' };
-  deploy({ ...base, totalS: 200, tlsS: 20, cpuClass: 'cx' }); // counts: owned 180
+  deploy({ ...base, totalS: 230, tlsS: 20, cpuClass: 'cx' }); // counts: owned 180 (230 - 20 - 30)
   deploy({ ...base, totalS: 999, status: 'fail', cpuClass: 'cx' }); // failed
   deploy({ ...base, totalS: 999, coldWarm: 'warm', cpuClass: 'cx' }); // warm
   deploy({ ...base, run: 'r1', started: '2026-11-05T01:00:00Z', totalS: 999, cpuClass: 'cx' }); // before --since
   deploy({ ...base, totalS: 999, cpuClass: 'cx', features: '["observability"]' }); // add-ons
   deploy({ ...base, totalS: 999, cpuClass: 'cx', features: null }); // features not recorded
-  deploy({ ...base, totalS: 150 }); // classed provider, class not recorded: the `any` row
-  deploy({ ...base, provider: 'linode', totalS: 190 });
+  deploy({ ...base, totalS: 180 }); // classed provider, class not recorded: the `any` row
+  deploy({ ...base, provider: 'linode', totalS: 220 });
   deploy({
     ...base,
     run: 'r0',
@@ -269,6 +283,8 @@ describe('reading the results db', () => {
       INSERT INTO scenarios VALUES ('sc-extra', 'r9', 'compose', 'hetzner', '[]');
       INSERT INTO steps VALUES ('st-extra', 'sc-extra', 'deploy', 'pass', 'cold');
       INSERT INTO perf_substep (step_id, name, duration_ms) VALUES ('st-extra', 'deploy.total', 210000);
+      INSERT INTO perf_substep (step_id, name, duration_ms)
+        VALUES ('st-extra', 'deploy.iac.upStack.resource.Server.server', 30000);
       INSERT INTO verifications VALUES ('v-extra', 'st-extra', 'deploy_budget', '{"cpuClass":"cx"}');
     `);
     extra.close();
@@ -333,6 +349,95 @@ describe('reading the results db', () => {
     const ro = new Database(dbPath, { readonly: true });
     expect(() => ro.exec('DELETE FROM steps')).toThrow(/readonly/);
     ro.close();
+  });
+});
+
+describe("the deploy-owned time is the check's own measure", () => {
+  const dir = createTempDir('calibrate-owned-');
+  const dbPath = path.join(dir, 'e2e.db');
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE runs (id TEXT PRIMARY KEY, started_at TEXT);
+    CREATE TABLE scenarios (id TEXT PRIMARY KEY, run_id TEXT, mode TEXT, provider TEXT, features TEXT);
+    CREATE TABLE steps (id TEXT PRIMARY KEY, scenario_id TEXT, name TEXT, status TEXT, cold_warm TEXT);
+    CREATE TABLE perf_substep (id INTEGER PRIMARY KEY AUTOINCREMENT, step_id TEXT, name TEXT, duration_ms INTEGER);
+    CREATE TABLE verifications (id TEXT PRIMARY KEY, step_id TEXT, check_name TEXT, details TEXT);
+    INSERT INTO runs VALUES ('r1', '2026-11-19T05:00:00Z');
+  `);
+  /** A stock Hetzner k8s cold deploy that passed, with these `[perf]` rows (ms). */
+  const deploy = (id: string, perf: Record<string, number>) => {
+    db.prepare("INSERT INTO scenarios VALUES (?, 'r1', 'k8s', 'hetzner', '[]')").run(`sc-${id}`);
+    db.prepare("INSERT INTO steps VALUES (?, ?, 'deploy', 'pass', 'cold')").run(id, `sc-${id}`);
+    db.prepare(
+      'INSERT INTO verifications VALUES (?, ?, \'deploy_budget\', \'{"cpuClass":"cpx"}\')',
+    ).run(`v-${id}`, id);
+    for (const [name, ms] of Object.entries(perf)) {
+      db.prepare('INSERT INTO perf_substep (step_id, name, duration_ms) VALUES (?, ?, ?)').run(
+        id,
+        name,
+        ms,
+      );
+    }
+  };
+  // Hetzner k8s on a slow day (run 44515679264): three servers made side by
+  // side in 173-192 s, inside a 376 s deploy.
+  const slowDay = {
+    'deploy.total': 375_874,
+    'deploy.tls.ready': 695,
+    'deploy.tls.snapshot': 1_183,
+    'deploy.k3s.iac.upStack.resource.Network.network': 1_200,
+    'deploy.k3s.iac.upStack.resource.Server.db': 172_940,
+    'deploy.k3s.iac.upStack.resource.Server.master': 191_303,
+    'deploy.k3s.iac.upStack.resource.Server.worker-1': 191_654,
+    // Another command's create, never this deploy's.
+    'scale.k8s.ci3.upStack.resource.Server.worker-2': 300_000,
+  };
+  deploy('slow-day', slowDay);
+  // No server-create row at all: the provider's wait cannot be taken out.
+  deploy('no-servers', { 'deploy.total': 250_000, 'deploy.tls.ready': 2_000 });
+  db.close();
+  const since = '2026-11-19T00:00:00Z';
+
+  it('takes deploy.total minus the TLS first look and the LONGEST server create, never their sum', () => {
+    const { groups } = readSamples(dbPath, since);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].rows).toEqual([
+      // 182 s, not the 10 s that subtracting all three creates would leave.
+      { ownedS: (375_874 - 1_878 - 191_654) / 1000, tlsS: 1.878, serverCreateS: 191.654 },
+    ]);
+  });
+
+  it('measures exactly what the check judges, with the same function', () => {
+    const [sample] = readSamples(dbPath, since).groups[0].rows;
+    const log = Object.entries(slowDay)
+      .map(([name, ms]) => `[perf] ${name} ${ms}ms`)
+      .join('\n');
+    const row = { ownedS: 900, endToEndS: 960, samples: 1 };
+    const r = checkDeployBudget(
+      log,
+      'k8s',
+      { provider: 'hetzner', cpuClass: 'cpx' },
+      { hetzner: { k8s: { cpx: row } } },
+    );
+    expect(r.details).toMatchObject({
+      ownedS: Math.round(sample.ownedS),
+      tlsFirstLookS: Math.round(sample.tlsS),
+      serverCreateS: Math.round(sample.serverCreateS),
+    });
+  });
+
+  it('ignores and reports a deploy with no server-create row, never counting the wait as zero', () => {
+    const samples = readSamples(dbPath, since);
+    expect(samples.noServerCreate).toBe(1);
+    expect(samples.groups[0].rows).toHaveLength(1);
+    const built = buildTable(samples, since);
+    expect(built.table.budgets.hetzner.k8s.cpx.samples).toBe(1);
+    const report = renderReport(built, since);
+    expect(report).toMatch(
+      /Ignored 1 cold deploys with no \[perf\] server-create row for their provider\./,
+    );
+    // The row shows the provider's wait it left out.
+    expect(report).toMatch(/\| hetzner \| k8s \| cpx \| 1 \| 335 \| 395 \| 60 \| 192 \| /);
   });
 });
 

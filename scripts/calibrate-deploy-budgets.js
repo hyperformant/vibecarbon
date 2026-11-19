@@ -32,20 +32,42 @@
  * Only modes in a provider's SUPPORTED_TIERS are enumerated.
  *
  * Rule (seconds):
- *   owned     = ceil5(1.5 x median + 60) of deploy.total minus the TLS first
- *               look, at any sample count. The median is nearest-rank.
+ *   owned     = ceil5(1.5 x median + 60) of the deploy-owned time, at any
+ *               sample count. The median is nearest-rank.
  *   endToEnd  = owned + the TLS allowance, ceil5(1.5 x the slowest TLS first
  *               look) and never under 60 s: that wait is the CA's, not ours.
  * ceil5 rounds up to a multiple of 5.
+ *
+ * The deploy-owned time is deploy.total minus the TLS first look and minus the
+ * provider's server create (the single longest server-create timing), measured
+ * by tests/e2e/utils/deploy-time.js, the same function the check judges with,
+ * from the deploy's `[perf]` rows in perf_substep. Since 2026-11-19 the
+ * server create is out of it: how long a cloud takes to make a server is not
+ * ours to change, and it moved the old number by minutes (Hetzner k8s server
+ * creates 29-52 s on most runs and 173-192 s on a slow day, one DigitalOcean
+ * droplet 558 s in an incident), failing deploys whose own work was steady.
+ * Only the longest create comes out, since creates run in parallel: creates
+ * our code serialized would still count. A sample with no server-create row
+ * cannot be split that way, so it is ignored and reported, never measured as
+ * if the provider had taken no time. Every sample since 2026-11-15T20:06:33Z
+ * has one (49 of 49): resource timings predate that table.
+ *
+ * Judged leave-one-out over those samples (the 44 in rows of two or more), the
+ * old quantity missed 3, exactly the three provider-slow deploys above, and
+ * the new one none. The cost: the rule's +60 now pads a smaller number, so a
+ * row whose own work is under about 2 minutes lets a deploy that doubles still
+ * pass: 8 of the 20 rows (all compose, medians 81-127 s), where the same
+ * samples on the old quantity gave 3 (Hetzner and Scaleway compose). Every
+ * budget sits 1.72x to 2.28x its row's median.
  *
  * Why this rule (2026-11-14): a budget is there to catch a regression, not to
  * fail a matrix on ordinary variance. The old rule (p90 + 15 at n >= 4, else
  * max + 30) put about one in ten cold deploys over budget on runs it had not
  * seen, which fails most 16-scenario matrices. Judged leave-one-out over 198
  * cold deploys since 2026-11-05 (102 GitHub, 96 local), this rule missed 1%
- * on GitHub and none locally. Every budget sits 1.7x to 2.03x its row's
- * median, so a deploy that doubles fails on every row but the two fastest
- * (Hetzner compose, about 2 minutes), where it just passes. The +60 is the
+ * on GitHub and none locally. Every budget then sat 1.7x to 2.03x its row's
+ * median, so a deploy that doubled failed on every row but the two fastest
+ * (Hetzner compose, about 2 minutes), where it just passed. The +60 is the
  * laptop's fixed overhead: local medians ran 1.4-1.5x GitHub's on the short
  * Hetzner compose deploys and about 1.07x elsewhere.
  *
@@ -77,13 +99,16 @@
  * out: the stock row came in at or under the older row on 14 of 16 classes,
  * and 5 s and 15 s over it on the other two (DigitalOcean regular k8s and
  * Linode k8s, n = 2 each). Read a carried row as a ceiling to tighten, not a
- * stock number.
+ * stock number. A row carried from a table before 2026-11-19 also measured
+ * the provider's server create as the deploy's own time, so it errs loose by
+ * that much more.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { getProviderClass, PROVIDERS } from '../src/lib/providers/index.js';
+import { deployTimes } from '../tests/e2e/utils/deploy-time.js';
 import { isStockFeaturesRecord } from '../tests/e2e/utils/feature-set.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -256,9 +281,6 @@ export function declaredClasses(provider) {
 const SAMPLE_SQL = `
   SELECT st.id AS step_id, COALESCE(s.provider, 'hetzner') AS provider, s.mode AS mode,
     s.features AS features,
-    (SELECT MAX(duration_ms) FROM perf_substep WHERE step_id = st.id AND name = 'deploy.total') AS total_ms,
-    (SELECT COALESCE(SUM(duration_ms), 0) FROM perf_substep
-       WHERE step_id = st.id AND name IN ('deploy.tls.ready', 'deploy.tls.snapshot')) AS tls_ms,
     (SELECT details FROM verifications WHERE step_id = st.id AND check_name = 'deploy_budget'
        ORDER BY rowid DESC LIMIT 1) AS details
   FROM steps st
@@ -266,6 +288,9 @@ const SAMPLE_SQL = `
   JOIN runs r ON r.id = s.run_id
   WHERE st.name = 'deploy' AND st.status = 'pass' AND st.cold_warm = 'cold'
     AND r.started_at >= ?`;
+
+/** A deploy's `[perf]` entries, as the runner recorded them from its output. */
+const PERF_SQL = 'SELECT name, duration_ms AS ms FROM perf_substep WHERE step_id = ?';
 
 function recordedClass(details) {
   try {
@@ -279,31 +304,40 @@ function recordedClass(details) {
 /**
  * Read the samples from one or more dbs, each opened read-only. A step id seen
  * in an earlier db (a copy of the same run) is not counted again. Returns the
- * grouped samples, and how many otherwise-eligible deploys were not stock.
+ * grouped samples, how many otherwise-eligible deploys were not stock, and how
+ * many had no server-create timing to take out.
  * @param {string | string[]} dbPaths
  * @param {string} since
  */
 export function readSamples(dbPaths, since) {
   const groups = new Map();
   const seen = new Set();
-  const counts = { nonStock: 0 };
+  const counts = { nonStock: 0, noServerCreate: 0 };
   for (const dbPath of [dbPaths].flat()) readOne(dbPath, since, groups, seen, counts);
-  return { groups: [...groups.values()], nonStock: counts.nonStock };
+  return { groups: [...groups.values()], ...counts };
 }
 
 function readOne(dbPath, since, groups, seen, counts) {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
+    const perfOf = db.prepare(PERF_SQL);
     for (const row of db.prepare(SAMPLE_SQL).all(since)) {
       if (seen.has(row.step_id)) continue;
       seen.add(row.step_id);
       if (!MODES.includes(row.mode) || !Object.hasOwn(PROVIDERS, row.provider)) continue;
       if (!supportedModes(row.provider).includes(row.mode)) continue;
-      if (row.total_ms == null) continue;
+      const times = deployTimes(perfOf.all(row.step_id), row.provider);
+      if (times.totalMs === null) continue;
       // Budgets are for stock deploys: one with add-ons (or no recorded
       // feature set) would size a budget the stock matrix never runs.
       if (!isStockFeaturesRecord(row.features)) {
         counts.nonStock++;
+        continue;
+      }
+      // No server-create row: the provider's wait cannot be taken out, and
+      // counting none would size the budget on a number the check never sees.
+      if (times.ownedMs === null) {
+        counts.noServerCreate++;
         continue;
       }
       // No recorded class goes in the provider + mode `any` row: a class is
@@ -316,8 +350,9 @@ function readOne(dbPath, since, groups, seen, counts) {
       if (!groups.has(gk))
         groups.set(gk, { provider: row.provider, mode: row.mode, cls, rows: [] });
       groups.get(gk).rows.push({
-        ownedS: (row.total_ms - row.tls_ms) / 1000,
-        tlsS: row.tls_ms / 1000,
+        ownedS: times.ownedMs / 1000,
+        tlsS: times.tlsMs / 1000,
+        serverCreateS: times.serverCreate.ms / 1000,
       });
     }
   } finally {
@@ -330,7 +365,7 @@ function readOne(dbPath, since, groups, seen, counts) {
  * `previous` (the table being overwritten, if any) that the samples do not
  * cover.
  */
-export function buildTable({ groups, nonStock = 0 }, since, previous) {
+export function buildTable({ groups, nonStock = 0, noServerCreate = 0 }, since, previous) {
   const budgets = {};
   const rows = [];
   for (const g of groups.sort(byRowKey)) {
@@ -356,27 +391,37 @@ export function buildTable({ groups, nonStock = 0 }, since, previous) {
     since,
     budgets: sortedTable(budgets),
   };
-  return { table, rows, seeds, carried, noData, nonStock };
+  return { table, rows, seeds, carried, noData, nonStock, noServerCreate };
 }
 
 export const RULE =
-  'owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled; ' +
-  'endToEnd = owned + ' +
+  'owned = ceil5(1.5 x median + 60) over local and GitHub stock cold deploys (no add-ons) pooled, ' +
+  "of deploy.total minus the TLS first look and minus the provider's server create (the longest " +
+  'server-create timing, tests/e2e/utils/deploy-time.js); endToEnd = owned + ' +
   'tlsAllowanceS (ceil5(1.5 x the slowest TLS first look), at least 60). A class with no stock ' +
   'sample keeps its row from the table this one replaced (carriedOver, with carriedFromSince, ' +
   'the since it was calibrated from) until a stock sample replaces it. A provider + mode with ' +
   "no row is seeded (samples 0) with the ceil5'd mean of that mode's calibrated rows on the " +
   'other providers, never a carried row. Regenerate with scripts/calibrate-deploy-budgets.js.';
 
-export function renderReport({ rows, seeds = [], carried = [], noData, nonStock = 0 }, since) {
+/** The median server create a row's samples had taken out, or `-` when none recorded one. */
+function medianServerCreate(samples = []) {
+  const waits = samples.map((x) => x.serverCreateS).filter(Number.isFinite);
+  return waits.length ? Math.round(percentile(waits, 0.5)) : '-';
+}
+
+export function renderReport(
+  { rows, seeds = [], carried = [], noData, nonStock = 0, noServerCreate = 0 },
+  since,
+) {
   const out = [
     `# Deploy budgets (runs since ${since})`,
     '',
-    '| provider | mode | class | n | owned s | end-to-end s | TLS allowance s | rule |',
-    '|---|---|---|---|---|---|---|---|',
+    '| provider | mode | class | n | owned s | end-to-end s | TLS allowance s | median server create s (not counted) | rule |',
+    '|---|---|---|---|---|---|---|---|---|',
     ...rows.map(
       (r) =>
-        `| ${r.provider} | ${r.mode} | ${r.cls} | ${r.samples} | ${r.ownedS} | ${r.endToEndS} | ${r.tlsAllowanceS} | ${
+        `| ${r.provider} | ${r.mode} | ${r.cls} | ${r.samples} | ${r.ownedS} | ${r.endToEndS} | ${r.tlsAllowanceS} | ${medianServerCreate(r.rows)} | ${
           '1.5 x median + 60'
         } |`,
     ),
@@ -402,6 +447,10 @@ export function renderReport({ rows, seeds = [], carried = [], noData, nonStock 
     '## Not stock (budgets are for stock deploys: the app and its database, no add-ons)',
     '',
     `Ignored ${nonStock} cold deploys that were not stock (add-ons, or no feature set recorded).`,
+    '',
+    "## No server-create timing (the provider's wait cannot be taken out)",
+    '',
+    `Ignored ${noServerCreate} cold deploys with no [perf] server-create row for their provider.`,
     '',
   ];
   return out.join('\n');
