@@ -1,6 +1,6 @@
 # Plan: remove duplicated code and the drift it caused
 
-Status: two waves merged on 2026-11-18. The second (#542 to #545) ported the last three template mirror tests, added the organisation rename route, shared the sweep pass outline, the ssh helper in the e2e checks and the CI sweep entry points, and moved tests onto shared repo, temp directory and prompt helpers. Still open: real-server proof of both waves, the deploy wizard test harness, the per-provider table tests, the knip blind spot behind 14 `new URL` reads, and the smaller rows of Phase 3 not named in `docs/history.md`. This is a working document: when
+Status: three waves merged on 2026-11-18 (the third is #547 to #552). Still open: real-server proof of all three; bug 15 (D7, unescaped kubectl strings in `ha/index.js`, needs a k8s-ha run); Paddle and Polar `getSubscription` still return null on any failure, as Stripe's did; `resolveBackendUrl` signs with `nbg1` for a record with no region (`src/lib/iac/index.js`); the organization slug is trimmed after its pattern check; `scaleway-guided-setup.js` exports three functions only it uses; and whether `carbon/k8s/flux/clusters/standby/vibecarbon.yaml`, which no workflow applies, can go (needs k8s-ha proof). This is a working document: when
 the work ships, its decisions go into `docs/history.md` and this file is
 deleted.
 
