@@ -26,26 +26,17 @@ const clackMock = await vi.hoisted(async () => {
 vi.mock('@clack/prompts', () => clackMock);
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof projectConfigStore> | null }));
-vi.mock('../../../src/lib/config.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  loadProjectConfig: () => structuredClone(store.current?.state.disk ?? null),
-  updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
-    store.current?.updateProjectConfig(fn),
-  registerProject: () => {},
-}));
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).configOverStore(await orig(), () => store.current),
+);
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
-vi.mock('../../../src/lib/deploy/delta.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  collectDeployDelta: () => ({}),
-  formatDeployDeltaLines: () => [],
-}));
-vi.mock('../../../src/lib/deploy/preflight.js', () => ({
-  assertOperatorConfig: vi.fn(),
-  // The scaffold is current (preflight-role-file owns the stale-scaffold refusal).
-  assertScaffoldSupportsRoleFile: vi.fn(),
-  checkDeployPrerequisites: vi.fn(),
-  operatorCheckEnvs: () => [],
-}));
+vi.mock('../../../src/lib/deploy/delta.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).noDeployDelta(await orig()),
+);
+// The scaffold is current (preflight-role-file owns the stale-scaffold refusal).
+vi.mock('../../../src/lib/deploy/preflight.js', async () =>
+  (await import('../helpers/deploy-to-plan.js')).preflightPasses(),
+);
 vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
 vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),

@@ -795,6 +795,28 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/state-passphrase-stub.test.ts'],
   },
+  // The module stubs that take the real executeDeployment to its plan, each
+  // spelled out the same way in every test that drives it there.
+  ...(
+    [
+      ['configOverStore', ['skeleton-env-persists-types']],
+      ['noDeployDelta', ['skeleton-env-persists-types']],
+      ['preflightPasses', ['skeleton-env-persists-types']],
+      ['localBuildNoCi', []],
+      ['mintedAppStorageKey', []],
+    ] as const
+  ).map(([helper, more]) => ({
+    helper,
+    definition: 'tests/unit/helpers/deploy-to-plan.ts',
+    consumers: [
+      'backups-bucket-regions',
+      'deploy-bundle-lifetime',
+      'k8s-ha-dns-single-writer',
+      'open-state-backend-wiring',
+      ...more,
+    ].map((name) => `tests/unit/deploy/${name}.test.ts`),
+    deepTests: ['tests/unit/helpers/deploy-to-plan.test.ts'],
+  })),
 ] as const;
 
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {

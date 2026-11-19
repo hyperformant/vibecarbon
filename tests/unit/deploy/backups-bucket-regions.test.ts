@@ -69,30 +69,19 @@ vi.mock('../../../src/lib/deploy/bundle.js', async (orig) => {
 });
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof projectConfigStore> | null }));
-vi.mock('../../../src/lib/config.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  loadProjectConfig: () => structuredClone(store.current?.state.disk ?? null),
-  updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
-    store.current?.updateProjectConfig(fn),
-  registerProject: () => {},
-}));
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).configOverStore(await orig(), () => store.current),
+);
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
-vi.mock('../../../src/lib/deploy/delta.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  collectDeployDelta: () => ({}),
-  formatDeployDeltaLines: () => [],
-}));
-vi.mock('../../../src/lib/deploy/preflight.js', () => ({
-  assertOperatorConfig: vi.fn(),
-  assertScaffoldSupportsRoleFile: vi.fn(),
-  checkDeployPrerequisites: vi.fn(),
-  operatorCheckEnvs: () => [],
-}));
-vi.mock('../../../src/lib/ci-setup.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  ciAvailable: () => false,
-  resolveBuildMode: () => 'local',
-}));
+vi.mock('../../../src/lib/deploy/delta.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).noDeployDelta(await orig()),
+);
+vi.mock('../../../src/lib/deploy/preflight.js', async () =>
+  (await import('../helpers/deploy-to-plan.js')).preflightPasses(),
+);
+vi.mock('../../../src/lib/ci-setup.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).localBuildNoCi(await orig()),
+);
 vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
@@ -103,17 +92,9 @@ vi.mock('../../../src/lib/operator-ip.js', () => ({
 vi.mock('../../../src/lib/deploy/compose/app-image.js', () => ({
   buildComposeAppImage: vi.fn(async () => undefined),
 }));
-vi.mock('../../../src/lib/deploy/app-storage-credential.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  resolveAppStorageCredential: vi.fn(async () => ({
-    accessKey: 'AK',
-    secretKey: 'SK',
-    record: null,
-    tier: 'isolated',
-    scoping: 'mint',
-  })),
-  syncHetznerFences: vi.fn(),
-}));
+vi.mock('../../../src/lib/deploy/app-storage-credential.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).mintedAppStorageKey(await orig()),
+);
 // The real tracker's skip contract for s3-setup: a matching hash (here
 // `run.skipStorageSetup`) skips only when the verify probe agrees, and a
 // probe that throws keeps the skip. `priorResults` is what an earlier run
