@@ -399,6 +399,35 @@ describe('compose-ha scale: the standby arm reseeds, never restores', () => {
     expect(h.reseeds).toEqual([]);
     expect(h.tunnels).toEqual([]);
   });
+
+  // The standby arm stops before it waits on the primary arm, so nothing
+  // awaits the wait when the primary arm fails and rejects it. That rejection
+  // must not surface as an unhandled one: the primary arm's own failure is
+  // the one reported.
+  it('both arms, standby arm fails before it waits, then the primary arm fails: one failure, nothing unhandled', async () => {
+    reset();
+    h.failRestore.value = true;
+    const { provider, ctx } = makeCtx('both');
+    provider.createServer.mockImplementation(async (args: { name: string }) => {
+      if (args.name.includes('standby')) throw new Error('standby server create failed');
+      return { id: 'p-new', n: 1 };
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/restore failed/);
+      // Let a stray rejection surface before asserting there was none.
+      await new Promise((r) => setTimeout(r, 0));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+    expect(provider.deleteServer).toHaveBeenCalledWith('p-new');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('p-old');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('s-old');
+    expect(h.reseeds).toEqual([]);
+  });
 });
 
 describe('compose-ha scale: each replacement gets its wal-g role file before its first up', () => {
