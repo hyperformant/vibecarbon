@@ -1240,6 +1240,23 @@ function isNoSuchBucket(err) {
 }
 
 /**
+ * The storage region this environment's buckets live in: the one its record
+ * names. Every deploy records `s3.region` before any remote work, so a record
+ * without one was edited by hand, and destroy then takes the region the
+ * deploy itself would have chosen: the provider's own mapping of the compute
+ * region (`resolveS3Region`, which answers that provider's default for an
+ * unknown or missing one). Never another provider's location: a Hetzner
+ * literal here once sent every provider's destroy to `fsn1`, which every
+ * other provider's S3 client refuses.
+ * @param {{ provider?: string, region?: string, s3?: { region?: string } }} envConfig
+ * @returns {Promise<string>}
+ */
+async function recordedStorageRegion(envConfig) {
+  if (envConfig.s3?.region) return envConfig.s3.region;
+  return resolveS3RegionFor(providerIdFor(envConfig), envConfig.region);
+}
+
+/**
  * Run `op` on a bucket at its recorded region, and when that region says the
  * bucket does not exist, look for it in every region these keys can address
  * before concluding anything (locateBucket; keys made for one cluster, as on
@@ -1278,23 +1295,6 @@ function isNoSuchBucket(err) {
  * @param {{ region?: string }} [ran] - written: where `op` runs
  * @returns {Promise<{ result: T, region: string, gone?: false } | { gone: true, searched: number }>}
  */
-/**
- * The storage region this environment's buckets live in: the one its record
- * names. Every deploy records `s3.region` before any remote work, so a record
- * without one was edited by hand, and destroy then takes the region the
- * deploy itself would have chosen: the provider's own mapping of the compute
- * region (`resolveS3Region`, which answers that provider's default for an
- * unknown or missing one). Never another provider's location: a Hetzner
- * literal here once sent every provider's destroy to `fsn1`, which every
- * other provider's S3 client refuses.
- * @param {{ provider?: string, region?: string, s3?: { region?: string } }} envConfig
- * @returns {Promise<string>}
- */
-async function recordedStorageRegion(envConfig) {
-  if (envConfig.s3?.region) return envConfig.s3.region;
-  return resolveS3RegionFor(providerIdFor(envConfig), envConfig.region);
-}
-
 async function atBucketRegion(store, bucket, region, op, ran = {}) {
   ran.region = region;
   try {
