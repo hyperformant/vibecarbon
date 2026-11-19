@@ -767,6 +767,34 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/teardown-provider.test.ts'],
   },
+  {
+    // The fixed state passphrase for tests that open stacks through a mocked
+    // LocalWorkspace, eighteen copies of the same four lines. A copy that
+    // stops stubbing it writes a passphrase into the repository root.
+    helper: 'fixedStatePassphrase',
+    definition: 'tests/_shared/state-passphrase-stub.ts',
+    consumers: [
+      'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
+      'tests/unit/iac/create-timeout.test.ts',
+      'tests/unit/iac/destroy-stack-partial-detection.test.ts',
+      'tests/unit/iac/destroy-stack-partial-failure.test.ts',
+      'tests/unit/iac/ha-pair-state-concurrency.test.ts',
+      'tests/unit/iac/provider-stack-config.test.ts',
+      'tests/unit/iac/remove-stack-state.test.ts',
+      'tests/unit/iac/retired-resources.test.ts',
+      'tests/unit/iac/server-state-retarget.test.ts',
+      'tests/unit/iac/size-unavailable.test.ts',
+      'tests/unit/iac/stack-absence-parity.test.ts',
+      'tests/unit/iac/stack-select-never-clobbers.test.ts',
+      'tests/unit/iac/state-lock-wiring.test.ts',
+      'tests/unit/iac/state-project-scoping.test.ts',
+      'tests/unit/iac/state-seal.test.ts',
+      'tests/unit/iac/state-telemetry.test.ts',
+      'tests/unit/iac/up-stack-resource-timing.test.ts',
+      'tests/unit/iac/up-stack-stale-frontend.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/state-passphrase-stub.test.ts'],
+  },
 ] as const;
 
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {

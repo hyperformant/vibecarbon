@@ -23,13 +23,9 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   },
 }));
 vi.mock('../../../src/lib/cli/progress.js', () => ({ progressLog: vi.fn() }));
-// upStack's stack open checks the project's state passphrase first, which
-// would write one into the cwd's .env.local and .vibecarbon.json (the repo
-// root), so it is stubbed; state-passphrase-census.test.ts covers the wiring.
-vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
-  ensureStatePassphrase: async () => 'test-passphrase',
-}));
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) =>
+  (await import('../../_shared/state-passphrase-stub.js')).fixedStatePassphrase(await orig()),
+);
 
 const STOCKOUT = [
   'Diagnostics:',

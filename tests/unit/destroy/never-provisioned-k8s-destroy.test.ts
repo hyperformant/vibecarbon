@@ -31,10 +31,9 @@ vi.mock('@clack/prompts', async (orig) =>
   }),
 );
 
-vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
-  ensureStatePassphrase: async () => 'test-passphrase',
-}));
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) =>
+  (await import('../../_shared/state-passphrase-stub.js')).fixedStatePassphrase(await orig()),
+);
 
 // The exact `pulumi stack select` failure of a backend whose bucket was never
 // created (excitingai, 2026-10-16).
