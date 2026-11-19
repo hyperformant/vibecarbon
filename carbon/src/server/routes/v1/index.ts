@@ -35,12 +35,14 @@ v1Routes.route('/admin/setup', setupRoutes);
 // VALIDATION SCHEMAS
 // ============================================================================
 
+// The name is trimmed before the length checks, so a name of spaces only is
+// refused (as in updateOrganizationSchema).
 const createOrganizationSchema = z.object({
   name: z
     .string()
+    .trim()
     .min(1, 'Name is required')
-    .max(100, 'Name must be 100 characters or less')
-    .trim(),
+    .max(100, 'Name must be 100 characters or less'),
   slug: z
     .string()
     .min(3, 'Slug must be at least 3 characters')

@@ -249,12 +249,20 @@ describe('POST /organizations', () => {
     expect(db.writes[0].values).toEqual({ name: 'My Org', slug: 'my-org' });
   });
 
+  // Trimmed before the length checks, as the rename route does.
+  it('measures the name after trimming it', async () => {
+    const name = 'a'.repeat(100);
+    expect((await create({ name: `  ${name}  `, slug: 'my-org' })).status).toBe(201);
+    expect(db.writes[0].values).toEqual({ name, slug: 'my-org' });
+  });
+
   it.each(['my-org', 'org-123', 'test-org-2024', 'abc-def-123'])('accepts the slug %s', async (slug) => {
     expect((await create({ name: 'My Org', slug })).status).toBe(201);
   });
 
   it.each([
     ['an empty name', { name: '', slug: 'my-org' }, 'Name is required'],
+    ['a name of spaces only', { name: '   ', slug: 'my-org' }, 'Name is required'],
     ['a name over 100 characters', { name: 'a'.repeat(101), slug: 'my-org' }, 'Name must be 100 characters or less'],
     ['a slug under 3 characters', { name: 'My Org', slug: 'ab' }, 'Slug must be at least 3 characters'],
     ['a slug over 50 characters', { name: 'My Org', slug: 'a'.repeat(51) }, 'Slug must be 50 characters or less'],
