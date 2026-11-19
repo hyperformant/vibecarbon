@@ -257,6 +257,8 @@ export class ScalewayProvider extends BaseProvider {
   // are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
 
+  static SERVER_RESOURCE_TYPE = 'scaleway:instance/server:Server';
+
   /**
    * The compose program gives the server a flexible IP, made before the
    * server: destroy looks for one by the environment's labels

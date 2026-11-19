@@ -162,6 +162,8 @@ export class VultrProvider extends BaseProvider {
   // recorded in the audit; the k8s tiers are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
 
+  static SERVER_RESOURCE_TYPE = 'vultr:index/instance:Instance';
+
   // Compute regions WITH a co-located Object Storage cluster (same
   // in-region-backup doctrine as the sibling providers; live cluster
   // listing 2026-08-08 — note the cluster slugs are NOT these ids, see

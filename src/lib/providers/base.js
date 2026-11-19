@@ -506,6 +506,18 @@ export class BaseProvider {
    */
   static RETIRED_STACK_RESOURCES = Object.freeze([]);
 
+  /**
+   * The Pulumi type token of the server (VM) this provider's IaC programs
+   * create, one of SERVER_RESOURCE_TYPES (lib/iac/create-timeout.js). Every
+   * program of the provider builds its servers as this type and no other
+   * (tests/unit/iac/server-create-timeouts-census.test.ts). The e2e deploy
+   * budget reads it to pick the provider's server creates out of a deploy's
+   * per-resource timings (lib/iac/resource-timing.js), because the time a
+   * provider takes to create a server is its wait, not the deploy's.
+   * @type {string}
+   */
+  static SERVER_RESOURCE_TYPE = '';
+
   // ── S3-egress VPC allowance (M3 Task 9c) ─────────────────────────────
   // On DigitalOcean, same-region Spaces endpoints resolve INSIDE pods to a
   // VPC-internal gateway address (e.g. nyc3.digitaloceanspaces.com ->

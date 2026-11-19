@@ -38,7 +38,10 @@
  * 5. DEPLOY BUDGET. tests/e2e/checks/deploy-budget.ts judges a cold deploy
  *    from its own [perf] and [state] lines. Its hollow shape is a log without
  *    them (VIBECARBON_PERF off, a truncated capture): that must FAIL, never
- *    pass because no marker was over budget.
+ *    pass because no marker was over budget. That includes the provider's
+ *    server create, which the budget takes out of the deploy's time: a cold
+ *    deploy always creates servers, so a log without one is never measured as
+ *    if the provider had taken no time.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -864,6 +867,21 @@ describe('DEPLOY BUDGET: every check fails on a log without its markers', () => 
     expect(r.status, r.errorMessage).toBe('fail');
     expect(r.errorMessage).not.toMatch(/no budget yet/);
   });
+
+  it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const)(
+    '%s: a log with deploy.total but no server create fails, naming the missing marker',
+    (mode) => {
+      const log = [
+        '[perf] deploy.iac.upStack.resource.Firewall.firewall 1500ms',
+        '[perf] deploy.total 100000ms',
+      ].join('\n');
+      const r = deployBudget.checkDeployBudget(log, mode, BUDGET_KEY, BUDGET_TABLE);
+      expect(r.status).toBe('fail');
+      expect(r.errorMessage).toMatch(
+        /no \[perf\] deploy\.<stem>\.resource\.Server\.<name> marker: a cold deploy always creates its servers/,
+      );
+    },
+  );
 
   it('a combination with no budget row fails, even on a log that would pass', () => {
     const r = deployBudget.checkDeployBudget(

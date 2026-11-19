@@ -317,6 +317,8 @@ export class LinodeProvider extends BaseProvider {
   // need a VPC, which two regions lack (K8S_UNSUPPORTED_REGIONS).
   static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
+  static SERVER_RESOURCE_TYPE = 'linode:index/instance:Instance';
+
   /**
    * Regions with no VPC, which the k8s tiers need for node-to-node traffic.
    * k8s and k8s-ha refuse them (k8sRegionProblem) and the region lists omit
