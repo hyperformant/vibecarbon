@@ -32,6 +32,7 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
+import { teardownProvider } from '../../_shared/teardown-provider.js';
 import { type Config, projectConfigStore } from '../helpers/project-config-store.js';
 
 const logs: string[] = [];
@@ -72,42 +73,34 @@ const world = {
 };
 
 function FakeProvider() {
-  const handler: ProxyHandler<object> = {
-    get: (_t, prop) => {
-      if (typeof prop !== 'string' || prop === 'then') return undefined;
-      if (prop === 'constructor') return FakeProvider;
-      if (prop === 'deleteServer') {
-        return async (
-          _id: unknown,
-          options?: { onLeftover?: (line: Record<string, string>) => void },
-        ) => {
-          if (world.serverDelete === 'throws') throw new Error('server is locked (HTTP 423)');
-          if (world.serverDelete === 'leaves-volume') {
-            // What Scaleway's deleteServer hands over for a detached SBS
-            // volume it could not delete.
-            options?.onLeftover?.({
-              resourceClass: 'detached-volume',
-              resource: 'SBS volume vol-9 (fr-par-1)',
-              reason: "server 11's delete left it behind, and deleting it failed for 60 s",
-              hint: 'Delete it in the FakeCloud console under Volumes; it bills until removed.',
-            });
-            return true;
-          }
-          return world.serverDelete === 'deleted';
-        };
-      }
-      if (prop === 'deleteFirewallByName') {
-        return async () => ({ deleted: false, everExisted: false, apiError: null });
-      }
-      if (prop === 'listServersDetailed') return async () => ({ items: [], complete: true });
-      if (prop === 'listVolumesDetailed') return async () => ({ items: [], complete: true });
-      if (prop === 'deleteReservedIpsByLabels') return async () => ({ deleted: [], failed: [] });
-      if (/^(delete|remove|destroy|detach|release)/.test(prop)) return async () => false;
-      if (/^(list|find|get)/.test(prop)) return async () => [];
-      return () => undefined;
+  return teardownProvider({
+    ctor: FakeProvider,
+    methods: {
+      deleteServer: async (
+        _id: unknown,
+        options?: { onLeftover?: (line: Record<string, string>) => void },
+      ) => {
+        if (world.serverDelete === 'throws') throw new Error('server is locked (HTTP 423)');
+        if (world.serverDelete === 'leaves-volume') {
+          // What Scaleway's deleteServer hands over for a detached SBS
+          // volume it could not delete.
+          options?.onLeftover?.({
+            resourceClass: 'detached-volume',
+            resource: 'SBS volume vol-9 (fr-par-1)',
+            reason: "server 11's delete left it behind, and deleting it failed for 60 s",
+            hint: 'Delete it in the FakeCloud console under Volumes; it bills until removed.',
+          });
+          return true;
+        }
+        return world.serverDelete === 'deleted';
+      },
+      deleteFirewallByName: async () => ({ deleted: false, everExisted: false, apiError: null }),
+      listServersDetailed: async () => ({ items: [], complete: true }),
+      listVolumesDetailed: async () => ({ items: [], complete: true }),
+      deleteReservedIpsByLabels: async () => ({ deleted: [], failed: [] }),
     },
-  };
-  return new Proxy({}, handler);
+    deleted: () => false,
+  });
 }
 Object.assign(FakeProvider, {
   NAME: 'FakeCloud',

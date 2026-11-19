@@ -19,25 +19,18 @@ const tick = () => new Promise<void>((r) => setTimeout(r, 2));
 
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
-  const handler: ProxyHandler<object> = {
-    get: (_t, prop) => {
-      if (typeof prop !== 'string' || prop === 'then') return undefined;
-      if (/^(delete|remove|destroy|detach|release)/.test(prop)) {
-        return async () => {
-          await tick();
-          events.push(`compute:${prop}`);
-          return { deleted: true, everExisted: true, apiError: null, removed: true };
-        };
-      }
-      if (prop === 'listServersDetailed') return async () => ({ items: [], complete: true });
-      if (/^(list|find|get)/.test(prop)) return async () => [];
-      if (/^(serverNetworkIds|serverVolumeIds)$/.test(prop)) return () => [];
-      return () => undefined;
-    },
-  };
+  const { teardownProvider } = await import('../../_shared/teardown-provider.js');
   // A plain constructor function: `new` yields the returned Proxy.
   function FakeProvider() {
-    return new Proxy({}, handler);
+    return teardownProvider({
+      methods: { listServersDetailed: async () => ({ items: [], complete: true }) },
+      serverIdsEmpty: true,
+      deleted: async (method) => {
+        await tick();
+        events.push(`compute:${method}`);
+        return { deleted: true, everExisted: true, apiError: null, removed: true };
+      },
+    });
   }
   FakeProvider.NAME = 'Hetzner';
   return { ...real, providerFor: () => FakeProvider };

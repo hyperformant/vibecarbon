@@ -64,6 +64,7 @@ import {
   traefikImageRef,
   upstreamRef,
 } from '../../../src/lib/images.js';
+import { walkAst } from '../../_shared/ast-walk.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const gitFiles = (...pathspecs: string[]) =>
@@ -138,22 +139,10 @@ function textSites(rel: string, text = readRepoFile(rel)): Site[] {
   return out;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
-function walk(node: Node, fn: (n: Node) => void) {
-  fn(node);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') walk(child, fn);
-    }
-  }
-}
-
 /** String literals and template chunks in a JS source, as image sites. */
 function jsSites(rel: string, text = readRepoFile(rel)): Site[] {
   const out: Site[] = [];
-  walk(parseAst(text), (n) => {
+  walkAst(parseAst(text), (n) => {
     let value: string | undefined;
     if (n.type === 'Literal' && typeof n.value === 'string') value = n.value;
     if (n.type === 'TemplateElement') value = n.value.cooked ?? n.value.raw;

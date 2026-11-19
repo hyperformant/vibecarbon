@@ -668,6 +668,155 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/pulumi-cli.test.ts'],
   },
+  {
+    // The walk the parseAst censuses run over src/, eight copies of the same
+    // body. A census whose own copy stopped reaching a kind of node would
+    // pass while missing the sites under it.
+    helper: 'walkAst',
+    definition: 'tests/_shared/ast-walk.ts',
+    consumers: [
+      'tests/unit/deploy/compose-ha-primary-address-census.test.ts',
+      'tests/unit/deploy/core-images-from-mirror-census.test.ts',
+      'tests/unit/deploy/image-delivery-census.test.ts',
+      'tests/unit/deploy/k8s-image-delivery-order.test.ts',
+      'tests/unit/deploy/public-domain-probe-census.test.ts',
+      'tests/unit/deploy/stable-flowlabel-deploy-census.test.ts',
+      'tests/unit/lib/printed-url-link-census.test.ts',
+      'tests/unit/lib/ssh-run-argv-census.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/ast-walk.test.ts'],
+  },
+  {
+    // Which nodes are functions, for the censuses that name a call's
+    // enclosing function.
+    helper: 'isFunctionNode',
+    definition: 'tests/_shared/ast-walk.ts',
+    consumers: [
+      'tests/unit/deploy/image-delivery-census.test.ts',
+      'tests/unit/deploy/public-domain-probe-census.test.ts',
+      'tests/unit/lib/printed-url-link-census.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/ast-walk.test.ts'],
+  },
+  {
+    // The name a call is made by. public-domain-probe-census.test.ts keeps
+    // its own: it also names a call through a private member.
+    helper: 'calleeName',
+    definition: 'tests/_shared/ast-walk.ts',
+    consumers: [
+      'tests/unit/deploy/image-delivery-census.test.ts',
+      'tests/unit/lib/printed-url-link-census.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/ast-walk.test.ts'],
+  },
+  {
+    // The run row the metrics tests seed a results database with. Each file
+    // wrote the same nine lines, differing only in the git sha.
+    helper: 'createTestRun',
+    definition: 'tests/_shared/e2e-db-seed.ts',
+    consumers: [
+      'tests/unit/metrics/last-green-baseline.test.ts',
+      'tests/unit/metrics/perf-data.test.ts',
+      'tests/unit/metrics/perf-table.test.ts',
+      'tests/unit/metrics/publish-perf-pr.test.ts',
+      'tests/unit/metrics/rto-rpo.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
+  },
+  {
+    // A scenario with the six curated steps, for the perf data, the perf
+    // table guard and the publisher. Three copies, two of them missing an
+    // option the third had.
+    helper: 'seedCuratedScenario',
+    definition: 'tests/_shared/e2e-db-seed.ts',
+    consumers: [
+      'tests/unit/metrics/perf-data.test.ts',
+      'tests/unit/metrics/perf-table.test.ts',
+      'tests/unit/metrics/publish-perf-pr.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
+  },
+  {
+    // A run holding one stepless scenario, for the tests that add their own
+    // steps (cold/warm, substeps, orphan counts).
+    helper: 'seedRunAndScenario',
+    definition: 'tests/_shared/e2e-db-seed.ts',
+    consumers: [
+      'tests/unit/metrics/cold-warm.test.ts',
+      'tests/unit/metrics/orphans-swept.test.ts',
+      'tests/unit/metrics/perf-substep.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/e2e-db-seed.test.ts'],
+  },
+  {
+    // The Proxy provider destroy's real teardown effects run against. Each
+    // file wrote its own; they differed in which verbs count as a delete,
+    // what a delete answers and whether the server id readers answer [], and
+    // those differences are now options a reader can see.
+    helper: 'teardownProvider',
+    definition: 'tests/_shared/teardown-provider.ts',
+    consumers: [
+      'tests/unit/destroy/dns-after-compute-census.test.ts',
+      'tests/unit/destroy/entry-keep-class-table.test.ts',
+      'tests/unit/destroy/failed-stack-second-pass.test.ts',
+      'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
+      'tests/unit/destroy/reserved-ip-label-backstop-wiring.test.ts',
+      'tests/unit/destroy/retry-hints-carry-purge.test.ts',
+      'tests/unit/destroy/state-passphrase-teardown.test.ts',
+      'tests/unit/destroy/unreadable-stack-purge-buckets.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/teardown-provider.test.ts'],
+  },
+  {
+    // The fixed state passphrase for tests that open stacks through a mocked
+    // LocalWorkspace, eighteen copies of the same four lines. A copy that
+    // stops stubbing it writes a passphrase into the repository root.
+    helper: 'fixedStatePassphrase',
+    definition: 'tests/_shared/state-passphrase-stub.ts',
+    consumers: [
+      'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
+      'tests/unit/iac/create-timeout.test.ts',
+      'tests/unit/iac/destroy-stack-partial-detection.test.ts',
+      'tests/unit/iac/destroy-stack-partial-failure.test.ts',
+      'tests/unit/iac/ha-pair-state-concurrency.test.ts',
+      'tests/unit/iac/provider-stack-config.test.ts',
+      'tests/unit/iac/remove-stack-state.test.ts',
+      'tests/unit/iac/retired-resources.test.ts',
+      'tests/unit/iac/server-state-retarget.test.ts',
+      'tests/unit/iac/size-unavailable.test.ts',
+      'tests/unit/iac/stack-absence-parity.test.ts',
+      'tests/unit/iac/stack-select-never-clobbers.test.ts',
+      'tests/unit/iac/state-lock-wiring.test.ts',
+      'tests/unit/iac/state-project-scoping.test.ts',
+      'tests/unit/iac/state-seal.test.ts',
+      'tests/unit/iac/state-telemetry.test.ts',
+      'tests/unit/iac/up-stack-resource-timing.test.ts',
+      'tests/unit/iac/up-stack-stale-frontend.test.ts',
+    ],
+    deepTests: ['tests/unit/lib/state-passphrase-stub.test.ts'],
+  },
+  // The module stubs that take the real executeDeployment to its plan, each
+  // spelled out the same way in every test that drives it there.
+  ...(
+    [
+      ['configOverStore', ['skeleton-env-persists-types']],
+      ['noDeployDelta', ['skeleton-env-persists-types']],
+      ['preflightPasses', ['skeleton-env-persists-types']],
+      ['localBuildNoCi', []],
+      ['mintedAppStorageKey', []],
+    ] as const
+  ).map(([helper, more]) => ({
+    helper,
+    definition: 'tests/unit/helpers/deploy-to-plan.ts',
+    consumers: [
+      'backups-bucket-regions',
+      'deploy-bundle-lifetime',
+      'k8s-ha-dns-single-writer',
+      'open-state-backend-wiring',
+      ...more,
+    ].map((name) => `tests/unit/deploy/${name}.test.ts`),
+    deepTests: ['tests/unit/helpers/deploy-to-plan.test.ts'],
+  })),
 ] as const;
 
 describe.each(REGISTRY)('convergence: $helper', ({ helper, definition, consumers, deepTests }) => {

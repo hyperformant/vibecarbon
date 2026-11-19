@@ -25,12 +25,9 @@ import { STATE_ERROR_CORPUS } from './fixtures/state-error-corpus.js';
 vi.mock('@pulumi/pulumi/automation/index.js', async () =>
   (await import('../../_shared/fake-pulumi-workspace.js')).fakeAutomationModule(),
 );
-// upStack opens the stack through getOrCreateStack, whose real passphrase
-// check would write into the cwd; state-passphrase-census.test.ts covers it.
-vi.mock('../../../src/lib/state-passphrase.js', async (orig) => ({
-  ...(await orig<typeof import('../../../src/lib/state-passphrase.js')>()),
-  ensureStatePassphrase: async () => 'test-passphrase',
-}));
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) =>
+  (await import('../../_shared/state-passphrase-stub.js')).fixedStatePassphrase(await orig()),
+);
 const warnings: string[] = [];
 vi.mock('@clack/prompts', async (orig) => {
   const actual = await orig<typeof import('@clack/prompts')>();

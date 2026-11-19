@@ -38,6 +38,7 @@ import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { parseAst } from 'vite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { type AstNode as Node, walkAst } from '../../_shared/ast-walk.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 
 // Every carrier bottoms out here (compose's sshRunAsync, lib/ssh.js's sshRun,
@@ -208,25 +209,10 @@ describe('compose and compose-ha: check-db-ledger sets it first on every server'
 
 const K3S = readRepoFile('src/lib/deploy/k8s/k3s.js');
 
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
-
-function walk(node: Node, fn: (n: Node, ancestors: Node[]) => void, ancestors: Node[] = []) {
-  fn(node, ancestors);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') {
-        walk(child, fn, [...ancestors, node]);
-      }
-    }
-  }
-}
-
 /** The top-level function declaration `name` in `src`. */
 function fnNode(src: string, name: string): Node {
   let found: Node = null;
-  walk(parseAst(src), (n) => {
+  walkAst(parseAst(src), (n) => {
     if (n.type === 'FunctionDeclaration' && n.id?.name === name) found = n;
   });
   expect(found, `${name} not found`).not.toBeNull();
@@ -236,7 +222,7 @@ function fnNode(src: string, name: string): Node {
 /** Every call to `callee` inside `fn`, with its ancestors below `fn`. */
 function callsIn(fn: Node, callee: string): Array<{ call: Node; ancestors: Node[] }> {
   const out: Array<{ call: Node; ancestors: Node[] }> = [];
-  walk(fn.body, (n, ancestors) => {
+  walkAst(fn.body, (n, ancestors) => {
     if (n.type === 'CallExpression' && n.callee?.type === 'Identifier' && n.callee.name === callee)
       out.push({ call: n, ancestors });
   });
@@ -288,7 +274,7 @@ describe('k8s and k8s-ha: deployK3s sets it first on every node', () => {
     // The node addresses: every `...Ip`/`...Ips` the infra outputs destructure
     // into, except private ones (the same nodes, on the private network).
     let outputs: string[] = [];
-    walk(steps.body, (n) => {
+    walkAst(steps.body, (n) => {
       if (
         n.type === 'VariableDeclarator' &&
         n.init?.type === 'Identifier' &&
@@ -386,7 +372,7 @@ function pullSitesInSrc(): string[] {
       if (lines.some((l) => REMOTE_PULL.test(l))) found.add(`${rel} <script>`);
       continue;
     }
-    walk(parseAst(src), (n, ancestors) => {
+    walkAst(parseAst(src), (n, ancestors) => {
       if (n.type !== 'Literal' && n.type !== 'TemplateLiteral') return;
       if (ancestors.some((a) => a.type === 'TemplateLiteral')) return;
       if (!REMOTE_PULL.test(src.slice(n.start, n.end))) return;

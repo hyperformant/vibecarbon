@@ -27,10 +27,9 @@ const createStackMock = vi.fn(() => {
   throw new Error('createStack must not be called: a destroy never conjures a stack');
 });
 
-vi.mock('../../../src/lib/state-passphrase.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../src/lib/state-passphrase.js')>()),
-  ensureStatePassphrase: async () => 'test-passphrase',
-}));
+vi.mock('../../../src/lib/state-passphrase.js', async (orig) =>
+  (await import('../../_shared/state-passphrase-stub.js')).fixedStatePassphrase(await orig()),
+);
 
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {

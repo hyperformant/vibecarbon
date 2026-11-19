@@ -9,31 +9,12 @@
  *   - Subagent query `WHERE orphans_swept > 0` finds regression scenarios.
  */
 
-import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { seedRunAndScenario } from '../../_shared/e2e-db-seed.js';
 import { E2EDb, type SweepBreakdown } from '../../e2e/metrics/db.js';
 
 function seedScenario(db: E2EDb, mode = 'compose-ha'): string {
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: 'sha',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
-  const scenarioId = randomUUID();
-  db.createScenario({
-    id: scenarioId,
-    runId,
-    mode,
-    dnsProvider: 'manual',
-    domain: 'example.test',
-    features: [],
-    projectName: 'proj',
-    envPrefix: 'e1',
-  });
-  return scenarioId;
+  return seedRunAndScenario(db, 'proj', 'e1', mode).scenarioId;
 }
 
 const ZERO: SweepBreakdown = {

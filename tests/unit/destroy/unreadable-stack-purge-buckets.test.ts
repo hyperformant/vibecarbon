@@ -17,6 +17,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { teardownProvider } from '../../_shared/teardown-provider.js';
 import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const APP = 'myapp-cd9ecc-staging-storage';
@@ -59,26 +60,18 @@ const s3 = {
 
 /** A provider whose every sweep finds nothing left and succeeds. */
 function FakeProvider() {
-  return new Proxy(
-    {},
-    {
-      get: (_t, prop) => {
-        if (typeof prop !== 'string' || prop === 'then') return undefined;
-        if (prop === 'constructor') return FakeProvider;
-        if (prop === 'listServersDetailed') return async () => ({ items: [], complete: true });
-        if (prop === 'listVolumesDetailed') return async () => ({ items: [], complete: true });
-        if (prop === 'deleteReservedIpsByLabels') return async () => ({ deleted: [], failed: [] });
-        if (prop === 'serverLabels') return () => ({});
-        if (prop === 'labelValue') return (_k: string, v: string) => v;
-        if (/^(serverNetworkIds|serverVolumeIds)$/.test(prop)) return () => [];
-        if (/^(delete|remove|destroy|detach|release)/.test(prop)) {
-          return async () => ({ deleted: true, everExisted: false, apiError: null });
-        }
-        if (/^(list|find|get)/.test(prop)) return async () => [];
-        return () => undefined;
-      },
+  return teardownProvider({
+    ctor: FakeProvider,
+    methods: {
+      listServersDetailed: async () => ({ items: [], complete: true }),
+      listVolumesDetailed: async () => ({ items: [], complete: true }),
+      deleteReservedIpsByLabels: async () => ({ deleted: [], failed: [] }),
+      serverLabels: () => ({}),
+      labelValue: (_k: string, v: string) => v,
     },
-  );
+    serverIdsEmpty: true,
+    deleted: () => ({ deleted: true, everExisted: false, apiError: null }),
+  });
 }
 Object.assign(FakeProvider, {
   NAME: 'Hetzner Cloud',

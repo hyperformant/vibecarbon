@@ -50,12 +50,10 @@ import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { isFunctionNode, type AstNode as Node, walkAst } from '../../_shared/ast-walk.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 const SRC = join(REPO_ROOT, 'src');
-
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
 
 const HELPER_FILE = 'lib/deploy/public-domain-probe.js';
 /** The helper's exports that reach the domain through public DNS. */
@@ -97,23 +95,6 @@ const NOT_A_PROBE: Record<string, string> = {
     'the bucket CORS origin the browser sends, a header value, not a request',
 };
 
-function walk(node: Node, fn: (n: Node, ancestors: Node[]) => void, ancestors: Node[] = []) {
-  fn(node, ancestors);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') {
-        walk(child, fn, [...ancestors, node]);
-      }
-    }
-  }
-}
-
-const isFn = (n: Node) =>
-  n.type === 'FunctionDeclaration' ||
-  n.type === 'FunctionExpression' ||
-  n.type === 'ArrowFunctionExpression';
-
 function nameOfFn(fnNode: Node, parent: Node): string | null {
   if (fnNode.id?.name) return fnNode.id.name;
   if (parent?.type === 'VariableDeclarator' && parent.id?.name) return parent.id.name;
@@ -127,7 +108,7 @@ function nameOfFn(fnNode: Node, parent: Node): string | null {
 function enclosing(ancestors: Node[]): { name: string; node: Node | null } {
   let sawAnonymous = false;
   for (let i = ancestors.length - 1; i >= 0; i--) {
-    if (!isFn(ancestors[i])) continue;
+    if (!isFunctionNode(ancestors[i])) continue;
     const nm = nameOfFn(ancestors[i], ancestors[i - 1]);
     if (nm) return { name: nm, node: ancestors[i] };
     sawAnonymous = true;
@@ -159,7 +140,7 @@ const modName = (v: unknown) =>
  */
 function importBindings(ast: Node): Map<string, string> {
   const out = new Map<string, string>();
-  walk(ast, (n) => {
+  walkAst(ast, (n) => {
     if (n.type === 'ImportDeclaration') {
       const mod = modName(n.source.value);
       if (!mod || !NET_MODULES.has(mod)) return;
@@ -251,7 +232,7 @@ function isDomainUrlValue(n: Node, text: string, bound: Set<string>): boolean {
 /** Identifiers a function's body references by name (callee, value, or member property). */
 function referencedNames(fnNode: Node | null, root: Node): Set<string> {
   const out = new Set<string>();
-  walk(fnNode ?? root, (n, anc) => {
+  walkAst(fnNode ?? root, (n, anc) => {
     if (n.type !== 'Identifier') return;
     const parent = anc[anc.length - 1];
     // `deps.fetch` is a property, not the global; `x.fetchPublicDomain(` still counts.
@@ -326,11 +307,12 @@ function scan(path: string, text: string): { findings: Finding[]; exemptKeys: st
     return m.get(k) as Set<string>;
   };
   const scopeOf = (ancestors: Node[]) => {
-    for (let i = ancestors.length - 1; i >= 0; i--) if (isFn(ancestors[i])) return ancestors[i];
+    for (let i = ancestors.length - 1; i >= 0; i--)
+      if (isFunctionNode(ancestors[i])) return ancestors[i];
     return null;
   };
   // Bindings first (declarations precede their uses in every shape we accept).
-  walk(ast, (n, ancestors) => {
+  walkAst(ast, (n, ancestors) => {
     if (n.type !== 'VariableDeclarator' || n.id.type !== 'Identifier' || !n.init) return;
     const scope = scopeOf(ancestors);
     if (isDomainUrlValue(n.init, text, setFor(boundByFn, scope))) {
@@ -344,16 +326,18 @@ function scan(path: string, text: string): { findings: Finding[]; exemptKeys: st
   const boundAt = (ancestors: Node[]) => {
     // Names visible here: this function's and every enclosing one's.
     const out = new Set<string>(boundByFn.get(null) ?? []);
-    for (const a of ancestors) if (isFn(a)) for (const nm of boundByFn.get(a) ?? []) out.add(nm);
+    for (const a of ancestors)
+      if (isFunctionNode(a)) for (const nm of boundByFn.get(a) ?? []) out.add(nm);
     return out;
   };
   const pinsAt = (ancestors: Node[]) => {
     const out = new Set<string>(pinsByFn.get(null) ?? []);
-    for (const a of ancestors) if (isFn(a)) for (const nm of pinsByFn.get(a) ?? []) out.add(nm);
+    for (const a of ancestors)
+      if (isFunctionNode(a)) for (const nm of pinsByFn.get(a) ?? []) out.add(nm);
     return out;
   };
 
-  walk(ast, (n, ancestors) => {
+  walkAst(ast, (n, ancestors) => {
     const opener = rawOpener(n, bindings);
     if (opener && !allowed.includes(opener)) {
       const { name } = enclosing(ancestors);

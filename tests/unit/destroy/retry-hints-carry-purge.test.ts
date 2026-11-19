@@ -13,6 +13,7 @@
  * of `args` down to each helper.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { teardownProvider } from '../../_shared/teardown-provider.js';
 
 const world: {
   Provider: unknown;
@@ -22,17 +23,14 @@ const world: {
 
 /** A provider whose listings fail, and whose every delete finds nothing. */
 function fakeProvider(statics: Record<string, unknown>) {
-  const handler: ProxyHandler<object> = {
-    get: (_t, prop) => {
-      if (typeof prop !== 'string' || prop === 'then') return undefined;
-      if (prop === 'constructor') return FakeProvider;
-      if (prop === 'deleteReservedIpsByLabels') {
-        return async () => {
+  function FakeProvider() {
+    return teardownProvider({
+      ctor: FakeProvider,
+      methods: {
+        deleteReservedIpsByLabels: async () => {
           throw new Error('label listing timed out');
-        };
-      }
-      if (prop === 'listServersDetailed') {
-        return async () => {
+        },
+        listServersDetailed: async () => {
           if (!world.orphan) throw new Error('server listing timed out');
           return {
             items: [
@@ -44,27 +42,17 @@ function fakeProvider(statics: Record<string, unknown>) {
             ],
             complete: true,
           };
-        };
-      }
-      if (prop === 'serverLabels')
-        return (sv: { labels?: Record<string, string> }) => sv.labels ?? {};
-      if (prop === 'labelValue') return (_k: string, v: string) => v;
-      if (prop === 'serverRegion') return () => 'nbg1';
-      if (prop === 'deleteServer') {
-        return async () => {
+        },
+        serverLabels: (sv: { labels?: Record<string, string> }) => sv.labels ?? {},
+        labelValue: (_k: string, v: string) => v,
+        serverRegion: () => 'nbg1',
+        deleteServer: async () => {
           throw new Error('server is locked');
-        };
-      }
-      if (/^(delete|remove|destroy|detach|release)/.test(prop)) {
-        return async () => ({ deleted: false, everExisted: false, apiError: null, removed: true });
-      }
-      if (/^(list|find|get)/.test(prop)) return async () => [];
-      if (/^(serverNetworkIds|serverVolumeIds)$/.test(prop)) return () => [];
-      return () => undefined;
-    },
-  };
-  function FakeProvider() {
-    return new Proxy({}, handler);
+        },
+      },
+      serverIdsEmpty: true,
+      deleted: () => ({ deleted: false, everExisted: false, apiError: null, removed: true }),
+    });
   }
   Object.assign(FakeProvider, { NAME: 'FakeCloud', getPublicIP: () => null, ...statics });
   return FakeProvider;

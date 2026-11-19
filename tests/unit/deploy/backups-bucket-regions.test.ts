@@ -69,30 +69,19 @@ vi.mock('../../../src/lib/deploy/bundle.js', async (orig) => {
 });
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof projectConfigStore> | null }));
-vi.mock('../../../src/lib/config.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  loadProjectConfig: () => structuredClone(store.current?.state.disk ?? null),
-  updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
-    store.current?.updateProjectConfig(fn),
-  registerProject: () => {},
-}));
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).configOverStore(await orig(), () => store.current),
+);
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
-vi.mock('../../../src/lib/deploy/delta.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  collectDeployDelta: () => ({}),
-  formatDeployDeltaLines: () => [],
-}));
-vi.mock('../../../src/lib/deploy/preflight.js', () => ({
-  assertOperatorConfig: vi.fn(),
-  assertScaffoldSupportsRoleFile: vi.fn(),
-  checkDeployPrerequisites: vi.fn(),
-  operatorCheckEnvs: () => [],
-}));
-vi.mock('../../../src/lib/ci-setup.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  ciAvailable: () => false,
-  resolveBuildMode: () => 'local',
-}));
+vi.mock('../../../src/lib/deploy/delta.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).noDeployDelta(await orig()),
+);
+vi.mock('../../../src/lib/deploy/preflight.js', async () =>
+  (await import('../helpers/deploy-to-plan.js')).preflightPasses(),
+);
+vi.mock('../../../src/lib/ci-setup.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).localBuildNoCi(await orig()),
+);
 vi.mock('../../../src/lib/cli/progress.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
@@ -103,17 +92,9 @@ vi.mock('../../../src/lib/operator-ip.js', () => ({
 vi.mock('../../../src/lib/deploy/compose/app-image.js', () => ({
   buildComposeAppImage: vi.fn(async () => undefined),
 }));
-vi.mock('../../../src/lib/deploy/app-storage-credential.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  resolveAppStorageCredential: vi.fn(async () => ({
-    accessKey: 'AK',
-    secretKey: 'SK',
-    record: null,
-    tier: 'isolated',
-    scoping: 'mint',
-  })),
-  syncHetznerFences: vi.fn(),
-}));
+vi.mock('../../../src/lib/deploy/app-storage-credential.js', async (orig) =>
+  (await import('../helpers/deploy-to-plan.js')).mintedAppStorageKey(await orig()),
+);
 // The real tracker's skip contract for s3-setup: a matching hash (here
 // `run.skipStorageSetup`) skips only when the verify probe agrees, and a
 // probe that throws keeps the skip. `priorResults` is what an earlier run
@@ -261,6 +242,25 @@ const env = (name: string) => loadProjectConfig()?.environments?.[name];
 const infoLines = () => clackMock.log.info.mock.calls.map((call) => String(call[0]));
 const sent = (command: string) => s3.calls.filter((c) => c.command === command);
 
+/**
+ * prod live in nbg1, its uploads, backups and state buckets there, and staging
+ * destroyed: its kept record is `staging` (backupS3, and backupsPurged when
+ * -purge ran) between the name and the date destroy wrote.
+ */
+function withDestroyedStaging(staging: Record<string, unknown>) {
+  s3.seed(BACKUPS, 'nbg1');
+  s3.seed(PROD_APP, 'nbg1');
+  s3.seed(STATE, 'nbg1');
+  store.current = projectConfigStore({
+    projectName: 'myapp',
+    bucketSalt: 'abc123',
+    environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
+    destroyedEnvironments: {
+      staging: { envName: 'staging', ...staging, destroyedAt: '2026-11-02T00:00:00.000Z' },
+    },
+  });
+}
+
 describe('a second storage region never moves another bucket region', () => {
   let quiet: number;
   beforeAll(() => {
@@ -298,22 +298,10 @@ describe('a second storage region never moves another bucket region', () => {
   });
 
   it('staging in fsn1 keeps fsn1 for its uploads while its recorded backups stay in nbg1', async () => {
-    s3.seed(BACKUPS, 'nbg1');
-    s3.seed(PROD_APP, 'nbg1');
-    s3.seed(STATE, 'nbg1');
     // staging archived into the project's nbg1 bucket before it was destroyed,
     // and its record kept that: a rebuild in fsn1 keeps it (`recorded`).
-    store.current = projectConfigStore({
-      projectName: 'myapp',
-      bucketSalt: 'abc123',
-      environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
-      destroyedEnvironments: {
-        staging: {
-          envName: 'staging',
-          backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
-          destroyedAt: '2026-11-02T00:00:00.000Z',
-        },
-      },
+    withDestroyedStaging({
+      backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
     });
     const before = new Set(s3.buckets.keys());
     const { envConfig } = resolveEnvSeed(loadProjectConfig(), 'staging');
@@ -768,20 +756,8 @@ describe('a second storage region never moves another bucket region', () => {
     });
 
     it('a rebuild whose first attempt dies in s3-setup keeps its recorded bucket on the retry', async () => {
-      s3.seed(BACKUPS, 'nbg1');
-      s3.seed(PROD_APP, 'nbg1');
-      s3.seed(STATE, 'nbg1');
-      store.current = projectConfigStore({
-        projectName: 'myapp',
-        bucketSalt: 'abc123',
-        environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
-        destroyedEnvironments: {
-          staging: {
-            envName: 'staging',
-            backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
-            destroyedAt: '2026-11-02T00:00:00.000Z',
-          },
-        },
+      withDestroyedStaging({
+        backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
       });
       // What the wizard seeds each run with: the live entry once one exists.
       const seed = () => resolveEnvSeed(loadProjectConfig(), 'staging').envConfig;
@@ -846,21 +822,9 @@ describe('a second storage region never moves another bucket region', () => {
       // staging's backups were alone in fsn1's bucket; destroy -purge deleted
       // the folder and the bucket (no other holder) and recorded
       // backupsPurged. staging comes back in nbg1, where prod's backups are.
-      s3.seed(BACKUPS, 'nbg1');
-      s3.seed(PROD_APP, 'nbg1');
-      s3.seed(STATE, 'nbg1');
-      store.current = projectConfigStore({
-        projectName: 'myapp',
-        bucketSalt: 'abc123',
-        environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
-        destroyedEnvironments: {
-          staging: {
-            envName: 'staging',
-            backupS3: { bucket: FSN1_BACKUPS, region: 'fsn1', endpoint: ENDPOINT.fsn1 },
-            backupsPurged: true,
-            destroyedAt: '2026-11-02T00:00:00.000Z',
-          },
-        },
+      withDestroyedStaging({
+        backupS3: { bucket: FSN1_BACKUPS, region: 'fsn1', endpoint: ENDPOINT.fsn1 },
+        backupsPurged: true,
       });
       const { envConfig } = resolveEnvSeed(loadProjectConfig(), 'staging');
 
@@ -880,21 +844,9 @@ describe('a second storage region never moves another bucket region', () => {
       // project's nbg1 bucket. -purge removed staging's folder and kept the
       // bucket for prod. Nothing of staging's is left there, so the rebuild
       // puts its backups beside its uploads.
-      s3.seed(BACKUPS, 'nbg1');
-      s3.seed(PROD_APP, 'nbg1');
-      s3.seed(STATE, 'nbg1');
-      store.current = projectConfigStore({
-        projectName: 'myapp',
-        bucketSalt: 'abc123',
-        environments: { prod: envRecord('prod', { app: 'nbg1', backups: 'nbg1' }) },
-        destroyedEnvironments: {
-          staging: {
-            envName: 'staging',
-            backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
-            backupsPurged: true,
-            destroyedAt: '2026-11-02T00:00:00.000Z',
-          },
-        },
+      withDestroyedStaging({
+        backupS3: { bucket: BACKUPS, region: 'nbg1', endpoint: ENDPOINT.nbg1 },
+        backupsPurged: true,
       });
       const { envConfig } = resolveEnvSeed(loadProjectConfig(), 'staging');
 

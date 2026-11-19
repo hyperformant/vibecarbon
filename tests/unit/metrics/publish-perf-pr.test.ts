@@ -21,6 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { createTestRun, seedCuratedScenario } from '../../_shared/e2e-db-seed.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
@@ -38,64 +39,13 @@ import {
 } from '../../e2e/metrics/publish-perf-pr.js';
 
 // ---------------------------------------------------------------------------
-// Test helpers — mirrors tests/unit/metrics/perf-table.test.ts's fixtures,
-// scoped to a single provider per leg (a leg's db only ever holds one
-// provider's rows in the real topology).
+// Test helpers. The run and scenario rows come from
+// tests/_shared/e2e-db-seed.ts, one provider per leg (a leg's db only ever
+// holds one provider's rows in the real topology).
 // ---------------------------------------------------------------------------
 
 const HETZNER_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
 const DO_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
-const CURATED_STEPS = ['deploy', 'warm-deploy', 'backup', 'restore', 'scale', 'destroy'] as const;
-
-function createTestRun(db: E2EDb): string {
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: 'deadbee',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
-  return runId;
-}
-
-function seedScenario(
-  db: E2EDb,
-  runId: string,
-  provider: string,
-  mode: string,
-  opts: {
-    status?: string;
-    stepDurationMs?: Partial<Record<string, number>>;
-    missingSteps?: Set<string>;
-    /** The add-ons the scenario deployed; stock (none) by default. */
-    features?: string[];
-  } = {},
-): void {
-  const scenarioId = randomUUID();
-  db.createScenario({
-    id: scenarioId,
-    runId,
-    mode,
-    dnsProvider: 'manual',
-    domain: `${mode}.example.test`,
-    features: opts.features ?? [],
-    projectName: `${provider}-${mode}`,
-    envPrefix: 'e1',
-    provider,
-  });
-
-  for (const step of CURATED_STEPS) {
-    if (opts.missingSteps?.has(step)) continue;
-    const stepId = randomUUID();
-    db.createStep({ id: stepId, scenarioId, name: step, command: step });
-    db.startStep(stepId);
-    const duration = opts.stepDurationMs?.[step] ?? 60_000;
-    db.completeStep(stepId, 'pass', duration);
-  }
-
-  db.updateScenarioStatus(scenarioId, opts.status ?? 'pass');
-}
 
 /** Create a leg's on-disk db at `<rootDir>/e2e-results-<provider>/e2e.db`. */
 function makeLegDb(rootDir: string, provider: string): { dbPath: string; db: E2EDb } {
@@ -206,7 +156,7 @@ describe('discoverLegArtifacts', () => {
       const dbPath = join(root, 'e2e.db');
       const db = new E2EDb(dbPath);
       const runId = createTestRun(db);
-      seedScenario(db, runId, 'digitalocean', 'compose');
+      seedCuratedScenario(db, runId, 'digitalocean', 'compose');
       db.completeRun(runId, 'pass');
       db.close();
       // No ci-batch-*.log written — e.g. if-no-files-found: warn dropped it.
@@ -262,7 +212,7 @@ describe('updateLeg', () => {
     const root = createTempDir('vc-leg-hetzner-green-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     db.close();
 
@@ -281,8 +231,8 @@ describe('updateLeg', () => {
     const root = createTempDir('vc-leg-partial-');
     const { dbPath, db } = makeLegDb(root, 'digitalocean');
     const runId = createTestRun(db);
-    seedScenario(db, runId, 'digitalocean', 'compose');
-    seedScenario(db, runId, 'digitalocean', 'compose-ha'); // missing k8s
+    seedCuratedScenario(db, runId, 'digitalocean', 'compose');
+    seedCuratedScenario(db, runId, 'digitalocean', 'compose-ha'); // missing k8s
     db.completeRun(runId, 'pass');
     db.close();
 
@@ -303,13 +253,15 @@ describe('collectAndRender', () => {
 
     const hetzner = makeLegDb(root, 'hetzner');
     const hetznerRunId = createTestRun(hetzner.db);
-    for (const mode of HETZNER_MODES) seedScenario(hetzner.db, hetznerRunId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES)
+      seedCuratedScenario(hetzner.db, hetznerRunId, 'hetzner', mode);
     hetzner.db.completeRun(hetznerRunId, 'pass');
     hetzner.db.close();
 
     const digitalocean = makeLegDb(root, 'digitalocean');
     const doRunId = createTestRun(digitalocean.db);
-    for (const mode of DO_MODES) seedScenario(digitalocean.db, doRunId, 'digitalocean', mode);
+    for (const mode of DO_MODES)
+      seedCuratedScenario(digitalocean.db, doRunId, 'digitalocean', mode);
     digitalocean.db.completeRun(doRunId, 'pass');
     digitalocean.db.close();
 
@@ -337,7 +289,7 @@ describe('collectAndRender', () => {
     const root = createTempDir('vc-legs-none-green-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
-    seedScenario(db, runId, 'hetzner', 'compose'); // partial: missing 3 modes
+    seedCuratedScenario(db, runId, 'hetzner', 'compose'); // partial: missing 3 modes
     db.completeRun(runId, 'pass');
     db.close();
 
@@ -354,14 +306,17 @@ describe('collectAndRender', () => {
     const hetzner = makeLegDb(root, 'hetzner');
     const hetznerRunId = createTestRun(hetzner.db);
     for (const mode of HETZNER_MODES) {
-      seedScenario(hetzner.db, hetznerRunId, 'hetzner', mode, { features: ['observability'] });
+      seedCuratedScenario(hetzner.db, hetznerRunId, 'hetzner', mode, {
+        features: ['observability'],
+      });
     }
     hetzner.db.completeRun(hetznerRunId, 'pass');
     hetzner.db.close();
 
     const digitalocean = makeLegDb(root, 'digitalocean');
     const doRunId = createTestRun(digitalocean.db);
-    for (const mode of DO_MODES) seedScenario(digitalocean.db, doRunId, 'digitalocean', mode);
+    for (const mode of DO_MODES)
+      seedCuratedScenario(digitalocean.db, doRunId, 'digitalocean', mode);
     digitalocean.db.completeRun(doRunId, 'pass');
     digitalocean.db.close();
 
@@ -390,7 +345,7 @@ describe('collectAndRender', () => {
     const stockRoot = createTempDir('vc-legs-stock-');
     const stock = makeLegDb(stockRoot, 'hetzner');
     const stockRunId = createTestRun(stock.db);
-    for (const mode of HETZNER_MODES) seedScenario(stock.db, stockRunId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(stock.db, stockRunId, 'hetzner', mode);
     stock.db.completeRun(stockRunId, 'pass');
     stock.db.close();
     const stockResult = collectAndRender(makeSurfacePaths(), discoverLegArtifacts(stockRoot));
@@ -402,14 +357,15 @@ describe('collectAndRender', () => {
 
     const hetzner = makeLegDb(root, 'hetzner');
     const hetznerRunId = createTestRun(hetzner.db);
-    for (const mode of HETZNER_MODES) seedScenario(hetzner.db, hetznerRunId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES)
+      seedCuratedScenario(hetzner.db, hetznerRunId, 'hetzner', mode);
     hetzner.db.completeRun(hetznerRunId, 'pass');
     hetzner.db.close();
 
     const digitalocean = makeLegDb(root, 'digitalocean');
     const doRunId = createTestRun(digitalocean.db);
     for (const mode of DO_MODES) {
-      seedScenario(
+      seedCuratedScenario(
         digitalocean.db,
         doRunId,
         'digitalocean',
@@ -443,7 +399,7 @@ describe('collectAndRender', () => {
     const root = createTempDir('vc-legs-preserve-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     db.close();
 
@@ -461,7 +417,7 @@ describe('collectAndRender', () => {
     const root = createTempDir('vc-legs-origin-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     db.close();
 
@@ -481,7 +437,7 @@ describe('collectAndRender', () => {
     const dbPath = join(root, 'e2e.db');
     const db = new E2EDb(dbPath);
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     db.close();
     writeFileSync(join(root, 'ci-batch-hetzner.log'), 'ok\n');
@@ -574,7 +530,7 @@ describe('collectAndRender with a pending perf-table-update branch', () => {
     const root = createTempDir('vc-legs-pending-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     db.close();
 
@@ -602,7 +558,7 @@ describe('collectAndRender with a pending perf-table-update branch', () => {
     const root = createTempDir('vc-legs-pending-only-');
     const { dbPath, db } = makeLegDb(root, 'hetzner');
     const runId = createTestRun(db);
-    seedScenario(db, runId, 'hetzner', 'compose', { status: 'fail' });
+    seedCuratedScenario(db, runId, 'hetzner', 'compose', { status: 'fail' });
     db.completeRun(runId, 'fail');
     db.close();
 

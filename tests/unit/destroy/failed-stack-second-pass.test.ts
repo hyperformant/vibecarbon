@@ -20,6 +20,7 @@
  * tests/integration/iac/destroy-finishes-stack-after-sweeps.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { teardownProvider } from '../../_shared/teardown-provider.js';
 
 vi.mock('@clack/prompts', async (orig) =>
   (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
@@ -39,43 +40,35 @@ const cloud = {
 };
 
 function FakeProvider() {
-  const specific: Record<string, unknown> = {
-    listServersDetailed: async () => ({ items: cloud.servers, complete: true }),
-    listVolumesDetailed: async () => ({ items: [], complete: true }),
-    serverLabels: (sv: Server) => sv.labels,
-    serverRegion: () => 'nyc3',
-    labelValue: (_key: string, value: string) => value,
-    deleteServer: async (id: number) => {
-      const server = cloud.servers.find((sv) => sv.id === id);
-      cloud.servers = cloud.servers.filter((sv) => sv.id !== id);
-      if (server) cloud.deletedServers.push(server.name);
-    },
-    deleteFirewallByName: async () => ({ deleted: false, apiError: null }),
-    deleteSSHKeyByName: async () => false,
-    deleteNetworkByName: async (name: string) => {
-      const found = cloud.networks.includes(name);
-      cloud.networks = cloud.networks.filter((n) => n !== name);
-      return { deleted: found, apiError: null };
-    },
-    deleteReservedIpsByLabels: async () => ({ deleted: [], failed: [] }),
-  };
-  return new Proxy(
-    {},
-    {
-      get: (_t, prop) => {
-        if (typeof prop !== 'string' || prop === 'then') return undefined;
-        if (prop === 'constructor') return FakeProvider;
-        if (prop in specific) return specific[prop];
-        if (prop === 'detachVolume' || prop === 'reservedIpLabelMatch') return undefined;
-        if (/^(delete|remove|destroy|release)/.test(prop)) {
-          return async () => ({ deleted: false, apiError: null });
-        }
-        if (/^(list|find|get)/.test(prop)) return async () => [];
-        if (/^(serverNetworkIds|serverVolumeIds)$/.test(prop)) return () => [];
-        return () => undefined;
+  return teardownProvider({
+    ctor: FakeProvider,
+    methods: {
+      listServersDetailed: async () => ({ items: cloud.servers, complete: true }),
+      listVolumesDetailed: async () => ({ items: [], complete: true }),
+      serverLabels: (sv: Server) => sv.labels,
+      serverRegion: () => 'nyc3',
+      labelValue: (_key: string, value: string) => value,
+      deleteServer: async (id: number) => {
+        const server = cloud.servers.find((sv) => sv.id === id);
+        cloud.servers = cloud.servers.filter((sv) => sv.id !== id);
+        if (server) cloud.deletedServers.push(server.name);
       },
+      deleteFirewallByName: async () => ({ deleted: false, apiError: null }),
+      deleteSSHKeyByName: async () => false,
+      deleteNetworkByName: async (name: string) => {
+        const found = cloud.networks.includes(name);
+        cloud.networks = cloud.networks.filter((n) => n !== name);
+        return { deleted: found, apiError: null };
+      },
+      deleteReservedIpsByLabels: async () => ({ deleted: [], failed: [] }),
+      detachVolume: undefined,
+      reservedIpLabelMatch: undefined,
     },
-  );
+    serverIdsEmpty: true,
+    // No detach: detachVolume is absent above, and any other detach answers nothing.
+    deleteVerbs: /^(delete|remove|destroy|release)/,
+    deleted: () => ({ deleted: false, apiError: null }),
+  });
 }
 Object.assign(FakeProvider, { NAME: 'FakeCloud', getPublicIP: () => null });
 Object.defineProperty(FakeProvider, 'K8S_DESTROY_BACKSTOP', { get: () => cloud.backstop });

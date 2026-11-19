@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { CURATED_STEPS, createTestRun, seedCuratedScenario } from '../../_shared/e2e-db-seed.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
@@ -35,64 +36,11 @@ import {
 } from '../../e2e/metrics/perf-data.js';
 
 // ---------------------------------------------------------------------------
-// Test helpers (mirrors perf-table.test.ts's seeding conventions)
+// Test helpers (the run and scenario rows come from tests/_shared/e2e-db-seed.ts)
 // ---------------------------------------------------------------------------
 
 const HETZNER_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
 const DO_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
-const CURATED_STEPS = ['deploy', 'warm-deploy', 'backup', 'restore', 'scale', 'destroy'] as const;
-
-function createTestRun(db: E2EDb): string {
-  const runId = randomUUID();
-  db.createRun({
-    id: runId,
-    gitSha: 'deadbee',
-    gitBranch: 'main',
-    vibecarbonVersion: '0.0.0',
-    machineInfo: {},
-  });
-  return runId;
-}
-
-function seedScenario(
-  db: E2EDb,
-  runId: string,
-  provider: string,
-  mode: string,
-  opts: {
-    status?: string;
-    stepDurationMs?: Partial<Record<string, number>>;
-    stepStatus?: Partial<Record<string, string>>;
-    missingSteps?: Set<string>;
-    /** The add-ons the scenario deployed; stock (none) by default. */
-    features?: string[];
-  } = {},
-): void {
-  const scenarioId = randomUUID();
-  db.createScenario({
-    id: scenarioId,
-    runId,
-    mode,
-    dnsProvider: 'manual',
-    domain: `${mode}.example.test`,
-    features: opts.features ?? [],
-    projectName: `${provider}-${mode}`,
-    envPrefix: 'e1',
-    provider,
-  });
-
-  for (const step of CURATED_STEPS) {
-    if (opts.missingSteps?.has(step)) continue;
-    const stepId = randomUUID();
-    db.createStep({ id: stepId, scenarioId, name: step, command: step });
-    db.startStep(stepId);
-    const status = opts.stepStatus?.[step] ?? 'pass';
-    const duration = opts.stepDurationMs?.[step] ?? 60_000;
-    db.completeStep(stepId, status, duration);
-  }
-
-  db.updateScenarioStatus(scenarioId, opts.status ?? 'pass');
-}
 
 /** Seed one run with every mode of both Hetzner and DigitalOcean, all green. */
 function seedFullGreenRun(
@@ -100,8 +48,9 @@ function seedFullGreenRun(
   opts: { hetznerModes?: readonly string[]; doModes?: readonly string[] } = {},
 ): { runId: string } {
   const runId = createTestRun(db);
-  for (const mode of opts.hetznerModes ?? HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
-  for (const mode of opts.doModes ?? DO_MODES) seedScenario(db, runId, 'digitalocean', mode);
+  for (const mode of opts.hetznerModes ?? HETZNER_MODES)
+    seedCuratedScenario(db, runId, 'hetzner', mode);
+  for (const mode of opts.doModes ?? DO_MODES) seedCuratedScenario(db, runId, 'digitalocean', mode);
   db.completeRun(runId, 'pass');
   return { runId };
 }
@@ -163,7 +112,7 @@ describe('stock deploys only', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) {
-      seedScenario(db, runId, 'hetzner', mode, {
+      seedCuratedScenario(db, runId, 'hetzner', mode, {
         features: mode === 'k8s' ? ['observability'] : [],
       });
     }
@@ -181,7 +130,7 @@ describe('stock deploys only', () => {
   it('a stock scenario with the same steps is collected', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     expect(collectProviderRunData(db, runId, 'hetzner')?.scenarios.k8s?.deploy).toBe(60_000);
     db.close();
@@ -191,9 +140,9 @@ describe('stock deploys only', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) {
-      seedScenario(db, runId, 'hetzner', mode, { features: ['observability'] });
+      seedCuratedScenario(db, runId, 'hetzner', mode, { features: ['observability'] });
     }
-    for (const mode of DO_MODES) seedScenario(db, runId, 'digitalocean', mode);
+    for (const mode of DO_MODES) seedCuratedScenario(db, runId, 'digitalocean', mode);
     db.completeRun(runId, 'pass');
     const file = tempDataPath();
     const kept: PerfData = {
@@ -247,7 +196,7 @@ describe('updatePerfDataFromRun', () => {
   it('preserves other providers already in the JSON when a single-provider run updates', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
-    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of HETZNER_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
 
     const file = tempDataPath();
@@ -273,7 +222,8 @@ describe('updatePerfDataFromRun', () => {
   it('skips a provider with partial registry coverage, leaving its existing entry untouched', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
-    for (const mode of ['compose', 'compose-ha', 'k8s']) seedScenario(db, runId, 'hetzner', mode); // no k8s-ha
+    for (const mode of ['compose', 'compose-ha', 'k8s'])
+      seedCuratedScenario(db, runId, 'hetzner', mode); // no k8s-ha
     db.completeRun(runId, 'pass');
 
     const file = tempDataPath();
@@ -298,7 +248,7 @@ describe('updatePerfDataFromRun', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
     for (const mode of HETZNER_MODES) {
-      seedScenario(db, runId, 'hetzner', mode, mode === 'k8s' ? { status: 'fail' } : {});
+      seedCuratedScenario(db, runId, 'hetzner', mode, mode === 'k8s' ? { status: 'fail' } : {});
     }
     db.completeRun(runId, 'fail');
     const file = tempDataPath();
@@ -311,12 +261,13 @@ describe('updatePerfDataFromRun', () => {
   it('accepts pass_after_retry as green but omits non-green step cells from the entry', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
-    seedScenario(db, runId, 'hetzner', 'compose', {
+    seedCuratedScenario(db, runId, 'hetzner', 'compose', {
       status: 'pass_after_retry',
       stepStatus: { backup: 'fail' },
       missingSteps: new Set(['scale']),
     });
-    for (const mode of ['compose-ha', 'k8s', 'k8s-ha']) seedScenario(db, runId, 'hetzner', mode);
+    for (const mode of ['compose-ha', 'k8s', 'k8s-ha'])
+      seedCuratedScenario(db, runId, 'hetzner', mode);
     db.completeRun(runId, 'pass');
     const file = tempDataPath();
 
@@ -344,7 +295,7 @@ describe('updatePerfDataFromRun', () => {
   it('does not touch the file when nothing in the run is green', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
-    seedScenario(db, runId, 'hetzner', 'compose', { status: 'fail' });
+    seedCuratedScenario(db, runId, 'hetzner', 'compose', { status: 'fail' });
     db.completeRun(runId, 'fail');
 
     const file = tempDataPath();

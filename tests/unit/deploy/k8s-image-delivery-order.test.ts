@@ -20,6 +20,7 @@
  */
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+import { type AstNode as Node, walkAst } from '../../_shared/ast-walk.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 
 const SRC = readRepoFile('src/lib/deploy/k8s/k3s.js');
@@ -95,28 +96,13 @@ describe('applyK3sManifests: the one delivery', () => {
   });
 });
 
-// biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
-type Node = any;
-
-function walk(node: Node, fn: (n: Node, ancestors: Node[]) => void, ancestors: Node[] = []) {
-  fn(node, ancestors);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'type' || k === 'start' || k === 'end') continue;
-    for (const child of Array.isArray(v) ? v : [v]) {
-      if (child && typeof child === 'object' && typeof child.type === 'string') {
-        walk(child, fn, [...ancestors, node]);
-      }
-    }
-  }
-}
-
 const LOOP = new Set(['ForStatement', 'ForInStatement', 'ForOfStatement', 'WhileStatement']);
 const ITERATORS = new Set(['map', 'forEach', 'flatMap', 'all', 'allSettled']);
 
 describe('once per image, never once per node', () => {
   it('no deliverImage call in k3s.js sits inside a loop or an iteration over nodes', () => {
     const calls: Node[][] = [];
-    walk(parseAst(SRC), (n, ancestors) => {
+    walkAst(parseAst(SRC), (n, ancestors) => {
       if (n.type !== 'CallExpression') return;
       if (n.callee?.type === 'Identifier' && n.callee.name === 'deliverImage')
         calls.push(ancestors);
