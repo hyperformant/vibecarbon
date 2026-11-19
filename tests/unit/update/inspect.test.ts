@@ -236,6 +236,14 @@ describe('a failed apt check is never read as nothing pending', () => {
 });
 
 describe('INSPECT_SCRIPT', () => {
+  it('plans with unattended-upgrade in one transaction, the mode the install uses', () => {
+    for (const kind of ['compose', 'k8s'] as const) {
+      expect(INSPECT_SCRIPT(kind)).toContain(
+        'unattended-upgrade --no-minimal-upgrade-steps --dry-run --verbose',
+      );
+    }
+  });
+
   it('is valid sh, and only compose asks about docker', () => {
     const dir = createTempDir('vc-inspect-');
     for (const kind of ['compose', 'k8s'] as const) {

@@ -4,9 +4,17 @@
  */
 import { mainPackage, REBOOT_TRIGGER_PATTERNS } from '../host-state.js';
 
-/** Outage ranges in seconds. */
+/**
+ * Outage ranges in seconds. A Kubernetes master or database node takes longer
+ * than a compose server: after the reboot k3s has to start and the pods on the
+ * node have to turn Ready again. Measured on real servers on 2026-11-19, a
+ * master and a db restart together cost 210 to 425 s of public downtime
+ * (Linode's slower boots at the top), against 20 to 130 s for one compose
+ * server.
+ */
 export const DOWNTIME = {
   restart: [60, 180],
+  clusterRestart: [60, 240],
   docker: [30, 60],
   dockerThenRestart: [60, 240],
 };
@@ -57,8 +65,8 @@ export function decideEffect(target, install, hasDocker, restart) {
     return none;
   }
   if (!restarting) return none;
-  if (target.role === 'master') return { kind: 'app-offline', seconds: DOWNTIME.restart };
-  if (target.role === 'db') return { kind: 'db-offline', seconds: DOWNTIME.restart };
+  if (target.role === 'master') return { kind: 'app-offline', seconds: DOWNTIME.clusterRestart };
+  if (target.role === 'db') return { kind: 'db-offline', seconds: DOWNTIME.clusterRestart };
   return none;
 }
 

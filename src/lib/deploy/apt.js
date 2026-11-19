@@ -161,6 +161,22 @@ export function aptWaitForDailyUnits() {
 }
 
 /**
+ * unattended-upgrade as `vibecarbon update` runs it, for its plan (--dry-run)
+ * and its install: every package in one apt transaction. Its default, minimal
+ * steps, commits each small set of packages on its own and reloads apt's whole
+ * cache after each one, so the daily job can stop cleanly when the server
+ * shuts down. With a backlog that costs a dpkg run, its triggers and a cache
+ * reload per set: on 2026-11-19 a fresh Hetzner cx23 took 9 to 20 minutes to
+ * install 121 security updates that way. Measured side by side in a 2-CPU
+ * Ubuntu 26.04 container with 79 updates already downloaded: 453 s and 51
+ * trigger runs in minimal steps, 58 s and 6 in one transaction, both leaving
+ * nothing pending. `update` runs while someone waits and restarts the server
+ * itself afterwards, so it does not need to stop halfway. The daily job keeps
+ * Ubuntu's default.
+ */
+export const UNATTENDED_UPGRADE = 'unattended-upgrade --no-minimal-upgrade-steps';
+
+/**
  * Install packages, refreshing the lists only if the install fails (a package
  * missing from the lists the image shipped with). The fallback update is plain,
  * hooks left in place: it is rare, and silencing is for the trimmed refresh.

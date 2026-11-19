@@ -151,7 +151,7 @@ export const confirmQuestion = (envName) => `Update ${envName} now?`;
  */
 export function unexpectedRestartPrompt({ target, pkg }) {
   const effect = decideEffect(target, 0, false, 'due');
-  const d = formatDuration(DOWNTIME.restart);
+  const d = formatDuration(effect.seconds ?? DOWNTIME.restart);
   let cost = `The app is offline for ${d} while it restarts.`;
   if (effect.kind === 'no-traffic') cost = 'Users notice nothing: this side takes no traffic.';
   else if (effect.kind === 'drained')

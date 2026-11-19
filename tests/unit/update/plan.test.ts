@@ -120,8 +120,16 @@ describe('buildUpdatePlan', () => {
       { target: t('db', { kind: 'k8s', role: 'db' }), state: due },
       { target: t('worker-1', { kind: 'k8s', role: 'worker' }), state: due },
     ]);
-    expect(p.steps.find((s) => s.target.name === 'db')?.effect.kind).toBe('db-offline');
-    expect(p.total).toEqual([120, 360]);
+    expect(p.steps.find((s) => s.target.name === 'db')?.effect).toEqual({
+      kind: 'db-offline',
+      seconds: [60, 240],
+    });
+    expect(p.steps.find((s) => s.target.name === 'master')?.effect).toEqual({
+      kind: 'app-offline',
+      seconds: [60, 240],
+    });
+    expect(DOWNTIME.clusterRestart).toEqual([60, 240]);
+    expect(p.total).toEqual([120, 480]);
     expect(p.outageServers).toEqual(['master', 'db']);
   });
 
