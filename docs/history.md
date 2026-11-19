@@ -1253,58 +1253,6 @@ bug that existed in one copy and not in its siblings.
 (`pod-exec-bound-census`, `list-endpoint-pagination-sweep`,
 `bucket-gone-census`, `shared-helper-consumers`).
 
-#### 2026-11-18: Third pass: per-provider tests as tables, shared test harnesses, three fixes found under load
-
-Per-provider test copies became tables over the provider registry, so a new
-provider gets each case without an edit: guided-setup credentials
-(`tests/unit/providers/guided-setup-credentials.test.ts`, Linode and Scaleway
-had none), IaC dispatch and its laziness (`iac-dispatch.test.ts`; DigitalOcean
-compose, Linode, Vultr and Scaleway had none), and the cases every orphan
-sweep shares (`tests/unit/e2e/sweep-shared-cases.test.ts`). Repeated test
-harnesses moved to `tests/_shared/` (`ast-walk.ts`, `e2e-db-seed.ts`,
-`teardown-provider.ts`, `state-passphrase-stub.ts`) and
-`tests/unit/helpers/deploy-to-plan.ts`. `scale.js` and the k8s-ha deploy use
-`Promise.withResolvers()`; `vibecarbon status` builds its container rows in
-one place (`src/lib/status/container-rows.js`).
-
-Fixes:
-- `destroy -purge` and the pasted-key fence no longer fall back to the Hetzner
-  location `fsn1` for a record with no storage region: they use the
-  provider's own storage region. `scale` refuses such a record and names the
-  missing field. Only hand-edited records reach either.
-- `redactCredentials` is linear. Its three patterns rescanned a long run from
-  every position inside it (a 200,000-character word took about 14 s); output
-  is unchanged (300,000-case differential fuzz).
-- Both restore scripts keep their scratch files under `${TMPDIR:-/tmp}`. A
-  fixed `/tmp` path let concurrent test runs on one host overwrite each
-  other's recovery settings. Servers are unaffected: TMPDIR is unset in the
-  db container.
-- The role-file preflight test copies the four files the preflight reads,
-  not the whole template (12.9 s to 0.65 s).
-- DNS dispatch loads backends through literal `import()`s, so `pnpm unused`
-  sees them, and tests read source through `readRepoFile`.
-
-Template: creating an organization trims the name before validating; billing
-return URLs follow `SITE_URL` in every environment; a Stripe subscription
-fetch that fails after checkout is logged and answered 500 so Stripe
-redelivers (a subscription Stripe says does not exist is logged and
-acknowledged); the organization settings page renders every string through
-`t()`.
-
-**Do not undo:**
-- A test that runs a shipped script on the host gives it its own TMPDIR (or
-  lock file). A fixed `/tmp` path is shared by every test run on the machine.
-- A provider table reads `PROVIDERS` from the registry; do not hand-list
-  providers in it.
-- `test.yml` pins the Pulumi CLI to the lockfile's SDK for its real-engine
-  tests; `e2e-us-perf.yml` installs the latest CLI, as users do. Both are on
-  purpose.
-
-**Guard:** `tests/unit/lib/redact-credentials.test.ts` (four 200,000-character
-inputs), the TMPDIR case in `tests/unit/walg/restore-script-states.test.ts`,
-`dns-registration-census.test.ts`, and the rows in
-`shared-helper-consumers.test.ts`.
-
 #### 2026-11-18: Second pass: one sweep outline, one ssh helper for the checks, shared test scaffolding
 
 The DigitalOcean, Linode, Vultr and Scaleway sweeps run each resource class
@@ -1477,6 +1425,96 @@ package when it was written, and the gate fails again the day a newer one is
 published or the advisory stops being reported.
 
 **Guard:** `tests/unit/scripts/audit-shipped-lockfile.test.ts`.
+
+#### 2026-11-18: Third pass: per-provider tests as tables, shared test harnesses, three fixes found under load
+
+Per-provider test copies became tables over the provider registry, so a new
+provider gets each case without an edit: guided-setup credentials
+(`tests/unit/providers/guided-setup-credentials.test.ts`, Linode and Scaleway
+had none), IaC dispatch and its laziness (`iac-dispatch.test.ts`; DigitalOcean
+compose, Linode, Vultr and Scaleway had none), and the cases every orphan
+sweep shares (`tests/unit/e2e/sweep-shared-cases.test.ts`). Repeated test
+harnesses moved to `tests/_shared/` (`ast-walk.ts`, `e2e-db-seed.ts`,
+`teardown-provider.ts`, `state-passphrase-stub.ts`) and
+`tests/unit/helpers/deploy-to-plan.ts`. `scale.js` and the k8s-ha deploy use
+`Promise.withResolvers()`; `vibecarbon status` builds its container rows in
+one place (`src/lib/status/container-rows.js`).
+
+Fixes:
+- `destroy -purge` and the pasted-key fence no longer fall back to the Hetzner
+  location `fsn1` for a record with no storage region: they use the
+  provider's own storage region. `scale` refuses such a record and names the
+  missing field. Only hand-edited records reach either.
+- `redactCredentials` is linear. Its three patterns rescanned a long run from
+  every position inside it (a 200,000-character word took about 14 s); output
+  is unchanged (300,000-case differential fuzz).
+- Both restore scripts keep their scratch files under `${TMPDIR:-/tmp}`. A
+  fixed `/tmp` path let concurrent test runs on one host overwrite each
+  other's recovery settings. Servers are unaffected: TMPDIR is unset in the
+  db container.
+- The role-file preflight test copies the four files the preflight reads,
+  not the whole template (12.9 s to 0.65 s).
+- DNS dispatch loads backends through literal `import()`s, so `pnpm unused`
+  sees them, and tests read source through `readRepoFile`.
+
+Template: creating an organization trims the name before validating; billing
+return URLs follow `SITE_URL` in every environment; a Stripe subscription
+fetch that fails after checkout is logged and answered 500 so Stripe
+redelivers (a subscription Stripe says does not exist is logged and
+acknowledged); the organization settings page renders every string through
+`t()`.
+
+**Do not undo:**
+- A test that runs a shipped script on the host gives it its own TMPDIR (or
+  lock file). A fixed `/tmp` path is shared by every test run on the machine.
+- A provider table reads `PROVIDERS` from the registry; do not hand-list
+  providers in it.
+- `test.yml` pins the Pulumi CLI to the lockfile's SDK for its real-engine
+  tests; `e2e-us-perf.yml` installs the latest CLI, as users do. Both are on
+  purpose.
+
+**Guard:** `tests/unit/lib/redact-credentials.test.ts` (four 200,000-character
+inputs), the TMPDIR case in `tests/unit/walg/restore-script-states.test.ts`,
+`dns-registration-census.test.ts`, and the rows in
+`shared-helper-consumers.test.ts`.
+
+#### 2026-11-19: `update` installs in one apt transaction and plans a Kubernetes restart honestly
+
+The first all-provider GitHub run since `update` started installing system
+updates (#491) failed five of sixteen scenarios. Two were `update` running
+past the e2e's 45 minutes: fresh Hetzner and DigitalOcean servers carried 121
+and 41 pending security updates, and each server took 5 to 20 minutes to
+install them. unattended-upgrade's default, minimal steps, commits each small
+package set on its own and reloads apt's cache after each, which lets the
+daily job stop cleanly at shutdown and costs a dpkg run, its triggers and a
+cache reload per set. In a 2-CPU Ubuntu 26.04 container, 79 downloaded
+updates took 453 s that way and 58 s in one transaction. `update` now passes
+`--no-minimal-upgrade-steps` to its dry run and its install
+(`UNATTENDED_UPGRADE` in `src/lib/deploy/apt.js`); the daily job keeps the
+default.
+
+A third, Linode k8s, measured 425 s of downtime for a master and a database
+restart against a plan of 360. Across the run that pair cost 210 to 425 s: k3s
+and the node's pods have to start again after the reboot, and Linode boots
+slowest. The plan now gives a Kubernetes master or database node 60 to 240 s;
+one compose server keeps 60 to 180 s (measured 20 to 130 s).
+
+The other two were not `update`. A Linode compose-ha failover promoted the
+standby, wrote the new A record through Linode's API, and read the old
+address straight back, so it reported DNS as not flipped. That is open: the
+next step is a probe that writes a record in the e2e zone and reads it back
+by list and by id, to tell a stale read from a lost write. A DigitalOcean
+compose-ha standby droplet in tor1 took 558 s to create, against 33 s in
+sfo3, during DigitalOcean's "Increased Error Rates in SFO3" incident.
+
+**Do not undo:**
+- `update` runs unattended-upgrade in one transaction. Minimal steps exist
+  for a job that may be stopped by a shutdown; `update` restarts the server
+  itself afterwards.
+- A Kubernetes master and database restart are planned at up to 240 s each.
+
+**Guard:** the one-transaction pins in `tests/unit/update/inspect.test.ts` and
+`execute.test.ts`; the ranges in `plan.test.ts` and `text.test.ts`.
 
 ## Added and later removed
 
