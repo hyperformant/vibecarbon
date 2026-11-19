@@ -1488,10 +1488,13 @@ install them. unattended-upgrade's default, minimal steps, commits each small
 package set on its own and reloads apt's cache after each, which lets the
 daily job stop cleanly at shutdown and costs a dpkg run, its triggers and a
 cache reload per set. In a 2-CPU Ubuntu 26.04 container, 79 downloaded
-updates took 453 s that way and 58 s in one transaction. `update` now passes
+updates took 453 s that way and 58 s in one transaction, and the dry run
+`update` reads for its plan took 577 s and 64 s. `update` now passes
 `--no-minimal-upgrade-steps` to its dry run and its install
 (`UNATTENDED_UPGRADE` in `src/lib/deploy/apt.js`); the daily job keeps the
-default.
+default. On the rerun (44496082723) a Hetzner cx23 installed its 121 updates
+in about 2m20s, and the whole step took 894 s on Hetzner k8s (a timeout at 45
+minutes the night before) and 1,383 s on Hetzner k8s-ha (2,541 s before).
 
 A third, Linode k8s, measured 425 s of downtime for a master and a database
 restart against a plan of 360. Across the run that pair cost 210 to 425 s: k3s
@@ -1507,14 +1510,30 @@ by list and by id, to tell a stale read from a lost write. A DigitalOcean
 compose-ha standby droplet in tor1 took 558 s to create, against 33 s in
 sfo3, during DigitalOcean's "Increased Error Rates in SFO3" incident.
 
+The rerun passed DigitalOcean and Linode, the Linode failover included, and
+failed two Hetzner checks while Hetzner's API was slow (server creates of 100
+to 238 s against 24 to 37 s the night before, nothing on its status page): a
+k8s-ha deploy went 36 s over its budget, and hetzner/k8s verify-scale got one
+503 for its post-scale type snapshot. The scale had resized all three servers,
+but the fallback grepped the scale's output for the compose success line,
+which a k8s scale never prints. verify-scale now reads each server's vCPUs
+and memory over ssh before and after the scale
+(`tests/e2e/utils/server-hardware.ts`) and, when the provider gives no types,
+requires every server to be bigger afterwards than every server was before.
+The exact-type check through the API stays the first proof.
+
 **Do not undo:**
 - `update` runs unattended-upgrade in one transaction. Minimal steps exist
   for a job that may be stopped by a shutdown; `update` restarts the server
   itself afterwards.
 - A Kubernetes master and database restart are planned at up to 240 s each.
 
+- verify-scale's fallback asks the servers, not the provider and not the
+  scale's own output.
+
 **Guard:** the one-transaction pins in `tests/unit/update/inspect.test.ts` and
-`execute.test.ts`; the ranges in `plan.test.ts` and `text.test.ts`.
+`execute.test.ts`; the ranges in `plan.test.ts` and `text.test.ts`;
+`tests/unit/e2e/server-hardware.test.ts`.
 
 ## Added and later removed
 
