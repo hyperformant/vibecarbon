@@ -178,6 +178,18 @@ describe('GET /billing/subscription', () => {
     expect(db.queries).toBe(0);
   });
 
+  // requireOrgRole answers this before the handler runs, so the handler keeps
+  // no check of its own for it.
+  it.each([
+    ['no organization id', '?type=organization'],
+    ['an empty organization id', '?type=organization&organizationId='],
+  ])('answers 400 to organization billing with %s, before any query', async (_name, query) => {
+    const res = await signedIn.request(`/api/v1/billing/subscription${query}`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Organization ID is required for organization billing' });
+    expect(db.queries).toBe(0);
+  });
+
   it.each([
     ['no customer', []],
     ['a customer with no active subscription', [CUSTOMER]],

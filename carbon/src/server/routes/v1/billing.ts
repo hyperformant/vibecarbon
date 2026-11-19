@@ -303,10 +303,6 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
   const organizationId = c.req.query('organizationId');
 
   try {
-    if (type === 'organization' && !organizationId) {
-      return c.json({ error: 'Organization ID is required' }, 400);
-    }
-
     // The customer row for this user (personal) or organization. The org
     // branch is explicit: only type === 'organization' reaches it.
     const owner = customerOwner(type, user.id, organizationId);
