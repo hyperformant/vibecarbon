@@ -497,12 +497,18 @@ export class HetznerProvider extends BaseProvider {
    *   into master-init.sh's `${...}` placeholders — no API token: deployK3s
    *   hands it to the cluster itself (applyCloudSecrets);
    *   cluster_name/disable_traefik are what hetzner-k8s.js passes but are
-   *   unused by the template.
+   *   unused by the template. The CSI install's image rewrites
+   *   (`csi_image_rewrites`) are added here, from src/lib/images.js.
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('master-init.sh'), vars);
+    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
+      '../iac/cloud-init.js'
+    );
+    return renderScript(loadCloudInit('master-init.sh'), {
+      ...vars,
+      ...csiImageRewriteVars('hetzner'),
+    });
   }
 
   /**

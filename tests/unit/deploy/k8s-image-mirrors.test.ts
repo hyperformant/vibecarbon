@@ -26,7 +26,9 @@
  *      pinned amd64 digest, no dupes;
  *  (b) the CSI sidecar re-pin spec matches the CSI driver versions cloud-init
  *      actually installs (a version bump there without re-deriving the sidecar
- *      tags here would silently re-open the 403);
+ *      tags here would silently re-open the 403), and the rewrite each master's
+ *      cloud-init makes to its CSI manifest puts exactly the refs the deploy's
+ *      re-pin sets on exactly its containers, so that re-pin rolls nothing;
  *  (c) every re-pinned image is in the mirror set (nothing points at a package
  *      the publish workflow never mirrors);
  *  (d) no deploy-facing file references registry.k8s.io outside a comment;
@@ -78,79 +80,19 @@ import {
   upstreamRef,
 } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import {
+  csiManifest,
+  imagesByContainer,
+  renderedCsiRewrites,
+  runCsiInstallRewrite,
+  UPSTREAM_CSI_MANIFESTS,
+} from '../../_shared/csi-install-rewrite.js';
 import { namesHost } from '../../_shared/hosts.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const WORKFLOW = '.github/workflows/publish-images.yml';
 const MIRROR_WORKFLOW = '.github/workflows/mirror-images.yml';
 const MATRIX_SCRIPT = 'scripts/mirror-matrix.mjs';
-
-/**
- * The registry.k8s.io images each pinned CSI release actually ships, captured
- * from the upstream manifests cloud-init applies:
- *   https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml
- *   https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/driver.yaml
- *   https://github.com/linode/linode-blockstorage-csi-driver/releases/download/v1.1.5/linode-blockstorage-csi-driver-v1.1.5.yaml
- * (hetzner and digitalocean fetched 2026-11-05, linode 2026-11-07). Keyed workload -> container -> image, exactly as
- * upstream spells them, because `kubectl set image` addresses containers BY
- * NAME: a rename upstream turns our re-pin into a silent no-op, and the 403
- * comes straight back. If you bump a CSI version, re-derive this fixture from
- * the new manifest — do not hand-edit it.
- */
-const UPSTREAM_CSI_MANIFESTS = {
-  hetzner: {
-    version: 'v2.24.1',
-    workloads: {
-      'daemonset/hcloud-csi-node': {
-        'csi-node-driver-registrar':
-          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0',
-        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.20.0',
-        'hcloud-csi-driver': 'docker.io/hetznercloud/hcloud-csi-driver:v2.24.1',
-      },
-      'deployment/hcloud-csi-controller': {
-        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.13.0',
-        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.2.1',
-        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.3.0',
-        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.20.0',
-        'hcloud-csi-driver': 'docker.io/hetznercloud/hcloud-csi-driver:v2.24.1',
-      },
-    },
-  },
-  digitalocean: {
-    version: 'v4.19.0',
-    workloads: {
-      'statefulset/csi-do-controller': {
-        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.3.0',
-        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.13.0',
-        'csi-snapshotter': 'registry.k8s.io/sig-storage/csi-snapshotter:v8.6.0',
-        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.2.1',
-        'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.19.0',
-      },
-      'daemonset/csi-do-node': {
-        'automount-udev-deleter': 'alpine:3',
-        'csi-node-driver-registrar':
-          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0',
-        'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.19.0',
-      },
-    },
-  },
-  linode: {
-    version: 'v1.1.5',
-    workloads: {
-      'statefulset/csi-linode-controller': {
-        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.2.0',
-        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.11.0',
-        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.1.0',
-        'csi-linode-plugin': 'linode/linode-blockstorage-csi-driver:v1.1.5',
-      },
-      'daemonset/csi-linode-node': {
-        'csi-node-driver-registrar':
-          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0',
-        'csi-linode-plugin': 'linode/linode-blockstorage-csi-driver:v1.1.5',
-      },
-    },
-  },
-} as const;
 
 describe('mirror set shape', () => {
   it('every entry mirrors registry.k8s.io or docker.io into our ghcr org', () => {
@@ -478,7 +420,9 @@ describe('csiSidecarSetImagePlan()', () => {
       const inPlace = new Set(
         (
           csiUpstreamImagePins()[providerId as keyof ReturnType<typeof csiUpstreamImagePins>] ?? []
-        ).flatMap(({ containers }) => Object.entries(containers).map(([c, ref]) => `${c}=${ref}`)),
+        ).flatMap(({ containers }) =>
+          Object.entries(containers).map(([c, { ref }]) => `${c}=${ref}`),
+        ),
       );
       for (const { workload, setImageArgs } of plan) {
         expect(workload).toMatch(/^(daemonset|deployment|statefulset)\//);
@@ -510,13 +454,17 @@ describe('csiSidecarSetImagePlan()', () => {
     expect(arg).toMatch(
       /^automount-udev-deleter=ghcr\.io\/hyperformant\/alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/,
     );
-    // Every in-place pin addresses a container upstream actually ships.
+    // Every in-place pin addresses a container upstream actually ships, and
+    // names the ref upstream ships there: the install rewrite matches it.
     for (const [provider, specs] of Object.entries(csiUpstreamImagePins())) {
       const workloads = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
         .workloads as Record<string, Record<string, string>>;
       for (const { workload, containers } of specs) {
-        for (const container of Object.keys(containers)) {
+        for (const [container, { upstream }] of Object.entries(containers)) {
           expect(workloads[workload], `${provider} ${workload}`).toHaveProperty(container);
+          expect(upstream, `${provider} ${workload} ${container}`).toBe(
+            workloads[workload][container],
+          );
         }
       }
     }
@@ -528,6 +476,119 @@ describe('csiSidecarSetImagePlan()', () => {
     expect(csiSidecarSetImagePlan('some-future-provider')).toEqual([]);
     expect(csiSidecarSetImagePlan(undefined)).toEqual([]);
   });
+});
+
+/** Every key a k3s master template is rendered with; each static takes the ones its template names. */
+const MASTER_VARS = {
+  k3s_version: 'v1.37.2+k3s1',
+  k3s_token: 'deadbeefcafe1234567890abcdef',
+  floating_ip: '203.0.113.10',
+  project_name: 'acme',
+  project_tag: 'project:acme',
+};
+
+type MasterUserData = { getK8sMasterUserData: (vars: object) => Promise<string> };
+const renderMaster = (provider: string) =>
+  (PROVIDERS as unknown as Record<string, MasterUserData>)[provider].getK8sMasterUserData(
+    MASTER_VARS,
+  );
+
+/** The repo each provider's CSI driver manifest comes from, in the master's URLs. */
+const CSI_REPO: Record<string, string> = {
+  hetzner: 'hetznercloud/csi-driver',
+  digitalocean: 'digitalocean/csi-digitalocean',
+  linode: 'linode/linode-blockstorage-csi-driver',
+};
+
+describe('cloud-init starts every CSI container on the ref the deploy re-pin sets', () => {
+  // The deploy's `kubectl set image` (csiSidecarSetImagePlan) used to be what
+  // moved the sidecars onto the mirrors, so it rolled the node plugin on
+  // every node while the db PVC waited (109 s on a Linode k8s-ha standby, run
+  // 44623637422). Each master's cloud-init now rewrites the manifest before it
+  // applies it. This census runs that rewrite, as rendered into the master,
+  // over each upstream manifest's images, and requires the plan's refs on the
+  // plan's containers and upstream's on every other one. A container added to
+  // the plan without the rewrite, or a rewrite the plan does not make, fails.
+  const providers = Object.keys(CSI_SIDECAR_MIRRORS);
+
+  it('covers every provider with a CSI plan, and each has a captured upstream manifest', () => {
+    expect(providers.length).toBeGreaterThan(0);
+    expect([...providers].sort()).toEqual(Object.keys(UPSTREAM_CSI_MANIFESTS).sort());
+    expect([...providers].sort()).toEqual(Object.keys(CSI_REPO).sort());
+  });
+
+  it.each(providers)(
+    '%s: the rendered rewrite puts exactly the plan’s refs on exactly the plan’s containers',
+    async (provider) => {
+      const upstream = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
+        .workloads as Record<string, Record<string, string>>;
+      const { status, stdout, stderr, installed } = runCsiInstallRewrite(
+        await renderMaster(provider),
+        csiManifest(upstream),
+      );
+      expect(status, stderr).toBe(0);
+      expect(stdout).toContain('returned 0');
+      expect(installed, 'the rewritten manifest').not.toBeNull();
+      // What every container would run: upstream's image, except where the
+      // plan sets one.
+      const expected = imagesByContainer(csiManifest(upstream));
+      for (const { workload, setImageArgs } of csiSidecarSetImagePlan(provider)) {
+        for (const arg of setImageArgs) {
+          const at = arg.indexOf('=');
+          const site = `${workload} ${arg.slice(0, at)}`;
+          expect(expected, `the plan names ${site}, which upstream does not ship`).toHaveProperty(
+            site,
+          );
+          expected[site] = arg.slice(at + 1);
+        }
+      }
+      expect(imagesByContainer(installed as string)).toEqual(expected);
+    },
+  );
+
+  it.each(providers)(
+    '%s: the rendered pairs are exactly the plan’s, one per upstream ref',
+    async (provider) => {
+      const upstream = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
+        .workloads as Record<string, Record<string, string>>;
+      const pairs = new Map<string, string>();
+      for (const { workload, setImageArgs } of csiSidecarSetImagePlan(provider)) {
+        for (const arg of setImageArgs) {
+          const at = arg.indexOf('=');
+          pairs.set(upstream[workload][arg.slice(0, at)], arg.slice(at + 1));
+        }
+      }
+      const rendered = renderedCsiRewrites(await renderMaster(provider));
+      expect(rendered.map(([from]) => from)).toEqual([...new Set(rendered.map(([from]) => from))]);
+      expect(new Map(rendered)).toEqual(pairs);
+    },
+  );
+
+  it.each(providers)(
+    '%s: the master installs its CSI driver through that rewrite, and applies what it wrote',
+    async (provider) => {
+      const rendered = await renderMaster(provider);
+      const installs = [
+        ...rendered.matchAll(
+          /csi_fetch_mirrored (https:\/\/\S+) (\S+) \\\n\s*&& kubectl apply -f (\S+?)(?:;| &&)/g,
+        ),
+      ];
+      expect(installs, 'one csi_fetch_mirrored install').toHaveLength(1);
+      const [, url, file, applied] = installs[0];
+      expect(url).toContain(CSI_REPO[provider]);
+      expect(url).toContain(
+        UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS].version,
+      );
+      expect(applied).toBe(file);
+      // A manifest of the driver applied straight from its URL would skip the
+      // rewrite. DigitalOcean's crds.yaml is the one: CRDs run no pod, so it
+      // names no image.
+      const direct = [...rendered.matchAll(/kubectl apply -f (https:\/\/\S+)/g)]
+        .map((m) => m[1])
+        .filter((u) => u.includes(CSI_REPO[provider]));
+      expect(direct.filter((u) => !u.endsWith('/crds.yaml'))).toEqual([]);
+    },
+  );
 });
 
 describe('applyK3sManifests re-pins the CSI sidecars before the db StatefulSet is applied', () => {

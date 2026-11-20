@@ -220,18 +220,22 @@ for i in 1 2 3; do
   sleep 10
 done
 
+# @include _csi-image-mirror.sh
+
 # Install the DigitalOcean CSI driver (pinned v4.19.0): CRDs first, then
 # the driver -- crds.yaml must land before driver.yaml since the driver's
 # resources depend on those CRDs existing. Deliberately no
 # snapshot-controller.yaml: we don't wire VolumeSnapshots here, matching
-# how the equivalent provider's path leaves snapshots unwired too.
+# how the equivalent provider's path leaves snapshots unwired too. The
+# driver goes on our mirrors (csi_fetch_mirrored); the CRDs name no image.
 for i in 1 2 3; do
   kubectl apply -f https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/crds.yaml && break
   echo "CSI crds install attempt $i failed, retrying in 10s..."
   sleep 10
 done
 for i in 1 2 3; do
-  kubectl apply -f https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/driver.yaml && break
+  csi_fetch_mirrored https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/driver.yaml /root/csi-driver.yaml \
+    && kubectl apply -f /root/csi-driver.yaml && break
   echo "CSI driver install attempt $i failed, retrying in 10s..."
   sleep 10
 done

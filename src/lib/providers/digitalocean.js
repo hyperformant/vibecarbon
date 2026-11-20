@@ -481,15 +481,22 @@ export class DigitalOceanProvider extends BaseProvider {
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
-   * }} vars - Substituted into do-master-init.sh's `${...}` placeholders —
-   *   this is the template's COMPLETE var set (unlike
+   * }} vars - Substituted into do-master-init.sh's `${...}` placeholders:
+   *   the caller's whole share of the template's var set (unlike
    *   HetznerProvider.getK8sMasterUserData, every key here is actually
-   *   consumed; there is no unused-var carry-over).
+   *   consumed; there is no unused-var carry-over). The rest, the CSI
+   *   install's image rewrites (`csi_image_rewrites`), is added here, from
+   *   src/lib/images.js.
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('do-master-init.sh'), vars);
+    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
+      '../iac/cloud-init.js'
+    );
+    return renderScript(loadCloudInit('do-master-init.sh'), {
+      ...vars,
+      ...csiImageRewriteVars('digitalocean'),
+    });
   }
 
   /**

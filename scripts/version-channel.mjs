@@ -80,9 +80,13 @@ const K3S_RELEASE = /^v\d+\.\d+\.\d+\+k3s\d+$/;
 const K8S_MODULE =
   /\bk8s\.io\/(?:api|apimachinery|client-go|cloud-provider|component-base|mount-utils|kubernetes)\s+v[01]\.(\d+)\.\d+/g;
 
-/** A manifest URL in a `kubectl apply -f` of a cloud-init script. */
+/**
+ * A manifest URL in a `kubectl apply -f` of a cloud-init script, or in the
+ * `csi_fetch_mirrored` that downloads a CSI driver's manifest to apply it
+ * (carbon/cloud-init/k3s/_csi-image-mirror.sh).
+ */
 const DRIVER_URL =
-  /kubectl apply -f https:\/\/(?:raw\.githubusercontent\.com|github\.com)\/([\w.-]+\/[\w.-]+)\/(?:releases\/download\/)?(v\d[\d.]*)\//g;
+  /(?:kubectl apply -f|csi_fetch_mirrored) https:\/\/(?:raw\.githubusercontent\.com|github\.com)\/([\w.-]+\/[\w.-]+)\/(?:releases\/download\/)?(v\d[\d.]*)\//g;
 
 const major = (version) => Number(version.replace(/^v/, '').split('.')[0]);
 const minor = (version) => Number(version.replace(/^v/, '').split('.')[1]);

@@ -264,16 +264,19 @@ for i in 1 2 3; do
   sleep 10
 done
 
-# Install Hetzner CSI Driver
+# @include _csi-image-mirror.sh
+
+# Install Hetzner CSI Driver, on our mirrors (csi_fetch_mirrored).
 #
 # The driver supports the latest three k8s minors, so it moves with
 # INSTALL_K3S_VERSION. The FLOOR is v2.15.0, below which the volume-label line
 # below does nothing. Both are asserted by
 # tests/unit/deploy/k8s-image-mirrors.test.ts, which also re-derives the
-# sig-storage sidecar tags src/lib/images.js re-pins onto our ghcr mirrors -
-# bump this URL and that fixture fails until the tags are re-derived too.
+# sig-storage sidecar tags src/lib/images.js mirrors - bump this URL and that
+# fixture fails until the tags are re-derived too.
 for i in 1 2 3; do
-  kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml && break
+  csi_fetch_mirrored https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml /root/csi-driver.yaml \
+    && kubectl apply -f /root/csi-driver.yaml && break
   echo "CSI install attempt $i failed, retrying in 10s..."
   sleep 10
 done

@@ -704,7 +704,7 @@ describe('Dependabot can bump every pinned location', () => {
       socatImageRef(),
       registryImageRef(),
       ...Object.values(csiUpstreamImagePins()).flatMap((specs) =>
-        specs.flatMap((s) => Object.values(s.containers)),
+        specs.flatMap((s) => Object.values(s.containers).map((c) => c.ref)),
       ),
     ];
     for (const ref of mirrored) expect(ref).toMatch(/^ghcr\.io\/hyperformant\//);

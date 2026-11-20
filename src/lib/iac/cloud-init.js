@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { csiInstallImageRewrites } from '../images.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -192,6 +193,28 @@ export function loadCloudInit(name, { role = 'worker' } = {}) {
   }
   const template = resolveIncludes(name, CLOUD_INIT_DIR, { omit: AGENT_ROLES[role].omit });
   return fillRoleSlots(template, role, name);
+}
+
+/**
+ * The `${csi_image_rewrites}` value a k3s master template's CSI install reads
+ * (_csi-image-mirror.sh): one "<upstream ref> <mirror ref>" pair per line,
+ * from csiInstallImageRewrites (src/lib/images.js). Each provider's
+ * getK8sMasterUserData adds it to the vars it renders with, so no caller of
+ * that static has it to pass, and none can leave it out.
+ *
+ * Throws for a provider with no rewrite: its master would install a CSI
+ * driver whose sidecars pull from registry.k8s.io, and the template's own
+ * check would refuse the empty list on the node, where nobody watches.
+ *
+ * @param {string} providerId - 'hetzner' | 'digitalocean' | 'linode'
+ * @returns {{ csi_image_rewrites: string }}
+ */
+export function csiImageRewriteVars(providerId) {
+  const rewrites = csiInstallImageRewrites(providerId);
+  if (rewrites.length === 0) {
+    throw new Error(`cloud-init: provider "${providerId}" has no CSI image rewrites`);
+  }
+  return { csi_image_rewrites: rewrites.map(({ from, to }) => `${from} ${to}`).join('\n') };
 }
 
 /**

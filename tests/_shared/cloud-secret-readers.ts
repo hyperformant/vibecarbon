@@ -99,6 +99,12 @@ export const CLOUD_SECRET_READERS: Record<string, { manifests: string[]; refs: S
   },
 };
 
-/** The manifests a master boot script applies by URL, in its order. */
+/**
+ * The manifests a master boot script applies by URL, in its order: straight
+ * from the URL, or a CSI driver's through `csi_fetch_mirrored`, which
+ * downloads it and moves its images onto the mirrors before the apply.
+ */
 export const manifestUrls = (script: string) =>
-  [...script.matchAll(/kubectl apply -f (https:\/\/[^\s;]+)/g)].map(([, url]) => url);
+  [...script.matchAll(/(?:kubectl apply -f|csi_fetch_mirrored) (https:\/\/[^\s;]+)/g)].map(
+    ([, url]) => url,
+  );
