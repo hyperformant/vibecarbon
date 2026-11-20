@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
+import { csiImageRewriteVars, loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
@@ -43,7 +43,9 @@ describe('LinodeProvider k8s user-data statics', () => {
       role === 'db'
         ? loadCloudInit('linode-worker-init.sh', { role: 'db' })
         : loadCloudInit(`linode-${role}-init.sh`);
-    expect(templatePlaceholders(raw)).toEqual(Object.keys(vars).sort());
+    // The master's static adds the CSI install's image rewrites itself.
+    const added = role === 'master' ? Object.keys(csiImageRewriteVars('linode')) : [];
+    expect(templatePlaceholders(raw)).toEqual([...Object.keys(vars), ...added].sort());
   });
 
   it.each(roles)('%s: renders with no placeholder left', async (_role, vars, render) => {
@@ -142,7 +144,10 @@ describe('LinodeProvider k8s user-data statics', () => {
     // Commands only: the comment above the install says why there is no --token.
     const commands = rendered.split('\n').filter((line) => !line.trimStart().startsWith('#'));
     expect(commands.join('\n')).not.toMatch(/--token\b/);
-    expect(rendered).toContain(`kubectl apply -f ${CSI_URL}`);
+    // Downloaded with its images rewritten onto the mirrors, then applied.
+    expect(rendered).toContain(`csi_fetch_mirrored ${CSI_URL} /root/csi-driver.yaml`);
+    expect(rendered).toContain('&& kubectl apply -f /root/csi-driver.yaml; then');
+    expect(rendered).not.toContain(`kubectl apply -f ${CSI_URL}`);
     expect(rendered).toContain('name: linode-block-storage-vibecarbon');
     expect(rendered).toContain('provisioner: linodebs.csi.linode.com');
     expect(rendered).toContain('reclaimPolicy: Delete');

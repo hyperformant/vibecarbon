@@ -14,7 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
+import { csiImageRewriteVars, loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
@@ -51,9 +51,11 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
       expect(rendered).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     });
 
-    it('template var contract: do-master-init.sh placeholder set is EXACTLY {k3s_version, k3s_token}', () => {
+    it('template var contract: do-master-init.sh placeholder set is EXACTLY {k3s_version, k3s_token} plus the CSI rewrites the static adds', () => {
       const raw = loadCloudInit('do-master-init.sh');
-      expect(templatePlaceholders(raw)).toEqual(new Set(Object.keys(masterVars)));
+      expect(templatePlaceholders(raw)).toEqual(
+        new Set([...Object.keys(masterVars), ...Object.keys(csiImageRewriteVars('digitalocean'))]),
+      );
     });
 
     it('includes the DigitalOcean metadata paths (id, public, private)', async () => {

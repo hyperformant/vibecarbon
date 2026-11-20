@@ -57,7 +57,12 @@ like. The suite tells you what is missing. The guard-decision table in
 - `k8s-storage-class-literal-guard.test.ts`: your `K8S_STORAGE_CLASS`
   literal is banned outside your provider file automatically.
 - `k8s-image-mirrors.test.ts`: if you declare `K8S_ASSETS.csiNodeDaemonSet`
-  you must ship a CSI sidecar mirror spec.
+  you must ship a CSI sidecar mirror spec, capture your manifest's images in
+  `UPSTREAM_CSI_MANIFESTS` (`tests/_shared/csi-install-rewrite.ts`), and
+  install the manifest from your master script with `csi_fetch_mirrored`
+  (`# @include _csi-image-mirror.sh`), rendering `csiImageRewriteVars('<id>')`
+  in your `getK8sMasterUserData`. The census runs that rewrite and requires
+  the re-pin plan's refs on the plan's containers.
 - `transient-classifier-census.test.ts`: any new retry classifier you add
   must be registered with a domain and meet its floor. Prefer reusing
   fetch-retry / s3-base over writing a new one.

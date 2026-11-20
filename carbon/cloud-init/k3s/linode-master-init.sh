@@ -205,13 +205,18 @@ _m x
 # before the app install, so the token never rides in this user data and no
 # volume is asked for before the driver can make one.
 
+# @include _csi-image-mirror.sh
+
 # Install the Linode Block Storage CSI driver from its pinned release asset
-# (v1.1.5; its images are pinned inside the asset). Its node plugin tolerates
+# (v1.1.5; its images are pinned inside the asset), on our mirrors
+# (csi_fetch_mirrored). Its node plugin tolerates
 # every taint, so the tainted dedicated=db node needs no patch. Retry --
-# kubectl apply can fail if the API server is briefly unavailable.
+# the download or kubectl apply can fail if GitHub or the API server is
+# briefly unavailable.
 CSI_INSTALL_OK=false
 for i in 1 2 3; do
-  if kubectl apply -f https://github.com/linode/linode-blockstorage-csi-driver/releases/download/v1.1.5/linode-blockstorage-csi-driver-v1.1.5.yaml; then
+  if csi_fetch_mirrored https://github.com/linode/linode-blockstorage-csi-driver/releases/download/v1.1.5/linode-blockstorage-csi-driver-v1.1.5.yaml /root/csi-driver.yaml \
+    && kubectl apply -f /root/csi-driver.yaml; then
     CSI_INSTALL_OK=true
     break
   fi

@@ -1637,6 +1637,76 @@ another record named, and the 2026-11-19 replay through the Linode backend);
 write carries); the lagging-list case in `failover-state-matrix.test.ts` and
 the partial-write case in `compose-scale-fence.test.ts`.
 
+#### 2026-11-19: CSI pods start on the mirrors, so the deploy's re-pin rolls nothing
+
+A Linode k8s-ha standby waited 109 s for its database
+(`deploy.k3s.standby.awaitDb`, run 44623637422), against the e2e's 60 s
+ceiling for a standby (`STANDBY_AWAIT_DB_MAX_MS`). Linode's database waits
+across runs were 15 to 69 s on the primary and 35 to 109 s on the standby;
+Hetzner's were 15 to 20 s. db-0 was created on the db node at 23:18:53. At
+23:19:23 the CSI node pod on that node was torn down by the deploy's own
+re-pin: step 0a of `applyK3sManifests` (`deploy.<prefix>.csiSidecars`) runs
+`kubectl set image` to move the CSI sidecars from registry.k8s.io onto our
+ghcr mirrors, which rolled the node DaemonSet and the controller. The new node
+pod registered the driver at 23:19:34, the controller (provisioner and
+attacher) was up at 23:20:06, the volume was provisioned at 23:20:07 to 14 and
+attached at 23:20:21 to 40 (Linode takes 19 s), and db-0 was Ready at
+23:20:44. The re-pin has a reason (registry.k8s.io 403s by node IP, so one
+node's CSI pod never came up, RCA 2026-08-05), and its comment hoped the
+rollout would overlap other work. On Linode it did not.
+
+Each master's cloud-init now downloads its pinned CSI manifest and rewrites
+the `image:` values before applying it (`csi_fetch_mirrored`,
+`carbon/cloud-init/k3s/_csi-image-mirror.sh`, included by all three master
+scripts). The pairs come from `csiInstallImageRewrites` in
+`src/lib/images.js`, rendered as `${csi_image_rewrites}` by each provider's
+`getK8sMasterUserData`, so no caller passes them. That function and
+`csiSidecarSetImagePlan` read one per-container list (`CSI_SIDECAR_MIRRORS`,
+and `csiUpstreamImagePins`, which now records DigitalOcean's `alpine:3` as
+upstream spells it), so the pods start on exactly the refs, digests included,
+that step 0a sets. There, kubectl computes an empty patch and sends nothing
+(its `set_image.go` skips a `{}` patch): the pod template and its generation
+stay, and nothing rolls. Step 0a stays as it was, to move a cluster built
+before this change, and one whose alpine the version channel has moved since
+its master booted. The rewrite matches whole `image:` values only, and it
+stops the install (FATAL) when the manifest lacks a ref it rewrites or still
+names an image on registry.k8s.io, so an upstream change cannot quietly put a
+node back on registry.k8s.io. A failed download goes back to each install's
+retry loop, which keeps its behaviour: Hetzner and DigitalOcean fall through
+after three attempts, Linode stops. The standby wait this should shorten is
+unmeasured as this is written; only an e2e run on real servers can show it.
+
+It costs user data, and Hetzner rejects more than 32 KiB of it at server
+create. The Hetzner master went from 28,284 to 30,924 bytes: the digest-pinned
+refs alone are 862, and the snippet is cut to its code and four comment lines
+(the reasons live on `csiInstallImageRewrites`). That tripped the 28 KiB
+tripwire in `tests/unit/deploy/private-net-guard.test.ts`, now 31 KiB. About
+half of every Hetzner render is comment lines, so the next addition makes its
+room there.
+
+Pulumi reads a server's user data only at create, so an existing cluster keeps
+the manifest it installed, and its next deploy's re-pin moves it onto the
+mirrors once, as before.
+
+**Do not undo:**
+- CSI workloads start on the mirrors; the deploy re-pin is a no-op on new
+  clusters.
+- The install rewrite and the re-pin read one list in `src/lib/images.js`.
+  Never copy a ref into a cloud-init script by hand.
+
+**Guard:** the install-rewrite census in
+`tests/unit/deploy/k8s-image-mirrors.test.ts`, which runs each rendered
+master's rewrite over its provider's upstream images (`UPSTREAM_CSI_MANIFESTS`,
+`tests/_shared/csi-install-rewrite.ts`), requires the plan's refs on the plan's
+containers and upstream's on every other, and requires the install to go
+through it; `tests/unit/deploy/csi-install-rewrite.test.ts` (the two FATALs,
+whole-value matching, a failed download); and
+`tests/integration/docker/csi-repin-noop.test.ts`, which runs step 0a's
+command on a real k3s: no patch and no new generation on the rewritten
+workloads, a change on upstream's (also in the version channel's k3s smoke, so
+the next k3s release proves it too). The Hetzner user-data size stays under
+the 31 KiB tripwire in `private-net-guard.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

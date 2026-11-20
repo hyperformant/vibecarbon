@@ -530,12 +530,19 @@ export class LinodeProvider extends BaseProvider {
    *   k3s_version: string,
    *   k3s_token: string,
    *   project_tag: string,
-   * }} vars - The template's complete var set.
+   * }} vars - The caller's whole share of the template's var set. The
+   *   rest, the CSI install's image rewrites (`csi_image_rewrites`), is
+   *   added here, from src/lib/images.js.
    * @returns {Promise<string>}
    */
   static async getK8sMasterUserData(vars) {
-    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('linode-master-init.sh'), vars);
+    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
+      '../iac/cloud-init.js'
+    );
+    return renderScript(loadCloudInit('linode-master-init.sh'), {
+      ...vars,
+      ...csiImageRewriteVars('linode'),
+    });
   }
 
   /**

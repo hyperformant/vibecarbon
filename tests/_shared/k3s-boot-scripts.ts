@@ -2,8 +2,10 @@
  * Which file in carbon/cloud-init/k3s/ each k8s provider boots each node
  * role from, found by asking the providers rather than by a hand list. A
  * provider's getK8s<Role>UserData({}) is its template loaded for the role
- * (loadCloudInit: includes resolved, role slots filled) and nothing
- * substituted, so it equals exactly one file loaded that way. The db node
+ * (loadCloudInit: includes resolved, role slots filled) with nothing
+ * substituted but what the static adds itself (a master's CSI image
+ * rewrites, csiImageRewriteVars), so it equals exactly one file loaded and
+ * filled that way. The db node
  * has no script of its own: it loads its provider's worker script as the db
  * role. The censuses walk this, so a new provider, role or script is checked
  * the day it lands, and a script no provider boots from is one they would
@@ -11,7 +13,7 @@
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadCloudInit } from '../../src/lib/iac/cloud-init.js';
+import { csiImageRewriteVars, loadCloudInit, renderScript } from '../../src/lib/iac/cloud-init.js';
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 
 const K3S_DIR = join(__dirname, '../../carbon/cloud-init/k3s');
@@ -67,7 +69,11 @@ export async function k8sBootScripts(): Promise<
     const P = PROVIDERS[provider] as unknown as UserDataGetters;
     for (const role of ROLES) {
       const userData = await P[GETTER[role]]({});
-      const files = bootScriptFiles().filter((file) => loadBootScript(file, role) === userData);
+      const added = role === 'master' ? csiImageRewriteVars(provider) : {};
+      const files = bootScriptFiles().filter((file) => {
+        const script = loadBootScript(file, role);
+        return script !== null && renderScript(script, added) === userData;
+      });
       out.push({ provider, role, files, userData });
     }
   }

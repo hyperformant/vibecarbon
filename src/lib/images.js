@@ -373,13 +373,14 @@ export const LINODE_CSI_VERSION = 'v1.1.5';
  * Per-provider map of the CSI workloads cloud-init applies from upstream YAML,
  * and the registry.k8s.io sidecar containers inside them.
  *
- * WHY THIS SHAPE — we do not own these manifests. cloud-init applies upstream's
- * YAML verbatim from a URL (master-init.sh / do-master-init.sh), so there is no
- * template seam to patch and no kustomize overlay to add. The seam is
- * `kubectl set image` at deploy time, addressing containers BY NAME — the exact
- * idiom cloud-init itself already uses one line later (`kubectl set env
- * deployment/hcloud-csi-controller HCLOUD_VOLUME_EXTRA_LABELS=...`), and the
- * same idiom applyK3sManifests already uses to re-pin the cluster-autoscaler pod.
+ * WHY THIS SHAPE: we do not own these manifests. cloud-init downloads upstream's
+ * YAML from a pinned URL and applies it, with no kustomize overlay of ours.
+ * Two seams read this map, both by (workload, container): cloud-init rewrites
+ * each upstream ref to its mirror before the apply (csiInstallImageRewrites,
+ * rendered into _csi-image-mirror.sh), so the pods start on the mirrors; and
+ * the deploy's `kubectl set image` (csiSidecarSetImagePlan) sets the same refs
+ * by container name, which changes nothing on such a cluster and repairs one
+ * built before the rewrite existed.
  *
  * Only registry.k8s.io containers are listed. The driver containers themselves
  * (docker.io/hetznercloud/hcloud-csi-driver, digitalocean/do-csi-plugin) are
@@ -726,14 +727,16 @@ export const DOCKERHUB_MIRRORS = [
 
 /**
  * Upstream CSI containers that ship FLOATING in upstream's manifest, re-pinned
- * by digest through the same `kubectl set image` seam. DO's v4.19.0
+ * by digest through the same two seams as the mirrors. DO's v4.19.0
  * driver.yaml runs its `automount-udev-deleter` init container as bare
  * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
  * (the set's `images.alpine`), so a rate-limited Docker Hub cannot hold up the
  * node plugin. `kubectl set image` addresses init containers by name too.
- * Values are full refs. csiSidecarSetImagePlan merges these into the same
- * per-workload call as the mirrors, so no extra rollout happens.
- * @returns {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
+ * `upstream` is the ref exactly as upstream's manifest spells it (what the
+ * cloud-init rewrite matches), `ref` the full ref the container runs.
+ * csiSidecarSetImagePlan merges these into the same per-workload call as the
+ * mirrors.
+ * @returns {Record<string, Array<{workload: string, containers: Record<string, {upstream: string, ref: string}>}>>}
  */
 export function csiUpstreamImagePins() {
   return {
@@ -741,7 +744,7 @@ export function csiUpstreamImagePins() {
       {
         workload: 'daemonset/csi-do-node',
         containers: {
-          'automount-udev-deleter': alpineImageRef(),
+          'automount-udev-deleter': { upstream: 'alpine:3', ref: alpineImageRef() },
         },
       },
     ],
@@ -862,30 +865,106 @@ export function mirroredPackageNames() {
 }
 
 /**
+ * Every CSI container a provider's cluster runs on a ref we choose, one site
+ * per (workload, container): `upstream` is the ref upstream's manifest names
+ * there, `ref` the one the container runs. The one list both seams read, so
+ * the refs cloud-init installs and the refs the deploy sets cannot differ.
+ * Unknown/absent provider -> no sites.
+ *
+ * @param {string|undefined} providerId
+ * @returns {Array<{workload: string, container: string, upstream: string, ref: string}>}
+ */
+function csiImageSites(providerId) {
+  const specs = (providerId && CSI_SIDECAR_MIRRORS[providerId]) || [];
+  const inPlace = (providerId && csiUpstreamImagePins()[providerId]) || [];
+  return [
+    ...specs.flatMap(({ workload, containers }) =>
+      Object.entries(containers).map(([container, image]) => ({
+        workload,
+        container,
+        upstream: upstreamRef(image),
+        ref: k8sMirrorRef(image),
+      })),
+    ),
+    ...inPlace.flatMap(({ workload, containers }) =>
+      Object.entries(containers).map(([container, { upstream, ref }]) => ({
+        workload,
+        container,
+        upstream,
+        ref,
+      })),
+    ),
+  ];
+}
+
+/**
  * Build the `kubectl set image` plan that moves a provider's CSI sidecars onto
  * the mirrors. Unknown/absent provider -> empty plan: applyK3sManifests runs
  * this unconditionally, and a provider that installs no CSI driver must
  * degrade to "do nothing", never to a failed deploy.
  *
+ * A cluster whose master cloud-init applied the manifest through
+ * csiInstallImageRewrites already runs every ref here, so the plan changes
+ * nothing there; it moves a cluster built before that rewrite.
+ *
  * @param {string|undefined} providerId - 'hetzner' | 'digitalocean' | 'linode'
  * @returns {Array<{workload: string, setImageArgs: string[]}>}
  */
 export function csiSidecarSetImagePlan(providerId) {
-  const specs = (providerId && CSI_SIDECAR_MIRRORS[providerId]) || [];
-  const inPlace = (providerId && csiUpstreamImagePins()[providerId]) || [];
-  const plan = specs.map(({ workload, containers }) => ({
-    workload,
-    setImageArgs: Object.entries(containers).map(
-      ([container, image]) => `${container}=${k8sMirrorRef(image)}`,
-    ),
-  }));
-  for (const { workload, containers } of inPlace) {
-    const args = Object.entries(containers).map(([container, ref]) => `${container}=${ref}`);
-    const entry = plan.find((p) => p.workload === workload);
-    if (entry) entry.setImageArgs.push(...args);
-    else plan.push({ workload, setImageArgs: args });
+  /** @type {Array<{workload: string, setImageArgs: string[]}>} */
+  const plan = [];
+  for (const { workload, container, ref } of csiImageSites(providerId)) {
+    let entry = plan.find((p) => p.workload === workload);
+    if (!entry) {
+      entry = { workload, setImageArgs: [] };
+      plan.push(entry);
+    }
+    entry.setImageArgs.push(`${container}=${ref}`);
   }
   return plan;
+}
+
+/**
+ * The rewrite a provider's master cloud-init makes to its CSI driver manifest
+ * before applying it: each upstream ref, as upstream spells it, to the ref
+ * csiSidecarSetImagePlan sets on that container. The pods then start on the
+ * mirrors, and the deploy's `kubectl set image` finds nothing to change: no
+ * rollout of the node plugin on every node while the db PVC waits for it
+ * (109 s on a Linode k8s-ha standby, run 44623637422).
+ *
+ * Keyed by upstream ref, because the rewrite edits `image:` lines. One upstream
+ * ref therefore has one target everywhere it appears (Hetzner's livenessprobe
+ * runs in both workloads); a site that wanted a second one would be a
+ * per-container rewrite this cannot express, so it throws.
+ *
+ * Rendered into the template by csiImageRewriteVars (src/lib/iac/cloud-init.js)
+ * as `${csi_image_rewrites}`, and applied on the master by csi_fetch_mirrored
+ * (carbon/cloud-init/k3s/_csi-image-mirror.sh, terse because Hetzner caps
+ * user data at 32KiB). It downloads the pinned manifest, replaces each whole
+ * `image:` value that equals an upstream ref (a double-quoted value and a
+ * trailing comment are kept), and only then is the result applied. It ends
+ * the install (FATAL) when the manifest has no `image:` line for a ref here,
+ * or still names an image on a registry a ref here moves away from
+ * (registry.k8s.io), so an upstream manifest change can never quietly leave
+ * a node pulling from there. A failed download returns to the caller's retry
+ * loop. tests/unit/deploy/csi-install-rewrite.test.ts pins each of those.
+ *
+ * @param {string|undefined} providerId
+ * @returns {Array<{from: string, to: string}>}
+ */
+export function csiInstallImageRewrites(providerId) {
+  const to = new Map();
+  for (const { workload, container, upstream, ref } of csiImageSites(providerId)) {
+    const prior = to.get(upstream);
+    if (prior !== undefined && prior !== ref) {
+      throw new Error(
+        `csiInstallImageRewrites: ${upstream} is rewritten to ${prior}, and ${workload} ` +
+          `${container} wants ${ref}; one upstream ref takes one mirror ref`,
+      );
+    }
+    to.set(upstream, ref);
+  }
+  return [...to].map(([from, ref]) => ({ from, to: ref }));
 }
 
 /**

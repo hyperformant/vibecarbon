@@ -126,9 +126,16 @@ describe('private-NIC guard is wired into every Hetzner k3s role', () => {
     // so the remaining headroom is real but no longer generous: this
     // threshold is the tripwire for the next thing that wants to be
     // "just a few more lines of cloud-init".
+    //
+    // Moved from 28KiB to 31KiB on 2026-11-19 for the CSI install rewrite
+    // (_csi-image-mirror.sh), which took the master from 28,284 to 30,924
+    // bytes: it must carry each mirror ref with its digest (862 bytes on
+    // Hetzner) and the code that checks the rewrite, already cut to the
+    // bone. About half of every render is comment lines, so the next
+    // addition makes its room there, not here.
     const renders = await hetznerRenders();
     for (const [role, script] of Object.entries(renders)) {
-      expect(Buffer.byteLength(script, 'utf-8'), role).toBeLessThan(28 * 1024);
+      expect(Buffer.byteLength(script, 'utf-8'), role).toBeLessThan(31 * 1024);
     }
   });
 

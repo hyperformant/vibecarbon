@@ -4,15 +4,20 @@
  * `carbon/cloud-init/k3s/{master,worker}-init.sh` templates (the db node
  * loads worker-init.sh as the db role). The wrap must
  * add nothing of its own: each static renders exactly what
- * loadCloudInit/renderScript render for the same vars, and a full vars
- * object leaves no placeholder behind.
+ * loadCloudInit/renderScript render for the same vars (the master's plus
+ * its CSI image rewrites, csiImageRewriteVars), and a full vars object
+ * leaves no placeholder behind.
  *
  * What the templates themselves must contain is pinned by the censuses that
  * own each snippet (tests/unit/deploy/*-census.test.ts), not by stored bytes
  * here.
  */
 import { describe, expect, it } from 'vitest';
-import { loadCloudInit, renderScript } from '../../../src/lib/iac/cloud-init.js';
+import {
+  csiImageRewriteVars,
+  loadCloudInit,
+  renderScript,
+} from '../../../src/lib/iac/cloud-init.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
 const masterVars = {
@@ -38,8 +43,11 @@ const dbVars = {
 };
 
 describe('HetznerProvider k8s user-data statics (the wrap adds nothing)', () => {
-  it('getK8sMasterUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds nothing)', async () => {
-    const direct = renderScript(loadCloudInit('master-init.sh'), masterVars);
+  it('getK8sMasterUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds only the CSI rewrites)', async () => {
+    const direct = renderScript(loadCloudInit('master-init.sh'), {
+      ...masterVars,
+      ...csiImageRewriteVars('hetzner'),
+    });
     const wrapped = await HetznerProvider.getK8sMasterUserData(masterVars);
     expect(wrapped).toBe(direct);
   });

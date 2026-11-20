@@ -4561,22 +4561,37 @@ export async function applyK3sManifests({
   //     driver has moved on since; the plan below always carries
   //     whatever tags CSI_SIDECAR_MIRRORS was last re-derived from.)
   //
-  //     WHY HERE AND NOT IN THE MANIFEST — we do not own these manifests.
-  //     cloud-init applies upstream's YAML verbatim from a URL, so there is no
-  //     template placeholder to render and no overlay to patch. `set image` is
-  //     the same seam cloud-init itself uses one line later (`kubectl set env
-  //     deployment/hcloud-csi-controller HCLOUD_VOLUME_EXTRA_LABELS=...`), and
-  //     the same one step 5a'' below uses for the cluster-autoscaler pod.
+  //     A NO-OP ON A NEW CLUSTER: the master's cloud-init rewrites the CSI
+  //     manifest's images to these same refs before applying it
+  //     (csi_fetch_mirrored, carbon/cloud-init/k3s/_csi-image-mirror.sh, with
+  //     pairs from csiInstallImageRewrites), so the pods START on the mirrors
+  //     and every container already carries its planned ref. `kubectl set
+  //     image` to the image a container already has computes an empty patch
+  //     and sends nothing (kubectl's set_image.go skips a "{}" patch), so the
+  //     pod template, its generation and its hash stay put and nothing rolls.
+  //     Before that rewrite this step moved the images itself, which rolled
+  //     the node plugin on every node while the db PVC waited for it: 109 s of
+  //     `awaitDb` on a Linode k8s-ha standby (run 44623637422), the old node
+  //     pod torn down 30 s after db-0 was created on its node.
+  //     tests/unit/deploy/k8s-image-mirrors.test.ts holds the two seams to the
+  //     same refs; tests/integration/docker/csi-repin-noop.test.ts runs this
+  //     step's command on a real k3s and sees no change.
   //
-  //     WHY IT IS SAFE TO ASSUME THE WORKLOADS EXIST — both master-init.sh and
-  //     do-master-init.sh write /tmp/k3s-ready only AFTER their CCM+CSI applies
-  //     have returned, and deployK3s blocks on that marker (waitForK3sReady)
-  //     before it ever fetches a kubeconfig. So there is no race to poll around.
+  //     WHY IT STAYS: it moves a cluster built before the rewrite onto the
+  //     mirrors (one rollout, on its next deploy), and a cluster whose master
+  //     user data rendered an older alpine (the version channel moves that
+  //     ref) onto the current one. Pulumi ignores a server's user data after
+  //     create, so neither is ever reinstalled.
   //
-  //     WHY FIRST — the re-pin triggers a DaemonSet rollout, and the node plugin
-  //     has to re-register on every node before a PVC can bind anywhere. That
-  //     wants to overlap with the minutes of cert-manager + traefik + registry
-  //     work below, not queue behind it. Unknown provider ⇒ empty plan ⇒ no-op.
+  //     WHY IT IS SAFE TO ASSUME THE WORKLOADS EXIST: every master script
+  //     writes /tmp/k3s-ready only AFTER its CCM+CSI applies have returned,
+  //     and deployK3s blocks on that marker (waitForK3sReady) before it ever
+  //     fetches a kubeconfig. So there is no race to poll around.
+  //
+  //     WHY FIRST: on a cluster this step does change, the DaemonSet rollout
+  //     and the node plugin's re-registration on every node want to overlap
+  //     with the minutes of cert-manager + traefik + registry work below, not
+  //     queue behind it. Unknown provider ⇒ empty plan ⇒ no-op.
   await perfAsync(`deploy.${perfPrefix}.csiSidecars`, async () => {
     for (const { workload, setImageArgs } of csiSidecarSetImagePlan(providerId)) {
       await runKubectlWithRetry(['-n', 'kube-system', 'set', 'image', workload, ...setImageArgs], {
