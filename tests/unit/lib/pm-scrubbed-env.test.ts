@@ -66,22 +66,30 @@ describe('e2eCliEnv routes the CLI child env through it', () => {
     // and built a pnpm project. The matrix therefore never exercised the npm
     // default a customer gets, and the run failed inside the pnpm path, on
     // `pnpm install --frozen-lockfile` in the generated Dockerfile.
-    const env = e2eCliEnv({}, {
-      PATH: '/usr/bin',
-      npm_config_user_agent: 'pnpm/11.18.0 npm/? node/v24.18.1 linux x64',
-    } as NodeJS.ProcessEnv);
+    const env = e2eCliEnv(
+      {},
+      {
+        PATH: '/usr/bin',
+        npm_config_user_agent: 'pnpm/11.18.0 npm/? node/v24.18.1 linux x64',
+      } as NodeJS.ProcessEnv,
+      { runnerCidr: '203.0.113.7/32' },
+    );
 
     expect(env.npm_config_user_agent).toBeUndefined();
     // Everything else the harness depends on still comes through.
     expect(env.PATH).toBe('/usr/bin');
-    expect(env.ALLOWED_SSH_IPS).toBe('0.0.0.0/0,::/0');
+    expect(env.ALLOWED_SSH_IPS).toBe('203.0.113.7/32');
   });
 
   it('still lets an explicit per-call override through', () => {
-    const env = e2eCliEnv({ npm_config_user_agent: 'bun/1.2.0' }, {
-      PATH: '/usr/bin',
-      npm_config_user_agent: 'pnpm/11.18.0',
-    } as NodeJS.ProcessEnv);
+    const env = e2eCliEnv(
+      { npm_config_user_agent: 'bun/1.2.0' },
+      {
+        PATH: '/usr/bin',
+        npm_config_user_agent: 'pnpm/11.18.0',
+      } as NodeJS.ProcessEnv,
+      { runnerCidr: '203.0.113.7/32' },
+    );
     expect(env.npm_config_user_agent).toBe('bun/1.2.0');
   });
 });

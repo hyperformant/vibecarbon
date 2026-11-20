@@ -29,6 +29,17 @@
  * simultaneously, and guessing which one a bare `k8s-ha` meant would risk
  * pointing a `destroy` at the wrong live infra.
  *
+ * Access: the rig's firewall opens SSH (22) and the k8s API (6443) only to
+ * the addresses in its operatorCidrs, which start as the address of the
+ * machine that deployed it (tests/e2e/utils/e2e-env.js e2eCliEnv). Off CI, a
+ * step's own `-y` detects this machine's address and adds it, patching the
+ * live firewall on every provider (ensureOperatorIpAccess, applyToFirewall
+ * in src/lib/operator-ip.js), so a rig deployed elsewhere, or before your
+ * address changed, comes back in reach. `status` is the one step that does
+ * not: it never touches the allowlist, so from a new address its remote
+ * health reads come back unavailable until another step (or
+ * `vibecarbon access add <cidr>` in the rig's project dir) adds you.
+ *
  * Usage:
  *   node scripts/iter-step.js <provider>/<mode> <step> [extra-args...]
  * Examples:
@@ -45,6 +56,7 @@ import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  detectRunnerCidr,
   e2eCliEnv,
   REPO_ROOT,
   resolveE2EAcmeCa,
@@ -86,6 +98,10 @@ function usage() {
   console.error('Usage: node scripts/iter-step.js <provider>/<mode> <step> [extra-args...]');
   console.error('  scenario: a qualified token, e.g. hetzner/k8s-ha or digitalocean/compose');
   console.error(`  steps: ${[...VALID_STEPS].join(' | ')}`);
+  console.error(
+    '  access: every step but status adds this machine to the rig firewall first; ' +
+      'from a new address, run another step (or vibecarbon access add) before status',
+  );
   const rigs = listKeptRigs();
   console.error(
     rigs.length ? `  kept rigs available: ${rigs.join(', ')}` : '  kept rigs available: (none)',
@@ -189,6 +205,20 @@ const cliArgs = await iterStepCliArgs(step, envPrefix, extraArgs);
 // during the M3 battery until someone prefixed the env by hand.
 const { envFileKeys, tls: tlsSetup } = setupE2EEnv();
 
+// ...the same access as the runner: this machine's public address, detected
+// once, is the only source the child's ALLOWED_SSH_IPS names (e2eCliEnv).
+// Off CI, the CLI's own -y also detects it and patches the rig's firewall
+// (ensureOperatorIpAccess), which is what lets this script iterate a rig
+// another machine deployed: every step command except `status` runs that
+// check first. Detection failing stops here, before the step runs.
+let runnerCidr;
+try {
+  runnerCidr = await detectRunnerCidr();
+} catch (err) {
+  console.error(`[iter] runner address: ${err?.message ?? err}`);
+  process.exit(1);
+}
+
 // ...and the same db image choice as the runner: the release tag, or this
 // branch's dev channel build when the release is not published yet (sets
 // VIBECARBON_DB_IMAGE, which e2eCliEnv hands to the child). Fails before the
@@ -209,7 +239,8 @@ console.log(`[iter] log=${logPath}`);
 console.log(
   `[iter] env: ACME=${resolveE2EAcmeCa().ca}` +
     `${tlsSetup ? `, ${tlsSetup.rootCount} LE staging roots trusted` : ''}` +
-    `${envFileKeys.length ? `, ${envFileKeys.length} key(s) from tests/.env.e2e` : ''}`,
+    `${envFileKeys.length ? `, ${envFileKeys.length} key(s) from tests/.env.e2e` : ''}` +
+    `, runner address ${runnerCidr}`,
 );
 console.log(`[iter] cmd=vibecarbon ${cliArgs.join(' ')}`);
 
@@ -223,7 +254,7 @@ const cliBin = join(repoRoot, 'src', 'cli.js');
 // an already-live rig is by definition a real-infra operation.
 const child = spawn('node', [cliBin, ...cliArgs], {
   cwd: projectDir,
-  env: e2eCliEnv({ REAL_INFRA: 'true' }, process.env, provider),
+  env: e2eCliEnv({ REAL_INFRA: 'true' }, process.env, { provider, runnerCidr }),
   stdio: ['inherit', 'pipe', 'pipe'],
 });
 

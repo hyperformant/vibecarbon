@@ -109,8 +109,12 @@ describe('census: no Hetzner-named token on provider-neutral paths', () => {
   it('every e2eCliEnv call site passes the scenario provider', () => {
     const cliRunner = readFileSync(join(root, 'utils/cli-runner.ts'), 'utf-8');
     const iterStep = readFileSync(join(root, '../../scripts/iter-step.js'), 'utf-8');
-    expect(cliRunner).toMatch(/e2eCliEnv\(options\.env, process\.env, [^)]*provider/);
-    expect(iterStep).toMatch(/e2eCliEnv\(\{ REAL_INFRA: 'true' \}, process\.env, provider\)/);
+    expect(cliRunner).toMatch(
+      /e2eCliEnv\(options\.env, process\.env, \{\s*provider: options\.provider/,
+    );
+    expect(iterStep).toMatch(
+      /e2eCliEnv\(\{ REAL_INFRA: 'true' \}, process\.env, \{ provider, runnerCidr \}\)/,
+    );
   });
 
   it('e2e-env.js never synthesizes HCLOUD_TOKEN outside the hetzner branch', () => {

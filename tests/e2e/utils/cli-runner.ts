@@ -38,6 +38,12 @@ export const scenarioContext = new AsyncLocalStorage<{
   echo?: boolean;
   /** The scenario's compute provider; decides which provider CLI token env the child gets. */
   provider?: string;
+  /**
+   * This machine's public address as one host CIDR, detected once per run by
+   * the runner (`detectRunnerCidr`, e2e-env.js). Every CLI child opens SSH and
+   * the k8s API to it alone; a runCli outside a context that carries it throws.
+   */
+  runnerCidr?: string;
   recordPerfSubsteps?: (timings: Array<{ name: string; ms: number; note?: string }>) => void;
 }>();
 
@@ -99,8 +105,13 @@ export async function runCli(args: string, options: RunOptions): Promise<CliResu
   // Child env comes from the shared builder (tests/e2e/utils/e2e-env.js) so
   // `scripts/iter-step.js` spawns the CLI with the identical environment —
   // iterating one step against a kept rig must not behave differently from
-  // that step inside a full run.
-  const env = e2eCliEnv(options.env, process.env, options.provider ?? ctx?.provider);
+  // that step inside a full run. The runner CIDR comes only from the scenario
+  // context the runner set up after detecting it; without one, e2eCliEnv
+  // throws rather than open the firewall wider.
+  const env = e2eCliEnv(options.env, process.env, {
+    provider: options.provider ?? ctx?.provider,
+    runnerCidr: ctx?.runnerCidr,
+  });
 
   // Argv form = no local shell, no injection surface.
   const splitArgs = args.split(/\s+/).filter(Boolean);

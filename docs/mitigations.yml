@@ -141,7 +141,24 @@ classes:
     evidence: >-
       Error text plus same-environment adjacency only (c0773fb0); two family
       members already proven ours (MaxStartups under verify fan-out; CPU-starved
-      sshd under concurrent reconcile, 7d045250).
+      sshd under concurrent reconcile, 7d045250). A third member was the e2e
+      harness's own exposure, not a customer path: runs 44623637422 and
+      44653733007 (Linode, GitHub-hosted) opened port 22 to 0.0.0.0/0,::/0
+      (ALLOWED_SSH_IPS in tests/e2e/utils/e2e-env.js). In 44653733007 the
+      update step's final recheck got "kex_exchange_identification: read:
+      Connection reset by peer" from the k8s-ha standby db at 172.238.166.230,
+      and the diagnostics 40 s later got the same; Linode's account events show
+      that server up and never rebooted from 02:22:24 to its deletion at
+      02:39:08. Linode reassigns IPs to the account: in 44623637422 the same
+      address belonged to a compose-ha standby and then a k8s-ha standby db,
+      and reset key exchanges at 23:26:55 and 00:00:52, outside any restart.
+      Across both runs every reset on every other address came 5 to 30 s after
+      that server's "restarting" line, while its sshd shut down; only this
+      address reset outside a restart, four times on three servers. Something
+      on the internet keeps hitting it, and a world-open port 22 let it reach
+      sshd. Root fix: e2e opens 22 and 6443 to the runner's own address
+      (detectRunnerCidr), as a customer's firewall admits only their operator
+      CIDR.
     proofDebtSpec: docs/attribution-ledger.md
     frozenSites: 7
     sites:

@@ -228,7 +228,7 @@ describe.skipIf(childSkipReason)(suite('child processes', childSkipReason), () =
     // harness spawns inherits NODE_EXTRA_CA_CERTS and therefore boots with the
     // staging roots already in its store. Node reads that variable once at
     // startup, so this can only be verified from a real child.
-    const env = e2eCliEnv({}, setupChildEnv());
+    const env = e2eCliEnv({}, setupChildEnv(), { runnerCidr: '203.0.113.7/32' });
     const out = execFileSync(
       process.execPath,
       [

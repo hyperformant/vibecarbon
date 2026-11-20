@@ -9,6 +9,9 @@ import { e2eCliEnv } from '../../e2e/utils/e2e-env.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
+// The address the entry point detected (documentation range, RFC 5737).
+const runnerCidr = '203.0.113.7/32';
+
 describe('e2eCliEnv state passphrase scrub', () => {
   const inherited = {
     VIBECARBON_STATE_PASSPHRASE: 'another-projects-state-passphrase-0123456789abcdef',
@@ -18,7 +21,7 @@ describe('e2eCliEnv state passphrase scrub', () => {
   };
 
   it('drops all three from the inherited environment', () => {
-    const env = e2eCliEnv({}, inherited);
+    const env = e2eCliEnv({}, inherited, { runnerCidr });
     expect(env.VIBECARBON_STATE_PASSPHRASE).toBeUndefined();
     expect(env.PULUMI_CONFIG_PASSPHRASE).toBeUndefined();
     expect(env.PULUMI_CONFIG_PASSPHRASE_FILE).toBeUndefined();
@@ -29,14 +32,14 @@ describe('e2eCliEnv state passphrase scrub', () => {
     vi.stubEnv('VIBECARBON_STATE_PASSPHRASE', inherited.VIBECARBON_STATE_PASSPHRASE);
     vi.stubEnv('PULUMI_CONFIG_PASSPHRASE', inherited.PULUMI_CONFIG_PASSPHRASE);
     vi.stubEnv('PULUMI_CONFIG_PASSPHRASE_FILE', inherited.PULUMI_CONFIG_PASSPHRASE_FILE);
-    const env = e2eCliEnv();
+    const env = e2eCliEnv({}, undefined, { runnerCidr });
     expect(Object.keys(env)).not.toContain('VIBECARBON_STATE_PASSPHRASE');
     expect(Object.keys(env)).not.toContain('PULUMI_CONFIG_PASSPHRASE');
     expect(Object.keys(env)).not.toContain('PULUMI_CONFIG_PASSPHRASE_FILE');
   });
 
   it('a scenario can still pass one explicitly', () => {
-    const env = e2eCliEnv({ VIBECARBON_STATE_PASSPHRASE: 'explicit' }, inherited);
+    const env = e2eCliEnv({ VIBECARBON_STATE_PASSPHRASE: 'explicit' }, inherited, { runnerCidr });
     expect(env.VIBECARBON_STATE_PASSPHRASE).toBe('explicit');
   });
 });
