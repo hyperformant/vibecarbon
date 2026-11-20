@@ -1707,6 +1707,65 @@ workloads, a change on upstream's (also in the version channel's k3s smoke, so
 the next k3s release proves it too). The Hetzner user-data size stays under
 the 31 KiB tripwire in `private-net-guard.test.ts`.
 
+#### 2026-11-20: A k8s destroy deletes CSI volumes after the servers (#562)
+
+A k8s destroy no longer releases, detaches or deletes any CSI volume before
+`pulumi destroy`. The servers' own deletes detach the volumes, and
+`cleanupOrphanedVolumes` deletes the volume ids captured from the cluster's
+PersistentVolumes afterwards, inside its existing 90 s wait for the cloud to
+clear each attachment. The namespace release (`cleanupClusterPVCs`), the
+pre-destroy detach step (`src/lib/destroy/csi-detach.js`) and the DigitalOcean
+provider methods only it used are gone. A captured volume whose first delete
+fails now joins that re-sweep and is reported if it never goes, where before it
+printed one refused line and the destroy reported clean.
+
+**Why:** e2e run 44653733007, DigitalOcean k8s, destroy exited 2 (LEAKED). The
+release deleted the db volume at 01:37:19 to 01:37:51. At 01:37:53 the detach
+step read every cluster droplet and found the volume gone. About 3 s later the
+DigitalOcean Pulumi provider's own read of the db droplet listed it again
+(terraform-provider-digitalocean re-reads `volume_ids` before a droplet
+delete, detaches each one, and fails the delete on any error), and the detach
+got a 404. The orphan sweep then deleted the droplet by API. csi-detach.js
+waited for DigitalOcean to agree, and that cannot hold when one endpoint's
+answer flips back.
+
+**Do not undo:** do not delete or release a volume before the servers that
+list it are destroyed. Any provider whose server delete walks its volumes
+meets a volume that no longer exists.
+
+**Guard:** `tests/unit/destroy/csi-volumes-after-servers.test.ts` runs the real
+k8s destroy effect against fakes for DigitalOcean, Hetzner and Linode, k8s and
+k8s-ha, with one ordered event log. The fake keeps DigitalOcean's stale read.
+It requires that nothing touches a volume before every `pulumi destroy` ends,
+and that every captured id is deleted after.
+
+#### 2026-11-20: E2E opens SSH only to the runner's own address (#561)
+
+E2E deploys now admit SSH (22) and the Kubernetes API (6443) only from the
+address of the machine running the test, as a customer's firewall admits only
+theirs. The runner and `scripts/iter-step.js` detect it once with the
+product's `detectOperatorIp` and pass it as `ALLOWED_SSH_IPS`, and
+`e2eCliEnv` refuses to build a CLI environment without one host address.
+Before, e2e opened both ports to `0.0.0.0/0,::/0`.
+
+**Why:** e2e run 44653733007, Linode k8s-ha. `update`'s final recheck got
+`kex_exchange_identification: read: Connection reset by peer` from the standby
+db server, which Linode's account events show was up the whole time. Linode
+had handed that address (172.238.166.230) to our servers before: in run
+44623637422 it belonged to a compose-ha standby and then a k8s-ha standby db,
+and it reset key exchanges at 23:26:55 and 00:00:52, outside any restart.
+Across both runs every other reset came 5 to 30 s after that server's
+"restarting" line, while its sshd shut down. Something on the internet keeps
+hitting that address, and it reached sshd only because e2e opened port 22 to
+everyone. A customer never meets it.
+
+**Do not undo:** do not widen `ALLOWED_SSH_IPS` in e2e to make a run pass. A
+world-open port lets failures in that customers never see, and hides any
+traffic that needs a wider firewall than a customer has.
+
+**Guard:** `tests/unit/e2e/runner-cidr.test.ts` requires one detected host
+address, never `0.0.0.0/0` or `::/0`, even from an inherited environment.
+
 ## Added and later removed
 
 | What | Removed | Why |
