@@ -22,30 +22,37 @@ import { e2eCliEnv, REPO_ROOT } from '../../../tests/e2e/utils/e2e-env.js';
 
 const read = (...parts: string[]) => readFileSync(join(REPO_ROOT, ...parts), 'utf-8');
 
+// The address the entry point detected (documentation range, RFC 5737).
+const runnerCidr = '203.0.113.7/32';
+
 describe('e2eCliEnv', () => {
   it('supplies the defaults every e2e CLI child needs', () => {
-    const env = e2eCliEnv({}, {});
+    const env = e2eCliEnv({}, {}, { runnerCidr });
     // Perf markers parsed by metrics/reporter.ts.
     expect(env.VIBECARBON_PERF).toBe('1');
-    // Disposable rigs: -y deploys need an operator CIDR list.
-    expect(env.ALLOWED_SSH_IPS).toBe('0.0.0.0/0,::/0');
+    // -y deploys need an operator CIDR list: the runner's own address.
+    expect(env.ALLOWED_SSH_IPS).toBe(runnerCidr);
     // Telemetry goes to a closed port, whatever the shell exported.
     expect(env.VIBECARBON_API_BASE).toBe('http://127.0.0.1:9');
     expect(
-      e2eCliEnv({}, { VIBECARBON_API_BASE: 'https://example.com' } as NodeJS.ProcessEnv)
-        .VIBECARBON_API_BASE,
+      e2eCliEnv({}, { VIBECARBON_API_BASE: 'https://example.com' } as NodeJS.ProcessEnv, {
+        runnerCidr,
+      }).VIBECARBON_API_BASE,
     ).toBe('http://127.0.0.1:9');
   });
 
   it('lets the real environment override a default, and a per-call value override both', () => {
-    const base = { ALLOWED_SSH_IPS: '10.0.0.0/8' } as NodeJS.ProcessEnv;
-    expect(e2eCliEnv({}, base).ALLOWED_SSH_IPS).toBe('10.0.0.0/8');
-    expect(e2eCliEnv({ ALLOWED_SSH_IPS: '1.2.3.4/32' }, base).ALLOWED_SSH_IPS).toBe('1.2.3.4/32');
+    const base = { VIBECARBON_PERF: '0' } as NodeJS.ProcessEnv;
+    expect(e2eCliEnv({}, base, { runnerCidr }).VIBECARBON_PERF).toBe('0');
+    expect(e2eCliEnv({ VIBECARBON_PERF: '1' }, base, { runnerCidr }).VIBECARBON_PERF).toBe('1');
   });
 
   it('mirrors the runner by aliasing HETZNER_API_TOKEN to the provider CLI var', () => {
     // _run-lifecycle.ts passes HCLOUD_TOKEN explicitly to every step it runs.
-    const env = e2eCliEnv({}, { HETZNER_API_TOKEN: 'tok' } as NodeJS.ProcessEnv, 'hetzner');
+    const env = e2eCliEnv({}, { HETZNER_API_TOKEN: 'tok' } as NodeJS.ProcessEnv, {
+      provider: 'hetzner',
+      runnerCidr,
+    });
     expect(env.HCLOUD_TOKEN).toBe('tok');
   });
 
@@ -56,10 +63,10 @@ describe('e2eCliEnv', () => {
         HETZNER_API_TOKEN: 'tok',
         HCLOUD_TOKEN: 'other',
       } as NodeJS.ProcessEnv,
-      'hetzner',
+      { provider: 'hetzner', runnerCidr },
     );
     expect(explicit.HCLOUD_TOKEN).toBe('other');
-    expect(e2eCliEnv({}, {}, 'hetzner').HCLOUD_TOKEN).toBeUndefined();
+    expect(e2eCliEnv({}, {}, { provider: 'hetzner', runnerCidr }).HCLOUD_TOKEN).toBeUndefined();
   });
 
   it('a DigitalOcean child gets no HCLOUD_TOKEN, and an inherited one is stripped', () => {
@@ -69,15 +76,19 @@ describe('e2eCliEnv', () => {
       DIGITALOCEAN_API_TOKEN: 'do',
     } as NodeJS.ProcessEnv;
     for (const provider of ['digitalocean', 'linode', 'vultr', 'scaleway', undefined]) {
-      const env = e2eCliEnv({}, base, provider);
+      const env = e2eCliEnv({}, base, { provider, runnerCidr });
       expect(env.HCLOUD_TOKEN).toBeUndefined();
       expect(Object.values(env)).not.toContain(undefined);
     }
-    expect(e2eCliEnv({}, base, 'digitalocean').DIGITALOCEAN_API_TOKEN).toBe('do');
+    expect(
+      e2eCliEnv({}, base, { provider: 'digitalocean', runnerCidr }).DIGITALOCEAN_API_TOKEN,
+    ).toBe('do');
   });
 
   it('drops undefined values (spawn rejects them on some platforms)', () => {
-    const env = e2eCliEnv({ SOMETHING: undefined }, { OTHER: undefined } as NodeJS.ProcessEnv);
+    const env = e2eCliEnv({ SOMETHING: undefined }, { OTHER: undefined } as NodeJS.ProcessEnv, {
+      runnerCidr,
+    });
     expect('SOMETHING' in env).toBe(false);
     expect('OTHER' in env).toBe(false);
   });
@@ -100,6 +111,25 @@ describe('runner ↔ iter-step parity (drift guards)', () => {
   it('the runner establishes its process env through the shared module too', () => {
     expect(runner).toMatch(/setupE2EEnv\(\)/);
     expect(runner).toMatch(/from '\.\/utils\/e2e-env\.js'/);
+  });
+
+  it('both entry points detect the runner address and hand it to every child', () => {
+    // runner.ts detects once and carries it in the scenario context;
+    // cli-runner.ts reads it from there; iter-step.js detects and passes it.
+    expect(runner).toMatch(/await detectRunnerCidr\(\)/);
+    expect(runner).toMatch(/const scenarioCtx = \{[^}]*\brunnerCidr\b[^}]*\}/);
+    expect(cliRunner).toMatch(/runnerCidr: ctx\?\.runnerCidr/);
+    expect(iterStep).toMatch(/await detectRunnerCidr\(\)/);
+    expect(iterStep).toMatch(/e2eCliEnv\([^)]*\{ provider, runnerCidr \}\)/);
+  });
+
+  it('the runner detects its address before the first CLI child', () => {
+    // runLifecycle is where every CLI child starts; the detection must come
+    // first, and outside the E2E_PREFLIGHT=skip branch.
+    const detect = runner.indexOf('await detectRunnerCidr()');
+    expect(detect).toBeGreaterThan(-1);
+    expect(detect).toBeLessThan(runner.indexOf('runLifecycle(scenarioConfig'));
+    expect(detect).toBeLessThan(runner.indexOf("process.env.E2E_PREFLIGHT !== 'skip'"));
   });
 
   it('iter-step no longer hand-copies the child env vars', () => {

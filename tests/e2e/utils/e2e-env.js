@@ -14,8 +14,9 @@
  * health probe purely because it lacked the runner's staging-CA handling,
  * and every iter-step run silently used PRODUCTION Let's Encrypt (5 certs /
  * week / identifier) instead of staging. Both consumers now call
- * `setupE2EEnv()` + `e2eCliEnv()` so a change here reaches both by
- * construction rather than by remembering to copy it.
+ * `setupE2EEnv()`, then `detectRunnerCidr()` once, then `e2eCliEnv()` per
+ * child, so a change here reaches both by construction rather than by
+ * remembering to copy it.
  *
  * PLAIN JS ON PURPOSE: `scripts/iter-step.js` runs under bare `node`, which
  * cannot import a `.ts` module. Types live in JSDoc; `tsconfig.e2e.json` sets
@@ -25,6 +26,7 @@
 import { randomBytes, X509Certificate } from 'node:crypto';
 import dns from 'node:dns';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { isIPv4, isIPv6 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import tls from 'node:tls';
@@ -370,6 +372,67 @@ export function setupE2EEnv(opts = {}) {
 }
 
 /**
+ * This machine's public address as a single-host CIDR (`/32`, or `/128` for
+ * IPv6): the only source the e2e deploys open SSH (22) and the k8s API (6443)
+ * to. Every e2e entry point calls this once per run, before its first CLI
+ * child, and hands the result to `e2eCliEnv`.
+ *
+ * It uses the product's own detector and formatter (src/lib/operator-ip.js),
+ * so the harness takes the address a customer's CLI would take. Loaded lazily
+ * so the modules that only build a child env never pull in the provider
+ * classes behind it.
+ *
+ * Throws, naming what failed, when the address cannot be detected: an e2e run
+ * with no address to scope the firewall to does not start, the same way the
+ * infra preflight stops a run before it provisions anything.
+ *
+ * @param {object} [opts]
+ * @param {() => Promise<{ip: string, version: 4|6}>} [opts.detect] The
+ *   detector (tests). Default: the product's `detectOperatorIp`.
+ * @returns {Promise<string>} e.g. `203.0.113.7/32`
+ */
+export async function detectRunnerCidr(opts = {}) {
+  const { detectOperatorIp, cidrFromIp } = await import('../../../src/lib/operator-ip.js');
+  const detect = opts.detect ?? (() => detectOperatorIp());
+  let found;
+  try {
+    found = await detect();
+  } catch (err) {
+    throw new Error(
+      `Cannot detect this machine's public address, so the e2e firewall has nothing to ` +
+        `open SSH and the k8s API to (${err instanceof Error ? err.message : String(err)}). ` +
+        `Every e2e deploy admits only the address of the machine running it, as a ` +
+        `customer's firewall admits only theirs. Check that https://api.ipify.org or ` +
+        `https://icanhazip.com answers from here, then run again.`,
+    );
+  }
+  const cidr = cidrFromIp(found.ip, found.version);
+  assertHostCidr(cidr, 'the detected address');
+  return cidr;
+}
+
+/**
+ * Throw unless `cidr` names exactly one host: an IPv4 address with `/32` or
+ * an IPv6 address with `/128`. This is what keeps a world-open `0.0.0.0/0`
+ * (or any wider range) out of an e2e firewall.
+ *
+ * @param {unknown} cidr
+ * @param {string} what Names the value in the error.
+ */
+function assertHostCidr(cidr, what) {
+  const [addr, bits, ...rest] = String(cidr ?? '').split('/');
+  const host =
+    rest.length === 0 && ((isIPv4(addr) && bits === '32') || (isIPv6(addr) && bits === '128'));
+  if (!host) {
+    throw new Error(
+      `${what} must be one host address (a.b.c.d/32 or an IPv6 address with /128), got ` +
+        `"${String(cidr ?? '')}". E2E opens SSH and the k8s API to the machine running it ` +
+        `and nothing wider.`,
+    );
+  }
+}
+
+/**
  * Passphrase variables an e2e child must not inherit: the project's own
  * (each scenario's `create` makes one) and the two Pulumi spellings a shell
  * export for another project would put ahead of it.
@@ -388,32 +451,63 @@ const INHERITED_STATE_PASSPHRASE_KEYS = [
  * same env as the same step inside a full lifecycle run.
  *
  * Precedence: defaults < process.env < pins < `extra`. The real environment
- * overriding a default is deliberate (an operator can widen ALLOWED_SSH_IPS
- * or turn perf logging off from the shell); per-call `extra` wins over both.
- * VIBECARBON_API_BASE is a PIN, set after the inherited spread, because a
- * shell-exported value must not be able to send a child's telemetry at
- * production — see its comment below.
+ * overriding a default is deliberate (an operator can turn perf logging off
+ * from the shell); per-call `extra` wins over both. VIBECARBON_API_BASE and
+ * ALLOWED_SSH_IPS are PINS, set after the inherited spread, so a shell export
+ * can neither send a child's telemetry at production nor open its firewall
+ * wider than this machine; see their comments below.
  *
  * @param {Record<string, string | undefined>} [extra] Per-call overrides.
+ *   ALLOWED_SSH_IPS is refused here: pass `runnerCidr` instead.
  * @param {NodeJS.ProcessEnv} [base] Env to inherit (default `process.env`).
- * @param {string} [provider] The scenario's compute provider. Only 'hetzner'
- *   gets `HCLOUD_TOKEN`; for any other value (or none) an inherited
+ * @param {object} [opts]
+ * @param {string} [opts.provider] The scenario's compute provider. Only
+ *   'hetzner' gets `HCLOUD_TOKEN`; for any other value (or none) an inherited
  *   `HCLOUD_TOKEN` is stripped so one cloud's token never rides into another's run.
+ * @param {string} [opts.runnerCidr] REQUIRED: this machine's public address
+ *   as one host CIDR, from `detectRunnerCidr()` at the entry point. Missing,
+ *   or anything wider than one host, throws.
  * @returns {Record<string, string>}
  */
-export function e2eCliEnv(extra = {}, base = process.env, provider = undefined) {
+export function e2eCliEnv(extra = {}, base = process.env, opts = {}) {
+  const { provider, runnerCidr } = opts;
+  // H-2: e2e deploys run with -y, which needs a populated operatorCidrs list
+  // or ALLOWED_SSH_IPS. In CI (CI=true) the CLI does not detect the
+  // operator's address itself (shouldAutoDetectOperatorIp in
+  // src/lib/operator-ip.js), so this value IS the firewall's SSH (22) and
+  // k8s API (6443) source list: the first deploy seeds operatorCidrs from it
+  // and every later command keeps that list. A laptop run detects its own
+  // address in the CLI too and gets the same /32.
+  //
+  // It used to be '0.0.0.0/0,::/0', which no customer runs. Linode hands
+  // the same public IPs back to an account, and one of them reset sshd's key
+  // exchange outside any restart, four times across two runs and three
+  // different servers, while every other address reset only during its own
+  // restart (runs 44623637422 and 44653733007, docs/mitigations.yml
+  // ssh-transport-blips). Something on the internet keeps hitting that
+  // address, and a world-open port 22 let it reach sshd. Scoped to the
+  // runner, e2e sees what a customer's firewall lets through and nothing else.
+  if (Object.hasOwn(extra ?? {}, 'ALLOWED_SSH_IPS')) {
+    throw new Error(
+      'e2eCliEnv: ALLOWED_SSH_IPS is not a per-call value. The firewall opens to the ' +
+        'runnerCidr the entry point detected, and nothing else.',
+    );
+  }
+  if (runnerCidr === undefined || runnerCidr === null || runnerCidr === '') {
+    throw new Error(
+      "e2eCliEnv: no runnerCidr. Every e2e entry point detects this machine's public " +
+        'address once (detectRunnerCidr in tests/e2e/utils/e2e-env.js) and passes it here, ' +
+        'so SSH and the k8s API open to that address only. There is no world-open fallback.',
+    );
+  }
+  assertHostCidr(runnerCidr, 'e2eCliEnv runnerCidr');
+
   const env = {
     // VIBECARBON_PERF=1 turns on the [perf] stderr lines emitted by every
     // deploy sub-step (setupServer, buildImageOnServer, pullComposeImages,
     // composeUp, migrations, ...) so the e2e log captures per-stage
     // wall-clock timings. Off-by-default outside e2e.
     VIBECARBON_PERF: '1',
-    // H-2: deploys run with --yes from e2e scenarios, which require either a
-    // populated operatorCidrs list or ALLOWED_SSH_IPS. E2E environments are
-    // disposable — open SSH/k8s API to the world; the point of these
-    // scenarios is exercising the deploy flow, not firewall hardening. Real
-    // deploys go through the interactive auto-detect path.
-    ALLOWED_SSH_IPS: '0.0.0.0/0,::/0',
     // `create` infers the package manager from npm_config_user_agent, and this
     // harness is launched by `pnpm test:e2e` — so spreading the raw environment
     // made every e2e project pnpm-based. The matrix then never exercised the
@@ -431,6 +525,9 @@ export function e2eCliEnv(extra = {}, base = process.env, provider = undefined) 
     // reports to production and a shell-exported value cannot send it there;
     // the calls fail fast and are swallowed.
     VIBECARBON_API_BASE: 'http://127.0.0.1:9',
+    // A pin for the same reason: an inherited ALLOWED_SSH_IPS (a shell
+    // export for another project) must not widen an e2e firewall.
+    ALLOWED_SSH_IPS: runnerCidr,
     ...extra,
   };
 

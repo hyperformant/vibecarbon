@@ -202,6 +202,16 @@ const REGISTRY = [
     deepTests: ['tests/unit/e2e/iter-step-env-parity.test.ts'],
   },
   {
+    // The one address an e2e firewall opens SSH and the k8s API to.
+    helper: 'detectRunnerCidr',
+    definition: 'tests/e2e/utils/e2e-env.js',
+    consumers: [
+      'scripts/iter-step.js', // kept-rig single-step iteration
+      'tests/e2e/runner.ts', // full runs, once per run
+    ],
+    deepTests: ['tests/unit/e2e/runner-cidr.test.ts'],
+  },
+  {
     helper: 'fetchServerTypes',
     definition: 'tests/e2e/utils/server-types.ts',
     consumers: [

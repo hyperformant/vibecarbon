@@ -45,6 +45,16 @@ Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean
 - `VC_KEEP_ON_FAILURE=1` (or `--keep-on-fail`) — preserves repo + cluster on failure so you can iterate.
 - `VC_KEEP_ALWAYS=1` (or `--keep`) — never tear down. Pairs with `iter-step.js` for the kept-rig pattern.
 
+## Access: SSH and the k8s API open to the runner only
+
+Every e2e deploy opens SSH (22) and the k8s API (6443) to one address: the public address of the machine running the harness, detected once per run with the product's own `detectOperatorIp` (`detectRunnerCidr` in `tests/e2e/utils/e2e-env.js`) and logged as `Runner address: <ip>/32`. `e2eCliEnv` passes it as `ALLOWED_SSH_IPS` and refuses to build a child env without it; nothing world-opens a firewall, in CI or on a laptop. A run that cannot detect its address stops before it provisions anything (check that `https://api.ipify.org` answers from that machine).
+
+- **Why:** a customer's firewall admits only their operator CIDR. With port 22 open to the world, a recycled Linode IP that something on the internet keeps hitting reset sshd's key exchange outside any restart (runs 44623637422 and 44653733007, `docs/mitigations.yml` `ssh-transport-blips`). Scoped to the runner, e2e sees what a customer sees.
+- **In CI** (`CI=true` plus `-y`) the CLI never detects the address itself (`shouldAutoDetectOperatorIp`): the first deploy seeds `operatorCidrs` from `ALLOWED_SSH_IPS` and every later command keeps that list. A runner whose public address changed mid-run black-holes :22 for the rest of the run; `tests/e2e/utils/ssh-reachability.ts` names that diagnosis.
+- **On a laptop** every `-y` command also detects the address and, when it is new, adds it and patches the live firewall (`ensureOperatorIpAccess` / `applyToFirewall`, all five providers). That is what lets `iter-step.js` iterate a rig another machine deployed, or one from before your address changed.
+- **`status` never touches the allowlist.** From a new address its remote health reads come back unavailable until another step (or `vibecarbon access add <cidr>` in the rig's project dir) adds you.
+- **Every check reaches the servers from the runner.** No e2e step dials a server's public :22 or :6443 from anywhere else, and the servers never dial each other's: k3s joins use the master's private IP, and HA replication and the standby's image copy ride WireGuard (udp/51821, admitted per peer).
+
 ## The kept-rig iteration loop (Pattern 2)
 
 When one specific step fails repeatedly (e.g. `failover`, `restore`, `verify-deploy`):
@@ -64,6 +74,8 @@ node scripts/iter-step.js hetzner/k8s-ha failover
 #    backup bucket by design and gets no sweep, so it leaks the bucket.
 node scripts/iter-step.js hetzner/k8s-ha destroy -purge
 ```
+
+`iter-step.js` detects this machine's address the same way the runner does and stops if it cannot. Off CI, every step but `status` adds that address to the rig's firewall first (see Access above).
 
 `iter-step.js` takes a **qualified** scenario token (`provider/mode`, the same identity `--scenario` uses) — a bare mode is rejected rather than guessed at, since both providers can keep a rig of the same mode at once. Valid steps: `deploy | failover | scale | backup | restore | destroy | status | diagnose`.
 

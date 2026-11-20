@@ -51,8 +51,14 @@
  *   always wins (a shell export or CI secret is never overridden).
  *   tests/.env.e2e is gitignored; never commit real tokens.
  *
- *   scripts/iter-step.js calls the SAME setupE2EEnv() + e2eCliEnv(), so a
- *   step iterated against a kept rig runs under the runner's environment.
+ *   scripts/iter-step.js calls the SAME setupE2EEnv() + detectRunnerCidr() +
+ *   e2eCliEnv(), so a step iterated against a kept rig runs under the
+ *   runner's environment.
+ *
+ *   Access: the runner detects this machine's public address once per run
+ *   (detectRunnerCidr) and every deploy opens SSH (22) and the k8s API
+ *   (6443) to that one address, as a customer's firewall would. A run that
+ *   cannot detect it stops before provisioning anything.
  *
  *   Which credentials a run needs is registry-driven (tests/config.ts
  *   `e2e.providers[provider].requiredEnv`) — a missing var aborts loudly,
@@ -113,7 +119,7 @@ import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { assertStorageDns } from './utils/dns-gate.js';
-import { resolveE2EAcmeCa, setupE2EEnv } from './utils/e2e-env.js';
+import { detectRunnerCidr, resolveE2EAcmeCa, setupE2EEnv } from './utils/e2e-env.js';
 import { parseFeaturesArg, resolveRunFeatures } from './utils/feature-set.js';
 import { attemptTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
 import { reapStaleLocalArtifacts } from './utils/local-artifacts.js';
@@ -631,6 +637,20 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     throw err;
   }
 
+  // This machine's public address, once per run, before the first CLI child:
+  // every scenario's firewall opens SSH and the k8s API to it alone, as a
+  // customer's firewall admits only the customer's own address (e2eCliEnv in
+  // utils/e2e-env.js says why). Not behind E2E_PREFLIGHT=skip: a run with no
+  // address has nothing to open the firewall to, so it stops here.
+  let runnerCidr: string;
+  try {
+    runnerCidr = await detectRunnerCidr();
+  } catch (err) {
+    console.error(`\nE2E runner address: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
+  console.log(`  Runner address: ${runnerCidr} (SSH and the k8s API open to this address only)`);
+
   // Pre-matrix infra preflight: 30-second sanity ping of every external
   // dependency. Surfaces "today is a bad day at Hetzner/Cloudflare" before
   // we burn 30+ minutes per scenario discovering it. Skip with
@@ -988,6 +1008,9 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       logPath: scenarioLogPath,
       echo: true,
       provider,
+      // Every CLI child of this scenario opens SSH and the k8s API to this
+      // address only (cli-runner.ts hands it to e2eCliEnv).
+      runnerCidr,
     };
 
     try {

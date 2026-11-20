@@ -13,6 +13,15 @@
  * black-holed) has exactly one common cause worth naming up front, and this
  * module names it once and then fails fast.
  *
+ * It holds for every run, CI included: the harness opens :22 (and the k8s API
+ * on :6443) only to the address it detected at the start of the run, which
+ * the runner logs as `Runner address: <cidr>` (e2eCliEnv in e2e-env.js; it
+ * was open to the world in CI before). So a mid-run change of this machine's
+ * public address black-holes :22. In CI nothing re-opens it before the run
+ * ends, because under CI=true the CLI never re-detects the operator address.
+ * On a laptop the next CLI command re-detects and patches the firewall, but
+ * the harness's own SSH checks in between still time out.
+ *
  * The distinction that makes this safe: a CONNECT timeout means the TCP
  * handshake never completed — nothing is listening for us at :22. That is a
  * property of the host/firewall, not of the moment, so it is worth memoizing. A
@@ -108,16 +117,17 @@ export function sshUnreachableDiagnosis(
       `or inbound :22 no longer matching the operator CIDRs captured at deploy time ` +
       `(a cloud firewall DROPs, which is why this times out instead of refusing). ` +
       `Check the node is running first, then compare \`curl -s https://api.ipify.org\` ` +
-      `against \`operatorCidrs\` in .vibecarbon.json.`
+      `against \`operatorCidrs\` in .vibecarbon.json and the run's "Runner address" line.`
     );
   }
   return (
     `${head}The HTTP checks against this deployment PASSED at the start of this phase, so the ` +
     `app was serving and the node was up — only operator ACCESS is broken. Inbound :22 is scoped to the operator ` +
-    `CIDRs captured at deploy time, so the cause is almost certainly the operator's public ` +
-    `IP changing mid-run (a cloud firewall DROPs, which is why this times out instead of ` +
-    `refusing). Confirm with \`curl -s https://api.ipify.org\` against \`operatorCidrs\` in ` +
-    `.vibecarbon.json, and repair with \`vibecarbon access add\`.`
+    `CIDRs captured at deploy time (the runner's own address, in CI too), so the cause is ` +
+    `almost certainly this machine's public IP changing mid-run (a cloud firewall DROPs, ` +
+    `which is why this times out instead of refusing). Confirm with ` +
+    `\`curl -s https://api.ipify.org\` against \`operatorCidrs\` in .vibecarbon.json and the ` +
+    `run's "Runner address" line, and repair with \`vibecarbon access add\`.`
   );
 }
 
