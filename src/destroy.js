@@ -53,7 +53,6 @@ import {
   pulumiStackEnvs,
   resolveTier,
 } from './lib/deploy/tier-registry.js';
-import { fallbackCsiVolumeIds, runCsiDetachStep } from './lib/destroy/csi-detach.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
 import { ORPHANS_DESTROY_COMMAND, retryDestroyCommand } from './lib/destroy/retry-command.js';
@@ -328,7 +327,8 @@ export function backupOfferIp(envConfig, envName, warn = (msg) => p.log.warn(msg
  * remote step, with the arguments `vibecarbon backup` uses
  * (ensureFirewallAccessIfNeeded in src/backup.js). Without it, an operator
  * whose IP changed since the deploy timed out on the pre-destroy backup and
- * the CSI volume release, and the only override (-force) skipped the backup.
+ * the kubectl steps after it, and the only override (-force) skipped the
+ * backup.
  *
  * A failed check warns and continues: destroy is the escape hatch, and a
  * remote step that then cannot connect stops on its own cause (the backup
@@ -530,58 +530,6 @@ export async function preDestroyBackup(
     log.warn(
       `The base backup is in the bucket, but pruning old backups failed: ${backup.retentionError}`,
     );
-  }
-}
-
-/**
- * Release all Hetzner CSI volumes via the cluster's own finalizers
- * before Pulumi tears the cluster down, so the underlying volumes
- * don't leak into the post-destroy orphan sweep.
- *
- * Approaches tried:
- *   - `kubectl delete pvc --all --wait=true`. Failed — PVCs have a
- *     kubernetes.io/pvc-protection finalizer that blocks delete while
- *     a Pod is bound, so the wait burned the full 180s while
- *     the db pod still held its PVC. 4 orphans.
- *   - Delete Pods first (--wait=false), then PVCs. Failed for the
- *     same end result — the db is a StatefulSet, so its
- *     controller recreated the deleted Pod within seconds and
- *     re-bound the PVC. Same 4 orphans on the 2026-04-28 rerun.
- *   - Current: delete the entire vibecarbon namespace. The namespace
- *     controller handles dependency ordering automatically —
- *     workload controllers (StatefulSet,
- *     Deployment) get deleted FIRST so they stop recreating Pods,
- *     then Pods drain, then PVCs lose their pvc-protection
- *     finalizers, then PVs trigger the Hetzner CSI controller
- *     (still alive in kube-system; we only touch the vibecarbon
- *     namespace) to delete the underlying volumes via the PV's
- *     reclaim policy.
- *
- * Best-effort: any failure (cluster unreachable, kubectl missing,
- * already-gone resources) is logged and swallowed so the destroy
- * continues to Pulumi destroy + sweep.
- *
- * @param {string} kubeconfigPath
- */
-export async function cleanupClusterPVCs(kubeconfigPath) {
-  if (!existsSync(kubeconfigPath)) return;
-  try {
-    runCommand(
-      [
-        'kubectl',
-        '--kubeconfig',
-        kubeconfigPath,
-        'delete',
-        'namespace',
-        'vibecarbon',
-        '--wait=true',
-        '--timeout=240s',
-        '--ignore-not-found=true',
-      ],
-      { silent: true, ignoreError: true, returnOutput: false },
-    );
-  } catch {
-    // best-effort: post-destroy sweep is the safety net
   }
 }
 
@@ -890,7 +838,24 @@ export function configuredClusterRegions(envConfig) {
   ];
 }
 
-/** Default budget for the detach re-sweep (see cleanupOrphanedVolumes). */
+/**
+ * Default budget for the detach re-sweep (see cleanupOrphanedVolumes). It
+ * starts after every `pulumi destroy` and the sweeps after it have returned,
+ * and each provider's server delete has done its part by then:
+ *   - DigitalOcean: the provider's Droplet delete detaches every listed volume
+ *     and waits for each detach action before it deletes the droplet
+ *     (detachVolumeIDOnDroplet, digitalocean/droplet/resource_droplet.go). What
+ *     can remain is DO's read lagging its writes, measured in seconds (a
+ *     deleted droplet's volume listed again ~3 s later in run 44653733007; a
+ *     deleted SSH key listed for 22 s, deleteSSHKeyById).
+ *   - Linode: the provider's instance delete waits for the delete event to
+ *     finish "to assure volumes are detached" (deleteResource,
+ *     linode/instance/resource.go).
+ *   - Hetzner: the server delete waits for its action, and the volume's
+ *     attachment clears asynchronously seconds later (2026-07-30, the run
+ *     this re-sweep exists for).
+ * So 90 s holds every observed lag several times over.
+ */
 const VOLUME_DETACH_WAIT_MS = 90_000;
 const VOLUME_DETACH_POLL_MS = 5_000;
 
@@ -909,6 +874,16 @@ const idKey = (id) => String(id);
  * Find and delete orphaned volumes created by the Kubernetes CSI driver.
  * These volumes are created via PersistentVolumeClaims, live outside every
  * Pulumi stack, and persist after server deletion.
+ *
+ * This is the ONLY place a k8s destroy deletes a cluster volume, and it runs
+ * after `pulumi destroy` has deleted the servers. Nothing before that deletes,
+ * detaches or releases one (not through the cluster's PVCs either):
+ * terraform-provider-digitalocean's Droplet delete detaches every volume DO
+ * lists on the droplet and fails on a 404 for one that is already gone, and
+ * DO's listing can name a deleted volume again seconds after a read that did
+ * not (e2e run 44653733007). Each server delete detaches volumes that still
+ * exist, and this deletes them by the ids captured before the teardown.
+ * tests/unit/destroy/csi-volumes-after-servers.test.ts holds the order.
  *
  * TWO TIERS OF MATCH, AND WHY THE DIFFERENCE IS THE WHOLE DESIGN
  * --------------------------------------------------------------
@@ -960,7 +935,11 @@ const idKey = (id) => String(id);
  * forever: both clouds clear the attachment ASYNCHRONOUSLY after the server
  * delete completes, so the volumes are "in use" for the one instant we look
  * and detached seconds later with nothing left to reap them. Hence the bounded
- * re-sweep, restricted to identity matches.
+ * re-sweep, restricted to identity matches. An identity volume whose first
+ * delete fails joins it too (a delete the cloud refuses while its own
+ * attachment record catches up), so it is tried again inside the same budget
+ * and, failing that, reported: never dropped. VOLUME_DETACH_WAIT_MS has the
+ * per-provider evidence for the budget.
  *
  * Cloud-shaped field reads (attachment, labels, region, creation time) go
  * through the provider's Task 7 accessors, so the same matching logic runs
@@ -1122,7 +1101,11 @@ async function cleanupOrphanedVolumes(
       continue;
     }
     if (identity) {
-      await tryDelete(volume, identity);
+      // A refused or failed delete of a volume we own goes to the re-sweep
+      // below, which tries it again inside the budget and reports it if it
+      // never goes. Dropping it here printed one DELETE line and left a
+      // billing volume out of every result list.
+      if (!(await tryDelete(volume, identity))) pending.set(idKey(volume.id), recordFor(volume));
       continue;
     }
     const heuristic = heuristicMatch(volume);
@@ -1146,8 +1129,8 @@ async function cleanupOrphanedVolumes(
   // A known volume absent from an INCOMPLETE listing proves nothing — we may
   // simply never have received its page. Carry it into the re-sweep so it is
   // retried and, failing that, reported. (Absent from a COMPLETE listing is
-  // real evidence: the CSI finalizer already reaped it, which is the normal
-  // green-teardown path and must stay silent.)
+  // real evidence that it is already gone: an earlier destroy of this
+  // environment deleted it, or someone did by hand. That must stay silent.)
   if (!listingComplete) {
     for (const id of knownIdSet) {
       if (!seenInFirstPass.has(id) && !pending.has(id)) {
@@ -1184,7 +1167,7 @@ async function cleanupOrphanedVolumes(
       if (await tryDelete(volume, 'captured-id (re-sweep)')) pending.delete(key);
     }
     // A pending volume that vanished from a listing we could actually read was
-    // reaped elsewhere (CSI finalizer, provider GC) — stop waiting on it.
+    // reaped elsewhere (provider GC, an operator), so stop waiting on it.
     for (const key of [...pending.keys()]) {
       if (!seenIds.has(key)) pending.delete(key);
     }
@@ -4534,11 +4517,14 @@ async function deleteBackstopNetwork({ provider, target, results, s }) {
 }
 
 /**
- * k8s / k8s-ha: Pulumi-managed infra teardown (volume pre-scan, CCM LB
- * cleanup, CSI release, CA-worker sweep, `pulumi destroy` per stack, orphan
- * sweep, HA shared-key delete), then DNS records (last, once nothing can still
- * validate them), then orphaned CSI volume cleanup. plan.stackEnvs already differs for k8s vs k8s-ha, so a single
- * function serves both.
+ * k8s / k8s-ha: Pulumi-managed infra teardown (CSI volume identity capture,
+ * volume pre-scan, CCM LB cleanup, CA-worker sweep, `pulumi destroy` per
+ * stack, orphan sweep, HA shared-key delete), then DNS records (last, once
+ * nothing can still validate them), then the CSI volumes, by the ids captured
+ * first (cleanupOrphanedVolumes). No volume is deleted, detached or released
+ * before `pulumi destroy`: the server deletes detach them (see
+ * cleanupOrphanedVolumes for why). plan.stackEnvs already differs for k8s vs
+ * k8s-ha, so a single function serves both.
  */
 async function destroyK8sTier({
   plan,
@@ -4577,14 +4563,6 @@ async function destroyK8sTier({
   // the identity list is the whole answer, so a `pvc-*` volume we did not
   // capture is somebody else's and must not be deleted.
   let identityComplete = false;
-  // The volumes the pre-destroy CSI detach may touch: the PersistentVolume
-  // capture, or when that failed, the pvc-<uuid> volumes on this env's cluster
-  // servers. Nothing else.
-  const capturedCsiVolumeIds = [];
-  // Droplets/servers on the cluster network(s), and the volumes attached to
-  // them, from the pre-scan.
-  const clusterServerIds = [];
-  const prescanVolumeIds = [];
 
   // 1. Delete Pulumi-managed cloud resources. DNS is deleted LAST (step 2):
   // while any cluster is alive its cert-manager may still be validating, and a
@@ -4595,7 +4573,8 @@ async function destroyK8sTier({
     // destroy` tears them all down in one pass.
 
     // No infrastructure on record and no kubeconfig: the deploy stopped before
-    // it had a cluster to talk to. Gates the two kubeconfig steps below.
+    // it had a cluster to talk to. Gates the kubeconfig step below (the
+    // capture).
     const neverHadCluster =
       !recordsInfrastructure(envConfig) &&
       stackEnvs.every((stackEnv) => !existsSync(localKubeconfigPath(cwd, stackEnv)));
@@ -4608,6 +4587,8 @@ async function destroyK8sTier({
     // lost to a partial teardown); the server pre-scan below sees only what is
     // attached right now, which is why detached CSI volumes kept surviving
     // green destroys (2026-07-29 / 07-31 / 08-05, 14 volumes hand-deleted).
+    // It only reads: the volumes it names are deleted after `pulumi destroy`
+    // (cleanupOrphanedVolumes), never before.
     // Best-effort per cluster: a dead cluster falls through to the gated
     // heuristic backstop, loudly.
     // Sequential on purpose: captureClusterCsiVolumes shells out with the
@@ -4626,7 +4607,7 @@ async function destroyK8sTier({
     const clustersToAsk = neverHadCluster ? [] : stackEnvs;
     console.log(
       neverHadCluster
-        ? `No cluster on record for ${environment} and no kubeconfig, so there are no CSI volumes to capture or release`
+        ? `No cluster on record for ${environment} and no kubeconfig, so there are no CSI volumes to capture`
         : `Capturing CSI volume identities from ${stackEnvs.length} cluster(s)...`,
     );
     for (const stackEnv of clustersToAsk) {
@@ -4635,7 +4616,6 @@ async function destroyK8sTier({
       const capture = captureClusterCsiVolumes(kubeconfigPath, { timeoutSeconds: 20 });
       if (capture.ok) {
         allClusterVolumeIds.push(...capture.volumeIds);
-        capturedCsiVolumeIds.push(...capture.volumeIds);
         for (const region of capture.regions) clusterLocations.add(region);
         console.log(
           `  Captured ${capture.volumeIds.length} CSI volume id(s) from PersistentVolumes${dirLabel}`,
@@ -4690,8 +4670,6 @@ async function destroyK8sTier({
             .serverNetworkIds(server)
             .some((id) => clusterNetworkIds.has(id));
           if (inCluster) {
-            clusterServerIds.push(server.id);
-            prescanVolumeIds.push(...provider.serverVolumeIds(server));
             allClusterVolumeIds.push(...provider.serverVolumeIds(server));
             // clusterLocations feeds cleanupOrphanedVolumes's
             // isPvcInClusterLocation fallback — the ONLY thing that catches a
@@ -4707,9 +4685,12 @@ async function destroyK8sTier({
           }
         }
       }
+      // One volume is usually named twice, by its PersistentVolume and by the
+      // server it is attached to, so count distinct ids.
+      const distinctVolumes = new Set(allClusterVolumeIds.map(idKey)).size;
       s.stop(
-        allClusterVolumeIds.length > 0
-          ? `Found ${allClusterVolumeIds.length} volume(s) to clean up`
+        distinctVolumes > 0
+          ? `Found ${distinctVolumes} volume(s) to clean up after the servers are deleted`
           : 'No volumes attached to cluster servers',
       );
     } catch (error) {
@@ -4792,43 +4773,16 @@ async function destroyK8sTier({
       );
     }
 
-    // No PersistentVolume capture, but the CSI release below still runs if the
-    // API answers: fall back to the pvc-<uuid> volumes on this env's cluster
-    // servers for the pre-destroy detach. Named now, while they still exist.
-    if (typeof provider.detachVolume === 'function' && !identityComplete) {
-      const known = new Set(capturedCsiVolumeIds);
-      for (const id of await fallbackCsiVolumeIds(provider, prescanVolumeIds)) {
-        if (!known.has(id)) capturedCsiVolumeIds.push(id);
-      }
-    }
-
-    // Pre-Pulumi: release Hetzner CSI volumes via the cluster's own
-    // finalizers while the CSI controller is still up. Pulumi destroy
-    // yanks the cluster before the controller can react, so without
-    // this step the underlying volumes survive each PVC. Iterate over
-    // every cluster (single = 1, HA = primary + standby) using the
-    // matching kubeconfig file. Helper is best-effort; the post-destroy
-    // sweep below catches anything left over.
-    // HA: release CSI volumes on primary + standby in parallel — each
-    // cluster's controller is independent. Nothing to release without a
-    // cluster (neverHadCluster, said once above).
-    if (!neverHadCluster) {
-      console.log(
-        `Releasing CSI volumes via cluster finalizers across ${stackEnvs.length} cluster(s)...`,
-      );
-    }
-    await Promise.allSettled(
-      clustersToAsk.map(async (stackEnv) => {
-        const kubeconfigPath = localKubeconfigPath(cwd, stackEnv);
-        const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
-        try {
-          await cleanupClusterPVCs(kubeconfigPath);
-          console.log(`  CSI volume release attempted${dirLabel}`);
-        } catch (error) {
-          console.log(`  CSI volume release failed${dirLabel}: ${error.message}`);
-        }
-      }),
-    );
+    // The CSI volumes stay as they are until `pulumi destroy` has deleted the
+    // servers: no PVC or namespace delete through the cluster, no detach.
+    // terraform-provider-digitalocean's Droplet delete detaches every volume
+    // DigitalOcean lists on the droplet and fails on a 404 for one already
+    // deleted, and DO's listing can name a deleted volume again seconds after
+    // a read that did not (e2e run 44653733007: a CSI release before Pulumi,
+    // a detach step that saw nothing attached, then the droplet delete 404'd
+    // on the deleted volume). Every provider's server delete detaches the
+    // volumes that still exist; cleanupOrphanedVolumes deletes them after,
+    // by the ids captured above.
 
     // Destroy via Pulumi. Each stack lives in the backend we configured at
     // deploy time (Hetzner S3 or DigitalOcean Spaces) — `pulumi destroy`
@@ -4902,21 +4856,6 @@ async function destroyK8sTier({
         }
       }),
     );
-
-    // DigitalOcean: the provider's Droplet delete detaches every volume DO
-    // lists on the droplet at that moment, and a volume the CSI release has
-    // just deleted can still be listed, so its detach 404s and the droplet
-    // (and everything that depends on it) survives. Detach the captured CSI
-    // volumes here and wait for DO to agree; see lib/destroy/csi-detach.js.
-    if (typeof provider.detachVolume === 'function') {
-      await runCsiDetachStep(provider, {
-        serverIds: clusterServerIds,
-        csiVolumeIds: capturedCsiVolumeIds,
-        spinner: s,
-        warn: (msg) => p.log.warn(msg),
-        log: (line) => console.log(`  ${line}`),
-      });
-    }
 
     const { destroyK8s: destroyK8sStack } = await import('./lib/deploy/k8s/index.js');
     // Whether the by-name backstop below runs for these stacks, and whether
@@ -5206,6 +5145,8 @@ async function destroyK8sTier({
 
   // Clean up Kubernetes-managed resources (created by CCM/CSI at runtime,
   // not by the Pulumi program). These aren't in any stack's resource graph.
+  // The CSI volumes are deleted only here, after the servers: the server
+  // deletes above detached them (see cleanupOrphanedVolumes).
   //
   // LAYER 2 gate — which regions still host servers we do NOT own. Computed
   // here, after the orphaned-server sweep above, so this environment's own
@@ -5904,7 +5845,7 @@ async function main(argv = []) {
   }
 
   // Every SSH/kubectl step below (the pre-destroy backup, the CSI volume
-  // release) needs this operator's IP on the firewall.
+  // capture) needs this operator's IP on the firewall.
   await ensureDestroyOperatorAccess({
     projectConfig,
     envName,

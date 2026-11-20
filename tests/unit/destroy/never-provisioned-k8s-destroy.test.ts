@@ -93,8 +93,7 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   function FakeProvider() {
     return teardownProvider({
       ctor: FakeProvider,
-      methods: { ...SPECIFIC, reservedIpLabelMatch: undefined, detachVolume: undefined },
-      // No detach: detachVolume is absent, and any other detach answers nothing.
+      methods: { ...SPECIFIC, reservedIpLabelMatch: undefined },
       deleteVerbs: /^(delete|remove|destroy|release)/,
       deleted: () => ({ deleted: false, apiError: null }),
     });
@@ -209,7 +208,6 @@ describe.each(['k8s', 'k8s-ha'] as const)('%s', (tier) => {
     expect(entryKeptReason(ctx.results, ctx.envConfig)).toBeNull();
     expect(captureAsked).toEqual([]);
     expect(printed.some((l) => l.includes('Capturing CSI volume identities'))).toBe(false);
-    expect(printed.some((l) => l.includes('CSI volume release attempted'))).toBe(false);
     expect(printed.join('\n')).toContain("its state bucket doesn't exist");
   });
 

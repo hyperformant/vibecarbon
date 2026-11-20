@@ -348,10 +348,10 @@ describe('an unreadable listing can never produce a clean verdict', () => {
     expect(unresolved.map((v) => String(v.id)).sort()).toEqual(['100604631', '100604632']);
   });
 
-  it('stays silent when a COMPLETE listing simply no longer contains them (CSI already reaped)', async () => {
-    // The normal green teardown: cleanupClusterPVCs deleted the namespace, the
-    // CSI controller deleted the volumes, and there is genuinely nothing left.
-    // This path must not manufacture issues or every destroy ends "with issues".
+  it('stays silent when a COMPLETE listing simply no longer contains them (already deleted)', async () => {
+    // A re-run after a destroy that deleted the volumes, or volumes removed by
+    // hand: there is genuinely nothing left. This path must not manufacture
+    // issues or every such destroy ends "with issues".
     installRouter([[]]);
 
     const { deleted, unresolved, deferred, listingComplete } = await cleanupOrphanedVolumes(
