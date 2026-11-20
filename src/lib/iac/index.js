@@ -1797,10 +1797,11 @@ export async function destroyStack(stackName, program, options = {}) {
   // treats it as a hard error — surfaced in orphan-stack cleanup as
   // "server not found (not_found, ...)".
   await refreshBestEffort(stack, stackName, 'pre-destroy refresh', options);
-  // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
-  // deleting. That is handled before this runs, against the live API, not in
-  // state: the provider's Droplet delete re-reads `volume_ids` from DO and
-  // ignores what state says (see lib/destroy/csi-detach.js).
+  // A DigitalOcean Droplet's delete detaches every volume DO lists on it,
+  // re-read from the live API (state's `volume_ids` is ignored), and fails on
+  // a 404 for one already deleted. So `vibecarbon destroy` deletes no CSI
+  // volume before this runs; it deletes them after, once the droplets are
+  // gone (cleanupOrphanedVolumes in src/destroy.js).
 
   // Pre-destroy resource snapshot — see the loud-partial-detection doc
   // above. Best-effort: if exportStack itself fails, skip the resource-count

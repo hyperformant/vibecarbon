@@ -249,8 +249,8 @@ describe('cleanupOrphanedVolumes — detach re-sweep for known cluster volumes',
       { detachWaitMs: 10_000, ...fast },
     );
 
-    // Gone from a listing we could actually read = reaped elsewhere (CSI
-    // finalizer, provider GC).
+    // Gone from a listing we could actually read = reaped elsewhere (provider
+    // GC, an operator).
     expect(deleted).toEqual([]);
     expect(unresolved).toEqual([]);
   });
@@ -288,8 +288,8 @@ describe('cleanupOrphanedVolumes — detach re-sweep for known cluster volumes',
   });
 
   // The complement: a listing we could read in full, with the volume absent,
-  // IS evidence — the CSI finalizer reaped it. That is the normal green
-  // teardown and must stay quiet, or every destroy ends "with issues".
+  // IS evidence that it is gone. That must stay quiet, or every such destroy
+  // ends "with issues".
   it('treats a COMPLETE empty listing as proof the volume was reaped elsewhere', async () => {
     const attached = { ...detachedCsiVolume, droplet_ids: [42] };
     installSequencedRouter([[attached], []]);
@@ -332,6 +332,62 @@ describe('cleanupOrphanedVolumes — detach re-sweep for known cluster volumes',
     );
 
     // Neither deleted nor silently dropped — a failed delete is reported.
+    expect(deleted).toEqual([]);
+    expect(unresolved.map((v) => v.name)).toEqual([CSI_NAME]);
+  });
+
+  // cleanupOrphanedVolumes is the only place a k8s destroy deletes a CSI
+  // volume, right after the server deletes detached them. A volume listed as
+  // detached whose delete the cloud still refuses (its attachment record
+  // catching up) used to print one DELETE REFUSED line and drop out of every
+  // result list: billing, with a clean verdict.
+  /** Volumes always listed detached; DELETE answers `statuses` in order (last repeats). */
+  function installRefusingRouter(statuses: number[]) {
+    const deletes: number[] = [];
+    fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      const method = init?.method ?? 'GET';
+      if (url.includes('/v2/volumes') && method === 'GET') {
+        return jsonResp({ volumes: [detachedCsiVolume], links: {} });
+      }
+      if (url.includes('/v2/volumes/') && method === 'DELETE') {
+        const status = statuses[Math.min(deletes.length, statuses.length - 1)];
+        deletes.push(status);
+        return jsonResp({}, status);
+      }
+      throw new Error(`unexpected fetchWithRetry: ${method} ${url}`);
+    });
+    return deletes;
+  }
+
+  it('deletes a known detached volume on the re-sweep when its first delete is refused', async () => {
+    const deletes = installRefusingRouter([409, 204]);
+
+    const { deleted, unresolved } = await cleanupOrphanedVolumes(
+      provider,
+      'proj',
+      'prod',
+      ['vol-uuid-1'],
+      [],
+      { detachWaitMs: 10_000, ...fast, report: () => {} },
+    );
+
+    expect(deletes).toEqual([409, 204]);
+    expect(deleted).toEqual([CSI_NAME]);
+    expect(unresolved).toEqual([]);
+  });
+
+  it('reports a known detached volume whose delete is refused for the whole budget', async () => {
+    installRefusingRouter([409]);
+
+    const { deleted, unresolved } = await cleanupOrphanedVolumes(
+      provider,
+      'proj',
+      'prod',
+      ['vol-uuid-1'],
+      [],
+      { detachWaitMs: 10, pollIntervalMs: 5, report: () => {} },
+    );
+
     expect(deleted).toEqual([]);
     expect(unresolved.map((v) => v.name)).toEqual([CSI_NAME]);
   });

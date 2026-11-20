@@ -61,11 +61,9 @@ function FakeProvider() {
         return { deleted: found, apiError: null };
       },
       deleteReservedIpsByLabels: async () => ({ deleted: [], failed: [] }),
-      detachVolume: undefined,
       reservedIpLabelMatch: undefined,
     },
     serverIdsEmpty: true,
-    // No detach: detachVolume is absent above, and any other detach answers nothing.
     deleteVerbs: /^(delete|remove|destroy|release)/,
     deleted: () => ({ deleted: false, apiError: null }),
   });

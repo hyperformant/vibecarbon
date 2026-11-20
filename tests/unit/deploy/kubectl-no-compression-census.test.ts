@@ -175,7 +175,6 @@ const SPAWNERS: Record<string, Spawner> = {
     kubeconfig: 'resolveKubeconfigPath, built on localKubeconfigPath',
   },
   'src/scale.js': { side: 'operator', resolves: true, kubeconfig: 'localKubeconfigPath' },
-  'src/destroy.js': { side: 'operator', resolves: true, kubeconfig: 'localKubeconfigPath' },
   'src/diagnose.js': { side: 'operator', resolves: true, kubeconfig: 'localKubeconfigPath' },
   'src/lib/csi-volumes.js': {
     side: 'operator',
