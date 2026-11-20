@@ -8,13 +8,14 @@
  * controller. They are never in Pulumi state, so `pulumi destroy` cannot touch
  * them, and both drivers name them `pvc-<pv-uuid>` with NO project/cluster
  * prefix, so every name-based sweep is structurally blind to them. The destroy
- * that deletes the SERVERS detaches the volumes and strands them — billable,
- * forever — unless destroy deletes them afterwards by id, which is what this
- * capture is for (cleanupOrphanedVolumes in destroy.js, the only place a k8s
- * destroy deletes a CSI volume, after `pulumi destroy`). Three occurrences (2026-07-29 six nbg1 volumes after a fully GREEN
- * k8s run; 2026-07-31 three after an e3 destroy whose `pulumi destroy` itself
- * 403'd; 2026-08-05 five across hel1+nbg1 after a k8s-ha destroy that printed
- * "No orphaned volumes found"), all hand-deleted.
+ * that deletes the SERVERS detaches the volumes and strands them, billable
+ * forever, unless destroy then deletes them by id. That is what this capture
+ * is for: cleanupOrphanedVolumes in destroy.js, the only place a k8s destroy
+ * deletes a CSI volume, runs after `pulumi destroy` with the ids captured
+ * here. Three stranding occurrences (2026-07-29 six nbg1 volumes after a fully
+ * GREEN k8s run; 2026-07-31 three after an e3 destroy whose `pulumi destroy`
+ * itself 403'd; 2026-08-05 five across hel1+nbg1 after a k8s-ha destroy that
+ * printed "No orphaned volumes found"), all hand-deleted.
  *
  * Before this module the only attribution destroy had was
  * `server.volumes` — the ids of volumes ATTACHED to a cluster server at the
@@ -233,7 +234,7 @@ export function parseCsiPersistentVolumes(payload) {
 /**
  * Ask a live cluster for the provider volume ids behind its PersistentVolumes.
  *
- * MUST be called while the API server is still reachable — i.e. before
+ * MUST be called while the API server is still reachable, so before
  * `pulumi destroy` deletes the servers. A failure here is not
  * fatal (the caller falls through to the degraded backstop) but it MUST be
  * reported: `ok: false` is exactly the state in which destroy is no longer

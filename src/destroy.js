@@ -1167,7 +1167,7 @@ async function cleanupOrphanedVolumes(
       if (await tryDelete(volume, 'captured-id (re-sweep)')) pending.delete(key);
     }
     // A pending volume that vanished from a listing we could actually read was
-    // reaped elsewhere (provider GC, an operator) — stop waiting on it.
+    // reaped elsewhere (provider GC, an operator), so stop waiting on it.
     for (const key of [...pending.keys()]) {
       if (!seenIds.has(key)) pending.delete(key);
     }
