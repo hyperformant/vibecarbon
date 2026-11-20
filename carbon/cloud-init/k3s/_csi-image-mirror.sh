@@ -4,7 +4,7 @@
 CSI_IMAGE_REWRITES="${csi_image_rewrites}"
 # csi_fetch_mirrored <url> <file>: <file> = the manifest, refs on the mirrors.
 csi_fetch_mirrored() {
-  curl -fsSL --max-time 120 --retry 3 --retry-delay 10 "$1" -o "$2.upstream" || { echo "CSI manifest download failed: $1"; return 1; }
+  curl -fsSL --max-time 120 "$1" -o "$2.upstream" || { echo "CSI manifest download failed: $1"; return 1; }
   if ! CSI_IMAGE_REWRITES="$CSI_IMAGE_REWRITES" awk '
 BEGIN { n = split(ENVIRON["CSI_IMAGE_REWRITES"], r, "\n")
   for (i = 1; i <= n; i++) if (split(r[i], p, " ") == 2) { to[p[1]] = p[2]; k++; h = substr(p[1], 1, index(p[1], "/") - 1); if (h ~ /[.:]/) away[h] = 1 }
