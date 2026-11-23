@@ -40,7 +40,7 @@ importers:
         version: 6.9.0(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.274.1
-        version: 3.276.0(typescript@7.0.2)
+        version: 3.277.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.61.1
         version: 1.62.1(typescript@7.0.2)
@@ -1000,8 +1000,8 @@ packages:
   '@pulumi/linode@6.9.0':
     resolution: {integrity: sha512-WG9lvLjYe6eNMd/mi1sbehCNemjX+uyNek5lxjFUO+9SQbetwq9rr8TzEipBaL0cD1iHGtLh+yXSGgShFetG2g==}
 
-  '@pulumi/pulumi@3.276.0':
-    resolution: {integrity: sha512-8ThwjehdLmmSpcoCtQG/9uxXx5duAsFm1OeMZOEzj9b/V3VdST6baKu51K4HnSTwqRHgH84NDhM2AwAKapTtXQ==}
+  '@pulumi/pulumi@3.277.0':
+    resolution: {integrity: sha512-EvvBo55xmGByLRWjIqp24k4vzmPoKmZ6nTmK8EHzRb9veLCNISN3/Fq4RlJxrEt5+HmNkZveEasI+z0UCgkMxw==}
     engines: {node: '>=22'}
     peerDependencies:
       ts-node: '>= 7.0.1 < 12'
@@ -1673,8 +1673,8 @@ packages:
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
 
-  es-module-lexer@3.0.4:
-    resolution: {integrity: sha512-BldNY5mwkVu+cQ5Ymn3e6hB9Sx8XHx4ZevWbiUyZbfKxJxYO27Hf0wfzkxIaD5CAJMaGl3YspKELj0ff/7nCMA==}
+  es-module-lexer@3.0.5:
+    resolution: {integrity: sha512-RNq2lKJw53c7z9QRHeiKeA6Ez0oikOqiBGdmxQhKDxEiOX1g5QJR4IoFVwicn8uCZcRWNrXC3NZaJihgK7aEbg==}
 
   es-object-atoms@1.1.2:
     resolution: {integrity: sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==}
@@ -3372,7 +3372,7 @@ snapshots:
 
   '@ediri/vultr@2.27.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.276.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.277.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3904,7 +3904,7 @@ snapshots:
 
   '@pulumi/digitalocean@4.85.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.276.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.277.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3912,7 +3912,7 @@ snapshots:
 
   '@pulumi/hcloud@1.43.4(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.276.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.277.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3920,13 +3920,13 @@ snapshots:
 
   '@pulumi/linode@6.9.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.276.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.277.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/pulumi@3.276.0(typescript@7.0.2)':
+  '@pulumi/pulumi@3.277.0(typescript@7.0.2)':
     dependencies:
       '@grpc/grpc-js': 1.14.7
       '@logdna/tail-file': 2.2.0
@@ -3959,7 +3959,7 @@ snapshots:
 
   '@pulumiverse/scaleway@1.62.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.276.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.277.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -4077,7 +4077,7 @@ snapshots:
       read-pkg: 10.1.0
       registry-auth-token: 5.1.1
       semantic-release: 25.0.9(typescript@7.0.2)
-      semver: 7.8.6
+      semver: 7.8.5
       tempy: 3.2.0
 
   '@semantic-release/release-notes-generator@14.1.1(semantic-release@25.0.9(typescript@7.0.2))':
@@ -4458,7 +4458,7 @@ snapshots:
       conventional-commits-filter: 5.0.0
       handlebars: 4.7.10
       meow: 13.2.0
-      semver: 7.8.6
+      semver: 7.8.5
 
   conventional-commits-filter@5.0.0: {}
 
@@ -4549,7 +4549,7 @@ snapshots:
 
   es-module-lexer@2.3.2: {}
 
-  es-module-lexer@3.0.4: {}
+  es-module-lexer@3.0.5: {}
 
   es-object-atoms@1.1.2:
     dependencies:
@@ -4853,7 +4853,7 @@ snapshots:
   import-in-the-middle@3.6.0:
     dependencies:
       cjs-module-lexer: 2.3.0
-      es-module-lexer: 3.0.4
+      es-module-lexer: 3.0.5
       module-details-from-path: 1.0.4
 
   import-meta-resolve@4.2.0: {}
@@ -5156,7 +5156,7 @@ snapshots:
   normalize-package-data@8.0.0:
     dependencies:
       hosted-git-info: 9.0.3
-      semver: 7.8.6
+      semver: 7.8.5
       validate-npm-package-license: 3.0.4
 
   normalize-url@9.0.1: {}
