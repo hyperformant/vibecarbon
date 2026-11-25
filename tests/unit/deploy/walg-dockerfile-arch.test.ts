@@ -32,8 +32,14 @@ import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files
 const WALG_VERSION = 'v3.0.9';
 const WALG_IMAGE = `ghcr.io/hyperformant/wal-g:${WALG_VERSION.slice(1)}`;
 // postgres:<major>.<minor>-alpine<alpine>, by multi-arch index digest.
-const PG_BASE = 'postgres:17.11-alpine3.24';
-const PG_BASE_DIGEST = 'sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0';
+const PG_BASE = 'postgres:17.12-alpine3.24';
+const PG_BASE_DIGEST = 'sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73';
+/** The server version in the pin above: `17.12`. */
+const PG_VERSION = PG_BASE.split(':')[1].replace(/-alpine.*$/, '');
+// The base image's own GOSU_VERSION, restated in the last stage. Read it from
+// the new base on every bump: `docker buildx imagetools inspect <base> --format
+// '{{json .Image}}'`.
+const GOSU_VERSION = '1.20';
 const PG_CRON_VERSION = '1.6.8';
 
 const WALG_BUILDER = join('docker', 'wal-g', 'Dockerfile');
@@ -148,7 +154,8 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
     expect(text).toMatch(/\bPGDATA=\/var\/lib\/postgresql\/data\b/);
     expect(text).toMatch(/\bLANG=en_US\.utf8\b/);
     expect(text).toMatch(/\bPG_MAJOR=17\b/);
-    expect(text).toMatch(/\bPG_VERSION=17\.11\b/);
+    expect(text).toMatch(new RegExp(`\\bPG_VERSION=${escapeRegExp(PG_VERSION)}(?!\\S)`));
+    expect(text).toMatch(new RegExp(`\\bGOSU_VERSION=${escapeRegExp(GOSU_VERSION)}(?!\\S)`));
     expect(scratchStage).toContain('VOLUME /var/lib/postgresql/data');
     expect(scratchStage).toContain('STOPSIGNAL SIGINT');
     expect(scratchStage).toContain('EXPOSE 5432');
@@ -214,11 +221,7 @@ describe('version lockstep across the delivery chain', () => {
     // Every mode pulls ghcr.io/hyperformant/postgres:<DB_IMAGE_TAG>, built from
     // docker/postgres-walg/Dockerfile, so the tag must describe that image.
     // -r<N> is our own revision (moved by db-image-fingerprint.test.ts's guard).
-    const pgVersion = PG_BASE.split(':')[1].replace(/-alpine.*$/, '');
-    const escaped = `${pgVersion}-walg${WALG_VERSION.slice(1)}`.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      '\\$&',
-    );
+    const escaped = escapeRegExp(`${PG_VERSION}-walg${WALG_VERSION.slice(1)}`);
     expect(DB_IMAGE_TAG).toMatch(new RegExp(`^${escaped}-r[1-9]\\d*$`));
   });
 });

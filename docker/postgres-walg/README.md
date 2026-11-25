@@ -160,7 +160,8 @@ ghcr package here, so servers and the harness pull it without credentials.
 
 ## Bump procedure
 1. Edit `Dockerfile`: both `FROM postgres:...@sha256:...` lines together (they
-   must stay identical), and/or `ARG PG_CRON_VERSION` plus the `ADD --checksum`
+   must stay identical) and the `PG_VERSION` and `GOSU_VERSION` the last stage
+   restates from that base, and/or `ARG PG_CRON_VERSION` plus the `ADD --checksum`
    value, and/or the `FROM ghcr.io/hyperformant/wal-g:<v>` pin (whose version is
    set by `ARG WALG_VERSION` in `docker/wal-g/Dockerfile`; bump both).
    Resolve a new base digest with
