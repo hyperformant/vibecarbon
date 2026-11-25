@@ -24,10 +24,11 @@ import { readRepoFile } from '../../_shared/source-files.js';
  *
  * WHY CONFIG ALONE DOES NOT COVER THIS. .github/dependabot.yml grew a group in
  * #70 so the pair travels in one PR. That group is the fix; this test is the
- * check on the fix. Dependabot has already split the pair once WITH a grouping
- * rule in place, and a group that silently stops matching (a rename, a new
- * `@vitest/*` package, an ecosystem the group does not cover) fails exactly the
- * way #71 did: quietly, green.
+ * check on the fix. Dependabot split the pair in every PR it opened for that
+ * group (eleven, #71 to #565) WITH the grouping rule in place; the describe below
+ * says why and pins the config that stops it. A group that silently stops
+ * matching (a rename, a new `@vitest/*` package, an ecosystem the group does
+ * not cover) fails exactly the way #71 did: quietly, green.
  *
  * THE FIX when this fails: bump both names to the same version in the manifest
  * that drifted, then regenerate that lockfile. Never raise just one — and never
@@ -129,5 +130,65 @@ describe('the shipped lockfiles resolve the pair to one version', () => {
         `carbon resolves @vitest/coverage-v8@${version}, which is not among vitest@${vitest.join(', ')}`,
       ).toContain(version);
     }
+  });
+});
+
+/**
+ * GROUPING: which Dependabot groups can claim each half.
+ *
+ * GitHub's docs say a dependency joins the first group it matches. The updater
+ * does not work that way: a group whose patterns match a name less specifically
+ * than another matching group loses it (dependabot-core
+ * updater/lib/dependabot/updater/pattern_specificity_calculator.rb). An exact
+ * name scores 1000, a group with NO patterns scores 500, and `@vitest/*` scores
+ * 94. So `vitest` stayed in the vitest group while `@vitest/coverage-v8` always
+ * went to the broad group with no patterns, wherever the groups were listed.
+ *
+ * Excluding the pair from every other group holds under both rules.
+ */
+describe('only the vitest group can claim either half of the pair', () => {
+  interface Group {
+    'applies-to'?: string;
+    'dependency-type'?: string;
+    patterns?: string[];
+    'exclude-patterns'?: string[];
+  }
+  const config = load(readRepoFile('.github', 'dependabot.yml')) as {
+    updates: { 'package-ecosystem': string; directory: string; groups?: Record<string, Group> }[];
+  };
+  const npmBlocks = config.updates.filter((u) => u['package-ecosystem'] === 'npm');
+
+  /** Dependabot's wildcard: `*` is any run of characters, all else is literal. */
+  const matches = (pattern: string, name: string): boolean =>
+    new RegExp(
+      `^${pattern
+        .split('*')
+        .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('.*')}$`,
+    ).test(name);
+
+  /** DependencyGroup#contains? in dependabot-core, for a devDependency. */
+  const canClaim = (group: Group, name: string): boolean => {
+    if ((group['applies-to'] ?? 'version-updates') !== 'version-updates') return false;
+    if (group['exclude-patterns']?.some((p) => matches(p, name))) return false;
+    if (group['dependency-type'] === 'production') return false;
+    return group.patterns?.some((p) => matches(p, name)) ?? true;
+  };
+
+  it('covers both npm manifests', () => {
+    expect(npmBlocks.map((b) => b.directory).sort()).toEqual(['/', '/carbon']);
+  });
+
+  it.each(
+    npmBlocks.flatMap((block) => PAIR.map((name) => ({ dir: block.directory, block, name }))),
+  )('$dir: $name', ({ block, name }) => {
+    const claiming = Object.entries(block.groups ?? {})
+      .filter(([, group]) => canClaim(group, name))
+      .map(([id]) => id);
+    expect(
+      claiming,
+      `${name} can land in ${claiming.join(', ')}. Add exclude-patterns ["vitest", "@vitest/*"] ` +
+        'to every version-update group except vitest.',
+    ).toEqual(['vitest']);
   });
 });
