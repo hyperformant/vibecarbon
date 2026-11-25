@@ -51,6 +51,24 @@ describe('renderHelp', () => {
     expect(out).toContain('# list prod backups');
   });
 
+  it('lists helpEnum, not the whole enum, beside a flag', () => {
+    const out = strip(
+      renderHelp({
+        name: 'deploy',
+        flags: [
+          {
+            name: 'mode',
+            value: '<mode>',
+            enum: ['compose', 'compose-ha', 'k8s'],
+            helpEnum: ['compose', 'k8s'],
+          },
+        ],
+      }),
+    );
+    expect(out).toContain('(compose|k8s)');
+    expect(out).not.toContain('compose-ha');
+  });
+
   it('NEVER renders double-dash flag forms', () => {
     const out = strip(
       renderHelp({

@@ -12,6 +12,7 @@ import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
 import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
 import { gatherDeploymentConfig, promptEnvironmentName } from './lib/deploy/prompts.js';
+import { OFFERED_TIERS, TIERS } from './lib/deploy/tier-registry.js';
 import { normalizeEnvName } from './lib/deploy/utils.js';
 import { withDeployLog } from './lib/deploy-logger.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
@@ -28,8 +29,6 @@ import { vibecarbonHome } from './lib/vibecarbon-home.js';
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
 // ============================================================================
-
-const DEPLOY_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
@@ -72,8 +71,10 @@ const SPEC = {
     {
       name: 'mode',
       value: '<mode>',
-      enum: DEPLOY_MODES,
-      description: 'Deploy mode: compose, compose-ha, k8s, or k8s-ha',
+      // Every tier still deploys; help and the error name only the offered ones.
+      enum: TIERS,
+      helpEnum: OFFERED_TIERS,
+      description: 'Deploy mode for a new environment: compose, k8s, or k8s-ha',
     },
     {
       name: 'server-type',

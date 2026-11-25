@@ -82,7 +82,7 @@ Vibecarbon deploys in the mode that fits what you are building. You pay your clo
 | **Supercharge** | Scale on demand. | Production that needs to scale | Kubernetes |
 | **Fortify** | Enterprise resiliency. | Production that must survive a region failure | Kubernetes HA |
 
-Compose HA gives a primary and a standby for providers without Kubernetes; select it explicitly with `-mode compose-ha`. Each environment picks its mode at first deploy, and the same app deploys in any of them.
+Each environment picks its mode at first deploy, and the same app deploys in any of them.
 
 Run `deploy` from inside this project's directory:
 
@@ -90,7 +90,7 @@ Run `deploy` from inside this project's directory:
 vibecarbon deploy
 ```
 
-The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `k8s`, or `k8s-ha`; `compose-ha` is also available, pass it explicitly with `-mode compose-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.
+The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `k8s`, or `k8s-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.
 
 See the [Deployment](/docs/deployment) guide for details on Docker Compose and Kubernetes options.
 

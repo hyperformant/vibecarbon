@@ -6,6 +6,16 @@
  */
 export const TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
+/**
+ * The tiers offered to a NEW environment: the deploy picker, `-mode` help and
+ * its error, the failover hints and the user docs name these and no others
+ * (tests/unit/docs/unoffered-tier-surface-census.test.ts). compose-ha is not
+ * shipping right now (2026-11-25) but stays a working tier: `-mode compose-ha`
+ * still deploys one, and an existing compose-ha environment keeps deploying,
+ * scaling, failing over and restoring as before.
+ */
+export const OFFERED_TIERS = TIERS.filter((tier) => tier !== 'compose-ha');
+
 export function resolveTier(envConfig = {}) {
   const { deployMode, ha } = envConfig;
   const haEnabled = typeof ha === 'object' ? !!ha?.enabled : !!ha;

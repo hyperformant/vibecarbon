@@ -53,7 +53,7 @@ describe('deploy SPEC + parseFlags integration', () => {
   it('rejects -mode values outside the enum', () => {
     const r = parseFlags(['-mode', 'kubernetes'], SPEC);
     expect(r.values.mode).toBeNull();
-    expect(r.errors[0]).toMatch(/-mode must be one of: compose, compose-ha, k8s, k8s-ha/);
+    expect(r.errors[0]).toMatch(/-mode must be one of: compose, k8s, k8s-ha \(got/);
   });
 
   it('parses -full as a boolean (clears resume state)', () => {

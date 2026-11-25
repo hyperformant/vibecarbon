@@ -388,17 +388,17 @@
   - Dynamic server type fetching from Hetzner API
   - Guided API token setup
   - Hetzner S3 Object Storage for backups
-- DigitalOcean fully supported for all four modes (compose, compose-ha, k8s, and k8s-ha) with the same CLI, lifecycle, and e2e gate as Hetzner
+- DigitalOcean fully supported for compose, k8s, and k8s-ha with the same CLI, lifecycle, and e2e gate as Hetzner
   - Interactive region selection, guided API token + Spaces key setup
   - DigitalOcean Spaces object storage for backups
-  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. on Vultr: `Vultr does not support the 'k8s' deploy tier. Supported: compose, compose-ha. (k8s: Hetzner Cloud, DigitalOcean, Linode only)`
-- Linode fully supported for all four modes (compose, compose-ha, k8s, and k8s-ha) with the same CLI, lifecycle, and e2e gate as Hetzner; the k8s modes run in every Linode region except us-east and us-southeast, which have no VPCs
+  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. on Vultr: `Vultr does not support the 'k8s' deploy tier. Supported: compose. (k8s: Hetzner Cloud, DigitalOcean, Linode only)`
+- Linode fully supported for compose, k8s, and k8s-ha with the same CLI, lifecycle, and e2e gate as Hetzner; the k8s modes run in every Linode region except us-east and us-southeast, which have no VPCs
   - Interactive region selection, guided API token + Object Storage key setup
   - Linode Object Storage for backups
-- Vultr supported for compose and compose-ha, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s is not supported on Vultr
+- Vultr supported for compose, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s is not supported on Vultr
   - Interactive region selection, guided API token + Object Storage key setup
   - Vultr Object Storage for backups
-- Scaleway supported for compose and compose-ha, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s and k8s-ha are not supported on Scaleway
+- Scaleway supported for compose, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s and k8s-ha are not supported on Scaleway
   - Interactive region selection (Paris `fr-par-1`/`fr-par-2`, Amsterdam `nl-ams-1`/`nl-ams-2`)
   - Guided API secret key setup (`SCALEWAY_SECRET_KEY`)
   - Scaleway Object Storage for backups

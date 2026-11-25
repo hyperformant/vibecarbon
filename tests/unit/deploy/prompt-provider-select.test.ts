@@ -243,7 +243,7 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
 
     const modeCall = clackMock.select.mock.calls[1][0];
     const modeValues = modeCall.options.map((o: { value: string }) => o.value);
-    // compose-ha is supported but not recommended, so the picker omits it.
+    // compose-ha is supported but not offered, so the picker omits it.
     expect(modeValues).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
   });
 
@@ -263,17 +263,14 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     ]);
   });
 
-  it('hides the k8s modes for vultr, which stays compose-only', async () => {
+  it('deploys compose on vultr without a mode select, since it is the one mode offered', async () => {
     clackMock.select.mockResolvedValueOnce('vultr'); // provider select
     const { envConfig } = await resolveProvider(noFlags, {});
 
-    clackMock.select.mockResolvedValueOnce('compose'); // deploy-mode select
-    await resolveDeployMode(noFlags, envConfig);
-
-    const modeCall = clackMock.select.mock.calls[1][0];
-    const values = modeCall.options.map((o: { value: string }) => o.value);
-    expect(values).not.toContain('kubernetes');
-    expect(values).not.toContain('kubernetes-ha');
+    const result = await resolveDeployMode(noFlags, envConfig);
+    expect(result).toEqual({ deployMode: 'compose', ha: false });
+    // Only the provider select ran.
+    expect(clackMock.select).toHaveBeenCalledTimes(1);
   });
 
   it('offers every recommended deploy mode for hetzner', async () => {

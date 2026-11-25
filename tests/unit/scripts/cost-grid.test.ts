@@ -58,10 +58,10 @@ const fixture = {
 describe('renderCostGrid', () => {
   it('renders the Hetzner row', () => {
     expect(renderCostGrid(fixture)).toContain(
-      '| Hetzner (USD account) | $23.59 (nbg1) | $47.18 (nbg1 + fsn1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |',
+      '| Hetzner (USD account) | $23.59 (nbg1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |',
     );
     expect(renderCostGrid(fixture)).toContain(
-      '| Scaleway | €21.84 (fr-par-1) | €43.68 (fr-par-1 + nl-ams-1) | not yet | not yet |',
+      '| Scaleway | €21.84 (fr-par-1) | not yet | not yet |',
     );
   });
 
@@ -90,7 +90,7 @@ describe('renderCostGrid', () => {
       ],
       storage: { vultr: '$18' },
     });
-    expect(md).toContain('| Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |');
+    expect(md).toContain('| Vultr | $20 (ewr) | not yet | not yet |');
   });
 
   it('dates the static peak-RAM figures', () => {
@@ -134,24 +134,20 @@ describe('on the 2026-10-22 catalogs', () => {
     [
       HetznerProvider,
       'hetzner',
-      '| Hetzner (USD account) | $23.59 (nbg1) | $47.18 (nbg1 + fsn1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |',
+      '| Hetzner (USD account) | $23.59 (nbg1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |',
     ],
     [
       DigitalOceanProvider,
       'digitalocean',
-      '| DigitalOcean | $24 (nyc3) | $48 (nyc3 + tor1) | $61 (nyc3) | $98 (nyc3 + tor1) |',
+      '| DigitalOcean | $24 (nyc3) | $61 (nyc3) | $98 (nyc3 + tor1) |',
     ],
-    [VultrProvider, 'vultr', '| Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |'],
+    [VultrProvider, 'vultr', '| Vultr | $20 (ewr) | not yet | not yet |'],
     [
       LinodeProvider,
       'linode',
-      '| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |',
+      '| Linode | $24 (us-iad) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |',
     ],
-    [
-      ScalewayProvider,
-      'scaleway',
-      '| Scaleway | €21.84 (fr-par-1) | €43.68 (fr-par-1 + nl-ams-1) | not yet | not yet |',
-    ],
+    [ScalewayProvider, 'scaleway', '| Scaleway | €21.84 (fr-par-1) | not yet | not yet |'],
   ] as const;
 
   it('an HA cell prices the pair the wizard creates, one CPU class on both sides', () => {

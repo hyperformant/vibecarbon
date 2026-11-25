@@ -26,6 +26,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { OFFERED_TIERS } from '../src/lib/deploy/tier-registry.js';
 import { PROVIDERS } from '../src/lib/providers/index.js';
 import {
   cheapestDefaultRegion,
@@ -35,8 +36,8 @@ import {
   ipv4MonthlyAt,
 } from '../src/lib/sizing.js';
 
-/** Deploy modes, in grid column order. */
-export const MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
+/** Deploy modes, in grid column order: the offered ones (compose-ha still prices, see computeEnvMonthly). */
+export const MODES = OFFERED_TIERS;
 
 /** Providers, in grid row order. */
 export const PROVIDER_ORDER = ['hetzner', 'digitalocean', 'vultr', 'linode', 'scaleway'];
@@ -380,7 +381,6 @@ export function renderCostGrid({ providers, date, storage }) {
     '| Mode | Servers | Peak RAM used per server |',
     '|---|---|---|',
     '| compose | 1 | 1.10 GB |',
-    '| compose-ha | 2 (primary + standby in a second location) | 1.25 GB |',
     '| k8s | 3 (master, database, worker) | 1.49 GB master, 0.64 GB database, 1.05 GB worker |',
     '| k8s-ha | 5 (3 primary + 2 standby in a second location) | 1.56 GB master, 0.66 GB database |',
     '',

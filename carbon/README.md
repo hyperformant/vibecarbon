@@ -166,13 +166,13 @@ vibecarbon deploy
 
 The bare command opens a guided prompt for environment, provider, region, and deploy mode, then provisions the infrastructure, ships the images, and configures TLS. Not every cloud offers every mode:
 
-| Provider | `compose` | `compose-ha` | `k8s` | `k8s-ha` |
-|----------|:---------:|:------------:|:-----:|:--------:|
-| Hetzner Cloud | ✅ | ✅ | ✅ | ✅ |
-| DigitalOcean | ✅ | ✅ | ✅ | ✅ |
-| Linode | ✅ | ✅ | ✅ | ✅ |
-| Vultr | ✅ | ✅ | — | — |
-| Scaleway | ✅ | ✅ | — | — |
+| Provider | `compose` | `k8s` | `k8s-ha` |
+|----------|:---------:|:-----:|:--------:|
+| Hetzner Cloud | ✅ | ✅ | ✅ |
+| DigitalOcean | ✅ | ✅ | ✅ |
+| Linode | ✅ | ✅ | ✅ |
+| Vultr | ✅ | — | — |
+| Scaleway | ✅ | — | — |
 
 `k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
 

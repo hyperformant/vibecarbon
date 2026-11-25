@@ -54,7 +54,7 @@ import { composeHaStackOf } from './compose/ha-role-swap.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
 import { assertOperatorConfig, assertScaffoldSupportsRoleFile } from './preflight.js';
 import { haStacksFrom, k8sStandbyTypes } from './standby-types.js';
-import { resolveTier } from './tier-registry.js';
+import { OFFERED_TIERS, resolveTier } from './tier-registry.js';
 import {
   DEFAULT_WORKER_MAX,
   DEFAULT_WORKER_MIN,
@@ -64,37 +64,15 @@ import {
 } from './utils.js';
 
 // Deploy-mode select option value → tier-registry id (see tier-registry.js
-// TIERS). Used to filter the interactive select to Provider.SUPPORTED_TIERS
-// below — the option values themselves predate the tier-id vocabulary
-// ('kubernetes'/'kubernetes-ha' vs 'k8s'/'k8s-ha') so they don't line up
-// 1:1.
-//
-// compose-ha stays in the map, but the picker only offers it on a provider
-// that has no Kubernetes tier at all — see COMPOSE_HA_OPTION below.
+// TIERS). Used to filter the interactive select to the tiers this provider
+// supports AND offers (OFFERED_TIERS): the option values predate the tier-id
+// vocabulary ('kubernetes'/'kubernetes-ha' vs 'k8s'/'k8s-ha') so they don't
+// line up 1:1. compose-ha has no option: it is not offered to a new
+// environment, though `-mode compose-ha` still resolves (resolveDeployMode).
 const MODE_OPTION_TIER = {
   compose: 'compose',
-  'compose-ha': 'compose-ha',
   kubernetes: 'k8s',
   'kubernetes-ha': 'k8s-ha',
-};
-
-// Compose HA is a fully supported deploy mode (existing environments keep
-// working, `-mode compose-ha` still resolves, e2e still runs it when named)
-// but it is no longer RECOMMENDED: Kubernetes HA is the HA answer we lead
-// with, so the picker hides Compose HA wherever Kubernetes HA is on offer.
-//
-// "Wherever" is per provider, not global. Vultr and Scaleway declare
-// SUPPORTED_TIERS = ['compose', 'compose-ha'] (no Kubernetes tiers built
-// yet), so hiding it unconditionally would leave their operators a
-// one-option select and put the only HA mode they can run behind a flag
-// they were never shown. On a provider with no Kubernetes tier, Compose HA
-// IS the HA answer, so it is listed.
-const COMPOSE_HA_OPTION = {
-  value: 'compose-ha',
-  // Failover is one manual command (`vibecarbon failover`), never automatic:
-  // nothing watches the primary and promotes the standby on its own.
-  label: 'Docker Compose HA (Failover)',
-  hint: '2 VPS - One-command failover without K8s complexity - Enterprise resiliency',
 };
 
 /**
@@ -253,10 +231,9 @@ export async function resolveDeployMode(args, envConfig) {
     return { deployMode: 'compose', ha: false };
   }
 
-  // Interactive: Simple choices optimized for robustness. Filtered to
-  // tiers the resolved provider actually supports (see providerFor() in
-  // lib/providers/index.js) — a no-op filter for Hetzner, which supports
-  // all four tiers.
+  // Interactive: Simple choices optimized for robustness. Filtered to the
+  // offered tiers the resolved provider supports (see providerFor() in
+  // lib/providers/index.js).
   const Provider = providerFor(envConfig);
   const allOptions = [
     {
@@ -275,17 +252,21 @@ export async function resolveDeployMode(args, envConfig) {
       hint: 'Multi-region cluster - Maximum availability - Enterprise resiliency',
     },
   ];
-  // Compose HA is offered only when this provider has no Kubernetes tier at
-  // all; it slots in right after plain Compose so the list still reads
-  // simplest-to-most-capable.
-  const supportsK8s = Provider.SUPPORTED_TIERS.some((tier) => tier === 'k8s' || tier === 'k8s-ha');
-  const offered = supportsK8s
-    ? allOptions
-    : [allOptions[0], COMPOSE_HA_OPTION, ...allOptions.slice(1)];
+  const options = allOptions.filter((opt) => {
+    const tier = MODE_OPTION_TIER[opt.value];
+    return OFFERED_TIERS.includes(tier) && Provider.SUPPORTED_TIERS.includes(tier);
+  });
 
-  const options = offered.filter((opt) =>
-    Provider.SUPPORTED_TIERS.includes(MODE_OPTION_TIER[opt.value]),
-  );
+  const chosen = (mode) =>
+    mode === 'kubernetes-ha'
+      ? { deployMode: 'kubernetes', ha: true }
+      : { deployMode: mode, ha: false };
+
+  // One mode to offer (Vultr and Scaleway: compose): say so, don't ask.
+  if (options.length === 1) {
+    p.log.info(`Deploy mode: ${options[0].label}, the one mode ${Provider.NAME} offers`);
+    return chosen(options[0].value);
+  }
 
   const mode = await p.select({
     message: 'Deployment architecture:',
@@ -296,9 +277,7 @@ export async function resolveDeployMode(args, envConfig) {
     exitCancelled();
   }
 
-  if (mode === 'kubernetes-ha') return { deployMode: 'kubernetes', ha: true };
-  if (mode === 'compose-ha') return { deployMode: 'compose-ha', ha: true };
-  return { deployMode: mode, ha: false };
+  return chosen(mode);
 }
 
 /**

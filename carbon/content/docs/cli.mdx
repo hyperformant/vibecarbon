@@ -50,7 +50,7 @@ them.
 |------|------|
 | Launch | Single-server Docker Compose |
 | Supercharge | Kubernetes |
-| Fortify | Kubernetes HA (Compose HA is the same idea for providers without Kubernetes) |
+| Fortify | Kubernetes HA |
 
 You pay your cloud provider directly for the servers in each mode.
 
@@ -508,7 +508,7 @@ confirmations.
 | `-provider <id>` | Cloud provider for a NEW environment (existing environments keep their binding). Required with -y on a new environment. |
 | `-region <id>` | Primary region (provider-specific, e.g. hel1 on Hetzner, nyc3 on DigitalOcean) |
 | `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of -region) |
-| `-mode <mode>` | Deploy mode: compose, compose-ha, k8s, or k8s-ha |
+| `-mode <mode>` | Deploy mode for a new environment: compose, k8s, or k8s-ha |
 | `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/database/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
 | `-restore <latest\|base\|timestamp>` | Disaster recovery: seed a new database from your wal-g backups in S3. Pass latest for the newest backup and all WAL, a base backup name (e.g. base_000000010000000000000004) for that backup and all WAL, or an ISO-8601 timestamp for point-in-time recovery. The restored database keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only, onto a fresh or destroyed environment. |
@@ -516,8 +516,8 @@ confirmations.
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
 {/* END GENERATED: flags deploy */}
 
-Provider support varies by mode: `compose` and `compose-ha` run on all five
-providers, and `k8s` and `k8s-ha` run on Hetzner, DigitalOcean, and Linode. See
+Provider support varies by mode: `compose` runs on all five providers, and
+`k8s` and `k8s-ha` run on Hetzner, DigitalOcean, and Linode. See
 [Deployment](/docs/deployment#choosing-a-provider) for the full matrix and
 the API token each provider reads.
 
@@ -740,7 +740,7 @@ vibecarbon scale -env prod -type cx33 -y
 
 | Topology | What you can change |
 |----------|---------------------|
-| Compose / Compose HA | VPS server type (blue-green; the app pauses for the cutover) |
+| Compose | VPS server type (blue-green; the app pauses for the cutover) |
 | Kubernetes | Worker / master / database server types (in-place) |
 | Kubernetes | Worker bounds (autoscaler floor + ceiling) |
 

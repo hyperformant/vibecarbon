@@ -137,7 +137,7 @@ const SPEC = {
   summary: 'Scale worker nodes and instance sizes',
   description: [
     'What you can change:',
-    '  Compose / Compose HA   VPS server type (blue-green; the app pauses for the cutover)',
+    '  Compose                VPS server type (blue-green; the app pauses for the cutover)',
     '  Kubernetes             Worker / master / database server types (in-place)',
     '  Kubernetes             Worker bounds (autoscaler floor + ceiling)',
   ].join('\n'),

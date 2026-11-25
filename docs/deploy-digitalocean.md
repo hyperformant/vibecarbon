@@ -3,7 +3,7 @@
 Deploying to DigitalOcean is fully automated by the CLI. You do not create Droplets, configure Cloud Firewalls, edit compose files, or set up replication by hand. One command provisions the infrastructure, deploys the app, and wires DNS + TLS:
 
 ```bash
-vibecarbon deploy -mode compose  # or -mode compose-ha / k8s / k8s-ha
+vibecarbon deploy -mode compose  # or -mode k8s / k8s-ha
 ```
 
 This guide covers setup prerequisites, cloud resource handling, and operational procedures for DigitalOcean deployments.
@@ -39,7 +39,6 @@ Vibecarbon does not install DigitalOcean's Droplet Console agent, which keeps fi
 | Mode | What it provisions on DigitalOcean |
 |------|------------------------------------|
 | `compose` | Single Droplet running the full stack under Docker Compose |
-| `compose-ha` | Primary + standby Droplets in two regions, encrypted WireGuard replication mesh, Postgres streaming replication, manual one-command failover (`vibecarbon failover` repoints DNS) |
 | `k8s` | k3s cluster (master Droplet + worker Droplets + dedicated database Droplet) with DO CSI volumes |
 | `k8s-ha` | Two k3s clusters in two regions (primary + pilot-light standby with a zeroed app tier), WireGuard replication transport, Postgres streaming replication, one-command failover |
 
@@ -94,7 +93,7 @@ A deployment executes the following steps:
 | Check health & replication | `vibecarbon status <env>` |
 | Scale worker nodes | `vibecarbon scale <env>` |
 | Database backup / restore | `vibecarbon backup <env>` / `vibecarbon restore <env>` |
-| Failover HA standby (compose-ha, k8s-ha) | `vibecarbon failover <env>` |
+| Failover HA standby (k8s-ha) | `vibecarbon failover <env>` |
 | Manage operator IP allowlist | `vibecarbon access` |
 | Teardown resources | `vibecarbon destroy <env>` |
 

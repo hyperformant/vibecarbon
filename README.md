@@ -245,7 +245,7 @@ Same family, different starting point. If your app already exists, those tools a
 
 ## Architecture
 
-One CLI, four deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on. Compose HA gives the same high-availability architecture as Kubernetes HA without needing a Kubernetes cluster, so it runs on every provider, including ones with no Kubernetes support at all; select it explicitly with `-mode compose-ha`.
+One CLI, three deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to three scenarios: compose (one server), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover), all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />
@@ -269,7 +269,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast). Vultr and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining modes aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
+DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast). Vultr and Scaleway are supported for `compose`, with the same CLI and e2e gate; `k8s` and `k8s-ha` aren't built for them yet.
 
 ### Integration Guides
 
@@ -317,19 +317,18 @@ You pay your cloud provider directly, and vibecarbon starts every new project on
 | Mode | Servers | Peak RAM used per server |
 |---|---|---|
 | compose | 1 | 1.10 GB |
-| compose-ha | 2 (primary + standby in a second location) | 1.25 GB |
 | k8s | 3 (master, database, worker) | 1.49 GB master, 0.64 GB database, 1.05 GB worker |
 | k8s-ha | 5 (3 primary + 2 standby in a second location) | 1.56 GB master, 0.66 GB database |
 
 **Monthly cost per environment**
 
-| Provider | compose | compose-ha | k8s | k8s-ha |
-|---|---|---|---|---|
-| Hetzner (USD account) | $23.59 (nbg1) | $47.18 (nbg1 + fsn1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
-| DigitalOcean | $24 (nyc3) | $48 (nyc3 + tor1) | $61 (nyc3) | $98 (nyc3 + tor1) |
-| Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |
-| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
-| Scaleway | €21.84 (fr-par-1) | €43.68 (fr-par-1 + nl-ams-1) | not yet | not yet |
+| Provider | compose | k8s | k8s-ha |
+|---|---|---|---|
+| Hetzner (USD account) | $23.59 (nbg1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
+| DigitalOcean | $24 (nyc3) | $61 (nyc3) | $98 (nyc3 + tor1) |
+| Vultr | $20 (ewr) | not yet | not yet |
+| Linode | $24 (us-iad) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
+| Scaleway | €21.84 (fr-par-1) | not yet | not yet |
 
 Plus object storage for backups and uploads, billed once per provider account and shared by every project on it: Hetzner $7.99 (this USD account; €6.49 on EUR accounts), DigitalOcean $5, Vultr $18, Linode $5, Scaleway usage-based (cents at this size).
 

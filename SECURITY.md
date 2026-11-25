@@ -18,7 +18,7 @@ Please include:
 
 - The affected component: the `vibecarbon` CLI, or the generated `carbon`
   application template.
-- The deploy mode (`compose`, `compose-ha`, `k8s`, `k8s-ha`) and provider
+- The deploy mode (`compose`, `k8s`, `k8s-ha`) and provider
   (Hetzner, DigitalOcean) if relevant.
 - The `vibecarbon` version (`vibecarbon -v`).
 - Steps to reproduce, and the impact you believe it has.

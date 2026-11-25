@@ -513,7 +513,7 @@ current pricing for the server types you select at deploy time.
 | Single K8s | Supercharge | Single-region k3s cluster |
 | Multi-Region K8s HA | Fortify | k3s primary + standby clusters with PG streaming replication + one-command failover |
 
-Compose HA gives a primary and a standby without Kubernetes, on every provider. Select it explicitly with `-mode compose-ha`.
+Compose HA (`compose-ha`, a primary and a standby without Kubernetes) is not offered to new environments since 2026-11-25: the picker, help and user docs leave it out (`OFFERED_TIERS` in `src/lib/deploy/tier-registry.js`). It still works on every provider: `-mode compose-ha` deploys one, and an existing compose-ha environment keeps deploying, scaling, failing over and restoring.
 
 Mode support by provider (same facts as the README architecture diagram):
 
