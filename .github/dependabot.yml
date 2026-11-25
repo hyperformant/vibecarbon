@@ -19,9 +19,13 @@ updates:
     groups:
       # vitest and @vitest/* must move together: @vitest/coverage-v8 declares
       # an EXACT `vitest` peer, so a split bump fails the strict `npm ci`
-      # (#61 + #65 each red on their own, superseded by #69). Listed first,
-      # with explicit patterns and no update-types filter, so it claims the
-      # pair at every semver level before the broader groups below.
+      # (#61 + #65 each red on their own, superseded by #69). No update-types
+      # filter, so the group holds the pair at every semver level.
+      #
+      # Order does not decide which group a dependency joins, specificity does:
+      # a group with no `patterns` outranks `@vitest/*`, so every broad group
+      # below must exclude the pair. Pinned, with the scoring rule, by
+      # tests/unit/meta/vitest-coverage-version-lockstep.test.ts.
       vitest:
         applies-to: version-updates
         patterns: ["vitest", "@vitest/*"]
@@ -32,6 +36,7 @@ updates:
       development-patches-and-minors:
         applies-to: version-updates
         dependency-type: development
+        exclude-patterns: ["vitest", "@vitest/*"]
         update-types: [patch, minor]
       security-fixes:
         applies-to: security-updates
@@ -79,10 +84,12 @@ updates:
         patterns: ["vitest", "@vitest/*"]
       template-patches:
         applies-to: version-updates
+        exclude-patterns: ["vitest", "@vitest/*"]
         update-types: [patch]
       template-dev-minors:
         applies-to: version-updates
         dependency-type: development
+        exclude-patterns: ["vitest", "@vitest/*"]
         update-types: [minor]
       template-security:
         applies-to: security-updates
