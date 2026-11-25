@@ -12,6 +12,7 @@
  * 2. Import and register it in PROVIDERS below
  */
 
+import { OFFERED_TIERS } from '../deploy/tier-registry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { BaseProvider } from './base.js';
 import { DigitalOceanProvider } from './digitalocean.js';
@@ -120,7 +121,11 @@ export function providerIdFor(envConfig) {
 export function assertTierSupported(ProviderClass, tier) {
   if (ProviderClass.SUPPORTED_TIERS.includes(tier)) return;
 
-  const supported = ProviderClass.SUPPORTED_TIERS.join(', ');
+  // Only the offered tiers: a tier that works but is not offered (compose-ha)
+  // is never suggested.
+  const supported = ProviderClass.SUPPORTED_TIERS.filter((t) => OFFERED_TIERS.includes(t)).join(
+    ', ',
+  );
   // Derived from the registry, never hand-listed: the note names exactly the
   // providers whose SUPPORTED_TIERS carry the requested tier, so a future
   // tier lift updates the message for free.

@@ -89,6 +89,7 @@ import { slotDropSkippedNote } from './lib/deploy/replication-slot.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import { stateS3Fields } from './lib/deploy/s3-record.js';
 import { DB_LINEAGE_SQL, parseDbLineage } from './lib/deploy/standby-lineage.js';
+import { OFFERED_TIERS } from './lib/deploy/tier-registry.js';
 import { DR_S3_CLIENT_OPTIONS } from './lib/deploy/tls-snapshot.js';
 import {
   assertWalgBackupsWorking,
@@ -3263,8 +3264,30 @@ async function failoverSingleServer(envName, envConfig) {
   p.log.message(`  1. ${c.info(`vibecarbon deploy ${envName}`)}`);
   p.log.message(`  2. ${c.info(`vibecarbon restore ${envName}`)}`);
   p.log.message(`  3. ${c.info(`vibecarbon status ${envName}`)}`);
-  p.log.info('To enable HA for one-command failover in the future:');
-  p.log.message(`  ${c.info(`vibecarbon deploy ${envName} -mode compose-ha`)}`);
+  logFailoverModeHint(envConfig, p.log.message);
+}
+
+/**
+ * How a single-server environment's operator gets one-command failover, named
+ * only from the offered tiers (OFFERED_TIERS). The saved mode wins over
+ * `-mode` (resolveDeployMode), so the answer is a new environment, never a
+ * redeploy of this one.
+ *
+ * @param {object} envConfig
+ * @param {(line: string) => void} logCommand - prints the command line
+ */
+export function logFailoverModeHint(envConfig, logCommand) {
+  const Provider = providerFor(envConfig);
+  if (OFFERED_TIERS.includes('k8s-ha') && Provider.SUPPORTED_TIERS.includes('k8s-ha')) {
+    p.log.info(
+      'For one-command failover, deploy a new environment in k8s-ha mode (an environment keeps the mode of its first deploy):',
+    );
+    logCommand(`  ${c.info('vibecarbon deploy <new-env> -mode k8s-ha')}`);
+    return;
+  }
+  p.log.info(
+    `${Provider.NAME} has no failover mode yet, so recovery is a new server and a restore.`,
+  );
 }
 
 // ============================================================================
@@ -3454,8 +3477,7 @@ export async function run(args) {
     p.log.info('Failover is not available for single-server Compose deployments.');
     p.log.info(`Environment "${envName}" uses Docker Compose on a single VPS.`);
     p.log.info('');
-    p.log.info(`${c.dim('To enable failover, redeploy in an HA mode:')}`);
-    p.log.info(`  ${c.info(`vibecarbon deploy ${envName} -mode compose-ha`)}`);
+    logFailoverModeHint(envConfig, p.log.info);
     p.outro('');
     return;
   }

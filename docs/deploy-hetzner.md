@@ -34,7 +34,7 @@ For exact, up-to-date figures, see
    to the project's `.env.local`; scripted runs can pass it via the
    `HETZNER_API_TOKEN` environment variable instead. The same token drives
    servers, firewalls, and DNS. No separate DNS token exists. Where it lives
-   depends on the mode. On compose and compose-ha it stays on your machine,
+   depends on the mode. On compose it stays on your machine,
    and the servers never hold it. On k8s and k8s-ha the cluster adds nodes
    and attaches volumes with it, so each deploy writes it into two
    `kube-system` Secrets: `hcloud`, which the cloud controller and CSI
@@ -57,7 +57,6 @@ migration = `destroy` + fresh deploy with `-restore`).
 | Mode | What it provisions |
 |------|--------------------|
 | `compose` | Single VPS running the full stack under Docker Compose |
-| `compose-ha` | Primary + standby VPS in two regions, Postgres streaming replication, one-command manual failover |
 | `k8s` | k3s cluster (master + workers + dedicated database node) |
 | `k8s-ha` | Primary + standby k3s clusters in two regions, pilot-light standby (2-node idle floor, cold app tier), Postgres streaming replication, manual failover with IaC provisioning |
 
@@ -153,8 +152,7 @@ A deploy:
    your server, and there is no wildcard certificate), or puts back
    the environment's saved certificate ([Certificates](#certificates))
 4. Builds your app image locally and sends only your app's own layers over
-   SSH; servers pull the shared runtime base themselves (compose-ha sends the
-   same layers to both servers). On k8s the image goes once into the
+   SSH; servers pull the shared runtime base themselves. On k8s the image goes once into the
    cluster's registry and every node pulls it from there. On k8s-ha the
    standby cluster is not sent to: it copies the image from the primary over
    the private tunnel; if that copy fails the deploy fails, unless
@@ -197,7 +195,7 @@ Your certificate is issued once and then reused. Right after a deploy finds it t
 
 A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about two minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way.
 
-On compose and compose-ha a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours.
+On compose a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours.
 
 On Kubernetes, cert-manager keeps retrying on its own.
 
@@ -343,25 +341,12 @@ Commit the updated `.vibecarbon.json`.
 
 ## High availability
 
-Both HA modes run two regions with Postgres streaming replication (TLS,
+`k8s-ha` runs two regions with Postgres streaming replication (TLS,
 `verify-ca`, dedicated replication port) and deliberate, one-command manual
 failover (never automatic: a split-brain database is worse than a few
-minutes of operator-decided downtime). Their standby architectures are
-different, and each mode keeps its own failover path:
-
-- **`compose-ha`** keeps its existing always-warm architecture unchanged: two
-  always-on VPSs, standby continuously replicating. The standby runs the app
-  tier, Redis and observability; an add-on that writes to the primary
-  database stays at zero there until the standby becomes the primary.
-  `vibecarbon failover` promotes the standby database and repoints DNS.
-  There's no idle floor to provision and no `-server-type` step, because
-  nothing is cold.
-- **`k8s-ha`** uses the pilot-light standby described below: a 2-node idle
-  floor with the app tier at zero, and failover provisions app-tier capacity
-  before promoting.
-
-The rest of this section (Standby Architecture, Failover ordering, Recovery &
-Fail-back) describes **k8s-ha** specifically.
+minutes of operator-decided downtime). Its standby is a pilot light: a
+2-node idle floor with the app tier at zero, and failover provisions
+app-tier capacity before promoting.
 
 ### Standby Architecture (Pilot-Light, k8s-ha only)
 
@@ -415,7 +400,7 @@ After a failover completes:
 - `vibecarbon status <env>` is the first stop: server, service, and replication
   state at a glance
 - `vibecarbon diagnose <env>` dumps full environment state to
-  `~/.vibecarbon/diag-<env>-<ts>.txt`. On compose/compose-ha it gathers
+  `~/.vibecarbon/diag-<env>-<ts>.txt`. On compose it gathers
   container states + health, recent service logs, Traefik/ACME cert state, and
   host disk usage over SSH; on k8s it runs the node/pod/network/Flux + egress
   battery and localizes the failing layer

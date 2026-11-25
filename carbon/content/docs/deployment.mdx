@@ -6,7 +6,7 @@ order: 6
 
 ## Overview
 
-Your application can be deployed using Docker Compose (single server) or Kubernetes (with Kubernetes HA for a standby region). Each environment picks its mode at first deploy, and the same app deploys in any of them. Compose HA is also available, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
+Your application can be deployed using Docker Compose (single server) or Kubernetes (with Kubernetes HA for a standby region). Each environment picks its mode at first deploy, and the same app deploys in any of them.
 
 ## Choosing a provider
 
@@ -20,7 +20,7 @@ Each environment is bound to one cloud provider, picked the first time you deplo
 | Vultr | `vultr` | `compose` | `ewr`, `ord`, `ams`, `lhr`, `sgp` | `VULTR_API_TOKEN` |
 | Scaleway | `scaleway` | `compose` | `fr-par-1`, `fr-par-2`, `nl-ams-1`, `nl-ams-2` | `SCALEWAY_SECRET_KEY` |
 
-Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`. `k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner, DigitalOcean, and Linode. Kubernetes on Linode runs in every region except Newark (`us-east`) and Atlanta (`us-southeast`).
+`k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner, DigitalOcean, and Linode. Kubernetes on Linode runs in every region except Newark (`us-east`) and Atlanta (`us-southeast`).
 
 `-provider` selects the cloud for a **new** environment; existing environments keep the provider they were first deployed with. It is required alongside `-y` when you create a new environment non-interactively — otherwise the deploy prompt asks. `-region` takes the provider's own region id, so the value is only meaningful next to the provider it belongs to:
 
@@ -134,9 +134,7 @@ This additionally includes:
 - Cluster Autoscaler (VPS-level autoscaling) per region
 - Health monitoring across replicas
 
-Compose HA (`vibecarbon deploy prod -mode compose-ha`) is also available, for providers without Kubernetes: two always-on VPS with PostgreSQL streaming replication and one-command failover (`vibecarbon failover`).
-
-Both HA modes place the standby in a second region. `-region` sets the primary and `-standby-region` sets the standby; leave `-standby-region` off and the CLI picks a same-continent partner of `-region` for you. An HA deploy fails unless replication is confirmed streaming, so pass `-allow-degraded` to finish anyway and accept a warm-standby (degraded DR) result.
+The standby goes in a second region. `-region` sets the primary and `-standby-region` sets the standby; leave `-standby-region` off and the CLI picks a same-continent partner of `-region` for you. An HA deploy fails unless replication is confirmed streaming, so pass `-allow-degraded` to finish anyway and accept a warm-standby (degraded DR) result.
 
 On Kubernetes HA, your app image is uploaded once, to the primary. The standby copies it from the primary over the private tunnel, and the deploy fails if that copy fails. With `-allow-degraded` it finishes, records the standby as missing its image, and failover refuses it until a deploy copies it. Failover checks for the image first: a planned failover refuses if the standby lacks it, and an unplanned one refuses unless you pass `-force-unproven`. `vibecarbon status` shows a `Standby image` line when the standby is missing it.
 
@@ -250,7 +248,7 @@ Certificates come from Let's Encrypt and renew on their own (Traefik on Docker C
 
 Your certificate is issued once and then reused. Right after a deploy finds it trusted, and on every scheduled backup after that, it is saved (with its key) to the environment's backup bucket. A restore, a scale onto new servers, or a failover puts that copy back instead of asking Let's Encrypt for a new one, so the new side serves your certificate as soon as it takes over and you stay clear of Let's Encrypt's rate limits. A plain `vibecarbon destroy` keeps the saved copy; `destroy -purge` removes it with the rest of the backups.
 
-A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about three minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way. On compose and compose-ha a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours. On Kubernetes, cert-manager keeps retrying on its own.
+A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about three minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way. On compose a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours. On Kubernetes, cert-manager keeps retrying on its own.
 
 `vibecarbon status <env>` has a TLS row that checks the live certificate, so it is right even when the last deploy saw something else: `trusted` with its expiry date, `pending` with the reason the deploy recorded, or `untrusted` with what is wrong now. On compose it also shows what the retries are doing (`retrying 3/48`, `waiting for DNS`). If they gave up, it prints the command that starts them again, once the ACME error in the Traefik log is fixed:
 

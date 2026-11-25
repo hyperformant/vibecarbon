@@ -84,6 +84,18 @@ describe('parseFlags', () => {
       expect(r.values.mode).toBe('k8s');
       expect(r.errors).toEqual([]);
     });
+
+    it('accepts a value left out of helpEnum, and its error names only helpEnum', () => {
+      // A mode that works but is not offered (compose-ha): accepted, never listed.
+      const flags = [
+        { name: 'mode', value: '<m>', enum: ['compose', 'compose-ha'], helpEnum: ['compose'] },
+      ];
+      const ok = parseFlags(['-mode', 'compose-ha'], { name: 'x', flags });
+      expect(ok.values.mode).toBe('compose-ha');
+      expect(ok.errors).toEqual([]);
+      const bad = parseFlags(['-mode', 'fictional'], { name: 'x', flags });
+      expect(bad.errors).toEqual(['-mode must be one of: compose (got: fictional)']);
+    });
   });
 
   describe('positional arguments', () => {

@@ -1766,6 +1766,24 @@ traffic that needs a wider firewall than a customer has.
 **Guard:** `tests/unit/e2e/runner-cidr.test.ts` requires one detected host
 address, never `0.0.0.0/0` or `::/0`, even from an inherited environment.
 
+#### 2026-11-25: Compose HA is not offered to new environments (#582)
+
+The deploy picker, `-mode` help and its error, the failover hints, the cost
+grid and the user docs leave `compose-ha` out, and e2e runs it only when named
+(#581). It still works on every provider: `-mode compose-ha` deploys one, and
+an existing compose-ha environment keeps deploying, scaling, failing over and
+restoring. On Vultr and Scaleway, where compose is then the one mode offered,
+the picker says so instead of asking.
+
+**Why:** we ship compose, k8s and k8s-ha right now, and leaving compose-ha out
+of the default e2e runs takes them from 16 scenarios to 11.
+
+**Do not undo:** offering it again is adding it to `OFFERED_TIERS`
+(`src/lib/deploy/tier-registry.js`) and restoring its docs. Deleting its code
+would strand the existing compose-ha environments.
+
+**Guard:** `tests/unit/docs/unoffered-tier-surface-census.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

@@ -1517,7 +1517,7 @@ ${formatDotenvLine('DB_NAME', 'postgres')}
 ${formatDotenvLine('POSTGRES_PASSWORD', variables.DB_PASSWORD)}
 ${formatDotenvLine('APP_DB_PASSWORD', variables.APP_DB_PASSWORD)}
 
-# HA PostgreSQL replication (used by HA deploy modes: -mode compose-ha / k8s-ha)
+# HA PostgreSQL replication (used by the HA deploy mode: -mode k8s-ha)
 ${formatDotenvLine('REPL_PASSWORD', variables.REPL_PASSWORD)}
 
 # The database image docker-compose.yml pulls. Set by the vibecarbon CLI:

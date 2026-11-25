@@ -396,9 +396,7 @@ describe('docs/deploy-hetzner.md says where the token lives, in each mode', () =
       `each deploy writes it into ${names.length === 2 ? 'two' : names.length} \`kube-system\` Secrets`,
     );
     for (const name of names) expect(flat).toContain(`\`${name}\``);
-    expect(flat).toContain(
-      'On compose and compose-ha it stays on your machine, and the servers never hold it.',
-    );
+    expect(flat).toContain('On compose it stays on your machine, and the servers never hold it.');
     expect(flat).toContain('except a master an earlier vibecarbon made');
   });
 

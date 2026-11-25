@@ -413,6 +413,7 @@ const REGISTRY = [
     helper: 'sourceFiles',
     definition: 'tests/_shared/source-files.ts',
     consumers: [
+      'tests/_shared/user-surfaces.ts',
       'tests/unit/autoscaler/image-ref.test.ts',
       'tests/unit/cli/no-positional-primary-census.test.ts',
       'tests/unit/cli/printed-command-flags-census.test.ts',
@@ -474,7 +475,6 @@ const REGISTRY = [
       'tests/unit/destroy/server-name-family-census.test.ts',
       'tests/unit/dns/dns-setup-result-consumed-census.test.ts',
       'tests/unit/docs/carbon-npm-scripts-census.test.ts',
-      'tests/unit/docs/parked-addon-surface-census.test.ts',
       'tests/unit/docs/terminology-census.test.ts',
       'tests/unit/e2e/acme-ca-switch.test.ts',
       'tests/unit/e2e/bucket-gone-census.test.ts',

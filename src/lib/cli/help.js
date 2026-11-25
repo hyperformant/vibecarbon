@@ -167,7 +167,8 @@ export function renderHelp(spec) {
     for (const f of flags) {
       const display = f.value ? `-${f.name} ${f.value}` : `-${f.name}`;
       const desc = f.description ?? '';
-      const enumNote = f.enum ? `${desc ? ' ' : ''}(${f.enum.join('|')})` : '';
+      const shown = f.helpEnum ?? f.enum;
+      const enumNote = shown ? `${desc ? ' ' : ''}(${shown.join('|')})` : '';
       lines.push(`  ${c.info(display.padEnd(20))} ${c.dim(desc + enumNote)}`);
     }
     lines.push('');

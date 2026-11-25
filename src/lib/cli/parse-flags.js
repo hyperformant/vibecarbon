@@ -23,6 +23,9 @@
  *   When set, the parser consumes the next argv element as the value.
  * @property {string[]} [enum] - constrain a value flag to an allowed set.
  *   The parser emits an error if the supplied value isn't in this list.
+ * @property {string[]} [helpEnum] - the subset of `enum` that help and the
+ *   flag's error name; the rest are still accepted (a mode that works but is
+ *   not offered).
  * @property {string} [description] - human-readable description for help.
  * @property {boolean} [featured] - docs-only: README and AGENTS give this flag
  *   its own row under the command. The parser ignores it.
@@ -164,7 +167,9 @@ export function parseFlags(argv, spec) {
       continue;
     }
     if (flagSpec.enum && !flagSpec.enum.includes(next)) {
-      errors.push(`-${name} must be one of: ${flagSpec.enum.join(', ')} (got: ${next})`);
+      errors.push(
+        `-${name} must be one of: ${(flagSpec.helpEnum ?? flagSpec.enum).join(', ')} (got: ${next})`,
+      );
       // Still consume next so we don't double-report it as a stray positional.
       i++;
       continue;
