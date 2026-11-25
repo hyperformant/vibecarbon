@@ -1,5 +1,7 @@
+import { testConfig } from '../../config.js';
 import { scratchNamePrefix } from './namespace.js';
 import { describeIncomplete, type PageDialect, walkProviderPages } from './provider-pages.js';
+import { checkDelegation } from './registry-delegation.js';
 
 type PreflightStatus = 'ok' | 'slow' | 'failed';
 
@@ -626,8 +628,19 @@ async function checkDnsZone(target: {
             `${names.slice(0, 3).join(', ') || 'none'}${names.length > 3 ? ', …' : ''})`,
         };
       }
-      // The zone is visible to the token. That is NOT the same as the
-      // provider's nameservers serving it — see probeZoneAuthoritative.
+      // The zone is visible to the token. That is NOT the same as the domain
+      // still being ours: a lapsed registration leaves the zone in place and
+      // points the domain elsewhere, and only the registry knows.
+      const registry = await checkDelegation({
+        dnsProvider: target.dnsProvider,
+        zone: match,
+        domains: testConfig.e2e.domains,
+      });
+      if (!registry.delegated) {
+        return { service, status: 'failed', latencyMs, detail: registry.detail };
+      }
+      // Nor is it the same as the provider's nameservers serving it — see
+      // probeZoneAuthoritative.
       //
       // Deliberately reported, never fatal. Linode serves DNS only for
       // accounts holding an active Linode, and preflight runs BEFORE the
@@ -646,7 +659,12 @@ async function checkDnsZone(target: {
           detail: `> ${SLOW_THRESHOLD_MS}ms (${match})${servedNote}`,
         };
       }
-      return { service, status: 'ok', latencyMs, detail: `zone ${match}${servedNote}` };
+      return {
+        service,
+        status: 'ok',
+        latencyMs,
+        detail: `zone ${match} (${registry.detail})${servedNote}`,
+      };
     } catch (err) {
       lastErr = err;
       lastLatency = Date.now() - t0;

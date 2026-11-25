@@ -112,12 +112,11 @@ describe('resolveSelection — explicit tokens', () => {
     expect(resolveSelection({ include: ['vultr/compose-vultr'] })[0].dnsProvider).toBe('vultr');
   });
 
-  it('scaleway/compose runs on native Scaleway DNS (own apex, threadtrace.app)', () => {
+  it('scaleway/compose runs on native Scaleway DNS (own apex, yachtbunker.com)', () => {
     // Scaleway's Domains API requires the account to own the domain as an
     // EXTERNAL DOMAIN before it will serve any zone for it, so this needed
     // a separate registrable domain rather than a 3-label delegation like
-    // do./linode. threadtrace.app was onboarded + validated and delegated
-    // to ns0/ns1.dom.scw.cloud on 2026-08-13.
+    // do./linode.
     expect(resolveSelection({ include: ['scaleway/compose'] })[0].dnsProvider).toBe('scaleway');
     expect(resolveSelection({ include: ['scaleway/compose-scaleway'] })[0].dnsProvider).toBe(
       'scaleway',
