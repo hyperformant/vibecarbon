@@ -88,10 +88,10 @@ export const testConfig = {
       // Separate apex, same reasoning as vultr above: Scaleway's Domains API
       // requires the account to own the domain as an EXTERNAL DOMAIN before
       // it will serve any zone for it (scaleway-dns.js), so a 3-label
-      // subdomain trick out of appcarbon.dev isn't an option. Onboarded +
-      // validated (status: active) and delegated to ns0/ns1.dom.scw.cloud
-      // 2026-08-13.
-      scaleway: 'threadtrace.app',
+      // subdomain trick out of appcarbon.dev isn't an option. Registered with
+      // Scaleway 2026-11-25, in place of threadtrace.app, which lapsed that
+      // day.
+      scaleway: 'yachtbunker.com',
     },
     // Baseline feature set for e2e runs: stock, the app and its database with
     // no add-ons, not even observability (owner decision 2026-11-15). Every
@@ -362,7 +362,7 @@ export const testConfig = {
       // ISOLATION: SCALEWAY_DEFAULT_PROJECT_ID must name a DEDICATED Scaleway
       // Project — SSH keys are Project-scoped and re-applied to every
       // instance at each boot (audit design flag 1).
-      // Native Scaleway DNS (threadtrace.app — see the domains map), same
+      // Native Scaleway DNS (yachtbunker.com, see the domains map), same
       // reasoning as the DO/Linode/Vultr blocks above: the same SCALEWAY_*
       // triple already in requiredEnv signs the Domains & DNS API
       // (scaleway-dns.js), so s1 needs no separate Cloudflare credential and

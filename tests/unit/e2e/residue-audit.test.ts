@@ -332,7 +332,7 @@ describe('inventory', () => {
     expect(dns).toContain('https://api.cloudflare.com/client/v4/zones?name=appcarbon.dev');
     expect(dns.some((u) => /\/v2\/domains\/do\.appcarbon\.dev\/records/.test(u))).toBe(true);
     expect(dns.some((u) => /\/v2\/domains\/threvidence\.com\/records/.test(u))).toBe(true);
-    expect(dns.some((u) => /dns-zones\?domain=threadtrace\.app/.test(u))).toBe(true);
+    expect(dns.some((u) => /dns-zones\?domain=yachtbunker\.com/.test(u))).toBe(true);
     expect(
       headers.some((h) => h['X-Filter'] === JSON.stringify({ domain: 'linode.appcarbon.dev' })),
     ).toBe(true);
