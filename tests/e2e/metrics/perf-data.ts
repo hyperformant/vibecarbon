@@ -14,9 +14,9 @@
  *   - the marketing component's data file (`syncCarbonPerfData`)
  *
  * The merge keeps the per-provider publication rules the retired
- * per-provider block patcher enforced: full registry coverage, every
- * scenario green, anomaly-guarded via `opts.excludeProviders`, and only
- * green steps contribute numbers. Every published number is a stock deploy
+ * per-provider block patcher enforced: the provider's whole default
+ * selection ran, every scenario in it green, anomaly-guarded via
+ * `opts.excludeProviders`, and only green steps contribute numbers. Every published number is a stock deploy
  * (the app and its database, no add-ons): a scenario recorded with add-ons
  * counts as absent, so its provider keeps its existing entry.
  */
@@ -31,6 +31,11 @@ type ProviderId = keyof typeof testConfig.e2e.providers;
 
 function isKnownProvider(provider: string): provider is ProviderId {
   return Object.hasOwn(testConfig.e2e.providers, provider);
+}
+
+/** Every mode the provider has a scenario for, in registry order. */
+function registeredModes(provider: ProviderId): string[] {
+  return testConfig.e2e.providers[provider].scenarios.map((s: { mode: string }) => s.mode);
 }
 
 interface PerfRunProvenance {
@@ -71,8 +76,10 @@ function isGreenStatus(status: string): boolean {
 /**
  * Collect one provider's entry from a run, or null when the run must not
  * update that provider (the same rules the per-provider README patcher
- * enforced): unknown provider or run, no/partial registry coverage, or any
- * non-green scenario. Within a green scenario only green steps contribute
+ * enforced): unknown provider or run, or a scenario of its default selection
+ * that is missing or not green. A registered mode outside that selection
+ * (compose-ha) is collected when it ran green beside it and never holds the
+ * provider back. Within a green scenario only green steps contribute
  * numbers — a pass_after_retry scenario's one failed step stays absent
  * rather than surfacing a number. A scenario that did not record a stock
  * deploy (`scenarios.features` other than `[]`) is ignored with a log line,
@@ -88,7 +95,7 @@ export function collectProviderRunData(
   const details = db.getRunDetails(runId);
   if (!details) return null;
 
-  const modes = testConfig.e2e.providers[provider].scenarios.map((s: { mode: string }) => s.mode);
+  const { defaultSelection } = testConfig.e2e.providers[provider];
 
   const scenariosByMode = new Map<string, (typeof details.scenarios)[number]>();
   for (const sc of details.scenarios) {
@@ -102,13 +109,20 @@ export function collectProviderRunData(
     }
     scenariosByMode.set(sc.mode, sc);
   }
-  for (const mode of modes) {
+  for (const mode of defaultSelection) {
     const sc = scenariosByMode.get(mode);
     if (!sc || !isGreenStatus(sc.status)) return null;
   }
+  const modes = registeredModes(provider).filter((mode) => {
+    const sc = scenariosByMode.get(mode);
+    return sc != null && isGreenStatus(sc.status);
+  });
 
   const scenarioIdToMode = new Map<string, string>();
-  for (const sc of scenariosByMode.values()) scenarioIdToMode.set(sc.id, sc.mode);
+  for (const mode of modes) {
+    const sc = scenariosByMode.get(mode);
+    if (sc) scenarioIdToMode.set(sc.id, mode);
+  }
 
   const scenarios: Record<string, Partial<Record<string, number>>> = {};
   for (const mode of modes) scenarios[mode] = {};
@@ -211,14 +225,15 @@ function tableRow(cells: string[]): string {
 }
 
 /**
- * Render the unified super table: one row per (provider × scenario it
- * supports, per the registry), grouped by provider (registry order) with
- * the provider's display name named only on its first row; each provider's
- * scenarios walk in the provider's own registry order. A registered
- * provider×mode with no measurement in `data` renders as `_pending_` cells
- * — support and measurement stay distinguishable ("not measured yet" is
- * never disguised as "not offered", and absent rows mean "not offered"). A
- * measured scenario missing one step renders that cell as an em-dash.
+ * Render the unified super table: one row per (provider × scenario in its
+ * default selection), grouped by provider (registry order) with the
+ * provider's display name named only on its first row; each provider's
+ * scenarios walk in the provider's own registry order. A default scenario
+ * with no measurement in `data` renders as `_pending_` cells, so "not
+ * measured yet" is never disguised as a missing row. A measured scenario
+ * missing one step renders that cell as an em-dash. Modes outside the default
+ * selection have no row: the footer names each provider's latest default run,
+ * which did not measure them.
  *
  * Ends with a provenance footer naming each measured provider's CI run
  * (shared origin folded to a single mention); omitted entirely while no
@@ -232,11 +247,9 @@ export function renderUnifiedPerfTableMd(data: PerfData): string {
   ];
 
   for (const providerId of providerIds) {
-    const registryModes = testConfig.e2e.providers[providerId].scenarios.map(
-      (s: { mode: string }) => s.mode,
-    );
+    const defaults: readonly string[] = testConfig.e2e.providers[providerId].defaultSelection;
     let firstOfGroup = true;
-    for (const mode of registryModes) {
+    for (const mode of registeredModes(providerId).filter((m) => defaults.includes(m))) {
       const measured = data.providers[providerId]?.scenarios[mode];
       const cells = PERF_TABLE_ROWS.map((r) => {
         if (measured == null) return '_pending_';

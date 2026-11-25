@@ -30,7 +30,8 @@ describe('providers.vultr (Vultr opt-in scenarios)', () => {
       dnsProvider: 'vultr',
       envPrefix: 'v2',
     });
-    expect(vultr.defaultSelection).toEqual(['compose', 'compose-ha']);
+    // compose-ha runs only when named (2026-11-25).
+    expect(vultr.defaultSelection).toEqual(['compose']);
   });
 
   it('names its required credentials', () => {

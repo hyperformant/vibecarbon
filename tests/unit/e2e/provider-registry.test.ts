@@ -23,29 +23,24 @@ describe('e2e provider registry', () => {
     }
   });
 
-  it('hetzner supports all four modes and defaults to all four', () => {
+  it('hetzner supports all four modes and defaults to the three we ship', () => {
     expect(providers.hetzner.scenarios.map((s) => s.mode)).toEqual([
       'compose',
       'compose-ha',
       'k8s',
       'k8s-ha',
     ]);
-    expect(providers.hetzner.defaultSelection).toEqual(['compose', 'compose-ha', 'k8s', 'k8s-ha']);
+    expect(providers.hetzner.defaultSelection).toEqual(['compose', 'k8s', 'k8s-ha']);
   });
 
-  it('digitalocean supports all four modes and defaults to all four (d4 lift, 2026-08-27)', () => {
+  it('digitalocean supports all four modes and defaults to the same three', () => {
     expect(providers.digitalocean.scenarios.map((s) => s.mode)).toEqual([
       'compose',
       'compose-ha',
       'k8s',
       'k8s-ha',
     ]);
-    expect(providers.digitalocean.defaultSelection).toEqual([
-      'compose',
-      'compose-ha',
-      'k8s',
-      'k8s-ha',
-    ]);
+    expect(providers.digitalocean.defaultSelection).toEqual(['compose', 'k8s', 'k8s-ha']);
     expect(providers.digitalocean.requiredEnv).toContain('DIGITALOCEAN_API_TOKEN');
   });
 
@@ -58,6 +53,17 @@ describe('e2e provider registry', () => {
     for (const p of Object.values(providers)) {
       const modes = new Set(p.scenarios.map((s) => s.mode));
       for (const m of p.defaultSelection) expect(modes.has(m)).toBe(true);
+    }
+  });
+
+  it('every provider runs all its registered modes by default except compose-ha', () => {
+    // compose-ha is not a mode we ship right now (2026-11-25), so it runs only
+    // when named. Any other mode left out of a default list would drop out of
+    // the matrix without anyone deciding it should.
+    for (const [name, p] of Object.entries(providers)) {
+      const modes = p.scenarios.map((s) => s.mode);
+      expect(modes, `${name} must keep a runnable compose-ha scenario`).toContain('compose-ha');
+      expect([...p.defaultSelection], name).toEqual(modes.filter((m) => m !== 'compose-ha'));
     }
   });
 

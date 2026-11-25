@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createTestRun } from '../../_shared/e2e-db-seed.js';
+import { createTestRun, seedCuratedScenario } from '../../_shared/e2e-db-seed.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
@@ -112,6 +112,25 @@ describe('collectRtoRpoFigures', () => {
     expect(f.mode).toBe('k8s-ha');
     // single-scenario run — the HA-claims matrix pin must be surfaced
     expect(f.fullGreenMatrix).toBe(false);
+  });
+
+  it('a green default run, which leaves out compose-ha, counts as a full matrix', () => {
+    const db = new E2EDb(':memory:');
+    const { runId } = seed(db);
+    for (const mode of ['compose', 'k8s']) seedCuratedScenario(db, runId, 'hetzner', mode);
+
+    const result = collectRtoRpoFigures(db, runId);
+    expect(result.ok && result.figures.fullGreenMatrix).toBe(true);
+  });
+
+  it('a red scenario in the default run is not a full matrix', () => {
+    const db = new E2EDb(':memory:');
+    const { runId } = seed(db);
+    seedCuratedScenario(db, runId, 'hetzner', 'compose');
+    seedCuratedScenario(db, runId, 'hetzner', 'k8s', { status: 'fail' });
+
+    const result = collectRtoRpoFigures(db, runId);
+    expect(result.ok && result.figures.fullGreenMatrix).toBe(false);
   });
 
   it('handles missing substeps (compose-ha has no provisioning marker)', () => {

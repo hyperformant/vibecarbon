@@ -21,40 +21,50 @@ describe('resolveSelection — defaults', () => {
     );
   });
 
-  it('--provider hetzner still gives the four Hetzner modes', () => {
+  it('--provider hetzner gives its three default modes', () => {
     expect(modes(resolveSelection({ providers: ['hetzner'] }))).toEqual([
       'hetzner/compose',
-      'hetzner/compose-ha',
       'hetzner/k8s',
       'hetzner/k8s-ha',
     ]);
   });
 
-  it('--provider digitalocean = DO defaults (all 4 since the d4 lift)', () => {
+  it('--provider digitalocean = DO defaults (the same three)', () => {
     expect(modes(resolveSelection({ providers: ['digitalocean'] }))).toEqual([
       'digitalocean/compose',
-      'digitalocean/compose-ha',
       'digitalocean/k8s',
       'digitalocean/k8s-ha',
     ]);
   });
 
-  it('--provider all = every provider defaults, hetzner first (16 total)', () => {
-    // 4 hetzner + 4 digitalocean (d4 lift 2026-08-27) + 4 linode (k8s lift)
-    // + 2 vultr + 2 scaleway (2026-08 expansion PRs 1-3 + tier-parity wave 1).
-    const sel = resolveSelection({ providers: ['all'] });
-    expect(sel).toHaveLength(16);
-    expect(sel[0]).toMatchObject({ provider: 'hetzner', mode: 'compose' });
-    expect(sel[6]).toMatchObject({ provider: 'digitalocean', mode: 'k8s' });
-    expect(sel[7]).toMatchObject({ provider: 'digitalocean', mode: 'k8s-ha' });
-    expect(sel[8]).toMatchObject({ provider: 'linode', mode: 'compose' });
-    expect(sel[9]).toMatchObject({ provider: 'linode', mode: 'compose-ha' });
-    expect(sel[10]).toMatchObject({ provider: 'linode', mode: 'k8s' });
-    expect(sel[11]).toMatchObject({ provider: 'linode', mode: 'k8s-ha' });
-    expect(sel[12]).toMatchObject({ provider: 'vultr', mode: 'compose' });
-    expect(sel[13]).toMatchObject({ provider: 'vultr', mode: 'compose-ha' });
-    expect(sel[14]).toMatchObject({ provider: 'scaleway', mode: 'compose' });
-    expect(sel[15]).toMatchObject({ provider: 'scaleway', mode: 'compose-ha' });
+  it('--provider all = every provider defaults, hetzner first (11 total, no compose-ha)', () => {
+    expect(modes(resolveSelection({ providers: ['all'] }))).toEqual([
+      'hetzner/compose',
+      'hetzner/k8s',
+      'hetzner/k8s-ha',
+      'digitalocean/compose',
+      'digitalocean/k8s',
+      'digitalocean/k8s-ha',
+      'linode/compose',
+      'linode/k8s',
+      'linode/k8s-ha',
+      'vultr/compose',
+      'scaleway/compose',
+    ]);
+  });
+
+  it('compose-ha runs on every provider when it is named', () => {
+    // The five tokens docs/tests.md gives for a compose-ha run on GitHub,
+    // where each leg adds its own `--provider`.
+    const all = ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway'];
+    expect(modes(resolveSelection({ include: all.map((p) => `${p}/compose-ha`) }))).toEqual(
+      all.map((p) => `${p}/compose-ha`),
+    );
+    for (const p of all) {
+      expect(modes(resolveSelection({ providers: [p], include: [`${p}/compose-ha`] }))).toEqual([
+        `${p}/compose-ha`,
+      ]);
+    }
   });
 });
 
@@ -140,7 +150,7 @@ describe('resolveSelection — explicit tokens', () => {
     // because there is no default one to subtract from.
     expect(
       modes(resolveSelection({ providers: ['hetzner'], exclude: ['hetzner/k8s-ha'] })),
-    ).toEqual(['hetzner/compose', 'hetzner/compose-ha', 'hetzner/k8s']);
+    ).toEqual(['hetzner/compose', 'hetzner/k8s']);
   });
 
   it('exclude with no provider throws rather than guessing one', () => {
@@ -148,8 +158,8 @@ describe('resolveSelection — explicit tokens', () => {
   });
 
   it('provider all + exclude', () => {
-    const sel = resolveSelection({ providers: ['all'], exclude: ['digitalocean/compose-ha'] });
-    expect(sel).toHaveLength(15);
+    const sel = resolveSelection({ providers: ['all'], exclude: ['digitalocean/k8s'] });
+    expect(sel).toHaveLength(10);
   });
 });
 

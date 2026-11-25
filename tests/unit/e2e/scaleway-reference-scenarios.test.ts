@@ -27,7 +27,8 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
       dnsProvider: 'scaleway',
       envPrefix: 's2',
     });
-    expect(scaleway.defaultSelection).toEqual(['compose', 'compose-ha']);
+    // compose-ha runs only when named (2026-11-25).
+    expect(scaleway.defaultSelection).toEqual(['compose']);
   });
 
   it('names its required credentials — the full triple, nothing else', () => {
