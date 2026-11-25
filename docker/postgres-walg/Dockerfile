@@ -52,7 +52,7 @@ FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:ac450461f1ec32d59b50b08d3d86ffcdbd5
 # also emit JIT bitcode and need clang + llvm (hundreds of MB) in the builder.
 # The bitcode only lets the JIT inline pg_cron's C functions, which no query
 # path of ours benefits from.
-FROM postgres:17.11-alpine3.24@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0 AS pg_cron
+FROM postgres:17.12-alpine3.24@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73 AS pg_cron
 ARG PG_CRON_VERSION=1.6.8
 ADD --checksum=sha256:c19ab9bb35406c60fb51ecda993737c083850abe424acb6c1030439d00a1f8e4 \
     https://github.com/citusdata/pg_cron/archive/refs/tags/v${PG_CRON_VERSION}.tar.gz /tmp/pg_cron.tar.gz
@@ -63,7 +63,7 @@ RUN apk add --no-cache build-base \
  && make -C /tmp/pg_cron with_llvm=no install DESTDIR=/out
 
 # --- db: the official image plus our additions, LLVM still present ----------
-FROM postgres:17.11-alpine3.24@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0 AS db
+FROM postgres:17.12-alpine3.24@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73 AS db
 
 # pg_cron: the shared library and the extension's control + SQL scripts. Only
 # those two directories come across; no compiler, headers or build output.
@@ -105,9 +105,9 @@ COPY --from=db / /
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LANG=en_US.utf8 \
     PG_MAJOR=17 \
-    PG_VERSION=17.11 \
+    PG_VERSION=17.12 \
     PGDATA=/var/lib/postgresql/data \
-    GOSU_VERSION=1.19
+    GOSU_VERSION=1.20
 VOLUME /var/lib/postgresql/data
 # SIGINT is postgres's "fast shutdown"; the default SIGTERM would be a smart
 # shutdown that waits for clients, until docker stop SIGKILLs it.
