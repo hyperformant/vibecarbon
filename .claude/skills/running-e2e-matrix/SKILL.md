@@ -15,13 +15,14 @@ Every scenario is a **stock deploy**: the app and its database, no add-ons, not 
 |---|---|---|
 | **Iterate on one failing scenario** (default for debugging) | `pnpm test:e2e:batch -- --scenario hetzner/<mode>` | 30–60 min |
 | Iterate on the failing step against a kept rig | `pnpm test:e2e:batch -- --scenario hetzner/<mode> --skip-steps <step> --keep` then `node scripts/iter-step.js hetzner/<mode> <step>` | step-only (1–10 min) |
-| Confidence check before merging | `pnpm test:e2e:batch -- --provider hetzner` (the Hetzner four, serial) | ~3 hr wall-clock |
-| Drop already-green scenarios | `pnpm test:e2e:batch -- --except hetzner/compose,hetzner/k8s` | matrix minus the named ones |
+| Confidence check before merging | `pnpm test:e2e:batch -- --provider hetzner` (Hetzner's default three, serial) | ~2.5 hr wall-clock |
+| Drop already-green scenarios | `pnpm test:e2e:batch -- --provider hetzner --except hetzner/compose,hetzner/k8s` | matrix minus the named ones |
+| Run compose-ha (in no default list) | `pnpm test:e2e:batch -- --scenario <provider>/compose-ha` | 30–60 min |
 | Skip slow steps you don't need | `pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal` (skips scale/backup/destroy/restore) | ~25 min |
 | Run another provider's default scenarios | `pnpm test:e2e:batch -- --provider <digitalocean\|linode\|vultr\|scaleway>` — credentials listed under Required environment | 30–60 min per scenario |
 | Run every provider's default scenarios | `pnpm test:e2e:batch -- --provider all` | many hours (every provider's scenarios, serial) |
 
-Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **A bare invocation (no `--scenario`/`--provider`) refuses to run**: there is deliberately no default provider. `--provider hetzner` runs the Hetzner four (`compose`, `compose-ha`, `k8s`, `k8s-ha`); `--provider digitalocean` runs DO's four (d1–d4; `digitalocean/k8s-ha` is d4, the DO pilot-light standby + failover scenario). `--provider linode` runs Linode's four (l1–l4; `linode/k8s-ha` is l4). Vultr and Scaleway run `compose` and `compose-ha` only (their `SUPPORTED_TIERS`). See `tests/e2e/selection.ts` for the full grammar.
+Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **A bare invocation (no `--scenario`/`--provider`) refuses to run**: there is deliberately no default provider. `--provider hetzner`, `--provider digitalocean` and `--provider linode` each run three (`compose`, `k8s`, `k8s-ha`; `digitalocean/k8s-ha` is d4 and `linode/k8s-ha` is l4, the pilot-light standby + failover scenarios). Vultr and Scaleway run `compose`. `--provider all` is those 11. **`compose-ha` is in no default list since 2026-11-25**: it is not a mode we ship right now, but the CLI still declares it on every provider and its scenarios stay registered, so run it by naming it. See `tests/e2e/selection.ts` for the full grammar.
 
 ## Serial execution
 
@@ -126,7 +127,7 @@ This is the discipline that makes the matrix stabilize.
 ## Quick reference
 
 ```bash
-# Full matrix, serial (confidence check before a risky merge; e2e gates no release: the Hetzner four)
+# Full matrix, serial (confidence check before a risky merge; e2e gates no release: Hetzner's default three)
 pnpm test:e2e:batch -- --provider hetzner
 
 # Single scenario
@@ -138,7 +139,7 @@ node scripts/iter-step.js hetzner/k8s-ha failover
 node scripts/iter-step.js hetzner/k8s-ha destroy -purge
 
 # Skip already-green scenarios
-pnpm test:e2e:batch -- --except hetzner/compose,hetzner/k8s
+pnpm test:e2e:batch -- --provider hetzner --except hetzner/compose,hetzner/k8s
 
 # Trim k8s-ha to deploy + verify + failover only (~25 min)
 pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal

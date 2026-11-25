@@ -39,28 +39,29 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { testConfig } from '../../config.js';
 import { E2EDb } from './db.js';
 import { formatDuration } from './reporter.js';
 
 export const RTO_RPO_BEGIN_MARKER = '<!-- BEGIN:rto-rpo-figures -->';
 export const RTO_RPO_END_MARKER = '<!-- END:rto-rpo-figures -->';
 
+/** The provider whose green runs feed the published guarantees block. */
+const GUARANTEE_PROVIDER = 'hetzner';
+
 /**
- * Keep in sync with the Hetzner registry entry's scenario list
- * (`testConfig.e2e.providers.hetzner.scenarios` in tests/config.ts).
+ * The modes a full matrix run covers: the guarantee provider's default
+ * selection in tests/config.ts.
  *
  * The published RTO/RPO guarantees stay HETZNER-SOURCED (see
- * GUARANTEE_PROVIDER below): they are the numbers docs/technical.md's
+ * GUARANTEE_PROVIDER above): they are the numbers docs/technical.md's
  * guarantees block advertises, measured on the release-matrix provider's
  * intra-EU pairing. DO's d4 produces its own figures (coast-to-coast
  * nyc3↔sfo3 — a different latency regime) which must never silently replace
  * the published ones; blessing a second provider's figures is a deliberate
  * docs decision, not a db race.
  */
-const ALL_MATRIX_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
-
-/** The provider whose green runs feed the published guarantees block. */
-const GUARANTEE_PROVIDER = 'hetzner';
+const MATRIX_MODES = testConfig.e2e.providers[GUARANTEE_PROVIDER].defaultSelection;
 
 /** Perf-substep names emitted by src/failover.js (perfTimer call sites). */
 export const FAILOVER_SUBSTEP_PROVISION = 'failover.provisionWorkers';
@@ -164,7 +165,7 @@ export function collectRtoRpoFigures(db: E2EDb, runId: string, mode = 'k8s-ha'):
   const promoteMs = substep(FAILOVER_SUBSTEP_PROMOTE);
   const totalMs = failover.duration_ms;
 
-  const fullGreenMatrix = ALL_MATRIX_MODES.every((m) => {
+  const fullGreenMatrix = MATRIX_MODES.every((m) => {
     const sc = details.scenarios.find((s) => s.mode === m);
     return sc != null && isGreenStatus(sc.status);
   });

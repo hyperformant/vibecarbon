@@ -42,7 +42,8 @@ describe('providers.linode (Linode opt-in scenarios)', () => {
       dnsProvider: 'linode',
       envPrefix: 'l4',
     });
-    expect(linode.defaultSelection).toEqual(['compose', 'compose-ha', 'k8s', 'k8s-ha']);
+    // compose-ha runs only when named (2026-11-25).
+    expect(linode.defaultSelection).toEqual(['compose', 'k8s', 'k8s-ha']);
   });
 
   it('names its required credentials', () => {

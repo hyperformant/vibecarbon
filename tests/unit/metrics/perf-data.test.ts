@@ -41,6 +41,8 @@ import {
 
 const HETZNER_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
 const DO_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
+/** What a `--provider` run of either covers: every mode but compose-ha. */
+const DEFAULT_MODES = ['compose', 'k8s', 'k8s-ha'] as const;
 
 /** Seed one run with every mode of both Hetzner and DigitalOcean, all green. */
 function seedFullGreenRun(
@@ -244,6 +246,42 @@ describe('updatePerfDataFromRun', () => {
     db.close();
   });
 
+  it('a default run, which leaves out compose-ha, updates the provider', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    for (const mode of DEFAULT_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
+    db.completeRun(runId, 'pass');
+    const file = tempDataPath();
+
+    expect(updatePerfDataFromRun(file, db, runId).updated).toEqual(['hetzner']);
+    expect(Object.keys(loadPerfData(file).providers.hetzner.scenarios)).toEqual([...DEFAULT_MODES]);
+    db.close();
+  });
+
+  it('compose-ha on its own never updates a provider', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    seedCuratedScenario(db, runId, 'vultr', 'compose-ha');
+    db.completeRun(runId, 'pass');
+    const file = tempDataPath();
+
+    expect(updatePerfDataFromRun(file, db, runId).updated).toEqual([]);
+    db.close();
+  });
+
+  it('a failed compose-ha beside a green default selection neither blocks nor contributes', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    seedCuratedScenario(db, runId, 'hetzner', 'compose-ha', { status: 'fail' });
+    for (const mode of DEFAULT_MODES) seedCuratedScenario(db, runId, 'hetzner', mode);
+    db.completeRun(runId, 'fail');
+    const file = tempDataPath();
+
+    expect(updatePerfDataFromRun(file, db, runId).updated).toEqual(['hetzner']);
+    expect(Object.keys(loadPerfData(file).providers.hetzner.scenarios)).toEqual([...DEFAULT_MODES]);
+    db.close();
+  });
+
   it('skips a provider when any of its scenarios is not green', () => {
     const db = new E2EDb(':memory:');
     const runId = createTestRun(db);
@@ -375,21 +413,16 @@ describe('renderUnifiedPerfTableMd', () => {
       });
     expect(firstTwoCells).toEqual([
       ['Hetzner Cloud', '`compose`'],
-      ['', '`compose-ha`'],
       ['', '`k8s`'],
       ['', '`k8s-ha`'],
       ['DigitalOcean', '`compose`'],
-      ['', '`compose-ha`'],
       ['', '`k8s`'],
       ['', '`k8s-ha`'],
       ['Linode', '`compose`'],
-      ['', '`compose-ha`'],
       ['', '`k8s`'],
       ['', '`k8s-ha`'],
       ['Vultr', '`compose`'],
-      ['', '`compose-ha`'],
       ['Scaleway', '`compose`'],
-      ['', '`compose-ha`'],
     ]);
   });
 

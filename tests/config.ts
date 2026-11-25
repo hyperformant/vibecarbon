@@ -238,6 +238,13 @@ export const testConfig = {
     // workflow inputs all key off this. Adding a provider = one entry here.
     // Env prefixes are INTERNAL namespacing (bucket/DNS/stack names) — they
     // are never selection vocabulary.
+    //
+    // `defaultSelection` is what `--provider <id>` runs, and what a provider
+    // must pass to refresh its published numbers. `compose-ha` is in no
+    // default list (2026-11-25): it is not a mode we ship right now, and
+    // leaving it out makes a run shorter. The CLI still declares it on every
+    // provider, so its scenario stays registered. Run it on its own with
+    // `--scenario <provider>/compose-ha`.
     // ---------------------------------------------------------------------
     providers: {
       hetzner: {
@@ -255,7 +262,7 @@ export const testConfig = {
           { mode: 'k8s' as const, dnsProvider: 'hetzner' as const, envPrefix: 'e3' },
           { mode: 'k8s-ha' as const, dnsProvider: 'hetzner' as const, envPrefix: 'e4' },
         ],
-        defaultSelection: ['compose', 'compose-ha', 'k8s', 'k8s-ha'],
+        defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
       digitalocean: {
         displayName: 'DigitalOcean',
@@ -282,7 +289,7 @@ export const testConfig = {
           // the compute — the self-contained default, like Hetzner's e4.
           { mode: 'k8s-ha' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd4' },
         ],
-        defaultSelection: ['compose', 'compose-ha', 'k8s', 'k8s-ha'],
+        defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
       // All four modes (LinodeProvider.SUPPORTED_TIERS; 4-mode headroom
       // recorded in the linode-provider-step0-audit plan). The k8s scenarios
@@ -312,7 +319,7 @@ export const testConfig = {
           // exercises the SAME provider that owns the compute, like d4.
           { mode: 'k8s-ha' as const, dnsProvider: 'linode' as const, envPrefix: 'l4' },
         ],
-        defaultSelection: ['compose', 'compose-ha', 'k8s', 'k8s-ha'],
+        defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
       // Compose + compose-ha (2026-08 expansion PR 2 + tier-parity wave 1 —
       // VultrProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode headroom
@@ -348,7 +355,7 @@ export const testConfig = {
           // same reasoning as Hetzner's e2.
           { mode: 'compose-ha' as const, dnsProvider: 'vultr' as const, envPrefix: 'v2' },
         ],
-        defaultSelection: ['compose', 'compose-ha'],
+        defaultSelection: ['compose'],
       },
       // Compose + compose-ha (2026-08 expansion PR 3 + tier-parity wave 1 —
       // ScalewayProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode
@@ -389,7 +396,7 @@ export const testConfig = {
             envPrefix: 's2',
           },
         ],
-        defaultSelection: ['compose', 'compose-ha'],
+        defaultSelection: ['compose'],
       },
     },
   },

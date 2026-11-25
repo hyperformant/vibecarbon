@@ -79,7 +79,7 @@ const MODE_OPTION_TIER = {
 };
 
 // Compose HA is a fully supported deploy mode (existing environments keep
-// working, `-mode compose-ha` still resolves, the e2e matrix still runs it)
+// working, `-mode compose-ha` still resolves, e2e still runs it when named)
 // but it is no longer RECOMMENDED: Kubernetes HA is the HA answer we lead
 // with, so the picker hides Compose HA wherever Kubernetes HA is on offer.
 //

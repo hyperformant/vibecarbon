@@ -8,7 +8,7 @@
  * a human (or Claude Code) can inspect output and decide how to proceed.
  *
  * Usage:
- *   pnpm test:e2e                    # Interactive (default; bare = Hetzner four)
+ *   pnpm test:e2e                    # Interactive (names its scenarios: a bare run refuses)
  *   pnpm test:e2e -- --batch         # Unattended / CI
  *   pnpm test:e2e -- --scenario hetzner/compose   # Run a single scenario
  *   pnpm test:e2e -- --provider digitalocean      # DO's default selection

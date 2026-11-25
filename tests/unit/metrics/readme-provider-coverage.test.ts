@@ -93,7 +93,7 @@ describe('README unified performance table', () => {
     expect(readmeBlock()).toBe(renderUnifiedPerfTableMd(loadPerfData(DATA_PATH)));
   });
 
-  it('shows every registered provider exactly once per registered scenario', () => {
+  it('shows every registered provider exactly once per default scenario', () => {
     // The renderer guarantees this from the registry; this pins the
     // CHECKED-IN file so a stale README (e.g. committed before a provider
     // registration) fails here rather than shipping a grid that under-
@@ -112,11 +112,10 @@ describe('README unified performance table', () => {
       rowCounts.set(currentDisplay, (rowCounts.get(currentDisplay) ?? 0) + 1);
     }
     for (const id of PROVIDER_IDS) {
-      const { displayName, scenarios } = testConfig.e2e.providers[id];
-      expect(
-        rowCounts.get(displayName) ?? 0,
-        `${id}: expected one row per registered scenario`,
-      ).toBe(scenarios.length);
+      const { displayName, defaultSelection } = testConfig.e2e.providers[id];
+      expect(rowCounts.get(displayName) ?? 0, `${id}: expected one row per default scenario`).toBe(
+        defaultSelection.length,
+      );
     }
   });
 
