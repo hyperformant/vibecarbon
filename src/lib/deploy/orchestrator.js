@@ -87,7 +87,12 @@ import { createDeployDropRetired, releaseRetiredReservedIps } from './k8s/retire
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
 import { tierPsqlFor } from './replication.js';
-import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
+import {
+  clearRetiredFence,
+  isRetiredSide,
+  reconcileRetiredFence,
+  retiredSides,
+} from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
 import { haStacksFrom } from './standby-types.js';
 import { StateTracker } from './state.js';
@@ -2021,7 +2026,6 @@ export async function executeDeployment(args, gatheredConfig) {
       imageTag: localImageTag,
       githubOwner: 'noop',
       repoName: projectConfig.projectName,
-      ghcrPullCreds: null,
       isLocal: true,
     });
   } else if (buildMode === 'local') {
@@ -2032,7 +2036,6 @@ export async function executeDeployment(args, gatheredConfig) {
       imageTag: localImageTag,
       githubOwner: 'noop',
       repoName: projectConfig.projectName,
-      ghcrPullCreds: null,
       isLocal: true,
     });
   } else if (buildMode === 'direct') {
@@ -2074,6 +2077,44 @@ export async function executeDeployment(args, gatheredConfig) {
   const imageRef = ciReady.isLocal
     ? ciReady.imageTag
     : buildImageRef(ciReady.githubOwner, ciReady.repoName, ciReady.imageTag);
+
+  // What the compose servers pull a private app image with
+  // (compose/ghcr-login.js), resolved once, here: before the DNS warm-up, the
+  // pending-server repair or any Pulumi up, so a refusal (no terminal and no
+  // GHCR_PULL_TOKEN, a token with more than read:packages) stops the deploy
+  // before any server is created or provisioned. The token a recorded server
+  // holds is read first and reused when it still passes, so a redeploy does
+  // not ask (compose-ha: both sides, primary first, less a side a failover
+  // retired, which this deploy rebuilds). A recorded server that cannot be
+  // read is warned about and skipped (serverStores), so GHCR_PULL_TOKEN still
+  // gets a deploy past one that is down. The owner and repo are the ones
+  // ensureCIImageReady read from the GitHub remote. Local and direct builds
+  // pull nothing from ghcr: null, and the ghcr-login step removes any login a
+  // server holds. The operator's gh token never reaches a server.
+  let ghcrPull = null;
+  if (isComposeTier(tier) && !ciReady.isLocal) {
+    const { resolveGhcrPull } = await import('./ghcr-pull.js');
+    const { COMPOSE_KEPT_AS, COMPOSE_WHERE, namedComposeServers, serverStores } = await import(
+      './compose/ghcr-login.js'
+    );
+    const recorded =
+      tier === 'compose-ha'
+        ? ['primary', 'standby'].flatMap((role) =>
+            (envConfig?.servers ?? []).filter(
+              (sv) => sv?.role === role && !isRetiredSide(envConfig, sv.ip),
+            ),
+          )
+        : [resolvePrimary(envConfig, { env: environment })?.entry];
+    ghcrPull = await resolveGhcrPull({
+      owner: ciReady.githubOwner,
+      repo: ciReady.repoName,
+      projectName: projectConfig.projectName,
+      envName: environment,
+      stores: serverStores(namedComposeServers(environment, recorded), sshKeyPathFor(environment)),
+      keptAs: COMPOSE_KEPT_AS,
+      where: COMPOSE_WHERE,
+    });
+  }
 
   // --- STEP 3: The deploy bundle (compose tiers) ---
   // What a compose server gets (bundle.js): the compose files and scripts, and
@@ -2263,6 +2304,9 @@ export async function executeDeployment(args, gatheredConfig) {
       imageRef,
       bundlePath,
       ciReady,
+      // The one pull credential every compose server logs in to ghcr.io with,
+      // or null (above).
+      ghcrPull,
       s3Config,
       state,
       dnsWarmupPromise,
@@ -2402,10 +2446,10 @@ export async function executeDeployment(args, gatheredConfig) {
         // it each keeps its server's recorded type (a scale may have changed one).
         serverTypeRequested: !!args.serverType,
         secondaryRegion: secondaryRegion || undefined,
-        // Docker Hub + GHCR creds gate the HA login fan-out; loaded here so the
-        // effects stay pure of credential I/O (mirrors the single-compose ctx).
+        // Docker Hub creds gate the HA fan-out's Docker Hub logins; loaded here
+        // so the effects stay pure of credential I/O (mirrors the single-compose
+        // ctx). Both sides log in to ghcr.io with deployCtx.ghcrPull.
         dockerHubCreds: resolveDockerHubCreds(),
-        ghcrPullCreds: ciReady.ghcrPullCreds,
         // Finding #1: hard-gate replication unless the operator opts into a
         // warm/degraded standby via `deploy -allow-degraded`.
         allowDegraded: !!args.allowDegraded,

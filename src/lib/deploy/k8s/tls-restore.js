@@ -167,6 +167,7 @@ async function readLiveSecret(runKubectl) {
   try {
     const out = await runKubectl([...LIVE_SECRET_ARGV], {
       captureStdout: true,
+      secret: true,
       description: 'read Secret/vibecarbon-tls',
     });
     return String(out ?? '').trim();
@@ -437,7 +438,11 @@ export async function liveK8sTlsSecretSerial(runKubectl) {
           'jsonpath={.data.tls\\.crt}',
           '--ignore-not-found',
         ],
-        { captureStdout: true, description: 'read the certificate of Secret/vibecarbon-tls' },
+        {
+          captureStdout: true,
+          secret: true,
+          description: 'read the certificate of Secret/vibecarbon-tls',
+        },
       )) ?? '',
     ).trim();
     if (!b64) return null;

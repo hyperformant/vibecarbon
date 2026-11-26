@@ -337,23 +337,27 @@ async function dockerhubLogin(ctx) {
   }
 }
 
-/** Log the server into GHCR when CI produced pull creds. State-gated. */
+/**
+ * Make the server's ghcr.io login match the pull credential the orchestrator
+ * resolved once (ctx.ghcrPull, compose/ghcr-login.js): the read:packages
+ * token for a private image, no login for a public image or an image this
+ * deploy builds (null). State-gated on the mode and a keyed fingerprint of the
+ * token, never the token. The gate an older vibecarbon recorded (its user and
+ * gh token fingerprint) has another shape and never matches, so the first
+ * deploy after an upgrade runs this and replaces or removes that token.
+ */
 async function ghcrLogin(ctx) {
-  const { state, serverIp, sshKeyPath, ciReady } = ctx;
-  const { dockerLoginOnServer } = await import('../compose/index.js');
+  const { state, serverIp, sshKeyPath, ghcrPull = null } = ctx;
+  const { ensureGhcrLoginOn } = await import('../compose/ghcr-login.js');
   const loginInputs = {
     serverIp,
     registry: 'ghcr.io',
-    user: ciReady.ghcrPullCreds.owner,
-    tokenFp: tokenFingerprint(ciReady.ghcrPullCreds.token),
+    mode: ghcrPull?.mode ?? 'none',
+    tokenFp: ghcrPull?.mode === 'token' ? tokenFingerprint(ghcrPull.token) : 'none',
   };
   if (!state.shouldSkip('compose-ghcr-login', loginInputs)) {
     state.startStep('compose-ghcr-login', loginInputs);
-    await dockerLoginOnServer(serverIp, sshKeyPath, {
-      username: ciReady.ghcrPullCreds.owner,
-      token: ciReady.ghcrPullCreds.token,
-      registry: 'ghcr.io',
-    });
+    await ensureGhcrLoginOn(serverIp, sshKeyPath, ghcrPull);
     state.completeStep('compose-ghcr-login', { serverIp });
   }
 }

@@ -148,6 +148,19 @@ export function describeArgv(argv) {
   return out.join(' ');
 }
 
+/**
+ * What a CI or DEBUG echo of a failed command prints for its stdout when the
+ * caller said the output is a secret (options.secret).
+ */
+const SECRET_STDOUT = '(not shown: this command reads a secret)';
+
+/**
+ * Execute a command synchronously. Same argv-vs-string rules and the same
+ * `secret` option as runCommandAsync.
+ *
+ * @param {string|string[]} cmd
+ * @param {object} [options]
+ */
 export function runCommand(cmd, options = {}) {
   const argv = toArgv(cmd);
   const commandStr = describeArgv(argv);
@@ -186,7 +199,7 @@ export function runCommand(cmd, options = {}) {
         : `Command failed with exit code ${res.status}: ${commandStr}`;
       const err = new Error(msg);
       err.status = res.status;
-      err.stdout = res.stdout;
+      if (!options.secret) err.stdout = res.stdout;
       err.stderr = res.stderr;
       throw err;
     }
@@ -202,7 +215,7 @@ export function runCommand(cmd, options = {}) {
 
     if (process.env.CI || process.env.DEBUG) {
       console.error(`Command failed: ${commandStr}`);
-      console.error('stdout:', error.stdout?.toString?.() || '');
+      console.error('stdout:', options.secret ? SECRET_STDOUT : error.stdout?.toString?.() || '');
       console.error('stderr:', error.stderr?.toString?.() || '');
     }
 
@@ -214,6 +227,14 @@ export function runCommand(cmd, options = {}) {
 /**
  * Execute a command asynchronously (non-blocking).
  * Same argv-vs-string rules as runCommand. No local shell ever.
+ *
+ * `options.secret`: the captured stdout holds a secret (a Secret's data, a
+ * server's .env or docker login file). A failed command's error then carries
+ * no `stdout`, and the CI or DEBUG echo prints SECRET_STDOUT in its place.
+ * The echo and the error otherwise hold every byte the child printed before
+ * it failed: a read whose ssh dropped at close (255), or that the timer
+ * stopped, had already printed the whole file
+ * (tests/unit/lib/command-secret-output.test.ts).
  *
  * @param {string|string[]} cmd
  * @param {object} [options]
@@ -313,7 +334,7 @@ export function runCommandAsync(cmd, options = {}) {
           ? `Command failed: ${commandStr}\n${stderrTrimmed}`
           : `Command failed: ${commandStr}`;
         const error = new Error(msg);
-        error.stdout = stdout;
+        if (!options.secret) error.stdout = stdout;
         error.stderr = stderr;
         error.status = code;
         error.timedOut = timedOut;
@@ -324,7 +345,7 @@ export function runCommandAsync(cmd, options = {}) {
         // been reading a Secret.
         if ((process.env.CI || process.env.DEBUG) && !options.signal?.aborted) {
           console.error(`Command failed: ${commandStr}`);
-          console.error('stdout:', stdout);
+          console.error('stdout:', options.secret ? SECRET_STDOUT : stdout);
           console.error('stderr:', stderr);
         }
 

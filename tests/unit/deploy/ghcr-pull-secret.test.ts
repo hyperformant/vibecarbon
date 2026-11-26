@@ -57,18 +57,23 @@ const {
   GHCR_PULL_SECRET,
   assertAppImageBuilt,
   ensureGhcrPullSecretOn,
-  ghcrAcceptsToken,
+  clusterStores,
   ghcrPullSecretManifest,
+  readGhcrPullSecret,
+} = await import('../../../src/lib/deploy/k8s/ghcr-pull-secret.js');
+const {
+  ghcrAcceptsToken,
   ghcrPullsAnonymously,
   githubTokenScopes,
   newPullTokenUrl,
   pullTokenProblem,
-  readGhcrPullSecret,
   resolveGhcrPull,
-} = await import('../../../src/lib/deploy/k8s/ghcr-pull-secret.js');
+} = await import('../../../src/lib/deploy/ghcr-pull.js');
 const { exitCancelled } = await import('../../../src/lib/cli/exit-guard.js');
 
-const MODULE = join(REPO_ROOT, 'src/lib/deploy/k8s/ghcr-pull-secret.js');
+const MODULES = ['src/lib/deploy/ghcr-pull.js', 'src/lib/deploy/k8s/ghcr-pull-secret.js'].map(
+  (file) => join(REPO_ROOT, file),
+);
 
 /** A classic token's shape: ghp_ and 36 more. Distinct enough to grep for. */
 const TOKEN = `ghp_${'vcpullsentinel'.padEnd(36, 'Q')}`;
@@ -161,11 +166,17 @@ function registry({
 
 const PRIMARY = '/project/.vibecarbon/kubeconfig-prod-primary';
 const STANDBY = '/project/.vibecarbon/kubeconfig-prod-standby';
-const clusters = [
+const clusters = clusterStores([
   { envName: 'prod-primary', kubeconfigPath: PRIMARY },
   { envName: 'prod-standby', kubeconfigPath: STANDBY },
-];
-const resolveArgs = { owner: 'acme', repo: 'shop', projectName: 'shop', envName: 'prod' };
+]);
+const resolveArgs = {
+  owner: 'acme',
+  repo: 'shop',
+  projectName: 'shop',
+  envName: 'prod',
+  keptAs: 'in the cluster as ghcr-pull-secret',
+};
 
 /** A prompt that answers `answer` and records what it was asked. */
 const promptAnswering = (answer: unknown) => vi.fn(async (_opts: { message: string }) => answer);
@@ -194,6 +205,46 @@ describe('the token scope check', () => {
     const problem = pullTokenProblem(['read:packages', 'repo']);
     expect(problem).toMatch(/can also repo/);
     expect(problem).toMatch(/lives in your cluster/);
+  });
+
+  it('the k8s refusals are worded as ever', () => {
+    const page = 'https://github.com/settings/tokens/new?scopes=read:packages';
+    expect(pullTokenProblem(['read:packages', 'repo'])).toBe(
+      'that token can also repo, and it lives in your cluster as ghcr-pull-secret, where anyone ' +
+        `who can read Secrets can use it. make a classic token with only read:packages here: ${page}`,
+    );
+    expect(pullTokenProblem(['workflow'])).toBe(
+      'that token can also workflow, and it lives in your cluster as ghcr-pull-secret, where ' +
+        `anyone who can read Secrets can use it. make a classic token with only read:packages here: ${page}`,
+    );
+    expect(pullTokenProblem([])).toBe(
+      `that token cannot read packages, so the cluster could not pull with it. make a classic token with only read:packages here: ${page}`,
+    );
+  });
+
+  it('a refusal for a store that is not a cluster names none of the cluster words', async () => {
+    const where = {
+      lives: "on the server in docker's login file",
+      readers: 'anyone with root on the server',
+      puller: 'the server',
+    };
+    const wide = pullTokenProblem(['read:packages', 'repo'], where) as string;
+    const none = pullTokenProblem([], where) as string;
+    expect(wide).toContain("it lives on the server in docker's login file, where anyone with root");
+    expect(none).toContain('so the server could not pull with it');
+    // The same wording reaches the operator through the resolver.
+    const err = await resolveGhcrPull({
+      ...resolveArgs,
+      stores: [],
+      where,
+      isTTY: true,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry({ scopes: 'read:packages, repo' }).fetcher,
+    }).catch((e) => e);
+    for (const text of [wide, none, err.message]) {
+      expect(text).not.toMatch(/cluster|Secret|ghcr-pull-secret/i);
+    }
+    expect(err.message).toContain('anyone with root on the server');
   });
 
   it('write:packages is refused too: read only', () => {
@@ -464,7 +515,7 @@ describe('resolveGhcrPull', () => {
     const { fetcher, fetched } = registry({ anonymous: { token: 200, tags: 200 } });
     const prompt = promptAnswering(TOKEN);
     expect(
-      await resolveGhcrPull({ ...resolveArgs, clusters, isTTY: true, prompt, fetcher }),
+      await resolveGhcrPull({ ...resolveArgs, stores: clusters, isTTY: true, prompt, fetcher }),
     ).toEqual({ mode: 'public' });
     expect(prompt).not.toHaveBeenCalled();
     expect(h.kubectl).toEqual([]);
@@ -476,7 +527,7 @@ describe('resolveGhcrPull', () => {
     const { fetcher, fetched } = registry();
     const prompt = promptAnswering(OLD_TOKEN);
     expect(
-      await resolveGhcrPull({ ...resolveArgs, clusters, isTTY: true, prompt, fetcher }),
+      await resolveGhcrPull({ ...resolveArgs, stores: clusters, isTTY: true, prompt, fetcher }),
     ).toEqual({ mode: 'token', username: 'octo', token: TOKEN });
     expect(prompt).not.toHaveBeenCalled();
     // Each side was read with its own kubeconfig; the primary has none.
@@ -499,7 +550,7 @@ describe('resolveGhcrPull', () => {
     const prompt = promptAnswering(TOKEN);
     const pull = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: true,
       prompt,
       fetcher: registry({ scopes, tokens }).fetcher,
@@ -533,7 +584,7 @@ describe('resolveGhcrPull', () => {
     h.kubectl.length = 0;
     const err = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: false,
       prompt,
       fetcher: registry({ scopes, tokens }).fetcher,
@@ -544,6 +595,44 @@ describe('resolveGhcrPull', () => {
     expect(writes()).toEqual([]);
   });
 
+  it('a cluster never says to revoke a gh token: none was ever written there', async () => {
+    // A stored token that can do what the gh token could: the warning and the
+    // refusal are the stale line alone, worded as ever.
+    h.secrets[PRIMARY] = storedSecret('octo', OLD_TOKEN);
+    const scopes = { [OLD_TOKEN]: 'gist, read:org, repo, workflow', [TOKEN]: 'read:packages' };
+    const tokens = {
+      [OLD_TOKEN]: { exchange: 200, tags: 200 },
+      [TOKEN]: { exchange: 200, tags: 200 },
+    };
+    await resolveGhcrPull({
+      ...resolveArgs,
+      stores: clusters,
+      isTTY: true,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry({ scopes, tokens }).fetcher,
+    });
+    expect(vi.mocked(clackMock.log.warn).mock.calls.map((c) => c[0])).toEqual([
+      "the token in prod-primary's cluster can also gist, read:org, repo, workflow, so it gets replaced.",
+    ]);
+
+    vi.mocked(clackMock.log.warn).mockClear();
+    const err = await resolveGhcrPull({
+      ...resolveArgs,
+      stores: clusters,
+      isTTY: false,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry({ scopes, tokens }).fetcher,
+    }).catch((e) => e);
+    const lines = String(err.message).split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe(
+      "the token in prod-primary's cluster can also gist, read:org, repo, workflow, so it is not used again.",
+    );
+    expect(lines[1]).toMatch(/^your app image at .* export GHCR_PULL_TOKEN as a classic token/);
+    expect(err.message).not.toContain('settings/applications');
+    expect(vi.mocked(clackMock.log.warn)).not.toHaveBeenCalled();
+  });
+
   it('a revoked stored token asks again', async () => {
     // Revoked at github. ghcr may still answer for a package not published
     // yet, so github's answer is the one that counts.
@@ -551,7 +640,7 @@ describe('resolveGhcrPull', () => {
     const prompt = promptAnswering(TOKEN);
     const pull = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: true,
       prompt,
       fetcher: registry({
@@ -578,10 +667,83 @@ describe('resolveGhcrPull', () => {
     const { fetcher } = registry();
     const prompt = promptAnswering(TOKEN);
     expect(
-      await resolveGhcrPull({ ...resolveArgs, clusters, isTTY: true, prompt, fetcher }),
+      await resolveGhcrPull({ ...resolveArgs, stores: clusters, isTTY: true, prompt, fetcher }),
     ).toEqual({ mode: 'token', username: 'octo', token: TOKEN });
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(h.kubectl.map((c) => c.env?.KUBECONFIG)).toEqual([PRIMARY, STANDBY]);
+  });
+
+  it('a store of any kind is read in order, and the first good pair wins with no ask', async () => {
+    const empty = { name: "on prod's server", read: vi.fn(async () => null) };
+    const holding = {
+      name: "on prod-standby's server",
+      read: vi.fn(async () => ({ username: 'octo', token: TOKEN })),
+    };
+    const never = { name: 'in a third place', read: vi.fn(async () => null) };
+    const prompt = promptAnswering(OLD_TOKEN);
+    expect(
+      await resolveGhcrPull({
+        ...resolveArgs,
+        stores: [empty, holding, never],
+        isTTY: true,
+        prompt,
+        fetcher: registry().fetcher,
+      }),
+    ).toEqual({ mode: 'token', username: 'octo', token: TOKEN });
+    expect(empty.read).toHaveBeenCalledTimes(1);
+    expect(holding.read).toHaveBeenCalledTimes(1);
+    expect(never.read).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it('keptAs names where the token lives in the ask', async () => {
+    await resolveGhcrPull({
+      ...resolveArgs,
+      stores: [],
+      keptAs: "in the server's docker login file",
+      isTTY: true,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry().fetcher,
+    });
+    const said = vi
+      .mocked(clackMock.log.info)
+      .mock.calls.map((c) => String(c[0]))
+      .join('\n');
+    expect(said).toContain(
+      "it lives in the server's docker login file and nowhere else, so give it nothing more.",
+    );
+    expect(said).not.toContain('ghcr-pull-secret');
+  });
+
+  it('a stored token with more than read:packages is never reused', async () => {
+    const wide = {
+      name: "on prod's server",
+      read: vi.fn(async () => ({ username: 'octo', token: OLD_TOKEN })),
+    };
+    const prompt = promptAnswering(TOKEN);
+    const pull = await resolveGhcrPull({
+      ...resolveArgs,
+      stores: [wide],
+      isTTY: true,
+      prompt,
+      fetcher: registry({
+        scopes: { [OLD_TOKEN]: 'repo, read:packages, workflow', [TOKEN]: 'read:packages' },
+        tokens: {
+          [OLD_TOKEN]: { exchange: 200, tags: 200 },
+          [TOKEN]: { exchange: 200, tags: 200 },
+        },
+      }).fetcher,
+    });
+    expect(pull).toEqual({ mode: 'token', username: 'octo', token: TOKEN });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    const warned = vi
+      .mocked(clackMock.log.warn)
+      .mock.calls.map((c) => String(c[0]))
+      .join('\n');
+    expect(warned).toContain(
+      "the token on prod's server can also repo, workflow, so it gets replaced.",
+    );
+    expect(warned).not.toContain(OLD_TOKEN);
   });
 
   it('a stored token ghcr turns down asks again', async () => {
@@ -592,7 +754,7 @@ describe('resolveGhcrPull', () => {
     expect(
       await resolveGhcrPull({
         ...resolveArgs,
-        clusters: clusters.slice(0, 1),
+        stores: clusters.slice(0, 1),
         isTTY: true,
         prompt,
         fetcher,
@@ -607,7 +769,7 @@ describe('resolveGhcrPull', () => {
     expect(
       await resolveGhcrPull({
         ...resolveArgs,
-        clusters,
+        stores: clusters,
         isTTY: false,
         prompt,
         fetcher: registry().fetcher,
@@ -617,7 +779,7 @@ describe('resolveGhcrPull', () => {
 
     const err = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: false,
       prompt,
       fetcher: registry({ scopes: 'read:packages, repo' }).fetcher,
@@ -630,7 +792,7 @@ describe('resolveGhcrPull', () => {
     vi.stubEnv('GHCR_PULL_TOKEN', 'ghp_short');
     const short = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: false,
       prompt,
       fetcher: registry().fetcher,
@@ -643,7 +805,7 @@ describe('resolveGhcrPull', () => {
     const prompt = promptAnswering(TOKEN);
     const err = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: false,
       prompt,
       fetcher: registry().fetcher,
@@ -663,7 +825,7 @@ describe('resolveGhcrPull', () => {
     ]) {
       const err = await resolveGhcrPull({
         ...resolveArgs,
-        clusters,
+        stores: clusters,
         isTTY: true,
         prompt: promptAnswering(TOKEN),
         fetcher,
@@ -674,9 +836,11 @@ describe('resolveGhcrPull', () => {
     expect(writes()).toEqual([]);
     // Not exported for a later step to pick up, and never written to a file.
     expect(process.env).toEqual(before);
-    expect(readFileSync(MODULE, 'utf-8')).not.toMatch(
-      /writeFile|appendFile|createWriteStream|mkdtemp|node:fs/,
-    );
+    for (const module of MODULES) {
+      expect(readFileSync(module, 'utf-8')).not.toMatch(
+        /writeFile|appendFile|createWriteStream|mkdtemp|node:fs/,
+      );
+    }
   });
 
   it('the ask links the new-token page with read:packages preselected', async () => {
@@ -684,7 +848,7 @@ describe('resolveGhcrPull', () => {
     await resolveGhcrPull({
       ...resolveArgs,
       owner: 'Acme',
-      clusters,
+      stores: clusters,
       isTTY: true,
       prompt,
       fetcher: registry().fetcher,
@@ -707,7 +871,7 @@ describe('resolveGhcrPull', () => {
   it('a cancelled ask stops the run', async () => {
     const err = await resolveGhcrPull({
       ...resolveArgs,
-      clusters,
+      stores: clusters,
       isTTY: true,
       prompt: promptAnswering(Symbol('cancel')),
       fetcher: registry().fetcher,
@@ -725,7 +889,7 @@ describe('resolveGhcrPull', () => {
     const prompt = promptAnswering(TOKEN);
     const pull = await resolveGhcrPull({
       ...resolveArgs,
-      clusters: clusters.slice(0, 1),
+      stores: clusters.slice(0, 1),
       isTTY: true,
       prompt,
       fetcher,

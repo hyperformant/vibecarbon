@@ -1693,7 +1693,8 @@ export async function runConfigureCicd(envName) {
   // with. Both sides of k8s-ha get the same token, so the operator is asked
   // at most once, and not at all for a public package or a token a cluster
   // already holds that still passes the checks.
-  const { resolveGhcrPull } = await import('./lib/deploy/k8s/ghcr-pull-secret.js');
+  const { resolveGhcrPull } = await import('./lib/deploy/ghcr-pull.js');
+  const { clusterStores } = await import('./lib/deploy/k8s/ghcr-pull-secret.js');
   const recorded = projectConfig.github;
   const repoRef =
     resolveOwnerAndRepo(cwd) ??
@@ -1711,10 +1712,13 @@ export async function runConfigureCicd(envName) {
       repo: repoRef.name,
       projectName: projectConfig.projectName,
       envName,
-      clusters: handed.map(({ envName: cluster, kubeconfigPath }) => ({
-        envName: cluster,
-        kubeconfigPath,
-      })),
+      stores: clusterStores(
+        handed.map(({ envName: cluster, kubeconfigPath }) => ({
+          envName: cluster,
+          kubeconfigPath,
+        })),
+      ),
+      keptAs: 'in the cluster as ghcr-pull-secret',
     });
   } catch (err) {
     p.log.error(err.message);

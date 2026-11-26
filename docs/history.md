@@ -1844,6 +1844,34 @@ possibly the operator's own.
 `tests/unit/deploy/flux-deploy-key.test.ts` and
 `tests/unit/deploy/ghcr-pull-secret.test.ts`.
 
+#### 2026-11-26: A compose server holds only a read:packages token (#592)
+
+Compose deploys, compose-ha deploys and compose scale resolve the ghcr pull
+credential once, before any server is created or provisioned. A public image
+stores nothing and removes any ghcr.io login on the server, leaving every other
+registry's login alone. A private image uses a `read:packages`-only token
+already on one of the environment's servers, then `GHCR_PULL_TOKEN`, then one
+ask on a terminal. A headless run with nothing usable refuses before any server
+is created or provisioned. The server's docker login file holds only that token
+for ghcr.io, and `ensureGhcrLoginOn` is its only writer. Commands that read a
+secret run with `secret: true`, so the output never reaches a CI or DEBUG log or
+an error.
+
+**Why:** the server held the operator's whole GitHub. Compose logged every
+server into ghcr.io with `gh auth token`, which usually carries `repo`,
+`workflow` and `read:org`, and docker keeps it in `/root/.docker/config.json`.
+Whoever got root on a server got every repo the operator can push to.
+
+**Do not undo:** a server never gets `gh auth token`; `getGHCRToken()` is for
+local probes only. A broad stored token is never reused, and the first deploy
+after upgrading rewrites the login it left. Anyone who may have had root on a
+compose server under an earlier version should revoke GitHub CLI's token at
+https://github.com/settings/applications.
+
+**Guard:** `tests/unit/deploy/ghcr-server-login-census.test.ts` for the login
+path, and `tests/unit/lib/secret-read-census.test.ts` with its behaviour test
+`tests/unit/lib/command-secret-output.test.ts` for secret reads.
+
 ## Added and later removed
 
 | What | Removed | Why |

@@ -28,17 +28,35 @@ const h = vi.hoisted(() => {
     deltaFails: false,
     buildArgv: [] as string[],
     buildFails: false,
+    // The old server's APP_IMAGE, and each server's docker login file.
+    appImage: 'myapp-app:local',
+    loginFiles: {} as Record<string, string>,
+    // The old server's .env as `cat` prints it (null: one APP_IMAGE line),
+    // the servers that do not answer, and each .env read's timeout.
+    envText: null as string | null,
+    envDown: new Set<string>(),
+    envReadTimeouts: [] as number[],
+    // What the .env read throws instead of answering (the operator-IP guard).
+    envThrow: null as Error | null,
+    // The image the new server's bundle was rendered with.
+    setupImage: null as string | null,
   };
-  return { events, state };
+  // What the new server's ghcr.io login was made to match, and every ask.
+  const ghcrLogins: Array<{ ip: string; pull: unknown }> = [];
+  const password = vi.fn(async () => {
+    throw new Error('scale asked for a pull token');
+  });
+  return { events, state, ghcrLogins, password };
 });
 
-vi.mock('@clack/prompts', async (orig) =>
-  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+vi.mock('@clack/prompts', async (orig) => ({
+  ...(await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
     log: ['info', 'warn', 'error', 'step', 'success', 'message'],
     spinner: true,
     fns: ['note', 'outro'],
   }),
-);
+  password: h.password,
+}));
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -109,8 +127,14 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     backupCompose: async () => ({ result: 'pushed', name: PUSHED }),
     waitForSSH: async () => true,
     setupServer: async () => {},
-    setupServerFiles: async () => {
+    setupServerFiles: async (
+      _ip: string,
+      _k: string,
+      _p: string,
+      opts: { image?: string } = {},
+    ) => {
       h.events.push('setup-files');
+      h.state.setupImage = opts.image ?? null;
     },
     pullComposeImages: async (ip: string) => {
       h.events.push(`pull:${ip}`);
@@ -122,7 +146,13 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     dockerLoginOnServer: async () => {},
     setupComposeBackupCron: async () => {},
     configureStandbyReplication: async () => {},
-    sshRunAsync: async (ip: string, _k: string, cmd: string) => {
+    sshRunAsync: async (ip: string, _k: string, cmd: string, opts: { input?: string } = {}) => {
+      // The login read (ghcr-login.js) prints the ghcr.io entry's login alone.
+      if (cmd === '/bin/bash -s' && opts.input?.includes('print(auth)')) {
+        h.events.push(`ghcrRead:${ip}`);
+        const file = h.state.loginFiles[ip];
+        return file ? `${JSON.parse(file).auths?.['ghcr.io']?.auth ?? ''}\n` : '';
+      }
       if (cmd.includes('docker pull ')) h.events.push(`basePull:${ip}`);
       return cmd.includes('compose-backup.sh') ? 'VC_CRON_REMOVED' : '';
     },
@@ -182,10 +212,32 @@ vi.mock('../../../src/lib/dns-propagation.js', async (orig) => {
   return { ...actual, waitForDNSPropagation: async () => true };
 });
 
-vi.mock('../../../src/lib/build.js', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, getGHCRCredentials: async () => ({}) };
-});
+vi.mock('../../../src/lib/deploy/compose/ghcr-login.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  ensureGhcrLoginOn: async (ip: string, _k: string, pull: unknown) => {
+    h.ghcrLogins.push({ ip, pull });
+    return pull ? 'stored' : 'absent';
+  },
+}));
+
+// GitHub and ghcr.io for a private package, `acme/shop`, that the token on
+// the old server may pull: ghcr turns down the anonymous probe, GitHub says
+// the token has only read:packages, and ghcr lets it list the tags.
+vi.mock('../../../src/lib/fetch-retry.js', () => ({
+  fetchWithRetry: async (url: string, init: { headers?: Record<string, string> } = {}) => {
+    const auth = init.headers?.Authorization ?? '';
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+      new Response(JSON.stringify(body), { status, headers });
+    if (url === 'https://api.github.com/user') {
+      return json(200, { login: 'octo' }, { 'x-oauth-scopes': 'read:packages' });
+    }
+    if (url.startsWith('https://ghcr.io/token?scope=repository:acme/shop:pull')) {
+      return auth.startsWith('Basic ') ? json(200, { token: 'bearer' }) : json(401, {});
+    }
+    if (url === 'https://ghcr.io/v2/acme/shop/tags/list') return json(200, { tags: ['abc'] });
+    throw new Error(`unexpected fetch ${url}`);
+  },
+}));
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -207,7 +259,17 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       const role = roleWriteOf(argv as string[]);
       if (role) return `WALG_ROLE_FILE=${role}`;
       if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
-        return 'APP_IMAGE=myapp-app:local\n';
+        h.events.push(`envRead:${ip}`);
+        h.state.envReadTimeouts.push(opts.timeout ?? 0);
+        if (h.state.envThrow) throw h.state.envThrow;
+        if (h.state.envDown.has(ip)) {
+          const stderr = `ssh: connect to host ${ip} port 22: Connection timed out`;
+          throw Object.assign(new Error(`Command failed: ssh root@${ip} cat\n${stderr}`), {
+            status: 255,
+            stderr,
+          });
+        }
+        return h.state.envText ?? `APP_IMAGE=${h.state.appImage}\n`;
       }
       const script = argv[2] ?? '';
       if (script.includes('echo present')) {
@@ -320,6 +382,15 @@ function reset({ localDocker = true, deltaFails = false } = {}) {
   h.state.deltaFails = deltaFails;
   h.state.buildArgv = [];
   h.state.buildFails = false;
+  h.state.appImage = 'myapp-app:local';
+  h.state.loginFiles = {};
+  h.state.envText = null;
+  h.state.envDown.clear();
+  h.state.envReadTimeouts = [];
+  h.state.envThrow = null;
+  h.state.setupImage = null;
+  h.ghcrLogins.length = 0;
+  h.password.mockClear();
 }
 
 describe('compose scale: the replacement gets the app image by layer delta', () => {
@@ -405,5 +476,186 @@ describe('compose-ha scale of both nodes', () => {
     await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
     expect(h.events.filter((e) => e.startsWith('localBuild:'))).toHaveLength(1);
     expect(h.events.filter((e) => e.startsWith('delta:')).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('compose scale: the new server ghcr.io login', () => {
+  const TOKEN = `ghp_${'vcscalesentinel'.padEnd(36, 'Q')}`;
+
+  it('a delivered image logs the new server into nothing', async () => {
+    reset();
+    await SCALE_EFFECTS.scaleServers(makeCtx());
+    expect(h.events).toContain('delta:root@9.9.9.9:myapp-app:local');
+    // An image this machine sent pulls nothing from ghcr: no login, no ask.
+    expect(h.ghcrLogins).toEqual([{ ip: '9.9.9.9', pull: null }]);
+    expect(h.password).not.toHaveBeenCalled();
+  });
+
+  it('an image the new server builds logs it into nothing too', async () => {
+    reset({ localDocker: false });
+    await SCALE_EFFECTS.scaleServers(makeCtx());
+    expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
+    expect(h.ghcrLogins).toEqual([{ ip: '9.9.9.9', pull: null }]);
+  });
+
+  it("a push image reuses the replaced server's token without asking", async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    h.state.loginFiles['1.1.1.1'] = JSON.stringify({
+      auths: {
+        'https://index.docker.io/v1/': { auth: 'aHViOmh1Yg==' },
+        'ghcr.io': { auth: Buffer.from(`octo:${TOKEN}`).toString('base64') },
+      },
+    });
+    try {
+      await SCALE_EFFECTS.scaleServers(makeCtx());
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(h.events).toContain('pull:9.9.9.9');
+    expect(h.ghcrLogins).toEqual([
+      { ip: '9.9.9.9', pull: { mode: 'token', username: 'octo', token: TOKEN } },
+    ]);
+    expect(h.password).not.toHaveBeenCalled();
+  });
+
+  it('a push image with no usable token on the replaced server refuses before any server is built', async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    const ctx = makeCtx();
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+        /export GHCR_PULL_TOKEN as a classic token with only read:packages/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // The preflight refused: no server was created, so none is left to delete.
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
+    expect(h.ghcrLogins).toEqual([]);
+    expect(h.events).toEqual(['envRead:1.1.1.1', 'ghcrRead:1.1.1.1']);
+  });
+
+  it('a compose-ha scale refuses the same way, with both sides read and no server built', async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    const ctx = makeCtx({ tier: 'compose-ha' });
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+        /export GHCR_PULL_TOKEN as a classic token with only read:packages/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
+    expect(h.ghcrLogins).toEqual([]);
+    // The one resolve read both old servers' logins, then refused: the
+    // standby's APP_IMAGE was never needed.
+    expect(h.events).toEqual(['envRead:1.1.1.1', 'ghcrRead:1.1.1.1', 'ghcrRead:2.2.2.2']);
+  });
+
+  it("a compose-ha scale resolves once, before building, and both new servers get the primary's token", async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    h.state.loginFiles['1.1.1.1'] = JSON.stringify({
+      auths: { 'ghcr.io': { auth: Buffer.from(`octo:${TOKEN}`).toString('base64') } },
+    });
+    const ctx = makeCtx({ tier: 'compose-ha' });
+    const created = (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer;
+    const readsBeforeCreate: string[] = [];
+    created.mockImplementation(async () => {
+      readsBeforeCreate.push(...h.events.filter((e) => e.startsWith('ghcrRead:')));
+      return { id: 'new-id' };
+    });
+    try {
+      // Whatever the arms prove afterwards, both replacements are logged in first.
+      await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // One resolve: the primary's login passed, so the standby's was never read.
+    expect(h.events.filter((e) => e.startsWith('ghcrRead:'))).toEqual(['ghcrRead:1.1.1.1']);
+    expect(readsBeforeCreate[0]).toBe('ghcrRead:1.1.1.1');
+    const pull = { mode: 'token', username: 'octo', token: TOKEN };
+    expect(h.ghcrLogins.length).toBeGreaterThanOrEqual(1);
+    expect(h.ghcrLogins.every((l) => JSON.stringify(l.pull) === JSON.stringify(pull))).toBe(true);
+    expect(h.password).not.toHaveBeenCalled();
+  });
+});
+
+describe('compose scale: the old server .env is read once, before anything is built', () => {
+  const TOKEN = `ghp_${'vcscaledupsentinel'.padEnd(36, 'Q')}`;
+
+  it('a hand-edited .env with two APP_IMAGE lines gives one decision, used by the resolve and the new server', async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    // The later line wins, as it does for every .env reader (util.parseEnv).
+    h.state.envText = 'APP_IMAGE=myapp-app:local\nAPP_IMAGE=ghcr.io/acme/shop:abc\n';
+    h.state.loginFiles['1.1.1.1'] = JSON.stringify({
+      auths: { 'ghcr.io': { auth: Buffer.from(`octo:${TOKEN}`).toString('base64') } },
+    });
+    try {
+      await SCALE_EFFECTS.scaleServers(makeCtx());
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // One read of the old .env, in the preflight.
+    expect(h.events.filter((e) => e.startsWith('envRead:'))).toEqual(['envRead:1.1.1.1']);
+    // The pulled ghcr image: no local build or delta, the bundle names it,
+    // and the new server is logged in with the token the resolve reused.
+    expect(h.events.some((e) => e.startsWith('localBuild:') || e.startsWith('delta:'))).toBe(false);
+    expect(h.state.setupImage).toBe('ghcr.io/acme/shop:abc');
+    expect(h.ghcrLogins).toEqual([
+      { ip: '9.9.9.9', pull: { mode: 'token', username: 'octo', token: TOKEN } },
+    ]);
+  });
+
+  it('an old server that does not answer stops the scale before anything is built, saying why', async () => {
+    reset();
+    h.state.envDown.add('1.1.1.1');
+    const ctx = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      'could not read .env on the old server 1.1.1.1 (ssh: connect to host 1.1.1.1 port 22: Connection timed out), so scale stopped before building a new server. run scale again once the old server answers.',
+    );
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
+    expect(h.events.some((e) => e.startsWith('localBuild:'))).toBe(false);
+    // Bounded for a read of a running server, not ssh's 120 s default.
+    expect(h.state.envReadTimeouts).toEqual([30_000]);
+  });
+
+  it('an old server that takes too long says it timed out', async () => {
+    reset();
+    // A host that accepts the connection and then hangs: ssh prints nothing.
+    h.state.envThrow = Object.assign(new Error('Command failed: ssh root@1.1.1.1 cat'), {
+      status: null,
+      stderr: '',
+      timedOut: true,
+    });
+    await expect(SCALE_EFFECTS.scaleServers(makeCtx())).rejects.toThrow(
+      'could not read .env on the old server 1.1.1.1 (it did not answer within 30 s), so scale stopped before building a new server. run scale again once the old server answers.',
+    );
+  });
+
+  it('a changed operator IP during the read stops scale with its own message', async () => {
+    reset();
+    const changed = Object.assign(new Error('Your public IP changed during this command'), {
+      code: 'OPERATOR_IP_CHANGED',
+    });
+    h.state.envThrow = changed;
+    const ctx = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toBe(changed);
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
   });
 });

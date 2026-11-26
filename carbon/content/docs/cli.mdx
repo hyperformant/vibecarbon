@@ -459,6 +459,20 @@ those checks. To rotate the token, revoke it at GitHub, then run:
 vibecarbon configure cicd <env>
 ```
 
+**On Compose.** A deploy in push mode pulls the image on each server, and
+`vibecarbon deploy` and `vibecarbon scale` settle how before any server is
+created or provisioned. If anyone can pull your app image, nothing is stored,
+and any ghcr.io login already on the server is removed (other registries' logins
+stay). Otherwise the server needs the same kind of token as a cluster: a classic
+token with only `read:packages`. The deploy looks, in order, for one already on
+the environment's servers, then `GHCR_PULL_TOKEN` from your shell, then asks
+once on a terminal. A token that can do more is never reused, and one that can
+do more or a fine-grained one is refused before it is stored, since anyone with
+root on the server can read it. A run without a terminal and with no usable
+token stops before any server is created or provisioned. Your `gh` token never
+goes to a server. The first deploy after upgrading replaces the login an earlier
+version wrote there.
+
 **What Flux leaves to the CLI.** Flux applies `k8s/base`, but what differs per
 cluster or holds a secret stays with `vibecarbon deploy <env>`: your secrets,
 the database StatefulSet, the TLS certificate, the backup CronJob and its

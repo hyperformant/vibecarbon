@@ -764,9 +764,10 @@ export const CONFIG_KEYS = [
   },
   {
     // The app image's pull token for a private ghcr.io package, stored only
-    // in the cluster (ghcr-pull-secret). `configure cicd <env>` uses it when
-    // exported; on a terminal without it, configure asks. The scope check
-    // (exactly read:packages) is GitHub's answer, not a shape.
+    // where it is pulled: the cluster (ghcr-pull-secret) or the compose
+    // server's docker login. `configure cicd <env>`, `deploy` and `scale`
+    // use it when exported; on a terminal without it, they ask. The scope
+    // check (exactly read:packages) is GitHub's answer, not a shape.
     key: 'GHCR_PULL_TOKEN',
     class: 'operator-secret',
     feature: 'providers',

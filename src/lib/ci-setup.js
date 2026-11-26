@@ -6,9 +6,12 @@
  * on first deploy and verifies the expected image tag is available before we
  * touch any infrastructure.
  *
- * Contract: `ensureCIImageReady()` returns `{ imageTag, githubOwner, repoName,
- * ghcrPullCreds }`. If any step fails irrecoverably the caller should abort
- * the deploy — there's no image to pull.
+ * Contract: `ensureCIImageReady()` returns `{ imageTag, githubOwner, repoName }`.
+ * If any step fails irrecoverably the caller should abort the deploy: there's
+ * no image to pull. What a server pulls that image with is not decided here:
+ * a compose deploy resolves a read:packages pull token for it
+ * (deploy/ghcr-pull.js, deploy/compose/ghcr-login.js). The operator's gh token
+ * stays on this machine, for the probes below.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -175,6 +178,10 @@ export function getGitHubRepo(cwd = process.cwd()) {
 /**
  * Get a GHCR-authenticated token using `gh auth token`. Returns null if gh
  * isn't authenticated. Works for both public and private packages.
+ *
+ * For probes from this machine only (waitForGhcrManifest): the token can push
+ * to every repo the operator can, so no value it returns may reach a server
+ * (tests/unit/deploy/ghcr-server-login-census.test.ts).
  */
 function getGHCRToken() {
   try {
@@ -182,6 +189,7 @@ function getGHCRToken() {
       cleanEnv: true,
       silent: true,
       returnOutput: true,
+      secret: true,
     })
       ?.toString()
       .trim();
@@ -495,13 +503,17 @@ async function commitAndPushWorkflow(cwd = process.cwd(), installedWorkflow = tr
 /**
  * Ensure a built image exists in ghcr.io for the current HEAD. Bootstraps CI
  * if needed (first deploy). Returns deploy-time info:
- *   { imageTag, githubOwner, repoName, ghcrPullCreds }
+ *   { imageTag, githubOwner, repoName }
  *
  * - `imageTag`: the tag to reference in k8s/compose manifests
  * - `githubOwner`: the GH owner (user/org) for ghcr.io path
  * - `repoName`: the GH repo name (= ghcr package name)
- * - `ghcrPullCreds`: { owner, token } for kubelet/docker login (null if user
- *   opts for a public package)
+ *
+ * No credential: the operator's gh token never goes to a server. A compose
+ * deploy resolves the read:packages token its servers pull with itself
+ * (orchestrator.js, deploy/compose/ghcr-login.js).
+ *
+ * @returns {Promise<{ imageTag: string, githubOwner: string, repoName: string }>}
  */
 // Per-process cache of `gh auth status` — the call costs ~500ms and the result
 // never changes within a single deploy invocation.
@@ -722,14 +734,10 @@ export async function ensureCIImageReady(options = {}) {
     p.log.success(`Using image ghcr.io/${repo.owner}/${repo.name}:${imageTag}`);
   }
 
-  const token = getGHCRToken();
-  const ghcrPullCreds = token ? { owner: repo.owner, token } : null;
-
   return {
     imageTag,
     githubOwner: repo.owner,
     repoName: repo.name,
-    ghcrPullCreds,
   };
 }
 

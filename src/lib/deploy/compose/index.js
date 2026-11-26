@@ -579,17 +579,21 @@ fi
 chmod 600 "$cfg"
 # Verify the auth entry landed. Deploys that silently lose auth here
 # surface as 401 during reconcile 15+ min later — this grep catches it
-# at login time so the failure is actionable.
-if ! grep -q ${shEscape(authB64)} "$cfg"; then
-  echo "docker auth write verification failed: config.json:" >&2
-  cat "$cfg" >&2
+# at login time so the failure is actionable. The login reaches grep on
+# its stdin (printf is a shell builtin), so it is in no process's argv,
+# and a failure never prints the file: it holds every login.
+if ! printf '%s\\n' ${shEscape(authB64)} | grep -qF -f - "$cfg"; then
+  echo "docker auth write verification failed: $cfg does not hold the new login" >&2
   exit 1
 fi
 `;
+  // The login is on stdin and the script prints nothing, but every command on
+  // the login file runs as a secret read (secret-read-census.test.ts).
   await sshRunAsync(ip, sshKeyPath, `/bin/bash -s`, {
     silent: true,
     timeout: 30_000,
     input: script,
+    secret: true,
   });
 }
 

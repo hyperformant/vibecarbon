@@ -15,8 +15,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { getGHCRCredentials } from './lib/build.js';
-import { errorFirstLine } from './lib/cli/error-line.js';
+import { errorFirstLine, errorReason } from './lib/cli/error-line.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -31,6 +30,14 @@ import { STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { buildComposeAppImage, deliverComposeAppImage } from './lib/deploy/compose/app-image.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
+import {
+  COMPOSE_KEPT_AS,
+  COMPOSE_WHERE,
+  ensureGhcrLoginOn,
+  ghcrImagePackage,
+  namedComposeServers,
+  serverStores,
+} from './lib/deploy/compose/ghcr-login.js';
 import { composePsqlRunner, demoteComposeWalgRole } from './lib/deploy/compose/ha.js';
 import { composeHaStackOf } from './lib/deploy/compose/ha-role-swap.js';
 import {
@@ -70,6 +77,7 @@ import {
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
+import { resolveGhcrPull } from './lib/deploy/ghcr-pull.js';
 import { carbonAutoscalerSecretYaml } from './lib/deploy/k8s/autoscaler-secret.js';
 import { sweepStaleDeltaDirs } from './lib/deploy/layer-delta.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
@@ -662,13 +670,18 @@ export async function readOldAppEnv(
 ) {
   let text;
   try {
-    text = await run(ip, sshKeyPath, [
-      'sh',
-      '-c',
-      `if [ -f "$1" ]; then cat "$1"; else printf '%s' ${NO_APP_ENV_MARKER}; fi`,
-      'sh',
-      `/opt/${projectName}/app.env`,
-    ]);
+    text = await run(
+      ip,
+      sshKeyPath,
+      [
+        'sh',
+        '-c',
+        `if [ -f "$1" ]; then cat "$1"; else printf '%s' ${NO_APP_ENV_MARKER}; fi`,
+        'sh',
+        `/opt/${projectName}/app.env`,
+      ],
+      { secret: true },
+    );
   } catch (err) {
     throw new Error(
       `could not read app.env on the old server ${ip} (${err.message}), so scale stopped rather than give the new app the account-wide storage key. Run scale again once the old server answers.`,
@@ -1116,6 +1129,144 @@ function sharedAppImageBuild(ctx, tag, build) {
 }
 
 /**
+ * The pull credential a compose scale's new server logs in to ghcr.io with:
+ * null unless compose pulls the app image from ghcr.io (an image this
+ * machine sends, or the new server builds, needs none); else resolveGhcrPull
+ * with the servers being replaced as its stores, so a token they hold that
+ * still passes is reused and nothing is asked. Resolved once per package per
+ * scale run, on ctx: a compose-ha scale of both nodes asks at most once.
+ * scaleServers calls it in its preflight (scalePreflight), before any
+ * server is built.
+ *
+ * @param {{ ghcrPulls?: Map<string, Promise<unknown>>, projectName: string,
+ *   environment: string, sshKeyPath: string, targetServers: object[] }} ctx
+ * @param {'delta' | 'remote-build' | 'pull'} imagePlan
+ * @param {string} appImage - the old server's APP_IMAGE
+ * @returns {Promise<import('./lib/deploy/ghcr-pull.js').GhcrPull | null>}
+ */
+function scaleGhcrPull(ctx, imagePlan, appImage) {
+  const pkg = imagePlan === 'pull' ? ghcrImagePackage(appImage) : null;
+  if (!pkg) return Promise.resolve(null);
+  const key = `${pkg.owner}/${pkg.repo}`.toLowerCase();
+  ctx.ghcrPulls ??= new Map();
+  if (!ctx.ghcrPulls.has(key)) {
+    ctx.ghcrPulls.set(
+      key,
+      resolveGhcrPull({
+        ...pkg,
+        projectName: ctx.projectName,
+        envName: ctx.environment,
+        stores: serverStores(
+          namedComposeServers(ctx.environment, ctx.targetServers ?? []),
+          ctx.sshKeyPath,
+        ),
+        keptAs: COMPOSE_KEPT_AS,
+        where: COMPOSE_WHERE,
+      }),
+    );
+  }
+  return ctx.ghcrPulls.get(key);
+}
+
+/** A read of a running old server's .env: it answers in seconds, or not at all. */
+const OLD_ENV_READ_TIMEOUT_MS = 30_000;
+
+/**
+ * The old server's full /opt/<project>/.env, for the replay onto its
+ * replacement, read once in the preflight while it runs (scalePreflight).
+ *
+ * Why the whole file rather than re-deriving it from project state: the
+ * original deploy merged values from many sources (the project `.env`,
+ * operator-secret env vars such as the S3 secret key, orchestrator overrides
+ * such as DOMAIN, ACME_EMAIL, SITE_URL, S3_*, S3_BACKUP_BUCKET, PROJECT_NAME
+ * and APP_IMAGE). Rebuilding them at scale time would mean asking for
+ * credentials again and rerunning the same envOverrides logic; the old
+ * server's `.env` already holds the resolved superset, including values the
+ * project's local `.env`/`.env.local` never knew.
+ *
+ * A server that does not answer stops the scale before any server is built.
+ * There is no fallback to the project's local `.env`: it lacks the values the
+ * deploy merged in, and its S3_* would be the account-wide pair, not the
+ * app's own key (security plan R2).
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @returns {Promise<string>} the file's text
+ */
+async function readOldServerEnv(ip, sshKeyPath, projectName) {
+  try {
+    return await sshRun(ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`], {
+      secret: true,
+      timeout: OLD_ENV_READ_TIMEOUT_MS,
+    });
+  } catch (err) {
+    // A changed operator IP fails every later ssh step too: its own message
+    // names the cause, where this one would blame the old server.
+    if (err?.code === 'OPERATOR_IP_CHANGED') throw err;
+    const why = err?.timedOut
+      ? `it did not answer within ${OLD_ENV_READ_TIMEOUT_MS / 1000} s`
+      : errorReason(err);
+    throw new Error(
+      `could not read .env on the old server ${ip} (${why}), so scale stopped before building a new server. run scale again once the old server answers.`,
+    );
+  }
+}
+
+/**
+ * What scale carries over from one old server, decided once.
+ *
+ * @typedef {{ oldEnv: Record<string, string>, appImage: string,
+ *   imagePlan: 'delta' | 'remote-build' | 'pull',
+ *   ghcrPull: import('./lib/deploy/ghcr-pull.js').GhcrPull | null }} OldServerRead
+ */
+
+/**
+ * Each target's carry-over, read and decided in the preflight, before any
+ * server is built: its .env (the replay), the APP_IMAGE in it, how the
+ * replacement gets that image, and its ghcr.io pull credential
+ * (scaleGhcrPull). One read and one parse per server, with the one dotenv
+ * dialect, so a hand-edited .env that names APP_IMAGE twice gives one image,
+ * the later line's, for the plan, the pull credential and the new server's
+ * bundle alike. The stores of the resolve are the old servers, read while
+ * they run; a refusal (no token to reuse, no GHCR_PULL_TOKEN, no terminal)
+ * leaves no new server to delete; and an ask happens before any arm's
+ * spinner starts.
+ *
+ * @param {object} ctx - scaleServers' ctx
+ * @returns {Promise<Map<object, OldServerRead>>} keyed by the targetServers entry
+ */
+async function scalePreflight(ctx) {
+  const reads = new Map();
+  for (const server of ctx.targetServers) {
+    const s = spinner();
+    s.start(`Reading the old server's configuration (${server.ip})...`);
+    let envText;
+    try {
+      envText = await readOldServerEnv(server.ip, ctx.sshKeyPath, ctx.projectName);
+    } catch (err) {
+      s.stop(`Could not read the old server's configuration (${server.ip})`, 1);
+      throw err;
+    }
+    s.stop(`Old server configuration read (${server.ip})`);
+    // renderBundle re-encodes every override and throws on a value the
+    // portable grammar refuses (a hand-edited server value with a tab, or
+    // `'` beside `"`): mid-scale, after the new server exists. Drop and warn
+    // here instead; the operator enters it again with configure.
+    const oldEnv = dropUnportableEnv(parseDotenv(envText));
+    const appImage = oldEnv.APP_IMAGE || '';
+    const imagePlan = replacementImagePlan(appImage, {
+      localDocker: checkDependency('docker'),
+      recorded: ctx.envConfig?.imageBuild,
+      forceDirect: !!ctx.forceDirectBuild,
+    });
+    const ghcrPull = await scaleGhcrPull(ctx, imagePlan, appImage);
+    reads.set(server, { oldEnv, appImage, imagePlan, ghcrPull });
+  }
+  return reads;
+}
+
+/**
  * How a compose scale replacement gets the app image the old server ran:
  * 'delta' (built on this machine and sent by layer delta, as a deploy does),
  * 'remote-build' (the new server builds it: `-direct`, a deploy recorded in
@@ -1142,11 +1293,16 @@ export function replacementImagePlan(appImage, { localDocker, recorded, forceDir
  *
  * `backupS3` (the primary arm only, from the preflight) restores the saved TLS
  * certificate into the new server's acme.json before its stack starts, so it
- * serves HTTPS as soon as DNS moves (restoreReplacementTls).
+ * serves HTTPS as soon as DNS moves (restoreReplacementTls). `old` is what
+ * the preflight read and decided for this server (scalePreflight): its .env,
+ * its APP_IMAGE, how the image arrives, and its pull credential.
+ * @param {{ backupS3?: object | null, old: OldServerRead }} opts
  * @returns {Promise<string>} the new server's public IP
  */
-async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 = null } = {}) {
+async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 = null, old }) {
   const { tier, provider, Provider, projectName, environment, sshKeyPath, domain, services } = ctx;
+  if (!old) throw new Error(`scale has no preflight read of the old server ${server.ip}`);
+  const { oldEnv, appImage: oldAppImage, imagePlan, ghcrPull } = old;
   // 3. Wait for the server to come online, THEN resolve its IP off the
   // object waitForServer resolves with — not off createServer's return.
   // Hetzner assigns the IP synchronously at create time, but
@@ -1185,69 +1341,16 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   queueBootTiming([{ ip: newIp, prefix: 'scale.server' }], sshKeyPath);
   s.stop('Docker installed');
 
-  // Pull the OLD server's full /opt/<project>/.env so every variable the
-  // original deploy seeded (auth secret, S3 creds, SMTP, billing,
-  // Grafana, n8n encryption key, etc.) propagates to the new server.
-  //
-  // Why pull the whole file vs. re-deriving from project state:
-  //   - The original deploy merges values from many sources — project
-  //     `.env` + operator-secret env vars (S3 secret key) +
-  //     orchestrator-derived overrides (DOMAIN, ACME_EMAIL, SITE_URL,
-  //     S3_*, S3_BACKUP_BUCKET, PROJECT_NAME, APP_IMAGE).
-  //     Reconstructing all of those at scale time would mean re-prompting
-  //     for credentials and re-running the same envOverrides logic.
-  //   - The old server's `.env` already contains the resolved superset.
-  //     Replaying it onto the new server is the smallest patch that
-  //     preserves every value, including ones the project's local
-  //     `.env`/`.env.local` doesn't even know about.
-  //
-  // The on-disk form is whichever of bare / "…" / '…' the portable
-  // grammar (src/lib/dotenv.js) picked; parseDotenv decodes it so the
-  // values we pass to renderBundle as envOverrides are raw strings ready
-  // to be re-encoded on write. We then pin APP_IMAGE explicitly because that's
-  // the one value scale needs to keep stable across the migration; all
-  // other keys flow through transparently.
-  // Spinner over the OLD-server .env pull: this SSHes a *different* host
-  // (the one being retired) and, if it's slow/unreachable, sits on sshRun's
-  // 120s client timeout. Without a spinner that window is a dead cursor
-  // between "Docker installed" and "Copying project files" — the exact
-  // stalled-spinner symptom flaky links produce.
-  let oldEnv = {};
-  /** @type {Record<string, string> | null} */
-  let oldAppEnv = null;
-  s.start('Reading current server configuration...');
-  try {
-    const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
-    s.stop('Current server configuration read');
-    // renderBundle re-encodes every override and throws on a value the
-    // portable grammar refuses (a hand-edited server value with a tab,
-    // or `'` beside `"`) — mid-scale, after the new server exists. Drop
-    // and warn here instead; the operator re-enters it with configure.
-    oldEnv = dropUnportableEnv(parseDotenv(envText));
-  } catch (err) {
-    // No fallback to the project's local `.env`: it lacks the values the
-    // deploy merged in, and its S3_* would be the account-wide pair, not
-    // the app's own key (security plan R2). Stop this server's scale; the
-    // caller's cleanup deletes the new server.
-    s.stop('Could not read old-server config, so this server is not scaled', 1);
-    throw new Error(
-      `could not read .env on the old server ${server.ip} (${err?.message ?? err}), so scale stopped rather than build the new server from the project .env. Run scale again once the old server answers.`,
-    );
-  }
-  // Only once the .env replay is in hand. A failed app.env read throws
-  // here, so the caller deletes the new server instead of guessing a pair.
-  oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
-  const oldAppImage = oldEnv.APP_IMAGE || '';
+  // The .env replay (oldEnv) came from the preflight; app.env is read here.
+  // A failed app.env read throws, so the caller deletes the new server
+  // instead of guessing a pair.
+  const oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
   // A local-only app image (a local or direct deploy built it, nothing pushed
   // it) is built here and sent by layer delta, exactly as a deploy does, unless
-  // the operator chose the server-side build (-direct, or a direct deploy). It starts now, so the build, the new server's
+  // the operator chose the server-side build (-direct, or a direct deploy):
+  // the preflight's imagePlan. It starts now, so the build, the new server's
   // base pull and the send overlap the bundle upload and the logins; 4c waits
   // for it. With no docker here, 4c builds it on the new server instead.
-  const imagePlan = replacementImagePlan(oldAppImage, {
-    localDocker: checkDependency('docker'),
-    recorded: ctx.envConfig?.imageBuild,
-    forceDirect: !!ctx.forceDirectBuild,
-  });
   const imageDelivery =
     imagePlan === 'delta'
       ? perfAsync('scale.imageDelivery', () =>
@@ -1299,9 +1402,13 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
     });
   }
 
-  // 4b. Registry auth (optional — avoids rate limits on shared Hetzner IPs).
-  // Scale pulls the same ghcr.io/<owner>/<repo>:<tag> the original
-  // deploy pushed, so ghcr credentials are required alongside Docker Hub.
+  // 4b. Registry logins. Docker Hub (optional) avoids the per-IP pull limit
+  // on shared provider IPs. ghcr.io only when compose pulls the app image
+  // from there, with the pull credential the preflight resolved
+  // (scalePreflight): the old server's read:packages token when it still
+  // passes, so nothing is asked. An image this machine sends or the new
+  // server builds pulls nothing from ghcr, so the new server gets no ghcr.io
+  // login at all.
   const dockerHubCreds = resolveDockerHubCreds();
   if (dockerHubCreds) {
     s.start('Authenticating with Docker Hub...');
@@ -1310,22 +1417,9 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
     );
     s.stop('Docker Hub authenticated');
   }
-  try {
-    const ghcrCreds = await getGHCRCredentials();
-    if (ghcrCreds?.username && ghcrCreds?.token) {
-      s.start('Authenticating with ghcr.io...');
-      await perfAsync('scale.ghcrLogin', () =>
-        dockerLoginOnServer(newIp, sshKeyPath, {
-          username: ghcrCreds.username,
-          token: ghcrCreds.token,
-          registry: 'ghcr.io',
-        }),
-      );
-      s.stop('ghcr.io authenticated');
-    }
-  } catch {
-    /* non-fatal: image may be public */
-  }
+  if (ghcrPull?.mode === 'token') s.start('Logging the new server in to ghcr.io...');
+  await perfAsync('scale.ghcrLogin', () => ensureGhcrLoginOn(newIp, sshKeyPath, ghcrPull));
+  if (ghcrPull?.mode === 'token') s.stop('Logged in to ghcr.io with the pull token');
 
   // 4c. The app image, before compose pulls and starts the stack (compose's
   // prod.yml resets `build: !reset null`, so `up --build` cannot make it).
@@ -1552,6 +1646,11 @@ async function scaleServers(ctx) {
     }
   }
 
+  // Each old server's .env, its app image and the ghcr.io pull credential,
+  // before any server is built too: an old server that does not answer, or
+  // a refused credential, leaves nothing to delete (scalePreflight).
+  const preflight = await scalePreflight(ctx);
+
   // The writers the fence stops: the app and the enabled primary-only add-ons.
   const addonNames = enabledAddonNames({
     ...envConfig,
@@ -1581,7 +1680,10 @@ async function scaleServers(ctx) {
     // The post-flip steps done, for the resume message.
     const progress = [];
     try {
-      newIp = await prepareReplacementServer(ctx, server, newServerId, s, { backupS3 });
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s, {
+        backupS3,
+        old: preflight.get(server),
+      });
 
       // 7. Fence writes on the old server: writers stopped, database
       //    read-only, WAL switched and archived through the fence. From here
@@ -1827,7 +1929,9 @@ async function scaleServers(ctx) {
     let newIp;
     let primary;
     try {
-      newIp = await prepareReplacementServer(ctx, server, newServerId, s);
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s, {
+        old: preflight.get(server),
+      });
       // The primary it reseeds from: the new one once the primary arm serves,
       // else the live one.
       primary = primaryReady
@@ -2713,7 +2817,7 @@ async function repatchClusterAutoscaler({
           '-o',
           `jsonpath={.data.${key}}`,
         ]),
-        { silent: true },
+        { silent: true, secret: true },
       );
     const configB64Raw = readSecretKey('config\\.json');
     const tokenB64Raw = readSecretKey('token');

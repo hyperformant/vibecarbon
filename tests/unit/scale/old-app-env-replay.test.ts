@@ -1,6 +1,7 @@
 /**
  * Scale replays the old server's `app.env` storage pair (security plan
- * 2026-10-20, Task 1). The read is its own step after the `.env` replay.
+ * 2026-10-20, Task 1). The read is its own step in the arm; the `.env` is read
+ * once, in the preflight.
  * Task 4: an app.env the server says it does not have is told apart from a
  * read that failed; a failed read stops that server's scale rather than hand
  * the new app the `.env`'s infra pair.
@@ -83,23 +84,30 @@ describe('scale keeps the .env replay when the app.env read fails', () => {
     }
   });
 
-  it('reads app.env only after, and outside, the .env read', async () => {
+  /** The source of one top-level function of scale.js, up to its closing brace. */
+  const fnSource = (src: string, name: string) => {
+    const start = src.search(new RegExp(`\\n(?:export )?async function ${name}\\(`));
+    expect(start, name).toBeGreaterThan(-1);
+    return src.slice(start, src.indexOf('\n}\n', start));
+  };
+
+  it('reads app.env in the arm, apart from the preflight .env read', async () => {
     const src = readRepoFile('src/scale.js');
-    const envRead = src.indexOf('oldEnv = dropUnportableEnv(parseDotenv(envText));');
-    const catchAfter = src.indexOf("s.stop('Could not read old-server config", envRead);
-    const appRead = src.indexOf('oldAppEnv = await readOldAppEnv(', envRead);
-    expect(envRead).toBeGreaterThan(-1);
-    // The app.env read sits after the .env try/catch closes, so its failure
-    // cannot reach that catch.
-    expect(appRead).toBeGreaterThan(catchAfter);
+    // The .env is read once, in the preflight, before any server is built.
+    expect(fnSource(src, 'scalePreflight')).toContain('await readOldServerEnv(');
+    expect(fnSource(src, 'scalePreflight')).not.toContain('readOldAppEnv(');
+    // app.env in the arm, where no .env read's catch can take its failure.
+    const arm = fnSource(src, 'prepareReplacementServer');
+    expect(arm).toContain('const oldAppEnv = await readOldAppEnv(');
+    expect(arm).not.toContain('readOldServerEnv(');
+    expect(arm).not.toMatch(/\.env`\]/);
   });
 
-  it('a failed old-server .env read stops that server scale instead of using the project .env', async () => {
-    const src = readRepoFile('src/scale.js');
-    const envRead = src.indexOf('oldEnv = dropUnportableEnv(parseDotenv(envText));');
-    const nextStep = src.indexOf("s.start('Copying project files...');", envRead);
-    const between = src.slice(envRead, nextStep);
-    expect(between).toMatch(/throw new Error\(\s*`could not read \.env on the old server/);
-    expect(between).not.toMatch(/falling back to project \.env/);
+  it('a failed old-server .env read stops the scale instead of using the project .env', async () => {
+    // The behavior (nothing built, the message) is in
+    // compose-scale-image-delta.test.ts; this pins that no fallback exists.
+    const read = fnSource(readRepoFile('src/scale.js'), 'readOldServerEnv');
+    expect(read).toMatch(/throw new Error\(\s*`could not read \.env on the old server/);
+    expect(read).not.toMatch(/readEnvFiles|falling back to project \.env/);
   });
 });

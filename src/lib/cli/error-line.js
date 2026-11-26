@@ -62,3 +62,20 @@ export function displayLine(message) {
  * @returns {string}
  */
 export const errorFirstLine = (err) => String(err?.message ?? err).split('\n')[0];
+
+/**
+ * The line of a failed command that says why: the first line of its stderr
+ * (ssh's own `Connection timed out`), else of its message, at most 200
+ * characters. A command error's message opens with the command line, which
+ * says what ran, not why it failed.
+ * @param {unknown} err
+ * @returns {string}
+ */
+export function errorReason(err) {
+  const lines = (text) =>
+    String(text ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  return (lines(err?.stderr)[0] ?? lines(err?.message ?? err)[0] ?? 'no answer').slice(0, 200);
+}

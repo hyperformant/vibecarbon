@@ -24,7 +24,7 @@ import { assertAppImageBuilt, ensureGhcrPullSecretOn } from './ghcr-pull-secret.
  *
  * @param {{ projectDir: string, envName: string, kubeconfigPath: string,
  *   owner: string, repo: string,
- *   ghcrPull: import('./ghcr-pull-secret.js').GhcrPull,
+ *   ghcrPull: import('../ghcr-pull.js').GhcrPull,
  *   warn?: (line: string) => void }} args - envName names the cluster in what
  *   the operator reads (`prod`, `prod-standby`) and in its key's title;
  *   kubeconfigPath is that cluster's kubeconfig; owner/repo is the repo Flux

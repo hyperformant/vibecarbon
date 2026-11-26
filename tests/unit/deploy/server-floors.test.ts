@@ -235,9 +235,14 @@ describe('assertServerFloors: the servers scale adds', () => {
     const src = readFileSync('src/scale.js', 'utf8');
     const ready = src.indexOf("perfAsync('scale.cloudInitReady'");
     const check = src.indexOf('assertServerFloors(newIp');
-    const pull = src.indexOf('Pull the OLD server');
+    // The first things sent to the new server: the app image's layer delta,
+    // then the project files.
+    const delta = src.indexOf('deliverComposeAppImage({');
+    const files = src.indexOf("s.start('Copying project files...')");
     expect(ready).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(ready);
-    expect(check).toBeLessThan(pull);
+    expect(delta).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(delta);
+    expect(check).toBeLessThan(files);
   });
 });
