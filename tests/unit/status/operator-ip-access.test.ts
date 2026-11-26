@@ -123,6 +123,20 @@ describe('status and the operator address', () => {
     );
   });
 
+  it("counts a k8s-HA environment recorded only by its sides' addresses as deployed", async () => {
+    project({
+      prod: {
+        provider: 'hetzner',
+        deployMode: 'kubernetes',
+        servers: [],
+        ha: { enabled: true, primary: { ingressIp: '192.0.2.10' }, standby: {} },
+      },
+      staging: { ...deployed('staging'), servers: [] },
+    });
+    await status(['-json']);
+    expect(m.warnAll).toHaveBeenCalledWith(expect.objectContaining({ environments: ['prod'] }));
+  });
+
   it('nothing deployed: no address check', async () => {
     project({
       prod: { ...deployed('prod'), servers: [] },

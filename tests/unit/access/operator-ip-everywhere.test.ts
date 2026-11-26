@@ -514,6 +514,61 @@ describe('vibecarbon access', () => {
     expect(m.pushes).toEqual([]);
   });
 
+  it('a skeleton environment (no servers yet) is skipped: add and remove exit 0 and never ask for its token', async () => {
+    // A first deploy of staging that stopped before any server existed left
+    // its skeleton entry: no firewall, nothing to protect.
+    writeProject({ prod: prod(), staging: staging({ servers: [], status: 'deploying' }) }, [
+      TEAMMATE,
+      ME,
+    ]);
+    m.token.mockImplementation((id: string) => (id === 'digitalocean' ? undefined : `token-${id}`));
+    m.absent.add('demo-staging-firewall');
+    const prodSides = ['demo-prod-primary-firewall', 'demo-prod-standby-firewall'];
+
+    expect(await access(['add', REMOVED])).toBeNull();
+    expect(pushedTo()).toEqual(prodSides);
+    m.pushes.length = 0;
+    expect(await access(['remove', REMOVED])).toBeNull();
+    expect(pushedTo()).toEqual(prodSides);
+
+    expect(logged(m.log.error)).toBe('');
+    expect(m.token).not.toHaveBeenCalledWith('digitalocean');
+    expect(onDisk().environments.staging).not.toHaveProperty('operatorCidrsPushed');
+  });
+
+  it('a rerun of remove skips a skeleton environment too', async () => {
+    writeProject(
+      {
+        prod: prod({ operatorCidrsPushed: sorted(TEAMMATE, ME) }),
+        staging: staging({ servers: [] }), // no record, but nothing to protect
+      },
+      [TEAMMATE, ME],
+    );
+    expect(await access(['remove', REMOVED])).toBeNull();
+    expect(m.pushes).toEqual([]);
+    expect(logged(m.log.warn)).toContain(`${REMOVED} is not in the list, nothing to remove.`);
+  });
+
+  it('a k8s-HA environment whose clusters are recorded only under ha.primary/ha.standby still counts as deployed', async () => {
+    // A first k8s-HA deploy that failed after both clusters came up: the
+    // side records are written, the flat servers list is not yet.
+    writeProject(
+      {
+        prod: prod({
+          servers: [],
+          ha: {
+            enabled: true,
+            primary: { ingressIp: '192.0.2.10' },
+            standby: { ingressIp: '192.0.2.11' },
+          },
+        }),
+      },
+      [TEAMMATE, ME, REMOVED],
+    );
+    expect(await access(['remove', REMOVED])).toBeNull();
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+  });
+
   it('a token gone by the time of the push is a failure too, naming the environment and the variable', async () => {
     writeProject({ prod: prod(), staging: staging() }, [TEAMMATE, ME, REMOVED]);
     // There for the check before the list changes, gone for the push.

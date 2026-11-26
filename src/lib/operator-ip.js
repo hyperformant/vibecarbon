@@ -301,6 +301,26 @@ export function envFirewallSides(environment, envConfig) {
 }
 
 /**
+ * Whether an environment records any server, so has a firewall to push: the
+ * flat `servers` list (every mode's final save, and the early writes of
+ * compose and compose-HA), or an address on an HA side (k8s-HA writes
+ * `ha.primary`/`ha.standby` once both clusters are up, before its final
+ * save). An environment with neither is the skeleton of a first deploy that
+ * stopped before any server existed: nothing to protect, so `status` and
+ * `vibecarbon access` pass over it.
+ *
+ * @param {{ servers?: unknown[], ha?: Record<string, any> } | undefined} envConfig
+ * @returns {boolean}
+ */
+export function envHasServers(envConfig) {
+  if (Array.isArray(envConfig?.servers) && envConfig.servers.length > 0) return true;
+  return ['primary', 'standby'].some((side) => {
+    const s = envConfig?.ha?.[side];
+    return !!(s?.ingressIp || s?.masterIp || s?.floatingIp || s?.dbIp || s?.ip);
+  });
+}
+
+/**
  * The operator's token for an environment's own provider. A project can mix
  * providers, so a push to several environments looks it up per environment.
  *

@@ -29,6 +29,7 @@ import {
   cidrFromIp,
   detectOperatorIp,
   envFirewallSides,
+  envHasServers,
   firewallName,
   loadOperatorCidrs,
   providerTokenFor,
@@ -125,6 +126,18 @@ function formatRelative(isoDate, now) {
 }
 
 /**
+ * The environments with a firewall to push: those that record a server. A
+ * skeleton left by a first deploy that stopped before any server existed is
+ * passed over (envHasServers): it has no firewall to update and nothing to
+ * protect, so it neither fails the push nor needs its provider's token.
+ */
+function deployedEnvNames(projectConfig) {
+  return Object.entries(projectConfig?.environments ?? {})
+    .filter(([, cfg]) => envHasServers(cfg))
+    .map(([name]) => name);
+}
+
+/**
  * Push the list to the named environments' firewalls (every deployed one by
  * default), both sides of an HA one, each with its own provider's token: a
  * project can mix providers. Each push records what that environment now
@@ -149,7 +162,7 @@ async function pushToFirewalls(
   projectConfig,
   list,
   spinner,
-  names = Object.keys(projectConfig?.environments ?? {}),
+  names = deployedEnvNames(projectConfig),
 ) {
   if (names.length === 0) {
     spinner?.stop('No deployed environments, nothing to push to.');
@@ -277,12 +290,10 @@ async function addAction(projectConfig, cidr) {
  * or a first push that failed).
  */
 function envsStillAllowing(projectConfig, cidr) {
-  return Object.entries(projectConfig?.environments ?? {})
-    .filter(([, cfg]) => {
-      const record = cfg?.operatorCidrsPushed;
-      return !Array.isArray(record) || record.includes(cidr);
-    })
-    .map(([name]) => name);
+  return deployedEnvNames(projectConfig).filter((name) => {
+    const record = projectConfig.environments[name]?.operatorCidrsPushed;
+    return !Array.isArray(record) || record.includes(cidr);
+  });
 }
 
 async function removeAction(projectConfig, cidr) {
@@ -418,13 +429,14 @@ export async function run(args = []) {
 
   // The list action doesn't need a token; the others push every deployed
   // environment's firewall, each with its own provider's token, so each must
-  // be there before the list changes.
+  // be there before the list changes. A skeleton environment is not pushed,
+  // so its provider's token is not needed.
   if (subcommand !== 'list') {
-    const missing = Object.entries(projectConfig.environments ?? {}).filter(
-      ([, cfg]) => !providerTokenFor(cfg),
+    const missing = deployedEnvNames(projectConfig).filter(
+      (name) => !providerTokenFor(projectConfig.environments[name]),
     );
-    for (const [name, cfg] of missing) {
-      const Provider = providerFor(cfg);
+    for (const name of missing) {
+      const Provider = providerFor(projectConfig.environments[name]);
       p.log.error(
         `${Provider.NAME} API token not found (needed to update ${name}'s firewall). Set ${Provider.TOKEN_ENV} in your shell or the project's .env.local.`,
       );

@@ -45,7 +45,11 @@ import { parseDotenv } from './lib/dotenv.js';
 import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
 import { findOrphanStacks, listVibecarbonStacks } from './lib/local-stacks.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
-import { ensureOperatorIpAccessWarnAll, shouldAutoDetectOperatorIp } from './lib/operator-ip.js';
+import {
+  ensureOperatorIpAccessWarnAll,
+  envHasServers,
+  shouldAutoDetectOperatorIp,
+} from './lib/operator-ip.js';
 import { formatOrphanNotice } from './lib/orphan-stack-notice.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
@@ -1764,7 +1768,7 @@ async function main(argv = []) {
   // jq`) never detects, saves or pushes, so it stays a pure read. Messages
   // go to stderr.
   const deployedEnvNames = envEntries
-    .filter(([, envConfig]) => (envConfig.servers ?? []).length > 0)
+    .filter(([, envConfig]) => envHasServers(envConfig))
     .map(([envName]) => envName);
   const interactive = !!process.stdout.isTTY && shouldAutoDetectOperatorIp({ yes: true });
   if (interactive && deployedEnvNames.length > 0) {
