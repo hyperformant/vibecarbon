@@ -6356,6 +6356,7 @@ async function deployK3sSteps(options, inFlight) {
   if (!infraStepSkips(state, 'k3s-infra', infraInputs, [options.environment])) {
     state.startStep('k3s-infra', infraInputs);
     const { upStack } = await import('../../iac/index.js');
+    const { replicationPeerIpFor } = await import('../../iac/program-inputs.js');
 
     const allowedCidrs = (options.operatorCidrs ?? []).map((e) => e.cidr);
     // CD2 — lazy dispatch through the provider class (no named
@@ -6378,6 +6379,11 @@ async function deployK3sSteps(options, inFlight) {
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
       allowedSshIps: allowedCidrs,
       allowedK8sApiIps: allowedCidrs,
+      // k8s-ha: the replication rule (UDP 51821) from the peer's database
+      // address as recorded before this deploy, so this up keeps the rule
+      // the last deploy wrote over REST. None on a first deploy: the
+      // open-replication-firewall step writes it after the up.
+      replicationPeerIp: replicationPeerIpFor(options.envConfig, options.environment),
     };
     // Replay the stack's existing k3s token before building the real
     // program. The token is interpolated into every node's cloud-init user

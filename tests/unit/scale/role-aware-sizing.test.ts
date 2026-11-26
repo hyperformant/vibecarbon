@@ -518,6 +518,103 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
     expect(ha.standbyWorkerSpec).toEqual({ count: 1, serverType: 'cx22' });
   });
 
+  // M1: the next up declares each side's replication rule from the peer's
+  // recorded address (replicationPeerIpFor), so a database node this scale's
+  // up replaced must be on record when the scale ends.
+  it("a database node the up replaced: its new addresses go on that side's record, in the same write", async () => {
+    const envConfig = {
+      dbServerType: 'cx22',
+      ha: {
+        primary: { stack: 'prod-primary', dbIp: '203.0.113.10', dbPrivateIp: '10.0.1.3' },
+        standby: { stack: 'prod-standby', dbIp: '203.0.113.20', dbPrivateIp: '10.1.1.3' },
+      },
+    };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      newValues: { dbType: 'cx33' },
+      isHA: true,
+      convergedDb: {
+        primary: { dbIp: '203.0.113.10', dbPrivateIp: '10.0.1.3' },
+        standby: { dbIp: '198.51.100.21', dbPrivateIp: '10.1.1.9' },
+      },
+    });
+    expect(store.state.writes).toHaveLength(1);
+    const ha = (store.state.writes[0] as { environments: ConfigJson }).environments.prod.ha;
+    expect(ha.primary).toEqual({
+      stack: 'prod-primary',
+      dbIp: '203.0.113.10',
+      dbPrivateIp: '10.0.1.3',
+      dbServerType: 'cx33',
+    });
+    expect(ha.standby).toEqual({
+      stack: 'prod-standby',
+      dbIp: '198.51.100.21',
+      dbPrivateIp: '10.1.1.9',
+      dbServerType: 'cx33',
+    });
+  });
+
+  it('a moved address is saved on a scale that changed no type, and a missing output never clears the record', async () => {
+    const envConfig = {
+      ha: {
+        primary: { stack: 'prod-primary', dbIp: '203.0.113.10', dbPrivateIp: '10.0.1.3' },
+        standby: { stack: 'prod-standby', dbIp: '203.0.113.20', dbPrivateIp: '10.1.1.3' },
+      },
+    };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      newValues: { minWorkers: 2 },
+      isHA: true,
+      convergedDb: {
+        primary: { dbIp: '198.51.100.11', dbPrivateIp: undefined },
+        standby: { dbIp: undefined, dbPrivateIp: '10.1.1.9' },
+      },
+    });
+    const ha = (store.state.writes[0] as { environments: ConfigJson }).environments.prod.ha;
+    expect(ha.primary).toEqual({
+      stack: 'prod-primary',
+      dbIp: '198.51.100.11',
+      dbPrivateIp: '10.0.1.3',
+    });
+    expect(ha.standby).toEqual({
+      stack: 'prod-standby',
+      dbIp: '203.0.113.20',
+      dbPrivateIp: '10.1.1.9',
+    });
+  });
+
+  it('leaves the record alone when the up left every database node where it was', async () => {
+    const envConfig = {
+      ha: {
+        primary: { stack: 'prod-primary', dbIp: '203.0.113.10', dbPrivateIp: '10.0.1.3' },
+        standby: { stack: 'prod-standby', dbIp: '203.0.113.20', dbPrivateIp: '10.1.1.3' },
+      },
+    };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      newValues: { minWorkers: 2 },
+      isHA: true,
+      convergedDb: {
+        primary: { dbIp: '203.0.113.10', dbPrivateIp: '10.0.1.3' },
+        standby: { dbIp: '203.0.113.20', dbPrivateIp: '10.1.1.3' },
+      },
+    });
+    const ha = (store.state.writes[0] as { environments: ConfigJson }).environments.prod.ha;
+    expect(ha).toEqual(envConfig.ha);
+  });
+
   it('does not add an ha block for non-HA environments', async () => {
     const envConfig = { workerServerType: 'cx22' };
     const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };

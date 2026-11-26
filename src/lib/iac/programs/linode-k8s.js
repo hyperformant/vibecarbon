@@ -103,6 +103,9 @@ function assertLabelsFit(labels) {
  * @property {Record<string,string>} [labels]
  * @property {string[]} allowedSshIps    CIDR list, required
  * @property {string[]} allowedK8sApiIps CIDR list, required
+ * @property {string} [replicationPeerIp] k8s-ha: the peer cluster's database
+ *                                       node public IPv4, as recorded
+ *                                       (replicationPeerIpFor)
  *
  * No API token: no node's user data carries it. deployK3s hands it to the
  * cluster's `linode` kube-system Secret, the CSI driver's credential, itself
@@ -152,6 +155,25 @@ export function buildLinodeK8sProgram(config) {
   const minWorkers = config.minWorkers ?? 1;
   const world = { ipv4s: ['0.0.0.0/0'], ipv6s: ['::/0'] };
   const toB64 = (s) => Buffer.from(s, 'utf-8').toString('base64');
+  // k8s-ha: the WireGuard replication rule (UDP 51821 from the peer cluster's
+  // database node), declared from the peer's recorded address
+  // (replicationPeerIpFor) so an up keeps what the deploy's REST step wrote:
+  // the rules PUT replaces the whole ordered list. Field for field
+  // LinodeProvider.buildReplicationFirewallRules's rule, its label included,
+  // in the order the REST writers produce
+  // (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). None until the
+  // peer is on record: the deploy's REST step opens it then.
+  const replicationRules = config.replicationPeerIp
+    ? [
+        {
+          label: 'wg-replication',
+          action: 'ACCEPT',
+          protocol: 'UDP',
+          ports: '51821',
+          ipv4s: [`${config.replicationPeerIp}/32`],
+        },
+      ]
+    : [];
 
   return async () => {
     let sshKeyId;
@@ -213,6 +235,7 @@ export function buildLinodeK8sProgram(config) {
           ipv4s: [VPC_CIDR],
         },
         { label: 'vpc-icmp', action: 'ACCEPT', protocol: 'ICMP', ipv4s: [VPC_CIDR] },
+        ...replicationRules,
       ],
       tags: encodeLabels(labels),
     });

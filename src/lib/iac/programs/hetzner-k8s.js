@@ -86,6 +86,8 @@ export function networkZoneFor(location) {
  * @property {Record<string,string>} labels
  * @property {string[]} [allowedSshIps]       CIDR list, defaults to 0.0.0.0/0
  * @property {string[]} [allowedK8sApiIps]    CIDR list, REQUIRED (no default since the H-2 closeout; public 6443 is operator-only — in-cluster + agent-tunnel traffic rides the private advertise-address)
+ * @property {string} [replicationPeerIp]     k8s-ha: the peer cluster's database node
+ *                                             public IPv4, as recorded (replicationPeerIpFor)
  *
  * No API token: no node's user data carries it. deployK3s hands it to the
  * cluster's `hcloud` kube-system Secret itself (applyCloudSecrets).
@@ -107,6 +109,23 @@ export function buildHetznerK8sProgram(config) {
   const privateNetworkRange = config.privateNetworkRange ?? '10.0.0.0/8';
   const subnetRange = config.subnetRange ?? '10.0.1.0/24';
   const minWorkers = config.minWorkers ?? 1;
+  // k8s-ha: the WireGuard replication rule (UDP 51821 from the peer cluster's
+  // database node), declared from the peer's recorded address
+  // (replicationPeerIpFor) so an up keeps what the deploy's REST step wrote.
+  // Field for field HetznerProvider.buildReplicationFirewallRules's rule, so
+  // no description, in the order the REST writers produce
+  // (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). None until the
+  // peer is on record: the deploy's REST step opens it then.
+  const replicationRules = config.replicationPeerIp
+    ? [
+        {
+          direction: 'in',
+          protocol: 'udp',
+          port: '51821',
+          sourceIps: [`${config.replicationPeerIp}/32`],
+        },
+      ]
+    : [];
 
   return async () => {
     // SSH key — either reuse an existing one (HA shared key) or create.
@@ -161,11 +180,18 @@ export function buildHetznerK8sProgram(config) {
     // The trade is asymmetric, which is why it lands this way. Keeping the
     // workaround costs a brief window where attached servers have no firewall
     // (Hetzner applies no filtering when none is attached) — a real exposure,
-    // bounded by one create+attach. Dropping it risks #931 emptying the rule
-    // set on a live firewall, and an empty Hetzner firewall fails CLOSED: per
-    // Hetzner's docs, "if you do not set any rule, all inbound traffic will
-    // automatically be blocked". That is a total inbound drop on 22/80/443/6443
-    // — full outage plus operator lockout, with no self-recovery.
+    // bounded by one create+attach, and paid only when the declared rules
+    // change. That holds because every rule a REST writer leaves is declared
+    // here too: the operator rules from the saved operatorCidrs, and on
+    // k8s-ha the replication rule from the peer's recorded database address
+    // (replicationRules above). Before the replication rule was declared,
+    // every k8s-ha scale replaced both clusters' firewalls and every failover
+    // the standby's, each with a new firewall id. Dropping it risks #931
+    // emptying the rule set on a live firewall, and an empty Hetzner firewall
+    // fails CLOSED: per Hetzner's docs, "if you do not set any rule, all
+    // inbound traffic will automatically be blocked". That is a total inbound
+    // drop on 22/80/443/6443 — full outage plus operator lockout, with no
+    // self-recovery.
     //
     // Remove this (and drop to a plain in-place Update) once #931 is closed
     // in a release we bridge. Do not "modernise" it away on the strength of
@@ -220,6 +246,7 @@ export function buildHetznerK8sProgram(config) {
             sourceIps: [privateNetworkRange],
             description: 'Internal cluster traffic (UDP)',
           },
+          ...replicationRules,
         ],
       },
       { replaceOnChanges: ['*'], deleteBeforeReplace: true },

@@ -4,6 +4,9 @@
  * a program's own resources stay in the program.
  */
 
+import { isIPv4 } from 'node:net';
+import { haStacksFrom } from '../deploy/standby-types.js';
+import { environmentForStack } from '../environment-name.js';
 import { SERVER_OWNER_LABELS } from './create-timeout.js';
 
 const OPERATOR_CIDRS_HINT =
@@ -44,6 +47,51 @@ export function requireOperatorCidrs(config, { k8sApi = false } = {}) {
   if (k8sApi && !config.allowedK8sApiIps?.length) {
     throw new Error(`allowedK8sApiIps required (${OPERATOR_CIDRS_HINT})`);
   }
+}
+
+/**
+ * The k8s-ha replication peer of one cluster stack: the OTHER side's recorded
+ * database node public IPv4, which the stack's program declares as its UDP
+ * 51821 allow rule (`config.replicationPeerIp`). The deploy writes that rule
+ * over REST (openReplicationFirewallForPeers), and every up resets an inline
+ * firewall to what its program declares, so a program that left it out
+ * dropped it on every scale and failover. Declared from the record, it is
+ * what REST wrote, and an up plans no firewall change.
+ *
+ * Keyed by stack, never by role: a failover swaps `ha.primary` and
+ * `ha.standby`, and the stacks keep their names (haStacksFrom). A record
+ * without stacks (one written before failover recorded them) maps the way the
+ * deploy and scale resolve it: `<env>-primary` plays primary, `<env>-standby`
+ * standby, the environment being `stackName` without its suffix. Undefined,
+ * so the program declares no rule and the deploy's REST step opens it, when
+ * the environment is not HA, `stackName` is neither side, or the peer has no
+ * address on record yet (the first deploy).
+ *
+ * @param {object|undefined} envConfig the environment's record in .vibecarbon.json
+ * @param {string} stackName the Pulumi stack the program is for
+ * @returns {string|undefined}
+ * @throws {Error} the recorded address is not an IPv4 address (a hand edit)
+ */
+export function replicationPeerIpFor(envConfig, stackName) {
+  const sides = haStacksFrom(envConfig);
+  if (!sides) return undefined;
+  const environment = environmentForStack(stackName);
+  const primaryStack = sides.primary.stack ?? `${environment}-primary`;
+  const standbyStack = sides.standby.stack ?? `${environment}-standby`;
+  const peerRole =
+    stackName === primaryStack ? 'standby' : stackName === standbyStack ? 'primary' : null;
+  if (!peerRole) return undefined;
+  const peerIp = envConfig.ha[peerRole]?.dbIp;
+  if (peerIp == null || peerIp === '') return undefined;
+  if (typeof peerIp !== 'string' || !isIPv4(peerIp)) {
+    throw new Error(
+      `ha.${peerRole}.dbIp ${JSON.stringify(peerIp)} in environment ${environment} ` +
+        `is not an IPv4 address (the replication peer of stack ${stackName}; set it to that ` +
+        "database node's public IPv4 in .vibecarbon.json, or delete it and vibecarbon deploy " +
+        'records it again)',
+    );
+  }
+  return peerIp;
 }
 
 /**

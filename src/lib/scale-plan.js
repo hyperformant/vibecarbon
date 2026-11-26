@@ -135,6 +135,8 @@ export function planK8sScaleChanges(parsed, _envConfig) {
  * @param {number|undefined} inputs.persistedMaxWorkers   envConfig.maxWorkers
  * @param {string} inputs.k3sVersion
  * @param {Record<string, string>} inputs.labels
+ * @param {string|undefined} inputs.replicationPeerIp  k8s-ha: the peer's recorded
+ *   database address (replicationPeerIpFor), as deployK3s passes it.
  * @returns {object}
  */
 export function buildProgramConfig({
@@ -152,6 +154,7 @@ export function buildProgramConfig({
   persistedMaxWorkers,
   k3sVersion,
   labels,
+  replicationPeerIp,
 }) {
   return {
     projectName,
@@ -174,5 +177,8 @@ export function buildProgramConfig({
     maxWorkers: newValues.maxWorkers ?? persistedMaxWorkers ?? DEFAULT_WORKER_MAX,
     k3sVersion,
     labels,
+    // The k8s-ha replication rule the program declares, so this up keeps the
+    // one the deploy wrote over REST instead of dropping it.
+    replicationPeerIp,
   };
 }
