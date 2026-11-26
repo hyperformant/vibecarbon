@@ -162,6 +162,9 @@ export function serverStores(servers, sshKeyPath) {
         try {
           return await readGhcrLoginOnServer(ip, sshKeyPath, { retries: 1 });
         } catch (err) {
+          // A changed operator IP stops the whole command: its abort names the
+          // cause, where a warning here would end in a GHCR_PULL_TOKEN refusal.
+          if (err?.code === 'OPERATOR_IP_CHANGED') throw err;
           p.log.warn(`could not read the token ${store} (${whyUnread(err)}), so it is not reused.`);
           return null;
         }

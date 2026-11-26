@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
   outputs: [] as string[],
   unreachable: new Map<string, string>(),
   warn: vi.fn(),
+  /** What the operator-IP guard does when a transient ssh error asks it. */
+  ipGuard: vi.fn(async () => {}),
   /** Set once the module is loaded: the fake server's answer to one command. */
   serve: null as null | ((ip: string, input: string) => string),
 }));
@@ -38,6 +40,11 @@ const h = vi.hoisted(() => ({
 vi.mock('@clack/prompts', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   log: { warn: h.warn, info: vi.fn() },
+}));
+
+vi.mock('../../../src/lib/operator-ip-guard.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  assertOperatorIpUnchanged: h.ipGuard,
 }));
 
 vi.mock('../../../src/lib/command.js', async (orig) => ({
@@ -142,6 +149,8 @@ beforeEach(() => {
   h.outputs.length = 0;
   h.unreachable.clear();
   h.warn.mockClear();
+  h.ipGuard.mockReset();
+  h.ipGuard.mockImplementation(async () => {});
   setLogin(IP, null);
   setLogin(IP2, null);
 });
@@ -209,6 +218,20 @@ describe('reading a server login back', () => {
     expect(h.warn.mock.calls[0][0]).toBe(
       `could not read the token on prod-primary's server (ssh: connect to host ${IP} port 22: Connection timed out), so it is not reused.`,
     );
+  });
+
+  it('a changed operator IP stops the command, not just the read', async () => {
+    // The guard runs on a transient ssh error. Its abort names the real cause;
+    // a warning here would turn it into a GHCR_PULL_TOKEN refusal.
+    h.unreachable.set(IP, `ssh: connect to host ${IP} port 22: Connection timed out`);
+    h.ipGuard.mockRejectedValueOnce(
+      Object.assign(new Error('Your public IP changed during this command'), {
+        code: 'OPERATOR_IP_CHANGED',
+      }),
+    );
+    const [store] = serverStores([{ name: 'prod-primary', ip: IP }], KEY);
+    await expect(store.read()).rejects.toMatchObject({ code: 'OPERATOR_IP_CHANGED' });
+    expect(h.warn).not.toHaveBeenCalled();
   });
 
   it('a single server is named for its environment, each compose-ha side for its role', () => {
