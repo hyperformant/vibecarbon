@@ -200,6 +200,21 @@ export async function convergeClusterInfra({
     if (type != null) Provider.assertAmd64ServerType(type, `the ${role} server type for ${label}`);
   }
 
+  // k8s-ha: the peer cluster's recorded database address, from which the
+  // program declares the replication rule (UDP 51821) the deploy wrote over
+  // REST. Without it this up would reset the firewall to a list without the
+  // rule: every scale dropped it on both clusters, every failover on the
+  // standby. A hand-edited address stops here, before any cloud call, by the
+  // name failover reads to skip its revert. Dynamic: program-inputs.js
+  // reaches @pulumi/pulumi (through create-timeout.js), see CD2 below.
+  const { replicationPeerIpFor } = await import('./program-inputs.js');
+  let replicationPeerIp;
+  try {
+    replicationPeerIp = replicationPeerIpFor(envConfig, clusterEnv);
+  } catch (err) {
+    throw new ConvergeBuildError(clusterEnv, err);
+  }
+
   // Apply server type changes via Pulumi. Hetzner server_type is an in-place
   // resize via the provider's update path (~2 min reboot), so a legitimate
   // type-bump shows up as `update`, not `replace`. Any planned `replace` of
@@ -329,6 +344,7 @@ export async function convergeClusterInfra({
     persistedMaxWorkers: envConfig.maxWorkers,
     k3sVersion: k3sVersion(),
     labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
+    replicationPeerIp,
   });
 
   // Probe prior stack outputs for the k3sToken so we can replay it into

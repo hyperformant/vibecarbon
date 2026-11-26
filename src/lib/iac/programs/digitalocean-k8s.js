@@ -158,6 +158,8 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  * @property {string[]} [allowedSshIps]       CIDR list, REQUIRED (no default — H-2 guard)
  * @property {string[]} [allowedK8sApiIps]    CIDR list, REQUIRED (no default — H-2 guard;
  *                                             public 6443 is operator-only)
+ * @property {string} [replicationPeerIp]     k8s-ha: the peer cluster's database node
+ *                                             public IPv4, as recorded (replicationPeerIpFor)
  *
  * No API token: no node's user data carries it. deployK3s hands it to the
  * cluster's `digitalocean` kube-system Secret itself (applyCloudSecrets).
@@ -185,6 +187,23 @@ export function buildDigitalOceanK8sProgram(config) {
   const image = config.image ?? DigitalOceanProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;
   const clusterTag = `cluster:${clusterName}`;
+  // k8s-ha: the WireGuard replication rule (UDP 51821 from the peer cluster's
+  // database node), declared from the peer's recorded address
+  // (replicationPeerIpFor) so an up keeps what the deploy's REST step wrote:
+  // the firewall PUT replaces the whole rule set. Field for field
+  // DigitalOceanProvider.buildReplicationFirewallRules's rule, and last,
+  // where that reconcile appends it
+  // (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). None until the
+  // peer is on record: the deploy's REST step opens it then.
+  const replicationRules = config.replicationPeerIp
+    ? [
+        {
+          protocol: 'udp',
+          portRange: '51821',
+          sourceAddresses: [`${config.replicationPeerIp}/32`],
+        },
+      ]
+    : [];
 
   return async () => {
     // SSH key — either reuse an existing one (HA shared key) or create.
@@ -248,6 +267,7 @@ export function buildDigitalOceanK8sProgram(config) {
           { protocol: 'tcp', portRange: '1-65535', sourceAddresses: [vpcIpRange] },
           { protocol: 'udp', portRange: '1-65535', sourceAddresses: [vpcIpRange] },
           { protocol: 'icmp', sourceAddresses: [vpcIpRange] },
+          ...replicationRules,
         ],
         outboundRules: [
           { protocol: 'tcp', portRange: '1-65535', destinationAddresses: ['0.0.0.0/0', '::/0'] },

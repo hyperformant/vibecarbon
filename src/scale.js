@@ -2902,7 +2902,14 @@ async function scaleApplyK8sChanges(ctx) {
   /** @type {Array<{clusterEnv: string, label: string, newMin: number, newMax: number, newType: string}>} */
   const caRepatches = [];
 
-  async function applyScaleChanges({ clusterEnv, clusterRegion, label, overrides, caBounds }) {
+  async function applyScaleChanges({
+    role,
+    clusterEnv,
+    clusterRegion,
+    label,
+    overrides,
+    caBounds,
+  }) {
     // Apply server type changes to this cluster via the hardened, reusable
     // converge seam (src/lib/iac/converge-cluster.js) — the SAME Pulumi path
     // the pilot-light failover uses to bring a standby's workers 0→N. The seam
@@ -2914,7 +2921,7 @@ async function scaleApplyK8sChanges(ctx) {
     // inline); replay each line, then process.exit(1).
     if (infraChanges.length > 0) {
       try {
-        await convergeClusterInfra({
+        const { outputs } = await convergeClusterInfra({
           projectConfig,
           envConfig,
           Provider,
@@ -2935,6 +2942,14 @@ async function scaleApplyK8sChanges(ctx) {
           s3Creds: null,
           label,
         });
+        // The database node as this up left it: a resize that replaced it
+        // gave it a new address, which the record does not have yet. The
+        // k8s-ha tunnel rebuild and its firewall re-open read it from here
+        // (scaleReestablishHaTunnel).
+        ctx.convergedDb = {
+          ...ctx.convergedDb,
+          [role]: { dbIp: outputs?.dbIp, dbPrivateIp: outputs?.dbPrivateIp },
+        };
       } catch (err) {
         const lines = Array.isArray(err.logLines) ? err.logLines : [err.message];
         for (const line of lines) p.log.error(line);
@@ -3011,6 +3026,7 @@ async function scaleApplyK8sChanges(ctx) {
 
   // Apply to primary (or single) cluster — keeps envConfig's persisted sizing.
   await applyScaleChanges({
+    role: 'primary',
     clusterEnv: haRoles.primary.clusterEnv,
     clusterRegion: haRoles.primary.clusterRegion,
     label: isHA ? `primary: ${haRoles.primary.clusterRegion}` : haRoles.primary.clusterRegion,
@@ -3028,6 +3044,7 @@ async function scaleApplyK8sChanges(ctx) {
   if (isHA) {
     p.log.step(`Applying same changes to standby cluster (${haRoles.standby.clusterRegion})...`);
     await applyScaleChanges({
+      role: 'standby',
       clusterEnv: haRoles.standby.clusterEnv,
       clusterRegion: haRoles.standby.clusterRegion,
       label: `standby: ${haRoles.standby.clusterRegion}`,
@@ -3058,6 +3075,14 @@ async function scaleApplyK8sChanges(ctx) {
  * scale. Recreate wg0 (also retrofits the boot-persistence systemd unit) and
  * bounce the gateway on both clusters BEFORE that wait.
  *
+ * Then UDP 51821 on both clusters' firewalls, for the addresses the tunnel was
+ * built to (openReplicationFirewallForPeers, the deploy's writer). The ups
+ * keep the rule the record names (each program declares it,
+ * replicationPeerIpFor), but a resize that replaced a database node gave it a
+ * new address the record does not have yet: the converge's outputs
+ * (scaleApplyK8sChanges, ctx.convergedDb) win over the record here, and the
+ * peer's firewall moves to the new address. A no-op when nothing moved.
+ *
  * Gated at the plan level to HA (`when: ctx.isHA`); here we further no-op
  * unless the DATABASE node type actually changed — only a database-node resize
  * reboots the node that owns wg0, so on a master/worker-only resize the tunnel
@@ -3080,7 +3105,14 @@ async function scaleReestablishHaTunnel(ctx) {
   const { identifyServers } = await import('./failover.js');
   const { reestablishReplicationTransport } = await import('./lib/deploy/k8s/index.js');
   const servers = identifyServers(environment, envConfig, projectConfig);
-  if (!servers?.primary?.dbIp || !servers?.standby?.dbIp) {
+  // Each database node as this scale's up left it, else as recorded.
+  const dbOf = (role) => ({
+    dbIp: ctx.convergedDb?.[role]?.dbIp || servers?.[role]?.dbIp,
+    dbPrivateIp: ctx.convergedDb?.[role]?.dbPrivateIp || servers?.[role]?.dbPrivateIp,
+  });
+  const primaryDb = dbOf('primary');
+  const standbyDb = dbOf('standby');
+  if (!servers || !primaryDb.dbIp || !standbyDb.dbIp) {
     p.log.warn(
       'Could not resolve HA database node IPs from config, skipping post-resize WireGuard ' +
         're-establish. If replication is down, run `vibecarbon deploy` to restore it.',
@@ -3097,6 +3129,7 @@ async function scaleReestablishHaTunnel(ctx) {
     secondaryRegion: ctx.secondaryRegion,
     isHA,
   });
+  let apiServersAnswer = true;
   try {
     for (const [role, side] of [
       ['primary', haRoles.primary],
@@ -3108,31 +3141,51 @@ async function scaleReestablishHaTunnel(ctx) {
       }
     }
   } catch (err) {
+    apiServersAnswer = false;
     p.log.warn(
       `Could not re-establish the replication tunnel after resize: ${err.message?.split('\n')[0] || err}. ` +
         'Run `vibecarbon deploy` to fully restore replication.',
     );
-    return;
   }
-  const sshKeyPath = sshKeyPathFor(environment);
-  const s = spinner();
-  s.start('Re-establishing WireGuard replication tunnel after database-node resize');
+  if (apiServersAnswer) {
+    const sshKeyPath = sshKeyPathFor(environment);
+    const s = spinner();
+    s.start('Re-establishing WireGuard replication tunnel after database-node resize');
+    try {
+      await reestablishReplicationTransport({
+        primaryIp: servers.primary.ip,
+        standbyIp: servers.standby.ip,
+        primaryDbIp: primaryDb.dbIp,
+        standbyDbIp: standbyDb.dbIp,
+        primaryDbPrivateIp: primaryDb.dbPrivateIp,
+        standbyDbPrivateIp: standbyDb.dbPrivateIp,
+        sshKeyPath,
+      });
+      s.stop('WireGuard tunnel re-established (wg0 recreated, repl-gateway restarted)');
+    } catch (err) {
+      s.stop('WireGuard tunnel re-establish failed, continuing to readiness wait', 1);
+      p.log.warn(
+        `Could not re-establish the replication tunnel after resize: ${err.message?.split('\n')[0] || err}. ` +
+          'Run `vibecarbon deploy` to fully restore replication.',
+      );
+    }
+  }
+  // Each cluster's firewall admits the other's database node as it is now.
+  // The opener warns per cluster and never throws; building the provider can.
   try {
-    await reestablishReplicationTransport({
-      primaryIp: servers.primary.ip,
-      standbyIp: servers.standby.ip,
-      primaryDbIp: servers.primary.dbIp,
-      standbyDbIp: servers.standby.dbIp,
-      primaryDbPrivateIp: servers.primary.dbPrivateIp,
-      standbyDbPrivateIp: servers.standby.dbPrivateIp,
-      sshKeyPath,
+    const { openReplicationFirewallForPeers } = await import('./lib/deploy/effects/k8s-ha.js');
+    await openReplicationFirewallForPeers({
+      provider: ctx.apiToken ? new ctx.Provider(ctx.apiToken) : null,
+      projectName: projectConfig.projectName,
+      primaryStack: haRoles.primary.clusterEnv,
+      standbyStack: haRoles.standby.clusterEnv,
+      primaryDbIp: primaryDb.dbIp,
+      standbyDbIp: standbyDb.dbIp,
     });
-    s.stop('WireGuard tunnel re-established (wg0 recreated, repl-gateway restarted)');
   } catch (err) {
-    s.stop('WireGuard tunnel re-establish failed, continuing to readiness wait', 1);
     p.log.warn(
-      `Could not re-establish the replication tunnel after resize: ${err.message?.split('\n')[0] || err}. ` +
-        'Run `vibecarbon deploy` to fully restore replication.',
+      `Could not open the replication firewall after resize: ${err.message?.split('\n')[0] || err}. ` +
+        'Run `vibecarbon deploy` to open UDP 51821 to each peer database node.',
     );
   }
 }

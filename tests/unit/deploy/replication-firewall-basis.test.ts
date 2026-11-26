@@ -50,8 +50,8 @@ describe('the replication openers pass the firewall they read as the basis', () 
 
     await K8S_HA_EFFECTS.haK8sOpenReplicationFirewall({
       options: { provider: 'vultr', apiToken: 't', projectName: 'acme', environment: 'prod' },
-      primaryResult: { dbIp: '198.51.100.1' },
-      standbyResult: { dbIp: '198.51.100.2' },
+      primaryResult: { stack: 'prod-primary', dbIp: '198.51.100.1' },
+      standbyResult: { stack: 'prod-standby', dbIp: '198.51.100.2' },
     });
 
     expect(set).toHaveBeenCalledTimes(2);

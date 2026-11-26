@@ -32,11 +32,21 @@ vi.mock('../../../src/failover.js', () => ({
 
 vi.mock('../../../src/lib/deploy/k8s/ha/index.js', () => ({
   reestablishReplicationTransport: vi.fn(async () => {}),
+  // Imported by effects/k8s-ha.js, whose replication opener the belt calls.
+  prepareReplicationTransport: vi.fn(async () => {}),
+  configurePrimaryForReplication: vi.fn(async () => {}),
+  setupReplication: vi.fn(async () => ({ streaming: true, lastState: '' })),
+}));
+
+vi.mock('../../../src/lib/iac/converge-cluster.js', () => ({
+  convergeClusterInfra: vi.fn(async () => ({ outputs: {} })),
 }));
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 const { identifyServers } = await import('../../../src/failover.js');
 const { reestablishReplicationTransport } = await import('../../../src/lib/deploy/k8s/ha/index.js');
+const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
+const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
 const baseCtx = {
   environment: 'prod',
@@ -104,5 +114,124 @@ describe('scaleReestablishHaTunnel gating', () => {
         infraChanges: ['dbType'],
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+// Review Focus 4. A database-node resize that REPLACED the node gives it a new
+// public address. The record (identifyServers) still holds the old one until
+// a deploy saves again, so the belt takes the converge's outputs, rebuilds the
+// tunnel to the new addresses, and then re-opens UDP 51821 on both clusters'
+// firewalls for them (openReplicationFirewallForPeers, the deploy's opener).
+describe('scaleReestablishHaTunnel after a resize that replaced the database nodes', () => {
+  const OLD = { primary: '167.233.150.173', standby: '157.180.115.19' };
+  const NEW = { primary: '198.51.100.98', standby: '198.51.100.99' };
+  const hetzner = new HetznerProvider('t');
+  /** A firewall holding the peer rule the deploy wrote, by the provider's own builder. */
+  const firewallAdmitting = (id: number, peer: string) => ({
+    id,
+    rules: hetzner.buildReplicationFirewallRules({ rules: [] }, peer),
+  });
+
+  function haCtx() {
+    return {
+      ...baseCtx,
+      isHA: true,
+      Provider: HetznerProvider,
+      apiToken: 't',
+      projectConfig: { projectName: 'acme' },
+      envConfig: {
+        ha: {
+          primary: { stack: 'prod-primary', region: 'nbg1', dbIp: OLD.primary },
+          standby: { stack: 'prod-standby', region: 'ash', dbIp: OLD.standby },
+        },
+      },
+      changes: ['dbType'],
+      newValues: { dbType: 'cx33' },
+      infraChanges: ['dbType'],
+      currentWorkerType: 'cx23',
+    } as Record<string, unknown>;
+  }
+
+  function firewalls() {
+    const byName: Record<string, ReturnType<typeof firewallAdmitting>> = {
+      'acme-prod-primary-firewall': firewallAdmitting(1, OLD.standby),
+      'acme-prod-standby-firewall': firewallAdmitting(2, OLD.primary),
+    };
+    const find = vi
+      .spyOn(HetznerProvider.prototype, 'findFirewallByName')
+      .mockImplementation(async (name: string) => structuredClone(byName[name]) ?? null);
+    const set = vi
+      .spyOn(HetznerProvider.prototype, 'setFirewallRules')
+      .mockResolvedValue(undefined as never);
+    return { find, set };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(reestablishReplicationTransport).mockClear();
+    vi.mocked(convergeClusterInfra).mockReset();
+  });
+
+  it('both clusters: the tunnel and both firewalls take the new addresses, the firewalls after the tunnel', async () => {
+    vi.mocked(convergeClusterInfra).mockImplementation(async ({ clusterEnv }) => ({
+      outputs:
+        clusterEnv === 'prod-standby'
+          ? { masterIp: '2.2.2.2', dbIp: NEW.standby, dbPrivateIp: '10.0.1.2' }
+          : { masterIp: '1.1.1.1', dbIp: NEW.primary, dbPrivateIp: '10.0.1.2' },
+    }));
+    const { find, set } = firewalls();
+    const ctx = haCtx();
+
+    await SCALE_EFFECTS.scaleApplyK8sChanges(ctx);
+    await SCALE_EFFECTS.scaleReestablishHaTunnel(ctx);
+
+    expect(reestablishReplicationTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ primaryDbIp: NEW.primary, standbyDbIp: NEW.standby }),
+    );
+    const written = Object.fromEntries(
+      set.mock.calls.map(([id, rules]) => [id, JSON.stringify(rules)]),
+    );
+    // prod-primary's firewall admits the standby's new database node, and
+    // prod-standby's the primary's; neither old address stays.
+    expect(Object.keys(written).sort()).toEqual(['1', '2']);
+    expect(written[1]).toContain(`"${NEW.standby}/32"`);
+    expect(written[2]).toContain(`"${NEW.primary}/32"`);
+    for (const rules of Object.values(written)) {
+      expect(rules).not.toContain(OLD.primary);
+      expect(rules).not.toContain(OLD.standby);
+    }
+    const transportAt = vi.mocked(reestablishReplicationTransport).mock.invocationCallOrder[0];
+    expect(Math.min(...find.mock.invocationCallOrder)).toBeGreaterThan(transportAt);
+  });
+
+  it('the standby only: the primary firewall moves to it, the standby firewall is left as it is', async () => {
+    vi.mocked(convergeClusterInfra).mockImplementation(async ({ clusterEnv }) => ({
+      outputs:
+        clusterEnv === 'prod-standby'
+          ? { masterIp: '2.2.2.2', dbIp: NEW.standby, dbPrivateIp: '10.0.1.2' }
+          : { masterIp: '1.1.1.1', dbIp: OLD.primary, dbPrivateIp: '10.0.1.2' },
+    }));
+    const { set } = firewalls();
+    const ctx = haCtx();
+
+    await SCALE_EFFECTS.scaleApplyK8sChanges(ctx);
+    await SCALE_EFFECTS.scaleReestablishHaTunnel(ctx);
+
+    expect(reestablishReplicationTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ primaryDbIp: OLD.primary, standbyDbIp: NEW.standby }),
+    );
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set.mock.calls[0][0]).toBe(1);
+    expect(JSON.stringify(set.mock.calls[0][1])).toContain(`"${NEW.standby}/32"`);
+    expect(JSON.stringify(set.mock.calls[0][1])).not.toContain(OLD.standby);
+  });
+
+  it('a firewall the provider cannot read only warns: the belt never throws', async () => {
+    vi.mocked(convergeClusterInfra).mockResolvedValue({ outputs: {} });
+    vi.spyOn(HetznerProvider.prototype, 'findFirewallByName').mockRejectedValue(
+      new Error('hetzner 503'),
+    );
+    await expect(SCALE_EFFECTS.scaleReestablishHaTunnel(haCtx())).resolves.toBeUndefined();
+    expect(reestablishReplicationTransport).toHaveBeenCalledTimes(1);
   });
 });

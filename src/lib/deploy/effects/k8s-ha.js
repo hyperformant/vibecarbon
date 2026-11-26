@@ -41,6 +41,7 @@ import { c, link } from '../../colors.js';
 import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { summarizePulumiError } from '../../iac/index.js';
+import { replicationPeerIpFor } from '../../iac/program-inputs.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor } from '../../providers/index.js';
 import { haClassMessage } from '../../sizing.js';
@@ -139,6 +140,12 @@ async function haK8sProvisionClusters(ctx) {
   const standbyEnv = options.haStacks?.standby?.stack ?? `${options.environment}-standby`;
   const primaryRegion = options.haStacks?.primary?.region ?? options.region;
   const standbyRegion = options.haStacks?.standby?.region ?? options.secondaryRegion;
+
+  // Each cluster's up declares its replication rule from the OTHER side's
+  // recorded database address (replicationPeerIpFor, read again by
+  // deployK3s). A hand-edited one refuses the deploy here, before either
+  // cluster's deploy starts, not after one side's up has run.
+  for (const stack of [primaryEnv, standbyEnv]) replicationPeerIpFor(options.envConfig, stack);
 
   // 1 & 2. Deploy primary and standby clusters in parallel.
   // Each cluster gets a PrefixedTracker that logs with [region] prefixes instead of
@@ -426,7 +433,8 @@ async function haK8sProvisionClusters(ctx) {
       await openReplicationFirewallForPeers({
         provider: options.apiToken ? new Provider(options.apiToken) : null,
         projectName: options.projectName,
-        environment: options.environment,
+        primaryStack: primaryEnv,
+        standbyStack: standbyEnv,
         primaryDbIp: pInfra.dbIp,
         standbyDbIp: sInfra.dbIp,
       });
@@ -580,30 +588,50 @@ function startStandbyImageCopy(ctx) {
  * WG endpoints are the database nodes' public IPs, and the firewall's default
  * udp rule only admits the private range. Symmetric on both clusters: the
  * standby streams from the primary at deploy time, and the post-failover
- * reverse re-seed dials the promoted standby (neither failover.js nor
- * restore.js touches firewalls, so deploy must set up both directions). The
- * per-cluster firewall (`<project>-<env>-<role>-firewall`) is attached to all
- * that cluster's nodes incl. the database/WG node. provider.buildReplicationFirewallRules
+ * reverse re-seed dials the promoted standby, so both directions are open.
+ *
+ * This is the bootstrap writer. Every k8s program that declares its rules
+ * inline (Hetzner, DigitalOcean, Linode) also declares this rule from the
+ * peer's RECORDED database address (replicationPeerIpFor), so the ups of a
+ * scale, a failover or a later deploy keep it; this step writes it when the
+ * record has none yet (a first deploy) or names an old node (a replaced
+ * database node), and is a no-op otherwise. The other caller is scale's
+ * tunnel rebuild (scaleReestablishHaTunnel), after a resize that may have
+ * replaced a database node. Failover and restore write no firewall rule.
+ *
+ * Each firewall is its cluster STACK's (`<project>-<stack>-firewall`, the
+ * program's name), never its role's: after a failover the `<env>-primary`
+ * stack plays the standby, and a role-named lookup wrote each cluster's own
+ * address into the other's firewall. It is attached to all that cluster's
+ * nodes incl. the database/WG node. provider.buildReplicationFirewallRules
  * emits the udp/51821 rule (Hetzner also scrubs stale TCP 5432/5433/30432
  * rules from the retired public-IP TLS transport — see HetznerProvider's
  * implementation). Non-fatal per cluster (manual firewall config may
- * suffice). Shared by the early fan-out prep and the post-provision effect;
- * idempotent — no set_rules PUT when the rules already match.
+ * suffice). Idempotent — no set_rules PUT when the rules already match.
+ *
+ * @param {object} args
+ * @param {object|null} args.provider a provider instance; null skips the step
+ * @param {string} args.projectName
+ * @param {string} args.primaryStack the stack serving as primary
+ * @param {string} args.standbyStack the stack serving as standby
+ * @param {string} [args.primaryDbIp] the primary's database node public IPv4
+ * @param {string} [args.standbyDbIp] the standby's database node public IPv4
  */
-async function openReplicationFirewallForPeers({
+export async function openReplicationFirewallForPeers({
   provider,
   projectName,
-  environment,
+  primaryStack,
+  standbyStack,
   primaryDbIp,
   standbyDbIp,
 }) {
   if (!provider) return;
-  for (const [clusterRole, peerDbIp] of [
-    ['primary', standbyDbIp],
-    ['standby', primaryDbIp],
+  for (const [clusterRole, stack, peerDbIp] of [
+    ['primary', primaryStack, standbyDbIp],
+    ['standby', standbyStack, primaryDbIp],
   ]) {
     if (!peerDbIp) continue;
-    const firewallName = `${projectName}-${environment}-${clusterRole}-firewall`;
+    const firewallName = `${projectName}-${stack}-firewall`;
     try {
       const firewall = await provider.findFirewallByName(firewallName);
       if (!firewall) {
@@ -647,7 +675,8 @@ async function haK8sOpenReplicationFirewall(ctx) {
   await openReplicationFirewallForPeers({
     provider: options.apiToken ? new Provider(options.apiToken) : null,
     projectName: options.projectName,
-    environment: options.environment,
+    primaryStack: primaryResult.stack,
+    standbyStack: standbyResult.stack,
     primaryDbIp: primaryResult.dbIp,
     standbyDbIp: standbyResult.dbIp,
   });
