@@ -8,9 +8,10 @@
  * public half goes to GitHub with `gh`, titled for the cluster; the private
  * half goes into the cluster's flux-system Secret, beside GitHub's published
  * host keys, and nowhere else. It reaches kubectl on stdin, never argv or
- * disk, and this process keeps no copy. Then the key that Secret held before,
- * the one with the same title, is removed. A key titled for any other cluster,
- * or added by anyone else, is never touched.
+ * disk, and this process keeps no copy. Then every other key with the same
+ * title is removed: the one that Secret held before, and any a failed run
+ * left. A key titled for any other cluster, or added by anyone else, is never
+ * touched.
  */
 
 import { generateKeyPairSync } from 'node:crypto';
@@ -123,8 +124,11 @@ export async function addDeployKey({ owner, repo, title, publicKey }) {
 }
 
 /**
- * Every deploy key on the repo, every page. The title is filtered here, not
- * in the jq expression, so no title is ever spliced into one.
+ * Every deploy key on the repo, every page, one JSON object per line: a title
+ * with a tab or a newline in it stays inside its own line's string, so no
+ * title can pass for another key. The title is filtered here, not in the
+ * fixed jq expression, so no title is ever spliced into one. An answer that
+ * is not one key per line is refused rather than guessed at.
  *
  * @param {{ owner: string, repo: string }} args
  * @returns {Promise<Array<{ id: number, title: string }>>}
@@ -135,15 +139,26 @@ export async function listDeployKeys({ owner, repo }) {
     `repos/${owner}/${repo}/keys`,
     '--paginate',
     '--jq',
-    '.[] | "\\(.id)\\t\\(.title)"',
+    '.[] | {id, title} | @json',
   ]);
   return String(out ?? '')
     .split('\n')
+    .filter((line) => line.trim())
     .map((line) => {
-      const tab = line.indexOf('\t');
-      return { id: Number(line.slice(0, tab)), title: line.slice(tab + 1) };
-    })
-    .filter(({ id }) => Number.isSafeInteger(id) && id > 0);
+      let key;
+      try {
+        key = JSON.parse(line);
+      } catch {
+        key = null;
+      }
+      if (!Number.isSafeInteger(key?.id) || key.id <= 0 || typeof key.title !== 'string') {
+        throw new Error(
+          `gh api repos/${owner}/${repo}/keys did not answer with its deploy keys, so no old key ` +
+            'was removed. the next configure cicd tries again.',
+        );
+      }
+      return { id: key.id, title: key.title };
+    });
 }
 
 /**
@@ -171,13 +186,15 @@ export function fluxSystemSecretManifest({ privateKeyPem, publicKey, knownHosts 
 /**
  * Give the cluster a new deploy key: host keys first (nothing is added
  * without them), then the new key at GitHub, then the Secret written whole,
- * and only then the old key, the one titled for this cluster, removed. Flux
- * never holds a key GitHub has already dropped.
+ * and only then every other key titled for this cluster removed. Flux never
+ * holds a key GitHub has already dropped.
  *
- * A Secret write that fails takes the new key back, and the cluster keeps the
- * old one, which still works. If even that removal fails, the key left at
- * GitHub opens nothing (its private half was never kept), and the next run
- * removes it by its title.
+ * A Secret write that fails removes no key: kubectl can report a failure for
+ * a write the API server committed (a lost response), so the cluster may hold
+ * either key, and both still work. The error goes to the operator, and the
+ * next run removes whichever key it does not write, by its title. A key left
+ * at GitHub that no Secret holds opens nothing: its private half was never
+ * kept.
  *
  * @param {{ env: NodeJS.ProcessEnv, owner: string, repo: string, envName: string }} args -
  *   env carries the cluster's KUBECONFIG; envName names the cluster
@@ -200,16 +217,11 @@ export async function rotateFluxDeployKey({ env, owner, repo, envName }) {
     }
     throw err;
   }
-  try {
-    await replaceWholeSecret({
-      env,
-      ...FLUX_SECRET,
-      manifest: fluxSystemSecretManifest({ privateKeyPem, publicKey, knownHosts }),
-    });
-  } catch (err) {
-    await deleteDeployKey({ owner, repo, id: keyId }).catch(() => {});
-    throw err;
-  }
+  await replaceWholeSecret({
+    env,
+    ...FLUX_SECRET,
+    manifest: fluxSystemSecretManifest({ privateKeyPem, publicKey, knownHosts }),
+  });
   const removed = [];
   for (const key of await listDeployKeys({ owner, repo })) {
     if (key.title !== title || key.id === keyId) continue;

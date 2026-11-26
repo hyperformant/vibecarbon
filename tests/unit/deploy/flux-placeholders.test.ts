@@ -25,6 +25,11 @@ import {
 } from '../../_shared/gitops-project.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
+vi.mock('@clack/prompts', async (orig) =>
+  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+    log: ['info', 'success', 'warn', 'error'],
+  }),
+);
 vi.mock('../../../src/lib/github-environments.js', () => ({
   listEnvironmentVariables: vi.fn(async () => []),
   listRepoSecretNames: vi.fn(async () => []),
@@ -229,18 +234,25 @@ describe('deployK8sGitOps refuses a tree Flux would apply with a token', () => {
         .map((rel) => [rel, readFileSync(join(dir, rel), 'utf-8')]),
     );
 
-  const deploy = (project: string, imageTag?: string) =>
-    deployK8sGitOps({
-      projectDir: project,
-      environment: 'prod',
-      domain: 'app.example.test',
-      projectName: 'proj',
-      kubeconfigPath: join(project, 'kubeconfig'),
-      appStorage: { accessKey: 'a', secretKey: 'b' },
-      imageTag,
-      githubOwner: 'acme',
-      ProviderClass: PROVIDERS.hetzner,
-    });
+  const deploy = async (project: string, imageTag?: string) => {
+    // git push reports to stderr, which execFileSync passes on to ours.
+    const pushLines = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      return await deployK8sGitOps({
+        projectDir: project,
+        environment: 'prod',
+        domain: 'app.example.test',
+        projectName: 'proj',
+        kubeconfigPath: join(project, 'kubeconfig'),
+        appStorage: { accessKey: 'a', secretKey: 'b' },
+        imageTag,
+        githubOwner: 'acme',
+        ProviderClass: PROVIDERS.hetzner,
+      });
+    } finally {
+      pushLines.mockRestore();
+    }
+  };
 
   it('stops before anything is written, committed, pushed or seeded, naming the file, the token and the way out', async () => {
     const { project, origin } = gitopsProject();

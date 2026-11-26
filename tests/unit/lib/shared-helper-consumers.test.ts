@@ -586,6 +586,7 @@ const REGISTRY = [
       'tests/unit/deploy/compose-ha-early-tunnel.test.ts',
       'tests/unit/deploy/compose-ha-reconverge.test.ts',
       'tests/unit/deploy/compose-ha-streaming-fastpath.test.ts',
+      'tests/unit/deploy/flux-placeholders.test.ts',
       'tests/unit/deploy/gitops-handover.test.ts',
       'tests/unit/destroy/failed-stack-second-pass.test.ts',
       'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',

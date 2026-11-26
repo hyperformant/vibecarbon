@@ -521,6 +521,27 @@ describe('vibecarbon upgrade after configure cicd', () => {
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   }
 
+  /**
+   * Turn the fresh project into one created when Flux cloned over https: the
+   * cluster files' url as that create wrote it, and the checksums it
+   * recorded for them.
+   */
+  function createdWhenFluxClonedOverHttps() {
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    for (const cluster of CLUSTERS) {
+      const rel = fluxFile(cluster);
+      const text = read(rel).replace(
+        'url: ssh://git@github.com/test-app/test-app',
+        'url: https://github.com/test-app/test-app',
+      );
+      expect(text, `${rel} aged`).not.toBe(read(rel));
+      writeFileSync(join(project, rel), text);
+      config.fileChecksums[rel] = hashContent(text);
+    }
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  }
+
   function configureCicd() {
     const r = runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 });
     assertSuccess(r);
@@ -548,6 +569,31 @@ describe('vibecarbon upgrade after configure cicd', () => {
       expect(existsSync(join(project, `${fluxFile(cluster)}.upgrade-new`)), cluster).toBe(false);
     }
     expect(read('k8s/base/app/deployment.yaml')).toContain(`image: ghcr.io/${OWNER}/test-app:main`);
+  });
+
+  it('-y moves the cluster files configure cicd pointed at the real owner over https to ssh', () => {
+    // The project an older vibecarbon made and configured: Flux cloned
+    // github.com/acme/test-app over https with the workflow's token, which
+    // configure cicd now refuses. Upgrade is the way out it names.
+    createdWhenFluxClonedOverHttps();
+    assertSuccess(
+      runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 }),
+    );
+    for (const cluster of CLUSTERS) {
+      expect(read(fluxFile(cluster))).toContain(`url: https://github.com/${OWNER}/test-app\n`);
+    }
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    for (const cluster of CLUSTERS) {
+      expect(read(fluxFile(cluster)), cluster).toBe(shipped(fluxFile(cluster), OWNER));
+      expect(read(fluxFile(cluster)), cluster).toContain(
+        `url: ssh://git@github.com/${OWNER}/test-app\n`,
+      );
+      expect(existsSync(join(project, `${fluxFile(cluster)}.upgrade-new`)), cluster).toBe(false);
+    }
   });
 
   it('a Flux file the user changed is offered with the real owner, and upgrade says Flux would apply the token', () => {

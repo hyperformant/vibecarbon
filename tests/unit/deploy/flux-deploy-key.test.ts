@@ -44,6 +44,7 @@ const {
   fluxSystemSecretManifest,
   generateDeployKeyPair,
   githubKnownHosts,
+  listDeployKeys,
   rotateFluxDeployKey,
 } = await import('../../../src/lib/deploy/k8s/flux-deploy-key.js');
 const { handOverCluster } = await import('../../../src/lib/deploy/k8s/flux-handover.js');
@@ -81,7 +82,7 @@ const github =
     if (argv[2] === 'meta') return `${HOST_KEYS.join('\n')}\n`;
     if (argv.includes('POST')) return `${added}\n`;
     if (argv.includes('--paginate')) {
-      return [...keys, { id: added, title }].map((k) => `${k.id}\t${k.title}\n`).join('');
+      return [...keys, { id: added, title }].map((k) => `${JSON.stringify(k)}\n`).join('');
     }
     if (argv.includes('DELETE')) return '';
     throw new Error(`unexpected gh ${argv.join(' ')}`);
@@ -226,6 +227,67 @@ describe('addDeployKey', () => {
   });
 });
 
+describe('a refused add', () => {
+  it('any other refusal reaches the operator as gh said it, and touches no cluster', async () => {
+    // A 422: GitHub already has this key (a key is unique across GitHub).
+    let refused: Error | undefined;
+    h.gh = (argv) => {
+      if (argv.includes('POST')) {
+        refused = ghFailed(
+          argv,
+          'gh: Validation Failed (HTTP 422)\n{"message":"Validation Failed","errors":[{"resource":"PublicKey","code":"custom","field":"key","message":"key is already in use"}]}\n',
+        );
+        throw refused;
+      }
+      return github()(argv);
+    };
+    const err = await rotateFluxDeployKey({
+      env,
+      owner: 'acme',
+      repo: 'shop',
+      envName: 'prod',
+    }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(refused).toBeDefined();
+    expect(err).toBe(refused);
+    expect(err?.message).toContain('key is already in use');
+    expect(h.calls.filter((c) => c.tool === 'kubectl')).toEqual([]);
+  });
+});
+
+describe('listDeployKeys', () => {
+  it("a title with a tab and a newline in it stays that one key's title", async () => {
+    // Read as `id<TAB>title` lines, this title would forge a second line
+    // naming key 9 as this cluster's, and key 9 would be removed.
+    const keys = [
+      { id: 9, title: 'deploy bot' },
+      { id: 10, title: 'notes\n9\tvibecarbon flux prod' },
+    ];
+    h.gh = () => keys.map((k) => `${JSON.stringify(k)}\n`).join('');
+    await expect(listDeployKeys({ owner: 'acme', repo: 'shop' })).resolves.toEqual(keys);
+
+    h.calls.length = 0;
+    h.gh = github({ keys });
+    h.kubectl = cluster();
+    await expect(
+      rotateFluxDeployKey({ env, owner: 'acme', repo: 'shop', envName: 'prod' }),
+    ).resolves.toEqual({ keyId: 42, removed: [] });
+    expect(steps().filter((s) => s.startsWith('gh DELETE'))).toEqual([]);
+  });
+
+  it('an answer that is not one key per line is refused, not guessed at', async () => {
+    for (const answer of ['9\tdeploy bot\n', '{"id":"9","title":"deploy bot"}\n', '{"id":9}\n']) {
+      h.gh = () => answer;
+      await expect(
+        listDeployKeys({ owner: 'acme', repo: 'shop' }),
+        JSON.stringify(answer),
+      ).rejects.toThrow(/did not answer with its deploy keys/);
+    }
+  });
+});
+
 describe('fluxSystemSecretManifest', () => {
   it('the Secret holds exactly identity, identity.pub and known_hosts', () => {
     const { privateKeyPem, publicKey } = generateDeployKeyPair();
@@ -283,7 +345,7 @@ describe('rotateFluxDeployKey', () => {
       'repos/acme/shop/keys',
       '--paginate',
       '--jq',
-      '.[] | "\\(.id)\\t\\(.title)"',
+      '.[] | {id, title} | @json',
     ]);
     // The cluster's own kubeconfig, for every kubectl.
     expect(h.calls.filter((c) => c.tool === 'kubectl').every((c) => c.env === env)).toBe(true);
@@ -332,21 +394,32 @@ describe('rotateFluxDeployKey', () => {
     expect(steps()).toEqual(['gh meta']);
   });
 
-  it('a Secret write that fails removes the new key and keeps the old one', async () => {
+  it('a Secret write that fails removes no key, and says why it failed', async () => {
+    // kubectl can report a failure for a write the API server committed (a
+    // lost response), so the cluster may hold either key: both stay at
+    // GitHub, and the next run removes the one it does not write.
     h.gh = github({ keys: [{ id: 7, title: 'vibecarbon flux prod' }] });
-    const refused = new Error('flux: replace Secret/flux-system failed with exit 1: forbidden');
+    const refused = new Error(
+      'flux: replace Secret/flux-system failed with exit 1: http2: client connection lost',
+    );
     h.kubectl = (args) => {
       if (args[0] === 'replace') throw refused;
       return cluster()(args);
     };
     await expect(rotate()).rejects.toBe(refused);
-    expect(steps()).toEqual([
-      'gh meta',
-      'gh POST',
-      'kubectl get secret',
-      'kubectl replace',
-      'gh DELETE 42',
-    ]);
+    expect(steps()).toEqual(['gh meta', 'gh POST', 'kubectl get secret', 'kubectl replace']);
+  });
+
+  it('the next run removes a key a failed write left behind, by its title', async () => {
+    // Key 41 is the one the failed run added; 7 the one before it.
+    h.gh = github({
+      keys: [
+        { id: 7, title: 'vibecarbon flux prod' },
+        { id: 41, title: 'vibecarbon flux prod' },
+      ],
+    });
+    h.kubectl = cluster();
+    await expect(rotate()).resolves.toEqual({ keyId: 42, removed: [7, 41] });
   });
 
   it('the private key rides stdin only and never touches disk', async () => {
