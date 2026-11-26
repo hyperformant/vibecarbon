@@ -46,6 +46,7 @@ fi
 hostnamectl set-hostname "$NODE_NAME"
 echo "Node name: $NODE_NAME"
 
+# @include _host-firewall-off.sh
 # @include _container-signals.sh
 # @include _stable-flowlabel.sh
 

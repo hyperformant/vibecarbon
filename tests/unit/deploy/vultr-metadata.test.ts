@@ -28,10 +28,10 @@ afterEach(() => {
 
 /**
  * Run the include under the boot scripts' shell options, then print what it
- * set. `metadata` is the /v1.json body, or null for a service that never
- * answers (curl -f exits 22).
+ * set. `metadata` is the /v1.json body (a string is sent as is), or null for
+ * a service that never answers (curl -f exits 22).
  */
-function run(metadata: object | null, kernel: Kernel) {
+function run(metadata: object | string | null, kernel: Kernel) {
   tmp = createTempDir('vc-vultr-metadata-');
   const bin = join(tmp, 'bin');
   mkdirSync(bin);
@@ -40,8 +40,10 @@ function run(metadata: object | null, kernel: Kernel) {
     chmodSync(join(bin, name), 0o755);
   };
   const json = join(tmp, 'v1.json');
-  if (metadata) writeFileSync(json, JSON.stringify(metadata));
-  shim('curl', metadata ? `cat ${json}` : 'exit 22');
+  if (metadata !== null) {
+    writeFileSync(json, typeof metadata === 'string' ? metadata : JSON.stringify(metadata));
+  }
+  shim('curl', metadata !== null ? `cat ${json}` : 'exit 22');
   const lines = kernel.map(
     ({ iface, cidr }, i) =>
       `${i + 1}: ${iface}    inet ${cidr} brd 10.255.255.255 scope global ${iface}\\       valid_lft forever preferred_lft forever`,
@@ -106,6 +108,28 @@ describe('_vultr-metadata.sh (executed)', () => {
 
   it('metadata never answers: FATAL on the public address', () => {
     const r = run(null, KERNEL);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('FATAL: no public address in Vultr metadata');
+    expect(r.stdout).toBe('');
+  });
+
+  it('no instance-v2-id: FATAL, so no node joins without a provider id', () => {
+    const r = run({ hostname: 'acme-prod-master', interfaces: [PUBLIC, PRIVATE] }, KERNEL);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('FATAL: no instance-v2-id in Vultr metadata');
+    expect(r.stdout).toBe('');
+  });
+
+  // A JSON body that is not an object fails the parser's first read, which
+  // prints nothing, so every value is empty; a body that is not JSON at all
+  // reads as no fields. Both stop on the first check.
+  it.each([
+    ['a JSON array', '[]'],
+    ['a JSON string', '"ok"'],
+    ['JSON null', 'null'],
+    ['not JSON', '<html>502 Bad Gateway</html>'],
+  ])('%s body: FATAL on the public address', (_what, body) => {
+    const r = run(body, KERNEL);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('FATAL: no public address in Vultr metadata');
     expect(r.stdout).toBe('');

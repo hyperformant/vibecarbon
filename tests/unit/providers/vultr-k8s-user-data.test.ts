@@ -69,6 +69,20 @@ describe('VultrProvider k8s user-data statics', () => {
     },
   );
 
+  // Vultr's Ubuntu image boots with UFW active, which would drop the
+  // cluster's own traffic (_host-firewall-off.sh).
+  it.each(roles)('%s: turns UFW off before the k3s install', async (_role, vars, fn) => {
+    const commands = (await render(fn, vars))
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    const disable = commands.indexOf('ufw --force disable');
+    const install = commands.search(/curl[^\n]*get\.k3s\.io/);
+    expect(disable, 'ufw disable').toBeGreaterThan(-1);
+    expect(install, 'k3s install').toBeGreaterThan(-1);
+    expect(disable).toBeLessThan(install);
+  });
+
   it('master: advertises the private address, joins agents only, and creates no Secret', async () => {
     const rendered = await VultrProvider.getK8sMasterUserData(masterVars);
     expect(rendered).toContain('provider-id=vultr://');
@@ -170,10 +184,13 @@ describe('VultrProvider k8s user-data statics', () => {
     });
   });
 
-  it('both templates, the include and the db render are pure ASCII', async () => {
-    const texts = ['vultr-master-init.sh', 'vultr-worker-init.sh', '_vultr-metadata.sh'].map((f) =>
-      readRepoFile(`carbon/cloud-init/k3s/${f}`),
-    );
+  it('both templates, their includes and the db render are pure ASCII', async () => {
+    const texts = [
+      'vultr-master-init.sh',
+      'vultr-worker-init.sh',
+      '_vultr-metadata.sh',
+      '_host-firewall-off.sh',
+    ].map((f) => readRepoFile(`carbon/cloud-init/k3s/${f}`));
     texts.push(await VultrProvider.getK8sDbUserData(agentVars));
     for (const text of texts) {
       expect([...text].every((ch) => (ch.codePointAt(0) ?? 0) <= 0x7f)).toBe(true);
