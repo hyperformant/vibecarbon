@@ -164,6 +164,7 @@ _m x
 # ones upstream's install docs name, at the snapshotter sidecar's version. No
 # snapshot controller: nothing here takes a VolumeSnapshot. CRDs run no pod,
 # so they name no image to mirror.
+# These CRDs follow the snapshotter sidecar's version and do not hold k3s.
 CSI_CRDS_OK=false
 for i in 1 2 3; do
   if kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml \
@@ -223,7 +224,9 @@ for i in 1 2 3; do
 done
 if [ "$CSI_NODE_TOLERATION_OK" != "true" ]; then
   echo "FATAL: could not patch csi-vultr-node with a universal toleration after 3 attempts -- the db pod (and any pod on a tainted dedicated node) would wait Pending for good with a volume node affinity conflict" >&2
+  echo "csi-vultr-node DaemonSet status:"
   kubectl get daemonset csi-vultr-node -n kube-system -o wide 2>&1 || true
+  kubectl describe daemonset csi-vultr-node -n kube-system 2>&1 || true
   exit 1
 fi
 

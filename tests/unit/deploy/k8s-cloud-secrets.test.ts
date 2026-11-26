@@ -504,12 +504,20 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
   });
 
   it.each(K8S_PROVIDERS.filter(([id]) => !NO_LEGACY_BOOT_SECRETS.includes(id)))(
-    '%s: the record is of the past: the boot script creates no Secret now',
-    async (id, Provider) => {
+    '%s: the record holds the Secrets an old boot script made',
+    (id) => {
       expect(masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]).length).toBeGreaterThan(0);
-      expect(masterInitSecrets(await Provider.getK8sMasterUserData({}))).toEqual([]);
     },
   );
+
+  // Every provider, the ones that never had a legacy boot Secret included:
+  // the token reaches the cluster only through applyCloudSecrets, so the
+  // boot script makes no Secret by any means, a command or a manifest.
+  it.each(K8S_PROVIDERS)('%s: the boot script creates no Secret now', async (_id, Provider) => {
+    const script = await Provider.getK8sMasterUserData({});
+    expect(masterInitSecrets(script)).toEqual([]);
+    expect(script).not.toMatch(/^\s*kind:\s*["']?Secret["']?\s*$/m);
+  });
 });
 
 describe('applyCloudSecrets', () => {

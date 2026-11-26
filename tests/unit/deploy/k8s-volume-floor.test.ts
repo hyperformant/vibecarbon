@@ -11,7 +11,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildDbManifestValues,
   renderK8sBase,
@@ -57,6 +58,8 @@ const requests = (text: string) =>
   [...text.matchAll(/^\s*storage:[ \t]*(\S.*)$/gm)].map(([, value]) => value.trim());
 
 describe('the volume floor raises a small request at render time', () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it('raises a 1Gi request to the floor', () => {
     const { 'pvc.yaml': out } = render({ 'pvc.yaml': pvc('1Gi') }, { minVolumeGi: 10 });
     expect(requests(out)).toEqual(['10Gi']);
@@ -89,6 +92,35 @@ describe('the volume floor raises a small request at render time', () => {
     expect(out['configmap.yaml']).toBe(other);
     expect(out['pvc.yaml'].startsWith('# storage: 1Gi\n')).toBe(true);
     expect(requests(out['pvc.yaml'])).toEqual(['10Gi']);
+  });
+
+  it('raises a request in a file with CRLF line ends, and keeps them', () => {
+    const crlf = (text: string) => text.replaceAll('\n', '\r\n');
+    const { 'pvc.yaml': out } = render({ 'pvc.yaml': crlf(pvc('1Gi')) }, { minVolumeGi: 10 });
+    expect(out).toBe(crlf(pvc('10Gi').replace(PLACEHOLDER, CLASS)));
+  });
+
+  it('says so when it cannot read a request, which would otherwise wait Pending silently', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const { 'pvc.yaml': out } = render({ 'pvc.yaml': pvc('500Mi') }, { minVolumeGi: 10 });
+    expect(out).toBe(pvc('500Mi').replace(PLACEHOLDER, CLASS));
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [message] = warn.mock.calls[0];
+    expect(message).toContain('pvc.yaml');
+    expect(message).toContain('storage: 500Mi');
+    expect(message).toContain('10Gi');
+    expect(message).toContain('Pending');
+    expect(message).toMatch(/^[a-z/]/);
+    expect(message).not.toMatch(/[–—]/);
+  });
+
+  it('says nothing about a request it read, a size-less storage key, or a floor of 0', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const nested = `${pvc('1Gi')}---\nkind: ConfigMap\ndata:\n  storage:\n    path: /data\n`;
+    render({ 'pvc.yaml': nested, 'quoted.yaml': pvc('"20Gi"') }, { minVolumeGi: 10 });
+    render({ 'pvc.yaml': pvc('500Mi') });
+    render({ 'configmap.yaml': 'kind: ConfigMap\ndata:\n  storage: 500Mi\n' }, { minVolumeGi: 10 });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('every PVC under carbon/k8s and services that names {{K8S_STORAGE_CLASS}} requests storage in Gi', () => {
@@ -158,7 +190,18 @@ describe('renderK8sBase raises the db and the add-on claims under k8s/base', () 
 
 describe('applyK3sManifests passes the provider floor to every StorageClass render', () => {
   const whole = readRepoFile('src/lib/deploy/k8s/k3s.js');
-  const body = whole.slice(whole.indexOf('export async function applyK3sManifests({'));
+  const start = whole.indexOf('export async function applyK3sManifests({');
+  // Through the function's own closing brace, the first one at column 0, so
+  // a call to either renderer elsewhere in the file cannot satisfy the guard.
+  const end = whole.indexOf('\n}\n', start);
+  const body = whole.slice(start, end + 2);
+
+  it('the slice is the whole function and nothing after it', () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(body.endsWith('\n}')).toBe(true);
+    expect(body.indexOf('\nexport ', 1)).toBe(-1);
+  });
   /** The call, through the parenthesis that closes it. */
   const call = (name: string) => {
     const at = body.indexOf(`${name}(`);

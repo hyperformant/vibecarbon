@@ -83,10 +83,18 @@ const K8S_MODULE =
 /**
  * A manifest URL in a `kubectl apply -f` of a cloud-init script, or in the
  * `csi_fetch_mirrored` that downloads a CSI driver's manifest to apply it
- * (carbon/cloud-init/k3s/_csi-image-mirror.sh).
+ * (carbon/cloud-init/k3s/_csi-image-mirror.sh): its repo, its tag, and the
+ * path after the tag.
  */
 const DRIVER_URL =
-  /(?:kubectl apply -f|csi_fetch_mirrored) https:\/\/(?:raw\.githubusercontent\.com|github\.com)\/([\w.-]+\/[\w.-]+)\/(?:releases\/download\/)?(v\d[\d.]*)\//g;
+  /(?:kubectl apply -f|csi_fetch_mirrored) https:\/\/(?:raw\.githubusercontent\.com|github\.com)\/([\w.-]+\/[\w.-]+)\/(?:releases\/download\/)?(v\d[\d.]*)\/(\S*)/g;
+
+/**
+ * The path of a CRD-only manifest in a kubernetes-csi repo. Those CRDs follow
+ * a CSI sidecar's version, not a Kubernetes minor, and run no code built
+ * against one, so they never hold k3s.
+ */
+const CRD_ONLY_PATH = /^client\/config\/crd\//;
 
 const major = (version) => Number(version.replace(/^v/, '').split('.')[0]);
 const minor = (version) => Number(version.replace(/^v/, '').split('.')[1]);
@@ -124,13 +132,16 @@ export function k8sMinorOfGoMod(goMod) {
 
 /**
  * Every driver the cloud-init scripts install, at the tag they install. Read
- * from the scripts, so a bump or a new driver cannot miss this check.
+ * from the scripts, so a bump or a new driver cannot miss this check. A
+ * CRD-only manifest is no driver (CRD_ONLY_PATH).
  * @param {string[]} scripts
  * @returns {Array<{ repo: string, tag: string }>}
  */
 export function driverPinsIn(scripts) {
   const pins = scripts.flatMap((text) =>
-    [...text.matchAll(DRIVER_URL)].map((m) => ({ repo: m[1], tag: m[2] })),
+    [...text.matchAll(DRIVER_URL)]
+      .filter((m) => !CRD_ONLY_PATH.test(m[3]))
+      .map((m) => ({ repo: m[1], tag: m[2] })),
   );
   return [...new Map(pins.map((pin) => [`${pin.repo}@${pin.tag}`, pin])).values()];
 }

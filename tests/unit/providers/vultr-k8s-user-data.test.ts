@@ -148,6 +148,12 @@ describe('VultrProvider k8s user-data statics', () => {
     ]) {
       expect(rendered).toMatch(new RegExp(`FATAL: could not (install|patch|apply) ${what}`));
     }
+    // A failed toleration patch leaves the DaemonSet's status and events in
+    // the boot log, the clue to why the patch did not take.
+    const fatal = rendered.indexOf('FATAL: could not patch csi-vultr-node');
+    const diagnostics = rendered.slice(fatal, rendered.indexOf('exit 1', fatal));
+    expect(diagnostics).toContain('kubectl get daemonset csi-vultr-node -n kube-system -o wide');
+    expect(diagnostics).toContain('kubectl describe daemonset csi-vultr-node -n kube-system');
   });
 
   it('master mirrors its own private IP, agents mirror the master', async () => {

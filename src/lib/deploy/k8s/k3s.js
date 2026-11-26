@@ -49,6 +49,7 @@ import {
 import { isIPv4 } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as p from '@clack/prompts';
 import {
   renderBackupCronJob,
   renderBackupSettingsConfigMap,
@@ -3731,8 +3732,29 @@ export function renderK8sStorageClassPlaceholder(dir, storageClass, { minVolumeG
 
 /** A file that names this claims a volume of the provider's StorageClass. */
 const STORAGE_CLASS_TOKEN = '{{K8S_STORAGE_CLASS}}';
-/** A `storage: <n>Gi` request, bare or double-quoted, alone on its line. */
+/**
+ * A `storage: <n>Gi` request, bare or double-quoted, alone on its line. A
+ * CRLF file passes too: in multiline mode `$` also matches before a `\r`.
+ */
 const GI_STORAGE_REQUEST = /^([ \t]*storage:[ \t]*)(")?(\d+)Gi\2([ \t]*)$/gm;
+/** GI_STORAGE_REQUEST against one line, which holds no line end. */
+const GI_STORAGE_LINE = new RegExp(GI_STORAGE_REQUEST.source);
+/** Any `storage:` key with a value on its line, read or not. */
+const STORAGE_VALUE = /^[ \t]*storage:[ \t]*[^\s#].*$/gm;
+
+/**
+ * Each `storage:` line in `content` that GI_STORAGE_REQUEST cannot read, so
+ * the floor cannot raise it: `500Mi`, `1Ti`, a bare number, a trailing comment.
+ *
+ * @param {string} content
+ * @returns {string[]} the lines, trimmed
+ */
+function unreadVolumeRequests(content) {
+  return [...content.matchAll(STORAGE_VALUE)]
+    .map(([line]) => line)
+    .filter((line) => !GI_STORAGE_LINE.test(line))
+    .map((line) => line.trim());
+}
 
 /**
  * `content` with every `storage: <n>Gi` request below `minVolumeGi` raised to
@@ -3756,7 +3778,8 @@ function raiseVolumeRequests(content, minVolumeGi) {
  * tree is never modified. Keys not in `values` are left as they are.
  *
  * With `minVolumeGi`, each file that names `{{K8S_STORAGE_CLASS}}` also has
- * its smaller `storage: <n>Gi` requests raised to it (raiseVolumeRequests).
+ * its smaller `storage: <n>Gi` requests raised to it (raiseVolumeRequests),
+ * and each `storage:` line it cannot read is named in a warning.
  *
  * @param {string} dir
  * @param {Record<string, string>} values
@@ -3786,7 +3809,17 @@ function renderK8sPlaceholders(dir, values, label, { minVolumeGi = 0 } = {}) {
         const token = `{{${key}}}`;
         if (content.includes(token)) content = content.replaceAll(token, value);
       }
-      if (claimsVolume) content = raiseVolumeRequests(content, minVolumeGi);
+      if (claimsVolume) {
+        content = raiseVolumeRequests(content, minVolumeGi);
+        // A claim the floor passed by would wait Pending with no word from us.
+        for (const line of unreadVolumeRequests(content)) {
+          p.log.warn(
+            `could not read the volume size in ${srcPath} (${line}), so it was not raised to ` +
+              `this provider's ${minVolumeGi}Gi minimum. a smaller volume is refused and its ` +
+              `claim waits Pending, so write it as storage: ${minVolumeGi}Gi or more`,
+          );
+        }
+      }
       writeFileSync(destPath, content);
     }
   };

@@ -56,6 +56,10 @@ function upstream(overrides: Record<string, unknown> = {}) {
 
 const drivers = (minor = MINOR) => [{ repo: 'x/ccm', tag: 'v1', minor }];
 
+/** A CRD-only apply: the snapshot CRDs a CSI driver's VolumeSnapshotClass needs. */
+const CRD_APPLY =
+  'kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.4.0/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml \\\n';
+
 /** `version` one up at part `at` (0 major, 1 minor, 2 patch), later parts zeroed. */
 const bump = (version: string, at: number) => {
   let i = -1;
@@ -163,11 +167,16 @@ describe('the driver support oracle', () => {
       'digitalocean/digitalocean-cloud-controller-manager',
       'hetznercloud/csi-driver',
       'hetznercloud/hcloud-cloud-controller-manager',
-      'kubernetes-csi/external-snapshotter',
       'linode/linode-blockstorage-csi-driver',
       'vultr/vultr-csi',
     ]);
     expect(driverPinsIn(scripts).every((d: { tag: string }) => /^v\d/.test(d.tag))).toBe(true);
+  });
+
+  it('a CRD-only URL is no driver: those CRDs follow a CSI sidecar, not Kubernetes', () => {
+    const driver =
+      'csi_fetch_mirrored https://raw.githubusercontent.com/x/csi/v2.0.0/deploy/driver.yml /root/csi.yaml\n';
+    expect(driverPinsIn([`${CRD_APPLY}${driver}`])).toEqual([{ repo: 'x/csi', tag: 'v2.0.0' }]);
   });
 });
 
@@ -386,6 +395,14 @@ describe('planChannel', () => {
     );
     expect(out.file.kubernetes.k3s).toBe(K3S_VERSION);
     expect(out.notes.join('\n')).toContain(k3s);
+  });
+
+  it('a CRD-only manifest never holds k3s, however far behind its repo is', async () => {
+    // Each pin read from the script, its go.mod taken as a minor behind.
+    const behind = driverPinsIn([CRD_APPLY]).map((pin) => ({ ...pin, minor: MINOR - 1 }));
+    const { k3s, over } = kubernetesPatch();
+    const out = await plan(over, [...drivers(), ...behind]);
+    expect(out.file.kubernetes.k3s).toBe(k3s);
   });
 
   it('nothing in the Kubernetes set moves when no k3s release is complete', async () => {
