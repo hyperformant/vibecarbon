@@ -421,12 +421,12 @@
   - Manual backup trigger and list
   - Restore from backup (`vibecarbon restore`)
 - CI/CD via GitHub Actions
-  - Auto-generated workflow: test (lint + typecheck + test) → build (Docker image to ghcr.io) → deploy (SSH)
+  - Auto-generated build workflow: test (lint + typecheck + test) → build (Docker image to ghcr.io). It never deploys, and holds no credential for a server or a cluster
   - Package manager auto-detection for correct CI setup
-  - GitHub secrets management via `gh secret set`
-  - Deployment monitoring via `gh run list` polling
+  - Build-time `VITE_*` values as repo-level Actions variables (`gh variable set`)
+  - A Compose push-mode deploy waits for the image CI built, and prints the build run's state when it never arrives
 - Pulumi programs for all five providers' infrastructure, and Cloudflare DNS
-- Flux GitOps support on the Kubernetes modes, opt-in via `vibecarbon configure cicd <env>` after a cluster is up; deploys themselves stay local-first. The GitHub Actions build/deploy workflows the same command installs work in every mode
+- Flux GitOps on the Kubernetes modes, opt-in via `vibecarbon configure cicd <env>` after a cluster is up: the cluster pulls your repo with its own read-only deploy key, so a push under `k8s/` deploys and nothing at GitHub ever connects to the cluster. The CLI installs Flux and applies the cluster file from your machine; `vibecarbon deploy` keeps owning what Flux leaves out (secrets, the database, the certificate, the backup schedule). The build workflow the same command installs works in every mode
 - Pod autoscaling via Kubernetes HPA (2-10 replicas); worker nodes and server sizes scale via `vibecarbon scale`
 
 ## Observability (add-on)

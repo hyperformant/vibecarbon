@@ -18,7 +18,7 @@ kind: Kustomization
 #
 # cert-manager is rendered by scripts/render-cert-manager.mjs: the upstream release
 # manifest with the controller flags and the control-plane pin patched in, applied once
-# with `kubectl apply -k` by the CLI deploy and by the GitOps workflow alike.
+# with `kubectl apply -k` by the CLI deploy, on a GitOps cluster too (Flux never applies it).
 #
 # To upgrade cert-manager: update CERT_MANAGER_VERSION in scripts/render-cert-manager.mjs
 #

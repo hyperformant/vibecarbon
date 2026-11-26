@@ -310,7 +310,7 @@ CI/CD).
 # Configure a new project after creation
 vibecarbon configure
 
-# Layer GitOps onto a deployed k8s cluster
+# Let a deployed k8s cluster pull from your repo
 vibecarbon configure cicd prod
 
 # Choose which languages the app ships
@@ -354,51 +354,126 @@ it. The command confirms first, and the file is recoverable with
 
 ### `configure cicd` subcommand
 
-Sets up CI/CD in one or two stages, depending on what the environment runs.
-This is the same CI/CD feature the interactive wizard offers; the subcommand
-just skips the menu.
+Sets up CI/CD so a push ships your app. On Kubernetes the cluster pulls its
+own updates from your repo, so nothing at GitHub ever connects to it, and
+vibecarbon gives GitHub no credential for it. This is the same CI/CD feature
+the interactive wizard offers; the subcommand just skips the menu.
 
 ```bash
 vibecarbon configure cicd          # stage 1 only
 vibecarbon configure cicd prod     # stage 1, plus stage 2 if prod is k8s
 ```
 
-**Stage 1** installs `.github/workflows/vibecarbon-build.yml` and
-`.github/workflows/deploy.yml` if missing, points the image references and the
-Flux repository URL at your GitHub owner and repo, and marks
-`cicdEnabled: true` in `.vibecarbon.json`, where it also records that owner and
-repo (`github`). It runs in every deploy mode. `vibecarbon upgrade` reads these
-edits as its own, not yours: a file only the CLI changed is upgraded like an
-untouched one and keeps your owner and repo.
+**Stage 1** installs `.github/workflows/vibecarbon-build.yml` (and the
+`.nvmrc` it reads) if missing. On every push to `main` that workflow tests your
+app and builds its image to `ghcr.io`; it never deploys, and it is the only
+workflow vibecarbon installs. Stage 1 also points the image references and the
+Flux repository URL (`ssh://git@github.com/<owner>/<repo>`) at your GitHub
+owner and repo, and marks `cicdEnabled: true` in `.vibecarbon.json`, where it
+also records that owner and repo (`github`). It runs in every deploy mode, and
+it leaves the commit to you: it prints the `git add` to run. `vibecarbon
+upgrade` reads these edits as its own, not yours: a file only the CLI changed is
+upgraded like an untouched one and keeps your owner and repo.
 
 Before stage 2 changes anything, it checks what Flux would build from your
-`k8s/` tree through the cluster file `deploy.yml` applies. Flux applies the
-files as they are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so
-if one would reach the cluster, the command stops and names the file and the
-placeholder. When your Flux cluster file is older than `k8s/base`, it tells you
-to take the new one from `vibecarbon upgrade`; for any other placeholder, it
-names the file to fill in. An add-on's volume (redis, for example) is not
-Flux's: the claim names your provider's storage class, so
+`k8s/` tree through the cluster file it applies
+(`k8s/flux/clusters/primary/vibecarbon.yaml`). Flux applies the files as they
+are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so if one would
+reach the cluster, the command stops and names the file and the placeholder.
+When your Flux cluster file is older than `k8s/base`, or still has Flux clone
+over `https://`, it tells you to take the new one from `vibecarbon upgrade`; for
+any other placeholder, it names the file to fill in. An add-on's volume (redis,
+for example) is not Flux's: the claim names your provider's storage class, so
 `vibecarbon deploy <env>` creates it, like the database's.
 
-**Stage 2** connects to the cluster, installs Flux, seeds the GitHub
-Environment secrets/vars, uploads `KUBECONFIG_B64`, and triggers the first
-reconcile. For HA clusters the handover runs against both the primary and
-standby kubeconfigs. It runs only when the named environment is `k8s` or
-`k8s-ha`.
+**Stage 2** runs only when the named environment is `k8s` or `k8s-ha`, and
+prints `Stage 2: install flux on the cluster and let it pull from your repo`.
+It runs from your machine, because the k8s API admits only your saved
+addresses: first it lets your address through the environment's firewall, as
+`deploy` does (a run with no terminal counts as `-y`, see [access](#access)).
+Then, once per run, it names what an earlier vibecarbon left at GitHub and
+works out how the clusters pull your app image (both below). Then, on each
+cluster (the primary and the standby on k8s-ha), it:
 
-Naming a Compose environment does stage 1 and stops there, successfully.
-Compose CD is push-based: the Actions workflow builds and deploys to your
-server. Flux is a Kubernetes controller that reconciles from inside the
-cluster, so there is nothing for it to do on Compose.
+1. points `k8s/` at your owner and repo, commits `k8s/` and pushes it to
+   `main`, so the first sync reads it;
+2. installs Flux v2.10.0 with `kubectl`, unless Flux is already there (you
+   don't need the `flux` CLI);
+3. gives Flux a new read-only deploy key of that cluster's own (below);
+4. puts the image pull Secret in place, when your image is private;
+5. applies the root `GitRepository` and `Kustomization` from the cluster file;
+6. has Flux fetch with the new key and apply what it fetched, and waits up to
+   10 minutes for that first sync. If Flux says it can't, the command prints
+   what Flux said and the `kubectl` to look closer, on that cluster.
+
+**The deploy key.** Each cluster gets its own read-only deploy key on your
+repo, titled `vibecarbon flux <cluster>`: `vibecarbon flux prod`, or
+`vibecarbon flux prod-primary` and `vibecarbon flux prod-standby` on k8s-ha, so
+you can revoke one side alone. Its private half lives only in the cluster's
+`flux-system/flux-system` Secret, next to GitHub's published host keys; it is
+never written to disk. Every run rotates it: it adds a new key, writes the
+Secret, then removes every other key with that exact title. A key with any
+other title is never touched. If writing the Secret fails, no key is removed,
+since the cluster may hold either one; the next run removes the one it doesn't
+write. Adding a deploy key needs admin rights on the repo.
+
+**Pulling a private image.** If anyone can pull your app image, nothing is
+asked and nothing is stored. Otherwise (an image not published yet counts too)
+each cluster needs a GitHub classic token with only `read:packages`, which it
+keeps in `vibecarbon/ghcr-pull-secret`. The command looks, in order, for:
+
+1. A token already in one of the clusters that ghcr still accepts, which it
+   reuses. Its scopes are checked again on every run, so one widened at GitHub
+   since is replaced.
+2. `GHCR_PULL_TOKEN` from your shell.
+3. On a terminal, your answer: it asks once, for both sides of k8s-ha, with a
+   link to GitHub's new-token page with `read:packages` already ticked
+   (`https://github.com/settings/tokens/new?scopes=read:packages`).
+
+A run without a terminal can't ask, so export `GHCR_PULL_TOKEN` for it. A token
+that can do more than `read:packages`, or a fine-grained token, is refused
+before it is stored anywhere: anyone who can read Secrets in the cluster can
+read it. `GHCR_PULL_TOKEN` does not replace a stored token that still passes
+those checks. To rotate the token, revoke it at GitHub, then run:
+
+```bash
+vibecarbon configure cicd <env>
+```
+
+**What Flux leaves to the CLI.** Flux applies `k8s/base`, but what differs per
+cluster or holds a secret stays with `vibecarbon deploy <env>`: your secrets,
+the database StatefulSet, the TLS certificate, the backup CronJob and its
+settings, the Traefik and registry Deployments, and volumes. The deploy applies
+those from `.env.local` and `.vibecarbon.json`, on a GitOps cluster as on any
+other.
+Nothing is copied to GitHub for them, and no cloud provider token goes there.
+So after you change a secret, deploy again. The run ends with:
+
+```
+flux now pulls main into prod. push under k8s/ to deploy. after you change a secret, run vibecarbon deploy prod
+```
+
+**What an earlier vibecarbon left at GitHub.** Older versions installed a
+`deploy.yml` workflow, copied secrets (among them `KUBECONFIG_B64`, admin
+access to the cluster) and variables into a GitHub Environment per cluster, and
+copied a provider token into an Actions secret. Nothing reads them now. Each
+run names what it finds, once: the Environment copies by the names those
+versions wrote, so a secret you made yourself is never named; the workflow
+file, if your repo still has it; and a provider token secret no workflow reads.
+It deletes nothing, and gives you a command to delete them yourself.
+
+Naming a Compose environment does stage 1 and stops there, successfully. Flux
+is a Kubernetes controller that reconciles from inside the cluster, so there is
+nothing for it to do on Compose; a Compose deploy can use the image the
+workflow builds instead.
 
 Pre-conditions: the `gh` CLI must be authenticated. For stage 2 the cluster
 must already be deployed (`vibecarbon deploy <env>` with `-mode k8s` or
 `-mode k8s-ha`).
 
-After stage 2, future commits to `main` reconcile through Flux automatically.
-The deploy path itself stays local-first: `vibecarbon deploy` continues to
-build and sideload as before; GitOps just runs on top.
+After stage 2, Flux fetches `main` every minute and applies `k8s/base` again
+whenever it changes. `vibecarbon deploy` stays local-first: it still builds and
+sideloads, and owns everything Flux leaves to it.
 
 ---
 
@@ -947,7 +1022,8 @@ vibecarbon access prune
 ```
 
 Every command that needs SSH or k8s-API access (`deploy`, `shell`, `diagnose`,
-`scale`, `failover`, `backup`, `restore`, `destroy`, `update`) auto-detects the
+`scale`, `failover`, `backup`, `restore`, `destroy`, `update`,
+`configure cicd <env>`) auto-detects the
 operator's public IP and persists it under `operatorCidrs` in
 `.vibecarbon.json`. When the environment's firewall was last pushed a list
 without it (its `operatorCidrsPushed` record), the command pushes the saved list
@@ -956,15 +1032,18 @@ later commands from it push nothing, and refresh its `lastUsedAt` at most once
 a day. A push sends the whole saved list, so run commands from an up-to-date
 checkout: a list that is behind would re-open an entry someone removed.
 
-**A `-y` run under CI does *not* auto-detect** (CI sets `CI=true`), since CI
-runners have ephemeral IPs that would pollute the list. A `-y` run outside CI
-still detects. In CI, either commit a populated `operatorCidrs` to
+**A run that won't prompt does *not* auto-detect under CI** (CI sets
+`CI=true`), since CI runners have ephemeral IPs that would pollute the list.
+That is `-y` on the commands that take it, and any `configure cicd <env>` run
+with no terminal on stdin. Outside CI such a run still detects, and `shell` and
+`diagnose` always do. In CI, either commit a populated `operatorCidrs` to
 `.vibecarbon.json` or set `ALLOWED_SSH_IPS="1.2.3.4/32,5.6.7.8/32"` once on the
 first deploy.
 
-If you somehow lock yourself out (no Hetzner API token, API unreachable), use
-[`vibecarbon console <node>`](#console): Hetzner's web VNC bypasses the
-firewall entirely.
+If you somehow lock yourself out (no API token for the environment's provider,
+or its API unreachable), edit the firewall in your provider's web console. On
+Hetzner, [`vibecarbon console <node>`](#console) opens its web VNC, which
+bypasses the firewall entirely.
 
 ---
 

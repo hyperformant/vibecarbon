@@ -24,8 +24,8 @@ until you configure SMTP**:
 ## Configure SMTP
 
 Run `vibecarbon configure` and choose the email/SMTP option, or set these in
-your environment (`.env.local` for local, GitHub Environment secrets for CI
-deploys):
+`.env.local` yourself. `vibecarbon deploy <env>` applies them to the
+environment, in every deploy mode, so run it again after you change one:
 
 ```
 SMTP_HOST=smtp.your-provider.com

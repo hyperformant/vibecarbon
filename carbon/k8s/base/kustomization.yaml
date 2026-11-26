@@ -7,11 +7,10 @@ resources:
   - namespace.yaml
   - network-policies.yaml
   # `config/` holds the vibecarbon-config ConfigMap (non-secret runtime
-  # settings — service URLs, retention days, etc.). The previous
-  # `secrets/` dir which bundled a Secret alongside the ConfigMap is
-  # gone — the Secret is now applied at deploy time by either the
-  # vibecarbon CLI or the .github/workflows/deploy.yml GitHub Action,
-  # with field-manager=github-actions-deploy so Flux doesn't touch it.
+  # settings: service URLs and the like). The previous `secrets/` dir
+  # which bundled a Secret alongside the ConfigMap is gone: the Secrets
+  # are applied by every `vibecarbon deploy <env>` from the operator's
+  # .env.local, and they are not in this tree, so Flux never touches them.
   - config/
   # Note: hetzner-ccm and hetzner-csi are installed via cloud-init (master-init.sh)
   # Note: cert-manager is installed separately via infra/ kustomization

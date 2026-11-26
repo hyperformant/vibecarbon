@@ -14,7 +14,7 @@
  *                                           #        vibecarbon configure payments stripe
  *                                           #        vibecarbon configure oauth google
  *   vibecarbon configure cicd               # Install the GitHub Actions build workflow
- *   vibecarbon configure cicd <env>         # ...and layer Flux GitOps if <env> is a k8s cluster
+ *   vibecarbon configure cicd <env>         # ...then let <env>'s k8s cluster pull from your repo
  *   vibecarbon configure -h                 # Show help
  */
 
@@ -85,12 +85,16 @@ export const SPEC = {
     '    globalization   (no provider: which languages the app ships)',
     '',
     'CICD SUBCOMMAND',
-    '  cicd         Install the GitHub Actions build + deploy workflows.',
-    '               Works in every deploy mode.',
-    '  cicd <env>   The same, then layer Flux GitOps onto <env> when it is a',
-    '               k8s/k8s-ha cluster. Compose deploys by push from Actions',
-    '               and needs no Flux, so naming a Compose env just does the',
-    '               workflows.',
+    '  cicd         Install the GitHub Actions build workflow, so every push',
+    '               to main builds your app image. Works in every deploy mode.',
+    '  cicd <env>   The same, then hand <env> to Flux when it is a k8s or',
+    '               k8s-ha cluster. The cluster pulls your repo with its own',
+    '               read-only deploy key, so a push under k8s/ is the deploy',
+    '               and nothing at GitHub ever connects to it. Run it again',
+    '               any time: each run rotates the key. Secrets stay with',
+    '               `vibecarbon deploy <env>`, which applies them from',
+    '               .env.local. A Compose env has no Flux step, so naming one',
+    '               installs the workflow and stops there.',
     '',
     'STORAGE SUBCOMMAND',
     "  storage <env> Paste a second Hetzner object storage key for <env>'s app.",
@@ -105,7 +109,7 @@ export const SPEC = {
     'CONFIGURABLE FEATURES',
     '  Providers, cloud/DNS credentials for deploys (written to .env.local; never committed, never shipped to servers)',
     '  Globalization Which languages the app ships (English only by default)',
-    '  CI/CD         Auto build & deploy with GitHub Actions',
+    '  CI/CD         Build your app image with GitHub Actions',
     '  Payments      Stripe payments (subscriptions + one-time)',
     '  OAuth         Sign in with Google or Microsoft',
     '  SMTP / Email  Transactional emails (Resend, Postmark, SendGrid, or any SMTP)',
@@ -144,11 +148,11 @@ export const SPEC = {
     },
     {
       command: 'vibecarbon configure cicd',
-      description: 'Install the GitHub Actions build + deploy workflows',
+      description: 'Install the GitHub Actions build workflow',
     },
     {
       command: 'vibecarbon configure cicd prod',
-      description: 'The same, plus Flux GitOps when prod is a k8s cluster',
+      description: "The same, then let prod's cluster pull from your repo",
     },
     {
       command: 'vibecarbon configure storage prod',
@@ -1050,13 +1054,13 @@ async function promptCicd() {
     p.log.success('Marked CI/CD as enabled in .vibecarbon.json');
   } else {
     p.log.warn(
-      '.vibecarbon.json not found; workflows installed but the CI/CD flag could not be persisted. Re-run `vibecarbon configure cicd` after fixing the project config.',
+      '.vibecarbon.json not found; the workflow is installed but the CI/CD flag could not be persisted. Re-run `vibecarbon configure cicd` after fixing the project config.',
     );
   }
 
   p.log.info(
     c.dim(
-      'Next: `git add .github/workflows .nvmrc && git commit && git push` to register the workflows with GitHub.',
+      'Next: `git add .github/workflows .nvmrc && git commit && git push` to register the workflow with GitHub.',
     ),
   );
 
@@ -1217,11 +1221,11 @@ export const FEATURES = [
   {
     value: 'cicd',
     label: 'CI/CD',
-    hint: 'Auto build & deploy with GitHub Actions',
+    hint: 'Build your app image with GitHub Actions',
     promptFn: promptCicd,
     isConfigured: (_env, ctx) => ctx?.projectConfig?.cicdEnabled === true,
     summary: () => [
-      `${c.dim('cicdEnabled')} = true ${c.dim('(GitHub Actions workflows installed)')}`,
+      `${c.dim('cicdEnabled')} = true ${c.dim('(GitHub Actions build workflow installed)')}`,
     ],
   },
   {
@@ -1529,7 +1533,7 @@ export async function runConfigureCicd(envName) {
     }
     p.outro(
       c.success(
-        'CI/CD workflows installed. Name an environment to also layer GitOps onto a k8s cluster.',
+        'the build workflow is installed. to let a k8s cluster pull from your repo too, run vibecarbon configure cicd <env>',
       ),
     );
     return;
@@ -1568,7 +1572,7 @@ export async function runConfigureCicd(envName) {
   // Stage 1 runs before the mode is consulted, because it is worth doing in
   // every mode. Deciding on Flux first is what used to turn a Compose user's
   // reasonable command into a hard failure for a feature they already had.
-  p.log.step('Stage 1: install GitHub Actions workflows + mark cicdEnabled');
+  p.log.step('Stage 1: install the GitHub Actions build workflow and mark cicdEnabled');
   const projectSide = await promptCicd();
   if (projectSide === null) {
     p.log.error('Workflow installation aborted. Fix the gh-CLI / origin issues above and re-run.');
@@ -1600,8 +1604,8 @@ export async function runConfigureCicd(envName) {
   }
 
   // Stage 2 reaches the k8s API from this machine, so the firewall must let
-  // this address in first. A headless run under CI trusts the saved list,
-  // as `deploy -y` does.
+  // this address in first. A run with no terminal on stdin counts as `-y`:
+  // under CI it trusts the saved list, as `deploy -y` does.
   await requireEnvOperatorIpAccess({
     projectConfig,
     envName,

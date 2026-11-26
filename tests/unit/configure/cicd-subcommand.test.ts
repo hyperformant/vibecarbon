@@ -21,6 +21,45 @@ describe('configure module export surface (PR 7)', () => {
   });
 });
 
+// A3e: CI/CD on k8s is pull only. The help says the cluster pulls with its
+// own read-only deploy key and that nothing at GitHub connects to it, and it
+// no longer offers deploy workflows.
+describe('configure cicd help (A3e)', () => {
+  const description = configure.SPEC.description ?? '';
+  const examples = configure.SPEC.examples ?? [];
+  const block = description.slice(
+    description.indexOf('CICD SUBCOMMAND'),
+    description.indexOf('STORAGE SUBCOMMAND'),
+  );
+
+  it('the help says flux pulls and nothing at GitHub reaches the cluster', () => {
+    expect(block.startsWith('CICD SUBCOMMAND')).toBe(true);
+    // Flattened, since the block wraps its lines.
+    const said = block.replace(/\s+/g, ' ');
+    expect(said).toContain('pulls');
+    expect(said).toContain('read-only deploy key');
+    expect(said).toContain('nothing at GitHub ever connects to it');
+    expect(said).not.toContain('deploy workflows');
+    for (const text of [description, ...examples.flatMap((e) => [e.command, e.description])]) {
+      expect(text).not.toMatch(/[\u2013\u2014]/);
+    }
+  });
+
+  it('the cicd examples say what each form does', () => {
+    const cicd = examples.filter((e) => e.command.startsWith('vibecarbon configure cicd'));
+    expect(cicd).toEqual([
+      {
+        command: 'vibecarbon configure cicd',
+        description: 'Install the GitHub Actions build workflow',
+      },
+      {
+        command: 'vibecarbon configure cicd prod',
+        description: "The same, then let prod's cluster pull from your repo",
+      },
+    ]);
+  });
+});
+
 // B1: Providers is the FIRST configurable feature (OWNER-PINNED label/hint).
 // Real, unmocked import (no @clack/prompts mock needed) — this only inspects
 // the FEATURES array's static shape, never invokes a prompt.

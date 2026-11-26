@@ -42,10 +42,11 @@ metadata:
     app: vibecarbon-backup
     component: backup
 spec:
-  # DEPLOY-owned, per environment: the CLI deploy and the deploy workflow fill
-  # this in (scripts/render-backup-settings.mjs) from the environment backup
-  # config. Flux does not build this object (see the vibecarbon-base patches
-  # in k8s/flux/clusters/*), so it never sees the placeholder.
+  # DEPLOY-owned, per environment: the CLI deploy fills this in
+  # (scripts/render-backup-settings.mjs) from the environment backup
+  # config, on a GitOps cluster too. Flux does not build this object (see
+  # the vibecarbon-base patches in k8s/flux/clusters/*), so it never sees
+  # the placeholder.
   schedule: "{{BACKUP_SCHEDULE}}"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -135,7 +136,7 @@ spec:
                   # positive whole number of days is accepted.
                   case "$RETAIN" in
                     ""|*[!0-9]*|0|0[0-9]*)
-                      echo "BACKUP_RETENTION_DAYS from ConfigMap vibecarbon-backup-settings is missing or not a positive whole number of days (got: $RETAIN). Run vibecarbon deploy for this environment (or the deploy workflow) to create it." >&2
+                      echo "BACKUP_RETENTION_DAYS from ConfigMap vibecarbon-backup-settings is missing or not a positive whole number of days (got: $RETAIN). Every deploy writes it, so deploy this environment again: vibecarbon deploy <env>" >&2
                       exit 1
                       ;;
                   esac
