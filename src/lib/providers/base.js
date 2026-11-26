@@ -440,6 +440,22 @@ export class BaseProvider {
   static K8S_FLOATING_IP = true;
 
   /**
+   * Whether this provider's k8s program leaves the operator rules (SSH on
+   * 22, the Kubernetes API on 6443, from the operator CIDRs) to REST, so
+   * that each firewall rule has one writer. Then a fresh cluster's firewall
+   * has neither after the infra up, and deployK3s writes them right after
+   * it, before its first ssh (writeOperatorRulesAfterUp, lib/operator-ip.js),
+   * through applyOperatorCidrs with their `ports`. Vultr opts in: its rules
+   * are separate resources with their own ids, `vibecarbon access` rewrites
+   * the operator ones, and a rule both the program and REST wrote was
+   * created again by the next up, which Vultr refuses. Every other
+   * provider's program writes them itself and keeps this false
+   * (tests/unit/deploy/k8s-operator-rules-after-up.test.ts).
+   * @type {boolean}
+   */
+  static K8S_OPERATOR_RULES_AFTER_UP = false;
+
+  /**
    * Whether this provider's compose program gives the server a floating (or
    * reserved) IP. Scaleway's does (a flexible IP); no other provider's does.
    * Compose destroy deletes the server by its API, which frees only an IP
@@ -961,7 +977,9 @@ export class BaseProvider {
   }
 
   /**
-   * Replace a firewall's rule set wholesale.
+   * Make a firewall's rule set the given one. Atomic where the provider has
+   * a set-style write; Vultr, which has none, applies it as a create-first
+   * minimal diff that keeps the rules it keeps.
    * @param {string|number} firewallId - Firewall ID
    * @param {object[]} rules - Full replacement rule list
    * @returns {Promise<void>}
@@ -976,9 +994,12 @@ export class BaseProvider {
    * untouched. Composes findFirewallByName + the provider's own
    * `{direction, port, source_ips}` rule-JSON rewrite + setFirewallRules —
    * that rule-JSON schema is provider wire knowledge and must never leave
-   * the class. No `ports` option: the SSH/Kubernetes-API ports are the
-   * provider's own constants (single consumer today).
-   * @param {{firewallName: string, cidrs: string[]}} args
+   * the class. The SSH/Kubernetes-API ports are the provider's own
+   * constants; `ports` names those a firewall must carry even with no rule
+   * on them yet, which only a provider with K8S_OPERATOR_RULES_AFTER_UP
+   * reads (its k8s program writes neither). Every other provider's program
+   * writes its operator rules, and it ignores `ports`.
+   * @param {{firewallName: string, cidrs: string[], ports?: string[]}} args
    * @returns {Promise<boolean>} true if a firewall by that name was found
    *   and updated; false if it doesn't exist yet — skipped silently, since
    *   that just means the environment hasn't been deployed.

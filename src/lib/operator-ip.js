@@ -419,6 +419,63 @@ export async function pushOperatorCidrs({
   return updated;
 }
 
+/** The operator ports a k8s cluster's firewall carries: SSH and the Kubernetes API. */
+const K8S_OPERATOR_PORTS = ['22', '6443'];
+
+/**
+ * Write the operator rules (SSH, and the Kubernetes API) onto a k8s
+ * cluster's firewall right after the infra up, on a provider whose k8s
+ * program leaves them to REST (K8S_OPERATOR_RULES_AFTER_UP, BaseProvider),
+ * so each rule has one writer. A fresh cluster's firewall there has
+ * neither, so the deploy's first ssh could not get in. deployK3s calls this
+ * after every up of its infra step, before it waits for k3s; on a firewall
+ * that has them already it writes nothing (the provider's write is a
+ * minimal diff). Every other provider's program writes them itself, and
+ * this does nothing there.
+ *
+ * Not recorded (`operatorCidrsPushed`), as no provider's program-made rules
+ * are: a first deploy has no environment record yet. The next command's
+ * gate pushes once, which changes nothing on the firewall.
+ *
+ * @param {object} o
+ * @param {typeof import('./providers/base.js').BaseProvider & { K8S_OPERATOR_RULES_AFTER_UP: boolean }} o.Provider
+ *   the cluster's provider class
+ * @param {string | null | undefined} o.apiToken that provider's token
+ * @param {string} o.projectName
+ * @param {string} o.stackName the cluster's stack: the environment, or one k8s-ha side
+ * @param {Array<{cidr: string}>} o.operatorCidrs the list the program was given
+ * @returns {Promise<boolean>} true when written; false on a provider that does not opt in
+ */
+export async function writeOperatorRulesAfterUp({
+  Provider,
+  apiToken,
+  projectName,
+  stackName,
+  operatorCidrs,
+}) {
+  if (!Provider.K8S_OPERATOR_RULES_AFTER_UP) return false;
+  const cidrs = operatorCidrs.map((e) => e.cidr);
+  if (cidrs.length === 0) {
+    throw new Error(
+      'Refusing to write the operator rules from an empty CIDR list (it would let no operator in).',
+    );
+  }
+  const name = firewallName(projectName, stackName);
+  const written = await new Provider(apiToken).applyOperatorCidrs({
+    firewallName: name,
+    cidrs,
+    ports: K8S_OPERATOR_PORTS,
+  });
+  if (!written) {
+    throw new Error(
+      `The up made this cluster's firewall, ${name}, but ${Provider.NAME} does not list it, ` +
+        "so the operator's SSH and Kubernetes API rules could not be written. " +
+        'Run the deploy again: it writes them after the up.',
+    );
+  }
+  return true;
+}
+
 /**
  * Whether an environment's record says its firewall was last pushed a list
  * holding `cidr`. No record (an environment last pushed before records

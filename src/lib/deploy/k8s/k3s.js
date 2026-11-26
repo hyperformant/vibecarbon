@@ -81,6 +81,7 @@ import {
   upgradeKubeconfig,
 } from '../../kubeconfig.js';
 import { readOperatorVar } from '../../operator-env.js';
+import { writeOperatorRulesAfterUp } from '../../operator-ip.js';
 import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
@@ -6361,6 +6362,19 @@ async function deployK3sSteps(options, inFlight) {
     if (missing.length > 0) {
       throw new Error(`Pulumi outputs missing ${missing.join(' and ')}`);
     }
+    // A provider whose k8s program leaves the operator rules to REST
+    // (K8S_OPERATOR_RULES_AFTER_UP) made this firewall with no SSH or
+    // Kubernetes API rule: write them now, before the first ssh
+    // (waitForK3sReady below). Nothing on every other provider, whose
+    // program wrote them. Before the step completes, so a deploy stopped
+    // in between runs the up and this again.
+    await writeOperatorRulesAfterUp({
+      Provider,
+      apiToken: options.apiToken,
+      projectName: options.projectName,
+      stackName: options.environment,
+      operatorCidrs: options.operatorCidrs ?? [],
+    });
     state.completeStep('k3s-infra', outputs);
     s.stop(
       `Cluster provisioned: master=${outputs.masterIp}` +

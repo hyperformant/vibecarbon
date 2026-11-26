@@ -342,10 +342,12 @@ describe('server-class create timeouts (census)', () => {
   // A first deploy still has a token, the derived one: only a replayed token
   // says there is a cluster to protect. Linode's workers take a fixed VPC
   // address too (10.0.1.2 for the master), so the same holds there.
-  it.each([
+  // Each with the input its worker boot script rides in.
+  const START_WITH_MASTER = [
     ['hetzner-k8s.js', 'userData'],
     ['linode-k8s.js', 'metadatas'],
-  ])(
+  ];
+  it.each(START_WITH_MASTER)(
     '%s: a first deploy starts its workers with the master, not after it',
     async (file, scriptInput) => {
       const fresh = {
@@ -385,6 +387,14 @@ describe('server-class create timeouts (census)', () => {
   // DigitalOcean and Vultr pin no private address, so on a deploy the db and
   // workers are rendered from the master's own, and wait for it.
   const WAIT_ON_MASTER_ADDRESS = ['digitalocean-k8s.js', 'vultr-k8s.js'];
+
+  // A new k8s program lands in one of the two first-deploy rules, or this fails.
+  it('every k8s program is in exactly one first-deploy list', () => {
+    const programs = Object.keys(PROGRAMS).filter((f) => f.endsWith('-k8s.js'));
+    expect([...START_WITH_MASTER.map(([f]) => f), ...WAIT_ON_MASTER_ADDRESS].sort()).toEqual(
+      programs.sort(),
+    );
+  });
   const PRIOR = { id: '5000001', privateIp: '10.0.1.2' };
 
   /** What a node is built from, as `<resource>.<property>` refs and plain text. */

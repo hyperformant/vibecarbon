@@ -13,8 +13,10 @@
  * - API v2 uses CURSOR pagination (`meta.links.next` → `&cursor=`), not
  *   page/pages — every listing routes through `_walkCursor`.
  * - Firewalls are GROUPS (identity field `description`, not label) whose
- *   rules are INBOUND-ONLY, separate resources with no replace-all PUT —
- *   see setFirewallRules' delete-then-recreate design.
+ *   rules are INBOUND-ONLY, separate resources with no replace-all PUT:
+ *   setFirewallRules is a create-first minimal diff, so a rule it keeps
+ *   keeps its id and the group never has none (an empty group is not
+ *   enforced).
  * - Instances attach at most ONE firewall group (`firewall_group_id`).
  * - Object-storage keys are per-subscription (see vultr-objectstorage.js).
  * - Rate limit: 400-request burst bucket, 1s reset (live headers
@@ -34,8 +36,9 @@ import {
 import { deleteServerAt } from './delete-server.js';
 import { decodeLabels, withAllTags } from './tag-labels.js';
 
-// Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
-// sibling providers (SSH, k8s API for future parity).
+// Ports whose inbound rules applyOperatorCidrs rewrites, the same set as the
+// sibling providers': SSH, and the Kubernetes API, which a k8s cluster's
+// group gets from the deploy after its up (K8S_OPERATOR_RULES_AFTER_UP).
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
@@ -44,10 +47,21 @@ const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 // public port).
 const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
-// WireGuard replication port (wireguard.js WG_PORT) — only reachable via
-// compose-ha (declared since tier-parity wave 1); the member is
+// WireGuard replication port (wireguard.js WG_PORT): the k8s-ha replication
+// rule, written over REST (buildReplicationFirewallRules); the member is
 // contract-required and unit-pinned.
 const WG_PORT = '51821';
+
+/**
+ * What Vultr treats as one firewall rule: it refuses a second with the same
+ * fields. Read rows and create bodies give the same key (an icmp rule reads
+ * back with port '').
+ * @param {{ip_type: string, protocol: string, subnet: string, subnet_size: number, port?: string}} r
+ * @returns {string}
+ */
+function vultrRuleKey(r) {
+  return [r.ip_type, r.protocol, `${r.subnet}/${r.subnet_size}`, r.port ?? ''].join(' ');
+}
 
 /**
  * Encode a label key/value pair into a Vultr tag string — same `key:value`
@@ -312,6 +326,13 @@ export class VultrProvider extends BaseProvider {
    * @type {string}
    */
   static K8S_IMAGE = '2760';
+
+  /**
+   * vultr-k8s.js declares no operator rule (SSH 22, the Kubernetes API
+   * 6443): those are REST's, as the k8s-ha replication rule is, so each rule
+   * of the group has one writer (see BaseProvider). @type {boolean}
+   */
+  static K8S_OPERATOR_RULES_AFTER_UP = true;
 
   // ── k8s boot user-data (carbon/cloud-init/k3s/vultr-*-init.sh) ──────────
 
@@ -828,29 +849,39 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
-   * Replace a firewall group's INBOUND rule set. Vultr has NO replace-all
-   * endpoint and rules are immutable sub-resources — the only faithful
-   * implementation of the cross-provider "total inbound replace" contract
-   * is delete-then-recreate. Ordering safety: a group with fewer/no rules
-   * DENIES inbound (Vultr firewall groups are default-deny), so the
-   * transient mid-replace state locks DOWN, never exposes — the same
-   * fail-closed direction every sibling's atomic replace guarantees.
+   * Make a firewall group's INBOUND rules the given set, as a minimal diff.
+   * Vultr has no replace-all endpoint and its rules are immutable
+   * sub-resources with their own ids, so this lists the live rules, creates
+   * the ones the set adds, then deletes the ones it drops. A rule the set
+   * keeps keeps its id, so the rules a k8s program owns (vultr-k8s.js: the
+   * web and the VPC) are where its next refresh looks for them, and a REST
+   * writer (applyOperatorCidrs, the replication rule) changes only its own.
+   *
+   * Creates go first because Vultr does not enforce a group with no rules:
+   * an empty group lets every packet in. So the group never empties on the
+   * way (between the creates and the deletes it holds both sets, the old
+   * one's addresses still let in for those few calls), and an empty set is
+   * refused. It ends where the delete-all-then-recreate it took over from
+   * ended: the group holds exactly the set given.
+   *
+   * A rule is matched on the fields Vultr refuses to repeat (ip_type,
+   * protocol, subnet, subnet_size, port): a set naming one twice makes it
+   * once, and a live rule matching one keeps its notes.
    * @param {string} firewallId - group id
-   * @param {object[]} rules - full replacement INBOUND rule list, Vultr
-   *   shape: {ip_type, protocol, port, subnet, subnet_size, notes?}
+   * @param {object[]} rules - full INBOUND rule set, Vultr shape
+   *   {ip_type, protocol, port, subnet, subnet_size, notes?}; read rows work
    * @returns {Promise<void>}
    */
   async setFirewallRules(firewallId, rules) {
     // Project every row to the documented create shape BEFORE the first
-    // delete. Both in-repo rule builders (buildReplicationFirewallRules,
+    // write. Both in-repo rule builders (buildReplicationFirewallRules,
     // applyOperatorCidrs) recycle rows read back from the rules listing,
     // and the READ shape carries fields the create endpoint rejects —
     // `source: "0.0.0.0/0"` draws "Invalid source group" (live v2 RCA
     // 2026-08-19: deletes succeeded, recreates 400'd, both HA firewalls
-    // were left holding only the WG rule and 443 went dark). Because this
-    // replace is delete-then-recreate, a row that cannot be recreated must
-    // abort HERE, while the live rules are still intact.
-    const toCreate = rules.map((r) => {
+    // were left holding only the WG rule and 443 went dark). A row that
+    // cannot be created must abort HERE, while the live rules are intact.
+    const wanted = rules.map((r) => {
       for (const key of ['ip_type', 'protocol', 'subnet']) {
         if (r[key] === undefined || r[key] === null || r[key] === '') {
           throw new Error(
@@ -874,6 +905,12 @@ export class VultrProvider extends BaseProvider {
         ...(r.notes ? { notes: r.notes } : {}),
       };
     });
+    if (wanted.length === 0) {
+      throw new Error(
+        `Refusing to leave Vultr firewall ${firewallId} with no rules: Vultr does not ` +
+          'enforce a group with none, so its servers would take traffic on every port.',
+      );
+    }
 
     const existing = await this._walkCursor(`/firewalls/${firewallId}/rules`, 'firewall_rules');
     if (!existing.complete) {
@@ -882,17 +919,19 @@ export class VultrProvider extends BaseProvider {
       );
     }
 
+    const target = new Map(wanted.map((r) => [vultrRuleKey(r), r]));
+    const live = new Map();
+    const dropped = [];
     for (const rule of existing.items) {
-      const res = await this.bareRequest(`/firewalls/${firewallId}/rules/${rule.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok && res.status !== 404) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`Vultr firewall rule delete failed (${res.status}): ${body}`);
-      }
+      const key = vultrRuleKey(rule);
+      // A second live rule with the same fields (Vultr refuses to make one,
+      // so only a race leaves it) goes with the dropped ones.
+      if (target.has(key) && !live.has(key)) live.set(key, rule);
+      else dropped.push(rule);
     }
 
-    for (const rule of toCreate) {
+    for (const [key, rule] of target) {
+      if (live.has(key)) continue;
       const res = await this.apiRequest(`/firewalls/${firewallId}/rules`, {
         method: 'POST',
         body: JSON.stringify(rule),
@@ -903,6 +942,16 @@ export class VultrProvider extends BaseProvider {
           `Vultr firewall rule create failed: ${error.error || 'unknown error'} ` +
             `(rule ${JSON.stringify(rule)})`,
         );
+      }
+    }
+
+    for (const rule of dropped) {
+      const res = await this.bareRequest(`/firewalls/${firewallId}/rules/${rule.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok && res.status !== 404) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Vultr firewall rule delete failed (${res.status}): ${body}`);
       }
     }
   }
@@ -936,11 +985,22 @@ export class VultrProvider extends BaseProvider {
    * list, deleting any tcp/5432 or tcp/6543 rule (RETIRED_DB_PORTS), and
    * leaving every other rule unchanged. Vultr keeps one subnet per
    * rule, so each locked port gets one rule PER CIDR (the same expansion
-   * the compose program applies at create time).
-   * @param {{firewallName: string, cidrs: string[]}} args
+   * the compose program applies at create time). The ports rewritten are
+   * the locked ones the group has rules on, plus `ports`: a k8s cluster's
+   * group has neither 22 nor 6443 until the deploy writes them after its up
+   * (writeOperatorRulesAfterUp, K8S_OPERATOR_RULES_AFTER_UP). The write is
+   * setFirewallRules' minimal diff, so an unchanged rule keeps its id.
+   * @param {{firewallName: string, cidrs: string[], ports?: string[]}} args
    * @returns {Promise<boolean>} true if found and updated
    */
-  async applyOperatorCidrs({ firewallName, cidrs }) {
+  async applyOperatorCidrs({ firewallName, cidrs, ports = [] }) {
+    for (const port of ports) {
+      if (!OPERATOR_LOCKED_PORTS.has(String(port))) {
+        throw new Error(
+          `Port ${port} is not an operator port (${[...OPERATOR_LOCKED_PORTS].join(', ')})`,
+        );
+      }
+    }
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
 
@@ -949,11 +1009,12 @@ export class VultrProvider extends BaseProvider {
       .filter((r) => !(r.protocol === 'tcp' && RETIRED_DB_PORTS.has(String(r.port))))
       .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
-      ...new Set(
-        (fw.rules || [])
+      ...new Set([
+        ...(fw.rules || [])
           .filter((r) => r.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(String(r.port)))
           .map((r) => String(r.port)),
-      ),
+        ...ports.map(String),
+      ]),
     ];
     const rebuilt = lockedPorts.flatMap((port) =>
       cidrs.map((cidr) => ({

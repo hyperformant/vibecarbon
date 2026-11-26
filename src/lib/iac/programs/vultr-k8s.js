@@ -21,6 +21,17 @@
  *     so the group is each node's one network filter, and Vultr does not
  *     enforce a group until it has a rule: every instance waits on the
  *     rules, so none boots behind an empty group.
+ *   - One writer per rule. The program declares only the rules nothing else
+ *     writes: the web (80, 443) and the VPC. The operator ports (22, 6443)
+ *     are REST's: deployK3s writes them right after the up, before its first
+ *     ssh (writeOperatorRulesAfterUp, VultrProvider.K8S_OPERATOR_RULES_AFTER_UP),
+ *     and `vibecarbon access` rewrites them. So is the k8s-ha replication
+ *     rule (UDP 51821). Each REST writer changes only its own rules
+ *     (VultrProvider.setFirewallRules is a minimal diff), so the program's
+ *     keep their ids and every later up (a scale, a failover, the next
+ *     deploy) finds them as it left them. A rule both wrote got a new id from
+ *     each REST rewrite, and the next up created it again, which Vultr
+ *     refuses ("This rule is already defined").
  *   - Vultr's metadata names each node (its `hostname`), which becomes its
  *     k8s node name, so every instance sets `hostname` to its label.
  *
@@ -64,8 +75,9 @@ const INSTANCE = 'vultr:index/instance:Instance';
  * @property {number} [minWorkers]       Default 1
  * @property {string} k3sVersion
  * @property {Record<string,string>} [labels]
- * @property {string[]} allowedSshIps    CIDR list, required
- * @property {string[]} allowedK8sApiIps CIDR list, required
+ * @property {string[]} allowedSshIps    CIDR list, required. Not a rule
+ *                                       here: deployK3s writes it after the up.
+ * @property {string[]} allowedK8sApiIps CIDR list, required, as allowedSshIps
  *
  * No API token: no node's user data carries it. deployK3s hands it to the
  * cluster's `vultr-csi` kube-system Secret, the CSI driver's credential,
@@ -78,6 +90,9 @@ const INSTANCE = 'vultr:index/instance:Instance';
  */
 export function buildVultrK8sProgram(config) {
   const { name: clusterName, labels } = stackIdentity(config);
+  // The program writes no operator rule (deployK3s does, after the up), but a
+  // deploy with no list would make a cluster no operator can reach: refused
+  // here, before any server exists.
   requireOperatorCidrs(config, { k8sApi: true });
   // Every node's hostname is its k8s node name (see the boot scripts), which
   // Kubernetes caps at 63. The longest is an autoscaler worker:
@@ -97,24 +112,10 @@ export function buildVultrK8sProgram(config) {
   const osId = Number(VultrProvider.K8S_IMAGE);
   const minWorkers = config.minWorkers ?? 1;
 
-  // One rule per (port, source): Vultr keeps one subnet per rule. The
-  // operator ports carry the notes applyOperatorCidrs writes when it
-  // rewrites them over REST (operator-ip.js), so a rewrite and a fresh deploy
-  // leave the same rules.
+  // One rule per (port, source): Vultr keeps one subnet per rule. No
+  // operator port: those rules are REST's (see the header).
   const WORLD = ['0.0.0.0/0', '::/0'];
   const ruleSpecs = [
-    ...config.allowedSshIps.map((cidr) => ({
-      protocol: 'tcp',
-      port: '22',
-      cidr,
-      notes: 'operator-22',
-    })),
-    ...config.allowedK8sApiIps.map((cidr) => ({
-      protocol: 'tcp',
-      port: '6443',
-      cidr,
-      notes: 'operator-6443',
-    })),
     ...WORLD.map((cidr) => ({ protocol: 'tcp', port: '80', cidr, notes: 'http' })),
     ...WORLD.map((cidr) => ({ protocol: 'tcp', port: '443', cidr, notes: 'https' })),
     // Internal cluster traffic (flannel VXLAN, kubelet, registry mirror),
@@ -151,18 +152,22 @@ export function buildVultrK8sProgram(config) {
     // `${clusterName}-firewall` to its id (renderCarbonAutoscalerConfig's
     // firewallName) and VultrProvider.createServer sends it as
     // `firewall_group_id`. operator-ip.js finds it by the same description
-    // (firewallName) to rewrite the operator ports.
+    // (firewallName) to write the operator ports.
     const firewall = new vultr.FirewallGroup('firewall', {
       description: `${clusterName}-firewall`,
     });
 
-    const rules = ruleSpecs.map((spec, i) => {
+    const rules = ruleSpecs.map((spec) => {
       const fields = cidrToVultrRuleFields(spec.cidr);
       // `source` is deliberately NOT set here, and must not be: a refresh
       // imports a CIDR into it that the provider rejects as input. Repaired
       // centrally by repairVultrFirewallRuleInputs (lib/iac/index.js), which
       // carries the full RCA; see vultr-compose.js.
-      return new vultr.FirewallRule(`rule-${i}`, {
+      // Named by what the rule admits (its notes, one per port and scope, and
+      // its family), never by its place in the list: a rule that comes or
+      // goes would rename every rule after it, and Pulumi deletes a renamed
+      // rule and makes it again.
+      return new vultr.FirewallRule(`rule-${spec.notes}-${fields.ip_type}`, {
         firewallGroupId: firewall.id,
         ipType: fields.ip_type,
         protocol: spec.protocol,

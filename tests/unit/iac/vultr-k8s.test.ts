@@ -10,7 +10,19 @@ import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
 
 type Opts = { dependsOn?: unknown[]; deleteBeforeReplace?: boolean };
 type Built = { name: string; resource: object; opts?: Opts };
-const { built } = vi.hoisted(() => ({ built: [] as Built[] }));
+const { built, net } = vi.hoisted(() => ({
+  built: [] as Built[],
+  /** Where the provider's REST calls go: a test's Vultr firewall API. */
+  net: { fetch: null as null | ((url: string, init?: RequestInit) => Promise<unknown>) },
+}));
+
+vi.mock('../../../src/lib/fetch-retry.js', async (orig) => ({
+  ...((await orig()) as object),
+  fetchWithRetry: (url: string, init?: RequestInit) => {
+    if (!net.fetch) throw new Error(`no Vultr API in this test: ${url}`);
+    return net.fetch(url, init);
+  },
+}));
 
 vi.mock('@ediri/vultr', async (orig) => {
   type ResourceClass = new (name: string, args: unknown, opts?: Opts) => object;
@@ -36,6 +48,7 @@ import { buildVultrK8sProgram } from '../../../src/lib/iac/programs/vultr-k8s.js
 import { vpcCidrForCluster } from '../../../src/lib/iac/vpc-cidr.js';
 import { firewallName } from '../../../src/lib/operator-ip.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { ruleFields, vultrFirewallApi } from '../../_shared/vultr-firewall-api.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: mock inputs of every resource shape
 type Captured = { type: string; name: string; inputs: Record<string, any> };
@@ -215,7 +228,7 @@ describe('buildVultrK8sProgram resource graph', () => {
     expect(outputs.k3sToken).toBe('SENTINEL-k3s-token');
   });
 
-  it('registers one key, VPC, group, reserved IP, master, db and two workers, plus the rules', () => {
+  it('registers one key, VPC, group, reserved IP, master, db and two workers, plus seven rules', () => {
     const count = (t: string) => byType(resources, t).length;
     expect(count(SSH_KEY)).toBe(1);
     expect(count(VPC)).toBe(1);
@@ -226,8 +239,8 @@ describe('buildVultrK8sProgram resource graph', () => {
         .map((i) => i.name)
         .sort(),
     ).toEqual(['db', 'master', 'worker-1', 'worker-2']);
-    expect(count(RULE)).toBe(10);
-    expect(resources).toHaveLength(1 + 1 + 1 + 1 + 4 + 10);
+    expect(count(RULE)).toBe(7);
+    expect(resources).toHaveLength(1 + 1 + 1 + 1 + 4 + 7);
   });
 
   it('gives the master the reserved IP at create, replaces it delete-first, and names its host', () => {
@@ -273,7 +286,7 @@ describe('buildVultrK8sProgram resource graph', () => {
     const groups = objects.filter((o) => o.name === 'firewall');
     expect(groups).toHaveLength(1);
     const rules = objects.filter((o) => o.name.startsWith('rule-'));
-    expect(rules).toHaveLength(10);
+    expect(rules).toHaveLength(7);
     for (const r of byType(resources, RULE)) {
       expect(r.inputs.firewallGroupId, r.name).toBe('fwg-uuid');
     }
@@ -304,7 +317,11 @@ describe('buildVultrK8sProgram resource graph', () => {
     });
   });
 
-  it('opens exactly the operator ports, the web and the VPC, one rule per source', () => {
+  // Ruling RV5, one writer per rule: the operator ports (22, 6443) are
+  // REST's (the deploy writes them after the up, `vibecarbon access` rewrites
+  // them), as is the k8s-ha replication rule. The program declares only the
+  // rules nothing else writes.
+  it('opens exactly the web and the VPC, one rule per source, and no operator port', () => {
     const rules = byType(resources, RULE).map((r) => r.inputs);
     const [vpcSubnet] = VPC_CIDR.split('/');
     expect(
@@ -313,9 +330,6 @@ describe('buildVultrK8sProgram resource graph', () => {
         .sort(),
     ).toEqual(
       [
-        'tcp 22 v4 203.0.113.5/32',
-        'tcp 22 v6 2001:db8::1/128',
-        'tcp 6443 v4 203.0.113.6/32',
         'tcp 80 v4 0.0.0.0/0',
         'tcp 80 v6 ::/0',
         'tcp 443 v4 0.0.0.0/0',
@@ -325,11 +339,29 @@ describe('buildVultrK8sProgram resource graph', () => {
         `icmp - v4 ${vpcSubnet}/24`,
       ].sort(),
     );
-    // applyOperatorCidrs matches the operator ports by these exact strings.
-    expect(rules.filter((r) => r.port === '22')).toHaveLength(2);
-    expect(rules.filter((r) => r.port === '6443')).toHaveLength(1);
+    expect(rules.filter((r) => ['22', '6443'].includes(String(r.port)))).toEqual([]);
     // `source` is never set: see repairVultrFirewallRuleInputs.
     for (const r of rules) expect(r).not.toHaveProperty('source');
+  });
+
+  // A name from the rule's place in a list renames every rule after one that
+  // comes or goes, and Pulumi deletes a renamed rule and makes it again.
+  it('names each rule by what it admits, not by its place in a list', () => {
+    expect(
+      byType(resources, RULE)
+        .map((r) => r.name)
+        .sort(),
+    ).toEqual(
+      [
+        'rule-http-v4',
+        'rule-http-v6',
+        'rule-https-v4',
+        'rule-https-v6',
+        'rule-vpc-tcp-v4',
+        'rule-vpc-udp-v4',
+        'rule-vpc-icmp-v4',
+      ].sort(),
+    );
   });
 
   it("renders the db and worker user data against the master's VPC address", () => {
@@ -361,81 +393,191 @@ describe('buildVultrK8sProgram resource graph', () => {
       ]),
     );
   });
+});
 
-  // Review Focus 3: the operator-ip push and the k8s-ha replication rule
-  // rewrite this group over REST (applyOperatorCidrs, then
-  // buildReplicationFirewallRules), deleting and recreating every rule. The
-  // VPC and web rules must come back as the program made them.
-  describe('the REST rewrites keep the rules they do not own', () => {
-    /** The program's rules as Vultr's rules listing returns them. */
-    const apiRules = () =>
-      byType(resources, RULE).map((r, i) => ({
-        id: i + 1,
-        protocol: r.inputs.protocol,
-        port: r.inputs.port ?? '',
-        subnet: r.inputs.subnet,
-        subnet_size: r.inputs.subnetSize,
-        ip_type: r.inputs.ipType,
-      }));
-    const withoutId = ({ id: _id, ...rest }: Record<string, unknown>) => rest;
-    const operator = (r: { protocol: unknown; port: unknown }) =>
-      r.protocol === 'tcp' && ['22', '6443'].includes(String(r.port));
+// Review Focus 3 and ruling RV5: one writer per rule. The program owns the
+// web and VPC rules. REST owns the operator ports (the deploy's push after
+// the up, then `vibecarbon access`) and the k8s-ha replication rule
+// (openReplicationFirewallForPeers: find, build, set). Each writer changes
+// only its own rules, so the program's keep their ids, and the next up (a
+// scale, a failover, the other side of an HA deploy) finds them as it left
+// them. Rewritten wholesale, they took new ids: the next up's refresh lost
+// them and it created them again, which Vultr refuses ("This rule is already
+// defined"), and the group sat empty, so unenforced, mid-rewrite.
+describe('one writer per firewall rule', () => {
+  const GROUP_NAME = `${CLUSTER}-firewall`;
+  const OPERATOR = ['203.0.113.5/32', '2001:db8::1/128'];
+  const ADDED = '198.51.100.9/32';
+  const PEER_DB = '198.51.100.7';
 
-    it('applyOperatorCidrs changes only the 22 and 6443 rules, one per new CIDR', async () => {
-      const listed = apiRules();
-      const provider = new VultrProvider('t');
-      const find = vi
-        .spyOn(provider, 'findFirewallByName')
-        .mockResolvedValue({ id: 'fwg-uuid', description: `${CLUSTER}-firewall`, rules: listed });
-      const set = vi.spyOn(provider, 'setFirewallRules').mockResolvedValue(undefined);
+  /** A FirewallRule's program inputs as the create body Vultr takes. */
+  const createBody = (inputs: Record<string, unknown>) => ({
+    ip_type: inputs.ipType,
+    protocol: inputs.protocol,
+    subnet: inputs.subnet,
+    subnet_size: inputs.subnetSize,
+    ...(inputs.port ? { port: inputs.port } : {}),
+    ...(inputs.notes ? { notes: inputs.notes } : {}),
+  });
 
-      const cidrs = ['198.51.100.9/32', '2001:db8::9/128'];
-      expect(
-        await provider.applyOperatorCidrs({ firewallName: `${CLUSTER}-firewall`, cidrs }),
-      ).toBe(true);
-      expect(find).toHaveBeenCalledWith(`${CLUSTER}-firewall`);
-      expect(set).toHaveBeenCalledTimes(1);
-      const [groupId, sent] = set.mock.calls[0] as [string, Record<string, unknown>[]];
-      expect(groupId).toBe('fwg-uuid');
+  /**
+   * The up that made the cluster: Vultr makes each of the program's rules,
+   * and state records its id under the rule's resource name.
+   */
+  function deployed(resources: Captured[]) {
+    const api = vultrFirewallApi({ groupId: 'fwg-uuid', description: GROUP_NAME });
+    const state = new Map<string, number>();
+    for (const r of byType(resources, RULE)) {
+      const row = api.create(createBody(r.inputs));
+      if (!row) throw new Error(`Vultr refused the program's rule ${r.name}`);
+      state.set(r.name, row.id);
+    }
+    // From here on, the calls are the REST writers'.
+    api.calls.length = 0;
+    net.fetch = api.fetch;
+    return { api, state };
+  }
 
-      // Non-vacuous: the VPC and web rules are really in the listing.
-      const others = listed.filter((r) => !operator(r)).map(withoutId);
-      expect(others).toHaveLength(7);
-      expect(sent.filter((r) => !operator(r as never))).toEqual(others);
-      expect(
-        sent
-          .filter((r) => operator(r as never))
-          .map((r) => `${r.port} ${r.ip_type} ${r.subnet}/${r.subnet_size}`)
-          .sort(),
-      ).toEqual(
-        [
-          '22 v4 198.51.100.9/32',
-          '22 v6 2001:db8::9/128',
-          '6443 v4 198.51.100.9/32',
-          '6443 v6 2001:db8::9/128',
-        ].sort(),
-      );
+  /**
+   * What the next up plans for the FirewallRules. Its refresh drops from
+   * state a rule whose id Vultr no longer lists. A rule still in state whose
+   * live fields differ from the program's is replaced (every FirewallRule
+   * field is ForceNew), a declared rule not in state is created, and a rule
+   * in state the program no longer declares is deleted.
+   */
+  function plan(
+    state: Map<string, number>,
+    api: ReturnType<typeof vultrFirewallApi>,
+    resources: Captured[],
+  ) {
+    const declared = byType(resources, RULE);
+    const refreshed = new Map([...state].filter(([, id]) => api.rules.has(id)));
+    const out = { create: [] as string[], replace: [] as string[], delete: [] as string[] };
+    for (const r of declared) {
+      const id = refreshed.get(r.name);
+      if (id === undefined) {
+        out.create.push(r.name);
+        continue;
+      }
+      const live = api.rules.get(id) as Record<string, unknown>;
+      const want = createBody(r.inputs);
+      if (ruleFields(live) !== ruleFields(want) || live.notes !== (want.notes ?? '')) {
+        out.replace.push(r.name);
+      }
+    }
+    for (const name of refreshed.keys()) {
+      if (!declared.some((r) => r.name === name)) out.delete.push(name);
+    }
+    return out;
+  }
+
+  const deletes = (api: ReturnType<typeof vultrFirewallApi>) =>
+    api.calls.filter((c) => c.method === 'DELETE');
+  const operatorRules = (api: ReturnType<typeof vultrFirewallApi>) =>
+    api.summary().filter((r) => / (22|6443) operator-/.test(r));
+
+  it("the deploy's push adds 22 and 6443 to a group with neither, and deletes nothing", async () => {
+    const { resources } = await run(baseConfig);
+    const { api } = deployed(resources);
+    const programRules = new Map(api.rules);
+
+    const provider = new VultrProvider('t');
+    expect(
+      await provider.applyOperatorCidrs({
+        firewallName: GROUP_NAME,
+        cidrs: OPERATOR,
+        ports: ['22', '6443'],
+      }),
+    ).toBe(true);
+
+    expect(deletes(api)).toEqual([]);
+    for (const [id, row] of programRules) expect(api.rules.get(id), row.notes).toEqual(row);
+    expect(operatorRules(api)).toEqual(
+      [
+        'v4 tcp 203.0.113.5/32 22 operator-22',
+        'v6 tcp 2001:db8::1/128 22 operator-22',
+        'v4 tcp 203.0.113.5/32 6443 operator-6443',
+        'v6 tcp 2001:db8::1/128 6443 operator-6443',
+      ].sort(),
+    );
+  });
+
+  it('an access push changes only the operator rules it adds or drops', async () => {
+    const { resources } = await run(baseConfig);
+    const { api } = deployed(resources);
+    const provider = new VultrProvider('t');
+    await provider.applyOperatorCidrs({
+      firewallName: GROUP_NAME,
+      cidrs: OPERATOR,
+      ports: ['22', '6443'],
     });
+    const before = new Map(api.rules);
+    api.calls.length = 0;
 
-    it('buildReplicationFirewallRules keeps every rule and adds the peer on UDP 51821', () => {
-      const listed = apiRules();
-      const provider = new VultrProvider('t');
-      const rules = provider.buildReplicationFirewallRules(
-        { id: 'fwg-uuid', rules: listed },
-        '198.51.100.7',
-      ) as Record<string, unknown>[];
-      expect(rules).toHaveLength(listed.length + 1);
-      for (const r of listed) expect(rules).toContainEqual(withoutId(r));
-      expect(rules).toContainEqual(
-        expect.objectContaining({
-          protocol: 'udp',
-          port: '51821',
-          ip_type: 'v4',
-          subnet: '198.51.100.7',
-          subnet_size: 32,
-        }),
-      );
+    // An address added: its two rules made, nothing deleted, every id kept.
+    await provider.applyOperatorCidrs({ firewallName: GROUP_NAME, cidrs: [...OPERATOR, ADDED] });
+    expect(api.calls.map((c) => `${c.method} ${c.rule}`).sort()).toEqual(
+      [`POST v4 tcp ${ADDED} 22`, `POST v4 tcp ${ADDED} 6443`].sort(),
+    );
+    for (const [id, row] of before) expect(api.rules.get(id)).toEqual(row);
+
+    // An address dropped: only its two rules deleted.
+    api.calls.length = 0;
+    await provider.applyOperatorCidrs({ firewallName: GROUP_NAME, cidrs: [OPERATOR[1], ADDED] });
+    expect(api.calls.map((c) => `${c.method} ${c.rule}`).sort()).toEqual(
+      ['DELETE v4 tcp 203.0.113.5/32 22', 'DELETE v4 tcp 203.0.113.5/32 6443'].sort(),
+    );
+    expect(api.state.emptied).toBe(false);
+  });
+
+  it('the replication write adds only the peer on UDP 51821', async () => {
+    const { resources } = await run(baseConfig);
+    const { api } = deployed(resources);
+    const before = new Map(api.rules);
+    const provider = new VultrProvider('t');
+
+    const fw = await provider.findFirewallByName(GROUP_NAME);
+    const rules = provider.buildReplicationFirewallRules(fw, PEER_DB);
+    await provider.setFirewallRules(fw.id, rules);
+
+    expect(api.calls).toEqual([
+      expect.objectContaining({ method: 'POST', rule: `v4 udp ${PEER_DB}/32 51821` }),
+    ]);
+    for (const [id, row] of before) expect(api.rules.get(id)).toEqual(row);
+  });
+
+  // The pin. A deploy, its push, an access push adding an address and the
+  // k8s-ha replication write, then the next program run (a scale, a
+  // failover, or the next deploy, handed the saved list with the new
+  // address in it): the up plans nothing for any FirewallRule.
+  it('after the REST writes, the next up plans no FirewallRule create, replace or delete', async () => {
+    const { resources } = await run(baseConfig);
+    const { api, state } = deployed(resources);
+    const provider = new VultrProvider('t');
+
+    await provider.applyOperatorCidrs({
+      firewallName: GROUP_NAME,
+      cidrs: OPERATOR,
+      ports: ['22', '6443'],
     });
+    const saved = [...OPERATOR, ADDED];
+    await provider.applyOperatorCidrs({ firewallName: GROUP_NAME, cidrs: saved });
+    const fw = await provider.findFirewallByName(GROUP_NAME);
+    await provider.setFirewallRules(fw.id, provider.buildReplicationFirewallRules(fw, PEER_DB));
+
+    const next = await run({ ...baseConfig, allowedSshIps: saved, allowedK8sApiIps: saved });
+    expect(plan(state, api, next.resources)).toEqual({ create: [], replace: [], delete: [] });
+    expect(api.state.emptied).toBe(false);
+
+    // Non-vacuous: REST's rules are all on the group, beside the program's.
+    expect(api.summary()).toEqual(
+      expect.arrayContaining([
+        `v4 tcp ${ADDED} 22 operator-22`,
+        `v4 tcp ${ADDED} 6443 operator-6443`,
+        `v4 udp ${PEER_DB}/32 51821 wg-replication`,
+      ]),
+    );
+    expect(api.rules.size).toBe(7 + 3 * 2 + 1);
   });
 });
 
