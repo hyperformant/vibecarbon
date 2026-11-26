@@ -9,8 +9,9 @@
  * there, KUBECONFIG_B64 (admin access to the cluster) first among it. The
  * CLI names those copies once per run, with the command that deletes one,
  * and deletes nothing itself (noteLeftoverGitopsCopies). Only names the old
- * seeding wrote count: one it never wrote is the operator's own. And since
- * vibecarbon makes no GitHub Environment, `vibecarbon destroy` deletes none.
+ * seeding wrote count: one it never wrote is the operator's own. And
+ * `vibecarbon destroy` changes nothing at GitHub: an Environment an earlier
+ * version made stays until the operator deletes it.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -348,10 +349,12 @@ describe('configure cicd names what an earlier vibecarbon left at GitHub, once, 
     const body = src.slice(src.indexOf('export async function runConfigureCicd('));
     const fn = body.slice(0, body.indexOf('\n}\n'));
     expect(fn.match(/noteLeftoverGitopsCopies\(/g)).toHaveLength(1);
-    const noteAt = fn.indexOf(
-      'await noteLeftoverGitopsCopies({ projectDir: cwd, envNames: targets.map((t) => t.envName) });',
+    // For the clusters handed over: a k8s-ha side skipped for want of its
+    // kubeconfig is not named.
+    const noteAt = fn.search(
+      /await noteLeftoverGitopsCopies\(\{\s*projectDir: cwd,\s*envNames: handed\.map\(\(target\) => target\.envName\),\s*\}\);/,
     );
     expect(noteAt).toBeGreaterThan(fn.indexOf('await noteUnreadTokenSecrets('));
-    expect(noteAt).toBeLessThan(fn.indexOf('for (const target of targets) {'));
+    expect(noteAt).toBeLessThan(fn.indexOf('for (const target of handed) {'));
   });
 });

@@ -195,7 +195,10 @@ const SPEC = {
     `  • ${destroySpecProviderName} firewalls`,
     `  • ${destroySpecProviderName} SSH keys (deployment keys only)`,
     '  • Cloudflare DNS records and health checks',
-    'GitHub is left alone: vibecarbon makes no GitHub environment, so it deletes none.',
+    'GitHub is left alone: destroy changes nothing there. A k8s cluster that ran',
+    '`configure cicd` leaves its read-only "vibecarbon flux <cluster>" deploy key on',
+    'your repo, which opens nothing once the cluster is gone. To find it and delete it:',
+    '  gh repo deploy-key list',
   ].join('\n'),
   positional: [
     {

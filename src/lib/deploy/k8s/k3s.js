@@ -3964,6 +3964,23 @@ export function renderK8sBase(
 }
 
 /**
+ * The vibecarbon-backup-settings ConfigMap an environment's backup CronJob
+ * reads: its retention, and where it saves the TLS Secret (none: no
+ * snapshot). applyK3sManifests pipes it to kubectl; it is in no manifest
+ * tree, so no Flux reconcile can touch it.
+ *
+ * @param {{schedule?: string, retentionDays?: number} | undefined} backupConfig
+ * @param {{ tlsSnapshotPrefix: string }} opts
+ * @returns {string}
+ */
+export function backupSettingsManifest(backupConfig, { tlsSnapshotPrefix }) {
+  return renderBackupSettingsConfigMap({
+    ...resolveBackupSettings(backupConfig),
+    tlsSnapshotPrefix,
+  });
+}
+
+/**
  * renderK8sBase's work on its fresh copy: the backup schedule, the replication
  * hostPort, the TLS Certificate, then the leftover-placeholder checks. Throws
  * on a placeholder it would otherwise apply; renderK8sBase removes the copy.
@@ -4529,8 +4546,9 @@ export async function applyK3sManifests({
   const master = { ip: masterIp, sshKeyPath };
   // The schedule and retention this environment runs backups with, validated
   // before anything is created; rendered into the CronJob (renderK8sBase) and
-  // the vibecarbon-backup-settings ConfigMap applied below.
-  const backupSettings = resolveBackupSettings(backupConfig);
+  // the vibecarbon-backup-settings ConfigMap applied below
+  // (backupSettingsManifest).
+  resolveBackupSettings(backupConfig);
   // Pilot-light: on the standby cluster nothing app-tier runs until a
   // failover promotes it — no app pods, no CA-spawned workers. Everything
   // below gated on this const either declaratively zeroes a Deployment
@@ -5235,7 +5253,7 @@ export async function applyK3sManifests({
   // tree, so no Flux reconcile can touch it).
   await runKubectlWithRetry(['-n', 'vibecarbon', 'apply', '-f', '-'], {
     env,
-    input: renderBackupSettingsConfigMap({ ...backupSettings, tlsSnapshotPrefix }),
+    input: backupSettingsManifest(backupConfig, { tlsSnapshotPrefix }),
     description: 'applyK3sManifests: kubectl apply ConfigMap/vibecarbon-backup-settings',
   });
   if (pilotStandby) {

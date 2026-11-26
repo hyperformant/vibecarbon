@@ -19,7 +19,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import * as p from '@clack/prompts';
 import { formatAmount, listStripePrices } from './lib/billing/stripe-catalog.js';
 import { writeBillingCatalog } from './lib/billing/write-catalog.js';
@@ -1510,8 +1510,11 @@ async function main(cliArgs) {
  * Pre-conditions:
  *   - Project is initialized (`.vibecarbon.json` exists).
  *   - `gh` CLI is authenticated and the project has a GitHub origin.
- *   - For Stage 2 only: the env was deployed via `vibecarbon deploy -mode k8s`
- *     (the kubeconfig at `.vibecarbon/kubeconfig-<env>` must exist).
+ *   - For Stage 2 only: the env was deployed from this machine, so each
+ *     cluster's kubeconfig is here: `.vibecarbon/kubeconfig-<env>`, or on
+ *     k8s-ha one per side, `kubeconfig-<env>-primary` and `-standby`. A side
+ *     whose kubeconfig is missing is skipped; with none, nothing is handed
+ *     over.
  */
 export async function runConfigureCicd(envName) {
   // Project guard runs before banner so an accidental `vibecarbon
@@ -1600,113 +1603,145 @@ export async function runConfigureCicd(envName) {
     return;
   }
 
-  const kubeconfigPath = localKubeconfigPath(cwd, envName);
-  if (!existsSync(kubeconfigPath)) {
+  const {
+    deployK8sGitOps,
+    gitopsTargets,
+    noteLeftoverGitopsCopies,
+    noteUnreadTokenSecrets,
+    refuseUnreadyGitopsProject,
+    resolveOwnerAndRepo,
+  } = await import('./lib/deploy/k8s/gitops-deploy.js');
+
+  // The clusters to hand over, each through its own kubeconfig: one, or on
+  // k8s-ha one per side (<env>-primary and <env>-standby, the files a k8s-ha
+  // deploy writes, named for each side's stack). A side whose kubeconfig is
+  // not on this machine is skipped, so the side that is up still gets Flux
+  // while the other is down; with none here there is nothing to hand over.
+  const targets = gitopsTargets(envName, envConfig).map((target) => {
+    const kubeconfigPath = localKubeconfigPath(cwd, target.envName);
+    return { ...target, kubeconfigPath, here: existsSync(kubeconfigPath) };
+  });
+  const handed = targets.filter((target) => target.here);
+  const skipped = targets.filter((target) => !target.here);
+  const shown = (target) => relative(cwd, target.kubeconfigPath);
+  const them = (list) => (list.length === 1 ? 'it' : 'them');
+  if (handed.length === 0) {
+    const paths = skipped.map(shown).join(' and ');
     p.log.error(
-      `Kubeconfig not found at ${kubeconfigPath}. Deploy the cluster first: vibecarbon deploy ${envName} -mode k8s`,
+      `no kubeconfig for ${envName} is on this machine (${paths} ${skipped.length === 1 ? 'is' : 'are'} ` +
+        `missing), so there is no cluster here to hand to flux. a deploy from this machine fetches ` +
+        `${them(skipped)}: vibecarbon deploy ${envName}`,
     );
+    process.exit(1);
+  }
+  if (skipped.length > 0) {
+    const names = skipped.map((target) => target.envName).join(' and ');
+    const files = skipped.map(shown).join(' and ');
+    const one = skipped.length === 1;
+    p.log.warn(
+      `skipping ${names}: ${one ? 'its kubeconfig' : 'their kubeconfigs'} (${files}) ` +
+        `${one ? 'is' : 'are'} not on this machine, so this run cannot reach ` +
+        `${one ? 'that cluster' : 'those clusters'}. a deploy from here fetches ${them(skipped)}: ` +
+        `vibecarbon deploy ${envName}\n` +
+        `then hand ${them(skipped)} over with: vibecarbon configure cicd ${envName}`,
+    );
+  }
+
+  // The project's own refusals, before the firewall gate, the notes and the
+  // pull token ask: a Flux tree with a placeholder in it, or a cluster file
+  // that still clones over https, is refused with nothing asked or touched.
+  // They read local files only; deployK8sGitOps runs them again for any
+  // other caller.
+  const { getImageTag } = await import('./lib/ci-setup.js');
+  const imageTag = getImageTag(cwd);
+  try {
+    refuseUnreadyGitopsProject(cwd, { environment: envName, imageTag });
+  } catch (err) {
+    p.log.error(err.message);
     process.exit(1);
   }
 
   // Stage 2 reaches the k8s API from this machine, so the firewall must let
-  // this address in first. A run with no terminal on stdin counts as `-y`:
-  // under CI it trusts the saved list, as `deploy -y` does.
+  // this address in first: the firewall of each side handed over. A run
+  // with no terminal on stdin counts as `-y`: under CI it trusts the saved
+  // list, as `deploy -y` does.
   await requireEnvOperatorIpAccess({
     projectConfig,
     envName,
     envConfig,
     yes: !process.stdin.isTTY,
+    sides: handed.map((target) => target.envName),
   });
 
   // Stage 2: hand each cluster to Flux from this machine. This is the body
   // that orchestrator.js used to run inline when --gitops was passed
   // (deleted in PR 5).
   p.log.step('Stage 2: install flux on the cluster and let it pull from your repo');
-  const {
-    deployK8sGitOps,
-    gitopsTargets,
-    noteLeftoverGitopsCopies,
-    noteUnreadTokenSecrets,
-    resolveOwnerAndRepo,
-  } = await import('./lib/deploy/k8s/gitops-deploy.js');
-  const { getImageTag } = await import('./lib/ci-setup.js');
-  const imageTag = getImageTag(cwd);
   const { getProviderClass } = await import('./lib/providers/index.js');
   const ProviderClass = getProviderClass((envConfig.provider || 'hetzner').toLowerCase());
 
-  // HA clusters split into <env>-primary and <env>-standby kubeconfigs;
-  // each needs its own GitOps handover. The orchestrator used to iterate
-  // over `[{suffix:'primary'}, {suffix:'standby'}]` in HA, single in non-HA.
-  const targets = gitopsTargets(envName, envConfig);
-
   // Once per run, not per cluster: the copies an earlier vibecarbon left at
   // GitHub that nothing reads any more, the provider token secret and what
-  // it seeded into each cluster's GitHub Environment for deploy.yml.
+  // it seeded into the GitHub Environment of each cluster handed over.
   await noteUnreadTokenSecrets({ projectDir: cwd, ProviderClass });
-  await noteLeftoverGitopsCopies({ projectDir: cwd, envNames: targets.map((t) => t.envName) });
+  await noteLeftoverGitopsCopies({
+    projectDir: cwd,
+    envNames: handed.map((target) => target.envName),
+  });
 
-  // Once per run too: what the clusters pull a private app image with. Both
-  // sides of k8s-ha get the same token, so the operator is asked at most
-  // once, and not at all for a public package or a token a cluster already
-  // holds that still passes the checks. With no cluster to hand over (the
-  // loop below skips each one), nothing is asked: a token would be stored
-  // nowhere.
-  const clusters = targets
-    .map((target) => ({
-      envName: target.envName,
-      kubeconfigPath: localKubeconfigPath(cwd, target.envName),
-    }))
-    .filter((cluster) => existsSync(cluster.kubeconfigPath));
-  let ghcrPull = null;
-  if (clusters.length > 0) {
-    const { resolveGhcrPull } = await import('./lib/deploy/k8s/ghcr-pull-secret.js');
-    const recorded = projectConfig.github;
-    const repoRef =
-      resolveOwnerAndRepo(cwd) ??
-      (recorded?.owner && recorded?.repo ? { owner: recorded.owner, name: recorded.repo } : null);
-    if (!repoRef) {
-      p.log.error(
-        `could not tell which github repo ${envName} pulls its app image from. point origin at github.com, then run vibecarbon configure cicd ${envName}`,
-      );
-      process.exit(1);
-    }
-    try {
-      ghcrPull = await resolveGhcrPull({
-        owner: repoRef.owner,
-        repo: repoRef.name,
-        projectName: projectConfig.projectName,
-        envName,
-        clusters,
-      });
-    } catch (err) {
-      p.log.error(err.message);
-      process.exit(1);
-    }
+  // Once per run too: what the clusters handed over pull a private app image
+  // with. Both sides of k8s-ha get the same token, so the operator is asked
+  // at most once, and not at all for a public package or a token a cluster
+  // already holds that still passes the checks.
+  const { resolveGhcrPull } = await import('./lib/deploy/k8s/ghcr-pull-secret.js');
+  const recorded = projectConfig.github;
+  const repoRef =
+    resolveOwnerAndRepo(cwd) ??
+    (recorded?.owner && recorded?.repo ? { owner: recorded.owner, name: recorded.repo } : null);
+  if (!repoRef) {
+    p.log.error(
+      `could not tell which github repo ${envName} pulls its app image from. point origin at github.com, then run vibecarbon configure cicd ${envName}`,
+    );
+    process.exit(1);
+  }
+  let ghcrPull;
+  try {
+    ghcrPull = await resolveGhcrPull({
+      owner: repoRef.owner,
+      repo: repoRef.name,
+      projectName: projectConfig.projectName,
+      envName,
+      clusters: handed.map(({ envName: cluster, kubeconfigPath }) => ({
+        envName: cluster,
+        kubeconfigPath,
+      })),
+    });
+  } catch (err) {
+    p.log.error(err.message);
+    process.exit(1);
   }
 
-  for (const target of targets) {
-    const targetKubeconfig = localKubeconfigPath(cwd, target.envName);
-    if (!existsSync(targetKubeconfig)) {
-      p.log.warn(
-        `Kubeconfig for ${target.envName} not found at ${targetKubeconfig}, skipping. Deploy that cluster first with \`vibecarbon deploy\`.`,
-      );
-      continue;
-    }
+  for (const target of handed) {
     p.log.info(`Configuring GitOps for ${c.bold(target.envName)}`);
     await deployK8sGitOps({
       projectDir: cwd,
       environment: target.envName,
       projectName: projectConfig.projectName,
-      kubeconfigPath: targetKubeconfig,
+      kubeconfigPath: target.kubeconfigPath,
       imageTag,
       ghcrPull,
     });
   }
 
   const env = environmentForStack(envName);
+  const into = handed.map((target) => target.envName).join(' and ');
+  const left =
+    skipped.length === 0
+      ? ''
+      : ` ${skipped.map((target) => target.envName).join(' and ')} ${skipped.length === 1 ? 'was' : 'were'} skipped, with no kubeconfig here.`;
   p.outro(
     c.success(
-      `flux now pulls main into ${env}. push under k8s/ to deploy. after you change a secret, run vibecarbon deploy ${env}`,
+      `flux now pulls main into ${into}.${left} push under k8s/ to deploy. after you change a secret, run vibecarbon deploy ${env}`,
     ),
   );
 }

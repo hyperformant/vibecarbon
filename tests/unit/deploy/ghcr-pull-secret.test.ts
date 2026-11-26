@@ -47,12 +47,15 @@ vi.mock('../../../src/lib/deploy/k8s/k3s.js', async (orig) => ({
     if (argv.at(-1) === 'jsonpath={.data.\\.dockerconfigjson}') return stored ?? '';
     if (argv.at(-1) === 'name') return stored === undefined ? '' : 'secret/ghcr-pull-secret\n';
     if (argv[1] === '-f' && argv[2] === '-') return '';
+    if (argv[0] === 'delete') return '';
     throw new Error(`unexpected kubectl ${argv.join(' ')}`);
   },
 }));
 
 const {
+  FLUX_APP_TAG,
   GHCR_PULL_SECRET,
+  assertAppImageBuilt,
   ensureGhcrPullSecretOn,
   ghcrAcceptsToken,
   ghcrPullSecretManifest,
@@ -73,6 +76,7 @@ const OLD_TOKEN = `ghp_${'vcpullold'.padEnd(36, 'Z')}`;
 
 const TOKEN_URL = 'https://ghcr.io/token?scope=repository:acme/shop:pull&service=ghcr.io';
 const TAGS_URL = 'https://ghcr.io/v2/acme/shop/tags/list';
+const MANIFEST_URL = 'https://ghcr.io/v2/acme/shop/manifests/main';
 const USER_URL = 'https://api.github.com/user';
 
 const basic = (user: string, token: string) =>
@@ -98,10 +102,12 @@ const forToken = <T>(value: PerToken<T>, token: string): T =>
  * Basic token (exchange, then tags); `user` is api.github.com's status for
  * the token's /user call, and `scopes` the x-oauth-scopes header it sends
  * (null: no header, a fine-grained token). `user` and `scopes` may be keyed
- * by token.
+ * by token. `manifest` is ghcr's answer to the HEAD of the app image's
+ * `:main` manifest, for the anonymous pull token and for a token's.
  */
 function registry({
   anonymous = { token: 200, tags: 401 },
+  manifest = { anonymous: 200, token: 200 },
   tokens = { [TOKEN]: { exchange: 200, tags: 200 } } as Record<
     string,
     { exchange: number; tags: number }
@@ -136,6 +142,11 @@ function registry({
         if (auth === 'Bearer anon-bearer') return { status: anonymous.tags };
         const m = auth.match(/^Bearer bearer-for-(\d+)$/);
         if (m) return { status: Number(m[1]) };
+        return { status: 401 };
+      }
+      if (url === MANIFEST_URL) {
+        if (auth === 'Bearer anon-bearer') return { status: manifest.anonymous };
+        if (/^Bearer bearer-for-\d+$/.test(auth)) return { status: manifest.token };
         return { status: 401 };
       }
       throw new Error(`unexpected fetch ${url}`);
@@ -395,8 +406,10 @@ describe('the Secret', () => {
     const env = { KUBECONFIG: PRIMARY } as NodeJS.ProcessEnv;
     const pull = { mode: 'token' as const, username: 'octo', token: TOKEN };
 
+    // Public: nothing written. (The stale-Secret delete has its own test.)
     expect(await ensureGhcrPullSecretOn({ env, pull: { mode: 'public' } })).toBe('public');
-    expect(h.kubectl).toEqual([]);
+    expect(writes()).toEqual([]);
+    h.kubectl.length = 0;
 
     // Missing: created.
     expect(await ensureGhcrPullSecretOn({ env, pull })).toBe('stored');
@@ -422,6 +435,21 @@ describe('the Secret', () => {
     for (const call of h.kubectl) {
       for (const arg of call.argv) expect(arg).not.toContain(TOKEN);
     }
+  });
+
+  it('a public package deletes a token an earlier run stored, so none sits there unchecked', async () => {
+    // The image went public after a run stored a token: kubelet would keep
+    // pulling with it, and no later run would check its scopes again. A
+    // Secret named in imagePullSecrets that is missing only makes kubelet
+    // pull anonymously.
+    const env = { KUBECONFIG: PRIMARY } as NodeJS.ProcessEnv;
+    h.secrets[PRIMARY] = storedSecret('octo', OLD_TOKEN);
+    expect(await ensureGhcrPullSecretOn({ env, pull: { mode: 'public' } })).toBe('public');
+    expect(h.kubectl.map((c) => c.argv)).toEqual([
+      ['delete', 'secret', 'ghcr-pull-secret', '-n', 'vibecarbon', '--ignore-not-found'],
+    ]);
+    expect(h.kubectl[0].env?.KUBECONFIG).toBe(PRIMARY);
+    expect(writes()).toEqual([]);
   });
 
   it('a pull credential that was never resolved is a bug, not a public package', async () => {
@@ -711,6 +739,119 @@ describe('resolveGhcrPull', () => {
   });
 });
 
+describe('the app image Flux rolls to is built before the handover', () => {
+  const PUBLIC = { mode: 'public' as const };
+  const PRIVATE = { mode: 'token' as const, username: 'octo', token: TOKEN };
+  const check = (
+    pull: typeof PUBLIC | typeof PRIVATE,
+    opts: Parameters<typeof registry>[0] = {},
+  ) => {
+    const reg = registry(opts);
+    return {
+      ...reg,
+      run: () =>
+        assertAppImageBuilt({
+          owner: 'Acme',
+          repo: 'Shop',
+          pull,
+          envName: 'prod-standby',
+          fetcher: reg.fetcher,
+        }),
+    };
+  };
+  const NOT_BUILT =
+    'your app image ghcr.io/acme/shop:main is not built yet, so flux would roll the app to an ' +
+    'image that does not exist. commit and push .github/workflows to main, wait for its first ' +
+    'build in the actions tab, then run vibecarbon configure cicd prod';
+
+  it('the tag is the one every app image line in k8s/base names', () => {
+    expect(FLUX_APP_TAG).toBe('main');
+  });
+
+  it('a built tag carries on: one HEAD of the manifest, asking for every image type', async () => {
+    for (const [pull, auth] of [
+      [PUBLIC, undefined],
+      [PRIVATE, basic('octo', TOKEN)],
+    ] as const) {
+      const { fetcher, fetched, run } = check(pull);
+      await expect(run()).resolves.toBeUndefined();
+      // The same exchange as the other probes, anonymous or with the token's
+      // Basic pair, then the manifest, lowercased like every ghcr path.
+      expect(fetched.map((f) => f.url)).toEqual([TOKEN_URL, MANIFEST_URL]);
+      expect(fetched[0].headers.Authorization).toBe(auth);
+      const [, init] = fetcher.mock.calls[1] as [
+        string,
+        RequestInit & { headers: Record<string, string> },
+      ];
+      expect(init.method).toBe('HEAD');
+      expect(init.headers.Accept.split(/,\s*/)).toEqual([
+        'application/vnd.oci.image.index.v1+json',
+        'application/vnd.oci.image.manifest.v1+json',
+        'application/vnd.docker.distribution.manifest.list.v2+json',
+        'application/vnd.docker.distribution.manifest.v2+json',
+      ]);
+      expect(init.headers.Authorization).toMatch(/^Bearer /);
+    }
+  });
+
+  it('a tag not built yet refuses, saying to push the workflow and wait for its build', async () => {
+    for (const [pull, opts] of [
+      [PRIVATE, { manifest: { anonymous: 200, token: 404 } }],
+      [PUBLIC, { manifest: { anonymous: 404, token: 200 } }],
+      // Anonymous, a package not published is a 401.
+      [PUBLIC, { manifest: { anonymous: 401, token: 200 } }],
+      [PUBLIC, { anonymous: { token: 401, tags: 401 } }],
+    ] as const) {
+      const err = await check(pull, opts)
+        .run()
+        .catch((e) => e);
+      expect(err?.message, JSON.stringify(opts)).toBe(NOT_BUILT);
+    }
+  });
+
+  it('ghcr down or rate limited says to try again, and never says the image is missing', async () => {
+    for (const status of [503, 500, 429]) {
+      for (const pull of [PUBLIC, PRIVATE]) {
+        const err = await check(pull, { manifest: { anonymous: status, token: status } })
+          .run()
+          .catch((e) => e);
+        expect(err?.message, String(status)).toMatch(/try again in a minute/);
+        expect(err?.message).not.toMatch(/not built yet/);
+      }
+    }
+    const exchange = await check(PRIVATE, { tokens: { [TOKEN]: { exchange: 503, tags: 200 } } })
+      .run()
+      .catch((e) => e);
+    expect(exchange?.message).toMatch(/try again in a minute/);
+  });
+
+  it('a token ghcr now turns down says to rerun, which checks it again', async () => {
+    const err = await check(PRIVATE, { tokens: {} })
+      .run()
+      .catch((e) => e);
+    expect(err?.message).toMatch(/turned down the pull token/);
+    expect(err?.message).toMatch(/vibecarbon configure cicd prod$/);
+  });
+
+  it('the token goes only into the exchange header: never a url or an error', async () => {
+    for (const opts of [
+      {},
+      { manifest: { anonymous: 200, token: 404 } },
+      { manifest: { anonymous: 200, token: 503 } },
+      { manifest: { anonymous: 200, token: 403 } },
+      { tokens: {} },
+    ]) {
+      const { fetched, run } = check(PRIVATE, opts);
+      const err = await run().catch((e) => e);
+      expect(String(err?.message ?? '')).not.toContain(TOKEN);
+      for (const { url, headers } of fetched) {
+        expect(url).not.toContain(TOKEN);
+        if (url === MANIFEST_URL) expect(JSON.stringify(headers)).not.toContain(TOKEN);
+      }
+    }
+  });
+});
+
 describe('configure cicd', () => {
   it('configure cicd resolves the pull credential once, before its per-cluster loop, and hands it to each cluster', () => {
     const src = readFileSync(join(REPO_ROOT, 'src/configure.js'), 'utf8');
@@ -718,7 +859,7 @@ describe('configure cicd', () => {
     const fn = body.slice(0, body.indexOf('\n}\n'));
     expect(fn.match(/resolveGhcrPull\(/g)).toHaveLength(1);
     const resolveAt = fn.indexOf('resolveGhcrPull(');
-    const loopAt = fn.indexOf('for (const target of targets) {');
+    const loopAt = fn.indexOf('for (const target of handed) {');
     expect(loopAt).toBeGreaterThan(-1);
     expect(resolveAt).toBeLessThan(loopAt);
     const call = fn.slice(fn.indexOf('await deployK8sGitOps({'));

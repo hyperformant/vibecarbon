@@ -11,10 +11,12 @@
  * disk, and this process keeps no copy. Then every other key with the same
  * title is removed: the one that Secret held before, and any a failed run
  * left. A key titled for any other cluster, or added by anyone else, is never
- * touched.
+ * touched. A removal that fails only warns: Flux already has the new key, and
+ * an old one opens nothing.
  */
 
 import { generateKeyPairSync } from 'node:crypto';
+import * as p from '@clack/prompts';
 import { runCommandAsync } from '../../command.js';
 import { environmentForStack } from '../../environment-name.js';
 import { replaceWholeSecret } from './flux-bootstrap.js';
@@ -196,11 +198,23 @@ export function fluxSystemSecretManifest({ privateKeyPem, publicKey, knownHosts 
  * at GitHub that no Secret holds opens nothing: its private half was never
  * kept.
  *
- * @param {{ env: NodeJS.ProcessEnv, owner: string, repo: string, envName: string }} args -
- *   env carries the cluster's KUBECONFIG; envName names the cluster
+ * So once the Secret is written, a list or a delete of the old keys that
+ * fails stops nothing: it is said once through `warn`, naming the title, and
+ * every key it can still remove is removed. The next run removes the rest.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, owner: string, repo: string, envName: string,
+ *   warn?: (line: string) => void }} args - env carries the cluster's
+ *   KUBECONFIG; envName names the cluster; warn says what was left (the
+ *   handover hands its caller's, to print once its spinner is done)
  * @returns {Promise<{ keyId: number, removed: number[] }>}
  */
-export async function rotateFluxDeployKey({ env, owner, repo, envName }) {
+export async function rotateFluxDeployKey({
+  env,
+  owner,
+  repo,
+  envName,
+  warn = (line) => p.log.warn(line),
+}) {
   const knownHosts = await githubKnownHosts();
   const title = deployKeyTitle(envName);
   const { privateKeyPem, publicKey } = generateDeployKeyPair();
@@ -223,10 +237,35 @@ export async function rotateFluxDeployKey({ env, owner, repo, envName }) {
     manifest: fluxSystemSecretManifest({ privateKeyPem, publicKey, knownHosts }),
   });
   const removed = [];
-  for (const key of await listDeployKeys({ owner, repo })) {
+  const failed = [];
+  let keys = [];
+  try {
+    keys = await listDeployKeys({ owner, repo });
+  } catch (err) {
+    failed.push(why(err));
+  }
+  for (const key of keys) {
     if (key.title !== title || key.id === keyId) continue;
-    await deleteDeployKey({ owner, repo, id: key.id });
-    removed.push(key.id);
+    try {
+      await deleteDeployKey({ owner, repo, id: key.id });
+      removed.push(key.id);
+    } catch (err) {
+      failed.push(why(err));
+    }
+  }
+  if (failed.length > 0) {
+    warn(
+      `flux has its new deploy key, but an old "${title}" key on ${owner}/${repo} was not ` +
+        `removed (${[...new Set(failed)].join('; ')}). an old key opens nothing, since its private ` +
+        'half was never kept, and the next configure cicd removes it. to remove it now, find its ' +
+        'id with gh repo deploy-key list',
+    );
   }
   return { keyId, removed };
+}
+
+/** What a failed gh call said, on one line: its stderr, else its message. */
+function why(err) {
+  const said = String(err?.stderr || err?.message || err).trim();
+  return said.split('\n').find((line) => line.trim()) ?? 'no reason given';
 }

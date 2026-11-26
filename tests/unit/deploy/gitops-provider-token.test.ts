@@ -209,7 +209,7 @@ describe('configure cicd names a token secret still at GitHub that no workflow r
     const fn = body.slice(0, body.indexOf('\n}\n'));
     expect(fn.match(/noteUnreadTokenSecrets\(/g)).toHaveLength(1);
     const noteAt = fn.indexOf('await noteUnreadTokenSecrets({ projectDir: cwd, ProviderClass });');
-    const loopAt = fn.indexOf('for (const target of targets) {');
+    const loopAt = fn.indexOf('for (const target of handed) {');
     expect(noteAt).toBeGreaterThan(-1);
     expect(noteAt).toBeLessThan(loopAt);
     // The deploy itself needs no provider: it copies nothing to GitHub.

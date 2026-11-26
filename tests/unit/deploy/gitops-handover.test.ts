@@ -10,6 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gitSafeEnv } from '../../../src/lib/command.js';
 import { createdK8sProject, withGitOrigin } from '../../_shared/gitops-project.js';
@@ -28,7 +29,7 @@ vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({ handOverCluster
 
 const github = await import('../../../src/lib/github-environments.js');
 const { handOverCluster } = await import('../../../src/lib/deploy/k8s/flux-handover.js');
-const { deployK8sGitOps, gitopsTargets } = await import(
+const { deployK8sGitOps, gitopsTargets, refuseUnreadyGitopsProject } = await import(
   '../../../src/lib/deploy/k8s/gitops-deploy.js'
 );
 const { FLUX_CLUSTER_FILE } = await import(
@@ -104,6 +105,7 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
       owner: 'acme',
       repo: 'proj',
       ghcrPull: GHCR_PULL,
+      warn: expect.any(Function),
     });
     expect(vi.mocked(handOverCluster).mock.calls[0][0].ghcrPull).toBe(GHCR_PULL);
     expect(originHadMain).toEqual([true]);
@@ -122,23 +124,52 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
     expect(err?.message).toBe('flux did not finish');
   });
 
-  it('a cluster file that still clones over https is refused before anything is written, naming upgrade', async () => {
+  it('what the handover warns of is printed once its spinner is done, and the run goes on', async () => {
+    const { project } = gitopsProject();
+    const warn = vi.spyOn(p.log, 'warn');
+    vi.mocked(handOverCluster).mockImplementation(async ({ warn: say }) => {
+      say?.('an old key was not removed');
+      // Nothing is printed while the handover (and its spinner) runs.
+      expect(warn).not.toHaveBeenCalledWith('an old key was not removed');
+    });
+    await expect(deploy(project)).resolves.toEqual({ pushed: true });
+    expect(warn).toHaveBeenCalledWith('an old key was not removed');
+
+    // A handover that fails after a warning still says it, then fails.
+    warn.mockClear();
+    vi.mocked(handOverCluster).mockImplementation(async ({ warn: say }) => {
+      say?.('an old key was not removed');
+      throw new Error('flux did not finish');
+    });
+    await expect(deploy(project)).rejects.toThrow('flux did not finish');
+    expect(warn).toHaveBeenCalledWith('an old key was not removed');
+  });
+
+  it('a cluster file that still clones over https is refused before anything is written, naming the ssh url and upgrade', async () => {
     vi.mocked(handOverCluster).mockResolvedValue(undefined);
     const { project, origin } = gitopsProject();
     const clusterFile = join(project, FLUX_CLUSTER_FILE);
     const https = readFileSync(clusterFile, 'utf-8').replace(
       'url: ssh://git@github.com/proj/proj',
-      'url: https://github.com/proj/proj',
+      'url: https://github.com/proj/proj.git',
     );
     writeFileSync(clusterFile, https);
     const err = await deploy(project).then(
       () => null,
       (e: Error) => e,
     );
+    // The url alone is enough, and the new cluster file an `upgrade -y` may
+    // have saved beside it has the ssh url too.
     expect(err?.message).toBe(
       `${FLUX_CLUSTER_FILE} still has flux read your repo over https, which needs a token github ` +
-        'takes back after every workflow run. run vibecarbon upgrade and take the new ' +
-        `${FLUX_CLUSTER_FILE}, then rerun vibecarbon configure cicd prod`,
+        'takes back after every workflow run. changing its url: to ' +
+        'ssh://git@github.com/proj/proj is enough. the new cluster file has that url too: take it ' +
+        `with vibecarbon upgrade (upgrade -y may have left it beside yours as ${FLUX_CLUSTER_FILE}.upgrade-new). ` +
+        'then rerun vibecarbon configure cicd prod',
+    );
+    expect(refuseUnreadyGitopsProject).toBeTypeOf('function');
+    expect(() => refuseUnreadyGitopsProject(project, { environment: 'prod-standby' })).toThrow(
+      err?.message,
     );
     // Nothing written, pushed or handed over.
     expect(readFileSync(clusterFile, 'utf-8')).toBe(https);

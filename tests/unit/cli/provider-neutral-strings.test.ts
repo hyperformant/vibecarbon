@@ -91,9 +91,13 @@ describe('destroy.js SPEC — teardown bullets derive from Provider.NAME (sancti
   it('leaves the non-provider bullet (Cloudflare) untouched, and deletes nothing at GitHub', () => {
     expect(DESTROY_SPEC.description).toContain('  • Cloudflare DNS records and health checks');
     expect(DESTROY_SPEC.description).not.toMatch(/• GitHub/);
-    expect(DESTROY_SPEC.description).toContain(
-      'GitHub is left alone: vibecarbon makes no GitHub environment, so it deletes none.',
-    );
+    // True of every version: earlier ones did make a GitHub environment, and
+    // destroy leaves it, and the cluster's deploy key, where they are.
+    const said = DESTROY_SPEC.description.replace(/\s+/g, ' ');
+    expect(said).toContain('GitHub is left alone: destroy changes nothing there.');
+    expect(said).toContain('"vibecarbon flux <cluster>" deploy key');
+    expect(said).not.toMatch(/makes no GitHub environment/);
+    expect(DESTROY_SPEC.description).toMatch(/\n {2}gh repo deploy-key list(\n|$)/);
   });
 });
 

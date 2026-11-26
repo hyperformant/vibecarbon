@@ -68,6 +68,7 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/ci-setup.js url https://ghcr.io/v2/{*}/{*}/manifests/{*}',
       'src/lib/deploy/k8s/ghcr-pull-secret.js ghcrEndpoints https://ghcr.io/token?scope=repository:{*}:pull&service=ghcr.io',
       'src/lib/deploy/k8s/ghcr-pull-secret.js ghcrEndpoints https://ghcr.io/v2/{*}/tags/list',
+      'src/lib/deploy/k8s/ghcr-pull-secret.js ghcrEndpoints https://ghcr.io/v2/{*}/manifests/{*}',
       'src/lib/providers/linode-objectstorage.js endpointUrl https://{*}',
       'src/add.js GITHUB_RAW_BASE https://raw.githubusercontent.com/{*}/{*}',
       'src/lib/kubeconfig.js operatorKubeconfigText https://{*}:6443',

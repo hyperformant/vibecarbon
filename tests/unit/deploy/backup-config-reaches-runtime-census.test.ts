@@ -24,18 +24,24 @@
  *   neither;
  * - Flux cannot revert the CLI's values.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadAll, load as loadYaml } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
-  renderBackupCronJob,
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
+import {
+  backupSettingsManifest,
+  buildDbManifestValues,
+  renderK8sBase,
+} from '../../../src/lib/deploy/k8s/k3s.js';
 import { resolveBackupConfig } from '../../../src/lib/deploy/prompts.js';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 import {
   formatReachSites,
   loadSourceTree,
@@ -44,6 +50,22 @@ import {
 } from '../helpers/runtime-reach-walk.js';
 
 const FIXTURE = { schedule: '0 */6 * * *', retentionDays: 14 };
+
+/** What renderK8sBase needs besides the backup settings (the db and the registry's address). */
+const BASE_VALUES = {
+  ...buildDbManifestValues({
+    projectName: 'proj',
+    dbImageTag: 'ghcr.io/org/postgres:17-walg1',
+    storageClass: 'provider-csi',
+    walArchiveSha: 'abc',
+  }),
+  MASTER_PRIVATE_IP: '10.0.1.1',
+};
+const TEST_TLS = {
+  dnsNames: ['app.example.test'],
+  issuerName: 'letsencrypt-prod',
+  effectiveIssuer: 'letsencrypt-prod',
+};
 const RENDERER = 'carbon/scripts/render-backup-settings.mjs';
 const FILES = [
   ...loadSourceTree('src/lib/deploy'),
@@ -94,18 +116,26 @@ describe('the configured backup renders into both runtimes, per environment', ()
   });
 
   it('two environments with different settings each render their own CronJob and ConfigMap', () => {
-    // The two objects, as the CLI deploy renders them (completeK8sBase and
-    // the settings apply in k3s.js).
-    const cronjob = readFileSync('carbon/k8s/base/backup/cronjob.yaml', 'utf8');
-    const render = (cfg: unknown) =>
-      loadAll(
-        `${renderBackupCronJob(cronjob, resolveBackupSettings(cfg)).trimEnd()}\n---\n${renderBackupSettingsConfigMap(resolveBackupSettings(cfg))}`,
-      ) as Array<{
-        kind: string;
-        metadata: { name: string };
-        spec?: { schedule: string };
-        data?: Record<string, string>;
-      }>;
+    // The two objects, rendered by the deploy's own code: the CronJob by
+    // renderK8sBase over the committed k8s/base (what applyK3sManifests
+    // applies), the ConfigMap by backupSettingsManifest (what it pipes to
+    // kubectl). A deploy that stops rendering either fails here.
+    const render = (cfg: unknown) => {
+      const out = renderK8sBase(join(REPO_ROOT, 'carbon/k8s/base'), BASE_VALUES, cfg, TEST_TLS);
+      try {
+        const cronjob = readFileSync(join(out, 'backup', 'cronjob.yaml'), 'utf8');
+        return loadAll(
+          `${cronjob.trimEnd()}\n---\n${backupSettingsManifest(cfg, { tlsSnapshotPrefix: '' })}`,
+        ) as Array<{
+          kind: string;
+          metadata: { name: string };
+          spec?: { schedule: string };
+          data?: Record<string, string>;
+        }>;
+      } finally {
+        rmSync(out, { recursive: true, force: true });
+      }
+    };
     const staging = render({ schedule: '0 */6 * * *', retentionDays: 14 });
     const prod = render({ schedule: '30 4 * * *', retentionDays: 90 });
     const pick = (docs: ReturnType<typeof render>) => ({
@@ -123,6 +153,19 @@ describe('the configured backup renders into both runtimes, per environment', ()
       days: '90',
       cm: 'vibecarbon-backup-settings',
     });
+  });
+
+  it('applyK3sManifests applies the ConfigMap backupSettingsManifest renders', () => {
+    // The ConfigMap is piped to kubectl in no manifest tree, so this is the
+    // one place the deploy can stop applying it: the apply's own input, in
+    // code that runs (comments and strings masked).
+    const src = maskSource(readFileSync('src/lib/deploy/k8s/k3s.js', 'utf8'));
+    const start = src.indexOf('export async function applyK3sManifests(');
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).toMatch(
+      /runKubectlWithRetry\(\[[^\]]*\], \{\s*env,\s*input: backupSettingsManifest\(backupConfig, \{ tlsSnapshotPrefix \}\),/,
+    );
   });
 
   it('the committed tree carries neither value: a placeholder and no retention', () => {

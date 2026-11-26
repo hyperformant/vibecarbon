@@ -97,12 +97,14 @@ export function ciAvailable(cwd = process.cwd()) {
  *                the new VPS. Slower (sequential after upStack) but works
  *                when the operator has no local Docker. Selected via
  *                `--direct`, or auto-fallback when `docker` is missing.
- *   - 'push'   — compose: commit + push triggers GitHub Actions build
- *                and deploy. Default when CI/CD is configured.
+ *   - 'push'   - compose: GitHub Actions builds the image (a push to main
+ *                triggers it), and the deploy has the server pull it from
+ *                ghcr.io. The workflow never deploys. Default when CI/CD is
+ *                configured.
  *
- * K8s/k8s-ha is always 'local'. Layer in Flux + GHA via
- * `vibecarbon configure cicd <env>` after the cluster is up — that
- * doesn't go through this function.
+ * K8s/k8s-ha is always 'local'. `vibecarbon configure cicd <env>` hands a
+ * running cluster to Flux, which pulls k8s/ from the repo; that doesn't go
+ * through this function.
  *
  * Compose modes auto-detect the default. The interactive compose prompt
  * (lib/deploy/prompts.js) lets the operator override by mutating

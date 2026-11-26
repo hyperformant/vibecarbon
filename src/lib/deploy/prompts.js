@@ -842,8 +842,9 @@ export async function gatherDeploymentConfig(args) {
   //
   // K8s is local-first via deployK3s — no prompt, no choice. Compose with
   // CI/CD offers both paths: direct is faster (~30s warm) but bypasses
-  // the CI review workflow; push is slower (~3 min) but goes through GHA
-  // and deploys via Flux.
+  // the CI review workflow; push is slower (~3 min): GitHub Actions builds
+  // and tests the image, and the deploy then has the server pull it from
+  // ghcr.io. The workflow only builds; the deploy is still this command.
   //
   // Skipped when:
   //   - -y / --yes — non-interactive auto-detects (push if CI configured,
@@ -868,7 +869,7 @@ export async function gatherDeploymentConfig(args) {
           {
             value: 'push',
             label: 'Push',
-            hint: 'Commit + GitHub Actions build & deploy (~3 min)',
+            hint: 'GitHub Actions builds the image, then the server pulls it (~3 min)',
           },
         ],
         initialValue: 'direct',

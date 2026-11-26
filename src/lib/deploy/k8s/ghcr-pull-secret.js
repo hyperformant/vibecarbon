@@ -18,7 +18,12 @@
  * it. A token GitHub sends no scope header for (a fine-grained one) is
  * refused as not classic, and so is one GitHub no longer accepts. A stored
  * token is checked the same way each run, since a classic token's scopes can
- * be widened after it was made.
+ * be widened after it was made. A package that has gone public deletes a
+ * stored token, so none sits in a cluster unchecked.
+ *
+ * Before the handover gives Flux the root, assertAppImageBuilt asks ghcr,
+ * with the same credential, whether the app image Flux rolls to
+ * (FLUX_APP_TAG) is built yet.
  *
  * The token goes only into Authorization headers to api.github.com and
  * ghcr.io, and into the Secret's manifest on kubectl's stdin. It is never in
@@ -37,6 +42,14 @@ import { runKubectlWithRetry, secretManifest } from './k3s.js';
 
 /** The Secret the app's ServiceAccount pulls with. */
 export const GHCR_PULL_SECRET = 'ghcr-pull-secret';
+
+/**
+ * The tag Flux rolls the app to: every app image line in k8s/base names it
+ * (carbon/k8s/base/app/deployment.yaml, pinned by
+ * tests/unit/deploy/flux-app-tag-census.test.ts), and the build workflow
+ * pushes it on every build of main.
+ */
+export const FLUX_APP_TAG = 'main';
 
 const NAMESPACE = 'vibecarbon';
 
@@ -60,8 +73,8 @@ export function newPullTokenUrl({ projectName, envName }) {
 }
 
 /**
- * ghcr's token and tags endpoints for a package. ghcr paths are lowercase,
- * whatever case GitHub spells the owner in.
+ * ghcr's token, tags and manifest endpoints for a package. ghcr paths are
+ * lowercase, whatever case GitHub spells the owner in.
  */
 function ghcrEndpoints(owner, repo) {
   const path = `${owner.toLowerCase()}/${repo.toLowerCase()}`;
@@ -69,8 +82,21 @@ function ghcrEndpoints(owner, repo) {
     image: `ghcr.io/${path}`,
     token: `https://ghcr.io/token?scope=repository:${path}:pull&service=ghcr.io`,
     tags: `https://ghcr.io/v2/${path}/tags/list`,
+    manifest: (tag) => `https://ghcr.io/v2/${path}/manifests/${tag}`,
   };
 }
+
+/**
+ * Every manifest type a build can publish under a tag: an OCI image index or
+ * manifest, a Docker manifest list or v2 manifest. All four are accepted, so
+ * the HEAD finds the tag whichever type the build pushed.
+ */
+const MANIFEST_TYPES = [
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.oci.image.manifest.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+  'application/vnd.docker.distribution.manifest.v2+json',
+].join(', ');
 
 /**
  * Every character a GitHub token can have. Checked before the token goes in a
@@ -179,27 +205,38 @@ export function pullTokenProblem(scopes) {
 }
 
 /**
- * Ask ghcr for a pull token on the package, anonymously or with `basic`,
- * then list its tags with it. Null when ghcr refuses the pull token itself;
- * otherwise the tags answer's status.
+ * Ask ghcr for a pull token on the package, anonymously or with `basic` (a
+ * GitHub token's Basic pair). Null when ghcr refuses it; ghcr not answering
+ * throws.
  */
-async function ghcrTagsStatus({ owner, repo, fetcher, basic }) {
-  const urls = ghcrEndpoints(owner, repo);
-  const grant = await fetcher(urls.token, {
+async function ghcrBearer({ owner, repo, fetcher, basic }) {
+  const { image, token } = ghcrEndpoints(owner, repo);
+  const grant = await fetcher(token, {
     ...(basic && { headers: { Authorization: `Basic ${basic}` } }),
     label: 'ghcr.io',
   });
   if (grant.status === 401 || grant.status === 403) return null;
   if (!grant.ok) {
     throw new Error(
-      `ghcr.io answered ${grant.status} when asked to pull ${urls.image}. try again in a minute.`,
+      `ghcr.io answered ${grant.status} when asked to pull ${image}. try again in a minute.`,
     );
   }
   const { token: bearer } = await grant.json();
   if (typeof bearer !== 'string' || !bearer) {
-    throw new Error(`ghcr.io gave no pull token for ${urls.image}. try again in a minute.`);
+    throw new Error(`ghcr.io gave no pull token for ${image}. try again in a minute.`);
   }
-  const tags = await fetcher(urls.tags, {
+  return bearer;
+}
+
+/**
+ * Ask ghcr for a pull token on the package (ghcrBearer), then list its tags
+ * with it. Null when ghcr refuses the pull token itself; otherwise the tags
+ * answer's status.
+ */
+async function ghcrTagsStatus({ owner, repo, fetcher, basic }) {
+  const bearer = await ghcrBearer({ owner, repo, fetcher, basic });
+  if (bearer === null) return null;
+  const tags = await fetcher(ghcrEndpoints(owner, repo).tags, {
     headers: { Authorization: `Bearer ${bearer}` },
     label: 'ghcr.io',
   });
@@ -243,6 +280,75 @@ export async function ghcrAcceptsToken({ owner, repo, username, token, fetcher =
   if (status === null || status === 401 || status === 403) return false;
   if (status === 200 || status === 404) return true;
   throw unexpectedTags(status, owner, repo);
+}
+
+/**
+ * Refuse to give a cluster to Flux before the app image Flux rolls the app
+ * Deployment to (`ghcr.io/<owner>/<repo>:main`, FLUX_APP_TAG) is built. Until
+ * the build workflow has run on main that tag does not exist, so the app's
+ * pods would sit in ImagePullBackOff and the first sync would wait out its
+ * budget saying only that it is still in progress.
+ *
+ * Asked with the credential the cluster pulls with: anonymously for a public
+ * package, through the token's Basic exchange (ghcrBearer) otherwise, then a
+ * HEAD of the tag's manifest. 200 is built; 404, or a 401 to an anonymous
+ * probe (a package not published), is not, and refuses; 5xx or 429 says to
+ * try again. The token goes only into the exchange's Authorization header,
+ * never a URL or an error.
+ *
+ * @param {{ owner: string, repo: string, pull: GhcrPull, envName: string,
+ *   fetcher?: typeof fetchWithRetry }} args - envName is the cluster's stack
+ *   (`prod`, `prod-standby`); pull is resolveGhcrPull's
+ */
+export async function assertAppImageBuilt({
+  owner,
+  repo,
+  pull,
+  envName,
+  fetcher = fetchWithRetry,
+}) {
+  const { image, manifest } = ghcrEndpoints(owner, repo);
+  const ref = `${image}:${FLUX_APP_TAG}`;
+  const env = environmentForStack(envName);
+  const anonymous = pull?.mode === 'public';
+  const basic = anonymous
+    ? undefined
+    : Buffer.from(`${pull.username}:${pull.token}`).toString('base64');
+  const bearer = await ghcrBearer({ owner, repo, fetcher, basic });
+  const status =
+    bearer === null
+      ? null
+      : (
+          await fetcher(manifest(FLUX_APP_TAG), {
+            method: 'HEAD',
+            headers: { Authorization: `Bearer ${bearer}`, Accept: MANIFEST_TYPES },
+            label: 'ghcr.io',
+          })
+        ).status;
+  if (status === 200) return;
+  if (status === 404 || (anonymous && (status === null || status === 401))) {
+    throw new Error(
+      `your app image ${ref} is not built yet, so flux would roll the app to an image that does ` +
+        'not exist. commit and push .github/workflows to main, wait for its first build in the ' +
+        `actions tab, then run vibecarbon configure cicd ${env}`,
+    );
+  }
+  if (status === 429 || status >= 500) {
+    throw new Error(
+      `ghcr.io answered ${status} when asked whether ${ref} is built. try again in a minute.`,
+    );
+  }
+  if (!anonymous && (status === null || status === 401 || status === 403)) {
+    throw new Error(
+      `ghcr.io turned down the pull token when asked whether ${ref} is built, so ${envName} was ` +
+        'not handed to flux. a rerun checks the stored token again and asks for a new one if ' +
+        `ghcr still turns it down: vibecarbon configure cicd ${env}`,
+    );
+  }
+  throw new Error(
+    `ghcr.io answered ${status} when asked whether ${ref} is built, which says neither yes nor ` +
+      `no, so ${envName} was not handed to flux. try again in a minute.`,
+  );
 }
 
 /**
@@ -446,16 +552,28 @@ export async function resolveGhcrPull({
 }
 
 /**
- * Put the pull credential in one cluster: nothing for a public package,
- * nothing when the Secret already holds this pair, else the Secret written
- * whole, its manifest on kubectl's stdin.
+ * Put the pull credential in one cluster: for a public package, no Secret
+ * (one an earlier run stored is deleted: no later run would check its
+ * scopes, and a missing Secret the ServiceAccount names only makes kubelet
+ * pull anonymously); nothing when the Secret already holds this pair; else
+ * the Secret written whole, its manifest on kubectl's stdin.
  *
  * @param {{ env: NodeJS.ProcessEnv, pull: GhcrPull }} args - env carries the
  *   cluster's KUBECONFIG; pull is resolveGhcrPull's
  * @returns {Promise<'public' | 'kept' | 'stored'>}
  */
 export async function ensureGhcrPullSecretOn({ env, pull }) {
-  if (pull?.mode === 'public') return 'public';
+  if (pull?.mode === 'public') {
+    await runKubectlWithRetry(
+      ['delete', 'secret', GHCR_PULL_SECRET, '-n', NAMESPACE, '--ignore-not-found'],
+      {
+        env,
+        captureStdout: true,
+        description: `delete Secret ${NAMESPACE}/${GHCR_PULL_SECRET} (the image is public)`,
+      },
+    );
+    return 'public';
+  }
   if (pull?.mode !== 'token') {
     throw new TypeError(
       'ensureGhcrPullSecretOn needs the pull credential resolveGhcrPull resolved',

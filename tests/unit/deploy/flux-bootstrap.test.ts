@@ -6,8 +6,10 @@
  * root object asked to reconcile and waited on until it has handled that
  * very request, so a rerun cannot pass on the Ready an earlier sync left.
  */
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { REPO_ROOT } from '../../_shared/source-files.js';
 
 type Call = { args: string[]; env?: NodeJS.ProcessEnv; input?: string };
 const k = vi.hoisted(() => ({
@@ -82,32 +84,54 @@ describe('installFluxIfAbsent', () => {
     );
   });
 
+  const WAIT = [
+    '-n',
+    'flux-system',
+    'wait',
+    '--for=condition=available',
+    'deployment/source-controller',
+    'deployment/kustomize-controller',
+    'deployment/helm-controller',
+    'deployment/notification-controller',
+    '--timeout=300s',
+  ];
+
   it('installs Flux only when source-controller is missing, server-side, then waits for the four controllers', async () => {
     // --ignore-not-found: a missing controller is an empty answer, not a
     // NotFound error kubectl would print under the spinner.
     k.answer = () => '';
     await expect(installFluxIfAbsent({ env })).resolves.toBe('installed');
-    expect(argsOf()).toEqual([
-      PROBE,
-      [...SERVER_SIDE, '-f', FLUX_INSTALL_URL],
-      [
-        '-n',
-        'flux-system',
-        'wait',
-        '--for=condition=available',
-        'deployment/source-controller',
-        'deployment/kustomize-controller',
-        'deployment/helm-controller',
-        'deployment/notification-controller',
-        '--timeout=300s',
-      ],
-    ]);
+    expect(argsOf()).toEqual([PROBE, [...SERVER_SIDE, '-f', FLUX_INSTALL_URL], WAIT]);
     expect(k.calls.every((c) => c.env === env)).toBe(true);
 
+    // Already there: nothing applied, and the same four-controller wait, so a
+    // Flux an earlier run left half installed is found here.
     k.calls.length = 0;
     k.answer = () => 'deployment.apps/source-controller\n';
     await expect(installFluxIfAbsent({ env })).resolves.toBe('present');
-    expect(argsOf()).toEqual([PROBE]);
+    expect(argsOf()).toEqual([PROBE, WAIT]);
+    expect(k.calls.every((c) => c.env === env)).toBe(true);
+  });
+
+  it('a rerun after a partial install fails fast at the wait, naming the missing controller', async () => {
+    // An earlier install that stopped after source-controller: the probe
+    // finds it, and the wait says which controller is not there, before any
+    // key or Secret is touched.
+    const missing = kubectlFailed(
+      WAIT,
+      'Error from server (NotFound): deployments.apps "helm-controller" not found',
+    );
+    k.answer = (args) => {
+      if (args[2] === 'wait') throw missing;
+      return 'deployment.apps/source-controller\n';
+    };
+    const err = await installFluxIfAbsent({ env }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err).toBe(missing);
+    expect(err?.message).toContain('helm-controller');
+    expect(argsOf()).toEqual([PROBE, WAIT]);
   });
 
   it('an unreachable API fails before anything is applied', async () => {
@@ -245,7 +269,7 @@ describe('awaitFluxReconcile', () => {
         'wait',
         `--for=jsonpath={.status.lastHandledReconcileAt}=${asked[GIT]}`,
         GIT,
-        '--timeout=600s',
+        '--timeout=180s',
       ],
       [
         '-n',
@@ -262,15 +286,20 @@ describe('awaitFluxReconcile', () => {
     expect(requested()[GIT]).not.toBe(asked[GIT]);
   });
 
-  it('the two waits share the one budget', async () => {
+  it('each object waits its own budget: the fetch 3 minutes, the apply the 10 its own timeout allows', async () => {
+    // A slow fetch takes nothing from the apply's budget, which matches the
+    // Kustomization's `timeout: 10m` in the cluster file.
     let clock = at.getTime();
     k.answer = (args) => {
-      if (args[2] === 'wait' && args[4] === GIT) clock += 250_000;
+      if (args[2] === 'wait' && args[4] === GIT) clock += 170_000;
       return flux({ [GIT]: 'True\nok', [BASE]: 'True\nok' })(args);
     };
     await reconcile({ now: () => new Date(clock) });
     const timeouts = k.calls.filter((c) => c.args[2] === 'wait').map((c) => c.args.at(-1));
-    expect(timeouts).toEqual(['--timeout=600s', '--timeout=350s']);
+    expect(timeouts).toEqual(['--timeout=180s', '--timeout=600s']);
+    expect(readFileSync(join(REPO_ROOT, 'carbon', FLUX_CLUSTER_FILE), 'utf-8')).toMatch(
+      /kind: Kustomization[\s\S]*\n {2}timeout: 10m\n/,
+    );
   });
 
   it('a rerun whose source can no longer fetch fails with what the GitRepository says, though it was Ready', async () => {
@@ -329,9 +358,11 @@ describe('awaitFluxReconcile', () => {
       () => null,
       (e: Error) => e,
     );
+    // True of any run, a rerun's too: no "first" sync.
     expect(err?.message).toContain(
-      'flux did not finish its first sync of prod within 10 minutes. here is what it says:',
+      'flux did not finish syncing prod: its GitRepository did not fetch within 3 minutes. here is what it says:',
     );
+    expect(err?.message).not.toMatch(/first/);
     expect(err?.message).toContain('GitRepository: authentication required');
     // A Kind with no message says nothing.
     expect(err?.message).not.toMatch(/Kustomization:/);
@@ -341,6 +372,26 @@ describe('awaitFluxReconcile', () => {
     expect(get?.args.slice(0, 5)).toEqual(['-n', 'flux-system', 'get', GIT, BASE]);
     expect(get?.args.join(' ')).toMatch(/-o jsonpath=.*Ready/);
     expect(get?.env).toBe(env);
+  });
+
+  it('an apply not handled in time says the Kustomization did not apply within 10 minutes', async () => {
+    k.answer = (args) => {
+      if (args[2] === 'wait' && args[4] === BASE) {
+        throw kubectlFailed(args, 'error: timed out waiting for the condition');
+      }
+      if (args[2] === 'get' && args.includes(BASE) && args.includes(GIT)) {
+        return 'GitRepository: stored artifact\nKustomization: health check failed\n';
+      }
+      return flux({ [GIT]: 'True\nstored artifact' })(args);
+    };
+    const err = await reconcile().then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err?.message).toContain(
+      'flux did not finish syncing prod: its Kustomization did not apply within 10 minutes. here is what it says:',
+    );
+    expect(err?.message).toContain('Kustomization: health check failed');
   });
 
   it("with no Ready message on either, the wait's own error is what it says", async () => {

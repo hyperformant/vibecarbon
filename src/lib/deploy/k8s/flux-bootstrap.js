@@ -47,10 +47,14 @@ const FLUX_CONTROLLERS = [
 ];
 
 /**
- * Install Flux unless its source-controller is already there. Missing is an
- * empty answer (`--ignore-not-found`), so a first install prints no NotFound
- * error; an unreachable API or a refused credential fails here, before
- * anything is applied.
+ * Install Flux unless its source-controller is already there, then wait for
+ * all four controllers either way. Missing is an empty answer
+ * (`--ignore-not-found`), so a first install prints no NotFound error; an
+ * unreachable API or a refused credential fails here, before anything is
+ * applied. The wait runs on a Flux found in place too: a rerun after an
+ * install that stopped part way fails here, with kubectl naming the
+ * controller that is missing or not available, not later as a sync that
+ * never finishes.
  *
  * @param {{ env: NodeJS.ProcessEnv }} args - env carries the cluster's KUBECONFIG
  * @returns {Promise<'installed' | 'present'>}
@@ -69,12 +73,14 @@ export async function installFluxIfAbsent({ env }) {
     ],
     { env, captureStdout: true, description: 'flux: look for source-controller' },
   );
-  if (found.trim()) return 'present';
-  await runKubectlWithRetry([...SERVER_SIDE_APPLY, '-f', FLUX_INSTALL_URL], {
-    env,
-    captureStdout: true,
-    description: `flux: install ${FLUX_VERSION}`,
-  });
+  const present = Boolean(found.trim());
+  if (!present) {
+    await runKubectlWithRetry([...SERVER_SIDE_APPLY, '-f', FLUX_INSTALL_URL], {
+      env,
+      captureStdout: true,
+      description: `flux: install ${FLUX_VERSION}`,
+    });
+  }
   await runKubectlWithRetry(
     [
       '-n',
@@ -86,7 +92,7 @@ export async function installFluxIfAbsent({ env }) {
     ],
     { env, captureStdout: true, description: 'flux: wait for its controllers' },
   );
-  return 'installed';
+  return present ? 'present' : 'installed';
 }
 
 /**
@@ -130,10 +136,39 @@ export async function replaceWholeSecret({ env, namespace, name, manifest }) {
   return verb === 'replace' ? 'replaced' : 'created';
 }
 
-/** The root objects, in the order they reconcile: the source, then the base. */
+/**
+ * How long the GitRepository may take to fetch: a clone of the repo over ssh,
+ * which takes seconds. Three minutes covers a slow GitHub without leaving a
+ * source that cannot fetch at all (a refused key) to wait out the apply's
+ * budget too.
+ */
+const FETCH_TIMEOUT_SEC = 180;
+
+/**
+ * How long the Kustomization may take to apply: its own `timeout: 10m` in the
+ * cluster file (k8s/flux/clusters/primary/vibecarbon.yaml), within which Flux
+ * applies the base and waits on its health checks. The wait ends when Flux's
+ * own does; change the two together.
+ */
+const APPLY_TIMEOUT_SEC = 600;
+
+/**
+ * The root objects, in the order they reconcile: the source, then the base,
+ * each with its own budget and what it does in that time.
+ */
 const FLUX_ROOT = [
-  { object: 'gitrepository/vibecarbon', kind: 'GitRepository' },
-  { object: 'kustomization/vibecarbon-base', kind: 'Kustomization' },
+  {
+    object: 'gitrepository/vibecarbon',
+    kind: 'GitRepository',
+    does: 'fetch',
+    timeoutSec: FETCH_TIMEOUT_SEC,
+  },
+  {
+    object: 'kustomization/vibecarbon-base',
+    kind: 'Kustomization',
+    does: 'apply',
+    timeoutSec: APPLY_TIMEOUT_SEC,
+  },
 ];
 
 /** One object's Ready status, then its message on the lines after. */
@@ -164,21 +199,15 @@ const lookCloser = (kubeconfigPath) =>
  *
  * Once a request is handled, the object's Ready condition is read once: not
  * True fails at once with its message. A request not handled within the
- * budget (one budget for both waits) fails with both objects' Ready messages.
- * Either failure names the kubectl to look closer, on this cluster.
+ * object's own budget (FETCH_TIMEOUT_SEC, APPLY_TIMEOUT_SEC) fails with both
+ * objects' Ready messages. Either failure names the kubectl to look closer,
+ * on this cluster.
  *
  * @param {{ env: NodeJS.ProcessEnv, envName: string, kubeconfigPath: string,
- *   timeoutSec?: number, now?: () => Date }} args
+ *   now?: () => Date }} args
  */
-export async function awaitFluxReconcile({
-  env,
-  envName,
-  kubeconfigPath,
-  timeoutSec = 600,
-  now = () => new Date(),
-}) {
-  const deadline = now().getTime() + timeoutSec * 1000;
-  for (const { object, kind } of FLUX_ROOT) {
+export async function awaitFluxReconcile({ env, envName, kubeconfigPath, now = () => new Date() }) {
+  for (const { object, kind, does, timeoutSec } of FLUX_ROOT) {
     const request = `${now().toISOString()}-${randomBytes(4).toString('hex')}`;
     await runKubectlWithRetry(
       [
@@ -191,9 +220,7 @@ export async function awaitFluxReconcile({
       ],
       { env, captureStdout: true, description: `flux: ask ${object} to reconcile` },
     );
-    const left = Math.ceil((deadline - now().getTime()) / 1000);
     try {
-      if (left <= 0) throw new Error(`no time was left to wait for ${object}`);
       await runKubectlWithRetry(
         [
           '-n',
@@ -201,12 +228,12 @@ export async function awaitFluxReconcile({
           'wait',
           `--for=jsonpath={.status.lastHandledReconcileAt}=${request}`,
           object,
-          `--timeout=${left}s`,
+          `--timeout=${timeoutSec}s`,
         ],
         { env, captureStdout: true, description: `flux: wait for ${object} to reconcile` },
       );
     } catch (waitErr) {
-      throw await notFinished({ env, envName, kubeconfigPath, timeoutSec, waitErr });
+      throw await notFinished({ env, envName, kubeconfigPath, kind, does, timeoutSec, waitErr });
     }
     const [status, ...message] = (
       await runKubectlWithRetry(['-n', 'flux-system', 'get', object, '-o', READY_CONDITION], {
@@ -227,11 +254,12 @@ export async function awaitFluxReconcile({
 }
 
 /**
- * The error for a request not handled in time: both objects' Ready messages
- * (a Kind with none is left out), or the wait's own error when neither has
- * one or they cannot be read.
+ * The error for a request not handled in time: which object ran out of its
+ * budget, then both objects' Ready messages (a Kind with none is left out),
+ * or the wait's own error when neither has one or they cannot be read. True
+ * of any run, a rerun's as much as the first.
  */
-async function notFinished({ env, envName, kubeconfigPath, timeoutSec, waitErr }) {
+async function notFinished({ env, envName, kubeconfigPath, kind, does, timeoutSec, waitErr }) {
   let said = '';
   try {
     said = await runKubectlWithRetry(
@@ -247,7 +275,7 @@ async function notFinished({ env, envName, kubeconfigPath, timeoutSec, waitErr }
     .join('\n');
   const minutes = Math.round(timeoutSec / 60);
   return new Error(
-    `flux did not finish its first sync of ${envName} within ${minutes} minute${minutes === 1 ? '' : 's'}. here is what it says:\n` +
+    `flux did not finish syncing ${envName}: its ${kind} did not ${does} within ${minutes} minute${minutes === 1 ? '' : 's'}. here is what it says:\n` +
       `${messages || waitErr.message}\n${lookCloser(kubeconfigPath)}`,
   );
 }

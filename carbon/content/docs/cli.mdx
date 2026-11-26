@@ -354,9 +354,11 @@ it. The command confirms first, and the file is recoverable with
 
 ### `configure cicd` subcommand
 
-Sets up CI/CD so a push ships your app. On Kubernetes the cluster pulls its
-own updates from your repo, so nothing at GitHub ever connects to it, and
-vibecarbon gives GitHub no credential for it. This is the same CI/CD feature
+Sets up CI/CD: GitHub Actions builds your app image on every push to `main`.
+On Kubernetes the cluster pulls its own updates from your repo, so a push under
+`k8s/` deploys; nothing at GitHub ever connects to the cluster, and vibecarbon
+gives GitHub no credential for it. On Compose, a deploy in push mode ships the
+image the workflow built. This is the same CI/CD feature
 the interactive wizard offers; the subcommand just skips the menu.
 
 ```bash
@@ -375,37 +377,51 @@ it leaves the commit to you: it prints the `git add` to run. `vibecarbon
 upgrade` reads these edits as its own, not yours: a file only the CLI changed is
 upgraded like an untouched one and keeps your owner and repo.
 
-Before it commits anything or touches a cluster, stage 2 checks what Flux
-would build from your `k8s/` tree through the cluster file it applies
-(`k8s/flux/clusters/primary/vibecarbon.yaml`). Flux applies the files as they
-are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so if one would
-reach the cluster, the command stops and names the file and the placeholder.
-When your Flux cluster file is older than `k8s/base`, or still has Flux clone
-over `https://`, it tells you to take the new one from `vibecarbon upgrade`; for
-any other placeholder, it names the file to fill in. An add-on's volume (redis,
+Before it asks for anything, commits anything or touches a cluster, stage 2
+checks what Flux would build from your `k8s/` tree through the cluster file it
+applies (`k8s/flux/clusters/primary/vibecarbon.yaml`). Flux applies the files
+as they are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so if one
+would reach the cluster, the command stops and names the file and the
+placeholder. When your Flux cluster file is older than `k8s/base`, it tells you
+to take the new one from `vibecarbon upgrade`; for any other placeholder, it
+names the file to fill in. A cluster file that still has Flux clone over
+`https://` is refused too: changing its `url:` to the `ssh://` form it names is
+enough, or take the new file from `vibecarbon upgrade` (`upgrade -y` may have
+left it beside yours as `vibecarbon.yaml.upgrade-new`). An add-on's volume (redis,
 for example) is not Flux's: the claim names your provider's storage class, so
 `vibecarbon deploy <env>` creates it, like the database's.
 
 **Stage 2** runs only when the named environment is `k8s` or `k8s-ha`, and
 prints `Stage 2: install flux on the cluster and let it pull from your repo`.
-It runs from your machine, because the k8s API admits only your saved
-addresses: first it lets your address through the environment's firewall, as
-`deploy` does (a run with no terminal counts as `-y`, see [access](#access)).
-Then, once per run, it names what an earlier vibecarbon left at GitHub and
-works out how the clusters pull your app image (both below). Then, on each
-cluster (the primary and the standby on k8s-ha), it:
+It runs from your machine, through each cluster's kubeconfig there:
+`.vibecarbon/kubeconfig-<env>`, or on k8s-ha one per side,
+`kubeconfig-<env>-primary` and `kubeconfig-<env>-standby`. A k8s-ha side whose
+kubeconfig is missing is skipped, said once and again at the end, so the side
+that is up still gets Flux; with no kubeconfig at all, the command stops and
+names the files. A deploy from your machine fetches them. The k8s API admits
+only your saved addresses, so first it lets your address through the firewall
+of each cluster it hands over, as `deploy` does (a run with no terminal counts
+as `-y`, see [access](#access)). Then, once per run, it names what an earlier
+vibecarbon left at GitHub and works out how the clusters pull your app image
+(both below). Then, on each cluster it hands over, it:
 
 1. points `k8s/` at your owner and repo, commits `k8s/` and pushes your
    current HEAD to `main` (`git push origin HEAD:main`), so the first sync
    reads it. Run it from `main`: any other commit on your branch goes to
    `main` too;
 2. installs Flux v2.10.0 with `kubectl`, unless Flux is already there (you
-   don't need the `flux` CLI);
+   don't need the `flux` CLI), and waits for its four controllers either way;
 3. gives Flux a new read-only deploy key of that cluster's own (below);
-4. puts the image pull Secret in place, when your image is private;
-5. applies the root `GitRepository` and `Kustomization` from the cluster file;
-6. has Flux fetch with the new key and apply what it fetched, and waits up to
-   10 minutes for that first sync. If Flux says it can't, the command prints
+4. puts the image pull Secret in place when your image is private, and
+   deletes one an earlier run stored when it is public;
+5. checks that your app image's `:main` tag is on `ghcr.io`, since Flux rolls
+   the app to it. Until the build workflow has run on `main` it is not, and the
+   command stops before it applies the cluster file, telling you to push the
+   workflow and wait for its first build;
+6. applies the root `GitRepository` and `Kustomization` from the cluster file;
+7. has Flux fetch with the new key and apply what it fetched, and waits for it:
+   up to 3 minutes for the fetch, and up to 10 for the apply (the
+   `Kustomization`'s own `timeout`). If Flux says it can't, the command prints
    what Flux said and the `kubectl` to look closer, on that cluster.
 
 **The deploy key.** Each cluster gets its own read-only deploy key on your
@@ -417,10 +433,11 @@ never written to disk. Every run rotates it: it adds a new key, writes the
 Secret, then removes every other key with that exact title. A key with any
 other title is never touched. If writing the Secret fails, no key is removed,
 since the cluster may hold either one; the next run removes the one it doesn't
-write. Adding a deploy key needs admin rights on the repo.
+write. If removing an old key fails, the run says so and goes on: Flux already
+has the new key, an old one opens nothing, and the next run removes it. Adding a deploy key needs admin rights on the repo.
 
 **Pulling a private image.** If anyone can pull your app image, nothing is
-asked and nothing is stored. Otherwise (an image not published yet counts too)
+asked and nothing is stored, and a token an earlier run stored is deleted. Otherwise (an image not published yet counts too)
 each cluster needs a GitHub classic token with only `read:packages`, which it
 keeps in `vibecarbon/ghcr-pull-secret`. The command looks, in order, for:
 
@@ -454,6 +471,9 @@ So after you change a secret, deploy again. The run ends with:
 ```
 flux now pulls main into prod. push under k8s/ to deploy. after you change a secret, run vibecarbon deploy prod
 ```
+
+On k8s-ha it names both sides (`prod-primary and prod-standby`), or only the
+side it handed over, and which it skipped.
 
 **What an earlier vibecarbon left at GitHub.** Older versions installed a
 `deploy.yml` workflow, copied secrets (among them `KUBECONFIG_B64`, admin
@@ -503,7 +523,7 @@ Files are classified into three categories:
 
 The add-ons you installed with `vibecarbon add` are upgraded too: their compose, Kubernetes and volume files are compared against the add-on as this CLI ships it, under the same three categories. Each add-on's integration doc stays yours.
 
-Some files the CLI edits after `create`: `vibecarbon configure cicd` points the image references and the Flux repository URL at your GitHub owner and repo, and `vibecarbon add` lists an add-on in `k8s/base/kustomization.yaml`. `upgrade` counts those edits as its own, so a file only the CLI changed is replaced like an untouched one, and every version it writes or offers keeps them. If you take one of those edits back out (an add-on entry you removed by hand, say), the file counts as yours and is offered for review. A CI workflow `configure cicd` installed before it was tracked is replaced when it is exactly a copy some release installed; one you changed is offered for review. On a GitOps project, if a file you kept would make Flux apply a placeholder it can't fill, `upgrade` names the file, the placeholder and what to do before you push.
+Some files the CLI edits after `create`: `vibecarbon configure cicd` points the image references and the Flux repository URL at your GitHub owner and repo, and `vibecarbon add` lists an add-on in `k8s/base/kustomization.yaml`. `upgrade` counts those edits as its own, so a file only the CLI changed is replaced like an untouched one, and every version it writes or offers keeps them. If you take one of those edits back out (an add-on entry you removed by hand, say), the file counts as yours and is offered for review. A CI workflow `configure cicd` installed before it was tracked is replaced when it is exactly a copy some release installed; one you changed is offered for review. On a GitOps project, if a file you kept would make Flux apply a placeholder it can't fill, `upgrade` names the file, the placeholder and what to do before you push; and if the Flux cluster file you kept still has Flux clone over `https://`, it says so, since `configure cicd` refuses it, and names the `ssh://` url to change it to.
 
 A project created before sign-in moved into the app gets a `BETTER_AUTH_SECRET` in `.env.local` and `.env`, and `upgrade` warns you that a server you already deployed needs a fresh database: accounts are not carried over, and the old tables still point at the previous auth service. Run `vibecarbon backup` if you want a copy of the old data, then `vibecarbon destroy` and `vibecarbon deploy`.
 
@@ -646,12 +666,12 @@ vibecarbon destroy prod -y -confirm myapp-prod
 The following are deleted from the environment's cloud provider: servers and
 all data on them, volumes (orphaned PVCs), firewalls, and SSH keys (deployment
 keys only) — plus DNS records and health checks at whichever DNS provider the
-environment uses. GitHub is left alone: vibecarbon makes no GitHub environment,
-so it deletes none. A k8s environment that ran `configure cicd` leaves each
-cluster's `vibecarbon flux <cluster>` deploy key on your repo. A left key opens
-nothing, since its private half was only in the destroyed cluster, and a later
-`configure cicd` for a cluster of the same name (the same environment, in the
-same mode) removes it. To delete one now, find its id with
+environment uses. GitHub is left alone: destroy changes nothing there, including
+a GitHub environment an earlier vibecarbon made. A k8s environment that ran
+`configure cicd` leaves each cluster's `vibecarbon flux <cluster>` deploy key on
+your repo. A left key opens nothing, since its private half was only in the
+destroyed cluster, and a later `configure cicd` for a cluster of the same name
+(the same environment, in the same mode) removes it. To delete one now, find its id with
 `gh repo deploy-key list`, then run:
 
 ```bash

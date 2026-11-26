@@ -48,6 +48,7 @@ import { handOverCluster } from './flux-handover.js';
 import {
   describeFluxPlaceholders,
   FLUX_CLUSTER_FILE,
+  fluxHttpsSource,
   fluxPlaceholders,
 } from './unrendered-placeholders.js';
 
@@ -176,20 +177,45 @@ function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
  * Refuse, before anything is written or committed, a Flux cluster file that
  * still clones the repo over https. Its Secret held the deploy workflow's
  * GITHUB_TOKEN, which GitHub revokes when the job ends; the cluster file this
- * vibecarbon ships clones over ssh with the cluster's own deploy key.
+ * vibecarbon ships clones over ssh with the cluster's own deploy key. Only
+ * the url differs, so the refusal names the ssh url to put there, and the new
+ * cluster file `upgrade -y` saves beside a changed one.
  *
  * @param {string} projectDir
  * @param {string} environment - the cluster (`prod`, `prod-standby`)
  */
 function refuseHttpsFluxSource(projectDir, environment) {
-  const path = join(projectDir, FLUX_CLUSTER_FILE);
-  if (!existsSync(path)) return;
-  if (!/^\s*url:\s*["']?https:\/\/github\.com\//m.test(readFileSync(path, 'utf-8'))) return;
+  const https = fluxHttpsSource(projectDir);
+  if (!https) return;
   throw new Error(
     `${FLUX_CLUSTER_FILE} still has flux read your repo over https, which needs a token github ` +
-      'takes back after every workflow run. run vibecarbon upgrade and take the new ' +
-      `${FLUX_CLUSTER_FILE}, then rerun vibecarbon configure cicd ${environmentForStack(environment)}`,
+      `takes back after every workflow run. changing its url: to ${https.ssh} is enough. the new ` +
+      'cluster file has that url too: take it with vibecarbon upgrade (upgrade -y may have left it ' +
+      `beside yours as ${FLUX_CLUSTER_FILE}.upgrade-new). ` +
+      `then rerun vibecarbon configure cicd ${environmentForStack(environment)}`,
   );
+}
+
+/**
+ * Refuse, before anything is written, committed or asked for, a project Flux
+ * could not run as it is: a tree it would apply with a `{{TOKEN}}` still in
+ * it (refuseFluxPlaceholders), or a cluster file that still clones over
+ * https (refuseHttpsFluxSource). Both read local files only and change
+ * nothing, so `configure cicd <env>` runs this before the firewall gate and
+ * the pull token ask, and deployK8sGitOps runs it again first thing for any
+ * other caller.
+ *
+ * @param {string} projectDir
+ * @param {{ environment: string, imageTag?: string }} opts - environment is
+ *   the cluster or the environment (`prod`, `prod-standby`), named in the
+ *   rerun command; imageTag, when given, is a token the deploy fills in the
+ *   app Deployment itself before it commits
+ */
+export function refuseUnreadyGitopsProject(projectDir, { environment, imageTag }) {
+  refuseFluxPlaceholders(projectDir, {
+    fills: imageTag ? { [APP_DEPLOYMENT]: ['{{IMAGE_TAG}}'] } : {},
+  });
+  refuseHttpsFluxSource(projectDir, environment);
 }
 
 /**
@@ -553,19 +579,16 @@ export async function deployK8sGitOps(args) {
     ghcrPull,
   } = args;
 
+  // Before anything is written or committed: a tree Flux would apply with a
+  // token in it, and a cluster file that still clones over https, fail here.
+  refuseUnreadyGitopsProject(projectDir, { environment, imageTag });
+
   // H-9: loudly warn (before any spinner) if observability is installed — the
   // gitops path won't reconcile it until its Flux wiring lands (tracked follow-up).
   const obsWarning = observabilityGitopsWarning(projectDir);
   if (obsWarning) {
     p.log.warn(obsWarning);
   }
-
-  // Before anything is written or committed: a tree Flux would apply with a
-  // token in it, and a cluster file that still clones over https, fail here.
-  refuseFluxPlaceholders(projectDir, {
-    fills: imageTag ? { [APP_DEPLOYMENT]: ['{{IMAGE_TAG}}'] } : {},
-  });
-  refuseHttpsFluxSource(projectDir, environment);
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -616,6 +639,12 @@ export async function deployK8sGitOps(args) {
   // reads main. The firewall admits the operator's address, so this machine
   // reaches the k8s API where a GitHub runner never could. Flux clones the
   // repo the refs were just pointed at, with a deploy key on that repo.
+  // What a step warns of and carries on past is printed once the spinner is
+  // done, so no line lands under it.
+  const warnings = [];
+  const sayWarnings = () => {
+    for (const line of warnings) p.log.warn(line);
+  };
   s.start(`handing ${environment} to flux`);
   try {
     await handOverCluster({
@@ -625,12 +654,15 @@ export async function deployK8sGitOps(args) {
       owner: repoOwner,
       repo: repoName,
       ghcrPull,
+      warn: (line) => warnings.push(line),
     });
   } catch (err) {
     s.error(`flux has not taken over ${environment}`);
+    sayWarnings();
     throw err;
   }
   s.stop(`flux has ${environment}, so a push under k8s/ to main deploys it from here on`);
+  sayWarnings();
 
   return { pushed };
 }

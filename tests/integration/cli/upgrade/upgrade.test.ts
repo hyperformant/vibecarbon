@@ -595,6 +595,33 @@ describe('vibecarbon upgrade after configure cicd', () => {
       );
       expect(existsSync(join(project, `${fluxFile(cluster)}.upgrade-new`)), cluster).toBe(false);
     }
+    // Nothing left on https, so nothing to warn of.
+    expect(r.stdout + r.stderr).not.toMatch(/over https/);
+  });
+
+  it('a changed Flux file still on https is kept, and upgrade says so, naming its .upgrade-new and the ssh url', () => {
+    // The https-era project, with a line of the user's own in the cluster
+    // file configure cicd applies: -y keeps it and saves the new one beside
+    // it, so the next configure cicd would refuse it. Upgrade says so first.
+    createdWhenFluxClonedOverHttps();
+    assertSuccess(
+      runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 }),
+    );
+    const primary = fluxFile('primary');
+    const custom = `${read(primary)}# site-specific\n`;
+    writeFileSync(join(project, primary), custom);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(read(primary)).toBe(custom);
+    expect(read(`${primary}.upgrade-new`)).toBe(shipped(primary, OWNER));
+    const out = (r.stdout + r.stderr).replace(/\s+/g, ' ');
+    expect(out).toContain(`${primary} still has flux read your repo over https`);
+    expect(out).toContain(
+      `apply ${primary}.upgrade-new, or change its url: to ssh://git@github.com/${OWNER}/test-app`,
+    );
   });
 
   it('a Flux file the user changed is offered with the real owner, and upgrade says Flux would apply the token', () => {

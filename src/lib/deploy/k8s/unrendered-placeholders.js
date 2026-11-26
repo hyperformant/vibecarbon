@@ -41,6 +41,26 @@ const TEMPLATE_DIR = join(
  */
 export const FLUX_CLUSTER_FILE = 'k8s/flux/clusters/primary/vibecarbon.yaml';
 
+/**
+ * The repo the Flux cluster file still has Flux clone over https, as that
+ * https URL and the ssh form the cluster file this CLI ships uses
+ * (`ssh://git@github.com/<owner>/<repo>`), or null when the project has no
+ * cluster file or it clones over ssh. An https clone needed the deploy
+ * workflow's GITHUB_TOKEN, which GitHub revokes when the job ends; only the
+ * url changes between the two.
+ *
+ * @param {string} projectDir
+ * @returns {{ url: string, ssh: string } | null}
+ */
+export function fluxHttpsSource(projectDir) {
+  const path = join(projectDir, FLUX_CLUSTER_FILE);
+  if (!existsSync(path)) return null;
+  const m = readFileSync(path, 'utf-8').match(
+    /^\s*url:\s*["']?(https:\/\/github\.com\/([^\s"']+?))(?:\.git)?\/?["']?\s*$/m,
+  );
+  return m ? { url: m[1], ssh: `ssh://git@github.com/${m[2]}` } : null;
+}
+
 const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 const KUSTOMIZATION_FILES = ['kustomization.yaml', 'kustomization.yml', 'Kustomization'];
 

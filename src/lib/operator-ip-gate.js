@@ -30,6 +30,7 @@ import { providerIdFor, resolveProviderToken } from './providers/index.js';
  * @param {boolean} o.yes
  * @param {string} [o.opened] what the success line says is open. Only the
  *   compose scale passes one ('SSH now allows'), the wording it has always had.
+ * @param {string[]} [o.sides] only these sides' firewalls (ensureOperatorIpAccess)
  */
 export async function requireOperatorIpAccess({
   projectConfig,
@@ -38,6 +39,7 @@ export async function requireOperatorIpAccess({
   apiToken,
   yes,
   opened = 'SSH/k8s API now allow',
+  sides,
 }) {
   if (!apiToken) return;
   try {
@@ -48,6 +50,7 @@ export async function requireOperatorIpAccess({
       apiToken,
       yes,
       onMessage: (msg) => p.log.info(msg),
+      ...(sides && { sides }),
     });
     if (result.missed?.length > 0) {
       p.log.warn(
@@ -79,13 +82,23 @@ export async function requireOperatorIpAccess({
  * @param {string} o.envName user-facing environment name
  * @param {{ deployMode?: string, ha?: { enabled?: boolean } }} o.envConfig
  * @param {boolean} o.yes
+ * @param {string[]} [o.sides] only these sides' firewalls, by stack
+ *   (`prod-primary`): `configure cicd` on k8s-ha passes the sides it hands
+ *   over, so a side whose kubeconfig is not here is not touched
  */
-export async function requireEnvOperatorIpAccess({ projectConfig, envName, envConfig, yes }) {
+export async function requireEnvOperatorIpAccess({
+  projectConfig,
+  envName,
+  envConfig,
+  yes,
+  sides,
+}) {
   await requireOperatorIpAccess({
     projectConfig,
     environment: envName,
     isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
     apiToken: resolveProviderToken(providerIdFor(envConfig)),
     yes,
+    ...(sides && { sides }),
   });
 }

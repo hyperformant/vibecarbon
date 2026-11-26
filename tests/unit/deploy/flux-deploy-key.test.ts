@@ -27,6 +27,14 @@ vi.mock('../../../src/lib/command.js', async (orig) => ({
     return h.gh(argv);
   },
 }));
+// ghcr.io, for the handover's app image check: the image is built.
+vi.mock('../../../src/lib/fetch-retry.js', () => ({
+  fetchWithRetry: vi.fn(async (url: string) =>
+    url.startsWith('https://ghcr.io/token?')
+      ? new Response(JSON.stringify({ token: 'anon-bearer' }), { status: 200 })
+      : new Response(null, { status: 200 }),
+  ),
+}));
 vi.mock('../../../src/lib/deploy/k8s/k3s.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   runKubectlWithRetry: async (
@@ -410,6 +418,61 @@ describe('rotateFluxDeployKey', () => {
     expect(steps()).toEqual(['gh meta', 'gh POST', 'kubectl get secret', 'kubectl replace']);
   });
 
+  it('an old-key list that fails after the Secret write warns and carries on: the new key works', async () => {
+    // Flux already holds the new key, and the old one opens nothing (its
+    // private half was never kept), so the handover goes on.
+    h.gh = (argv) => {
+      if (argv.includes('--paginate')) throw ghFailed(argv, 'HTTP 502: Bad Gateway');
+      return github({ keys: [{ id: 7, title: 'vibecarbon flux prod' }] })(argv);
+    };
+    h.kubectl = cluster();
+    const warn = vi.fn();
+    await expect(
+      rotateFluxDeployKey({ env, owner: 'acme', repo: 'shop', envName: 'prod', warn }),
+    ).resolves.toEqual({ keyId: 42, removed: [] });
+    expect(steps()).toEqual([
+      'gh meta',
+      'gh POST',
+      'kubectl get secret',
+      'kubectl replace',
+      'gh list',
+    ]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const said = String(warn.mock.calls[0][0]);
+    expect(said).toContain('"vibecarbon flux prod"');
+    expect(said).toContain('HTTP 502: Bad Gateway');
+    expect(said).toMatch(/gh repo deploy-key list$/);
+  });
+
+  it('an old key that will not delete warns once, and the others are still removed', async () => {
+    h.gh = (argv) => {
+      if (argv.includes('DELETE') && argv.at(-1)?.endsWith('/7')) {
+        throw ghFailed(argv, 'HTTP 500: Internal Server Error');
+      }
+      return github({
+        keys: [
+          { id: 7, title: 'vibecarbon flux prod' },
+          { id: 41, title: 'vibecarbon flux prod' },
+        ],
+      })(argv);
+    };
+    h.kubectl = cluster();
+    const warn = vi.fn();
+    await expect(
+      rotateFluxDeployKey({ env, owner: 'acme', repo: 'shop', envName: 'prod', warn }),
+    ).resolves.toEqual({ keyId: 42, removed: [41] });
+    expect(steps().filter((s) => s.startsWith('gh DELETE'))).toEqual([
+      'gh DELETE 7',
+      'gh DELETE 41',
+    ]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const said = String(warn.mock.calls[0][0]);
+    expect(said).toContain('"vibecarbon flux prod"');
+    expect(said).toContain('HTTP 500: Internal Server Error');
+    expect(said).toMatch(/gh repo deploy-key list$/);
+    expect(said).not.toMatch(/PRIVATE KEY/);
+  });
+
   it('the next run removes a key a failed write left behind, by its title', async () => {
     // Key 41 is the one the failed run added; 7 the one before it.
     h.gh = github({
@@ -475,12 +538,15 @@ describe('handOverCluster with the deploy key', () => {
     // base is never asked to apply what an old key fetched.
     expect(steps()).toEqual([
       'kubectl get source-controller',
+      'kubectl wait',
       'gh meta',
       'gh POST',
       'kubectl get secret',
       'kubectl replace',
       'gh list',
       'gh DELETE 7',
+      // A public package: no pull Secret, and a stale one is deleted.
+      'kubectl delete secret',
       'kubectl apply',
       'kubectl annotate gitrepository/vibecarbon',
       'kubectl wait gitrepository/vibecarbon',
