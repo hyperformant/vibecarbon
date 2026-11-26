@@ -28,17 +28,26 @@ const h = vi.hoisted(() => {
     deltaFails: false,
     buildArgv: [] as string[],
     buildFails: false,
+    // The old server's APP_IMAGE, and each server's docker login file.
+    appImage: 'myapp-app:local',
+    loginFiles: {} as Record<string, string>,
   };
-  return { events, state };
+  // What the new server's ghcr.io login was made to match, and every ask.
+  const ghcrLogins: Array<{ ip: string; pull: unknown }> = [];
+  const password = vi.fn(async () => {
+    throw new Error('scale asked for a pull token');
+  });
+  return { events, state, ghcrLogins, password };
 });
 
-vi.mock('@clack/prompts', async (orig) =>
-  (await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
+vi.mock('@clack/prompts', async (orig) => ({
+  ...(await import('../../_shared/clack-fake.js')).quietClack(await orig(), {
     log: ['info', 'warn', 'error', 'step', 'success', 'message'],
     spinner: true,
     fns: ['note', 'outro'],
   }),
-);
+  password: h.password,
+}));
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -123,6 +132,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     setupComposeBackupCron: async () => {},
     configureStandbyReplication: async () => {},
     sshRunAsync: async (ip: string, _k: string, cmd: string) => {
+      if (cmd.startsWith('cat /root/.docker/config.json')) return h.state.loginFiles[ip] ?? '';
       if (cmd.includes('docker pull ')) h.events.push(`basePull:${ip}`);
       return cmd.includes('compose-backup.sh') ? 'VC_CRON_REMOVED' : '';
     },
@@ -182,10 +192,32 @@ vi.mock('../../../src/lib/dns-propagation.js', async (orig) => {
   return { ...actual, waitForDNSPropagation: async () => true };
 });
 
-vi.mock('../../../src/lib/build.js', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, getGHCRCredentials: async () => ({}) };
-});
+vi.mock('../../../src/lib/deploy/compose/ghcr-login.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  ensureGhcrLoginOn: async (ip: string, _k: string, pull: unknown) => {
+    h.ghcrLogins.push({ ip, pull });
+    return pull ? 'stored' : 'absent';
+  },
+}));
+
+// GitHub and ghcr.io for a private package, `acme/shop`, that the token on
+// the old server may pull: ghcr turns down the anonymous probe, GitHub says
+// the token has only read:packages, and ghcr lets it list the tags.
+vi.mock('../../../src/lib/fetch-retry.js', () => ({
+  fetchWithRetry: async (url: string, init: { headers?: Record<string, string> } = {}) => {
+    const auth = init.headers?.Authorization ?? '';
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+      new Response(JSON.stringify(body), { status, headers });
+    if (url === 'https://api.github.com/user') {
+      return json(200, { login: 'octo' }, { 'x-oauth-scopes': 'read:packages' });
+    }
+    if (url.startsWith('https://ghcr.io/token?scope=repository:acme/shop:pull')) {
+      return auth.startsWith('Basic ') ? json(200, { token: 'bearer' }) : json(401, {});
+    }
+    if (url === 'https://ghcr.io/v2/acme/shop/tags/list') return json(200, { tags: ['abc'] });
+    throw new Error(`unexpected fetch ${url}`);
+  },
+}));
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -207,7 +239,7 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       const role = roleWriteOf(argv as string[]);
       if (role) return `WALG_ROLE_FILE=${role}`;
       if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
-        return 'APP_IMAGE=myapp-app:local\n';
+        return `APP_IMAGE=${h.state.appImage}\n`;
       }
       const script = argv[2] ?? '';
       if (script.includes('echo present')) {
@@ -320,6 +352,10 @@ function reset({ localDocker = true, deltaFails = false } = {}) {
   h.state.deltaFails = deltaFails;
   h.state.buildArgv = [];
   h.state.buildFails = false;
+  h.state.appImage = 'myapp-app:local';
+  h.state.loginFiles = {};
+  h.ghcrLogins.length = 0;
+  h.password.mockClear();
 }
 
 describe('compose scale: the replacement gets the app image by layer delta', () => {
@@ -405,5 +441,63 @@ describe('compose-ha scale of both nodes', () => {
     await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
     expect(h.events.filter((e) => e.startsWith('localBuild:'))).toHaveLength(1);
     expect(h.events.filter((e) => e.startsWith('delta:')).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('compose scale: the new server ghcr.io login', () => {
+  const TOKEN = `ghp_${'vcscalesentinel'.padEnd(36, 'Q')}`;
+
+  it('a delivered image logs the new server into nothing', async () => {
+    reset();
+    await SCALE_EFFECTS.scaleServers(makeCtx());
+    expect(h.events).toContain('delta:root@9.9.9.9:myapp-app:local');
+    // An image this machine sent pulls nothing from ghcr: no login, no ask.
+    expect(h.ghcrLogins).toEqual([{ ip: '9.9.9.9', pull: null }]);
+    expect(h.password).not.toHaveBeenCalled();
+  });
+
+  it('an image the new server builds logs it into nothing too', async () => {
+    reset({ localDocker: false });
+    await SCALE_EFFECTS.scaleServers(makeCtx());
+    expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
+    expect(h.ghcrLogins).toEqual([{ ip: '9.9.9.9', pull: null }]);
+  });
+
+  it("a push image reuses the replaced server's token without asking", async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    h.state.loginFiles['1.1.1.1'] = JSON.stringify({
+      auths: {
+        'https://index.docker.io/v1/': { auth: 'aHViOmh1Yg==' },
+        'ghcr.io': { auth: Buffer.from(`octo:${TOKEN}`).toString('base64') },
+      },
+    });
+    try {
+      await SCALE_EFFECTS.scaleServers(makeCtx());
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(h.events).toContain('pull:9.9.9.9');
+    expect(h.ghcrLogins).toEqual([
+      { ip: '9.9.9.9', pull: { mode: 'token', username: 'octo', token: TOKEN } },
+    ]);
+    expect(h.password).not.toHaveBeenCalled();
+  });
+
+  it('a push image with no usable token on the replaced server refuses, saying what to export', async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    h.state.appImage = 'ghcr.io/acme/shop:abc';
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(makeCtx())).rejects.toThrow(
+        /export GHCR_PULL_TOKEN as a classic token with only read:packages/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // Nothing was logged in, and the new server never started its stack.
+    expect(h.ghcrLogins).toEqual([]);
+    expect(h.events).not.toContain('up:9.9.9.9');
   });
 });

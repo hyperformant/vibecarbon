@@ -190,10 +190,12 @@ vi.mock('../../../src/lib/dns-propagation.js', async (orig) => {
   return { ...actual, waitForDNSPropagation: async () => true };
 });
 
-vi.mock('../../../src/lib/build.js', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, getGHCRCredentials: async () => ({}) };
-});
+// The new server's ghcr.io login is not under test here
+// (compose-scale-image-delta.test.ts covers it).
+vi.mock('../../../src/lib/deploy/compose/ghcr-login.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  ensureGhcrLoginOn: async () => 'absent',
+}));
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;

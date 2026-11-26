@@ -15,7 +15,6 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { getGHCRCredentials } from './lib/build.js';
 import { errorFirstLine } from './lib/cli/error-line.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -31,6 +30,14 @@ import { STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { buildComposeAppImage, deliverComposeAppImage } from './lib/deploy/compose/app-image.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
+import {
+  COMPOSE_KEPT_AS,
+  COMPOSE_WHERE,
+  ensureGhcrLoginOn,
+  ghcrImagePackage,
+  namedComposeServers,
+  serverStores,
+} from './lib/deploy/compose/ghcr-login.js';
 import { composePsqlRunner, demoteComposeWalgRole } from './lib/deploy/compose/ha.js';
 import { composeHaStackOf } from './lib/deploy/compose/ha-role-swap.js';
 import {
@@ -70,6 +77,7 @@ import {
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
+import { resolveGhcrPull } from './lib/deploy/ghcr-pull.js';
 import { carbonAutoscalerSecretYaml } from './lib/deploy/k8s/autoscaler-secret.js';
 import { sweepStaleDeltaDirs } from './lib/deploy/layer-delta.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
@@ -1116,6 +1124,45 @@ function sharedAppImageBuild(ctx, tag, build) {
 }
 
 /**
+ * The pull credential a compose scale's new server logs in to ghcr.io with:
+ * null unless compose pulls the app image from ghcr.io (an image this
+ * machine sends, or the new server builds, needs none); else resolveGhcrPull
+ * with the servers being replaced as its stores, read while they still run,
+ * so a token they hold that still passes is reused and nothing is asked.
+ * Resolved once per package per scale run, on ctx: a compose-ha scale of both
+ * nodes asks at most once.
+ *
+ * @param {{ ghcrPulls?: Map<string, Promise<unknown>>, projectName: string,
+ *   environment: string, sshKeyPath: string, targetServers: object[] }} ctx
+ * @param {'delta' | 'remote-build' | 'pull'} imagePlan
+ * @param {string} appImage - the old server's APP_IMAGE
+ * @returns {Promise<import('./lib/deploy/ghcr-pull.js').GhcrPull | null>}
+ */
+function scaleGhcrPull(ctx, imagePlan, appImage) {
+  const pkg = imagePlan === 'pull' ? ghcrImagePackage(appImage) : null;
+  if (!pkg) return Promise.resolve(null);
+  const key = `${pkg.owner}/${pkg.repo}`.toLowerCase();
+  ctx.ghcrPulls ??= new Map();
+  if (!ctx.ghcrPulls.has(key)) {
+    ctx.ghcrPulls.set(
+      key,
+      resolveGhcrPull({
+        ...pkg,
+        projectName: ctx.projectName,
+        envName: ctx.environment,
+        stores: serverStores(
+          namedComposeServers(ctx.environment, ctx.targetServers ?? []),
+          ctx.sshKeyPath,
+        ),
+        keptAs: COMPOSE_KEPT_AS,
+        where: COMPOSE_WHERE,
+      }),
+    );
+  }
+  return ctx.ghcrPulls.get(key);
+}
+
+/**
  * How a compose scale replacement gets the app image the old server ran:
  * 'delta' (built on this machine and sent by layer delta, as a deploy does),
  * 'remote-build' (the new server builds it: `-direct`, a deploy recorded in
@@ -1299,9 +1346,14 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
     });
   }
 
-  // 4b. Registry auth (optional — avoids rate limits on shared Hetzner IPs).
-  // Scale pulls the same ghcr.io/<owner>/<repo>:<tag> the original
-  // deploy pushed, so ghcr credentials are required alongside Docker Hub.
+  // 4b. Registry logins. Docker Hub (optional) avoids the per-IP pull limit
+  // on shared provider IPs. ghcr.io only when compose pulls the app image
+  // from there, with the pull credential (scaleGhcrPull): the old server's
+  // read:packages token when it still passes, so nothing is asked. An image
+  // this machine sends or the new server builds pulls nothing from ghcr, so
+  // the new server gets no ghcr.io login at all. A refusal (no token to reuse
+  // and no GHCR_PULL_TOKEN on a run with no terminal) stops this server's
+  // scale, and the caller deletes the new server.
   const dockerHubCreds = resolveDockerHubCreds();
   if (dockerHubCreds) {
     s.start('Authenticating with Docker Hub...');
@@ -1310,22 +1362,10 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
     );
     s.stop('Docker Hub authenticated');
   }
-  try {
-    const ghcrCreds = await getGHCRCredentials();
-    if (ghcrCreds?.username && ghcrCreds?.token) {
-      s.start('Authenticating with ghcr.io...');
-      await perfAsync('scale.ghcrLogin', () =>
-        dockerLoginOnServer(newIp, sshKeyPath, {
-          username: ghcrCreds.username,
-          token: ghcrCreds.token,
-          registry: 'ghcr.io',
-        }),
-      );
-      s.stop('ghcr.io authenticated');
-    }
-  } catch {
-    /* non-fatal: image may be public */
-  }
+  const ghcrPull = await scaleGhcrPull(ctx, imagePlan, oldAppImage);
+  if (ghcrPull?.mode === 'token') s.start('Logging the new server in to ghcr.io...');
+  await perfAsync('scale.ghcrLogin', () => ensureGhcrLoginOn(newIp, sshKeyPath, ghcrPull));
+  if (ghcrPull?.mode === 'token') s.stop('Logged in to ghcr.io with the pull token');
 
   // 4c. The app image, before compose pulls and starts the stack (compose's
   // prod.yml resets `build: !reset null`, so `up --build` cannot make it).

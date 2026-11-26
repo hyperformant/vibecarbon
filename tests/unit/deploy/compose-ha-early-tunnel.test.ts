@@ -41,6 +41,13 @@ vi.mock('../../../src/lib/deploy/wireguard.js', async (orig) => {
   return { ...actual, exchangeAndBringUpTunnel: h.tunnel };
 });
 
+// Each side's ghcr.io login is not under test here
+// (compose-ghcr-login-effects.test.ts covers it).
+vi.mock('../../../src/lib/deploy/compose/ghcr-login.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  ensureGhcrLoginOn: vi.fn(async () => 'absent'),
+}));
+
 vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {

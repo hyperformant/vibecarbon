@@ -69,11 +69,11 @@ describe('planDeploy(compose)', () => {
     expect(byName['transfer-image'].when({ isDirectDeploy: true })).toBe(true);
     expect(byName['transfer-image'].when({})).toBe(false);
 
-    // login steps gated on credentials being present
+    // Docker Hub's login gated on credentials being present. ghcr-login runs
+    // on every deploy (below): with no pull credential it removes a login, so
+    // the gh token an older vibecarbon left on a server goes.
     expect(byName['dockerhub-login'].when({ dockerHubCreds: { username: 'x' } })).toBe(true);
     expect(byName['dockerhub-login'].when({ dockerHubCreds: null })).toBe(false);
-    expect(byName['ghcr-login'].when({ ciReady: { ghcrPullCreds: { owner: 'x' } } })).toBe(true);
-    expect(byName['ghcr-login'].when({ ciReady: {} })).toBe(false);
 
     // update-dns only for managed DNS providers with a domain
     expect(byName['update-dns'].when({ domain: 'x.com', dnsProvider: 'cloudflare' })).toBe(true);
@@ -84,6 +84,7 @@ describe('planDeploy(compose)', () => {
     for (const always of [
       'setup-server',
       'check-db-ledger',
+      'ghcr-login',
       'setup-server-files',
       'start-compose-stack',
       'wait-admin-ready',

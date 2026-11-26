@@ -17,7 +17,8 @@
  *     secondaryRegion, serverType, services, domain, dnsProvider, apiToken,
  *     dnsZoneId, dnsToken, backupConfig,
  *     backupS3Config, imageRef, bundlePath, s3Config, dockerHubCreds,
- *     ghcrPullCreds, allowDegraded, isComposeLocal, isDirectDeploy,
+ *     ghcrPull (the one pull credential both sides log in to ghcr.io with, or
+ *       null: compose/ghcr-login.js), allowDegraded, isComposeLocal, isDirectDeploy,
  *     composeLocalBuildPromise, sshKeyPath, onProgress,
  *     reconverge (planComposeHaReconverge: { promoted, retired } on a pair a
  *       failover swapped, else null)
@@ -46,6 +47,7 @@ import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '
 import { queueBootTiming } from '../boot-timing.js';
 import { VC_COMPOSE } from '../compose/command.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
+import { ensureGhcrLoginOn } from '../compose/ghcr-login.js';
 import {
   assertComposeStandbyNotPromotedOutside,
   buildReplicationOverlay,
@@ -768,16 +770,19 @@ async function haTransferImage(ctx) {
 
 /**
  * Fan-out setup: bundle upload + WireGuard firewall opening (UFW + cloud
- * firewall, both directions for post-failover symmetry) + registry
- * logins (Docker Hub / GHCR when creds are present). All independent → one
- * Promise.all under `deploy.ha.compose.setupFan`. The cloud-firewall openers
- * are non-fatal (B0-1) — they warn and resolve, so the bare Promise.all is
- * safe.
+ * firewall, both directions for post-failover symmetry) + registry logins on
+ * each side: Docker Hub when creds are present, then ghcr.io made to match
+ * the one pull credential the deploy resolved (ctx.ghcrPull; null removes a
+ * login, compose/ghcr-login.js). A side's two logins edit the same docker
+ * login file, so they run one after the other; everything else is
+ * independent → one Promise.all under `deploy.ha.compose.setupFan`. The
+ * cloud-firewall openers are non-fatal (B0-1): they warn and resolve, so the
+ * bare Promise.all is safe.
  */
 async function haSetupServerFiles(ctx) {
   const projectName = ctx.projectConfig.projectName;
-  const { primary, standby, sshKeyPath, apiToken, dockerHubCreds, ghcrPullCreds, environment } =
-    ctx;
+  const { primary, standby, sshKeyPath, apiToken, dockerHubCreds, environment } = ctx;
+  const ghcrPull = ctx.ghcrPull ?? null;
   // Conditional on purpose: BaseProvider throws on a falsy token, and the
   // opener's contract is to no-op without credentials.
   const provider = apiToken ? new (providerFor(ctx.envConfig))(apiToken) : null;
@@ -817,29 +822,21 @@ async function haSetupServerFiles(ctx) {
       ),
     ),
   ];
-  if (dockerHubCreds) {
+  for (const [side, node] of [
+    ['primary', primary],
+    ['standby', standby],
+  ]) {
     setupTasks.push(
-      perfAsync('deploy.ha.compose.dockerLogin.primary', () =>
-        dockerLoginOnServer(primary.ip, sshKeyPath, dockerHubCreds),
-      ),
-      perfAsync('deploy.ha.compose.dockerLogin.standby', () =>
-        dockerLoginOnServer(standby.ip, sshKeyPath, dockerHubCreds),
-      ),
-    );
-  }
-  if (ghcrPullCreds?.owner && ghcrPullCreds?.token) {
-    const ghcrLogin = {
-      username: ghcrPullCreds.owner,
-      token: ghcrPullCreds.token,
-      registry: 'ghcr.io',
-    };
-    setupTasks.push(
-      perfAsync('deploy.ha.compose.ghcrLogin.primary', () =>
-        dockerLoginOnServer(primary.ip, sshKeyPath, ghcrLogin),
-      ),
-      perfAsync('deploy.ha.compose.ghcrLogin.standby', () =>
-        dockerLoginOnServer(standby.ip, sshKeyPath, ghcrLogin),
-      ),
+      (async () => {
+        if (dockerHubCreds) {
+          await perfAsync(`deploy.ha.compose.dockerLogin.${side}`, () =>
+            dockerLoginOnServer(node.ip, sshKeyPath, dockerHubCreds),
+          );
+        }
+        await perfAsync(`deploy.ha.compose.ghcrLogin.${side}`, () =>
+          ensureGhcrLoginOn(node.ip, sshKeyPath, ghcrPull),
+        );
+      })(),
     );
   }
   try {

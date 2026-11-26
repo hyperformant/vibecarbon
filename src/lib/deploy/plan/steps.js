@@ -51,13 +51,13 @@ export const dockerhubLoginStep = () =>
     when: (ctx) => !!ctx.dockerHubCreds,
   });
 
-/** Authenticate the server to GHCR — only when CI produced pull creds. */
-export const ghcrLoginStep = () =>
-  defineStep({
-    name: 'ghcr-login',
-    effect: 'ghcrLogin',
-    when: (ctx) => !!ctx.ciReady?.ghcrPullCreds,
-  });
+/**
+ * Make the server's ghcr.io login match the pull credential the deploy
+ * resolved (ctx.ghcrPull): the read:packages token for a private image, none
+ * for a public one or a local or direct build. Every compose deploy, so the
+ * first one after an upgrade takes off a gh token an older vibecarbon left.
+ */
+export const ghcrLoginStep = () => defineStep({ name: 'ghcr-login', effect: 'ghcrLogin' });
 
 /** Tar + stream the rendered bundle to the server and install the unit file. */
 export const setupServerFilesStep = () =>

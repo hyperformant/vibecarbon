@@ -39,7 +39,9 @@ describe('registry-login gate fingerprints tokens with a digest, not a prefix', 
 
   it('both gates route through tokenFingerprint', () => {
     expect(effectsSrc).toMatch(/tokenFp:\s*tokenFingerprint\(dockerHubCreds\.token\)/);
-    expect(effectsSrc).toMatch(/tokenFp:\s*tokenFingerprint\(ciReady\.ghcrPullCreds\.token\)/);
+    expect(effectsSrc).toMatch(
+      /tokenFp:\s*ghcrPull\?\.mode === 'token' \? tokenFingerprint\(ghcrPull\.token\)/,
+    );
   });
 
   it('two Docker Hub PATs sharing the 8-char prefix produce DIFFERENT fingerprints', () => {
