@@ -33,11 +33,15 @@ vi.mock('../../../src/lib/github-environments.js', () => ({
   listRepoSecretNames: vi.fn(async (): Promise<string[]> => []),
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
-  triggerDeployWorkflow: vi.fn(async () => {}),
-  waitForLatestWorkflowRun: vi.fn(async () => ({ runId: 1 })),
+}));
+// The cluster half of the deploy (flux-handover.test.ts); this file reads
+// what it pushes and seeds.
+vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({
+  handOverCluster: vi.fn(async () => {}),
 }));
 
 const github = await import('../../../src/lib/github-environments.js');
+const { handOverCluster } = await import('../../../src/lib/deploy/k8s/flux-handover.js');
 const { deployK8sGitOps, noteUnreadTokenSecrets } = await import(
   '../../../src/lib/deploy/k8s/gitops-deploy.js'
 );
@@ -123,7 +127,7 @@ describe('deployK8sGitOps seeds no provider token', () => {
     const { dir } = project('template', TEMPLATE_WORKFLOW);
     await deploy(dir);
     expect(vi.mocked(github.seedEnvironmentSecrets)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(github.triggerDeployWorkflow)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(handOverCluster)).toHaveBeenCalledTimes(1);
     const [, secrets, vars] = vi.mocked(github.seedEnvironmentSecrets).mock.calls[0];
     expect(Object.keys(secrets as object)).not.toContain('HETZNER_API_TOKEN');
     expect(Object.keys(vars as object)).not.toContain('HCLOUD_NETWORK_ID');

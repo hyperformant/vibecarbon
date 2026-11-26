@@ -34,8 +34,12 @@ const TEMPLATE_DIR = join(
   'carbon',
 );
 
-/** The workflow that applies a GitOps project's Flux cluster file. */
-const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
+/**
+ * The Flux cluster file `configure cicd` applies on every cluster, a k8s-ha
+ * standby's too, as deploy.yml did: what puts Flux's GitRepository and
+ * Kustomization there.
+ */
+export const FLUX_CLUSTER_FILE = 'k8s/flux/clusters/primary/vibecarbon.yaml';
 
 const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 const KUSTOMIZATION_FILES = ['kustomization.yaml', 'kustomization.yml', 'Kustomization'];
@@ -227,25 +231,16 @@ function strippedByFlux(doc) {
 }
 
 /**
- * The Flux cluster files the project's deploy workflow applies, relative to
- * the project: what puts Flux's Kustomizations on a cluster. The template's
- * workflow applies clusters/primary/vibecarbon.yaml on every cluster, the
- * standby's too. No workflow, none.
+ * The Flux cluster files that reach a cluster, relative to the project: the
+ * CLI applies FLUX_CLUSTER_FILE on every cluster (flux-bootstrap.js), the
+ * standby's too, so it is that one when the project has it, and none
+ * otherwise.
  *
  * @param {string} projectDir
  * @returns {string[]}
  */
 export function fluxClusterFilesApplied(projectDir) {
-  const workflow = join(projectDir, DEPLOY_WORKFLOW);
-  if (!existsSync(workflow)) return [];
-  // The suffix is checked apart: in the pattern, `[\w.-]+` before `\.ya?ml`
-  // would backtrack over a long run of dots.
-  const named = uncommented(readFileSync(workflow, 'utf-8')).match(
-    /(?<![\w./-])k8s\/flux\/clusters\/[\w.-]+\/[\w.-]+/g,
-  );
-  return [...new Set(named ?? [])]
-    .filter((rel) => /\.ya?ml$/.test(rel) && existsSync(join(projectDir, rel)))
-    .sort();
+  return existsSync(join(projectDir, FLUX_CLUSTER_FILE)) ? [FLUX_CLUSTER_FILE] : [];
 }
 
 /**
@@ -272,7 +267,7 @@ function builtPlaceholders(projectDir, clusterText) {
 
 /**
  * Every placeholder Flux would apply from this project: in each cluster file
- * the deploy workflow applies (it goes on as it is) and in what each of its
+ * the CLI applies (it goes on as it is) and in what each of its
  * Kustomizations builds from a path in the repo, minus what it strips.
  *
  * `upgradeStrips` says whether the cluster file this CLI ships strips all of

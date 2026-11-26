@@ -54,6 +54,7 @@ import {
   readOperatorVar,
   validateOperatorValue,
 } from './lib/operator-env.js';
+import { requireEnvOperatorIpAccess } from './lib/operator-ip-gate.js';
 import {
   buildGitAddArgv,
   loadEnvVariables,
@@ -1617,9 +1618,19 @@ export async function runConfigureCicd(envName) {
     process.exit(1);
   }
 
-  // Stage 2: layer Flux + GH Environment + workflow trigger onto the live
-  // cluster. This is the body that orchestrator.js used to run inline when
-  // --gitops was passed (deleted in PR 5).
+  // Stage 2 reaches the k8s API from this machine, so the firewall must let
+  // this address in first. A headless run under CI trusts the saved list,
+  // as `deploy -y` does.
+  await requireEnvOperatorIpAccess({
+    projectConfig,
+    envName,
+    envConfig,
+    yes: !process.stdin.isTTY,
+  });
+
+  // Stage 2: seed the GH Environment, then hand each cluster to Flux from
+  // this machine. This is the body that orchestrator.js used to run inline
+  // when --gitops was passed (deleted in PR 5).
   p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
   const { deployK8sGitOps, gitopsTargets, noteUnreadTokenSecrets } = await import(
     './lib/deploy/k8s/gitops-deploy.js'

@@ -21,8 +21,11 @@ import { createTempDir } from '../../_shared/temp-dir.js';
 vi.mock('../../../src/lib/github-environments.js', () => ({
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
-  triggerDeployWorkflow: vi.fn(async () => {}),
-  waitForLatestWorkflowRun: vi.fn(async () => ({ runId: 1 })),
+}));
+// The cluster half of the deploy (flux-handover.test.ts); this file reads
+// what it pushes and seeds.
+vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({
+  handOverCluster: vi.fn(async () => {}),
 }));
 
 const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environments.js');

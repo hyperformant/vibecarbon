@@ -7,15 +7,21 @@
  *      (the image tag in the app Deployment).
  *   2. git add k8s/ && git commit && git push.
  *   3. Seed GitHub Environment secrets + vars + upload KUBECONFIG_B64.
- *   4. Trigger .github/workflows/deploy.yml + wait for completion.
+ *   4. Hand the cluster to Flux from this machine (handOverCluster in
+ *      ./flux-handover.js): install Flux, apply the root GitRepository and
+ *      Kustomization, wait for the first sync. No workflow is dispatched: a
+ *      GitHub runner cannot reach the k8s API, which admits only the
+ *      operator's addresses.
  *
- * The workflow (Phase 4.3b.C) installs Flux + root Kustomization + applies
- * the vibecarbon-app-secrets / vibecarbon-infra-secrets Secrets. It writes no
- * cloud provider Secret: `vibecarbon deploy` hands the provider API token to
- * the cluster itself (applyCloudSecrets in ./k3s.js), so this CLI puts no copy
- * at GitHub. A copy an earlier one put there is refused while deploy.yml still
- * reads it (refuseLegacyProviderTokenStep) and named once nothing does
- * (noteUnreadTokenSecrets).
+ * The objects Flux leaves to the CLI (the namespace, the backup CronJob and
+ * its settings, the vibecarbon-app-secrets / vibecarbon-infra-secrets
+ * Secrets, cert-manager, the Traefik CRDs, the TLS Certificate) are applied by
+ * every `vibecarbon deploy <env>`, as on a cluster without GitOps. No cloud
+ * provider Secret goes through GitHub: `vibecarbon deploy` hands the provider
+ * API token to the cluster itself (applyCloudSecrets in ./k3s.js), so this
+ * CLI puts no copy at GitHub. A copy an earlier one put there is refused
+ * while deploy.yml still reads it (refuseLegacyProviderTokenStep) and named
+ * once nothing does (noteUnreadTokenSecrets).
  * Flux reconciles the rest from the committed k8s/ tree.
  *
  * Callers: `vibecarbon configure cicd <env>` (PR 7) layers this onto an
@@ -39,13 +45,12 @@ import {
   listEnvironmentVariables,
   listRepoSecretNames,
   seedEnvironmentSecrets,
-  triggerDeployWorkflow,
   uploadKubeconfig,
-  waitForLatestWorkflowRun,
 } from '../../github-environments.js';
 import { alpineK8sImageRef, traefikVersion } from '../../images.js';
 import { GITHUB_REF_FILES, originGitHubRepo, writeGitHubRefs } from '../../template-edits.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { handOverCluster } from './flux-handover.js';
 import { k8sTlsIdentity } from './k3s.js';
 import { describeFluxPlaceholders, fluxPlaceholders } from './unrendered-placeholders.js';
 
@@ -271,9 +276,9 @@ function readsSecret(text, name) {
  * seeded on every run. The CLI no longer seeds it (deployK3s hands the
  * provider's token to the cluster itself), so in such a project that copy
  * only goes stale. On Hetzner, whose cluster reads kube-system/hcloud,
- * after a token rotation the workflow this deploy triggers would write the
- * revoked token back over the one the deploy applied, and the cloud
- * controller and CSI driver would read it at their next start. On another
+ * after a token rotation a run of that workflow would write the revoked
+ * token back over the one the deploy applied, and the cloud controller and
+ * CSI driver would read it at their next start. On another
  * provider nothing reads that Secret and a deploy removes it
  * (K8S_RETIRED_CLOUD_SECRETS), so each run of the workflow would only put a
  * copy of whatever Hetzner token the secret holds back into the cluster.
@@ -377,7 +382,7 @@ export async function noteUnreadTokenSecrets({ projectDir, ProviderClass }) {
 
 /**
  * Full GitOps deploy: render manifests, commit + push, seed GitHub
- * Environment, trigger workflow, wait for Flux reconciliation.
+ * Environment, then hand the cluster to Flux and wait for its first sync.
  *
  * @param {object} args
  * @param {string} args.projectDir - customer repo root
@@ -400,11 +405,7 @@ export async function noteUnreadTokenSecrets({ projectDir, ProviderClass }) {
  * @param {typeof import('../../providers/base.js').BaseProvider} args.ProviderClass - the
  *   environment's provider: the refusal of a deploy.yml that still writes kube-system/hcloud
  *   names its own token (refuseLegacyProviderTokenStep)
- * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
- *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
- *   install + ~5m CRD apply. A 30m outer budget once tied with the internal
- *   ceiling and every timeout raced the workflow to its own error; 3600s
- *   gives the workflow room to fail naturally and surface its own log.
+ * @returns {Promise<{ pushed: boolean }>} whether a new deploy commit was pushed
  */
 export async function deployK8sGitOps(args) {
   const {
@@ -418,7 +419,6 @@ export async function deployK8sGitOps(args) {
     backupConfig,
     tlsSnapshotPrefix,
     role = 'primary',
-    workflowTimeoutSec = 3600,
     skipCi = false,
     ProviderClass,
   } = args;
@@ -526,18 +526,19 @@ export async function deployK8sGitOps(args) {
   await uploadKubeconfig(environment, kubeconfigPath);
   s.stop(`GitHub Environment '${environment}' seeded`);
 
-  // 4. Trigger the deploy workflow on the just-pushed commit + wait for
-  // completion. The workflow_dispatch trigger takes environment as an
-  // input; the concurrency group ensures only one run per env at a time.
-  s.start(`Triggering deploy.yml workflow for '${environment}'`);
-  await triggerDeployWorkflow(environment);
-  s.stop('Workflow triggered');
+  // 4. Hand the cluster to Flux from here, after the push: its first sync
+  // reads main. The firewall admits the operator's address, so this machine
+  // reaches the k8s API where a GitHub runner never could.
+  s.start(`handing ${environment} to flux`);
+  try {
+    await handOverCluster({ projectDir, envName: environment, kubeconfigPath });
+  } catch (err) {
+    s.error(`flux has not taken over ${environment}`);
+    throw err;
+  }
+  s.stop(`flux has ${environment}, so a push to main deploys it from here on`);
 
-  s.start('Waiting for Flux reconciliation (via GitHub Actions)');
-  const result = await waitForLatestWorkflowRun(workflowTimeoutSec);
-  s.stop(`Workflow run ${result.runId} succeeded`);
-
-  return { runId: result.runId, pushed };
+  return { pushed };
 }
 
 /**

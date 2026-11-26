@@ -805,6 +805,18 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/state-passphrase-stub.test.ts'],
   },
+  // A created k8s project with a local bare origin, for the tests that run
+  // deployK8sGitOps for real: one copy of the k8s/ tree create lays down, so
+  // a template change reaches every such test at once.
+  ...(['createdK8sProject', 'withGitOrigin'] as const).map((helper) => ({
+    helper,
+    definition: 'tests/_shared/gitops-project.ts',
+    consumers: [
+      'tests/unit/deploy/flux-placeholders.test.ts',
+      'tests/unit/deploy/gitops-handover.test.ts',
+    ],
+    deepTests: ['tests/unit/deploy/flux-placeholders.test.ts'],
+  })),
   // The module stubs that take the real executeDeployment to its plan, each
   // spelled out the same way in every test that drives it there.
   ...(

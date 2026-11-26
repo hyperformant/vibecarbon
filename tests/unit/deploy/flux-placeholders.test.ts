@@ -11,7 +11,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { PLACEHOLDERS, SECRET_PLACEHOLDERS } from '../../../src/create.js';
 import { gitSafeEnv } from '../../../src/lib/command.js';
 import {
   describeFluxPlaceholders,
@@ -20,24 +19,28 @@ import {
   unrenderedPlaceholders,
 } from '../../../src/lib/deploy/k8s/unrendered-placeholders.js';
 import { addKustomizationEntry } from '../../../src/lib/template-edits.js';
+import {
+  createdK8sProject as createdProject,
+  withGitOrigin,
+} from '../../_shared/gitops-project.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
-import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
   listEnvironmentVariables: vi.fn(async () => []),
   listRepoSecretNames: vi.fn(async () => []),
   seedEnvironmentSecrets: vi.fn(async () => {}),
   uploadKubeconfig: vi.fn(async () => {}),
-  triggerDeployWorkflow: vi.fn(async () => {}),
-  waitForLatestWorkflowRun: vi.fn(async () => ({ runId: 1 })),
+}));
+// The cluster half of the deploy (flux-handover.test.ts); this file reads
+// what it pushes.
+vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({
+  handOverCluster: vi.fn(async () => {}),
 }));
 
 const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environments.js');
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
-const CARBON = join(REPO_ROOT, 'carbon');
-const CARBON_K8S = join(CARBON, 'k8s');
 const SERVICES = join(REPO_ROOT, 'services');
 const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
 const PRIMARY = 'k8s/flux/clusters/primary/vibecarbon.yaml';
@@ -47,26 +50,6 @@ const TRAEFIK_STRIP =
   / {4}# Traefik's image comes from[\s\S]*?\n {6}target:\n {8}kind: Deployment\n {8}name: traefik\n/;
 const CLAIM_STRIP =
   / {4}# Volumes are the CLI's too[\s\S]*?\n {6}target:\n {8}kind: PersistentVolumeClaim\n/;
-
-/**
- * A project's k8s/ tree as `vibecarbon create` lays it down, with the deploy
- * workflow `configure cicd` installs as it is (it names the Flux cluster file
- * the workflow applies).
- */
-function createdProject(): string {
-  const dir = createTempDir('vc-flux-ph-');
-  const fill = Object.keys(PLACEHOLDERS).filter((k) => !SECRET_PLACEHOLDERS.has(k));
-  for (const src of sourceFiles(CARBON_K8S)) {
-    let text = readFileSync(src, 'utf-8');
-    for (const key of fill) text = text.replaceAll(`{{${key}}}`, 'proj');
-    const dest = join(dir, 'k8s', relative(CARBON_K8S, src));
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, text);
-  }
-  mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
-  writeFileSync(join(dir, DEPLOY_WORKFLOW), readFileSync(join(CARBON, DEPLOY_WORKFLOW), 'utf-8'));
-  return dir;
-}
 
 /** Every add-on `vibecarbon add` wires into k8s/base (it declares an entry). */
 const BASE_ADDONS = readdirSync(SERVICES).flatMap((name) => {
@@ -154,21 +137,27 @@ describe('fluxPlaceholders', () => {
     );
   });
 
-  it('reads only the cluster file the deploy workflow applies, and names each finding once', () => {
+  it('reads only the cluster file the CLI applies, and names each finding once', () => {
     const dir = createdProject();
     expect(fluxClusterFilesApplied(dir)).toEqual([PRIMARY]);
-    // deploy.yml applies the primary file on every cluster, the standby's
-    // too: an old standby file reaches no cluster.
+    // The CLI applies the primary file on every cluster, the standby's too:
+    // an old standby file reaches no cluster.
     edit(dir, STANDBY, (t) => t.replace(TRAEFIK_STRIP, ''));
     expect(fluxPlaceholders(dir)).toEqual([]);
-    edit(dir, DEPLOY_WORKFLOW, (t) => t.replaceAll(PRIMARY, STANDBY));
-    expect(fluxClusterFilesApplied(dir)).toEqual([STANDBY]);
+    edit(dir, PRIMARY, (t) => t.replace(TRAEFIK_STRIP, ''));
     expect(fluxPlaceholders(dir)).toEqual([
-      { file: TRAEFIK, placeholders: ['{{TRAEFIK_IMAGE}}'], via: STANDBY, upgradeStrips: true },
+      { file: TRAEFIK, placeholders: ['{{TRAEFIK_IMAGE}}'], via: PRIMARY, upgradeStrips: true },
     ]);
     const none = createdProject();
-    rmSync(join(none, DEPLOY_WORKFLOW));
+    rmSync(join(none, PRIMARY));
     expect(fluxClusterFilesApplied(none)).toEqual([]);
+  });
+
+  it('a project with no deploy workflow still has its cluster file checked', () => {
+    // The CLI applies the cluster file itself, so no workflow has to name it.
+    const dir = createdProject();
+    rmSync(join(dir, DEPLOY_WORKFLOW));
+    expect(fluxClusterFilesApplied(dir)).toEqual([PRIMARY]);
   });
 
   // CodeQL js/redos (alerts 200 and 201): the strip parser once matched
@@ -228,15 +217,7 @@ describe('deployK8sGitOps refuses a tree Flux would apply with a token', () => {
       join(project, '.vibecarbon.json'),
       `${JSON.stringify({ projectName: 'proj' })}\n`,
     );
-    const origin = createTempDir('vc-flux-ph-origin-');
-    git(origin, 'init', '--bare', '-q', '-b', 'main');
-    git(project, 'init', '-q', '-b', 'main');
-    // A name of its own, so a write that ever lands outside the temp repo
-    // says which test made it.
-    git(project, 'config', 'user.email', 'flux-placeholders@test.invalid');
-    git(project, 'config', 'user.name', 'flux-placeholders-test');
-    git(project, 'remote', 'add', 'origin', origin);
-    return { project, origin };
+    return withGitOrigin(project);
   }
 
   /** Every file of the project outside .git, with its content. */

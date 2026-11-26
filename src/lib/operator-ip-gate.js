@@ -1,12 +1,12 @@
 /**
  * The operator-IP gate of the commands that cannot go on without SSH or the
- * k8s API (`backup`, `restore`, `update`, `failover`, both `scale` paths):
- * refresh the allowlist through ensureOperatorIpAccess, say so when the
- * firewall changed (or changed only in part), and exit 1 when the check
- * fails. A push that fails for an address already on the list warns and goes
- * on instead: before records existed, such a command pushed nothing at all,
- * and a failover must not stop on a firewall API that is down when the
- * address it comes from is already let in.
+ * k8s API (`backup`, `restore`, `update`, `configure cicd <env>`, `failover`,
+ * both `scale` paths): refresh the allowlist through ensureOperatorIpAccess,
+ * say so when the firewall changed (or changed only in part), and exit 1 when
+ * the check fails. A push that fails for an address already on the list warns
+ * and goes on instead: before records existed, such a command pushed nothing
+ * at all, and a failover must not stop on a firewall API that is down when
+ * the address it comes from is already let in.
  *
  * The other callers of ensureOperatorIpAccess differ on purpose and stay
  * their own: `deploy` runs it under a spinner and throws, `destroy` warns and
@@ -71,7 +71,8 @@ export async function requireOperatorIpAccess({
 /**
  * requireOperatorIpAccess for an environment as its record describes it: both
  * firewalls for compose-HA and k8s HA, and the provider token from the
- * operator's environment. The gate of `backup`, `restore` and `update`.
+ * operator's environment. The gate of `backup`, `restore`, `update` and
+ * `configure cicd <env>`.
  *
  * @param {object} o
  * @param {object} o.projectConfig
