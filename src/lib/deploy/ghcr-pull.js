@@ -146,9 +146,37 @@ export async function githubTokenScopes(token, { fetcher = fetchWithRetry } = {}
 /**
  * Where a pull token lives, in the words a refusal uses: `lives` follows "it
  * lives", `readers` is who can read it there, `puller` is what pulls with it.
+ * `ghTokenLeft` is the why of the line warned when a token stored there can
+ * do what only the operator's gh token could (GH_TOKEN_SCOPES): an earlier
+ * vibecarbon wrote that token to compose servers. The line then says to
+ * revoke it (ghTokenRevokeLine). Absent where none was ever written (a
+ * cluster).
  *
- * @typedef {{ lives: string, readers: string, puller: string }} TokenWhere
+ * @typedef {{ lives: string, readers: string, puller: string,
+ *   ghTokenLeft?: string }} TokenWhere
  */
+
+/**
+ * Scopes a stored token has only when it is the operator's gh token, which
+ * earlier versions logged compose servers into ghcr.io with (gh auth asks for
+ * repo, read:org and gist, and workflow when told to).
+ */
+const GH_TOKEN_SCOPES = ['repo', 'workflow'];
+
+/** Where GitHub lists the apps a user authorized, GitHub CLI among them. */
+const GITHUB_AUTHORIZED_APPS_PAGE = 'https://github.com/settings/applications';
+
+/**
+ * The line that says to revoke the gh token: `why` (a TokenWhere's
+ * ghTokenLeft), then the page to do it at (GITHUB_AUTHORIZED_APPS_PAGE: in
+ * link() for a warning, plain in an error).
+ *
+ * @param {string} why
+ * @param {string} page
+ */
+function ghTokenRevokeLine(why, page) {
+  return `${why}, revoke GitHub CLI's token at ${page}`;
+}
 
 /** A cluster's: the Secret in the vibecarbon namespace. */
 const CLUSTER_WHERE = {
@@ -280,33 +308,64 @@ export async function ghcrAcceptsToken({ owner, repo, username, token, fetcher =
 /**
  * What keeps a token read back from a store from being used again, checked
  * as a new token is: its scopes at github (a token widened since, or
- * revoked, fails here), then ghcr. Null when it can be reused. Github or
- * ghcr not answering throws: that says nothing about the token.
+ * revoked, fails here), then ghcr. Null when it can be reused; else `said`
+ * follows "the token", and `ghToken` is true when its scopes say it is the
+ * operator's gh token (GH_TOKEN_SCOPES). Github or ghcr not answering
+ * throws: that says nothing about the token.
+ *
+ * @returns {Promise<{ said: string, ghToken: boolean } | null>}
  */
 async function storedTokenShortfall({ owner, repo, stored, fetcher }) {
   let scopes;
   try {
     ({ scopes } = await githubTokenScopes(stored.token, { fetcher }));
   } catch (err) {
-    if (err.shortfall) return err.shortfall;
+    if (err.shortfall) return { said: err.shortfall, ghToken: false };
     throw err;
   }
   // Only `said` is used here, so the where does not matter.
   const shortfall = scopeShortfall(scopes, CLUSTER_WHERE);
-  if (shortfall) return shortfall.said;
+  if (shortfall) {
+    const ghToken = (scopes ?? []).some((scope) => GH_TOKEN_SCOPES.includes(scope));
+    return { said: shortfall.said, ghToken };
+  }
   if (!(await ghcrAcceptsToken({ owner, repo, ...stored, fetcher }))) {
-    return 'is one ghcr.io no longer accepts';
+    return { said: 'is one ghcr.io no longer accepts', ghToken: false };
   }
   return null;
 }
 
 /**
+ * The stores' tokens that get replaced, as one warning, then `ghTokenLeft`
+ * on its own when one of them was the operator's gh token.
+ *
+ * @param {string[]} stale
+ * @param {string | null} ghTokenLeft
+ */
+function warnStale(stale, ghTokenLeft) {
+  if (stale.length > 0) {
+    p.log.warn(stale.map((line) => `${line}, so it gets replaced.`).join('\n'));
+  }
+  if (ghTokenLeft) p.log.warn(ghTokenRevokeLine(ghTokenLeft, link(GITHUB_AUTHORIZED_APPS_PAGE)));
+}
+
+/**
  * A token the operator gives this run: GHCR_PULL_TOKEN from the shell, else
  * one ask on a terminal. `from` names where it came from in a refusal.
- * `stale` says which store's token is not used again, and why; `keptAs` says
- * where the new one will live.
+ * `stale` says which store's token is not used again, and why, and
+ * `ghTokenLeft` what to do when one was the gh token; `keptAs` says where
+ * the new one will live.
  */
-async function newPullToken({ image, envName, projectName, keptAs, isTTY, prompt, stale }) {
+async function newPullToken({
+  image,
+  envName,
+  projectName,
+  keptAs,
+  isTTY,
+  prompt,
+  stale,
+  ghTokenLeft,
+}) {
   const shell = readOperatorVar(TOKEN_ENV);
   if (shell.problem) throw new Error(shell.problem);
   const pageUrl = newPullTokenUrl({ projectName, envName });
@@ -314,15 +373,14 @@ async function newPullToken({ image, envName, projectName, keptAs, isTTY, prompt
     throw new Error(
       [
         ...stale.map((line) => `${line}, so it is not used again.`),
+        ...(ghTokenLeft ? [ghTokenRevokeLine(ghTokenLeft, GITHUB_AUTHORIZED_APPS_PAGE)] : []),
         `your app image at ${image} is private or not published yet, so ${envName} needs a token ` +
           `to pull it, and there is no terminal to ask for one. export ${TOKEN_ENV} as a classic ` +
           `token with only read:packages, made here: ${pageUrl}`,
       ].join('\n'),
     );
   }
-  if (stale.length > 0) {
-    p.log.warn(stale.map((line) => `${line}, so it gets replaced.`).join('\n'));
-  }
+  warnStale(stale, ghTokenLeft);
   if (shell.value) return { token: shell.value, from: TOKEN_ENV };
   p.log.info(
     [
@@ -388,17 +446,18 @@ export async function resolveGhcrPull({
 }) {
   if (await ghcrPullsAnonymously({ owner, repo, fetcher })) return { mode: 'public' };
   const stale = [];
+  /** where.ghTokenLeft, once a store's token turns out to be the gh token. */
+  let ghTokenLeft = null;
   for (const store of stores) {
     const stored = await store.read();
     if (!stored) continue;
     const shortfall = await storedTokenShortfall({ owner, repo, stored, fetcher });
     if (!shortfall) {
-      if (stale.length > 0) {
-        p.log.warn(stale.map((line) => `${line}, so it gets replaced.`).join('\n'));
-      }
+      warnStale(stale, ghTokenLeft);
       return { mode: 'token', ...stored };
     }
-    stale.push(`the token ${store.name} ${shortfall}`);
+    stale.push(`the token ${store.name} ${shortfall.said}`);
+    if (shortfall.ghToken && where.ghTokenLeft) ghTokenLeft = where.ghTokenLeft;
   }
   const { image } = ghcrEndpoints(owner, repo);
   const { token, from } = await newPullToken({
@@ -409,6 +468,7 @@ export async function resolveGhcrPull({
     isTTY,
     prompt,
     stale,
+    ghTokenLeft,
   });
   const refuse = (why) => new Error(`${from} was not stored: ${why}`);
   let login;

@@ -322,8 +322,7 @@ describe('every ssh command on a server .env, docker login file or kubeconfig is
       'lib/deploy/compose/ghcr-login.js:removeGhcrLogin',
       'lib/deploy/compose/index.js:dockerLoginOnServer',
       'scale.js:readOldAppEnv',
-      'scale.js:readOldAppImage',
-      'scale.js:prepareReplacementServer',
+      'scale.js:readOldServerEnv',
     ]) {
       expect(keys, key).toContain(key);
     }

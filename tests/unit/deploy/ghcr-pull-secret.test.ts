@@ -595,6 +595,44 @@ describe('resolveGhcrPull', () => {
     expect(writes()).toEqual([]);
   });
 
+  it('a cluster never says to revoke a gh token: none was ever written there', async () => {
+    // A stored token that can do what the gh token could: the warning and the
+    // refusal are the stale line alone, worded as ever.
+    h.secrets[PRIMARY] = storedSecret('octo', OLD_TOKEN);
+    const scopes = { [OLD_TOKEN]: 'gist, read:org, repo, workflow', [TOKEN]: 'read:packages' };
+    const tokens = {
+      [OLD_TOKEN]: { exchange: 200, tags: 200 },
+      [TOKEN]: { exchange: 200, tags: 200 },
+    };
+    await resolveGhcrPull({
+      ...resolveArgs,
+      stores: clusters,
+      isTTY: true,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry({ scopes, tokens }).fetcher,
+    });
+    expect(vi.mocked(clackMock.log.warn).mock.calls.map((c) => c[0])).toEqual([
+      "the token in prod-primary's cluster can also gist, read:org, repo, workflow, so it gets replaced.",
+    ]);
+
+    vi.mocked(clackMock.log.warn).mockClear();
+    const err = await resolveGhcrPull({
+      ...resolveArgs,
+      stores: clusters,
+      isTTY: false,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry({ scopes, tokens }).fetcher,
+    }).catch((e) => e);
+    const lines = String(err.message).split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe(
+      "the token in prod-primary's cluster can also gist, read:org, repo, workflow, so it is not used again.",
+    );
+    expect(lines[1]).toMatch(/^your app image at .* export GHCR_PULL_TOKEN as a classic token/);
+    expect(err.message).not.toContain('settings/applications');
+    expect(vi.mocked(clackMock.log.warn)).not.toHaveBeenCalled();
+  });
+
   it('a revoked stored token asks again', async () => {
     // Revoked at github. ghcr may still answer for a package not published
     // yet, so github's answer is the one that counts.

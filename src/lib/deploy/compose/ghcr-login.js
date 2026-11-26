@@ -19,6 +19,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { errorReason } from '../../cli/error-line.js';
 import { shEscape } from '../../shell.js';
 import { dockerLoginOnServer, sshRunAsync } from './index.js';
 
@@ -28,11 +29,19 @@ const DOCKER_CONFIG = '/root/.docker/config.json';
 /** Where a compose pull token lives, to complete the ask's "it lives ___". */
 export const COMPOSE_KEPT_AS = "on the server in docker's login file";
 
-/** The same, in the words a refused token is told with (ghcr-pull.js TokenWhere). */
+/**
+ * The same, in the words a refused token is told with (ghcr-pull.js
+ * TokenWhere). `ghTokenLeft` follows the warning about a stored token that
+ * can do repo or workflow: earlier versions logged the server in with the
+ * operator's gh token, so whoever had root there could have taken it.
+ */
 export const COMPOSE_WHERE = {
   lives: COMPOSE_KEPT_AS,
   readers: 'anyone with root on the server',
   puller: 'the server',
+  ghTokenLeft:
+    'that is likely the gh token an earlier vibecarbon left there, and it reaches every repo you can: ' +
+    'if anyone else may have had root on that server',
 };
 
 /**
@@ -130,16 +139,6 @@ export async function readGhcrLoginOnServer(ip, sshKeyPath, { retries } = {}) {
   return ghcrPairIn(out);
 }
 
-/** The line of a failed read that says why: ssh's own, else the error's first. */
-function whyUnread(err) {
-  const lines = (text) =>
-    String(text ?? '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-  return (lines(err?.stderr)[0] ?? lines(err?.message)[0] ?? 'no answer').slice(0, 200);
-}
-
 /**
  * Servers as places a pull token may be stored, each read over ssh with the
  * environment's key, in order. `name` is how the operator knows the server
@@ -165,7 +164,9 @@ export function serverStores(servers, sshKeyPath) {
           // A changed operator IP stops the whole command: its abort names the
           // cause, where a warning here would end in a GHCR_PULL_TOKEN refusal.
           if (err?.code === 'OPERATOR_IP_CHANGED') throw err;
-          p.log.warn(`could not read the token ${store} (${whyUnread(err)}), so it is not reused.`);
+          p.log.warn(
+            `could not read the token ${store} (${errorReason(err)}), so it is not reused.`,
+          );
           return null;
         }
       },
@@ -220,7 +221,7 @@ try:
     cfg = json.loads(text)
 except ValueError:
     if '"' + host + '"' in text:
-        sys.exit(cfg_path + ' is not json docker can read but names ' + host + ', so its login could not be removed')
+        sys.exit(cfg_path + ' is not json docker can read but names ' + host + ', so its login could not be removed. fix or remove ' + cfg_path + ' on that server, then deploy again: vibecarbon deploy <env>')
     print('absent')
     sys.exit(0)
 auths = cfg.get('auths') if isinstance(cfg, dict) else None
@@ -248,7 +249,7 @@ cfg=${shEscape(cfgPath)}
 if [ ! -s "$cfg" ]; then echo absent; exit 0; fi
 if ! command -v python3 >/dev/null 2>&1; then
   if grep -qF '"${GHCR}"' "$cfg"; then
-    echo "the server has no python3 to edit $cfg, so its ${GHCR} login could not be removed" >&2
+    echo "the server has no python3 to edit $cfg, so its ${GHCR} login could not be removed. install python3 or remove $cfg on that server, then deploy again: vibecarbon deploy <env>" >&2
     exit 1
   fi
   echo absent

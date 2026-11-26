@@ -31,6 +31,13 @@ const h = vi.hoisted(() => {
     // The old server's APP_IMAGE, and each server's docker login file.
     appImage: 'myapp-app:local',
     loginFiles: {} as Record<string, string>,
+    // The old server's .env as `cat` prints it (null: one APP_IMAGE line),
+    // the servers that do not answer, and each .env read's timeout.
+    envText: null as string | null,
+    envDown: new Set<string>(),
+    envReadTimeouts: [] as number[],
+    // The image the new server's bundle was rendered with.
+    setupImage: null as string | null,
   };
   // What the new server's ghcr.io login was made to match, and every ask.
   const ghcrLogins: Array<{ ip: string; pull: unknown }> = [];
@@ -118,8 +125,14 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     backupCompose: async () => ({ result: 'pushed', name: PUSHED }),
     waitForSSH: async () => true,
     setupServer: async () => {},
-    setupServerFiles: async () => {
+    setupServerFiles: async (
+      _ip: string,
+      _k: string,
+      _p: string,
+      opts: { image?: string } = {},
+    ) => {
       h.events.push('setup-files');
+      h.state.setupImage = opts.image ?? null;
     },
     pullComposeImages: async (ip: string) => {
       h.events.push(`pull:${ip}`);
@@ -244,12 +257,16 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       const role = roleWriteOf(argv as string[]);
       if (role) return `WALG_ROLE_FILE=${role}`;
       if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
-        return `APP_IMAGE=${h.state.appImage}\n`;
-      }
-      // The preflight's read of the one APP_IMAGE line.
-      if (argv[0] === 'sed' && String(argv.at(-1)).endsWith('/.env')) {
-        h.events.push(`appImageRead:${ip}`);
-        return `APP_IMAGE=${h.state.appImage}\n`;
+        h.events.push(`envRead:${ip}`);
+        h.state.envReadTimeouts.push(opts.timeout ?? 0);
+        if (h.state.envDown.has(ip)) {
+          const stderr = `ssh: connect to host ${ip} port 22: Connection timed out`;
+          throw Object.assign(new Error(`Command failed: ssh root@${ip} cat\n${stderr}`), {
+            status: 255,
+            stderr,
+          });
+        }
+        return h.state.envText ?? `APP_IMAGE=${h.state.appImage}\n`;
       }
       const script = argv[2] ?? '';
       if (script.includes('echo present')) {
@@ -364,6 +381,10 @@ function reset({ localDocker = true, deltaFails = false } = {}) {
   h.state.buildFails = false;
   h.state.appImage = 'myapp-app:local';
   h.state.loginFiles = {};
+  h.state.envText = null;
+  h.state.envDown.clear();
+  h.state.envReadTimeouts = [];
+  h.state.setupImage = null;
   h.ghcrLogins.length = 0;
   h.password.mockClear();
 }
@@ -512,7 +533,7 @@ describe('compose scale: the new server ghcr.io login', () => {
       (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
     ).not.toHaveBeenCalled();
     expect(h.ghcrLogins).toEqual([]);
-    expect(h.events).toEqual(['appImageRead:1.1.1.1', 'ghcrRead:1.1.1.1']);
+    expect(h.events).toEqual(['envRead:1.1.1.1', 'ghcrRead:1.1.1.1']);
   });
 
   it('a compose-ha scale refuses the same way, with both sides read and no server built', async () => {
@@ -533,7 +554,7 @@ describe('compose scale: the new server ghcr.io login', () => {
     expect(h.ghcrLogins).toEqual([]);
     // The one resolve read both old servers' logins, then refused: the
     // standby's APP_IMAGE was never needed.
-    expect(h.events).toEqual(['appImageRead:1.1.1.1', 'ghcrRead:1.1.1.1', 'ghcrRead:2.2.2.2']);
+    expect(h.events).toEqual(['envRead:1.1.1.1', 'ghcrRead:1.1.1.1', 'ghcrRead:2.2.2.2']);
   });
 
   it("a compose-ha scale resolves once, before building, and both new servers get the primary's token", async () => {
@@ -563,5 +584,48 @@ describe('compose scale: the new server ghcr.io login', () => {
     expect(h.ghcrLogins.length).toBeGreaterThanOrEqual(1);
     expect(h.ghcrLogins.every((l) => JSON.stringify(l.pull) === JSON.stringify(pull))).toBe(true);
     expect(h.password).not.toHaveBeenCalled();
+  });
+});
+
+describe('compose scale: the old server .env is read once, before anything is built', () => {
+  const TOKEN = `ghp_${'vcscaledupsentinel'.padEnd(36, 'Q')}`;
+
+  it('a hand-edited .env with two APP_IMAGE lines gives one decision, used by the resolve and the new server', async () => {
+    reset();
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    // The later line wins, as it does for every .env reader (util.parseEnv).
+    h.state.envText = 'APP_IMAGE=myapp-app:local\nAPP_IMAGE=ghcr.io/acme/shop:abc\n';
+    h.state.loginFiles['1.1.1.1'] = JSON.stringify({
+      auths: { 'ghcr.io': { auth: Buffer.from(`octo:${TOKEN}`).toString('base64') } },
+    });
+    try {
+      await SCALE_EFFECTS.scaleServers(makeCtx());
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    // One read of the old .env, in the preflight.
+    expect(h.events.filter((e) => e.startsWith('envRead:'))).toEqual(['envRead:1.1.1.1']);
+    // The pulled ghcr image: no local build or delta, the bundle names it,
+    // and the new server is logged in with the token the resolve reused.
+    expect(h.events.some((e) => e.startsWith('localBuild:') || e.startsWith('delta:'))).toBe(false);
+    expect(h.state.setupImage).toBe('ghcr.io/acme/shop:abc');
+    expect(h.ghcrLogins).toEqual([
+      { ip: '9.9.9.9', pull: { mode: 'token', username: 'octo', token: TOKEN } },
+    ]);
+  });
+
+  it('an old server that does not answer stops the scale before anything is built, saying why', async () => {
+    reset();
+    h.state.envDown.add('1.1.1.1');
+    const ctx = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      'could not read .env on the old server 1.1.1.1 (ssh: connect to host 1.1.1.1 port 22: Connection timed out), so scale stopped before building a new server. run scale again once the old server answers.',
+    );
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
+    expect(h.events.some((e) => e.startsWith('localBuild:'))).toBe(false);
+    // Bounded for a read of a running server, not ssh's 120 s default.
+    expect(h.state.envReadTimeouts).toEqual([30_000]);
   });
 });

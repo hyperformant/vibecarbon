@@ -19,6 +19,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -303,6 +304,123 @@ describe('a compose-ha redeploy with one side down', () => {
   });
 });
 
+describe('a stale token an earlier vibecarbon left on a compose server', () => {
+  const NEW = `ghp_${'vcpullnewtoken'.padEnd(36, 'N')}`;
+  // The gh token an earlier vibecarbon wrote, and a narrower stray one.
+  const GH = `ghp_${'vcpullghtoken'.padEnd(36, 'G')}`;
+  const NARROW = `ghp_${'vcpullnarrow'.padEnd(36, 'R')}`;
+  const SCOPES: Record<string, string> = {
+    [GH]: 'gist, read:org, repo, workflow',
+    [NARROW]: 'read:org, read:packages',
+    [NEW]: 'read:packages',
+    [TOKEN]: 'read:packages',
+  };
+  const REVOKE =
+    'that is likely the gh token an earlier vibecarbon left there, and it reaches every repo you can: ' +
+    "if anyone else may have had root on that server, revoke GitHub CLI's token at https://github.com/settings/applications";
+  const fetcher = async (url: string, init: { headers?: Record<string, string> } = {}) => {
+    const authz = init.headers?.Authorization ?? '';
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+      new Response(JSON.stringify(body), { status, headers });
+    if (url === 'https://api.github.com/user') {
+      const scopes = SCOPES[authz.replace(/^Bearer /, '')];
+      if (scopes === undefined) return json(401, {});
+      return json(200, { login: 'octo' }, { 'x-oauth-scopes': scopes });
+    }
+    if (url.startsWith('https://ghcr.io/token?scope=repository:acme/shop:pull')) {
+      return authz.startsWith('Basic ') ? json(200, { token: 'bearer' }) : json(401, {});
+    }
+    if (url === 'https://ghcr.io/v2/acme/shop/tags/list') return json(200, { tags: ['abc'] });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const resolveOn = async (servers: Array<{ ip: string; role?: string }>, isTTY: boolean) =>
+    resolveGhcrPull({
+      owner: 'acme',
+      repo: 'shop',
+      projectName: 'shop',
+      envName: 'prod',
+      stores: serverStores(namedComposeServers('prod', servers), KEY),
+      keptAs: COMPOSE_KEPT_AS,
+      where: COMPOSE_WHERE,
+      isTTY,
+      fetcher: fetcher as never,
+    });
+  const warned = () => h.warn.mock.calls.map((c) => c[0]);
+
+  it('a stale token that can do repo or workflow says to revoke the gh token, after the stale line', async () => {
+    setLogin(IP, withHub({ auth: auth('octo', GH) }));
+    vi.stubEnv('GHCR_PULL_TOKEN', NEW);
+    try {
+      expect(await resolveOn([{ ip: IP }], false)).toEqual({
+        mode: 'token',
+        username: 'octo',
+        token: NEW,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(warned()).toEqual([
+      "the token on prod's server can also gist, read:org, repo, workflow, so it gets replaced.",
+      REVOKE,
+    ]);
+    expect(warned().join('\n')).not.toContain(GH);
+  });
+
+  it('a stale token with no repo or workflow scope says nothing of the gh token', async () => {
+    setLogin(IP, withHub({ auth: auth('octo', NARROW) }));
+    vi.stubEnv('GHCR_PULL_TOKEN', NEW);
+    try {
+      await resolveOn([{ ip: IP }], false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(warned()).toEqual([
+      "the token on prod's server can also read:org, so it gets replaced.",
+    ]);
+  });
+
+  it('the reuse of the other side warns it too, and so does a headless refusal', async () => {
+    // compose-ha: the primary holds the gh token, the standby a good one.
+    setLogin(IP, withHub({ auth: auth('octo', GH) }));
+    setLogin(IP2, withHub({ auth: auth('octo', TOKEN) }));
+    const sides = [
+      { ip: IP, role: 'primary' },
+      { ip: IP2, role: 'standby' },
+    ];
+    expect(await resolveOn(sides, false)).toEqual({
+      mode: 'token',
+      username: 'octo',
+      token: TOKEN,
+    });
+    expect(warned()).toEqual([
+      "the token on prod-primary's server can also gist, read:org, repo, workflow, so it gets replaced.",
+      REVOKE,
+    ]);
+
+    // Headless, nothing to reuse and no GHCR_PULL_TOKEN: the refusal carries
+    // it, before the line that says what to export.
+    h.warn.mockClear();
+    setLogin(IP2, null);
+    vi.stubEnv('GHCR_PULL_TOKEN', '');
+    let err: Error | undefined;
+    try {
+      await resolveOn(sides, false);
+    } catch (e) {
+      err = e as Error;
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const lines = String(err?.message).split('\n');
+    expect(lines.slice(0, 2)).toEqual([
+      "the token on prod-primary's server can also gist, read:org, repo, workflow, so it is not used again.",
+      REVOKE,
+    ]);
+    expect(lines.at(-1)).toMatch(/export GHCR_PULL_TOKEN as a classic token/);
+    expect(err?.message).not.toContain(GH);
+    expect(warned()).toEqual([]);
+  });
+});
+
 describe('the removal python, run against a login file', () => {
   const file = join(DIR, 'removal.config.json');
   const extras = {
@@ -349,7 +467,11 @@ describe('the removal python, run against a login file', () => {
       err = e as typeof err;
     }
     expect(err?.status).toBe(1);
-    expect(err?.stderr).toContain('names ghcr.io, so its login could not be removed');
+    // Why, then what to do, ending with the command.
+    expect(err?.stderr?.trim()).toBe(
+      `${file} is not json docker can read but names ghcr.io, so its login could not be removed. ` +
+        `fix or remove ${file} on that server, then deploy again: vibecarbon deploy <env>`,
+    );
     expect(err?.stderr).not.toContain(TOKEN);
     expect(readFileSync(file, 'utf-8')).toBe(broken);
   });
@@ -358,6 +480,33 @@ describe('the removal python, run against a login file', () => {
     writeFileSync(file, '{"auths": ', { mode: 0o600 });
     expect(runPython(ghcrLoginRemovalPython(file))).toBe('absent\n');
     expect(readFileSync(file, 'utf-8')).toBe('{"auths": ');
+  });
+
+  it('a server without python3 whose file names ghcr.io stops, saying what to do', () => {
+    // The shipped script under bash with only grep on PATH: no python3.
+    const bin = mkdtempSync(join(DIR, 'bin-'));
+    const grep = ['/usr/bin/grep', '/bin/grep'].find((g) => existsSync(g));
+    if (!grep) throw new Error('this test needs grep at /usr/bin or /bin');
+    symlinkSync(grep, join(bin, 'grep'));
+    const broken = `{"auths": {"ghcr.io": {"auth": "${auth('octo', TOKEN)}"}}}`;
+    writeFileSync(file, broken, { mode: 0o600 });
+    let err: { status?: number; stderr?: string } | undefined;
+    try {
+      execFileSync('/bin/bash', ['-s'], {
+        input: ghcrLoginRemovalScript(file),
+        env: { PATH: bin },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+      });
+    } catch (e) {
+      err = e as typeof err;
+    }
+    expect(err?.status).toBe(1);
+    expect(err?.stderr?.trim()).toBe(
+      `the server has no python3 to edit ${file}, so its ghcr.io login could not be removed. ` +
+        `install python3 or remove ${file} on that server, then deploy again: vibecarbon deploy <env>`,
+    );
+    expect(readFileSync(file, 'utf-8')).toBe(broken);
   });
 
   it('the script that ships runs that same python, under python3 -I, on stdin', () => {
@@ -387,7 +536,7 @@ describe('making a server login match the pull credential', () => {
   it('a login file that names ghcr.io but cannot be read stops the step, saying why', async () => {
     setLogin(IP, '{"auths": {"ghcr.io": ');
     await expect(ensureGhcrLoginOn(IP, KEY, null)).rejects.toThrow(
-      /names ghcr\.io, so its login could not be removed/,
+      /names ghcr\.io, so its login could not be removed\. fix or remove \S+ on that server, then deploy again: vibecarbon deploy <env>\s*$/,
     );
     expect(loginText(IP)).toBe('{"auths": {"ghcr.io": ');
   });
@@ -445,6 +594,9 @@ describe('where a compose pull token lives, in the words the resolver uses', () 
       lives: COMPOSE_KEPT_AS,
       readers: 'anyone with root on the server',
       puller: 'the server',
+      ghTokenLeft: expect.stringMatching(
+        /^that is likely the gh token .* had root on that server$/,
+      ),
     });
   });
 });

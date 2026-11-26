@@ -1,10 +1,11 @@
 /**
  * A compose or compose-ha deploy resolves the credential its servers pull a
- * private app image with once, before anything outside this machine changes:
+ * private app image with once, before any server is created or provisioned:
  * before the DNS warm-up, the pending-server repair and any Pulumi up
- * (orchestrator.js, after the image is resolved). A refusal there (a headless
- * run with no GHCR_PULL_TOKEN, a token with more than read:packages) stops the
- * deploy with nothing created or changed. Local and direct builds pull nothing
+ * (orchestrator.js, after the image is resolved). The resolve only reads
+ * (each recorded server's ghcr.io login, over ssh). A refusal there (a
+ * headless run with no GHCR_PULL_TOKEN, a token with more than read:packages)
+ * stops the deploy before any server is created or provisioned. Local and direct builds pull nothing
  * from ghcr: their plan still runs the ghcr-login step, with a null
  * credential, so a gh token an older vibecarbon left on the server goes.
  *
@@ -310,7 +311,7 @@ describe.each(['compose', 'compose-ha'] as const)('a %s push deploy', (tier) => 
     );
     const at = (e: string) => run.events.indexOf(e);
     expect(run.events.filter((e) => e === 'resolve')).toHaveLength(1);
-    // After the image it pulls is known, before anything outside changes.
+    // After the image it pulls is known, before any server is created or provisioned.
     expect(at('ciImageReady')).toBeLessThan(at('resolve'));
     for (const later of ['dnsWarmup', 'repairPendingServerState', PROVISION[tier]]) {
       expect(at(later), later).toBeGreaterThan(at('resolve'));
