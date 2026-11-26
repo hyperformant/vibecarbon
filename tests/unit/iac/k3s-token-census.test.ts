@@ -32,6 +32,9 @@ vi.mock('@pulumi/linode', async () =>
 vi.mock('@ediri/vultr', async () =>
   (await import('../../_shared/pulumi-recorder.js')).recorderModule('vultr', created),
 );
+vi.mock('@pulumiverse/scaleway', async () =>
+  (await import('../../_shared/pulumi-recorder.js')).recorderModule('scaleway', created),
+);
 
 // A region each k8s provider sells. A provider that gains the k8s tier needs a
 // row: the census fails until it has one.
@@ -40,6 +43,7 @@ const LOCATION: Record<string, string> = {
   digitalocean: 'nyc3',
   linode: 'us-east',
   vultr: 'ewr',
+  scaleway: 'fr-par-1',
 };
 
 const config = (location: string) => ({

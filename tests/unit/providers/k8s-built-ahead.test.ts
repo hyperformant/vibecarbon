@@ -51,13 +51,14 @@ describe('K8S_BUILT_AHEAD', () => {
     },
   );
 
-  it("k8sCensusProviders('boot') is the k8s sellers then scaleway; 'program' has no scaleway", () => {
-    // Scaleway's boot scripts have landed; its program, CSI and destroy code
-    // land after them, each adding its part.
+  it("k8sCensusProviders('boot') and ('program') are the k8s sellers then scaleway; 'csi' has no scaleway", () => {
+    // Scaleway's boot scripts and program have landed; its CSI and destroy
+    // code land after them, each adding its part.
     expect(sellers).toEqual(['hetzner', 'digitalocean', 'linode', 'vultr']);
     expect(ids('boot')).toEqual([...sellers, 'scaleway']);
-    expect(ids('program')).not.toContain('scaleway');
-    expect(ids('program')).toEqual(sellers);
+    expect(ids('program')).toEqual([...sellers, 'scaleway']);
+    expect(ids('csi')).not.toContain('scaleway');
+    expect(ids('csi')).toEqual(sellers);
   });
 
   it("k8sCensusProviders() and k8sCensusProviders('nope') throw", () => {

@@ -18,7 +18,7 @@ export type K8sPart = (typeof K8S_PARTS)[number];
 // Scaleway's k8s code lands part by part (Part C): its boot scripts first,
 // then its program, its CSI driver and its destroy code, each adding its part.
 export const K8S_BUILT_AHEAD: Readonly<Record<string, readonly K8sPart[]>> = {
-  scaleway: ['boot'],
+  scaleway: ['boot', 'program'],
 };
 
 type Entry = [string, (typeof PROVIDERS)[keyof typeof PROVIDERS]];

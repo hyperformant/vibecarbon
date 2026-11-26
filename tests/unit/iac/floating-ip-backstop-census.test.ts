@@ -24,18 +24,23 @@ import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { reservedIpLabel as vultrReservedIpLabel } from '../../../src/lib/providers/vultr.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
+import { scalewayPrivateIps } from '../../_shared/scaleway-private-ips.js';
 
 let counter = 0;
 const registered: { type: string; name: string; inputs: Record<string, unknown> }[] = [];
+/** A Scaleway server's IPAM addresses; scaleway-k8s.js refuses a master without one. */
+const privateIps = scalewayPrivateIps();
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs) {
       counter += 1;
       registered.push({ type: args.type, name: args.name, inputs: args.inputs });
       const ip = `203.0.113.${counter % 250}`;
+      const id = String(7_000_000 + counter);
       return {
-        id: String(7_000_000 + counter),
+        id,
         state: {
+          ...privateIps(args, id),
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
@@ -187,6 +192,7 @@ describe('floating and reserved IPs a program makes are found by their labels', 
       'compose scaleway:instance/ip:Ip',
       'k8s hcloud:index/floatingIp:FloatingIp',
       'k8s linode:index/reservedIp:ReservedIp',
+      'k8s scaleway:instance/ip:Ip',
       'k8s vultr:index/reservedIp:ReservedIp',
     ]);
   });

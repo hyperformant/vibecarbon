@@ -1,7 +1,9 @@
 /**
  * IPv4 and IPv6 address math: the operator access list's matching
- * (operator-ip.js) and the canonical network a Vultr firewall rule is
- * matched on (vultrRuleKey, providers/vultr.js).
+ * (operator-ip.js), the canonical network a Vultr firewall rule is matched on
+ * (vultrRuleKey, providers/vultr.js), and the Private Network address a
+ * Scaleway k8s program picks (iac/programs/scaleway-k8s.js). No imports, so
+ * a Pulumi program can use it without loading the provider registry.
  */
 
 /**
@@ -27,7 +29,7 @@ export function ipv4ToInt(ip) {
  * @param {string} ip
  * @returns {bigint | null}
  */
-export function ipv6ToBigInt(ip) {
+function ipv6ToBigInt(ip) {
   const halves = ip.split('::');
   if (halves.length > 2) return null;
   const head = halves[0] ? halves[0].split(':') : [];
@@ -96,4 +98,44 @@ export function canonicalCidr(cidr) {
   const mask = bits === 0 ? 0 : (-1 << (32 - bits)) >>> 0;
   const network = (n & mask) >>> 0;
   return `${[24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join('.')}/${bits}`;
+}
+
+/**
+ * Whether `cidr` contains `ip`. `version` is the address family (4 or 6) and
+ * is required: a CIDR of the other family contains nothing, and a call
+ * without it takes both as IPv6, so it is false for every IPv4 address.
+ * @param {string} cidr e.g. `10.130.5.0/24`
+ * @param {string} ip
+ * @param {4 | 6} version
+ * @returns {boolean}
+ */
+export function cidrContainsIp(cidr, ip, version) {
+  const slashIdx = cidr.indexOf('/');
+  if (slashIdx < 0) return false;
+  const base = cidr.slice(0, slashIdx);
+  const bits = Number(cidr.slice(slashIdx + 1));
+  if (!Number.isInteger(bits) || bits < 0) return false;
+
+  const cidrIsV6 = base.includes(':');
+  if (cidrIsV6 !== (version === 6)) return false;
+
+  if (version === 4) {
+    if (bits > 32) return false;
+    const baseNum = ipv4ToInt(base);
+    const ipNum = ipv4ToInt(ip);
+    if (baseNum === null || ipNum === null) return false;
+    if (bits === 0) return true;
+    if (bits === 32) return baseNum === ipNum;
+    const mask = (-1 << (32 - bits)) >>> 0;
+    return (baseNum & mask) === (ipNum & mask);
+  }
+
+  if (bits > 128) return false;
+  const baseNum = ipv6ToBigInt(base);
+  const ipNum = ipv6ToBigInt(ip);
+  if (baseNum === null || ipNum === null) return false;
+  if (bits === 0) return true;
+  if (bits === 128) return baseNum === ipNum;
+  const shift = BigInt(128 - bits);
+  return baseNum >> shift === ipNum >> shift;
 }

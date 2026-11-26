@@ -30,6 +30,7 @@ import { describe, expect, it } from 'vitest';
 import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
+import { scalewayPrivateIps } from '../../_shared/scaleway-private-ips.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const K3S_DIR = join(REPO_ROOT, 'carbon/cloud-init/k3s');
@@ -41,6 +42,8 @@ const K3S_SENTINEL = 'vc-sentinel-k3s-token-7a2c';
 let counter = 0;
 /** Every resource the current program run registered, with its inputs. */
 const registered: { type: string; name: string; inputs: Record<string, unknown> }[] = [];
+/** A Scaleway server's IPAM addresses; scaleway-k8s.js refuses a master without one. */
+const privateIps = scalewayPrivateIps();
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs) {
@@ -48,9 +51,11 @@ pulumi.runtime.setMocks(
       registered.push({ type: args.type, name: args.name, inputs: args.inputs });
       // Every address field any of the programs reads, on every resource.
       const ip = `203.0.113.${counter % 250}`;
+      const id = String(8_000_000 + counter);
       return {
-        id: String(8_000_000 + counter),
+        id,
         state: {
+          ...privateIps(args, id),
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
@@ -89,13 +94,18 @@ function sealed(value: unknown): boolean {
 
 /**
  * A server's user data as it boots with it, read through its secret wrapper:
- * `userData` (Hetzner, DigitalOcean) or Linode's base64
+ * `userData` (Hetzner, DigitalOcean), Scaleway's key-value `userData`, whose
+ * `cloud-init` key holds the boot script, or Linode's base64
  * `metadatas[].userData`, decoded. `sealed` is whether the program handed it
  * over as a secret. null for a resource that carries none.
  */
 function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: boolean } | null {
   const userData = unsealMockInput(inputs.userData);
   if (typeof userData === 'string') return { text: userData, sealed: sealed(inputs.userData) };
+  const cloudInit = unsealMockInput(
+    (userData as Record<string, unknown> | undefined)?.['cloud-init'],
+  );
+  if (typeof cloudInit === 'string') return { text: cloudInit, sealed: sealed(inputs.userData) };
   const metadatas = unsealMockInput<{ userData?: string }[] | undefined>(inputs.metadatas);
   const encoded = metadatas?.map((m) => m.userData).filter((u) => typeof u === 'string');
   if (!encoded?.length) return null;

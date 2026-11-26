@@ -137,9 +137,9 @@ export const EXPECTED: Record<
     // multi-credential seam — not via a second token static.
     tokenEnv: 'SCALEWAY_SECRET_KEY',
     cliTokenEnv: 'SCW_SECRET_KEY',
-    // Scaleway's CCM builds `scaleway://instance/<zone>/<uuid>` — two path
-    // segments between prefix and UUID, unlike hcloud://<id> (k8s-tier
-    // caveat recorded in the audit; inert while compose-only).
+    // No Scaleway CCM runs: k3s takes the provider id `scaleway://<server
+    // uuid>` from the boot script's --kubelet-arg, the prefix plus the
+    // server id, as the shared parsers read it.
     providerIdPrefix: 'scaleway://',
     // A ZONE (3-part), not a region — Scaleway's Instance API is
     // zone-scoped and ScalewayProvider.REGIONS is keyed on zones.
@@ -163,7 +163,8 @@ export const EXPECTED: Record<
       networkEnvVar: '',
     },
     k8sStorageClass: 'sbs-default',
-    k8sImage: '',
+    // The compose image (scaleway-k8s.js reads K8S_IMAGE).
+    k8sImage: 'ubuntu_resolute',
   },
   digitalocean: {
     name: 'DigitalOcean',

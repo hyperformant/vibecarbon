@@ -37,20 +37,25 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildProgramConfig } from '../../../src/lib/scale-plan.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
+import { scalewayPrivateIps } from '../../_shared/scaleway-private-ips.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { CODE, findCalls, functionRanges, lex, matchBracket } from '../helpers/js-call-scan.js';
 
 let counter = 0;
 const registered: { type: string; name: string; inputs: Record<string, unknown> }[] = [];
+/** A Scaleway server's IPAM addresses; scaleway-k8s.js refuses a master without one. */
+const privateIps = scalewayPrivateIps();
 pulumi.runtime.setMocks(
   {
     newResource(args: pulumi.runtime.MockResourceArgs) {
       counter += 1;
       registered.push({ type: args.type, name: args.name, inputs: args.inputs });
       const ip = `192.0.2.${counter % 250}`;
+      const id = String(8_000_000 + counter);
       return {
-        id: String(8_000_000 + counter),
+        id,
         state: {
+          ...privateIps(args, id),
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
@@ -169,6 +174,23 @@ const INLINE: Record<
       id: 1,
       rules: { inbound: rules, inbound_policy: 'DROP', outbound: [], outbound_policy: 'ACCEPT' },
     }),
+  },
+  // scaleway `inboundRules[]` (one port, one ipRange each) -> the Instance
+  // API's security-group rules, which carry their direction and a port range
+  // (`dest_port_from` to `dest_port_to`), around the augmented group
+  // ScalewayProvider.findFirewallByName returns (`zone` and `rules` added).
+  scaleway: {
+    type: 'scaleway:instance/securityGroup:SecurityGroup',
+    toWire: (inputs) =>
+      (inputs.inboundRules as Rule[]).map((r) => ({
+        action: r.action,
+        protocol: r.protocol,
+        direction: 'inbound',
+        ip_range: r.ipRange,
+        dest_port_from: r.port,
+        dest_port_to: r.port,
+      })),
+    wrap: (rules) => ({ id: 'sg', zone: 'fr-par-1', rules }),
   },
 };
 

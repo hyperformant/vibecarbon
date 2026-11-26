@@ -1031,10 +1031,17 @@ export class BaseProvider {
   /**
    * Look up a firewall by its exact name.
    * @param {string} name - Firewall name
-   * @returns {Promise<object|null>} The firewall, or null if not found
-   *   (also null on a non-2xx response — callers rely on this as a soft
-   *   "does this env's firewall exist yet?" check for a not-yet-deployed
-   *   environment, so it must swallow errors rather than throw).
+   * @returns {Promise<object|null>} The firewall, or null when no firewall
+   *   has the name: callers use that as the "does this env's firewall exist
+   *   yet?" check for a not-yet-deployed environment. A short listing must
+   *   never read as that, nor as the firewall's whole rule set, since
+   *   applyOperatorCidrs and the replication write PUT back a list built
+   *   from it. Scaleway, whose group and rules listings can stop early,
+   *   throws on either; Vultr marks a short rules listing
+   *   (`rulesComplete: false`) and its rule builders refuse it. Every
+   *   caller catches the throw (the autoscaler's _lookupFirewallId, both
+   *   replication openers, and deleteFirewallByName, which reports it as
+   *   its apiError) or passes it on (applyOperatorCidrs, to operator-ip.js).
    */
   async findFirewallByName(_name) {
     throw new Error('findFirewallByName() must be implemented by subclass');

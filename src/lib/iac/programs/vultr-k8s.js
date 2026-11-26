@@ -51,11 +51,13 @@ import {
 } from '../../providers/vultr.js';
 import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
-import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
+import {
+  requireK8sNodeNamesFit,
+  requireOperatorCidrs,
+  sshKeyIdOutput,
+  stackIdentity,
+} from '../program-inputs.js';
 import { vpcCidrForCluster } from '../vpc-cidr.js';
-
-/** Kubernetes node names are DNS labels here (the hostname): 63 at most. */
-const K8S_NODE_NAME_MAX = 63;
 
 const INSTANCE = 'vultr:index/instance:Instance';
 
@@ -116,17 +118,8 @@ export function buildVultrK8sProgram(config) {
   // deploy with no list would make a cluster no operator can reach: refused
   // here, before any server exists.
   requireOperatorCidrs(config, { k8sApi: true });
-  // Every node's hostname is its k8s node name (see the boot scripts), which
-  // Kubernetes caps at 63. The longest is an autoscaler worker:
-  // `<cluster>-ca-` plus 8 random characters.
-  const longestNodeName = `${clusterName}-ca-xxxxxxxx`;
-  if (longestNodeName.length > K8S_NODE_NAME_MAX) {
-    throw new Error(
-      `Kubernetes on Vultr cannot give this cluster's nodes a node name: the longest, ` +
-        `"${clusterName}-ca-<8 characters>", is ${longestNodeName.length} characters and ` +
-        `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
-    );
-  }
+  // Every node's hostname is its k8s node name (see the boot scripts).
+  requireK8sNodeNamesFit(clusterName, VultrProvider.NAME);
   // The reserved IP's one attribution, refused here, before any server
   // exists, for a name it cannot spell.
   const reservedIpLabelText = requireReservedIpLabel(labels);

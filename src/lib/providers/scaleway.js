@@ -74,6 +74,21 @@ import { decodeLabels, withAllTags } from './tag-labels.js';
 const SSH_PORT = 22;
 const K8S_API_PORT = 6443;
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+
+/**
+ * An inbound TCP rule on an operator-locked port: the rules
+ * applyOperatorCidrs rebuilds, and writes after every other.
+ * @param {{direction?: string, protocol?: string, dest_port_from?: number|string}} rule
+ * @returns {boolean}
+ */
+function isOperatorLockedRule(rule) {
+  return (
+    rule.direction === 'inbound' &&
+    rule.protocol === 'TCP' &&
+    OPERATOR_LOCKED_PORTS.has(Number(rule.dest_port_from))
+  );
+}
+
 // Inbound DB ports a retired external pooler once opened to the operator
 // CIDRs; applyOperatorCidrs deletes any such rule (the database has no
 // public port).
@@ -253,8 +268,9 @@ export class ScalewayProvider extends BaseProvider {
   // Compose tiers only (compose-ha added in the 2026-08 tier-parity wave 1 —
   // the HA surface here was contract-complete since expansion PR 3;
   // effects/compose-ha is provider-generic). 4-mode headroom
-  // (CCM/CSI/block-storage/DNS-flip) recorded in the audit; the k8s tiers
-  // are not yet built or declared.
+  // (CCM/CSI/block-storage/DNS-flip) recorded in the audit. The k8s tiers'
+  // code lands ahead of them, part by part (boot scripts, the program);
+  // they are not declared until all of it has.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
 
   static SERVER_RESOURCE_TYPE = 'scaleway:instance/server:Server';
@@ -450,8 +466,12 @@ export class ScalewayProvider extends BaseProvider {
   /** Compose-only: no k8s program exists to pin a VPC CIDR against. @type {string} */
   static DEFAULT_VPC_CIDR = '';
 
-  /** Compose-only: no k8s program/image literal to byte-match. @type {string} */
-  static K8S_IMAGE = '';
+  /**
+   * The k8s nodes' marketplace label: the compose image (COMPOSE_IMAGE says
+   * why a label, not a UUID). scaleway-k8s.js reads it.
+   * @type {string}
+   */
+  static K8S_IMAGE = 'ubuntu_resolute';
 
   // ── ARM guard ───────────────────────────────────────────────────────────
   // Scaleway sells real arm64 lines. The catalog names them with an 'A'
@@ -556,11 +576,17 @@ export class ScalewayProvider extends BaseProvider {
     return renderScript(loadCloudInit('scaleway-worker-init.sh', { role: 'db' }), vars);
   }
 
-  // ── k8s program: not built yet, refuses by name ─────────────────────────
+  // ── k8s program (iac/programs/scaleway-k8s.js) ─────────────────────────
 
-  /** @returns {Promise<never>} */
-  static async getK8sProgram() {
-    throw new Error("Scaleway's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Build the k8s Pulumi program, built ahead of the tier (SUPPORTED_TIERS
+   * turns it on).
+   * @param {object} config
+   * @returns {Promise<() => Promise<Record<string, unknown>>>}
+   */
+  static async getK8sProgram(config) {
+    const { buildScalewayK8sProgram } = await import('../iac/programs/scaleway-k8s.js');
+    return buildScalewayK8sProgram(config);
   }
 
   // ── Compose-tier replacement-server identity ────────────────────────────
@@ -1368,20 +1394,34 @@ export class ScalewayProvider extends BaseProvider {
    * filter + client-side exact match, per zone). The returned object is
    * AUGMENTED with `rules` (fetched here) and `zone` so the rule-rewrite
    * methods can operate on it — Scaleway keeps rules as a sub-resource.
+   *
+   * Null only when every zone's listing came back whole and none has the
+   * name. A walk that stopped early (an error page, or the page cap) throws
+   * instead, for the zone's groups and for the group's rules alike: read as
+   * whole, a short group listing told destroy a live group never existed,
+   * and a short rules listing had applyOperatorCidrs and the replication
+   * write PUT back a rule set missing whatever the listing dropped, 80 and
+   * 443 among them. Every caller catches the throw or passes it on.
    * @param {string} name
    * @returns {Promise<object|null>}
    */
   async findFirewallByName(name) {
+    const partial = (what, walk) =>
+      new Error(
+        `Scaleway listed only part of ${what}` +
+          `${walk.status === undefined ? '' : ` (HTTP ${walk.status})`}, so nothing was changed`,
+      );
     for (const zone of ScalewayProvider._zones()) {
       const walk = await this._walkZone(
         `/security_groups?name=${encodeURIComponent(name)}`,
         'security_groups',
         zone,
       );
-      if (!walk.complete) return null;
+      if (!walk.complete) throw partial(`zone ${zone}'s security groups`, walk);
       const group = walk.items.find((g) => g.name === name);
       if (!group) continue;
       const rulesWalk = await this._walkZone(`/security_groups/${group.id}/rules`, 'rules', zone);
+      if (!rulesWalk.complete) throw partial(`${name}'s rules`, rulesWalk);
       this._sgZoneCache ??= new Map();
       this._sgZoneCache.set(group.id, zone);
       // Strip the zone stamp _walkZone put on each rule — rules are pure
@@ -1426,14 +1466,17 @@ export class ScalewayProvider extends BaseProvider {
     if (!zone) {
       throw new Error(`Scaleway security group ${firewallId} not found in any zone`);
     }
-    // Normalize: fresh rules carry no id (null ⇒ create), positions are
-    // sequential, editable defaults true (non-editable rules are ignored
-    // by the API — pinning it avoids a silently-dropped rule).
+    // Normalize: fresh rules carry no id (null ⇒ create), editable defaults
+    // true (the API ignores a non-editable rule, so pinning it avoids a
+    // silently-dropped rule), and each rule's position is its place in the
+    // list. Set last: a kept rule still carries the position it was read
+    // with, and two rules on one position leave their order to the API, so
+    // the order the caller built would not be the order on the group.
     const wireRules = rules.map((rule, i) => ({
       id: null,
-      position: i + 1,
       editable: true,
       ...rule,
+      position: i + 1,
     }));
     const response = await this.apiRequest(
       `/instance/v1/zones/${zone}/security_groups/${firewallId}/rules`,
@@ -1453,6 +1496,14 @@ export class ScalewayProvider extends BaseProvider {
    * (rules attached). The reconcile is the shared replaceWireguardPeerRules:
    * the UDP/51821 rule follows the current peer (an old peer's rule is
    * dropped), null when already correct.
+   *
+   * The shared reconcile appends the peer's rule; this then moves the
+   * operator-locked rules after every other, each group in its order, so the
+   * list lands in the order applyOperatorCidrs writes (the rest as read,
+   * then 22, then 6443) and a k8s program declares
+   * (iac/programs/scaleway-k8s.js). Left at the end, the peer's rule would
+   * follow 6443 after a first deploy, and the next up would reorder the
+   * group.
    * @param {object} firewall - augmented group ({...group, zone, rules})
    * @param {string} peerIp
    * @returns {object[]|null}
@@ -1472,7 +1523,11 @@ export class ScalewayProvider extends BaseProvider {
         dest_port_to: WG_PORT,
       }),
     });
-    return rules === null ? null : rules.map(({ id: _id, ...rest }) => rest);
+    if (rules === null) return null;
+    return [
+      ...rules.filter((r) => !isOperatorLockedRule(r)),
+      ...rules.filter(isOperatorLockedRule),
+    ].map(({ id: _id, ...rest }) => rest);
   }
 
   /**
@@ -1483,7 +1538,9 @@ export class ScalewayProvider extends BaseProvider {
    * expansion the compose program applies at create time); the whole set
    * lands in one atomic PUT (closest in shape to Hetzner's
    * read-filter-rebuild — audit's firewall verdict). CIDR-count ceiling to
-   * respect: 500 Security Rules per Organization.
+   * respect: 500 Security Rules per Organization. The kept rules go first,
+   * as read, then the rebuilt ones, 22 before 6443: the one order every k8s
+   * writer keeps (buildReplicationFirewallRules, iac/programs/scaleway-k8s.js).
    * @param {{firewallName: string, cidrs: string[]}} args
    * @returns {Promise<boolean>} true if found and updated
    */
@@ -1491,19 +1548,17 @@ export class ScalewayProvider extends BaseProvider {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
 
-    const isLocked = (r) =>
-      r.direction === 'inbound' &&
-      r.protocol === 'TCP' &&
-      OPERATOR_LOCKED_PORTS.has(Number(r.dest_port_from));
     const isRetiredDbPort = (r) =>
       r.direction === 'inbound' &&
       r.protocol === 'TCP' &&
       RETIRED_DB_PORTS.has(Number(r.dest_port_from));
     const kept = (fw.rules || [])
-      .filter((r) => !isLocked(r) && !isRetiredDbPort(r))
+      .filter((r) => !isOperatorLockedRule(r) && !isRetiredDbPort(r))
       .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
-      ...new Set((fw.rules || []).filter(isLocked).map((r) => Number(r.dest_port_from))),
+      ...new Set(
+        (fw.rules || []).filter(isOperatorLockedRule).map((r) => Number(r.dest_port_from)),
+      ),
     ];
     const rebuilt = lockedPorts.flatMap((port) =>
       cidrs.map((cidr) => ({

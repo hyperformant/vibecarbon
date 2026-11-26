@@ -32,7 +32,7 @@
  *     stderr, warn-and-continue form (`shell`, `diagnose`, `status`)
  */
 
-import { ipv4ToInt, ipv6ToBigInt } from './cidr.js';
+import { cidrContainsIp } from './cidr.js';
 import { readProjectConfigFile, updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
@@ -93,6 +93,10 @@ export function cidrFromIp(ip, version) {
 // CIDR MATCHING
 // ============================================================================
 
+// The containment math lives in cidr.js, which imports nothing, so a Pulumi
+// program can use it (this module pulls in the provider registry).
+export { cidrContainsIp };
+
 /**
  * Find the first persisted CIDR entry that contains the given IP, or null.
  */
@@ -101,37 +105,6 @@ export function findMatchingCidr(list, ip, version) {
     if (cidrContainsIp(entry.cidr, ip, version)) return entry;
   }
   return null;
-}
-
-export function cidrContainsIp(cidr, ip, version) {
-  const slashIdx = cidr.indexOf('/');
-  if (slashIdx < 0) return false;
-  const base = cidr.slice(0, slashIdx);
-  const bits = Number(cidr.slice(slashIdx + 1));
-  if (!Number.isInteger(bits) || bits < 0) return false;
-
-  const cidrIsV6 = base.includes(':');
-  if (cidrIsV6 !== (version === 6)) return false;
-
-  if (version === 4) {
-    if (bits > 32) return false;
-    const baseNum = ipv4ToInt(base);
-    const ipNum = ipv4ToInt(ip);
-    if (baseNum === null || ipNum === null) return false;
-    if (bits === 0) return true;
-    if (bits === 32) return baseNum === ipNum;
-    const mask = (-1 << (32 - bits)) >>> 0;
-    return (baseNum & mask) === (ipNum & mask);
-  }
-
-  if (bits > 128) return false;
-  const baseNum = ipv6ToBigInt(base);
-  const ipNum = ipv6ToBigInt(ip);
-  if (baseNum === null || ipNum === null) return false;
-  if (bits === 0) return true;
-  if (bits === 128) return baseNum === ipNum;
-  const shift = BigInt(128 - bits);
-  return baseNum >> shift === ipNum >> shift;
 }
 
 // ============================================================================

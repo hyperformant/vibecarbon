@@ -110,6 +110,10 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
     builder: 'buildScalewayComposeProgram',
     config: { ...base, location: 'fr-par-1' },
   },
+  'scaleway-k8s.js': {
+    builder: 'buildScalewayK8sProgram',
+    config: { ...k8s, location: 'fr-par-1' },
+  },
 };
 
 async function runProgram(file: string) {
