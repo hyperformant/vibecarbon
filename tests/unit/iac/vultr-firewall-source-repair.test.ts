@@ -124,6 +124,83 @@ describe('repairVultrFirewallRuleInputs', () => {
     expect(rule.inputs.source).toBe('');
   });
 
+  it("a k8s stack's FirewallRule resources are repaired like compose's", async () => {
+    // A refreshed k8s stack (vultr-k8s.js): the group, its rules and a node.
+    // The VPC accept rules (TCP and UDP 1:65535, ICMP) are rules like any
+    // other, so the refresh poisons them the same way.
+    const vpc = { subnet: '10.180.176.0', subnetSize: 24 };
+    const rule = (name: string, fields: Record<string, unknown>, source: string) => ({
+      type: RULE,
+      urn: `urn:pulumi:prod::p::${RULE}::${name}`,
+      inputs: { firewallGroupId: 'fwg', ipType: 'v4', ...fields, source },
+      outputs: { firewallGroupId: 'fwg', ipType: 'v4', ...fields, source },
+    });
+    const group = {
+      type: 'vultr:index/firewallGroup:FirewallGroup',
+      urn: 'urn:pulumi:prod::p::vultr:index/firewallGroup:FirewallGroup::firewall',
+      inputs: { description: 'acme-prod-firewall' },
+      outputs: { id: 'fwg', description: 'acme-prod-firewall' },
+    };
+    const master = {
+      type: 'vultr:index/instance:Instance',
+      urn: 'urn:pulumi:prod::p::vultr:index/instance:Instance::master',
+      inputs: { label: 'acme-prod-master', firewallGroupId: 'fwg' },
+      outputs: { label: 'acme-prod-master', firewallGroupId: 'fwg', internalIp: '10.180.176.3' },
+    };
+    const state = {
+      deployment: {
+        resources: [
+          { type: 'pulumi:pulumi:Stack', inputs: {} },
+          group,
+          rule(
+            'rule-0',
+            { protocol: 'tcp', port: '22', subnet: '203.0.113.5', subnetSize: 32 },
+            '203.0.113.5/32',
+          ),
+          rule(
+            'rule-1',
+            { protocol: 'tcp', port: '6443', subnet: '203.0.113.6', subnetSize: 32 },
+            '203.0.113.6/32',
+          ),
+          rule(
+            'rule-2',
+            { protocol: 'tcp', port: '443', subnet: '0.0.0.0', subnetSize: 0 },
+            '0.0.0.0/0',
+          ),
+          rule('rule-3', { protocol: 'tcp', port: '1:65535', ...vpc }, '10.180.176.0/24'),
+          rule('rule-4', { protocol: 'udp', port: '1:65535', ...vpc }, '10.180.176.0/24'),
+          rule('rule-5', { protocol: 'icmp', ...vpc }, '10.180.176.0/24'),
+          master,
+        ],
+      },
+    };
+    const before = structuredClone(state);
+    const { stack, importDeployment, imported } = fakeStack(state);
+
+    expect(await repairVultrFirewallRuleInputs(stack as never)).toBe(6);
+    expect(importDeployment).toHaveBeenCalledTimes(1);
+    const after = (imported[0] as typeof state).deployment.resources;
+    const rules = after.filter((r) => r.type === RULE);
+    expect(rules).toHaveLength(6);
+    for (const r of rules as ReturnType<typeof rule>[]) {
+      expect(r.inputs.source, r.urn).toBe('');
+      expect(r.outputs.source, r.urn).toBe('');
+    }
+    // The rest of each rule, the group and the node are left as they were.
+    for (const [i, r] of after.entries()) {
+      const was = before.deployment.resources[i] as typeof r;
+      if (r.type !== RULE) {
+        expect(r).toEqual(was);
+        continue;
+      }
+      const strip = (x: Record<string, unknown>) => ({ ...x, source: '' });
+      const rr = r as ReturnType<typeof rule>;
+      const ww = was as ReturnType<typeof rule>;
+      expect(rr.inputs).toEqual(strip(ww.inputs));
+      expect(rr.outputs).toEqual(strip(ww.outputs));
+    }
+  });
+
   it('leaves inputs that never had a source alone', async () => {
     const { stack, importDeployment } = fakeStack(stateWith([{}, {}]));
 

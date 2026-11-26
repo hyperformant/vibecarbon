@@ -5,8 +5,8 @@
  * check and the post-select re-check in gatherDeploymentConfig — see its
  * "Resolved once per flow" comment). Also pins the gate interaction with
  * resolveDeployMode (A2's SUPPORTED_TIERS mode filter), which must use the
- * POST-SELECT provider so selecting a compose-only provider (Vultr) hides
- * the k8s modes while Hetzner, DigitalOcean and Linode keep all four.
+ * POST-SELECT provider so selecting a compose-only provider (Scaleway) hides
+ * the k8s modes while Hetzner, DigitalOcean, Linode and Vultr keep them.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -263,8 +263,24 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     ]);
   });
 
-  it('deploys compose on vultr without a mode select, since it is the one mode offered', async () => {
+  it('offers every recommended deploy mode for vultr (k8s lift)', async () => {
     clackMock.select.mockResolvedValueOnce('vultr'); // provider select
+    const { envConfig } = await resolveProvider(noFlags, {});
+    expect(envConfig.provider).toBe('vultr');
+
+    clackMock.select.mockResolvedValueOnce('compose'); // deploy-mode select
+    await resolveDeployMode(noFlags, envConfig);
+
+    const modeCall = clackMock.select.mock.calls[1][0];
+    expect(modeCall.options.map((o: { value: string }) => o.value)).toEqual([
+      'compose',
+      'kubernetes',
+      'kubernetes-ha',
+    ]);
+  });
+
+  it('deploys compose on scaleway without a mode select, since it is the one mode offered', async () => {
+    clackMock.select.mockResolvedValueOnce('scaleway'); // provider select
     const { envConfig } = await resolveProvider(noFlags, {});
 
     const result = await resolveDeployMode(noFlags, envConfig);

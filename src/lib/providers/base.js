@@ -39,6 +39,44 @@ export function deleteFailure(providerName, status) {
 }
 
 /**
+ * The body of `deleteNetworkByName` on a provider whose VPCs each have a
+ * `name` (listNetworksDetailed) and that deletes one at `DELETE /vpcs/{id}`
+ * (DigitalOcean, Linode, Vultr). The VPC is the one whose name is exactly
+ * `name`. A 2xx or 404 is deleted. Any other answer is the provider refusing,
+ * most often because a server is still in the VPC: an ordering bug in the
+ * caller, never a not-found, so it comes back as `apiError` for the caller
+ * to report. A listing that cannot be read whole throws instead: a VPC
+ * missing from part of the list is not proven gone, and the caller reports
+ * that it could not confirm it (deleteBackstopNetwork).
+ * @param {{listNetworksDetailed: () => Promise<{items: Array<{id: string|number, name: string}>, complete: boolean, status?: number}>, bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
+ * @param {string} name
+ * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+ * @throws when the VPC listing cannot be read whole
+ */
+export async function deleteVpcByName(provider, name) {
+  const { items: vpcs, complete, status } = await provider.listNetworksDetailed();
+  if (!complete) {
+    throw new Error(
+      `the VPC listing could not be read whole (${status ? `HTTP ${status}` : 'it stopped early'})`,
+    );
+  }
+  const vpc = vpcs.find((v) => v.name === name);
+  if (!vpc) return { deleted: false, everExisted: false, apiError: null };
+  try {
+    const res = await provider.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
+    if (res.ok || res.status === 404) return { deleted: true, everExisted: true, apiError: null };
+    const body = await res.text().catch(() => '');
+    return {
+      deleted: false,
+      everExisted: true,
+      apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
+    };
+  } catch (err) {
+    return { deleted: false, everExisted: true, apiError: err };
+  }
+}
+
+/**
  * What a provider's `deleteReservedIpByAddress` says about the address.
  * `released`: it is off the account. Otherwise `held` is true when it is
  * still on the account (still listed, or the delete refused) and null when
@@ -426,9 +464,35 @@ export class BaseProvider {
   static K8S_STORAGE_CLASS = '';
 
   /**
+   * The smallest volume, in GiB, this provider's CSI driver can create. Every
+   * render that resolves `{{K8S_STORAGE_CLASS}}` raises a `storage: <n>Gi`
+   * request below it in the same file to it (renderK8sStorageClassPlaceholder
+   * and renderK8sBase, deploy/k8s/k3s.js), because a claim the provider's API
+   * refuses stays Pending for good. 0: the driver takes any size, rounding a
+   * small request up itself, as Hetzner's and Linode's do.
+   * @type {number}
+   */
+  static K8S_MIN_VOLUME_GI = 0;
+
+  /**
+   * Whether a k8s destroy may delete a detached `pvc-*` CSI volume in one of
+   * the cluster's regions when nothing proves whose it is: the identity
+   * capture of the cluster's PersistentVolumes failed, and no server of
+   * another owner runs in that region (the `pvc-in-cluster-region` match in
+   * cleanupOrphanedVolumes, destroy.js). True keeps that backstop, which is
+   * how a volume detached before a failed capture is still collected on
+   * Hetzner, DigitalOcean and Linode. False makes such a match a reported
+   * deferral (`no-owner-signal`) that fails the destroy: Vultr's volumes
+   * carry no tags, so only a captured id proves one is this environment's,
+   * and a region-wide guess there could delete another cluster's disk.
+   * @type {boolean}
+   */
+  static ORPHAN_VOLUME_REGION_GUESS = true;
+
+  /**
    * Whether this provider's k8s program gives each cluster a floating (or
    * reserved) IP for its ingress, exported as the `floatingIp` output, which
-   * deployK3s then requires. Hetzner and Linode do. DigitalOcean does not:
+   * deployK3s then requires. Hetzner, Linode and Vultr do. DigitalOcean does not:
    * its clusters' domains point at the master's own address
    * (clusterIngressIp, lib/deploy/k8s/ingress-ip.js), and a deploy releases
    * the reserved IP a cluster made before that still has on record
@@ -438,6 +502,22 @@ export class BaseProvider {
    * @type {boolean}
    */
   static K8S_FLOATING_IP = true;
+
+  /**
+   * Whether this provider's k8s program leaves the operator rules (SSH on
+   * 22, the Kubernetes API on 6443, from the operator CIDRs) to REST, so
+   * that each firewall rule has one writer. Then a fresh cluster's firewall
+   * has neither after the infra up, and deployK3s writes them right after
+   * it, before its first ssh (writeOperatorRulesAfterUp, lib/operator-ip.js),
+   * through applyOperatorCidrs with their `ports`. Vultr opts in: its rules
+   * are separate resources with their own ids, `vibecarbon access` rewrites
+   * the operator ones, and a rule both the program and REST wrote was
+   * created again by the next up, which Vultr refuses. Every other
+   * provider's program writes them itself and keeps this false
+   * (tests/unit/deploy/k8s-operator-rules-after-up.test.ts).
+   * @type {boolean}
+   */
+  static K8S_OPERATOR_RULES_AFTER_UP = false;
 
   /**
    * Whether this provider's compose program gives the server a floating (or
@@ -961,12 +1041,19 @@ export class BaseProvider {
   }
 
   /**
-   * Replace a firewall's rule set wholesale.
+   * Make a firewall's rule set the given one. Atomic where the provider has
+   * a set-style write; Vultr, which has none, applies it as a create-first
+   * minimal diff that keeps the rules it keeps, and deletes only rules
+   * `basis` held, so a rule another writer made since the read stays.
    * @param {string|number} firewallId - Firewall ID
    * @param {object[]} rules - Full replacement rule list
+   * @param {object} [basis] - the firewall as this provider's
+   *   findFirewallByName read it, which `rules` was built from. Callers pass
+   *   the object, never its rules, as for buildReplicationFirewallRules. Only
+   *   Vultr reads it; the set-style writes replace the whole list.
    * @returns {Promise<void>}
    */
-  async setFirewallRules(_firewallId, _rules) {
+  async setFirewallRules(_firewallId, _rules, _basis) {
     throw new Error('setFirewallRules() must be implemented by subclass');
   }
 
@@ -976,9 +1063,12 @@ export class BaseProvider {
    * untouched. Composes findFirewallByName + the provider's own
    * `{direction, port, source_ips}` rule-JSON rewrite + setFirewallRules —
    * that rule-JSON schema is provider wire knowledge and must never leave
-   * the class. No `ports` option: the SSH/Kubernetes-API ports are the
-   * provider's own constants (single consumer today).
-   * @param {{firewallName: string, cidrs: string[]}} args
+   * the class. The SSH/Kubernetes-API ports are the provider's own
+   * constants; `ports` names those a firewall must carry even with no rule
+   * on them yet, which only a provider with K8S_OPERATOR_RULES_AFTER_UP
+   * reads (its k8s program writes neither). Every other provider's program
+   * writes its operator rules, and it ignores `ports`.
+   * @param {{firewallName: string, cidrs: string[], ports?: string[]}} args
    * @returns {Promise<boolean>} true if a firewall by that name was found
    *   and updated; false if it doesn't exist yet — skipped silently, since
    *   that just means the environment hasn't been deployed.

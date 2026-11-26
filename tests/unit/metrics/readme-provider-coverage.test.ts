@@ -149,47 +149,43 @@ describe('marketing component data (carbon vendor-matrix)', () => {
     }
   });
 
-  it("the component's tier claims match each provider's CLI SUPPORTED_TIERS", () => {
-    // The component mirrors src/lib/providers/*.js SUPPORTED_TIERS by hand;
-    // this walk is what turns that comment-enforced sync into a test. A
-    // tier the CLI supports must claim availability ('yes'/'beta'), and a
-    // tier the CLI does not support must not ('no'/'soon' — 'soon' is the
-    // honest roadmap chip, not a support claim).
+  // The component mirrors src/lib/providers/*.js SUPPORTED_TIERS by hand;
+  // this walk is what turns that comment-enforced sync into a test, one case
+  // per registered provider. A tier the CLI supports must claim availability
+  // ('yes'/'beta'), and a tier the CLI does not support must not ('no'/'soon'
+  // — 'soon' is the honest roadmap chip, not a support claim).
+  it.each(PROVIDER_IDS)("%s: the component's tier claims match the CLI's SUPPORTED_TIERS", (id) => {
     const component = readFileSync(COMPONENT_PATH, 'utf8');
     const ALL_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
-    for (const id of PROVIDER_IDS) {
-      const providerJs = readRepoFile('src', 'lib', 'providers', `${id}.js`);
-      const tiersMatch = /static SUPPORTED_TIERS = \[([^\]]*)\]/.exec(providerJs);
-      expect(tiersMatch, `${id}.js: no SUPPORTED_TIERS literal`).not.toBeNull();
-      const supported = (tiersMatch as RegExpExecArray)[1]
-        .split(',')
-        .map((t) => t.trim().replace(/['"]/g, ''))
-        .filter(Boolean);
+    const providerJs = readRepoFile('src', 'lib', 'providers', `${id}.js`);
+    const tiersMatch = /static SUPPORTED_TIERS = \[([^\]]*)\]/.exec(providerJs);
+    expect(tiersMatch, `${id}.js: no SUPPORTED_TIERS literal`).not.toBeNull();
+    const supported = (tiersMatch as RegExpExecArray)[1]
+      .split(',')
+      .map((t) => t.trim().replace(/['"]/g, ''))
+      .filter(Boolean);
 
-      const entryMatch = new RegExp(`id: '${id}'[\\s\\S]*?tiers: \\{([^}]*)\\}`, 'm').exec(
-        component,
+    const entryMatch = new RegExp(`id: '${id}'[\\s\\S]*?tiers: \\{([^}]*)\\}`, 'm').exec(component);
+    expect(entryMatch, `vendor-matrix.tsx: no tiers literal for "${id}"`).not.toBeNull();
+    const tiersLiteral = (entryMatch as RegExpExecArray)[1];
+
+    for (const tier of ALL_TIERS) {
+      const cellMatch = new RegExp(`'?${tier}'?:\\s*'([a-z]+)'`).exec(
+        tiersLiteral.replace(/"/g, "'"),
       );
-      expect(entryMatch, `vendor-matrix.tsx: no tiers literal for "${id}"`).not.toBeNull();
-      const tiersLiteral = (entryMatch as RegExpExecArray)[1];
-
-      for (const tier of ALL_TIERS) {
-        const cellMatch = new RegExp(`'?${tier}'?:\\s*'([a-z]+)'`).exec(
-          tiersLiteral.replace(/"/g, "'"),
-        );
-        expect(cellMatch, `vendor-matrix.tsx ${id}: no cell for tier "${tier}"`).not.toBeNull();
-        const support = (cellMatch as RegExpExecArray)[1];
-        if (supported.includes(tier)) {
-          expect(
-            ['yes', 'beta'],
-            `vendor-matrix.tsx ${id}/${tier}: CLI supports this tier but the component renders '${support}'`,
-          ).toContain(support);
-        } else {
-          expect(
-            ['no', 'soon'],
-            `vendor-matrix.tsx ${id}/${tier}: component claims support the CLI does not declare`,
-          ).toContain(support);
-        }
+      expect(cellMatch, `vendor-matrix.tsx ${id}: no cell for tier "${tier}"`).not.toBeNull();
+      const support = (cellMatch as RegExpExecArray)[1];
+      if (supported.includes(tier)) {
+        expect(
+          ['yes', 'beta'],
+          `vendor-matrix.tsx ${id}/${tier}: CLI supports this tier but the component renders '${support}'`,
+        ).toContain(support);
+      } else {
+        expect(
+          ['no', 'soon'],
+          `vendor-matrix.tsx ${id}/${tier}: component claims support the CLI does not declare`,
+        ).toContain(support);
       }
     }
   });

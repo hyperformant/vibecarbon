@@ -497,7 +497,7 @@ call  deleteFirewallByName("testapp-tr-fw")
 warn  [t] [sweep] firewall list enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] Firewall cleanup failed: connect ETIMEDOUT
 fetch GET /v2/reserved-ips?per_page=100
-log   [t] [sweep] Deleting orphaned reserved IP testapp-tr-ingress (r-1)
+log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:e1 (r-1)
 fetch DELETE /v2/reserved-ips/r-1
 warn  [t] [sweep] reserved-ip list enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] Reserved IP cleanup failed: connect ETIMEDOUT
@@ -562,13 +562,13 @@ log   [t] [sweep] Deleting orphaned firewall group testapp-tr-fw-refused
 call  deleteFirewallByName("testapp-tr-fw-refused")
 warn  [t] [sweep] Firewall group testapp-tr-fw-refused delete failed
 fetch GET /v2/reserved-ips?per_page=100
-log   [t] [sweep] Deleting orphaned reserved IP testapp-tr-ingress (203.0.113.7)
+log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:e1 (203.0.113.7)
 fetch DELETE /v2/reserved-ips/r-1
-log   [t] [sweep] Deleting orphaned reserved IP testapp-tr-ingress-gone (r-2)
+log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:gone (r-2)
 fetch DELETE /v2/reserved-ips/r-2
-log   [t] [sweep] Deleting orphaned reserved IP testapp-tr-ingress-refused (r-3)
+log   [t] [sweep] Deleting orphaned reserved IP project:testapp-tr:environment:refused (r-3)
 fetch DELETE /v2/reserved-ips/r-3
-warn  [t] [sweep] Reserved IP testapp-tr-ingress-refused delete failed (500)
+warn  [t] [sweep] Reserved IP project:testapp-tr:environment:refused delete failed (500)
 fetch GET /v2/ssh-keys?per_page=100
 log   [t] [sweep] Deleting orphaned ssh key testapp-tr-key
 call  deleteSSHKeyByName("testapp-tr-key")

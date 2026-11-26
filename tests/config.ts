@@ -192,10 +192,9 @@ export const testConfig = {
         regions: ['us-iad', 'us-ord', 'fr-par', 'us-sea'] as const,
         scaleTo: { 'g6-standard-1': 'g6-standard-2', 'g6-standard-2': 'g6-standard-4' },
       },
-      // Vultr runs compose + compose-ha (2026-08 expansion phase 1, PR 2 +
-      // tier-parity wave 1 — see VultrProvider.SUPPORTED_TIERS). Regions are
+      // Vultr runs all four modes (VultrProvider.SUPPORTED_TIERS). Regions are
       // compute region ids (IATA-style) that (a) actually carry the vc2
-      // pair and (b) have a co-located Object Storage cluster (`ewr`→ewr1,
+      // plans and (b) have a co-located Object Storage cluster (`ewr`→ewr1,
       // `ord`→chi3, `sjc`→sjc1, `lax`→lax1, `ams`→ams1 — see
       // VultrObjectStorageProvider.COMPUTE_TO_S3; cluster slugs are NOT
       // region ids).
@@ -217,9 +216,19 @@ export const testConfig = {
       // live catalog). The resolver's live plan-locations check is the flux
       // guard: a region that loses vc2 is skipped as a primary, and a
       // default standby that cannot sell the scale target fails preflight.
+      // sjc stays for compose. Vultr runs no Kubernetes there (no NVMe block
+      // storage, VultrProvider.K8S_UNSUPPORTED_REGIONS), so the resolver
+      // skips it for v3 and v4. The ladder covers every default the picker
+      // chooses on the fixtures (default-sizes-unpinned-census: the 4 GB vc2
+      // and the db's 2 GB vc2), and the 4 GB vhf it falls to where vc2 is out
+      // of stock, so a live stock-out still has a scale target.
       vultr: {
         regions: ['ewr', 'ord', 'sjc', 'lax', 'ams'] as const,
-        scaleTo: { 'vc2-2c-4gb': 'vc2-4c-8gb' },
+        scaleTo: {
+          'vc2-1c-2gb': 'vc2-2c-4gb',
+          'vc2-2c-4gb': 'vc2-4c-8gb',
+          'vhf-2c-4gb': 'vhf-3c-8gb',
+        },
       },
       // Scaleway runs compose + compose-ha (2026-08 expansion PR 3 +
       // tier-parity wave 1 — see ScalewayProvider.SUPPORTED_TIERS). "Regions"
@@ -328,10 +337,9 @@ export const testConfig = {
         ],
         defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
-      // Compose + compose-ha (2026-08 expansion PR 2 + tier-parity wave 1 —
-      // VultrProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode headroom
-      // recorded in
-      // the vultr-provider-step0-audit plan).
+      // All four modes (VultrProvider.SUPPORTED_TIERS; 4-mode headroom
+      // recorded in the vultr-provider-step0-audit plan). The k8s scenarios
+      // run in regions with NVMe block storage: sjc has none.
       // VULTR_STORAGE_REGION is required alongside the key pair, not
       // optional like the other providers' region overrides: Vultr mints
       // object-storage keys PER SUBSCRIPTION and one subscription is one
@@ -361,8 +369,13 @@ export const testConfig = {
           // SAME provider that owns the compute — the self-contained default,
           // same reasoning as Hetzner's e2.
           { mode: 'compose-ha' as const, dnsProvider: 'vultr' as const, envPrefix: 'v2' },
+          { mode: 'k8s' as const, dnsProvider: 'vultr' as const, envPrefix: 'v3' },
+          // v4: the k8s-ha reference scenario. Its standby goes where a
+          // customer's deploy puts it (getDefaultStandbyRegion); the flip
+          // exercises the SAME provider that owns the compute, like l4.
+          { mode: 'k8s-ha' as const, dnsProvider: 'vultr' as const, envPrefix: 'v4' },
         ],
-        defaultSelection: ['compose'],
+        defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
       // Compose + compose-ha (2026-08 expansion PR 3 + tier-parity wave 1 —
       // ScalewayProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode

@@ -112,18 +112,18 @@ export const EXPECTED: Record<
     s3RegionEnv: 'VULTR_STORAGE_REGION',
     defaultComposeType: 'vc2-2c-4gb',
     defaultK8sNodeType: 'vc2-2c-4gb',
-    // Compose-only (2026-08 expansion PR 2): empty asset identity except
-    // the storage-class literal (vultr-csi's real default class), which the
-    // literal-guard census requires distinct + resident in vultr.js.
+    // vultr-csi v0.19.1's workloads; no CCM (k3s's embedded cloud
+    // controller). The Delete-reclaim class the master's boot script makes.
     k8sAssets: {
-      csiNodeDaemonSet: '',
-      csiControllerSelector: '',
+      csiNodeDaemonSet: 'daemonset/csi-vultr-node',
+      csiControllerSelector: 'app=csi-vultr-controller',
       ccmDeployment: '',
       ccmSelector: '',
       networkEnvVar: '',
     },
-    k8sStorageClass: 'vultr-block-storage',
-    k8sImage: '',
+    k8sStorageClass: 'vultr-block-storage-vibecarbon',
+    // Ubuntu 26.04 LTS x64, the compose image (vultr-k8s.js osId).
+    k8sImage: '2760',
   },
   scaleway: {
     name: 'Scaleway',

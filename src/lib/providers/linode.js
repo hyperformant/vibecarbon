@@ -19,6 +19,7 @@ import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  deleteVpcByName,
   normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
@@ -1365,10 +1366,19 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const { items: vpcs } = await this._walkPages('/vpcs');
+    return (await this.listNetworksDetailed()).items;
+  }
+
+  /**
+   * listNetworks with the walk's completeness signal, for a caller that must
+   * not read part of the list as the whole (deleteVpcByName).
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async listNetworksDetailed() {
+    const { items: vpcs, complete, status } = await this._walkPages('/vpcs');
     // `name` is the provider-neutral identity callers match on
     // (autoscaler groups.js, destroy.js); Linode calls it `label`.
-    return vpcs.map((v) => ({ ...v, name: v.label }));
+    return { items: vpcs.map((v) => ({ ...v, name: v.label })), complete, status };
   }
 
   /**
@@ -1377,25 +1387,10 @@ export class LinodeProvider extends BaseProvider {
    * the caller), never as a not-found.
    * @param {string} name
    * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   * @throws when the VPC listing cannot be read whole (deleteVpcByName)
    */
   async deleteNetworkByName(name) {
-    let everExisted = false;
-    try {
-      const vpcs = await this.listNetworks();
-      const vpc = vpcs.find((v) => v.name === name);
-      if (!vpc) return { deleted: false, everExisted: false, apiError: null };
-      everExisted = true;
-      const res = await this.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
-      if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
-      const body = await res.text().catch(() => '');
-      return {
-        deleted: false,
-        everExisted,
-        apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
-      };
-    } catch (err) {
-      return { deleted: false, everExisted, apiError: err };
-    }
+    return deleteVpcByName(this, name);
   }
 
   /**

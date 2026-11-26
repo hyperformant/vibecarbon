@@ -178,7 +178,7 @@ measures the runner's own cache:
   resolution pin (`tests/e2e/utils/dns-pin.ts`, both HA modes) that dials the
   address the flip wrote directly (the promoted node on `compose-ha`, the
   promoted cluster's ingress IP on `k8s-ha`: its floating IP, or a
-  DigitalOcean or Linode master's own address) while keeping the domain in the
+  DigitalOcean master's own address) while keeping the domain in the
   `Host` header and the TLS SNI, so name-based routing and certificate
   validity are still fully asserted, but a mid-TTL cache cannot redirect a
   check onto the retired side. Before the pin, that is exactly what happened:

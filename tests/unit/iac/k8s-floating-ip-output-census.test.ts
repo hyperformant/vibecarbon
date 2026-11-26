@@ -13,7 +13,7 @@
  */
 import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it } from 'vitest';
-import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 
 let counter = 0;
 /** Every resource the current program run registered: type token and logical name. */
@@ -33,6 +33,9 @@ pulumi.runtime.setMocks(
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
           ipAddress: ip,
           address: ip,
+          mainIp: ip,
+          internalIp: `10.10.0.${counter % 250}`,
+          subnet: ip,
         },
       };
     },
@@ -54,9 +57,8 @@ type K8sProvider = {
   getK8sProgram: (config: object) => Promise<() => Promise<Record<string, unknown>>>;
 };
 
-const k8sProviders = Object.entries(PROVIDERS as unknown as Record<string, K8sProvider>).filter(
-  ([, P]) => P.SUPPORTED_TIERS.includes('k8s'),
-);
+/** The k8s sellers, and the programs built ahead of their tier. */
+const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
 
 describe('k8s program outputs match K8S_FLOATING_IP', () => {
   it('there are k8s providers on both sides of the flag', () => {

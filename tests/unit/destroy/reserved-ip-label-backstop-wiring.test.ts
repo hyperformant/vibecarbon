@@ -66,6 +66,21 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
 });
 
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+
+/**
+ * The providers whose compose program makes no IP but whose class has the
+ * method: the k8s label sweep needs it, compose must still never ask.
+ */
+const NO_COMPOSE_IP: Array<
+  [string, { COMPOSE_FLOATING_IP: boolean; prototype: { deleteReservedIpsByLabels?: unknown } }]
+> = [
+  ['Hetzner', HetznerProvider],
+  ['Linode', LinodeProvider],
+  ['Vultr', VultrProvider],
+];
 
 const spinner = { start: () => {}, stop: () => {}, message: () => {} };
 
@@ -143,8 +158,10 @@ describe('compose: asked only where the compose program makes an IP', () => {
     expect(labelCalls).toEqual([{ project: 'proj', environment: 'prod' }]);
   });
 
-  it('no compose IP (Hetzner, Linode): never asked, even with the method', async () => {
-    holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: false }, true);
+  it.each(NO_COMPOSE_IP)('no compose IP (%s): never asked, even with the method', async (_, P) => {
+    expect(P.COMPOSE_FLOATING_IP).toBe(false);
+    expect(typeof P.prototype.deleteReservedIpsByLabels).toBe('function');
+    holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: P.COMPOSE_FLOATING_IP }, true);
     await run('destroyComposeServices', makeCtx('compose', ['prod']));
     expect(labelCalls).toEqual([]);
   });
@@ -160,8 +177,10 @@ describe('compose-ha: each side asked by its own stack, where compose makes an I
     ]);
   });
 
-  it('no compose IP (Hetzner, Linode): never asked, even with the method', async () => {
-    holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: false }, true);
+  it.each(NO_COMPOSE_IP)('no compose IP (%s): never asked, even with the method', async (_, P) => {
+    expect(P.COMPOSE_FLOATING_IP).toBe(false);
+    expect(typeof P.prototype.deleteReservedIpsByLabels).toBe('function');
+    holder.Provider = fakeProvider({ COMPOSE_FLOATING_IP: P.COMPOSE_FLOATING_IP }, true);
     await run('destroyComposeHa', makeCtx('compose-ha', ['prod']));
     expect(labelCalls).toEqual([]);
   });

@@ -100,6 +100,7 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
     config: { ...k8s, location: 'nyc3' },
   },
   'vultr-compose.js': { builder: 'buildVultrComposeProgram', config: { ...base, location: 'ewr' } },
+  'vultr-k8s.js': { builder: 'buildVultrK8sProgram', config: { ...k8s, location: 'ewr' } },
   'linode-compose.js': {
     builder: 'buildLinodeComposeProgram',
     config: { ...base, location: 'us-east' },

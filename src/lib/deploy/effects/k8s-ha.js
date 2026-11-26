@@ -617,7 +617,8 @@ async function openReplicationFirewallForPeers({
       }
       const updatedRules = provider.buildReplicationFirewallRules(firewall, peerDbIp);
       if (updatedRules) {
-        await provider.setFirewallRules(firewall.id, updatedRules);
+        // The read the rules were built from: Vultr deletes only what it held.
+        await provider.setFirewallRules(firewall.id, updatedRules, firewall);
       }
     } catch (err) {
       // Stays non-fatal (manual firewall config may suffice), but it must SAY

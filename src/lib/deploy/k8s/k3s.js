@@ -49,6 +49,7 @@ import {
 import { isIPv4 } from 'node:net';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as p from '@clack/prompts';
 import {
   renderBackupCronJob,
   renderBackupSettingsConfigMap,
@@ -81,6 +82,7 @@ import {
   upgradeKubeconfig,
 } from '../../kubeconfig.js';
 import { readOperatorVar } from '../../operator-env.js';
+import { writeOperatorRulesAfterUp } from '../../operator-ip.js';
 import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
@@ -3701,13 +3703,17 @@ export async function verifyWalgBackups({ kubeconfig, dbPod = DB_POD }) {
  * API server, which accepts it (storageClassName is a free-form reference,
  * never DNS-1123-validated) and leaves the PVC Pending forever.
  *
+ * The provider's volume floor (`ProviderClass.K8S_MIN_VOLUME_GI`) is applied
+ * in the same pass: see renderK8sPlaceholders.
+ *
  * @param {string} dir - Source kustomize directory (e.g.
  *   `${projectDir}/k8s/base/observability`)
  * @param {string} storageClass - `ProviderClass.K8S_STORAGE_CLASS`
+ * @param {{ minVolumeGi?: number }} [opts] - `ProviderClass.K8S_MIN_VOLUME_GI`
  * @returns {string} Path to the rendered temp copy — pass this to
  *   applyKustomization instead of `dir`.
  */
-export function renderK8sStorageClassPlaceholder(dir, storageClass) {
+export function renderK8sStorageClassPlaceholder(dir, storageClass, { minVolumeGi = 0 } = {}) {
   // Fail loudly up front: k8s gives NO natural error for a bad value here.
   // A leftover `{{K8S_STORAGE_CLASS}}` is accepted by kubectl (free-form
   // reference, never DNS-1123-validated) and the PVC sits Pending forever;
@@ -3719,7 +3725,51 @@ export function renderK8sStorageClassPlaceholder(dir, storageClass) {
       'renderK8sStorageClassPlaceholder: unresolved placeholder target; ProviderClass.K8S_STORAGE_CLASS is empty',
     );
   }
-  return renderK8sPlaceholders(dir, { K8S_STORAGE_CLASS: storageClass }, 'storageclass');
+  return renderK8sPlaceholders(dir, { K8S_STORAGE_CLASS: storageClass }, 'storageclass', {
+    minVolumeGi,
+  });
+}
+
+/** A file that names this claims a volume of the provider's StorageClass. */
+const STORAGE_CLASS_TOKEN = '{{K8S_STORAGE_CLASS}}';
+/**
+ * A `storage: <n>Gi` request, bare or double-quoted, alone on its line. A
+ * CRLF file passes too: in multiline mode `$` also matches before a `\r`.
+ */
+const GI_STORAGE_REQUEST = /^([ \t]*storage:[ \t]*)(")?(\d+)Gi\2([ \t]*)$/gm;
+/** GI_STORAGE_REQUEST against one line, which holds no line end. */
+const GI_STORAGE_LINE = new RegExp(GI_STORAGE_REQUEST.source);
+/** Any `storage:` key with a value on its line, read or not. */
+const STORAGE_VALUE = /^[ \t]*storage:[ \t]*[^\s#].*$/gm;
+
+/**
+ * Each `storage:` line in `content` that GI_STORAGE_REQUEST cannot read, so
+ * the floor cannot raise it: `500Mi`, `1Ti`, a bare number, a trailing comment.
+ *
+ * @param {string} content
+ * @returns {string[]} the lines, trimmed
+ */
+function unreadVolumeRequests(content) {
+  return [...content.matchAll(STORAGE_VALUE)]
+    .map(([line]) => line)
+    .filter((line) => !GI_STORAGE_LINE.test(line))
+    .map((line) => line.trim());
+}
+
+/**
+ * `content` with every `storage: <n>Gi` request below `minVolumeGi` raised to
+ * it, its quoting kept. Some CSI drivers pass a claim's size to their
+ * provider's API unrounded, and the API refuses one under its minimum, so
+ * the claim stays Pending for good (BaseProvider.K8S_MIN_VOLUME_GI).
+ *
+ * @param {string} content
+ * @param {number} minVolumeGi
+ * @returns {string}
+ */
+function raiseVolumeRequests(content, minVolumeGi) {
+  return content.replace(GI_STORAGE_REQUEST, (line, head, quote = '', size, tail) =>
+    Number(size) < minVolumeGi ? `${head}${quote}${minVolumeGi}Gi${quote}${tail}` : line,
+  );
 }
 
 /**
@@ -3727,12 +3777,17 @@ export function renderK8sStorageClassPlaceholder(dir, storageClass) {
  * `{{KEY}}` for each KEY in `values` (recursively, every file). The source
  * tree is never modified. Keys not in `values` are left as they are.
  *
+ * With `minVolumeGi`, each file that names `{{K8S_STORAGE_CLASS}}` also has
+ * its smaller `storage: <n>Gi` requests raised to it (raiseVolumeRequests),
+ * and each `storage:` line it cannot read is named in a warning.
+ *
  * @param {string} dir
  * @param {Record<string, string>} values
  * @param {string} label - lands in the temp dir's name, for logs
+ * @param {{ minVolumeGi?: number }} [opts]
  * @returns {string} the rendered temp copy
  */
-function renderK8sPlaceholders(dir, values, label) {
+function renderK8sPlaceholders(dir, values, label, { minVolumeGi = 0 } = {}) {
   // Prefix carries the source dir's basename (e.g. `observability`) so the
   // rendered path stays recognizable in `kubectl` error output/logs, and so
   // any argv/log matching on the addon name (e.g. tests asserting the
@@ -3749,9 +3804,21 @@ function renderK8sPlaceholders(dir, values, label) {
         continue;
       }
       let content = readFileSync(srcPath, 'utf-8');
+      const claimsVolume = minVolumeGi > 0 && content.includes(STORAGE_CLASS_TOKEN);
       for (const [key, value] of entries) {
         const token = `{{${key}}}`;
         if (content.includes(token)) content = content.replaceAll(token, value);
+      }
+      if (claimsVolume) {
+        content = raiseVolumeRequests(content, minVolumeGi);
+        // A claim the floor passed by would wait Pending with no word from us.
+        for (const line of unreadVolumeRequests(content)) {
+          p.log.warn(
+            `could not read the volume size in ${srcPath} (${line}), so it was not raised to ` +
+              `this provider's ${minVolumeGi}Gi minimum. a smaller volume is refused and its ` +
+              `claim waits Pending, so write it as storage: ${minVolumeGi}Gi or more`,
+          );
+        }
       }
       writeFileSync(destPath, content);
     }
@@ -3921,11 +3988,15 @@ function addDbReplicationHostPort(rendered) {
  * rendered `db/`, so the StatefulSet is CREATED with it and never has to be
  * restarted to gain it (see rendersReplicationHostPort).
  *
+ * `minVolumeGi` (`ProviderClass.K8S_MIN_VOLUME_GI`) raises the db's and the
+ * add-on claims' smaller requests to the provider's volume floor
+ * (renderK8sPlaceholders).
+ *
  * @param {string} dir - the project's `k8s/base`
  * @param {Record<string, string>} values - buildDbManifestValues' output
  * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
  * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} tls
- * @param {{ replicationHostPort?: boolean }} [opts]
+ * @param {{ replicationHostPort?: boolean, minVolumeGi?: number }} [opts]
  * @returns {string} the rendered temp copy to pass to applyKustomization
  */
 export function renderK8sBase(
@@ -3933,7 +4004,7 @@ export function renderK8sBase(
   values,
   backupConfig,
   tls,
-  { replicationHostPort = false } = {},
+  { replicationHostPort = false, minVolumeGi = 0 } = {},
 ) {
   if (!tls?.dnsNames?.length || !tls.issuerName || !tls.effectiveIssuer) {
     throw new Error(
@@ -3961,7 +4032,9 @@ export function renderK8sBase(
   }
   // The image tokens are the deploy's version set (images.js), never the
   // caller's: there is one set per deploy.
-  const rendered = renderK8sPlaceholders(dir, { ...values, ...manifestImageValues() }, 'base');
+  const rendered = renderK8sPlaceholders(dir, { ...values, ...manifestImageValues() }, 'base', {
+    minVolumeGi,
+  });
   try {
     completeK8sBase(rendered, { backupConfig, tls, replicationHostPort, hasRegistry });
   } catch (err) {
@@ -5199,8 +5272,12 @@ export async function applyK3sManifests({
     backupConfig,
     { dnsNames, issuerName, effectiveIssuer },
     // k8s-ha: the db StatefulSet is created with its replication hostPort,
-    // never patched (and so restarted) to gain it later.
-    { replicationHostPort: rendersReplicationHostPort(role) },
+    // never patched (and so restarted) to gain it later. The provider's
+    // volume floor raises any claim its driver could not create.
+    {
+      replicationHostPort: rendersReplicationHostPort(role),
+      minVolumeGi: ProviderClass.K8S_MIN_VOLUME_GI,
+    },
   );
   // When this deploy's restore wrote Secret/vibecarbon-tls (operator clock),
   // returned so the TLS phase can tell a re-issue after it.
@@ -5461,6 +5538,7 @@ export async function applyK3sManifests({
     const renderedObservabilityDir = renderK8sStorageClassPlaceholder(
       observabilityDir,
       ProviderClass.K8S_STORAGE_CLASS,
+      { minVolumeGi: ProviderClass.K8S_MIN_VOLUME_GI },
     );
     try {
       await perfAsync(`deploy.${perfPrefix}.applyObservability`, () =>
@@ -6361,6 +6439,19 @@ async function deployK3sSteps(options, inFlight) {
     if (missing.length > 0) {
       throw new Error(`Pulumi outputs missing ${missing.join(' and ')}`);
     }
+    // A provider whose k8s program leaves the operator rules to REST
+    // (K8S_OPERATOR_RULES_AFTER_UP) made this firewall with no SSH or
+    // Kubernetes API rule: write them now, before the first ssh
+    // (waitForK3sReady below). Nothing on every other provider, whose
+    // program wrote them. Before the step completes, so a deploy stopped
+    // in between runs the up and this again.
+    await writeOperatorRulesAfterUp({
+      Provider,
+      apiToken: options.apiToken,
+      projectName: options.projectName,
+      stackName: options.environment,
+      operatorCidrs: options.operatorCidrs ?? [],
+    });
     state.completeStep('k3s-infra', outputs);
     s.stop(
       `Cluster provisioned: master=${outputs.masterIp}` +

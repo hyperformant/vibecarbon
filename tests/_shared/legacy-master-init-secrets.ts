@@ -8,7 +8,9 @@
  * K8S_RETIRED_CLOUD_SECRETS against them, and the Docker takeover test
  * (tests/integration/docker/k8s-cloud-secrets-takeover.test.ts) runs them to
  * make such a master. Read them with masterInitSecrets
- * (./master-init-secrets.ts). A record of the past: never edit it.
+ * (./master-init-secrets.ts). A record of the past: never edit it. A k8s
+ * provider whose boot scripts never wrote one is in NO_LEGACY_BOOT_SECRETS
+ * instead; the census holds every k8s provider to exactly one of the two.
  */
 
 export const LEGACY_MASTER_INIT_SECRETS: Record<string, string> = {
@@ -33,3 +35,10 @@ export const LEGACY_MASTER_INIT_SECRETS: Record<string, string> = {
     '  --dry-run=client -o yaml | kubectl apply -f -',
   ].join('\n'),
 };
+
+/**
+ * Providers whose k8s boot scripts never wrote a cloud Secret: their tier
+ * came after the CLI took the token over (applyCloudSecrets), so no cluster
+ * of theirs holds a boot-made Secret to retire.
+ */
+export const NO_LEGACY_BOOT_SECRETS: readonly string[] = ['vultr'];

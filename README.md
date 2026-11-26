@@ -269,7 +269,7 @@ One CLI, three deploy modes, picked per environment. Every mode includes automat
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast). Vultr and Scaleway are supported for `compose`, with the same CLI and e2e gate; `k8s` and `k8s-ha` aren't built for them yet.
+DigitalOcean, Linode and Vultr are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast), and on Vultr in every region except Silicon Valley (sjc). Scaleway is supported for `compose`, with the same CLI and e2e gate; `k8s` and `k8s-ha` aren't built for it yet.
 
 ### Integration Guides
 
@@ -298,12 +298,14 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | | `k8s` | 5m 2s | 8.6s | 44.5s | 1m 35s | 8m 36s | 1m 22s | — |
 | | `k8s-ha` | 5m 12s | 21.2s | 17.7s | 2m 12s | 15m 40s | 1m 30s | 4m 1s |
 | Vultr | `compose` | 2m 46s | 16.4s | 6.7s | 2m 42s | 4m 11s | 20.6s | — |
+| | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | Scaleway | `compose` | 2m 27s | 17.5s | 5.6s | 2m 12s | 2m 30s | 21.3s | — |
 
 _Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `c7cfa3a` (2026-11-26) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
-`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
+`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, Linode, and Vultr today.
 
 ---
 
@@ -326,7 +328,7 @@ You pay your cloud provider directly, and vibecarbon starts every new project on
 |---|---|---|---|
 | Hetzner (USD account) | $23.59 (nbg1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
 | DigitalOcean | $24 (nyc3) | $61 (nyc3) | $98 (nyc3 + tor1) |
-| Vultr | $20 (ewr) | not yet | not yet |
+| Vultr | $20 (ewr) | $53.92 (ewr) | $87.84 (ewr + ord) |
 | Linode | $24 (us-iad) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
 | Scaleway | €21.84 (fr-par-1) | not yet | not yet |
 

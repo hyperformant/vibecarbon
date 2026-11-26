@@ -85,13 +85,20 @@ describe('resolveDeployMode', () => {
     clackMock.select.mockClear();
   });
 
-  it.each([
-    ['vultr', 'Vultr'],
-    ['scaleway', 'Scaleway'],
-  ])(
+  it('offers Vultr the three shipping modes, Kubernetes included', async () => {
+    clackMock.select.mockResolvedValueOnce('kubernetes-ha');
+    const result = await resolveDeployMode(noFlags, { provider: 'vultr' });
+
+    expect(result).toEqual({ deployMode: 'kubernetes', ha: true });
+    const options = clackMock.select.mock.calls[0][0].options as { value: string }[];
+    expect(options.map((o) => o.value)).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
+    clackMock.select.mockClear();
+  });
+
+  it.each([['scaleway', 'Scaleway']])(
     'deploys compose on %s without asking, since it is the one mode offered',
     async (provider, name) => {
-      // Vultr and Scaleway support compose and compose-ha; with compose-ha not
+      // Scaleway supports compose and compose-ha; with compose-ha not
       // offered, a select would have one choice, so the picker says what it
       // picked instead.
       clackMock.log.info.mockClear();

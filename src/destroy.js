@@ -140,7 +140,7 @@ export function planDestroyTargets(envConfig, projectConfig, environment) {
   // servers are removed. See the ownership-filtered delete docs in the DNS backends.
   //
   // k8s DNS records point at the cluster's ingress IP (clusterIngressIp): its
-  // floating/reserved IP on Hetzner and Linode, which is not any server's own
+  // floating/reserved IP on Hetzner, Linode and Vultr, which is not any server's own
   // IP — without folding it in here, every k8s destroy preserved its own DNS
   // record as "unowned" (M3 Task 9f evidence: both Hetzner and DO k8s
   // destroys left the A record behind, hand-deleted afterwards). Single k8s
@@ -934,9 +934,15 @@ const idKey = (id) => String(id);
  *     is by definition not ours. Defer + report, never delete.
  *   - a `foreignRegions` entry => some server we do not own is still running
  *     in that region, so a live cluster may own this volume. Defer + report.
+ *   - a provider with `ORPHAN_VOLUME_REGION_GUESS` false (Vultr, whose
+ *     volumes carry no tags) => a `pvc-in-cluster-region` match is the only
+ *     signal left, and it proves nothing about the environment. Defer +
+ *     report.
  * Deferrals are loud and land in the destroy summary with the exact volume
- * names; the standing sweep (which waits for a quiet moment with zero servers)
- * is what eventually collects them.
+ * names, and the operator deletes them in the provider's console once no
+ * live cluster owns them (the hint says so). No later vibecarbon command
+ * collects one: nothing new proves whose it is by then, and on Vultr, whose
+ * volumes carry no tags, nothing ever can.
  *
  * ATTACHMENT ORDERING (2026-07-30 — six detached, unlabeled `pvc-*` volumes
  * survived a fully green Hetzner k8s run's final destroy). A volume that still
@@ -1042,10 +1048,12 @@ async function cleanupOrphanedVolumes(
   };
 
   /**
-   * @returns {{ code: 'identity-complete'|'foreign-region', why: string }|null}
+   * @param {object} volume
+   * @param {string} heuristic - what heuristicMatch matched it by
+   * @returns {{ code: 'identity-complete'|'foreign-region'|'no-owner-signal', why: string }|null}
    *   null when the heuristic delete is allowed.
    *
-   * The `code` is the discriminator the destroy report needs, and the two
+   * The `code` is the discriminator the destroy report needs, and the
    * cases are NOT the same verdict:
    *   identity-complete — we captured this environment's whole PersistentVolume
    *     list and this volume is not in it, so it is PROVEN not ours. Somebody
@@ -1053,8 +1061,12 @@ async function cleanupOrphanedVolumes(
    *   foreign-region — a server we don't own is live in that region and our own
    *     identity capture was incomplete, so ownership is genuinely UNKNOWN. It
    *     may well be ours: that fails the exit code.
+   *   no-owner-signal — the provider's volumes carry no tags
+   *     (ORPHAN_VOLUME_REGION_GUESS false), our identity capture was
+   *     incomplete, and only its region matched, which any cluster there
+   *     shares. UNKNOWN as well: that fails the exit code.
    */
-  const heuristicBlockedBecause = (volume) => {
+  const heuristicBlockedBecause = (volume, heuristic) => {
     if (identityComplete) {
       return {
         code: 'identity-complete',
@@ -1066,6 +1078,15 @@ async function cleanupOrphanedVolumes(
       return {
         code: 'foreign-region',
         why: `a server we do not own is still running in ${region}; it may belong to a live cluster, and our own identity capture was incomplete`,
+      };
+    }
+    if (
+      heuristic === 'pvc-in-cluster-region' &&
+      provider.constructor.ORPHAN_VOLUME_REGION_GUESS === false
+    ) {
+      return {
+        code: 'no-owner-signal',
+        why: `${provider.constructor.NAME} volumes carry no tags, so only a captured id proves one is this environment's`,
       };
     }
     return null;
@@ -1119,7 +1140,7 @@ async function cleanupOrphanedVolumes(
     }
     const heuristic = heuristicMatch(volume);
     if (!heuristic) continue;
-    const blocked = heuristicBlockedBecause(volume);
+    const blocked = heuristicBlockedBecause(volume, heuristic);
     if (blocked) {
       deferred.push({
         ...recordFor(volume),
@@ -3980,12 +4001,13 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * Whether the reserved IP at an address saved at deploy time is still this
  * cluster's. Linode reissues a released address within minutes, so by
  * destroy time the saved address can be another project's. A provider whose
- * reserved IPs carry tags (Linode: `reservedIpLabelMatch`) is asked, and only
- * an IP carrying this project's tags and those of one of `stackEnvs` (the
- * labels the k8s program stamps) counts as ours. One of ours that is still
- * assigned (to a Linode, or any entity) is `held`: this runs after the
- * teardown, so whatever holds it is something the teardown did not delete,
- * and an address is never taken off a running server.
+ * reserved IPs carry the k8s program's labels (`reservedIpLabelMatch`:
+ * Linode by its tags, Vultr by its one label and the tags of the instance
+ * holding it) is asked, and only an IP carrying this project's labels and
+ * those of one of `stackEnvs` counts as ours. One of ours that is still
+ * assigned (to a Linode or a Vultr instance, or any entity) is `held`: this
+ * runs after the teardown, so whatever holds it is something the teardown
+ * did not delete, and an address is never taken off a running server.
  *
  * DigitalOcean reserved IPs carry no tags, so DO is asked where the address
  * is assigned (`reservedIpAssignment`). This runs after the teardown, so
@@ -4271,12 +4293,12 @@ export async function sweepTaggedReservedIps({
  * that died before the cluster was ready (no kubeconfig) is swept just the
  * same.
  *
- * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode), whose
+ * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode, Vultr), whose
  *   `pulumi destroy` has been seen to skip them: the firewall and SSH key by
  *   name, each recorded reserved IP by address (releaseRecordedReservedIp),
  *   then the VPC last.
  * - On every provider whose reserved IPs carry the program's labels
- *   (`deleteReservedIpsByLabels`: Hetzner, Linode): the IPs labelled for the
+ *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr): the IPs labelled for the
  *   stack that no record names (sweepTaggedReservedIps), before the VPC.
  *
  * Exported for unit testing (destroyK8sTier itself is not).
@@ -4983,7 +5005,7 @@ async function destroyK8sTier({
     }
 
     // Name/address backstop for providers with K8S_DESTROY_BACKSTOP (M3 Task 9f;
-    // DigitalOcean first, Linode too). Two live DO k8s destroys
+    // DigitalOcean first, then Linode and Vultr). Two live DO k8s destroys
     // left the firewall/VPC/SSH-key/reserved-IP behind even though Pulumi
     // reported success. The loud-partial-detection this task also added
     // (destroyStack's internal checks in lib/iac/index.js, PLUS the
@@ -5204,8 +5226,9 @@ async function destroyK8sTier({
     // they get depends on WHY (see heuristicBlockedBecause): a volume absent
     // from a COMPLETE capture of our own PersistentVolumes is proven not ours
     // (foreign — reported, exit-neutral), while one blocked only by a live
-    // foreign server in the region, with our capture incomplete, is genuinely
-    // unknown and may be ours (unverified — exit-failing). Their own class,
+    // foreign server in the region, or by a provider whose volumes carry no
+    // owner signal (no-owner-signal), with our capture incomplete, is
+    // genuinely unknown and may be ours (unverified — exit-failing). Their own class,
     // `volume-deferred`, keeps nothing: a re-run cannot prove the owner
     // either while that server lives (ENTRY_KEEP_BY_CLASS).
     for (const volume of deferred) {
@@ -5213,7 +5236,7 @@ async function destroyK8sTier({
         resourceClass: 'volume-deferred',
         resource: describeResource({ name: volume.name, id: volume.id, region: volume.region }),
         reason: `left in place (${volume.match} match only): ${volume.blocked}`,
-        hint: `Confirm no live cluster owns it, then delete via the ${Provider.NAME} console (Volumes) or run scripts/sweep-hetzner.js once the project is quiet.`,
+        hint: `Confirm no live cluster owns it, then delete it in the ${Provider.NAME} console (Volumes); it keeps billing until it is removed.`,
       };
       if (volume.blockedBy === 'identity-complete') results.leaks.foreign(entry);
       else results.leaks.unverified(entry);

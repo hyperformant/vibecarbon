@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { assertRegionSupportedForTier, regionsForTier } from '../../../src/lib/providers/index.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -55,5 +56,25 @@ describe('Linode k8s region rule', () => {
     expect(regionsForTier(LinodeProvider, 'compose', LinodeProvider.REGIONS)).toBe(
       LinodeProvider.REGIONS,
     );
+  });
+});
+
+describe('Vultr k8s region rule', () => {
+  it('the k8s region lists leave out sjc, which sells no NVMe block storage', () => {
+    for (const tier of ['k8s', 'k8s-ha']) {
+      const ids = Object.keys(regionsForTier(VultrProvider, tier, VultrProvider.REGIONS));
+      expect(ids).not.toContain('sjc');
+      expect(ids).toContain('ewr');
+      expect(ids).toContain('lax');
+      expect(ids.length).toBe(Object.keys(VultrProvider.REGIONS).length - 1);
+    }
+  });
+
+  it('the compose region lists keep sjc', () => {
+    for (const tier of ['compose', 'compose-ha']) {
+      expect(Object.keys(regionsForTier(VultrProvider, tier, VultrProvider.REGIONS))).toContain(
+        'sjc',
+      );
+    }
   });
 });

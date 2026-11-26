@@ -165,6 +165,19 @@ const cases: Case[] = [
     id: 'k-1',
     url: 'https://api.vultr.com/v2/ssh-keys/k-1',
   },
+  // Vultr Vpc and ReservedIp ids are the API uuid (vpc.js, reservedIp.js import notes)
+  {
+    provider: 'vultr',
+    type: T('vultr', 'Vpc'),
+    id: '0e04f918-575e-41cb-86f6-d729b354a5a1',
+    url: 'https://api.vultr.com/v2/vpcs/0e04f918-575e-41cb-86f6-d729b354a5a1',
+  },
+  {
+    provider: 'vultr',
+    type: T('vultr', 'ReservedIp'),
+    id: 'b9cc6fad-70b1-40ee-ab6a-4d622858962f',
+    url: 'https://api.vultr.com/v2/reserved-ips/b9cc6fad-70b1-40ee-ab6a-4d622858962f',
+  },
   // Scaleway: zoned ids "<zone>/<uuid>" (server.js, ip.js, securityGroup.js import notes); iam SshKey is a bare uuid
   {
     provider: 'scaleway',

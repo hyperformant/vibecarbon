@@ -353,6 +353,14 @@ describe('budgets are keyed on provider + mode + class', () => {
     // Seeded or calibrated, never missing: the first run is judged, not failed.
     expect(row?.ownedS).toBeGreaterThan(0);
   });
+
+  it('vultr/k8s and vultr/k8s-ha have a seeded budget until their first cold deploy passes', () => {
+    for (const mode of ['k8s', 'k8s-ha'] as const) {
+      const row = budgetFor(DEPLOY_BUDGET_TABLE, mode, { provider: 'vultr', cpuClass: 'vc2' });
+      expect(row?.row).toBe(`vultr/${mode}/any`);
+      expect(row?.ownedS).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('deployCpuClass', () => {

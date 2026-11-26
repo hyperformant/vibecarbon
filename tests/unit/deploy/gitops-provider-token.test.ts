@@ -183,6 +183,21 @@ describe('configure cicd names a token secret still at GitHub that no workflow r
   });
 
   it('docs/security.md says what an earlier vibecarbon left at GitHub and in the cluster, and what to do', () => {
+    // The k8s providers whose deploy retires the whole kube-system/hcloud
+    // Secret, which nothing on their clusters reads (Hetzner retires one key
+    // of its own), named as prose lists them.
+    const retiring = Object.values(PROVIDERS)
+      .filter(
+        (P) =>
+          P.SUPPORTED_TIERS.includes('k8s') &&
+          P.K8S_RETIRED_CLOUD_SECRETS.some(
+            (s: { namespace: string; name: string; keys?: string[] }) =>
+              s.namespace === 'kube-system' && s.name === 'hcloud' && !s.keys,
+          ),
+      )
+      .map((P) => P.NAME);
+    expect(retiring.length).toBeGreaterThan(1);
+    const retiringList = `${retiring.slice(0, -1).join(', ')} or ${retiring[retiring.length - 1]}`;
     const doc = readFileSync('docs/security.md', 'utf8');
     const gitops = doc.slice(doc.indexOf('**GitOps** (`vibecarbon configure cicd`)'));
     const para = gitops.slice(0, gitops.indexOf('\n'));
@@ -196,7 +211,7 @@ describe('configure cicd names a token secret still at GitHub that no workflow r
         'vibecarbon left at GitHub each time `configure cicd` runs, and nothing dispatches it now.',
       'Once no workflow reads the secret, `configure cicd` names it each time it runs, with ' +
         '`gh secret delete HETZNER_API_TOKEN`, and leaves deleting it to you.',
-      'On a DigitalOcean or Linode cluster nothing reads `kube-system/hcloud`, and a deploy removes it',
+      `On a ${retiringList} cluster nothing reads \`kube-system/hcloud\`, and a deploy removes it`,
       'so rotate that token too.',
     ]) {
       expect(para).toContain(said);

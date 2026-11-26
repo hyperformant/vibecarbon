@@ -63,8 +63,12 @@ import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-readers.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
-import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
+import {
+  LEGACY_MASTER_INIT_SECRETS,
+  NO_LEGACY_BOOT_SECRETS,
+} from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
@@ -273,26 +277,35 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
   apiReads.push({ url: String(input), bearer: new Headers(init?.headers).get('authorization') });
   if (apiThrows) throw apiThrows;
   const id = Number(apiServerId);
+  // Vultr's error is a string where Hetzner's is an object, so it gets its own.
+  const vultr = String(input).startsWith(`${PROVIDERS.vultr.API_BASE}/`);
   const body =
     apiStatus === 200
-      ? { server: { id }, droplet: { id }, id }
-      : {
-          error: { message: 'server not found' },
-          message: 'The resource you were accessing could not be found.',
-          errors: [{ reason: 'Not found' }],
-        };
+      ? { server: { id }, droplet: { id }, instance: { id }, id }
+      : vultr
+        ? { error: 'Invalid instance-id.', status: apiStatus }
+        : {
+            error: { message: 'server not found' },
+            message: 'The resource you were accessing could not be found.',
+            errors: [{ reason: 'Not found' }],
+          };
   return new Response(JSON.stringify(body), {
     status: apiStatus,
     headers: { 'content-type': 'application/json' },
   });
 }
 
-const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
-  P.SUPPORTED_TIERS.includes('k8s'),
-);
+const K8S_PROVIDERS = k8sCensusProviders();
 const OTHER_PROVIDERS = Object.entries(PROVIDERS).filter(
-  ([, P]) => !P.SUPPORTED_TIERS.includes('k8s'),
+  ([id]) => !K8S_PROVIDERS.some(([k8sId]) => k8sId === id),
 );
+
+/**
+ * The cloud Secrets this provider's old boot script made, as the record has
+ * them: none for a provider whose boot scripts never wrote one.
+ */
+const bootMade = (id: string) =>
+  NO_LEGACY_BOOT_SECRETS.includes(id) ? [] : masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]);
 
 /** What an old boot script rendered for a template variable, by the naming they used. */
 function legacyValue(variable: string, token: string): string {
@@ -407,10 +420,12 @@ describe('docs/deploy-hetzner.md says where the token lives, in each mode', () =
 });
 
 describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml made and the CLI no longer writes', () => {
-  it('there is a record for every k8s provider', () => {
-    expect(Object.keys(LEGACY_MASTER_INIT_SECRETS).sort()).toEqual(
+  it('every k8s provider has a record, or is one whose boot scripts never wrote a Secret', () => {
+    const recorded = Object.keys(LEGACY_MASTER_INIT_SECRETS);
+    expect([...recorded, ...NO_LEGACY_BOOT_SECRETS].sort()).toEqual(
       K8S_PROVIDERS.map(([id]) => id).sort(),
     );
+    expect(recorded.filter((id) => NO_LEGACY_BOOT_SECRETS.includes(id))).toEqual([]);
   });
 
   it("the old deploy.yml's record is one Secret, holding a repo secret, and the template has no deploy.yml", () => {
@@ -450,7 +465,7 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
           repoSecret,
         });
     };
-    for (const { namespace, name, keys } of masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id])) {
+    for (const { namespace, name, keys } of bootMade(id)) {
       add(namespace, name, Object.keys(keys), true);
     }
     for (const { namespace, name, keys } of legacyGitopsSecrets()) {
@@ -488,13 +503,21 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
     }
   });
 
-  it.each(K8S_PROVIDERS)(
-    '%s: the record is of the past: the boot script creates no Secret now',
-    async (id, Provider) => {
+  it.each(K8S_PROVIDERS.filter(([id]) => !NO_LEGACY_BOOT_SECRETS.includes(id)))(
+    '%s: the record holds the Secrets an old boot script made',
+    (id) => {
       expect(masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]).length).toBeGreaterThan(0);
-      expect(masterInitSecrets(await Provider.getK8sMasterUserData({}))).toEqual([]);
     },
   );
+
+  // Every provider, the ones that never had a legacy boot Secret included:
+  // the token reaches the cluster only through applyCloudSecrets, so the
+  // boot script makes no Secret by any means, a command or a manifest.
+  it.each(K8S_PROVIDERS)('%s: the boot script creates no Secret now', async (_id, Provider) => {
+    const script = await Provider.getK8sMasterUserData({});
+    expect(masterInitSecrets(script)).toEqual([]);
+    expect(script).not.toMatch(/^\s*kind:\s*["']?Secret["']?\s*$/m);
+  });
 });
 
 describe('applyCloudSecrets', () => {
@@ -632,7 +655,7 @@ describe('applyCloudSecrets', () => {
    */
   const holdLegacy = (Provider: typeof BaseProvider, token: string) => {
     const id = Object.entries(PROVIDERS).find(([, P]) => P === Provider)?.[0] ?? '';
-    for (const { namespace, name, keys } of masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id])) {
+    for (const { namespace, name, keys } of bootMade(id)) {
       const data = Object.fromEntries(
         Object.entries(keys).map(([key, variable]) => [key, legacyValue(variable, token)]),
       );
@@ -713,9 +736,11 @@ describe('applyCloudSecrets', () => {
 
   it.each(K8S_PROVIDERS)(
     '%s: the token rides stdin only, never argv or a log line',
-    async (_id, Provider) => {
-      // An old master's Secrets, so the cleanup's calls are checked too.
-      holdLegacy(Provider, 'vc-sentinel-token-old');
+    async (id, Provider) => {
+      // An old master's Secrets, so the cleanup's calls are checked too. A
+      // provider whose boot scripts wrote none holds its own on the old token.
+      if (NO_LEGACY_BOOT_SECRETS.includes(id)) holdAll(Provider, 'vc-sentinel-token-old');
+      else holdLegacy(Provider, 'vc-sentinel-token-old');
       readerPerSecret(Provider);
       await apply(Provider);
       expect(restarts()).toHaveLength(1);
@@ -739,6 +764,7 @@ describe('applyCloudSecrets', () => {
       digitalocean:
         'Handing your DigitalOcean API token to the cluster (kube-system/digitalocean).',
       linode: 'Handing your Linode API token to the cluster (kube-system/linode).',
+      vultr: 'Handing your Vultr API token to the cluster (kube-system/vultr-csi).',
     });
   });
 
@@ -782,6 +808,7 @@ describe('applyCloudSecrets', () => {
       hetzner: 'Failed to get server: server not found',
       digitalocean: 'Failed to get server: The resource you were accessing could not be found.',
       linode: 'Failed to get server: Not found',
+      vultr: 'Failed to get server: Invalid instance-id.',
     };
     /** The Secrets a refusal says it left as they were, as the provider names them. */
     const secretsOf = (Provider: typeof BaseProvider) =>
@@ -1613,10 +1640,7 @@ describe('applyCloudSecrets', () => {
         readerPerSecret(Provider);
         await apply(Provider);
         const written = Provider.k8sCloudSecrets({ token: TOKEN });
-        const made = [
-          ...masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]),
-          ...legacyGitopsSecrets(),
-        ];
+        const made = [...bootMade(id), ...legacyGitopsSecrets()];
         for (const { namespace, name } of made) {
           const kept = written.find((w) => w.namespace === namespace && w.name === name);
           expect(cluster.get(`${namespace}/${name}`), `${namespace}/${name}`).toEqual(
@@ -1629,7 +1653,7 @@ describe('applyCloudSecrets', () => {
     );
 
     it('the old deploy.yml wrote to a cluster that reads none of it on some providers', () => {
-      expect(GITOPS_UNREAD.map(([id]) => id).sort()).toEqual(['digitalocean', 'linode']);
+      expect(GITOPS_UNREAD.map(([id]) => id).sort()).toEqual(['digitalocean', 'linode', 'vultr']);
     });
 
     it.each(GITOPS_UNREAD)(
@@ -1715,7 +1739,7 @@ describe('applyCloudSecrets', () => {
         holdLegacy(Provider, 'vc-sentinel-token-old');
         readerPerSecret(Provider);
         await apply(Provider);
-        const legacy = masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[id]);
+        const legacy = bootMade(id);
         const written = Provider.k8sCloudSecrets({ token: TOKEN });
         for (const { namespace, name } of legacy) {
           const kept = written.find((w) => w.namespace === namespace && w.name === name);

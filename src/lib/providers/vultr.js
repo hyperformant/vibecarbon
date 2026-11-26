@@ -1,19 +1,23 @@
 /**
  * Vultr Cloud Provider
  *
- * Compose + compose-ha provider (PR 2 of the 2026-08 provider expansion +
- * tier-parity wave 1 — see
- * the vultr-provider-step0-audit plan for the
- * sourced capability audit and live-probe results). The k8s statics throw
- * provider-specific errors (Vultr's k8s tier is unbuilt, not forgotten —
- * 4-mode headroom is recorded in the audit).
+ * All four tiers (PR 2 of the 2026-08 provider expansion, tier-parity wave 1,
+ * and the k8s tiers of the 2026-11 k8s-everywhere work; see the
+ * vultr-provider-step0-audit plan for the sourced capability audit and
+ * live-probe results). The k8s user-data statics render the vultr-*-init.sh
+ * boot scripts, and getK8sProgram builds iac/programs/vultr-k8s.js. The k8s
+ * tiers need NVMe block storage, which one region lacks
+ * (K8S_UNSUPPORTED_REGIONS).
  *
  * Vultr-shape notes (vs the Hetzner/DO/Linode templates):
  * - API v2 uses CURSOR pagination (`meta.links.next` → `&cursor=`), not
  *   page/pages — every listing routes through `_walkCursor`.
  * - Firewalls are GROUPS (identity field `description`, not label) whose
- *   rules are INBOUND-ONLY, separate resources with no replace-all PUT —
- *   see setFirewallRules' delete-then-recreate design.
+ *   rules are INBOUND-ONLY, separate resources with no replace-all PUT:
+ *   setFirewallRules is a create-first minimal diff, so a rule it keeps
+ *   keeps its id and the group never has none (an empty group is not
+ *   enforced), and handed the caller's read it deletes only rules that
+ *   read held.
  * - Instances attach at most ONE firewall group (`firewall_group_id`).
  * - Object-storage keys are per-subscription (see vultr-objectstorage.js).
  * - Rate limit: 400-request burst bucket, 1s reset (live headers
@@ -22,19 +26,25 @@
  * API Documentation: https://www.vultr.com/api/
  */
 
+import { canonicalCidr } from '../cidr.js';
 import { fetchWithRetry } from '../fetch-retry.js';
 import {
   BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  deleteVpcByName,
   normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
+  sweepLabels,
   waitUntilServerUp,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
 import { decodeLabels, withAllTags } from './tag-labels.js';
 
-// Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
-// sibling providers (SSH, k8s API for future parity).
+// Ports whose inbound rules applyOperatorCidrs rewrites, the same set as the
+// sibling providers': SSH, and the Kubernetes API, which a k8s cluster's
+// group gets from the deploy after its up (K8S_OPERATOR_RULES_AFTER_UP).
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
@@ -43,10 +53,45 @@ const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 // public port).
 const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
-// WireGuard replication port (wireguard.js WG_PORT) — only reachable via
-// compose-ha (declared since tier-parity wave 1); the member is
+// WireGuard replication port (wireguard.js WG_PORT): the k8s-ha replication
+// rule, written over REST (buildReplicationFirewallRules); the member is
 // contract-required and unit-pinned.
 const WG_PORT = '51821';
+
+/**
+ * What Vultr treats as one firewall rule: it refuses a second with the same
+ * fields. Read rows and create bodies give the same key (an icmp rule reads
+ * back with port ''). The network is compared canonically (canonicalCidr):
+ * `vibecarbon access` takes an IPv4 CIDR with host bits and IPv6 in any
+ * spelling, and Vultr may read either back in another form. Matched
+ * verbatim, such a rule is never found again, and every push would POST it
+ * once more, which Vultr refuses as already defined.
+ * @param {{ip_type: string, protocol: string, subnet: string, subnet_size: number, port?: string}} r
+ * @returns {string}
+ */
+function vultrRuleKey(r) {
+  const cidr = `${r.subnet}/${r.subnet_size}`;
+  return [r.ip_type, r.protocol, canonicalCidr(cidr) ?? cidr, r.port ?? ''].join(' ');
+}
+
+/**
+ * Refuse to build a rewrite from a firewall whose rules listing broke off.
+ * A target built from part of the list misses the rest: handed that part as
+ * its basis, setFirewallRules leaves the rules it never saw, an operator
+ * address the rewrite was told to drop among them; handed none, it deletes
+ * them all.
+ * @param {{description?: string, id?: string, rulesComplete?: boolean}} firewall
+ *   the group findFirewallByName returns
+ */
+function requireCompleteRules(firewall) {
+  if (firewall.rulesComplete === false) {
+    throw new Error(
+      `Vultr's rules listing for firewall ${firewall.description ?? firewall.id} came back ` +
+        'incomplete, so its rules were left as they are: a rewrite built from part of the ' +
+        'list would delete the rules it did not see. Run the command again.',
+    );
+  }
+}
 
 /**
  * Encode a label key/value pair into a Vultr tag string — same `key:value`
@@ -89,6 +134,10 @@ export function cidrToVultrRuleFields(cidr) {
   return { ip_type: isV6 ? 'v6' : 'v4', subnet, subnet_size };
 }
 
+/** walkCursor's page size and page guard: it reads at most 10,000 of a kind. */
+const WALK_PAGE_SIZE = 500;
+const WALK_MAX_PAGES = 20;
+
 /**
  * Cursor-paginated collection walk (Vultr's `meta.links.next` idiom), the
  * single pagination implementation every listing in this file shares.
@@ -103,9 +152,9 @@ async function walkCursor(init, path, key) {
   const items = [];
   const sep = path.includes('?') ? '&' : '?';
   let cursor = '';
-  for (let guard = 0; guard < 20; guard++) {
+  for (let guard = 0; guard < WALK_MAX_PAGES; guard++) {
     const response = await fetchWithRetry(
-      `${VultrProvider.API_BASE}${path}${sep}per_page=500${cursor ? `&cursor=${cursor}` : ''}`,
+      `${VultrProvider.API_BASE}${path}${sep}per_page=${WALK_PAGE_SIZE}${cursor ? `&cursor=${cursor}` : ''}`,
       init,
     );
     if (!response.ok) return { items, complete: false, status: response.status };
@@ -116,6 +165,64 @@ async function walkCursor(init, path, key) {
     cursor = next;
   }
   return { items, complete: false };
+}
+
+/** The characters a project, environment or stack name is spelled with. */
+const NAME_RE = /^[a-z0-9-]+$/;
+
+/**
+ * The label vultr-k8s.js gives a cluster's reserved IP, the one attribution
+ * a Vultr reserved IP carries (it takes a label and no tags):
+ * `project:<project>:environment:<environment>`, the stack's two ownership
+ * labels in the instances' own tag form (encodeLabel), joined by `:`.
+ * Project, environment and stack names are spelled `[a-z0-9-]`
+ * (validators.js, deploy/prompts.js) and never hold a `:`, so a label names
+ * exactly one project and environment. The `<cluster>-ingress` it replaced
+ * did not: `acme-prod-primary-ingress` was both project acme's k8s-ha stack
+ * prod-primary and project acme-prod's environment primary.
+ *
+ * Vultr documents the label as a plain string with no pattern or length
+ * (`label`, "The user-supplied label", on POST /v2/reserved-ips in the
+ * OpenAPI spec its vultr-python-client is generated from; terraform-provider-
+ * vultr's reserved_ip schema is a bare string too). `:` and `-` are the
+ * characters every Vultr instance tag vibecarbon writes already carries.
+ *
+ * null for labels that are not exactly a project and an environment, each
+ * spelled as a name: no reserved IP carries such a label, so none can be
+ * proven to match.
+ * @param {Object<string, string|undefined|null>|undefined|null} labels
+ * @returns {string|null}
+ */
+export function reservedIpLabel(labels) {
+  const keys = Object.keys(labels ?? {}).sort();
+  if (keys.join(',') !== 'environment,project') return null;
+  const { project, environment } = labels;
+  if (![project, environment].every((v) => typeof v === 'string' && NAME_RE.test(v))) return null;
+  return `${encodeLabel('project', project)}:${encodeLabel('environment', environment)}`;
+}
+
+/**
+ * The project and environment a reserved IP's label names, the inverse of
+ * reservedIpLabel; null for a label it did not write. The e2e sweep reads
+ * the project from it.
+ * @param {string|undefined|null} label
+ * @returns {{project: string, environment: string}|null}
+ */
+export function reservedIpLabelOwner(label) {
+  const parts = typeof label === 'string' ? label.split(':') : [];
+  if (parts.length !== 4 || parts[0] !== 'project' || parts[2] !== 'environment') return null;
+  const owner = { project: parts[1], environment: parts[3] };
+  return reservedIpLabel(owner) === label ? owner : null;
+}
+
+/**
+ * What a reserved IP is assigned to, as a phrase, or null when it is
+ * unassigned (Vultr answers `instance_id: ''`).
+ * @param {{instance_id?: string|null}} ip
+ * @returns {string|null}
+ */
+function reservedIpHolder(ip) {
+  return ip.instance_id ? `instance ${ip.instance_id}` : null;
 }
 
 export class VultrProvider extends BaseProvider {
@@ -145,8 +252,10 @@ export class VultrProvider extends BaseProvider {
   // vultr-objectstorage.js's key-model doc; the region env below is
   // effectively required alongside them.
   static OBJECT_STORAGE_ENV = ['VULTR_ACCESS_KEY', 'VULTR_SECRET_KEY'];
-  // The providerID scheme Vultr's CCM stamps on nodes — relevant only at
-  // the (unbuilt) k8s tier, pinned now for uniqueness.
+  // The providerID on Vultr k8s nodes (`vultr://<instance-v2-id>`). There is
+  // no Vultr CCM: the k3s boot scripts pre-seed it with the kubelet's
+  // `provider-id` flag, and the autoscaler strips the prefix to find the
+  // instance.
   static PROVIDER_ID_PREFIX = 'vultr://';
   static DEFAULT_REGION = 'ewr';
   static PRICING_URL = 'https://www.vultr.com/pricing/';
@@ -156,13 +265,37 @@ export class VultrProvider extends BaseProvider {
   // vultr-objectstorage.js.
   static S3_REGION_ENV = 'VULTR_STORAGE_REGION';
 
-  // Compose tiers only (compose-ha added in the 2026-08 tier-parity wave 1 —
-  // the HA surface below was contract-complete since PR 2; effects/compose-ha
-  // is provider-generic). 4-mode headroom (CCM/CSI/block-storage/DNS-flip)
-  // recorded in the audit; the k8s tiers are not yet built or declared.
-  static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+  // All four tiers. compose-ha came in the 2026-08 tier-parity wave 1 (the
+  // HA surface below was contract-complete since PR 2; effects/compose-ha is
+  // provider-generic), k8s and k8s-ha with the 2026-11 k8s-everywhere work.
+  // The k8s tiers need NVMe block storage, which one region lacks
+  // (K8S_UNSUPPORTED_REGIONS).
+  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
   static SERVER_RESOURCE_TYPE = 'vultr:index/instance:Instance';
+
+  /**
+   * Regions with no NVMe block storage, which the k8s tiers' database volume
+   * needs (vultr-k8s.js's StorageClass asks for `disk_type: nvme`): sjc sells
+   * only HDD block storage (`block_storage_storage_opt`, public GET
+   * /v2/regions, 2026-11-25). k8s and k8s-ha refuse it (k8sRegionProblem) and
+   * the region lists omit it; compose tiers use it freely.
+   * @type {string[]}
+   */
+  static K8S_UNSUPPORTED_REGIONS = ['sjc'];
+
+  /**
+   * @param {string} region
+   * @returns {string|null}
+   */
+  static k8sRegionProblem(region) {
+    if (!VultrProvider.K8S_UNSUPPORTED_REGIONS.includes(region)) return null;
+    const city = VultrProvider.REGIONS[region]?.split(',')[0] ?? region;
+    return (
+      `Kubernetes on Vultr does not run in ${city} (${region}): Vultr sells no NVMe block ` +
+      "storage there for the cluster's database volume. Use lax, ewr or another region."
+    );
+  }
 
   // Compute regions WITH a co-located Object Storage cluster (same
   // in-region-backup doctrine as the sibling providers; live cluster
@@ -196,12 +329,15 @@ export class VultrProvider extends BaseProvider {
   // Offline fallback catalog — vc2 shared line, live-verified 2026-08-08
   // via the public GET /v2/plans (ram is MB on the wire; stored as GB);
   // `vhf-2c-4gb` (the compose fallback candidate) from the same endpoint on
-  // 2026-10-22.
+  // 2026-10-22; `vhf-1c-2gb` (the k8s db fallback) and `vhf-3c-8gb` (its
+  // scale target) on 2026-11-25.
   static FALLBACK_SERVER_TYPES = {
     'vc2-1c-2gb': { vcpu: 1, ram: 2, disk: 55 },
     'vc2-2c-4gb': { vcpu: 2, ram: 4, disk: 80 },
     'vc2-4c-8gb': { vcpu: 4, ram: 8, disk: 160 },
+    'vhf-1c-2gb': { vcpu: 1, ram: 2, disk: 64 },
     'vhf-2c-4gb': { vcpu: 2, ram: 4, disk: 128 },
+    'vhf-3c-8gb': { vcpu: 3, ram: 8, disk: 256 },
   };
 
   // Live catalog populated by fetchServerTypes(); object map (name → spec).
@@ -218,10 +354,14 @@ export class VultrProvider extends BaseProvider {
   // location's own price (sao, 1.5x, on 2026-10-22). null until a live fetch.
   static _prices = null;
 
-  // Compose candidates (see BaseProvider.ROLE_CANDIDATES): the regular vc2
-  // 4 GB plan, then the high-frequency one as its stock-out fallback.
+  // Role candidates (see BaseProvider.ROLE_CANDIDATES): the regular vc2 plan
+  // at each role's RAM floor, then the high-frequency one as its stock-out
+  // fallback. The k8s master and worker take 4 GB, the db 2 GB.
   static ROLE_CANDIDATES = {
     compose: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+    master: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+    worker: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+    db: ['vc2-1c-2gb', 'vhf-1c-2gb'],
   };
 
   // x86 CPU classes (see BaseProvider.CPU_CLASSES): regular `vc2`, then
@@ -252,7 +392,8 @@ export class VultrProvider extends BaseProvider {
 
   // ── Engine-literal statics ──────────────────────────────────────────────
   static DEFAULT_COMPOSE_TYPE = 'vc2-2c-4gb';
-  // Pinned for EXPECTED-table completeness; unread while compose-only.
+  // The k8s node type a k8s-ha standby falls back to when no type was given
+  // (effects/k8s-ha.js); the master and worker candidates' first.
   static DEFAULT_K8S_NODE_TYPE = 'vc2-2c-4gb';
 
   // No Docker-preinstalled OS on Vultr (Marketplace Docker is an app, not
@@ -269,9 +410,10 @@ export class VultrProvider extends BaseProvider {
   static WAIT_FOR_SERVER_TIMEOUT_MS = 600_000;
 
   /**
-   * Empty at the compose-only tier — no CCM/CSI deployed; real values come
-   * from vultr-cloud-controller-manager / vultr-csi manifests when the k8s
-   * tier is built (audit headroom record).
+   * Kubernetes cluster-addon asset identity. The CSI names come from
+   * vultr-csi v0.19.1: a StatefulSet controller and a DaemonSet node
+   * plugin, both labelled with a bare `app=` key. No CCM: k3s's embedded
+   * cloud controller runs instead, so the CCM entries stay empty.
    * @type {{
    *   csiNodeDaemonSet: string,
    *   csiControllerSelector: string,
@@ -281,48 +423,162 @@ export class VultrProvider extends BaseProvider {
    * }}
    */
   static K8S_ASSETS = {
-    csiNodeDaemonSet: '',
-    csiControllerSelector: '',
+    csiNodeDaemonSet: 'daemonset/csi-vultr-node',
+    csiControllerSelector: 'app=csi-vultr-controller',
     ccmDeployment: '',
     ccmSelector: '',
     networkEnvVar: '',
   };
 
   /**
-   * vultr-csi's DEFAULT StorageClass (verified 2026-08-08 against the
-   * driver's docs/kubernetes manifests: `vultr-block-storage` is default,
-   * Delete policy; `-retain` also installed). Unread while compose-only;
-   * the literal-guard census requires distinctness + residence here.
+   * The StorageClass the k3s master boot script creates for vultr-csi: NVMe
+   * block storage, Delete reclaim, expandable, bound where the pod lands.
+   * The driver's own classes (`vultr-block-storage` and five more) carry no
+   * default annotation and bind at once. The literal-guard census requires
+   * every registered provider's value to be distinct and to live in this
+   * file.
    * @type {string}
    */
-  static K8S_STORAGE_CLASS = 'vultr-block-storage';
+  static K8S_STORAGE_CLASS = 'vultr-block-storage-vibecarbon';
 
-  /** Compose-only: no k8s program exists to pin a VPC CIDR against. @type {string} */
+  /**
+   * Vultr's NVMe block volumes start at 10 GB (POST /v2/blocks), and
+   * vultr-csi passes a claim's request through unrounded, so a smaller claim
+   * never binds. See BaseProvider.K8S_MIN_VOLUME_GI.
+   * @type {number}
+   */
+  static K8S_MIN_VOLUME_GI = 10;
+
+  /**
+   * The `vultr-csi` Secret (key `api-key`) the CSI controller reads. See
+   * BaseProvider.k8sCloudSecrets.
+   * @param {{token: string}} values
+   * @returns {Array<{namespace: string, name: string, stringData: Record<string, string>}>}
+   */
+  static k8sCloudSecrets({ token }) {
+    return [{ namespace: 'kube-system', name: 'vultr-csi', stringData: { 'api-key': token } }];
+  }
+
+  /**
+   * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
+   * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
+   * from the repo's HETZNER_API_TOKEN Actions secret. Nothing on a Vultr
+   * cluster reads it. No Vultr boot script ever wrote a cloud Secret, so
+   * there is none of those to retire. See BaseProvider.K8S_RETIRED_CLOUD_SECRETS.
+   */
+  static K8S_RETIRED_CLOUD_SECRETS = Object.freeze([
+    {
+      namespace: 'kube-system',
+      name: 'hcloud',
+      copyOf: "your repo's HETZNER_API_TOKEN Actions secret",
+    },
+  ]);
+
+  /**
+   * No fixed range: vultr-k8s.js derives a /24 per cluster
+   * (vpcCidrForCluster) and exports it as `vpcCidr`, the value deployK3s
+   * reads. @type {string}
+   */
   static DEFAULT_VPC_CIDR = '';
 
-  /** Compose-only: no k8s program/image literal to byte-match. @type {string} */
-  static K8S_IMAGE = '';
+  /**
+   * The k8s node image: os_id 2760, "Ubuntu 26.04 LTS x64" (public
+   * GET /v2/os), the compose image. A string for interface parity;
+   * vultr-k8s.js and the autoscaler's createServer convert with Number().
+   * @type {string}
+   */
+  static K8S_IMAGE = '2760';
 
-  // ── k8s statics — compose-only, provider-specific throws ────────────────
+  /**
+   * vultr-k8s.js declares no operator rule (SSH 22, the Kubernetes API
+   * 6443): those are REST's, as the k8s-ha replication rule is, so each rule
+   * of the group has one writer (see BaseProvider). @type {boolean}
+   */
+  static K8S_OPERATOR_RULES_AFTER_UP = true;
 
-  /** @returns {Promise<never>} */
-  static async getK8sMasterUserData() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * A deploy that failed partway (the reserved IP and VPC made, the master
+   * never ready) can leave the reserved IP, VPC, firewall group and SSH key
+   * outside what `pulumi destroy` removes, as on DigitalOcean and Linode, so
+   * destroy also removes them by name, address and label
+   * (sweepK8sBackstopTargets, destroy.js). @type {boolean}
+   */
+  static K8S_DESTROY_BACKSTOP = true;
+
+  /**
+   * Vultr block volumes carry no tags, so a detached `pvc-*` volume in the
+   * cluster's region could be any cluster's: destroy reports one no capture
+   * names instead of deleting it (BaseProvider.ORPHAN_VOLUME_REGION_GUESS).
+   * @type {boolean}
+   */
+  static ORPHAN_VOLUME_REGION_GUESS = false;
+
+  // ── k8s boot user-data (carbon/cloud-init/k3s/vultr-*-init.sh) ──────────
+
+  /**
+   * Render the k3s master boot script. No API token: deployK3s hands the
+   * CSI driver's credential to the cluster itself (applyCloudSecrets,
+   * k8sCloudSecrets). No project tag either: Vultr block volumes take no
+   * tags.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   * }} vars - The caller's whole share of the template's var set. The
+   *   rest, the CSI install's image rewrites (`csi_image_rewrites`), is
+   *   added here, from src/lib/images.js.
+   * @returns {Promise<string>}
+   */
+  static async getK8sMasterUserData(vars) {
+    const { csiImageRewriteVars, loadCloudInit, renderScript } = await import(
+      '../iac/cloud-init.js'
+    );
+    return renderScript(loadCloudInit('vultr-master-init.sh'), {
+      ...vars,
+      ...csiImageRewriteVars('vultr'),
+    });
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sWorkerUserData() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s worker boot script.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - master_ip is the master's private (VPC) IP.
+   * @returns {Promise<string>}
+   */
+  static async getK8sWorkerUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('vultr-worker-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sDbUserData() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s database-node boot script: the worker script loaded as
+   * the db role, which adds the dedicated=db label and taint at join time
+   * (AGENT_ROLES in cloud-init.js).
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - Same set as getK8sWorkerUserData.
+   * @returns {Promise<string>}
+   */
+  static async getK8sDbUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('vultr-worker-init.sh', { role: 'db' }), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sProgram() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  // ── k8s program ─────────────────────────────────────────────────────────
+
+  /**
+   * Lazily build the Pulumi Automation-API program for a single Vultr k3s
+   * cluster (dynamic import, never top-level).
+   * @param {import('../iac/programs/vultr-k8s.js').K8sStackConfig} config
+   * @returns {Promise<() => Promise<{masterIp: string, masterId: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   */
+  static async getK8sProgram(config) {
+    const { buildVultrK8sProgram } = await import('../iac/programs/vultr-k8s.js');
+    return buildVultrK8sProgram(config);
   }
 
   // ── Compose-tier replacement-server identity ────────────────────────────
@@ -417,7 +673,8 @@ export class VultrProvider extends BaseProvider {
   /**
    * The static HA standby pair — conventional pairs, then same-continent,
    * mirroring the sibling providers' contract (contract-tested for every
-   * region even while compose-only).
+   * region). lax pairs with sjc, which the k8s tiers cannot use:
+   * cheapestStandbyRegion gives that pair way to a partner that can.
    * @param {string} primaryRegion
    * @returns {string} the static pair, before prices
    */
@@ -507,14 +764,24 @@ export class VultrProvider extends BaseProvider {
    * @param {string|number} [config.sshKeyId] - single-entry fallback
    * @param {object} [config.labels]
    * @param {string} [config.userData] - RAW cloud-init YAML; base64'd here
-   * @param {(string|number)[]} [config.networks] - interface parity; Vultr
-   *   compose instances join no VPC (documented no-op)
+   * @param {(string|number)[]} [config.networks] - VPC ids; each becomes
+   *   `attach_vpc` (the autoscaler passes the cluster VPC; compose passes none)
    * @param {(string|number)[]} [config.firewalls]
    * @returns {Promise<{id: string, server: object, reused?: boolean}>}
    */
   async createServer(config) {
-    const { name, region, serverType, image, sshKeys, sshKeyId, labels, userData, firewalls } =
-      config;
+    const {
+      name,
+      region,
+      serverType,
+      image,
+      sshKeys,
+      sshKeyId,
+      labels,
+      userData,
+      firewalls,
+      networks,
+    } = config;
 
     const [existing] = await this.findServersByName(name);
     if (existing) {
@@ -543,8 +810,18 @@ export class VultrProvider extends BaseProvider {
       sshkey_id: resolvedSshKeys,
       tags: encodeLabels(labels),
     };
+    // A hostname is one DNS label, at most 63 characters. A longer name (a
+    // 63-character project's `-prod-db-new` scale replacement) keeps Vultr's
+    // default hostname rather than failing the create; k8s boot scripts set
+    // their own with hostnamectl anyway.
+    if (name.length <= 63) {
+      body.hostname = name;
+    }
     if (userData) {
       body.user_data = Buffer.from(userData, 'utf-8').toString('base64');
+    }
+    if (Array.isArray(networks) && networks.length > 0) {
+      body.attach_vpc = networks.map(String);
     }
     if (fwList.length === 1) {
       body.firewall_group_id = String(fwList[0]);
@@ -763,9 +1040,10 @@ export class VultrProvider extends BaseProvider {
    * Look up a firewall GROUP by its exact description (Vultr's identity
    * field for groups). The returned object is AUGMENTED with `rules` (the
    * group's inbound rule list, fetched here) so
-   * buildReplicationFirewallRules/applyOperatorCidrs can operate on it —
+   * buildReplicationFirewallRules/applyOperatorCidrs can operate on it:
    * Vultr keeps rules as separate sub-resources, unlike the siblings'
-   * embedded rule arrays.
+   * embedded rule arrays. `rulesComplete` is false when that listing broke
+   * off; both rule builders then refuse (requireCompleteRules).
    * @param {string} name
    * @returns {Promise<object|null>}
    */
@@ -776,33 +1054,54 @@ export class VultrProvider extends BaseProvider {
     if (!group) return null;
 
     const rulesWalk = await this._walkCursor(`/firewalls/${group.id}/rules`, 'firewall_rules');
-    return { ...group, rules: rulesWalk.items };
+    return { ...group, rules: rulesWalk.items, rulesComplete: rulesWalk.complete };
   }
 
   /**
-   * Replace a firewall group's INBOUND rule set. Vultr has NO replace-all
-   * endpoint and rules are immutable sub-resources — the only faithful
-   * implementation of the cross-provider "total inbound replace" contract
-   * is delete-then-recreate. Ordering safety: a group with fewer/no rules
-   * DENIES inbound (Vultr firewall groups are default-deny), so the
-   * transient mid-replace state locks DOWN, never exposes — the same
-   * fail-closed direction every sibling's atomic replace guarantees.
+   * Make a firewall group's INBOUND rules the given set, as a minimal diff.
+   * Vultr has no replace-all endpoint and its rules are immutable
+   * sub-resources with their own ids, so this lists the live rules, creates
+   * the ones the set adds, then deletes the ones it drops. A rule the set
+   * keeps keeps its id, so the rules a k8s program owns (vultr-k8s.js: the
+   * web and the VPC) are where its next refresh looks for them, and a REST
+   * writer (applyOperatorCidrs, the replication rule) changes only its own.
+   *
+   * Creates go first because Vultr does not enforce a group with no rules:
+   * an empty group lets every packet in. So the group never empties on the
+   * way (between the creates and the deletes it holds both sets, the old
+   * one's addresses still let in for those few calls), and an empty set is
+   * refused on a group that has rules (on one with none it is already
+   * true, and nothing is done). It ends where the delete-all-then-recreate
+   * it took over from ended: the group holds exactly the set given.
+   *
+   * A rule is matched on the fields Vultr refuses to repeat (ip_type,
+   * protocol, the network, port; vultrRuleKey, which compares the network
+   * canonically): a set naming one twice makes it once, and a live rule
+   * matching one keeps its notes.
+   *
+   * Every caller builds the set from an earlier read of the group, and
+   * other writers change the group's rules between that read and this
+   * write: the replication rule from a parallel HA step, an access push
+   * from another terminal. Handed that read as `basis`, this deletes only
+   * the rules the read held and the set drops, so a rule made since is
+   * kept. Without one it deletes every live rule the set lacks.
    * @param {string} firewallId - group id
-   * @param {object[]} rules - full replacement INBOUND rule list, Vultr
-   *   shape: {ip_type, protocol, port, subnet, subnet_size, notes?}
+   * @param {object[]} rules - full INBOUND rule set, Vultr shape
+   *   {ip_type, protocol, port, subnet, subnet_size, notes?}; read rows work
+   * @param {{rules?: object[]}} [basis] - the group as findFirewallByName
+   *   read it, the read `rules` was built from
    * @returns {Promise<void>}
    */
-  async setFirewallRules(firewallId, rules) {
+  async setFirewallRules(firewallId, rules, basis) {
     // Project every row to the documented create shape BEFORE the first
-    // delete. Both in-repo rule builders (buildReplicationFirewallRules,
+    // write. Both in-repo rule builders (buildReplicationFirewallRules,
     // applyOperatorCidrs) recycle rows read back from the rules listing,
     // and the READ shape carries fields the create endpoint rejects —
     // `source: "0.0.0.0/0"` draws "Invalid source group" (live v2 RCA
     // 2026-08-19: deletes succeeded, recreates 400'd, both HA firewalls
-    // were left holding only the WG rule and 443 went dark). Because this
-    // replace is delete-then-recreate, a row that cannot be recreated must
-    // abort HERE, while the live rules are still intact.
-    const toCreate = rules.map((r) => {
+    // were left holding only the WG rule and 443 went dark). A row that
+    // cannot be created must abort HERE, while the live rules are intact.
+    const wanted = rules.map((r) => {
       for (const key of ['ip_type', 'protocol', 'subnet']) {
         if (r[key] === undefined || r[key] === null || r[key] === '') {
           throw new Error(
@@ -833,18 +1132,38 @@ export class VultrProvider extends BaseProvider {
         `Vultr firewall ${firewallId} rules listing incomplete, refusing a partial replace`,
       );
     }
+    // An empty set on a group with no rules is already true: a deploy killed
+    // between the group's create and its first rule's leaves one, and the
+    // retry's access push finds nothing to write. On a group with rules it
+    // would delete them all.
+    if (wanted.length === 0) {
+      if (existing.items.length === 0) return;
+      throw new Error(
+        `Refusing to delete every rule of Vultr firewall ${firewallId}: Vultr does not ` +
+          'enforce a group with none, so its servers would take traffic on every port.',
+      );
+    }
 
+    const target = new Map(wanted.map((r) => [vultrRuleKey(r), r]));
+    // The rules this write may drop: those the caller's read held. One made
+    // since is another writer's, so it stays.
+    const read = basis ? new Set((basis.rules || []).map(vultrRuleKey)) : null;
+    const live = new Map();
+    const dropped = [];
     for (const rule of existing.items) {
-      const res = await this.bareRequest(`/firewalls/${firewallId}/rules/${rule.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok && res.status !== 404) {
-        const body = await res.text().catch(() => '');
-        throw new Error(`Vultr firewall rule delete failed (${res.status}): ${body}`);
+      const key = vultrRuleKey(rule);
+      if (target.has(key)) {
+        // A second live rule with the same fields (Vultr refuses to make
+        // one, so only a race leaves it) goes: the first still lets it in.
+        if (live.has(key)) dropped.push(rule);
+        else live.set(key, rule);
+      } else if (!read || read.has(key)) {
+        dropped.push(rule);
       }
     }
 
-    for (const rule of toCreate) {
+    for (const [key, rule] of target) {
+      if (live.has(key)) continue;
       const res = await this.apiRequest(`/firewalls/${firewallId}/rules`, {
         method: 'POST',
         body: JSON.stringify(rule),
@@ -855,6 +1174,16 @@ export class VultrProvider extends BaseProvider {
           `Vultr firewall rule create failed: ${error.error || 'unknown error'} ` +
             `(rule ${JSON.stringify(rule)})`,
         );
+      }
+    }
+
+    for (const rule of dropped) {
+      const res = await this.bareRequest(`/firewalls/${firewallId}/rules/${rule.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok && res.status !== 404) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Vultr firewall rule delete failed (${res.status}): ${body}`);
       }
     }
   }
@@ -870,6 +1199,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {object[]|null}
    */
   buildReplicationFirewallRules(firewall, peerIp) {
+    requireCompleteRules(firewall);
     const rules = replaceWireguardPeerRules(firewall.rules || [], peerIp, {
       isWireguardRule: (r) => r.protocol === 'udp' && String(r.port) === WG_PORT,
       admitsOnlyPeer: (r, ip) => r.subnet === ip && Number(r.subnet_size) === 32,
@@ -888,24 +1218,39 @@ export class VultrProvider extends BaseProvider {
    * list, deleting any tcp/5432 or tcp/6543 rule (RETIRED_DB_PORTS), and
    * leaving every other rule unchanged. Vultr keeps one subnet per
    * rule, so each locked port gets one rule PER CIDR (the same expansion
-   * the compose program applies at create time).
-   * @param {{firewallName: string, cidrs: string[]}} args
+   * the compose program applies at create time). The ports rewritten are
+   * the locked ones the group has rules on, plus `ports`: a k8s cluster's
+   * group has neither 22 nor 6443 until the deploy writes them after its up
+   * (writeOperatorRulesAfterUp, K8S_OPERATOR_RULES_AFTER_UP). The write is
+   * setFirewallRules' minimal diff, so an unchanged rule keeps its id, and
+   * it is handed this read, so a rule another writer made since stays. A
+   * group whose rules listing broke off is refused (requireCompleteRules).
+   * @param {{firewallName: string, cidrs: string[], ports?: string[]}} args
    * @returns {Promise<boolean>} true if found and updated
    */
-  async applyOperatorCidrs({ firewallName, cidrs }) {
+  async applyOperatorCidrs({ firewallName, cidrs, ports = [] }) {
+    for (const port of ports) {
+      if (!OPERATOR_LOCKED_PORTS.has(String(port))) {
+        throw new Error(
+          `Port ${port} is not an operator port (${[...OPERATOR_LOCKED_PORTS].join(', ')})`,
+        );
+      }
+    }
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
+    requireCompleteRules(fw);
 
     const kept = (fw.rules || [])
       .filter((r) => !(r.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(String(r.port))))
       .filter((r) => !(r.protocol === 'tcp' && RETIRED_DB_PORTS.has(String(r.port))))
       .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
-      ...new Set(
-        (fw.rules || [])
+      ...new Set([
+        ...(fw.rules || [])
           .filter((r) => r.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(String(r.port)))
           .map((r) => String(r.port)),
-      ),
+        ...ports.map(String),
+      ]),
     ];
     const rebuilt = lockedPorts.flatMap((port) =>
       cidrs.map((cidr) => ({
@@ -916,7 +1261,7 @@ export class VultrProvider extends BaseProvider {
       })),
     );
 
-    await this.setFirewallRules(fw.id, [...kept, ...rebuilt]);
+    await this.setFirewallRules(fw.id, [...kept, ...rebuilt], fw);
     return true;
   }
 
@@ -955,13 +1300,224 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
-   * List ALL VPCs (soft-fail []) — never provisioned by the compose tier,
-   * enumerated so a future tier's leak can't hide behind a stub.
+   * List ALL VPCs (soft-fail []). The k8s tiers make one per stack,
+   * described `${clusterName}-network` (vultr-k8s.js); `name` is the
+   * provider-neutral identity callers match on (autoscaler groups.js,
+   * destroy.js), and Vultr calls it `description`. The compose tier makes
+   * none.
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const { items, status } = await this._walkCursor('/vpcs', 'vpcs');
-    return status === undefined ? items.map((n) => ({ ...n, name: n.description })) : [];
+    const { items, status } = await this.listNetworksDetailed();
+    return status === undefined ? items : [];
+  }
+
+  /**
+   * listNetworks with the walk's completeness signal, for a caller that must
+   * not read part of the list as the whole (deleteVpcByName).
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async listNetworksDetailed() {
+    const { items, complete, status } = await this._walkCursor('/vpcs', 'vpcs');
+    return { items: items.map((n) => ({ ...n, name: n.description })), complete, status };
+  }
+
+  /**
+   * Delete a VPC by its exact description (listNetworks' `name`). Vultr
+   * refuses while an instance is still attached to it; that comes back as
+   * `apiError` (an ordering bug in the caller), never as a not-found
+   * (deleteVpcByName).
+   * @param {string} name
+   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   * @throws when the VPC listing cannot be read whole (deleteVpcByName)
+   */
+  async deleteNetworkByName(name) {
+    return deleteVpcByName(this, name);
+  }
+
+  /**
+   * Every reserved IP on the account (cursor walk of GET /reserved-ips).
+   * An account past the walk's guard is not read in full, and a partial
+   * listing must not pass for the whole: destroy reads an address missing
+   * from it as already released (reservedIpLabelMatch).
+   * @returns {Promise<Array<{id: string, subnet: string, label?: string, instance_id?: string, region?: string}>>}
+   *   `subnet` is the address
+   * @throws when a page cannot be read, or there are more pages than the guard reads
+   */
+  async _listReservedIps() {
+    const { items, complete, status } = await this._walkCursor('/reserved-ips', 'reserved_ips');
+    if (status !== undefined) throw new Error(`GET /reserved-ips failed: HTTP ${status}`);
+    if (complete) return items;
+    throw new Error(
+      `the Vultr account has more reserved IPs than vibecarbon reads (${WALK_MAX_PAGES * WALK_PAGE_SIZE})`,
+    );
+  }
+
+  /**
+   * Delete one listed reserved IP by its id, answered as a ReservedIpRelease:
+   * 2xx or 404 is released, a 4xx is a refusal (still held), and any other
+   * status, a 5xx that outlasted fetchWithRetry's retries, proves nothing
+   * either way (deleteRefused).
+   * @param {{id: string}} ip
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
+   */
+  async _deleteReservedIp(ip) {
+    const response = await this.bareRequest(`/reserved-ips/${ip.id}`, { method: 'DELETE' });
+    if (response.ok || response.status === 404) return { released: true };
+    return {
+      released: false,
+      held: deleteRefused(response.status) ? true : null,
+      region: null,
+      reason: deleteFailure(VultrProvider.NAME, response.status),
+    };
+  }
+
+  /**
+   * Release a reserved IP by address, answered as a ReservedIpRelease
+   * (providers/base.js) so destroy reads every provider one way. Vultr
+   * deletes by id, so this lists and matches `subnet` (the address) first;
+   * an address the account no longer holds is already released. One still
+   * assigned to an instance is refused here, with no delete sent: an address
+   * is never taken off a running server, whoever asks.
+   * @param {string} address
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
+   * @throws when the listing cannot be read whole
+   */
+  async deleteReservedIpByAddress(address) {
+    const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
+    if (!ip) return { released: true };
+    const holder = reservedIpHolder(ip);
+    if (holder) {
+      return {
+        released: false,
+        held: true,
+        region: null,
+        reason: `it is still assigned to ${holder}`,
+      };
+    }
+    return this._deleteReservedIp(ip);
+  }
+
+  /**
+   * What holds a reserved IP labelled for `labels`, and whether it is
+   * theirs. vultr-k8s.js tags every instance with the stack's project and
+   * environment (encodeLabel), so the instance an IP of theirs is assigned to
+   * carries both. One that does not is someone else's, whatever the IP's
+   * label says, and the address is never released or reported as held by
+   * this stack. An instance Vultr no longer lists (404) holds it on its way
+   * out, so the IP stays this stack's and held.
+   * @param {{instance_id?: string|null}} ip
+   * @param {{project: string, environment: string}} labels
+   * @returns {Promise<{holder: string|null, foreign: string|null}>}
+   *   holder names the instance, null when unassigned; foreign, when set,
+   *   says whose that instance is instead
+   * @throws when the instance cannot be read
+   */
+  async _reservedIpHolder(ip, labels) {
+    const holder = reservedIpHolder(ip);
+    if (!holder) return { holder: null, foreign: null };
+    let instance;
+    try {
+      instance = await this.getServer(ip.instance_id);
+    } catch (err) {
+      if (err.status === 404) return { holder, foreign: null };
+      const why = err.status ? `HTTP ${err.status}` : err.message;
+      throw new Error(`Vultr did not answer for ${holder}, which holds it (${why})`);
+    }
+    const { project, environment } = decodeLabels(instance?.tags);
+    if (project === labels.project && environment === labels.environment) {
+      return { holder, foreign: null };
+    }
+    const whose = project
+      ? `project ${project}, environment ${environment ?? 'none'}`
+      : 'no vibecarbon project';
+    return { holder, foreign: `held by ${holder}, which is ${whose}` };
+  }
+
+  /**
+   * Whether the reserved IP at `address` is still this project's and
+   * environment's: its label is exactly reservedIpLabel(labels), and the
+   * instance it is assigned to, if any, carries the same project and
+   * environment tags (_reservedIpHolder). Destroy asks before it releases an
+   * address saved at deploy time: a released address can be reissued to
+   * another account or project by then, and one of ours still assigned to an
+   * instance the teardown did not delete must never be taken off it. Labels
+   * that are not exactly a project and an environment match nothing. `tags`
+   * is the IP's label, the one attribution it carries, and what its holder
+   * carries when that is someone else's.
+   * @param {string} address
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
+   *   found is false when the account holds no reserved IP at that address;
+   *   holder names the instance the address is assigned to, null when unassigned
+   * @throws when the listing, or the instance holding a labelled one, cannot be read
+   */
+  async reservedIpLabelMatch(address, labels) {
+    const wanted = reservedIpLabel(labels);
+    const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
+    if (!ip) return { found: false };
+    const tags = ip.label ? [ip.label] : [];
+    if (wanted === null || ip.label !== wanted) {
+      return { found: true, matches: false, tags, holder: reservedIpHolder(ip) };
+    }
+    const { holder, foreign } = await this._reservedIpHolder(ip, labels);
+    if (foreign) return { found: true, matches: false, tags: [...tags, foreign], holder };
+    return { found: true, matches: true, tags, holder };
+  }
+
+  /**
+   * Release every reserved IP labelled for this project and environment:
+   * its label is exactly reservedIpLabel(labels), never a prefix match, so
+   * another environment's or project's IP is never touched. A label without
+   * a value is refused (sweepLabels), and so is any key set other than
+   * exactly project and environment, which a Vultr IP's one label cannot
+   * prove. One assigned to an instance is never deleted: if that instance
+   * carries this stack's tags it is one the teardown did not delete, and the
+   * IP is reported held; if it carries anyone else's, the IP is not this
+   * stack's and is left out (_reservedIpHolder).
+   * @param {Object<string,string>} labels
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
+   * @throws when the labels are refused (before any read), or the listing cannot be read whole
+   */
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
+    const scope = Object.fromEntries(sweepLabels(labels));
+    const wanted = reservedIpLabel(scope);
+    if (wanted === null) {
+      throw new Error(
+        `refusing to sweep Vultr reserved IPs by ${Object.keys(labels).join(', ')}: a Vultr ` +
+          'reserved IP carries one label and no tags, so it is found only by project and ' +
+          'environment, and nothing was listed or released',
+      );
+    }
+    const skip = new Set(except);
+    const matches = (await this._listReservedIps()).filter(
+      (ip) => ip.label === wanted && !skip.has(ip.subnet),
+    );
+    const deleted = [];
+    const failed = [];
+    for (const ip of matches) {
+      let held;
+      try {
+        held = await this._reservedIpHolder(ip, scope);
+      } catch (err) {
+        failed.push({ address: ip.subnet, held: null, reason: err.message });
+        continue;
+      }
+      if (held.foreign) continue;
+      if (held.holder) {
+        failed.push({
+          address: ip.subnet,
+          held: true,
+          reason: `it is still assigned to ${held.holder}, which was not deleted`,
+        });
+        continue;
+      }
+      const outcome = await this._deleteReservedIp(ip);
+      if (outcome.released) deleted.push(ip.subnet);
+      else failed.push({ address: ip.subnet, held: outcome.held, reason: outcome.reason });
+    }
+    return { deleted, failed };
   }
 
   /**
@@ -1002,13 +1558,15 @@ export class VultrProvider extends BaseProvider {
   // ── Destroy-sweep field accessors ───────────────────────────────────────
 
   /**
-   * Compose-tier Vultr instances join no VPC — always [] (VPC attribution
-   * lives on the VPC side of Vultr's API anyway).
-   * @param {object} _server
+   * VPC ids the instance is attached to: Vultr's instance object lists them
+   * as `vpcs: [{id, subnet}]` (govultr Instance.VPCs). [] for an instance in
+   * no VPC (every compose instance).
+   * @param {object} server
    * @returns {string[]}
    */
-  serverNetworkIds(_server) {
-    return [];
+  serverNetworkIds(server) {
+    // govultr PR #481 (Vultr's, merged 2026-10-22): Instance.VPCs `json:"vpcs"`, each {id, subnet}.
+    return Array.isArray(server?.vpcs) ? server.vpcs.map((v) => v.id) : [];
   }
 
   /**
@@ -1047,6 +1605,16 @@ export class VultrProvider extends BaseProvider {
    */
   volumeAttachedServerIds(volume) {
     return volume.attached_to_instance ? [volume.attached_to_instance] : [];
+  }
+
+  /**
+   * Vultr names a block volume with `label`; a CSI volume's is its request
+   * name, `pvc-<16 hex>` (vultr-csi).
+   * @param {object} volume
+   * @returns {string|null}
+   */
+  volumeName(volume) {
+    return volume.label ?? null;
   }
 
   /**

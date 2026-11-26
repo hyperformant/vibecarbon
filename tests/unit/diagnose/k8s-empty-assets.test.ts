@@ -17,7 +17,7 @@ vi.mock('node:child_process', async (orig) => {
 });
 
 import { diagnoseK8s } from '../../../src/diagnose.js';
-import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 type Call = { cmd: string; args: string[] };
@@ -61,9 +61,9 @@ const valueAfter = (args: string[], flag: string) => {
   return i === -1 ? undefined : args[i + 1];
 };
 
-const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
-  (P as { SUPPORTED_TIERS: string[] }).SUPPORTED_TIERS.includes('k8s'),
-) as Array<[string, { NAME: string; K8S_ASSETS: Record<string, string> }]>;
+const K8S_PROVIDERS = k8sCensusProviders() as unknown as Array<
+  [string, { NAME: string; K8S_ASSETS: Record<string, string> }]
+>;
 
 beforeEach(() => {
   execFileSyncMock.mockClear();

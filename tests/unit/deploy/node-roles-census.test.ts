@@ -119,7 +119,12 @@ describe('worker nodes are picked by label', () => {
     const sts = readRepoFile('carbon/k8s/base/db/statefulset.yaml');
     expect(sts).toMatch(/nodeSelector:\s*\n\s+dedicated: db/);
     // Every provider's db node: its worker script loaded as the db role.
-    for (const script of ['worker-init.sh', 'do-worker-init.sh', 'linode-worker-init.sh']) {
+    for (const script of [
+      'worker-init.sh',
+      'do-worker-init.sh',
+      'linode-worker-init.sh',
+      'vultr-worker-init.sh',
+    ]) {
       const text = loadCloudInit(script, { role: 'db' });
       expect(text, script).toContain('--node-label="dedicated=db"');
     }

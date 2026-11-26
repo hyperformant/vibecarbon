@@ -15,17 +15,20 @@
  * channel is about to publish), control plane only, and the kubectl on this
  * machine, the one a deploy runs.
  *
- * For every provider with a k8s tier, the cloud controller and CSI driver
- * manifests its boot script applies are applied here from the same URLs, so
- * the workloads that read the token are upstream's own, and what they read
- * is held to the census's record of it (tests/_shared/cloud-secret-readers.ts).
- * Then each test starts from what an old master has: the old boot script's
- * Secret commands (tests/_shared/legacy-master-init-secrets.ts) run on the
- * node, and no workload carries a restart. The tests of what a deploy
+ * For every provider with a k8s tier, or with one built ahead of it
+ * (k8sCensusProviders), the cloud controller and CSI driver manifests its
+ * boot script applies are applied here from the same URLs, so the workloads
+ * that read the token are upstream's own, and what they read is held to the
+ * census's record of it (tests/_shared/cloud-secret-readers.ts). Then each
+ * test starts from what an old master has: the old boot script's Secret
+ * commands (tests/_shared/legacy-master-init-secrets.ts) run on the node,
+ * none where the boot scripts never wrote one (NO_LEGACY_BOOT_SECRETS), and
+ * no workload carries a restart. The tests of what a deploy
  * removes also run the old GitOps deploy.yml's step
  * (tests/_shared/legacy-gitops-secrets.ts) with this machine's kubectl, as a
  * runner did, on every provider: it wrote kube-system/hcloud whatever the
- * provider, and nothing on a DigitalOcean or Linode cluster reads it. applyCloudSecrets runs from here.
+ * provider, and nothing on a DigitalOcean, Linode or Vultr cluster reads it.
+ * applyCloudSecrets runs from here.
  * It must take the Secrets over with exactly the keys it writes, delete the
  * Secrets it no longer writes (and never call a retired key kept that the
  * takeover itself dropped, though something reads it), and leave no
@@ -50,15 +53,18 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { applyCloudSecrets, CLOUD_SECRETS_APPLY_ARGV } from '../../../src/lib/deploy/k8s/k3s.js';
 import { renderScript } from '../../../src/lib/iac/cloud-init.js';
 import { k3sVersion } from '../../../src/lib/images.js';
-import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import {
   CLOUD_SECRET_READERS,
   manifestUrls,
   type SecretRef,
 } from '../../_shared/cloud-secret-readers.js';
 import { dockerRunner, dockerTierSkip, sleepSync } from '../../_shared/docker-sync.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
-import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
+import {
+  LEGACY_MASTER_INIT_SECRETS,
+  NO_LEGACY_BOOT_SECRETS,
+} from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
@@ -90,9 +96,7 @@ const READERS: Record<string, string[]> = Object.fromEntries(
   ]),
 );
 
-const K8S_PROVIDERS = Object.entries(PROVIDERS).filter(([, P]) =>
-  P.SUPPORTED_TIERS.includes('k8s'),
-);
+const K8S_PROVIDERS = k8sCensusProviders();
 
 const { run, must } = dockerRunner({ timeoutMs: LONG });
 
@@ -267,7 +271,12 @@ describe.skipIf(SKIPPED)(
     describe.each(K8S_PROVIDERS)('%s', (providerId, Provider) => {
       let script: string;
       let installed: Workload[];
-      const legacy = masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[providerId]);
+      /** The manifest URLs applied so far, in order. */
+      const applied: string[] = [];
+      // A provider whose boot scripts never wrote a Secret leaves none to take over.
+      const legacy = NO_LEGACY_BOOT_SECRETS.includes(providerId)
+        ? []
+        : masterInitSecrets(LEGACY_MASTER_INIT_SECRETS[providerId]);
       const gitops = legacyGitopsSecrets();
 
       // What the boot script installs besides the Secrets: upstream's cloud
@@ -279,6 +288,7 @@ describe.skipIf(SKIPPED)(
         const before = new Set(workloads().map(id));
         for (const url of urls) {
           kube(['apply', '-f', url]);
+          applied.push(url);
           // A later manifest may hold objects of a CRD this one created. By
           // name: `crd --all` fails outright while k3s has registered none
           // of its own yet.
@@ -298,12 +308,17 @@ describe.skipIf(SKIPPED)(
         }
       }, LONG);
 
-      // Each provider's cluster runs only its own controllers: Hetzner's
-      // read kube-system/hcloud, which a DigitalOcean or Linode deploy must
-      // find nothing reading before it removes the old deploy.yml's copy.
+      // Each provider's cluster holds only its own manifests' objects, as a
+      // real one does, so everything they made goes, last applied first (a
+      // CRD's objects before the CRD). Its controllers: Hetzner's read
+      // kube-system/hcloud, which a DigitalOcean, Linode or Vultr deploy must
+      // find nothing reading before it removes the old deploy.yml's copy. And
+      // its cluster-scoped objects: two drivers can name one alike with an
+      // immutable field that differs (Linode's and Vultr's
+      // csi-controller-attacher-binding, each bound to its own ClusterRole).
       afterAll(() => {
-        if (installed?.length > 0) {
-          kube(['-n', 'kube-system', 'delete', ...installed.map(id), '--ignore-not-found']);
+        for (const url of [...applied].reverse()) {
+          kube(['delete', '-f', url, '--ignore-not-found', '--timeout=120s']);
         }
       }, LONG);
 
@@ -399,7 +414,8 @@ describe.skipIf(SKIPPED)(
         expect(secretRefs(installed)).toEqual(byJson(CLOUD_SECRET_READERS[providerId].refs));
       });
 
-      it(
+      // Nothing to take over where the boot scripts never wrote a Secret.
+      it.runIf(legacy.length > 0)(
         'takes over what the old boot script made, with no conflict, keeps only what it writes, and restarts nothing',
         async () => {
           oldMaster();
@@ -449,6 +465,9 @@ describe.skipIf(SKIPPED)(
         'replaces a rotated token, with no conflict, and restarts exactly what reads it',
         async () => {
           oldMaster();
+          // Where no boot script wrote one, an earlier deploy handed it over.
+          // A new Secret restarts nothing.
+          if (legacy.length === 0) await hand(BOOT_TOKEN);
           await hand(ROTATED_TOKEN);
           for (const { namespace, name, stringData } of expected(ROTATED_TOKEN)) {
             expect(read(namespace, name).data).toEqual(stringData);
@@ -499,15 +518,17 @@ describe.skipIf(SKIPPED)(
                 )
                 .join('\n---\n'),
             );
-          ssa(
-            legacy.map(({ namespace, name, keys }) => ({
-              namespace,
-              name,
-              stringData: Object.fromEntries(
-                Object.entries(keys).map(([key, variable]) => [key, bootValue(variable)]),
-              ),
-            })),
-          );
+          if (legacy.length > 0) {
+            ssa(
+              legacy.map(({ namespace, name, keys }) => ({
+                namespace,
+                name,
+                stringData: Object.fromEntries(
+                  Object.entries(keys).map(([key, variable]) => [key, bootValue(variable)]),
+                ),
+              })),
+            );
+          }
           // And a project on GitOps: the old deploy.yml's step ran too.
           oldGitopsStep();
           // The premise: an apply of only what the CLI writes now leaves both.

@@ -185,14 +185,14 @@ describe('VultrProvider.applyOperatorCidrs scrubs retired DB-port rules', () => 
     },
   ];
 
-  it('deletes every live rule, then recreates the set without 5432/6543', async () => {
+  it('creates the new SSH rule, then deletes the old one and the 5432/6543 rules, keeping the rest', async () => {
     const provider = new VultrProvider('tok');
-    const deletes: string[] = [];
+    const calls: Call[] = [];
     fetchWithRetryMock.mockImplementation(async (url: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET';
-      if (method === 'DELETE') {
-        deletes.push(url);
-        return { ok: true, status: 204 };
+      if (method === 'DELETE' || method === 'POST') {
+        calls.push({ url, method, ...(init?.body ? { body: String(init.body) } : {}) });
+        return method === 'POST' ? jsonResp({}, 201) : { ok: true, status: 204 };
       }
       if (/\/firewalls\?per_page/.test(url)) {
         return jsonResp({
@@ -205,14 +205,6 @@ describe('VultrProvider.applyOperatorCidrs scrubs retired DB-port rules', () => 
       }
       return jsonResp({}, 404);
     });
-    const posts: unknown[] = [];
-    vi.spyOn(provider, 'apiRequest').mockImplementation(
-      async (path: string, opts?: RequestInit) => {
-        expect(path).toBe('/firewalls/gid-1/rules');
-        posts.push(JSON.parse(String(opts?.body)));
-        return { ok: true, json: async () => ({}) } as Response;
-      },
-    );
 
     const updated = await provider.applyOperatorCidrs({
       firewallName: 'proj-prod-firewall',
@@ -220,34 +212,24 @@ describe('VultrProvider.applyOperatorCidrs scrubs retired DB-port rules', () => 
     });
 
     expect(updated).toBe(true);
-    expect(deletes).toEqual(
-      [1, 2, 3, 4, 5].map((id) => `https://api.vultr.com/v2/firewalls/gid-1/rules/${id}`),
-    );
-    expect(posts).toEqual([
+    // HTTPS (2) and the WireGuard rule (5) are kept as they are, ids and all.
+    expect(calls).toEqual([
       {
-        ip_type: 'v4',
-        protocol: 'tcp',
-        subnet: '0.0.0.0',
-        subnet_size: 0,
-        port: '443',
-        notes: 'https',
+        url: 'https://api.vultr.com/v2/firewalls/gid-1/rules',
+        method: 'POST',
+        body: JSON.stringify({
+          ip_type: 'v4',
+          protocol: 'tcp',
+          subnet: '1.2.3.4',
+          subnet_size: 32,
+          port: '22',
+          notes: 'operator-22',
+        }),
       },
-      {
-        ip_type: 'v4',
-        protocol: 'udp',
-        subnet: '5.5.5.5',
-        subnet_size: 32,
-        port: '51821',
-        notes: 'wg-replication',
-      },
-      {
-        ip_type: 'v4',
-        protocol: 'tcp',
-        subnet: '1.2.3.4',
-        subnet_size: 32,
-        port: '22',
-        notes: 'operator-22',
-      },
+      ...[1, 3, 4].map((id) => ({
+        url: `https://api.vultr.com/v2/firewalls/gid-1/rules/${id}`,
+        method: 'DELETE',
+      })),
     ]);
   });
 });

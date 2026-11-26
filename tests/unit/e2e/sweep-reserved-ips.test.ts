@@ -6,7 +6,8 @@
  * Until this file they were pinned by source text only
  * (sweep-reserved-ip-coverage.test.ts); these tests run them.
  *
- *   - Vultr deletes a reserved IP whose label starts with the project name.
+ *   - Vultr deletes a reserved IP whose label names a project starting with
+ *     the scratch prefix (reservedIpLabel).
  *   - DigitalOcean and Linode cannot attribute an unassigned reserved IP, so
  *     they delete nothing, report it and mark the sweep incomplete.
  */
@@ -97,13 +98,16 @@ describe('Vultr sweep: reserved IPs', () => {
     return { ...result, deleted: api.deleted, warned: out.warned(), logged: out.logged() };
   };
   const listing = (rows: Json[]) => ({ reserved_ips: rows, ...vultrEmpty });
+  const OURS = `project:${PROJECT}:environment:prod`;
 
-  it('deletes the one whose label starts with the project name and leaves the others', async () => {
+  it("deletes the one whose label names this run's project and leaves the others", async () => {
     const { counts, enumFailed, deleted } = await run({
       listing: listing([
-        { id: 'rip-1', label: `${PROJECT}-prod-ingress`, subnet: '203.0.113.7' },
-        { id: 'rip-2', label: 'someone-elses-ingress', subnet: '203.0.113.8' },
+        { id: 'rip-1', label: OURS, subnet: '203.0.113.7' },
+        { id: 'rip-2', label: 'project:someone-else:environment:prod', subnet: '203.0.113.8' },
         { id: 'rip-3', subnet: '203.0.113.9' },
+        // Starts with the project name, but names no project: not ours.
+        { id: 'rip-4', label: `${PROJECT}-prod-ingress`, subnet: '203.0.113.10' },
       ]),
     });
     expect(deleted).toEqual(['/v2/reserved-ips/rip-1']);
@@ -113,7 +117,7 @@ describe('Vultr sweep: reserved IPs', () => {
 
   it('a sweep that deleted only a reserved IP reports a destroy regression, not a clean run', async () => {
     const { warned, logged } = await run({
-      listing: listing([{ id: 'rip-1', label: `${PROJECT}-prod-ingress` }]),
+      listing: listing([{ id: 'rip-1', label: OURS }]),
     });
     expect(warned).toContain('REGRESSION: destroy left 1 Vultr orphan resource(s)');
     expect(warned).toContain('reserved-ips=1');
@@ -122,7 +126,7 @@ describe('Vultr sweep: reserved IPs', () => {
 
   it('a 404 on delete counts as swept (already released)', async () => {
     const { counts, enumFailed } = await run({
-      listing: listing([{ id: 'rip-1', label: `${PROJECT}-prod-ingress` }]),
+      listing: listing([{ id: 'rip-1', label: OURS }]),
       deleteStatus: 404,
     });
     expect(counts.floatingIps).toBe(1);
@@ -131,12 +135,12 @@ describe('Vultr sweep: reserved IPs', () => {
 
   it('a refused delete is not counted and fails the sweep', async () => {
     const { counts, enumFailed, warned } = await run({
-      listing: listing([{ id: 'rip-1', label: `${PROJECT}-prod-ingress` }]),
+      listing: listing([{ id: 'rip-1', label: OURS }]),
       deleteStatus: 500,
     });
     expect(counts.floatingIps).toBe(0);
     expect(enumFailed).toBe(true);
-    expect(warned).toContain(`Reserved IP ${PROJECT}-prod-ingress delete failed (500)`);
+    expect(warned).toContain(`Reserved IP ${OURS} delete failed (500)`);
   });
 
   it('an unreadable listing marks the sweep incomplete', async () => {

@@ -27,8 +27,8 @@ import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import * as rpc from '@pulumi/pulumi/runtime/rpc.js';
 import { describe, expect, it } from 'vitest';
-import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
@@ -56,6 +56,9 @@ pulumi.runtime.setMocks(
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
           ipAddress: ip,
           address: ip,
+          mainIp: ip,
+          internalIp: `10.10.0.${counter % 250}`,
+          subnet: ip,
         },
       };
     },
@@ -102,9 +105,11 @@ function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: bo
   };
 }
 
-const k8sProviders = Object.entries(PROVIDERS as unknown as Record<string, K8sProvider>).filter(
-  ([, P]) => P.SUPPORTED_TIERS.includes('k8s'),
-);
+/**
+ * Whose boot scripts are walked and whose programs are run: the k8s providers
+ * and those built ahead of their tier.
+ */
+const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
 
 describe('the k3s boot scripts take no credential but the k3s join token', () => {
   const scripts = readdirSync(K3S_DIR)

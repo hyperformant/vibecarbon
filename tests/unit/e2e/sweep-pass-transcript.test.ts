@@ -359,10 +359,10 @@ const CLOUDS: Cloud[] = [
         },
         '/v2/reserved-ips': {
           reserved_ips: [
-            { id: 'r-1', label: `${P}-ingress`, subnet: '203.0.113.7' },
-            { id: 'r-2', label: `${P}-ingress-gone` },
-            { id: 'r-3', label: `${P}-ingress-refused` },
-            { id: 'r-4', label: 'someone-elses-ingress' },
+            { id: 'r-1', label: `project:${P}:environment:e1`, subnet: '203.0.113.7' },
+            { id: 'r-2', label: `project:${P}:environment:gone` },
+            { id: 'r-3', label: `project:${P}:environment:refused` },
+            { id: 'r-4', label: 'project:someone-else:environment:e1' },
             { id: 'r-5' },
           ],
           ...vultrEnd,
@@ -411,8 +411,8 @@ const CLOUDS: Cloud[] = [
         },
         '/v2/reserved-ips': {
           reserved_ips: [
-            { id: 'r-1', label: `${P}-ingress` },
-            { id: 'r-2', label: `${P}-ingress-2` },
+            { id: 'r-1', label: `project:${P}:environment:e1` },
+            { id: 'r-2', label: `project:${P}:environment:e2` },
           ],
           ...vultrEnd,
         },

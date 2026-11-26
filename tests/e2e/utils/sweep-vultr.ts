@@ -32,9 +32,10 @@
  *
  * CSI-volume safety (Hetzner RCA 2026-07-18): a pvc-* volume is only
  * deleted when its decoded tags carry project=<projectName>. An untagged
- * unattached pvc-* volume is REPORTED, never deleted. Compose-tier Vultr
- * deploys create no block storage at all — this rule is future-proofing for
- * the k8s tier, kept now so the family stays uniform.
+ * unattached pvc-* volume is REPORTED, never deleted. Vultr block storage
+ * takes no tags, so every k8s CSI volume (`pvc-<16 hex>`) is reported here;
+ * `vibecarbon destroy` deletes them by the ids it captured from the
+ * cluster's PersistentVolumes. Compose-tier deploys create no block storage.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
 import { walkProviderPages } from './provider-pages.js';
@@ -257,9 +258,14 @@ export async function sweepOrphanedVultrResources(
   // the compose tier and became false the moment the k8s tier landed: the
   // ledger then reported zero meaning "never looked", not "found none".
   //
-  // Attribution is the `label` the program sets (`<cluster>-ingress`), same
-  // prefix contract as every other pass here. An unlabelled or foreign IP is
+  // Attribution is the `label` the program sets,
+  // `project:<project>:environment:<environment>` (reservedIpLabel): its
+  // project carries the scratch prefix, the same prefix contract as every
+  // other pass here. An unlabelled IP, or one labelled any other way, is
   // never touched.
+  const { reservedIpLabelOwner } = (await import('../../../src/lib/providers/vultr.js')) as {
+    reservedIpLabelOwner: (label?: string) => { project: string; environment: string } | null;
+  };
   await sweepClass(sweep, {
     listing: 'reserved-ip list',
     cleanupFailed: 'Reserved IP cleanup failed',
@@ -269,7 +275,7 @@ export async function sweepOrphanedVultrResources(
         '/reserved-ips',
         'reserved_ips',
       ),
-    owned: (ip) => !!ip.label?.startsWith(projectName),
+    owned: (ip) => !!reservedIpLabelOwner(ip.label)?.project.startsWith(projectName),
     announce: (ip) => `Deleting orphaned reserved IP ${ip.label} (${ip.subnet ?? ip.id})`,
     remove: async (ip) => {
       const res = await fetchImpl(`${API_BASE}/reserved-ips/${ip.id}`, { method: 'DELETE' });
@@ -291,8 +297,9 @@ export async function sweepOrphanedVultrResources(
       `SSH key ${sshKey.name} delete failed`,
   });
 
-  // 4. Load balancers + VPCs — never provisioned by the compose tier, but
-  // enumerated so a future tier's leak can't hide behind a stub (same
+  // 4. Load balancers + VPCs. No tier provisions a load balancer; the k8s
+  // tiers make one VPC per stack (`<cluster>-network`), the compose tier
+  // none. Both are enumerated so a leak can't hide behind a stub (same
   // reasoning as the Linode sweep's listNetworks doc).
   // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
   // method answers [] when the API call fails (its contract for destroy), so

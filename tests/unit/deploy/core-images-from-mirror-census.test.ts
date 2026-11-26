@@ -346,12 +346,17 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   const SNIPPET = 'carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml';
   // [label, script] for every provider's master, worker and db node. The db
   // node boots its provider's worker script loaded as the db role.
-  const ROLE_SCRIPTS = ['', 'do-', 'linode-'].flatMap((p) => [
+  const ROLE_SCRIPTS = ['', 'do-', 'linode-', 'vultr-'].flatMap((p) => [
     [`${p}master-init.sh`, loadCloudInit(`${p}master-init.sh`)],
     [`${p}worker-init.sh`, loadCloudInit(`${p}worker-init.sh`)],
     [`${p}worker-init.sh as the db node`, loadCloudInit(`${p}worker-init.sh`, { role: 'db' })],
   ]);
-  const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh', 'linode-master-init.sh'];
+  const SERVER_SCRIPTS = [
+    'master-init.sh',
+    'do-master-init.sh',
+    'linode-master-init.sh',
+    'vultr-master-init.sh',
+  ];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
     const k3sVersion = readRepoFile('src/lib/images.js').match(/K3S_VERSION = '([^']+)'/)?.[1];

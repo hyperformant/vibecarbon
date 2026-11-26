@@ -32,6 +32,7 @@
  *     stderr, warn-and-continue form (`shell`, `diagnose`, `status`)
  */
 
+import { ipv4ToInt, ipv6ToBigInt } from './cidr.js';
 import { readProjectConfigFile, updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
@@ -131,36 +132,6 @@ export function cidrContainsIp(cidr, ip, version) {
   if (bits === 128) return baseNum === ipNum;
   const shift = BigInt(128 - bits);
   return baseNum >> shift === ipNum >> shift;
-}
-
-function ipv4ToInt(ip) {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return null;
-  let n = 0;
-  for (const p of parts) {
-    const num = Number(p);
-    if (!Number.isInteger(num) || num < 0 || num > 255) return null;
-    n = (n << 8) | num;
-  }
-  return n >>> 0;
-}
-
-function ipv6ToBigInt(ip) {
-  const halves = ip.split('::');
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(':') : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
-  if (head.length + tail.length > 8) return null;
-  if (halves.length === 1 && head.length !== 8) return null;
-  const fillCount = halves.length === 2 ? 8 - head.length - tail.length : 0;
-  const groups = [...head, ...new Array(fillCount).fill('0'), ...tail];
-  if (groups.length !== 8) return null;
-  let result = 0n;
-  for (const g of groups) {
-    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
-    result = (result << 16n) | BigInt(Number.parseInt(g, 16));
-  }
-  return result;
 }
 
 // ============================================================================
@@ -417,6 +388,63 @@ export async function pushOperatorCidrs({
     if (inMemory) inMemory.operatorCidrsPushed = pushed;
   }
   return updated;
+}
+
+/** The operator ports a k8s cluster's firewall carries: SSH and the Kubernetes API. */
+const K8S_OPERATOR_PORTS = ['22', '6443'];
+
+/**
+ * Write the operator rules (SSH, and the Kubernetes API) onto a k8s
+ * cluster's firewall right after the infra up, on a provider whose k8s
+ * program leaves them to REST (K8S_OPERATOR_RULES_AFTER_UP, BaseProvider),
+ * so each rule has one writer. A fresh cluster's firewall there has
+ * neither, so the deploy's first ssh could not get in. deployK3s calls this
+ * after every up of its infra step, before it waits for k3s; on a firewall
+ * that has them already it writes nothing (the provider's write is a
+ * minimal diff). Every other provider's program writes them itself, and
+ * this does nothing there.
+ *
+ * Not recorded (`operatorCidrsPushed`), as no provider's program-made rules
+ * are: a first deploy has no environment record yet. The next command's
+ * gate pushes once, which changes nothing on the firewall.
+ *
+ * @param {object} o
+ * @param {typeof import('./providers/base.js').BaseProvider & { K8S_OPERATOR_RULES_AFTER_UP: boolean }} o.Provider
+ *   the cluster's provider class
+ * @param {string | null | undefined} o.apiToken that provider's token
+ * @param {string} o.projectName
+ * @param {string} o.stackName the cluster's stack: the environment, or one k8s-ha side
+ * @param {Array<{cidr: string}>} o.operatorCidrs the list the program was given
+ * @returns {Promise<boolean>} true when written; false on a provider that does not opt in
+ */
+export async function writeOperatorRulesAfterUp({
+  Provider,
+  apiToken,
+  projectName,
+  stackName,
+  operatorCidrs,
+}) {
+  if (!Provider.K8S_OPERATOR_RULES_AFTER_UP) return false;
+  const cidrs = operatorCidrs.map((e) => e.cidr);
+  if (cidrs.length === 0) {
+    throw new Error(
+      'Refusing to write the operator rules from an empty CIDR list (it would let no operator in).',
+    );
+  }
+  const name = firewallName(projectName, stackName);
+  const written = await new Provider(apiToken).applyOperatorCidrs({
+    firewallName: name,
+    cidrs,
+    ports: K8S_OPERATOR_PORTS,
+  });
+  if (!written) {
+    throw new Error(
+      `The up made this cluster's firewall, ${name}, but ${Provider.NAME} does not list it, ` +
+        "so the operator's SSH and Kubernetes API rules could not be written. " +
+        'Run the deploy again: it writes them after the up.',
+    );
+  }
+  return true;
 }
 
 /**

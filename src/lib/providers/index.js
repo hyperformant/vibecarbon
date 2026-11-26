@@ -3,8 +3,8 @@
  *
  * Provides a unified interface for accessing cloud providers.
  * Providers differ only by which deploy tiers they implement, never by
- * standing: Hetzner, DigitalOcean and Linode cover all four, and
- * Vultr/Scaleway are compose-only (see assertTierSupported below).
+ * standing: Hetzner, DigitalOcean, Linode and Vultr cover all four, and
+ * Scaleway is compose-only (see assertTierSupported below).
  * No provider is a default or gates a release.
  *
  * To add a new provider:

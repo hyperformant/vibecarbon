@@ -21,8 +21,9 @@
  *
  * Attribution differs, so the correct handling differs, and that asymmetry is
  * deliberate rather than an oversight:
- *   - Vultr labels its reserved IP (`<cluster>-ingress`) -> prefix-matched and
- *     DELETED, like every other Vultr pass.
+ *   - Vultr labels its reserved IP with its project and environment
+ *     (reservedIpLabel) -> the project prefix-matched and DELETED, like every
+ *     other Vultr pass.
  *   - DigitalOcean and Linode attach no name or tag, so an UNASSIGNED one
  *     cannot be attributed from the API. Deleting it could destroy someone's
  *     production address, so it is REPORTED and the sweep marked incomplete.
@@ -64,7 +65,7 @@ describe('reserved-IP sweep coverage', () => {
     // Vultr is the one that can attribute, so it must actually reap.
     const c = code('vultr');
     expect(c).toMatch(/reserved-ips/);
-    expect(c).toMatch(/label\?\.startsWith\(projectName\)/);
+    expect(c).toMatch(/reservedIpLabelOwner\(ip\.label\)\?\.project\.startsWith\(projectName\)/);
     expect(c).toMatch(/method: 'DELETE'/);
     // The pass counts through sweepClass (sweep-core.ts) under this class.
     expect(c).toMatch(

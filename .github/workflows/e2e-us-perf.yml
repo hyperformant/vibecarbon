@@ -236,13 +236,13 @@ jobs:
           # for ensureProjectAssignment, so CI runs file droplets into the
           # standing project instead of find-or-creating one per run.
           DIGITALOCEAN_PROJECT_ID: ${{ vars.DIGITALOCEAN_PROJECT_ID }}
-          # Linode (linode/compose scenario). Same empty-until-configured
+          # Linode (the linode compose, k8s and k8s-ha scenarios). Same empty-until-configured
           # contract as the DigitalOcean pair above.
           LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
           LINODE_ACCESS_KEY: ${{ secrets.LINODE_ACCESS_KEY }}
           LINODE_SECRET_KEY: ${{ secrets.LINODE_SECRET_KEY }}
           LINODE_STORAGE_REGION: ${{ secrets.LINODE_STORAGE_REGION }}
-          # Vultr (vultr/compose scenario). Same empty-until-configured
+          # Vultr (the vultr compose, k8s and k8s-ha scenarios). Same empty-until-configured
           # contract. The REGION is the subscription's object-storage CLUSTER
           # slug and is part of the required set, not an override — see the
           # prerequisite block at the top of this file.

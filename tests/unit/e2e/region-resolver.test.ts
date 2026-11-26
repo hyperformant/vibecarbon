@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import { testConfig } from '../../config.js';
 import {
   type CapacityPreferences,
   deployedScaleTarget,
@@ -94,6 +96,22 @@ describe('resolveCapacity', () => {
     const fetchSpy = vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(true);
     await resolveCapacity(HETZNER, 'tok', { mode: 'compose' });
     expect(fetchSpy).toHaveBeenCalledWith('tok');
+  });
+
+  it('a k8s resolve skips a region the provider runs no Kubernetes in', async () => {
+    // Vultr sells no NVMe block storage in sjc, so a k8s deploy there stops
+    // at the region gate (VultrProvider.k8sRegionProblem). With ewr and ord
+    // out, the e2e list reaches sjc next: compose takes it, k8s goes on to lax.
+    restore = seedCatalog(VultrProvider, '2026-10-22/vultr');
+    const prefs = testConfig.e2e.capacityPreferences.vultr as unknown as CapacityPreferences;
+    const opts = {
+      provider: 'vultr' as const,
+      excludeRegions: ['ewr', 'ord'],
+      loadCatalog: seeded,
+    };
+    expect((await resolveCapacity(prefs, 't', { ...opts, mode: 'k8s' })).region).toBe('lax');
+    expect((await resolveCapacity(prefs, 't', { ...opts, mode: 'k8s-ha' })).region).toBe('lax');
+    expect((await resolveCapacity(prefs, 't', { ...opts, mode: 'compose' })).region).toBe('sjc');
   });
 
   it('lists what it tried when no region fits', async () => {
