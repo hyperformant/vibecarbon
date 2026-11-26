@@ -294,13 +294,13 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | DigitalOcean | `compose` | 2m 27s | 24.4s | 4.6s | 2m 23s | 2m 20s | 26.4s | — |
 | | `k8s` | 3m 9s | 10.6s | 34.0s | 1m 30s | 2m 20s | 1m 9s | — |
 | | `k8s-ha` | 3m 19s | 21.5s | 45.1s | 1m 53s | 4m 8s | 1m 26s | 2m 58s |
-| Linode | `compose` | 3m 6s | 20.6s | 4.4s | 4m 31s | 3m 34s | 11.8s | — |
-| | `k8s` | 4m 51s | 8.1s | 28.6s | 1m 17s | 9m 22s | 1m 24s | — |
-| | `k8s-ha` | 5m 32s | 21.9s | 12.6s | 2m 18s | 18m 22s | 1m 24s | 3m 22s |
+| Linode | `compose` | 3m 36s | 23.6s | 4.6s | 3m 49s | 4m 31s | 14.5s | — |
+| | `k8s` | 5m 2s | 8.6s | 44.5s | 1m 35s | 8m 36s | 1m 22s | — |
+| | `k8s-ha` | 5m 12s | 21.2s | 17.7s | 2m 12s | 15m 40s | 1m 30s | 4m 1s |
 | Vultr | `compose` | 2m 46s | 16.4s | 6.7s | 2m 42s | 4m 11s | 20.6s | — |
 | Scaleway | `compose` | 2m 27s | 17.5s | 5.6s | 2m 12s | 2m 30s | 21.3s | — |
 
-_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `f7fac70` (2026-11-20) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `c7cfa3a` (2026-11-26) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
