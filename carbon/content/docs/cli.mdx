@@ -922,8 +922,10 @@ so you can click through. Does NOT auto-open a browser.
 ## access
 
 Manage the operator-CIDR allowlist that locks SSH (port 22) and the Kubernetes
-API (port 6443) on the cloud firewall. The allowlist push assumes one provider
-per project and targets the Hetzner Cloud firewall today.
+API (port 6443) on each environment's cloud firewall. Every environment is
+pushed with its own provider's API token, so a project can mix providers, and
+`add`, `remove` and `prune` need the token of every deployed environment, set in
+your shell or the project's `.env.local`.
 
 {/* BEGIN GENERATED: flags access */}
 _No flags beyond -h and -v._
@@ -943,16 +945,21 @@ vibecarbon access remove 5.6.7.8/32
 vibecarbon access prune
 ```
 
-Every interactive command that needs SSH or k8s-API access (`deploy`, `shell`,
-`diagnose`, `scale`, `failover`, `backup`, `restore`, `destroy`, `update`) auto-detects the
-operator's public IP, persists it under `operatorCidrs` in `.vibecarbon.json`,
-and patches the live firewall via the environment's provider API. Subsequent
-commands from the same IP are silent.
+Every command that needs SSH or k8s-API access (`deploy`, `shell`, `diagnose`,
+`scale`, `failover`, `backup`, `restore`, `destroy`, `update`) auto-detects the
+operator's public IP and persists it under `operatorCidrs` in
+`.vibecarbon.json`. When the environment's firewall was last pushed a list
+without it (its `operatorCidrsPushed` record), the command pushes the saved list
+through the environment's provider API. Once the record holds your address,
+later commands from it push nothing, and refresh its `lastUsedAt` at most once
+a day. A push sends the whole saved list, so run commands from an up-to-date
+checkout: a list that is behind would re-open an entry someone removed.
 
-**Non-interactive (`-y`) flows do *not* auto-detect**. CI runners have
-ephemeral IPs that would pollute the list. Either commit a populated
-`operatorCidrs` to `.vibecarbon.json` or set
-`ALLOWED_SSH_IPS="1.2.3.4/32,5.6.7.8/32"` once on the first deploy.
+**A `-y` run under CI does *not* auto-detect** (CI sets `CI=true`), since CI
+runners have ephemeral IPs that would pollute the list. A `-y` run outside CI
+still detects. In CI, either commit a populated `operatorCidrs` to
+`.vibecarbon.json` or set `ALLOWED_SSH_IPS="1.2.3.4/32,5.6.7.8/32"` once on the
+first deploy.
 
 If you somehow lock yourself out (no Hetzner API token, API unreachable), use
 [`vibecarbon console <node>`](#console): Hetzner's web VNC bypasses the
