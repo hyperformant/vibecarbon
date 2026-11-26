@@ -3934,6 +3934,8 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
  * that stack. Deriving these from the USER-FACING environment instead (the
  * pre-d4 shape) named a cluster that never existed on k8s-ha — both real
  * per-stack firewalls/VPCs and BOTH reserved IPs leaked every HA destroy.
+ * `clusterName` itself goes too: an autoscaled worker carries it as its
+ * `cluster` label (K8S_AUTOSCALED_WORKER_IPS).
  *
  * - `reservedIps` are recorded floating/reserved IPs only (`floatingIp`,
  *   never `ingressIp`), so the backstop never releases a master's own
@@ -3954,7 +3956,7 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
  *   accepts each), and it is released once, by the first.
  *
  * @param {{plan: {tier: string, stackEnvs: string[]}, envConfig: object, projectConfig: {projectName: string}}} args
- * @returns {Array<{stackEnv: string, firewallName: string, sshKeyName: string|null, reservedIps: Array<{address: string, stacks: string[]}>, networkName: string}>}
+ * @returns {Array<{stackEnv: string, clusterName: string, firewallName: string, sshKeyName: string|null, reservedIps: Array<{address: string, stacks: string[]}>, networkName: string}>}
  */
 export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
   const isHA = isHATier(plan.tier);
@@ -3987,6 +3989,7 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
     const clusterName = `${projectConfig.projectName}-${stackEnv}`;
     return {
       stackEnv,
+      clusterName,
       firewallName: `${clusterName}-firewall`,
       sshKeyName: !isHA && envConfig.region ? `${clusterName}-${envConfig.region}-key` : null,
       reservedIps: [...stacksOf]
@@ -4206,15 +4209,20 @@ async function releaseRecordedReservedIp({
  * pending create) and out of .vibecarbon.json, and it bills until released.
  *
  * Scoped to exactly this project and this stack, never the project alone:
- * another environment's IP, or another project's, is never touched.
+ * another environment's IP, or another project's, is never touched. `labels`
+ * replaces the two for an IP labelled otherwise: an autoscaled worker's
+ * carries its cluster and its stack's environment, and no project
+ * (sweepK8sBackstopTargets).
  * `except` names addresses the record already names, which the address path
  * (releaseRecordedReservedIp) handles. One found here that is not released is
  * kept on record like any other of ours, so the next destroy retries it.
  * Exported for unit testing.
  *
- * @param {{provider: object, projectName: string, stackEnv: string, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string, args?: {purgeBackups?: boolean}}} params
+ * @param {{provider: object, projectName: string, stackEnv: string, labels?: Object<string,string>, except?: string[], results: object, s: {start: Function, stop: Function}, environment: string, args?: {purgeBackups?: boolean}}} params
  *   `stackEnv`: the stack's environment label (k8s-ha: `<env>-primary` or
  *   `<env>-standby`; compose and single k8s: the environment).
+ *   `labels`: what the IP carries, `{ project, environment: stackEnv }`
+ *   unless given.
  *   `environment`: as the operator names it, and `args`, this destroy's
  *   flags, for the retry line (retryDestroyCommand).
  * @returns {Promise<boolean>} whether it released any
@@ -4223,6 +4231,7 @@ export async function sweepTaggedReservedIps({
   provider,
   projectName,
   stackEnv,
+  labels = { project: projectName, environment: stackEnv },
   except = [],
   results,
   s,
@@ -4231,13 +4240,12 @@ export async function sweepTaggedReservedIps({
 }) {
   const Provider = provider.constructor;
   const noun = Provider.RESERVED_IP_NAME ?? 'reserved IP';
-  const scope = `project ${projectName}, environment ${stackEnv}`;
+  const scope = Object.entries(labels)
+    .map(([key, value]) => `${key} ${value}`)
+    .join(', ');
   s.start(`Looking for ${Provider.NAME} ${noun}s labelled ${scope}`);
   try {
-    const swept = await provider.deleteReservedIpsByLabels(
-      { project: projectName, environment: stackEnv },
-      { except },
-    );
+    const swept = await provider.deleteReservedIpsByLabels(labels, { except });
     s.stop(
       swept.deleted.length > 0
         ? `Released by label (backstop): ${swept.deleted.join(', ')}`
@@ -4301,6 +4309,13 @@ export async function sweepTaggedReservedIps({
  * - On every provider whose reserved IPs carry the program's labels
  *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr, Scaleway): the IPs labelled for the
  *   stack that no record names (sweepTaggedReservedIps), before the VPC.
+ * - On a provider with `K8S_AUTOSCALED_WORKER_IPS` (Scaleway), whose
+ *   autoscaled workers each get an IP labelled with the worker's labels (its
+ *   cluster and environment, no project): those too, by the stack's cluster
+ *   name and environment. deleteServer releases each with its worker; this
+ *   finds one whose release failed. The cluster name embeds the project, and
+ *   the environment tells apart two stacks whose names join to the same
+ *   cluster name. One still attached follows the same holder rule.
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
@@ -4342,17 +4357,19 @@ export async function sweepK8sBackstopTargets({
       for (const stackEnv of removedOf) swept.add(stackEnv);
     }
     if (byLabel) {
-      const released = await sweepTaggedReservedIps({
-        provider,
-        projectName,
-        stackEnv: target.stackEnv,
-        except: recorded,
-        results,
-        s,
-        environment,
-        args,
-      });
-      if (released) swept.add(target.stackEnv);
+      const byStack = { provider, projectName, stackEnv: target.stackEnv, except: recorded };
+      const rest = { results, s, environment, args };
+      if (await sweepTaggedReservedIps({ ...byStack, ...rest })) swept.add(target.stackEnv);
+      if (
+        Provider.K8S_AUTOSCALED_WORKER_IPS === true &&
+        (await sweepTaggedReservedIps({
+          ...byStack,
+          labels: { cluster: target.clusterName, environment: target.stackEnv },
+          ...rest,
+        }))
+      ) {
+        swept.add(target.stackEnv);
+      }
     }
     if (byName && (await deleteBackstopNetwork({ provider, target, results, s, projectName }))) {
       swept.add(target.stackEnv);

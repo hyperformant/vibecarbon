@@ -66,6 +66,7 @@ const Provider = {
   assertAmd64ServerType: (type: string, source: string) =>
     HetznerProvider.assertAmd64ServerType(type, source),
   K8S_ASSETS: { csiNodeDaemonSet: 'daemonset/hcloud-csi-node' },
+  k8sAutoscalerEnv: () => HetznerProvider.k8sAutoscalerEnv(),
 };
 
 // A master resize on a single cluster: no CA re-patch, no HA tunnel. The

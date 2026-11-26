@@ -163,6 +163,7 @@ describe.each(rows)(
         targets: [
           {
             stackEnv: 'prod',
+            clusterName: 'proj-prod',
             firewallName: 'proj-prod-firewall',
             sshKeyName: null,
             reservedIps: [],

@@ -199,6 +199,16 @@ function serverZoneError(failure, serverId, refusedIn) {
 }
 
 /**
+ * An answer Scaleway refused, as an Error: `HTTP <status>: <message>`.
+ * @param {Response} res
+ * @returns {Promise<Error>}
+ */
+async function refusal(res) {
+  const error = await res.json().catch(() => ({}));
+  return new Error(`HTTP ${res.status}: ${error.message || 'Unknown error'}`);
+}
+
+/**
  * The server a flexible IP is attached to, as destroy names it
  * (`server <name> (<id>)`), or null when it is attached to none.
  * @param {{server?: {id: string, name?: string}|null}} ip
@@ -684,6 +694,14 @@ export class ScalewayProvider extends BaseProvider {
    * (sweepK8sBackstopTargets, destroy.js). @type {boolean}
    */
   static K8S_DESTROY_BACKSTOP = true;
+
+  /**
+   * createServer reserves a flexible IP for every server it makes, an
+   * autoscaled worker's included, tagged with the worker's labels (cluster
+   * and environment; renderCarbonAutoscalerConfig's serverLabels carry no
+   * project). See BaseProvider.K8S_AUTOSCALED_WORKER_IPS. @type {boolean}
+   */
+  static K8S_AUTOSCALED_WORKER_IPS = true;
 
   /**
    * No fixed range: scaleway-k8s.js derives a /24 per cluster
@@ -1174,10 +1192,15 @@ export class ScalewayProvider extends BaseProvider {
    *
    * Each `networks` entry is a Private Network the server joins before it
    * boots: an autoscaled k8s worker's boot script waits for that NIC (MAC
-   * prefix 02:00:00) and gives up without it. An attach Scaleway refuses
-   * leaves nothing behind: the server is deleted, its flexible IP with it,
-   * as when the IP cannot be reserved. The body sends no hostname; Scaleway
-   * takes the server's name.
+   * prefix 02:00:00) and gives up without it. The body sends no hostname;
+   * Scaleway takes the server's name.
+   *
+   * Any step after the server exists that fails, refused by Scaleway or a
+   * request that threw after fetchWithRetry's retries, deletes the server
+   * through deleteServer (which releases its flexible IP) and throws, naming
+   * the step. A delete that fails too is named in the same error: that
+   * server is left behind, and destroy's sweep of the cluster's autoscaled
+   * workers (by their labels) is what removes it.
    *
    * @param {object} config
    * @param {string} config.name
@@ -1253,67 +1276,67 @@ export class ScalewayProvider extends BaseProvider {
     this._zoneCache ??= new Map();
     this._zoneCache.set(server.id, region);
 
-    // User data is a keyed sub-resource; the cloud-init payload lives
-    // under the `cloud-init` key, PLAIN TEXT (no base64/gzip leg — hence
-    // the ASCII guard). Must be written BEFORE first boot.
-    if (userData) {
-      const udRes = await this.apiRequest(
-        `/instance/v1/zones/${region}/servers/${server.id}/user_data/cloud-init`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'text/plain' },
-          body: assertAsciiCloudInit(userData),
-        },
-      );
-      if (!udRes.ok) {
-        const detail = await udRes.text().catch(() => '');
-        throw new Error(`Scaleway user-data write failed (${udRes.status}): ${detail}`);
-      }
-    }
-
-    // Before first boot, so the server has its address when cloud-init runs.
-    // Without it the server could never be reached, so it does not stay.
-    const ipRes = await this.apiRequest(`/instance/v1/zones/${region}/ips`, {
-      method: 'POST',
-      body: JSON.stringify({
-        project: projectId,
-        type: 'routed_ipv4',
-        tags: encodeLabels(labels),
-        server: server.id,
-      }),
-    });
-    if (!ipRes.ok) {
-      const error = await ipRes.json().catch(() => ({}));
-      await this.deleteServer(server.id).catch(() => {});
-      throw new Error(`Scaleway flexible IP failed: ${error.message || 'Unknown error'}`);
-    }
-
-    // Before first boot, so the NIC is there when the boot script looks for
-    // it. A server left stopped and labelled would count as running at the
-    // autoscaler's next refresh, so a failed attach removes it.
-    for (const networkId of Array.isArray(networks) ? networks : []) {
-      const nicRes = await this.apiRequest(
-        `/instance/v1/zones/${region}/servers/${server.id}/private_nics`,
-        { method: 'POST', body: JSON.stringify({ private_network_id: String(networkId) }) },
-      );
-      if (!nicRes.ok) {
-        const error = await nicRes.json().catch(() => ({}));
-        await this.deleteServer(server.id).catch(() => {});
-        throw new Error(
-          `Scaleway Private Network attach failed for ${networkId} (HTTP ${nicRes.status}): ` +
-            `${error.message || 'Unknown error'}`,
+    // Every step from here runs on a server that exists. A server left
+    // stopped and labelled would count as running at the autoscaler's next
+    // refresh, and its flexible IP bills, so a step that fails, by an answer
+    // Scaleway refused or by a request fetchWithRetry gave up on (it throws),
+    // deletes the server, and deleteServer releases its IP.
+    let step = 'user-data write';
+    try {
+      // User data is a keyed sub-resource; the cloud-init payload lives
+      // under the `cloud-init` key, PLAIN TEXT (no base64/gzip leg — hence
+      // the ASCII guard). Must be written BEFORE first boot.
+      if (userData) {
+        const udRes = await this.apiRequest(
+          `/instance/v1/zones/${region}/servers/${server.id}/user_data/cloud-init`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'text/plain' },
+            body: assertAsciiCloudInit(userData),
+          },
         );
+        if (!udRes.ok) {
+          const detail = await udRes.text().catch(() => '');
+          throw new Error(`HTTP ${udRes.status}: ${detail}`);
+        }
       }
-    }
 
-    // Create leaves the server stopped — boot it.
-    const bootRes = await this.apiRequest(
-      `/instance/v1/zones/${region}/servers/${server.id}/action`,
-      { method: 'POST', body: JSON.stringify({ action: 'poweron' }) },
-    );
-    if (!bootRes.ok) {
-      const error = await bootRes.json().catch(() => ({}));
-      throw new Error(`Scaleway poweron failed: ${error.message || 'Unknown error'}`);
+      // Before first boot, so the server has its address when cloud-init runs.
+      step = 'flexible IP';
+      const ipRes = await this.apiRequest(`/instance/v1/zones/${region}/ips`, {
+        method: 'POST',
+        body: JSON.stringify({
+          project: projectId,
+          type: 'routed_ipv4',
+          tags: encodeLabels(labels),
+          server: server.id,
+        }),
+      });
+      if (!ipRes.ok) throw await refusal(ipRes);
+
+      // Before first boot, so the NIC is there when the boot script looks for it.
+      for (const networkId of Array.isArray(networks) ? networks : []) {
+        step = `Private Network attach for ${networkId}`;
+        const nicRes = await this.apiRequest(
+          `/instance/v1/zones/${region}/servers/${server.id}/private_nics`,
+          { method: 'POST', body: JSON.stringify({ private_network_id: String(networkId) }) },
+        );
+        if (!nicRes.ok) throw await refusal(nicRes);
+      }
+
+      // Create leaves the server stopped — boot it.
+      step = 'poweron';
+      const bootRes = await this.apiRequest(
+        `/instance/v1/zones/${region}/servers/${server.id}/action`,
+        { method: 'POST', body: JSON.stringify({ action: 'poweron' }) },
+      );
+      if (!bootRes.ok) throw await refusal(bootRes);
+    } catch (err) {
+      const cleanup = await this.deleteServer(server.id).then(
+        () => '',
+        (deleteErr) => `; deleting server ${name} failed too (${deleteErr.message})`,
+      );
+      throw new Error(`Scaleway ${step} failed: ${err.message}${cleanup}`, { cause: err });
     }
 
     return { id: server.id, server };

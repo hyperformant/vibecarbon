@@ -942,6 +942,86 @@ describe('GroupManager — network resolution', () => {
   });
 });
 
+describe('GroupManager — a lookup the cache drops is only ever its own', () => {
+  // Both lookups go through one cache (_cachedLookup): a lookup that rejects
+  // is dropped when it settles, but only while it is still the cached one. A
+  // refresh() clears the cache and the next create starts a newer lookup; the
+  // old one rejecting late must leave the newer one cached, or every create
+  // after it would start a lookup of its own.
+  it.each([
+    ['firewall', 'findFirewallByName', { id: 555 }, 'firewalls'],
+    ['network', 'listNetworks', [{ id: 555, name: 'acme-prod-network' }], 'networks'],
+  ] as const)(
+    'a %s lookup that rejects after a refresh and a newer lookup leaves the newer one cached',
+    async (_, method, found, field) => {
+      const pending: Array<{ resolve: (v: unknown) => void; reject: (e: Error) => void }> = [];
+      const lookup = vi.fn(
+        () =>
+          new Promise((resolve, reject) => {
+            pending.push({ resolve, reject });
+          }),
+      );
+      const provider = createProvider({
+        [method]: lookup,
+        createServer: vi.fn(() => new Promise(() => {})),
+      });
+      const gm = new GroupManager({
+        config: baseConfig(),
+        provider,
+        providerIdPrefix: 'testprov://',
+        log: vi.fn(),
+      });
+
+      await gm.increaseSize('worker-pool', 1); // waits on the first lookup
+      await flush();
+      await gm.refresh(); // clears the cache; the first lookup is still in flight
+      await gm.increaseSize('worker-pool', 1); // starts the second lookup
+      await flush();
+      expect(lookup).toHaveBeenCalledTimes(2);
+
+      pending[0].reject(new Error('socket hang up')); // the stale lookup settles late
+      await flush();
+      await gm.increaseSize('worker-pool', 1); // must share the second lookup
+      await flush();
+      expect(lookup).toHaveBeenCalledTimes(2);
+
+      pending[1].resolve(found);
+      await flush();
+      expect(provider.createServer.mock.calls.map((c) => c[0][field])).toEqual([[555], [555]]);
+    },
+  );
+
+  it('a failed network lookup is not remembered: the next create in the same cycle asks again', async () => {
+    const listNetworks = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('HTTP 503'))
+      .mockResolvedValue([{ id: 4242, name: 'acme-prod-network' }]);
+    const provider = createProvider({
+      listNetworks,
+      createServer: vi.fn(() => new Promise(() => {})),
+    });
+    const gm = new GroupManager({
+      config: baseConfig(),
+      provider,
+      providerIdPrefix: 'testprov://',
+      log: vi.fn(),
+    });
+
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    expect(provider.createServer).not.toHaveBeenCalled();
+    expect(gm.nodeGroupNodes('worker-pool')[0].status.errorInfo).toMatchObject({
+      errorCode: 'network-not-found',
+    });
+
+    // No refresh in between.
+    await gm.increaseSize('worker-pool', 1);
+    await flush();
+    expect(listNetworks).toHaveBeenCalledTimes(2);
+    expect(provider.createServer.mock.calls.map((c) => c[0].networks)).toEqual([[4242]]);
+  });
+});
+
 describe('GroupManager — background create/delete never reject (fire-and-forget safety)', () => {
   it('does not unhandled-reject a background create when the group is dropped from config, and marks the tracked intent failed', async () => {
     const { gm, provider } = makeGroupManager();

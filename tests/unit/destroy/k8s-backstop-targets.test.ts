@@ -31,6 +31,7 @@ describe('planK8sBackstopTargets', () => {
     expect(targets).toEqual([
       {
         stackEnv: 'e3',
+        clusterName: 'proj-e3',
         firewallName: 'proj-e3-firewall',
         sshKeyName: 'proj-e3-nyc3-key',
         reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],
@@ -64,6 +65,7 @@ describe('planK8sBackstopTargets', () => {
     expect(targets).toEqual([
       {
         stackEnv: 'e4-primary',
+        clusterName: 'proj-e4-primary',
         firewallName: 'proj-e4-primary-firewall',
         sshKeyName: null,
         reservedIps: [{ address: '203.0.113.10', stacks: ['e4-primary'] }],
@@ -71,6 +73,7 @@ describe('planK8sBackstopTargets', () => {
       },
       {
         stackEnv: 'e4-standby',
+        clusterName: 'proj-e4-standby',
         firewallName: 'proj-e4-standby-firewall',
         sshKeyName: null,
         reservedIps: [{ address: '203.0.113.20', stacks: ['e4-standby'] }],
@@ -256,6 +259,7 @@ describe.each([
     expect(planK8sBackstopTargets(single)).toEqual([
       {
         stackEnv: 'e3',
+        clusterName: 'proj-e3',
         firewallName: 'proj-e3-firewall',
         sshKeyName: `proj-e3-${region}-key`,
         reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],

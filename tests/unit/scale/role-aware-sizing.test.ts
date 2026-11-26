@@ -310,7 +310,8 @@ describe('scaleApplyK8sChanges — role-aware HA stack/region resolution', () =>
       isHA: false,
     });
 
-    expect(k8sAutoscalerEnv).toHaveBeenCalled();
+    // Read once, before anything changed, and handed to the re-patch.
+    expect(k8sAutoscalerEnv).toHaveBeenCalledTimes(1);
     const applyCall = vi
       .mocked(runCommand)
       .mock.calls.find(
@@ -322,6 +323,50 @@ describe('scaleApplyK8sChanges — role-aware HA stack/region resolution', () =>
     if (!applyCall) throw new Error('expected an `apply -f -` call with input');
     const yaml = (applyCall[1] as { input: string }).input;
     expect(yaml.split('\n')).toContain('  SCALEWAY_DEFAULT_PROJECT_ID: "proj-uuid"');
+  });
+
+  it('Scaleway without SCALEWAY_DEFAULT_PROJECT_ID: a bounds-only scale refuses before it changes or records anything', async () => {
+    const { runPlan } = await import('../../../src/lib/deploy/plan/runner.js');
+    const { planScale } = await import('../../../src/lib/deploy/plan/scale-plan.js');
+    const { ScalewayProvider } = await import('../../../src/lib/providers/scaleway.js');
+    vi.stubEnv('SCALEWAY_ACCESS_KEY', 'SCWABCDEFGHIJKLMNOPQ');
+    vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
+    delete process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    // The refusal names the variable (the clack log is silenced here).
+    expect(() => ScalewayProvider.k8sAutoscalerEnv()).toThrow('SCALEWAY_DEFAULT_PROJECT_ID');
+    const envConfig = { minWorkers: 1, maxWorkers: 3, region: 'fr-par-1' };
+    store.reset({ projectName: 'proj', environments: { prod: envConfig } });
+    try {
+      await expect(
+        runPlan(
+          planScale('k8s'),
+          {
+            ...baseApplyCtx,
+            Provider: { ...Provider, k8sAutoscalerEnv: () => ScalewayProvider.k8sAutoscalerEnv() },
+            projectConfig: { projectName: 'proj', environments: { prod: envConfig } },
+            envConfig,
+            region: 'fr-par-1',
+            secondaryRegion: undefined,
+            isHA: false,
+            apiToken: null,
+            infraChanges: [],
+            changes: ['workerBounds'],
+            newValues: { minWorkers: 1, maxWorkers: 5 },
+          },
+          SCALE_EFFECTS,
+        ),
+      ).rejects.toThrow('[step:apply-scale-changes] process.exit(1)');
+    } finally {
+      exit.mockRestore();
+      vi.unstubAllEnvs();
+    }
+
+    expect(convergeClusterInfra).not.toHaveBeenCalled();
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(store.state.writes).toEqual([]);
   });
 });
 

@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * ScalewayProvider.createServer as the carbon-autoscaler calls it for a k8s
  * worker: the server joins the cluster's Private Network before it boots,
  * because the worker's boot script waits for the 02:00:00 NIC and gives up
- * after 180 s. A failed attach leaves nothing behind: the half-made server is
- * terminated and its flexible IP released, as a failed IP reservation does.
+ * after 180 s. Any step after the create that fails, refused or a request
+ * that threw after fetchWithRetry's retries, leaves nothing behind: the
+ * half-made server is terminated and its flexible IP released.
  * Stubbed fetch, every call recorded in order.
  */
 
@@ -31,8 +32,26 @@ const jsonResp = (body: unknown, status = 200) => ({
 
 type Call = { method: string; path: string; body: Record<string, unknown> | string | null };
 
-/** One server in fr-par-1, srv-new, from POST to poweron (or teardown). */
-function wire({ nicStatus = 201 }: { nicStatus?: number } = {}) {
+/** The create steps a request can be made to throw on, as writes() names them. */
+type Step = 'write user data' | 'attach private network' | 'poweron';
+
+/**
+ * One server in fr-par-1, srv-new, from POST to poweron (or teardown).
+ * `throwOn` makes that step's request throw, as fetchWithRetry does once its
+ * retries are spent; `refuseDelete` answers both terminate and the plain
+ * DELETE with 409.
+ */
+function wire({
+  nicStatus = 201,
+  udStatus = 204,
+  refuseDelete = false,
+  throwOn,
+}: {
+  nicStatus?: number;
+  udStatus?: number;
+  refuseDelete?: boolean;
+  throwOn?: Step;
+} = {}) {
   const calls: Call[] = [];
   let terminated = false;
   let ipReleased = false;
@@ -43,6 +62,9 @@ function wire({ nicStatus = 201 }: { nicStatus?: number } = {}) {
     const u = new URL(url);
     const path = u.pathname;
     calls.push({ method, path, body });
+    if (throwOn && writes([{ method, path, body }])[0] === throwOn) {
+      throw new Error('fetch failed: ECONNRESET');
+    }
     if (method === 'GET' && path.endsWith('/servers') && u.searchParams.has('name')) {
       return jsonResp({ servers: [] });
     }
@@ -50,7 +72,7 @@ function wire({ nicStatus = 201 }: { nicStatus?: number } = {}) {
       return jsonResp({ server: { id: 'srv-new', zone: 'fr-par-1' } }, 201);
     }
     if (method === 'PATCH' && path.endsWith('/servers/srv-new/user_data/cloud-init')) {
-      return jsonResp({}, 204);
+      return jsonResp(udStatus < 300 ? {} : { message: 'bad payload' }, udStatus);
     }
     if (method === 'POST' && path === '/instance/v1/zones/fr-par-1/ips') {
       return jsonResp({ ip: { id: 'ip-new', address: '203.0.113.7' } }, 201);
@@ -60,8 +82,13 @@ function wire({ nicStatus = 201 }: { nicStatus?: number } = {}) {
         ? jsonResp({ private_nic: { id: 'nic-1', private_network_id: 'pn-uuid' } }, nicStatus)
         : jsonResp({ message: 'insufficient permissions', type: 'permissions_denied' }, nicStatus);
     }
+    if (refuseDelete && path === '/instance/v1/zones/fr-par-1/servers/srv-new') {
+      if (method === 'DELETE') return jsonResp({ message: 'server is locked' }, 409);
+    }
     if (method === 'POST' && path.endsWith('/servers/srv-new/action')) {
-      if ((body as { action?: string })?.action === 'terminate') terminated = true;
+      const { action } = (body as { action?: string }) ?? {};
+      if (refuseDelete && action === 'terminate') return jsonResp({ message: 'locked' }, 409);
+      if (action === 'terminate') terminated = true;
       return jsonResp({ task: { id: 't' } }, 202);
     }
     if (method === 'GET' && path === '/instance/v1/zones/fr-par-1/servers/srv-new') {
@@ -184,6 +211,56 @@ describe('createServer: an autoscaled worker joins the Private Network before it
     expect(done).toContain('terminate');
     expect(done).toContain('delete root volume');
     expect(done).toContain('release IP');
+  });
+
+  it.each([
+    ['user-data write', 'write user data', 'user-data write'],
+    ['Private Network attach', 'attach private network', 'Private Network attach for pn-uuid'],
+    ['poweron', 'poweron', 'poweron'],
+  ] as const)(
+    'a %s whose request throws after its retries terminates the server and releases its IP',
+    async (_, step, named) => {
+      const calls = wire({ throwOn: step });
+      const err = await new ScalewayProvider('tok')
+        .createServer({ ...worker, networks: ['pn-uuid'], firewalls: ['sg-uuid'] })
+        .catch((e: Error) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe(`Scaleway ${named} failed: fetch failed: ECONNRESET`);
+      const done = writes(calls);
+      const at = done.indexOf(step);
+      expect(at).toBeGreaterThan(0);
+      // Nothing after the failed step but the teardown.
+      expect(done.slice(at + 1)).toEqual(['terminate', 'delete root volume', 'release IP']);
+    },
+  );
+
+  it('a refused user-data write cleans up too', async () => {
+    const calls = wire({ udStatus: 400 });
+    const err = await new ScalewayProvider('tok')
+      .createServer({ ...worker, networks: ['pn-uuid'] })
+      .catch((e: Error) => e);
+
+    expect((err as Error).message).toMatch(/^Scaleway user-data write failed: HTTP 400: /);
+    expect(writes(calls)).toEqual([
+      'create server',
+      'write user data',
+      'terminate',
+      'delete root volume',
+      'release IP',
+    ]);
+  });
+
+  it('names a delete that fails too, so the leftover is never silent', async () => {
+    wire({ throwOn: 'poweron', refuseDelete: true });
+    const err = await new ScalewayProvider('tok')
+      .createServer({ ...worker, networks: ['pn-uuid'] })
+      .catch((e: Error) => e);
+
+    expect((err as Error).message).toBe(
+      'Scaleway poweron failed: fetch failed: ECONNRESET; deleting server acme-prod-ca-k3x9q2ab ' +
+        'failed too (Failed to delete server: server is locked)',
+    );
   });
 
   it('sends no hostname, whatever the name: Scaleway takes the name', async () => {

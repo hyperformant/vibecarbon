@@ -523,17 +523,105 @@ describe('sweepK8sBackstopTargets on Scaleway', () => {
     expect(byName.sshKey).toHaveBeenCalledExactlyOnceWith('proj-prod-fr-par-1-key');
     expect(byAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
     expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network', PROD);
-    // The label sweep leaves the recorded address to the address path.
-    expect(byLabel).toHaveBeenCalledExactlyOnceWith(
-      { project: 'proj', environment: 'prod' },
-      { except: ['203.0.113.7'] },
-    );
+    // Both label sweeps leave the recorded address to the address path: the
+    // program's IPs by project, then autoscaled workers' by cluster.
+    expect(byLabel.mock.calls).toEqual([
+      [{ project: 'proj', environment: 'prod' }, { except: ['203.0.113.7'] }],
+      [{ cluster: 'proj-prod', environment: 'prod' }, { except: ['203.0.113.7'] }],
+    ]);
     expect(deleteUrls()).toEqual([IP_7]);
     const networkAt = byName.network.mock.invocationCallOrder[0];
     for (const spy of [byName.firewall, byName.sshKey, byAddress, byLabel]) {
       expect(spy.mock.invocationCallOrder[0]).toBeLessThan(networkAt);
     }
     expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  /**
+   * The tags createServer gives an autoscaled worker's flexible IP and its
+   * server: renderCarbonAutoscalerConfig's serverLabels, with no project.
+   */
+  const workerTags = (cluster: string, environment: string) =>
+    scalewayLabels({
+      'cluster-autoscaler/node': 'worker-pool',
+      'managed-by': 'vibecarbon',
+      environment,
+      cluster,
+    });
+  const sweepHaPrimary = async (provider: ScalewayProvider) => {
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: planK8sBackstopTargets({
+        plan: { tier: 'k8s-ha', stackEnvs: ['prod-primary'] },
+        envConfig: { provider: 'scaleway', region: 'fr-par-1' },
+        projectConfig: { projectName: 'proj' },
+      }),
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    return results;
+  };
+
+  it("an autoscaled worker's flexible IP its delete did not release is released by its cluster and environment", async () => {
+    const { provider } = scaleway();
+    scalewayIps([
+      { id: 'ip-8', address: '203.0.113.8', tags: workerTags('proj-prod', 'prod') },
+      { id: 'ip-9', address: '203.0.113.9', tags: workerTags('proj-prod2', 'prod') },
+      { id: 'ip-10', address: '203.0.113.10', tags: workerTags('proj-prod', 'staging') },
+    ]);
+    const results = await sweepSingle(provider);
+    expect(deleteUrls()).toEqual(['https://api.scaleway.com/instance/v1/zones/fr-par-1/ips/ip-8']);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  // Project proj's k8s-ha side prod-primary and project proj-prod's
+  // environment primary are both cluster proj-prod-primary; the environment
+  // tag tells them apart.
+  it('a worker IP with the same cluster name in another environment is left alone', async () => {
+    const { provider } = scaleway();
+    scalewayIps([
+      { id: 'ip-1', address: '203.0.113.1', tags: workerTags('proj-prod-primary', 'prod-primary') },
+      { id: 'ip-2', address: '203.0.113.2', tags: workerTags('proj-prod-primary', 'primary') },
+    ]);
+    const results = await sweepHaPrimary(provider);
+    expect(deleteUrls()).toEqual(['https://api.scaleway.com/instance/v1/zones/fr-par-1/ips/ip-1']);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it("a worker IP still attached follows the holder rule: held on our worker, left out on the other environment's", async () => {
+    const { provider } = scaleway();
+    scalewayIps(
+      [
+        {
+          id: 'ip-1',
+          address: '203.0.113.1',
+          tags: workerTags('proj-prod-primary', 'prod-primary'),
+          server: { id: 'srv-1', name: 'proj-prod-primary-ca-aaaa' },
+        },
+        {
+          id: 'ip-2',
+          address: '203.0.113.2',
+          tags: workerTags('proj-prod-primary', 'prod-primary'),
+          server: { id: 'srv-2', name: 'proj-prod-primary-ca-bbbb' },
+        },
+      ],
+      {
+        'srv-1': workerTags('proj-prod-primary', 'prod-primary'),
+        'srv-2': workerTags('proj-prod-primary', 'primary'),
+      },
+    );
+    const results = await sweepHaPrimary(provider);
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries).toHaveLength(1);
+    expect(results.leaks.entries[0]).toMatchObject({ severity: 'leak', resource: '203.0.113.1' });
+    expect(results.leaks.entries[0].reason).toContain(
+      'labelled cluster proj-prod-primary, environment prod-primary not released: it is still ' +
+        'attached to server proj-prod-primary-ca-aaaa, which was not deleted',
+    );
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.1']);
   });
 
   it('a flexible IP no record names is released by its tags, and no other', async () => {
@@ -1347,6 +1435,13 @@ describe('K8S_DESTROY_BACKSTOP census', () => {
       if (id === 'hetzner') continue;
       expect(Provider.K8S_DESTROY_BACKSTOP, id).toBe(true);
     }
+  });
+
+  it("K8S_AUTOSCALED_WORKER_IPS is Scaleway's alone: no other createServer reserves a worker an IP", () => {
+    const flagged = Object.entries(PROVIDERS)
+      .filter(([, P]) => (P as { K8S_AUTOSCALED_WORKER_IPS?: boolean }).K8S_AUTOSCALED_WORKER_IPS)
+      .map(([id]) => id);
+    expect(flagged).toEqual(['scaleway']);
   });
 
   it('is set on DigitalOcean, Linode, Vultr and Scaleway', () => {

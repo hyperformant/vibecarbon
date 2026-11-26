@@ -554,6 +554,18 @@ export class BaseProvider {
   static COMPOSE_FLOATING_IP = false;
 
   /**
+   * Whether this provider's createServer gives an autoscaled k8s worker a
+   * floating (or reserved) IP of its own. Scaleway's does (a flexible IP,
+   * tagged with the worker's labels: its cluster and environment, no
+   * project); no other provider's does. deleteServer releases it with the
+   * worker; where this is true, the k8s destroy backstop also looks for one
+   * by the stack's cluster name and environment, which finds one a failed
+   * release left (sweepK8sBackstopTargets).
+   * @type {boolean}
+   */
+  static K8S_AUTOSCALED_WORKER_IPS = false;
+
+  /**
    * What the provider calls a floating or reserved IP, in destroy's lines.
    * @type {string}
    */
