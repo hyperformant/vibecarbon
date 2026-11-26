@@ -1,6 +1,7 @@
 /** The weekly read-only residue audit: classifier, summary, exit code, and the GET-only guarantee. */
 import { DeleteBucketCommand, ListBucketsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { describe, expect, it } from 'vitest';
+import { reservedIpLabel } from '../../../src/lib/providers/vultr.js';
 import { testConfig } from '../../config.js';
 import {
   auditExitCode,
@@ -92,6 +93,21 @@ describe('classify', () => {
     const tag = (ms: number) => row({ kind: 'tag', name: `project:testapp-k8s-${ms}-abc123` });
     expect(classify(tag(NOW - 2 * H), NOW)).toBe('in-flight');
     expect(classify(tag(NOW - 7 * H), NOW)).toBe('residue');
+  });
+
+  // vultr-k8s.js labels its reserved IP `project:<project>:environment:<env>`
+  // (reservedIpLabel): the audit lists that label as the row's name.
+  it("reads a Vultr reserved IP's label by the project it names", () => {
+    const ip = (project: string, createdAt: string) =>
+      row({
+        provider: 'vultr',
+        kind: 'ip',
+        name: reservedIpLabel({ project, environment: 'v1' }) as string,
+        createdAt,
+      });
+    expect(classify(ip('testapp-k8s-1731000000000-abc123', ago(7 * H)), NOW)).toBe('residue');
+    expect(classify(ip('citest-k8s-1731000000000-abc123', ago(1 * H)), NOW)).toBe('in-flight');
+    expect(classify(ip('mytestapp-site', ago(900 * H)), NOW)).toBe('other');
   });
 
   it('an undated test-shaped server with no time in its name is residue', () => {

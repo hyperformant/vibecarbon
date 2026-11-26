@@ -1470,7 +1470,16 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    return (await walkPages(this.apiToken, '/vpcs?per_page=50', 'vpcs')).items;
+    return (await this.listNetworksDetailed()).items;
+  }
+
+  /**
+   * listNetworks with the walk's completeness signal, for a caller that must
+   * not read part of the list as the whole (deleteVpcByName).
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async listNetworksDetailed() {
+    return walkPages(this.apiToken, '/vpcs?per_page=50', 'vpcs');
   }
 
   /**

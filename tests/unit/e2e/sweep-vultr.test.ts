@@ -350,8 +350,11 @@ describe('sweepOrphanedVultrResources', () => {
         { id: 'vpc-2', description: 'other-network' },
       ]),
       '/reserved-ips': list('reserved_ips', [
-        { id: 'rip-1', label: 'acme-v3-ingress', subnet: '203.0.113.7' },
-        { id: 'rip-2', label: 'other-ingress', subnet: '203.0.113.8' },
+        { id: 'rip-1', label: 'project:acme-v3:environment:prod', subnet: '203.0.113.7' },
+        { id: 'rip-2', label: 'project:other:environment:prod', subnet: '203.0.113.8' },
+        // The label the program wrote before it named its project and
+        // environment apart: never matched.
+        { id: 'rip-3', label: 'acme-v3-prod-ingress', subnet: '203.0.113.9' },
       ]),
       '/firewalls': list('firewall_groups', [
         { id: 'fw-1', description: 'acme-v3-firewall' },

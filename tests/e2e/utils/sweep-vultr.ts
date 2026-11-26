@@ -258,9 +258,14 @@ export async function sweepOrphanedVultrResources(
   // the compose tier and became false the moment the k8s tier landed: the
   // ledger then reported zero meaning "never looked", not "found none".
   //
-  // Attribution is the `label` the program sets (`<cluster>-ingress`), same
-  // prefix contract as every other pass here. An unlabelled or foreign IP is
+  // Attribution is the `label` the program sets,
+  // `project:<project>:environment:<environment>` (reservedIpLabel): its
+  // project carries the scratch prefix, the same prefix contract as every
+  // other pass here. An unlabelled IP, or one labelled any other way, is
   // never touched.
+  const { reservedIpLabelOwner } = (await import('../../../src/lib/providers/vultr.js')) as {
+    reservedIpLabelOwner: (label?: string) => { project: string; environment: string } | null;
+  };
   await sweepClass(sweep, {
     listing: 'reserved-ip list',
     cleanupFailed: 'Reserved IP cleanup failed',
@@ -270,7 +275,7 @@ export async function sweepOrphanedVultrResources(
         '/reserved-ips',
         'reserved_ips',
       ),
-    owned: (ip) => !!ip.label?.startsWith(projectName),
+    owned: (ip) => !!reservedIpLabelOwner(ip.label)?.project.startsWith(projectName),
     announce: (ip) => `Deleting orphaned reserved IP ${ip.label} (${ip.subnet ?? ip.id})`,
     remove: async (ip) => {
       const res = await fetchImpl(`${API_BASE}/reserved-ips/${ip.id}`, { method: 'DELETE' });

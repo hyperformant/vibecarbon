@@ -1366,10 +1366,19 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const { items: vpcs } = await this._walkPages('/vpcs');
+    return (await this.listNetworksDetailed()).items;
+  }
+
+  /**
+   * listNetworks with the walk's completeness signal, for a caller that must
+   * not read part of the list as the whole (deleteVpcByName).
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async listNetworksDetailed() {
+    const { items: vpcs, complete, status } = await this._walkPages('/vpcs');
     // `name` is the provider-neutral identity callers match on
     // (autoscaler groups.js, destroy.js); Linode calls it `label`.
-    return vpcs.map((v) => ({ ...v, name: v.label }));
+    return { items: vpcs.map((v) => ({ ...v, name: v.label })), complete, status };
   }
 
   /**

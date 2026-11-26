@@ -11,9 +11,11 @@
  *     the db and worker user data wait on the master's VPC address.
  *   - The ingress address is a `vultr.ReservedIp`, given to the master at
  *     create as its main IP (`reservedIpId`), so it never moves to another
- *     instance and needs no assignment resource. `reservedIpId` is ForceNew:
- *     the master is replaced delete-first, so the old instance frees the
- *     address before the new one asks for it.
+ *     instance and needs no assignment resource. `reservedIpId` is
+ *     ForceNew: the master is replaced delete-first, so the old instance
+ *     frees the address before the new one asks for it. A reserved IP takes
+ *     no tags, so its label names the stack's project and environment
+ *     (reservedIpLabel).
  *   - The firewall is a `vultr.FirewallGroup` whose rules are separate
  *     `vultr.FirewallRule` resources, one per (rule, source), as on compose
  *     (vultr-compose.js). Instances attach the group at create
@@ -41,7 +43,12 @@
 
 import * as vultr from '@ediri/vultr';
 import * as pulumi from '@pulumi/pulumi';
-import { cidrToVultrRuleFields, encodeLabels, VultrProvider } from '../../providers/vultr.js';
+import {
+  cidrToVultrRuleFields,
+  encodeLabels,
+  reservedIpLabel,
+  VultrProvider,
+} from '../../providers/vultr.js';
 import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { requireK3sToken } from '../k3s-token.js';
 import { requireOperatorCidrs, sshKeyIdOutput, stackIdentity } from '../program-inputs.js';
@@ -51,6 +58,21 @@ import { vpcCidrForCluster } from '../vpc-cidr.js';
 const K8S_NODE_NAME_MAX = 63;
 
 const INSTANCE = 'vultr:index/instance:Instance';
+
+/**
+ * The reserved IP's label for the stack's project and environment, the
+ * same two labels every instance here is tagged with.
+ * @param {Record<string, string>} labels - stackIdentity's labels
+ * @returns {string}
+ */
+function requireReservedIpLabel(labels) {
+  const label = reservedIpLabel({ project: labels.project, environment: labels.environment });
+  if (label) return label;
+  throw new Error(
+    `Vultr cannot label this cluster's reserved IP for project ${labels.project} and ` +
+      `environment ${labels.environment}: each must be spelled with a-z, 0-9 and -.`,
+  );
+}
 
 /**
  * @typedef {Object} K8sStackConfig
@@ -105,6 +127,9 @@ export function buildVultrK8sProgram(config) {
         `Kubernetes allows ${K8S_NODE_NAME_MAX}. Use a shorter project or environment name.`,
     );
   }
+  // The reserved IP's one attribution, refused here, before any server
+  // exists, for a name it cannot spell.
+  const reservedIpLabelText = requireReservedIpLabel(labels);
   // Always the CLI's: the stack's recorded token or the one derived from the
   // state passphrase (lib/iac/k3s-token.js). Never made here.
   const k3sToken = requireK3sToken(config, 'buildVultrK8sProgram');
@@ -178,10 +203,13 @@ export function buildVultrK8sProgram(config) {
       });
     });
 
+    // Labelled with the stack's project and environment, the one way destroy
+    // can tell this cluster's IP from another's (reservedIpLabel): a Vultr
+    // reserved IP takes no tags.
     const reservedIp = new vultr.ReservedIp('ingress', {
       region: config.location,
       ipType: 'v4',
-      label: `${clusterName}-ingress`,
+      label: reservedIpLabelText,
     });
 
     /** What every instance shares: region, image, key, the one VPC, the group. */

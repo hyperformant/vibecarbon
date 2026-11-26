@@ -47,7 +47,11 @@ vi.mock('@ediri/vultr', async (orig) => {
 import { buildVultrK8sProgram } from '../../../src/lib/iac/programs/vultr-k8s.js';
 import { vpcCidrForCluster } from '../../../src/lib/iac/vpc-cidr.js';
 import { firewallName } from '../../../src/lib/operator-ip.js';
-import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import {
+  decodeLabels,
+  reservedIpLabelOwner,
+  VultrProvider,
+} from '../../../src/lib/providers/vultr.js';
 import { ruleFields, vultrFirewallApi } from '../../_shared/vultr-firewall-api.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: mock inputs of every resource shape
@@ -162,6 +166,12 @@ describe('buildVultrK8sProgram config guard', () => {
     );
   });
 
+  it('refuses a project or environment its reserved IP label cannot spell', () => {
+    expect(() => buildVultrK8sProgram({ ...baseConfig, environment: 'Prod' })).toThrow(
+      "Vultr cannot label this cluster's reserved IP for project acme and environment Prod",
+    );
+  });
+
   it('requires the k3s token the CLI hands it', () => {
     expect(() => buildVultrK8sProgram({ ...baseConfig, k3sToken: '' })).toThrow(
       /k3sToken required/,
@@ -260,9 +270,24 @@ describe('buildVultrK8sProgram resource graph', () => {
     expect(instance(resources, 'worker-2').inputs.label).toBe(`${CLUSTER}-worker-2`);
   });
 
-  it('asks for a v4 reserved IP in the region, labelled for the cluster, bound to nothing', () => {
+  it('asks for a v4 reserved IP in the region, labelled for the stack, bound to nothing', () => {
     const ip = byType(resources, RESERVED)[0].inputs;
-    expect(ip).toEqual({ region: 'ewr', ipType: 'v4', label: `${CLUSTER}-ingress` });
+    expect(ip).toEqual({
+      region: 'ewr',
+      ipType: 'v4',
+      label: 'project:acme:environment:prod',
+    });
+  });
+
+  // Destroy tells whose an assigned reserved IP is by the tags of the
+  // instance holding it (VultrProvider._reservedIpHolder), so the master
+  // must carry the project and environment its IP's label names.
+  it("tags the master with the project and environment its reserved IP's label names", () => {
+    const { label } = byType(resources, RESERVED)[0].inputs as { label: string };
+    const owner = reservedIpLabelOwner(label);
+    expect(owner).toEqual({ project: 'acme', environment: 'prod' });
+    const tags = decodeLabels(instance(resources, 'master').inputs.tags as string[]);
+    expect({ project: tags.project, environment: tags.environment }).toEqual(owner);
   });
 
   it('puts every instance on exactly the one VPC, behind the firewall group, on Ubuntu 26.04', () => {

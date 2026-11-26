@@ -939,8 +939,10 @@ const idKey = (id) => String(id);
  *     signal left, and it proves nothing about the environment. Defer +
  *     report.
  * Deferrals are loud and land in the destroy summary with the exact volume
- * names; the standing sweep (which waits for a quiet moment with zero servers)
- * is what eventually collects them.
+ * names, and the operator deletes them in the provider's console once no
+ * live cluster owns them (the hint says so). No later vibecarbon command
+ * collects one: nothing new proves whose it is by then, and on Vultr, whose
+ * volumes carry no tags, nothing ever can.
  *
  * ATTACHMENT ORDERING (2026-07-30 — six detached, unlabeled `pvc-*` volumes
  * survived a fully green Hetzner k8s run's final destroy). A volume that still
@@ -4000,12 +4002,12 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * cluster's. Linode reissues a released address within minutes, so by
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry the k8s program's labels (`reservedIpLabelMatch`:
- * Linode by its tags, Vultr by its one label) is asked, and only an IP
- * carrying this project's labels and those of one of `stackEnvs` counts as
- * ours. One of ours that is still assigned (to a Linode or a Vultr
- * instance, or any entity) is `held`: this runs after the
- * teardown, so whatever holds it is something the teardown did not delete,
- * and an address is never taken off a running server.
+ * Linode by its tags, Vultr by its one label and the tags of the instance
+ * holding it) is asked, and only an IP carrying this project's labels and
+ * those of one of `stackEnvs` counts as ours. One of ours that is still
+ * assigned (to a Linode or a Vultr instance, or any entity) is `held`: this
+ * runs after the teardown, so whatever holds it is something the teardown
+ * did not delete, and an address is never taken off a running server.
  *
  * DigitalOcean reserved IPs carry no tags, so DO is asked where the address
  * is assigned (`reservedIpAssignment`). This runs after the teardown, so
@@ -5234,7 +5236,7 @@ async function destroyK8sTier({
         resourceClass: 'volume-deferred',
         resource: describeResource({ name: volume.name, id: volume.id, region: volume.region }),
         reason: `left in place (${volume.match} match only): ${volume.blocked}`,
-        hint: `Confirm no live cluster owns it, then delete via the ${Provider.NAME} console (Volumes) or run scripts/sweep-hetzner.js once the project is quiet.`,
+        hint: `Confirm no live cluster owns it, then delete it in the ${Provider.NAME} console (Volumes); it keeps billing until it is removed.`,
       };
       if (volume.blockedBy === 'identity-complete') results.leaks.foreign(entry);
       else results.leaks.unverified(entry);

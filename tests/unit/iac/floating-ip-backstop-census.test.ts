@@ -21,6 +21,7 @@
 import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { reservedIpLabel as vultrReservedIpLabel } from '../../../src/lib/providers/vultr.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 
 let counter = 0;
@@ -101,7 +102,9 @@ async function ipsOf(program: () => Promise<Record<string, unknown>>) {
 function carriesBoth(ip: { type: string; inputs: Record<string, unknown> }) {
   const { inputs } = ip;
   if (ip.type.startsWith('vultr:')) {
-    return inputs.label === `${LABELS.project}-${LABELS.environment}-ingress`;
+    // A Vultr reserved IP takes one label and no tags: reservedIpLabel's
+    // spelling, the one deleteReservedIpsByLabels matches exactly.
+    return inputs.label === vultrReservedIpLabel(LABELS);
   }
   const labels = (inputs.labels ?? {}) as Record<string, string>;
   const tags = (inputs.tags ?? []) as string[];

@@ -14,8 +14,8 @@
  *   4. console.js: new loud failure for a non-Hetzner provider (previously
  *      unconditional Hetzner-only behavior with no gate at all).
  *   5. destroy.js console-hint sites (deleteStateBucket, deleteAppBucketEffect,
- *      the firewall-leak hint, the k8s manual-cleanup hint) and the
- *      orphan-token error: "...the Hetzner console" -> "...the Hetzner Cloud
+ *      the firewall-leak hint, the k8s manual-cleanup hint, the
+ *      deferred-volume hint) and the orphan-token error: "...the Hetzner console" -> "...the Hetzner Cloud
  *      console" / "No Hetzner API token found..." -> "No Hetzner Cloud API
  *      token found..." (same NAME expansion, plus TOKEN_ENV interpolation).
  *   6. scale.js register-ssh-key spinner: "Registering SSH key with
@@ -39,6 +39,7 @@ import { SPEC as DESTROY_SPEC } from '../../../src/destroy.js';
 import { hcloudGateSkipNote } from '../../../src/diagnose.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { buildShellTryHint } from '../../../src/shell.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 
@@ -147,6 +148,24 @@ describe('destroy.js console-hint + orphan-token strings — Provider.NAME/.TOKE
     const rendered = `Delete it via the ${HetznerProvider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`;
     expect(rendered).toBe(
       'Delete it via the Hetzner Cloud console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.',
+    );
+  });
+
+  // The deferred-volume hint once sent every provider's user to
+  // scripts/sweep-hetzner.js, a Hetzner-only script that is not in the npm
+  // package. The console is the route on every provider.
+  it('the deferred-volume hint interpolates Provider.NAME and names no repo script', () => {
+    expect(DESTROY_SRC).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${Provider.NAME} placeholder, not a JS template
+      'hint: `Confirm no live cluster owns it, then delete it in the ${Provider.NAME} console (Volumes); it keeps billing until it is removed.`,',
+    );
+    expect(DESTROY_SRC).not.toContain('sweep-hetzner');
+  });
+
+  it('renders "... in the Vultr console (Volumes); ..." for Vultr', () => {
+    const rendered = `Confirm no live cluster owns it, then delete it in the ${VultrProvider.NAME} console (Volumes); it keeps billing until it is removed.`;
+    expect(rendered).toBe(
+      'Confirm no live cluster owns it, then delete it in the Vultr console (Volumes); it keeps billing until it is removed.',
     );
   });
 

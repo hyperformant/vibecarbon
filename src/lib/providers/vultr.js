@@ -164,24 +164,52 @@ async function walkCursor(init, path, key) {
   return { items, complete: false };
 }
 
+/** The characters a project, environment or stack name is spelled with. */
+const NAME_RE = /^[a-z0-9-]+$/;
+
 /**
- * The label vultr-k8s.js gives a cluster's reserved IP, `${clusterName}-ingress`
- * (clusterName is `<project>-<environment>`, stackIdentity), for labels that
- * name exactly a project and an environment, each with a value; null for any
- * other key set. A Vultr reserved IP takes a label and no tags, so on Vultr
- * an IP is "labelled project P, environment E" exactly when its label is
- * `P-E-ingress`, and a label it cannot carry (a role, a third key) can never
- * be proven.
+ * The label vultr-k8s.js gives a cluster's reserved IP, the one attribution
+ * a Vultr reserved IP carries (it takes a label and no tags):
+ * `project:<project>:environment:<environment>`, the stack's two ownership
+ * labels in the instances' own tag form (encodeLabel), joined by `:`.
+ * Project, environment and stack names are spelled `[a-z0-9-]`
+ * (validators.js, deploy/prompts.js) and never hold a `:`, so a label names
+ * exactly one project and environment. The `<cluster>-ingress` it replaced
+ * did not: `acme-prod-primary-ingress` was both project acme's k8s-ha stack
+ * prod-primary and project acme-prod's environment primary.
+ *
+ * Vultr documents the label as a plain string with no pattern or length
+ * (`label`, "The user-supplied label", on POST /v2/reserved-ips in the
+ * OpenAPI spec its vultr-python-client is generated from; terraform-provider-
+ * vultr's reserved_ip schema is a bare string too). `:` and `-` are the
+ * characters every Vultr instance tag vibecarbon writes already carries.
+ *
+ * null for labels that are not exactly a project and an environment, each
+ * spelled as a name: no reserved IP carries such a label, so none can be
+ * proven to match.
  * @param {Object<string, string|undefined|null>|undefined|null} labels
  * @returns {string|null}
  */
-function ingressLabel(labels) {
+export function reservedIpLabel(labels) {
   const keys = Object.keys(labels ?? {}).sort();
   if (keys.join(',') !== 'environment,project') return null;
   const { project, environment } = labels;
-  if (typeof project !== 'string' || typeof environment !== 'string') return null;
-  if (!project || !environment) return null;
-  return `${project}-${environment}-ingress`;
+  if (![project, environment].every((v) => typeof v === 'string' && NAME_RE.test(v))) return null;
+  return `${encodeLabel('project', project)}:${encodeLabel('environment', environment)}`;
+}
+
+/**
+ * The project and environment a reserved IP's label names, the inverse of
+ * reservedIpLabel; null for a label it did not write. The e2e sweep reads
+ * the project from it.
+ * @param {string|undefined|null} label
+ * @returns {{project: string, environment: string}|null}
+ */
+export function reservedIpLabelOwner(label) {
+  const parts = typeof label === 'string' ? label.split(':') : [];
+  if (parts.length !== 4 || parts[0] !== 'project' || parts[2] !== 'environment') return null;
+  const owner = { project: parts[1], environment: parts[3] };
+  return reservedIpLabel(owner) === label ? owner : null;
 }
 
 /**
@@ -1205,8 +1233,18 @@ export class VultrProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const { items, status } = await this._walkCursor('/vpcs', 'vpcs');
-    return status === undefined ? items.map((n) => ({ ...n, name: n.description })) : [];
+    const { items, status } = await this.listNetworksDetailed();
+    return status === undefined ? items : [];
+  }
+
+  /**
+   * listNetworks with the walk's completeness signal, for a caller that must
+   * not read part of the list as the whole (deleteVpcByName).
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async listNetworksDetailed() {
+    const { items, complete, status } = await this._walkCursor('/vpcs', 'vpcs');
+    return { items: items.map((n) => ({ ...n, name: n.description })), complete, status };
   }
 
   /**
@@ -1262,9 +1300,9 @@ export class VultrProvider extends BaseProvider {
    * Release a reserved IP by address, answered as a ReservedIpRelease
    * (providers/base.js) so destroy reads every provider one way. Vultr
    * deletes by id, so this lists and matches `subnet` (the address) first;
-   * an address the account no longer holds is already released. Destroy
-   * asks reservedIpLabelMatch before it calls this, so an address of
-   * another project's, or one still assigned, never reaches it.
+   * an address the account no longer holds is already released. One still
+   * assigned to an instance is refused here, with no delete sent: an address
+   * is never taken off a running server, whoever asks.
    * @param {string} address
    * @returns {Promise<import('./base.js').ReservedIpRelease>}
    * @throws when the listing cannot be read whole
@@ -1272,53 +1310,103 @@ export class VultrProvider extends BaseProvider {
   async deleteReservedIpByAddress(address) {
     const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
     if (!ip) return { released: true };
+    const holder = reservedIpHolder(ip);
+    if (holder) {
+      return {
+        released: false,
+        held: true,
+        region: null,
+        reason: `it is still assigned to ${holder}`,
+      };
+    }
     return this._deleteReservedIp(ip);
   }
 
   /**
-   * Whether the reserved IP at `address` is still labelled for `labels` (a
-   * project and an environment: its label is `<project>-<environment>-ingress`,
-   * ingressLabel), and what it is assigned to. Destroy asks before it
-   * releases an address saved at deploy time: a released address can be
-   * reissued to another account or project by then, and one of ours still
-   * assigned to an instance the teardown did not delete must never be taken
-   * off it. Labels that are not exactly a project and an environment match
-   * nothing. `tags` is the IP's label, the one attribution it carries.
+   * What holds a reserved IP labelled for `labels`, and whether it is
+   * theirs. vultr-k8s.js tags every instance with the stack's project and
+   * environment (encodeLabel), so the instance an IP of theirs is assigned to
+   * carries both. One that does not is someone else's, whatever the IP's
+   * label says, and the address is never released or reported as held by
+   * this stack. An instance Vultr no longer lists (404) holds it on its way
+   * out, so the IP stays this stack's and held.
+   * @param {{instance_id?: string|null}} ip
+   * @param {{project: string, environment: string}} labels
+   * @returns {Promise<{holder: string|null, foreign: string|null}>}
+   *   holder names the instance, null when unassigned; foreign, when set,
+   *   says whose that instance is instead
+   * @throws when the instance cannot be read
+   */
+  async _reservedIpHolder(ip, labels) {
+    const holder = reservedIpHolder(ip);
+    if (!holder) return { holder: null, foreign: null };
+    let instance;
+    try {
+      instance = await this.getServer(ip.instance_id);
+    } catch (err) {
+      if (err.status === 404) return { holder, foreign: null };
+      const why = err.status ? `HTTP ${err.status}` : err.message;
+      throw new Error(`Vultr did not answer for ${holder}, which holds it (${why})`);
+    }
+    const { project, environment } = decodeLabels(instance?.tags);
+    if (project === labels.project && environment === labels.environment) {
+      return { holder, foreign: null };
+    }
+    const whose = project
+      ? `project ${project}, environment ${environment ?? 'none'}`
+      : 'no vibecarbon project';
+    return { holder, foreign: `held by ${holder}, which is ${whose}` };
+  }
+
+  /**
+   * Whether the reserved IP at `address` is still this project's and
+   * environment's: its label is exactly reservedIpLabel(labels), and the
+   * instance it is assigned to, if any, carries the same project and
+   * environment tags (_reservedIpHolder). Destroy asks before it releases an
+   * address saved at deploy time: a released address can be reissued to
+   * another account or project by then, and one of ours still assigned to an
+   * instance the teardown did not delete must never be taken off it. Labels
+   * that are not exactly a project and an environment match nothing. `tags`
+   * is the IP's label, the one attribution it carries, and what its holder
+   * carries when that is someone else's.
    * @param {string} address
    * @param {Object<string,string>} labels
    * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
    *   found is false when the account holds no reserved IP at that address;
    *   holder names the instance the address is assigned to, null when unassigned
-   * @throws when the listing cannot be read whole
+   * @throws when the listing, or the instance holding a labelled one, cannot be read
    */
   async reservedIpLabelMatch(address, labels) {
-    const wanted = ingressLabel(labels);
+    const wanted = reservedIpLabel(labels);
     const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
     if (!ip) return { found: false };
-    return {
-      found: true,
-      matches: wanted !== null && ip.label === wanted,
-      tags: ip.label ? [ip.label] : [],
-      holder: reservedIpHolder(ip),
-    };
+    const tags = ip.label ? [ip.label] : [];
+    if (wanted === null || ip.label !== wanted) {
+      return { found: true, matches: false, tags, holder: reservedIpHolder(ip) };
+    }
+    const { holder, foreign } = await this._reservedIpHolder(ip, labels);
+    if (foreign) return { found: true, matches: false, tags: [...tags, foreign], holder };
+    return { found: true, matches: true, tags, holder };
   }
 
   /**
    * Release every reserved IP labelled for this project and environment:
-   * its label is exactly `<project>-<environment>-ingress` (ingressLabel),
-   * never a prefix match, so another environment's or project's IP is never
-   * touched. A label without a value is refused (sweepLabels), and so is any
-   * key set other than exactly project and environment, which a Vultr IP's
-   * one label cannot prove. One still assigned to an instance is left alone:
-   * destroy runs after the teardown, so that instance is one the teardown
-   * did not delete, and an address is never taken off a running server.
+   * its label is exactly reservedIpLabel(labels), never a prefix match, so
+   * another environment's or project's IP is never touched. A label without
+   * a value is refused (sweepLabels), and so is any key set other than
+   * exactly project and environment, which a Vultr IP's one label cannot
+   * prove. One assigned to an instance is never deleted: if that instance
+   * carries this stack's tags it is one the teardown did not delete, and the
+   * IP is reported held; if it carries anyone else's, the IP is not this
+   * stack's and is left out (_reservedIpHolder).
    * @param {Object<string,string>} labels
    * @param {{except?: string[]}} [options] - addresses the caller already handled
    * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
    * @throws when the labels are refused (before any read), or the listing cannot be read whole
    */
   async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
-    const wanted = ingressLabel(Object.fromEntries(sweepLabels(labels)));
+    const scope = Object.fromEntries(sweepLabels(labels));
+    const wanted = reservedIpLabel(scope);
     if (wanted === null) {
       throw new Error(
         `refusing to sweep Vultr reserved IPs by ${Object.keys(labels).join(', ')}: a Vultr ` +
@@ -1333,12 +1421,19 @@ export class VultrProvider extends BaseProvider {
     const deleted = [];
     const failed = [];
     for (const ip of matches) {
-      const holder = reservedIpHolder(ip);
-      if (holder) {
+      let held;
+      try {
+        held = await this._reservedIpHolder(ip, scope);
+      } catch (err) {
+        failed.push({ address: ip.subnet, held: null, reason: err.message });
+        continue;
+      }
+      if (held.foreign) continue;
+      if (held.holder) {
         failed.push({
           address: ip.subnet,
           held: true,
-          reason: `it is still assigned to ${holder}, which was not deleted`,
+          reason: `it is still assigned to ${held.holder}, which was not deleted`,
         });
         continue;
       }

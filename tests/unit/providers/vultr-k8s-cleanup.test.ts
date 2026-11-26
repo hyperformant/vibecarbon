@@ -4,12 +4,14 @@
  * the two accessors the pre-scan reads (serverNetworkIds, volumeName).
  *
  * Vultr's reserved IPs and VPCs carry no tags. The k8s program
- * (vultr-k8s.js) labels the reserved IP `${clusterName}-ingress` and
+ * (vultr-k8s.js) labels the reserved IP
+ * `project:<project>:environment:<environment>` (reservedIpLabel) and
  * describes the VPC `${clusterName}-network`, so those exact strings are the
- * only attribution destroy has. Every delete lists first and matches exactly:
- * an address or label that is not this environment's is never deleted, one
- * still assigned to an instance is left alone, and a listing that cannot be
- * read whole throws. fetch is stubbed; nothing here touches Vultr.
+ * only attribution destroy has, with the tags of the instance an IP is
+ * assigned to. Every delete lists first and matches exactly: an address or
+ * label that is not this environment's is never deleted, one still assigned
+ * to an instance is left alone, and a listing that cannot be read whole
+ * throws. fetch is stubbed; nothing here touches Vultr.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,7 +22,11 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 });
 
 import { BaseProvider } from '../../../src/lib/providers/base.js';
-import { VultrProvider } from '../../../src/lib/providers/vultr.js';
+import {
+  reservedIpLabel,
+  reservedIpLabelOwner,
+  VultrProvider,
+} from '../../../src/lib/providers/vultr.js';
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
@@ -49,11 +55,15 @@ const status = (code: number, text = '') => ({
 
 /**
  * A fake Vultr API: GET /reserved-ips and GET /vpcs list `ips` and `vpcs`
- * (or answer `listStatus`), every DELETE answers `deleteStatus`.
+ * (or answer `listStatus`), GET /instances/{id} answers the tags in
+ * `instances` (404 for any other id, `instanceStatus` when set), and every
+ * DELETE answers `deleteStatus`.
  */
 function api({
   ips = [] as ReservedIp[],
   vpcs = [] as Array<{ id: string; description: string }>,
+  instances = {} as Record<string, string[]>,
+  instanceStatus = 200,
   listStatus = 200,
   deleteStatus = 204,
   deleteText = '',
@@ -78,6 +88,13 @@ function api({
       );
     }
     if (path === '/vpcs') return page('vpcs', vpcs);
+    const instance = /^\/instances\/([^/]+)$/.exec(path)?.[1];
+    if (instance) {
+      if (instanceStatus !== 200) return status(instanceStatus);
+      const tags = instances[instance];
+      if (!tags) return status(404);
+      return { ok: true, status: 200, json: async () => ({ instance: { id: instance, tags } }) };
+    }
     throw new Error(`unexpected ${method} ${url}`);
   });
   return calls;
@@ -85,6 +102,14 @@ function api({
 const deletes = (calls: Call[]) => calls.filter((c) => c.method === 'DELETE').map((c) => c.path);
 
 const OURS = { project: 'acme', environment: 'prod' };
+const L = (project: string, environment: string) => `project:${project}:environment:${environment}`;
+/** The tags vultr-k8s.js gives an instance of that stack (encodeLabels). */
+const TAGS = (project: string, environment: string) => [
+  `project:${project}`,
+  `environment:${environment}`,
+  'managed-by:vibecarbon',
+  'role:master',
+];
 
 describe('VultrProvider k8s destroy members', () => {
   it('runs the k8s destroy backstop, and never guesses a volume owner by region', () => {
@@ -94,6 +119,49 @@ describe('VultrProvider k8s destroy members', () => {
 
   it('the base keeps the region guess, so every other provider is unchanged', () => {
     expect(BaseProvider.ORPHAN_VOLUME_REGION_GUESS).toBe(true);
+  });
+});
+
+describe('the reserved IP label: project:<project>:environment:<environment>', () => {
+  it("names the project and environment in the instance tags' key:value form", () => {
+    expect(reservedIpLabel(OURS)).toBe('project:acme:environment:prod');
+    expect(reservedIpLabelOwner('project:acme:environment:prod')).toEqual(OURS);
+  });
+
+  // Names are spelled [a-z0-9-], so `-` cannot separate them: project acme's
+  // k8s-ha stack prod-primary and project acme-prod's environment primary
+  // were both `acme-prod-primary-ingress`. `:` is in no name.
+  it('gives two stacks whose names join to the same string two labels', () => {
+    const haSide = reservedIpLabel({ project: 'acme', environment: 'prod-primary' });
+    const other = reservedIpLabel({ project: 'acme-prod', environment: 'primary' });
+    expect(haSide).toBe('project:acme:environment:prod-primary');
+    expect(other).toBe('project:acme-prod:environment:primary');
+    expect(haSide).not.toBe(other);
+    expect(reservedIpLabelOwner(haSide)).toEqual({ project: 'acme', environment: 'prod-primary' });
+    expect(reservedIpLabelOwner(other)).toEqual({ project: 'acme-prod', environment: 'primary' });
+  });
+
+  it.each([
+    ['a third key', { ...OURS, role: 'master' }],
+    ['only a project', { project: 'acme' }],
+    ['an empty value', { project: 'acme', environment: '' }],
+    ['a value holding the separator', { project: 'acme', environment: 'prod:x' }],
+    ['a value outside the name characters', { project: 'Acme', environment: 'prod' }],
+    ['no labels', undefined],
+  ])('labels with %s have no label', (_, labels) => {
+    expect(reservedIpLabel(labels as Record<string, string> | undefined)).toBeNull();
+  });
+
+  it.each([
+    'acme-prod-ingress',
+    'project:acme',
+    'project:acme:environment:prod:role:master',
+    'environment:prod:project:acme',
+    'project::environment:prod',
+    'project:Acme:environment:prod',
+    '',
+  ])('reads no owner from %j, a label it did not write', (label) => {
+    expect(reservedIpLabelOwner(label)).toBeNull();
   });
 });
 
@@ -177,8 +245,8 @@ describe('VultrProvider._listReservedIps', () => {
 
 describe('VultrProvider.deleteReservedIpByAddress', () => {
   const ips = [
-    { id: 'rip-7', subnet: '203.0.113.7', label: 'acme-prod-ingress' },
-    { id: 'rip-8', subnet: '203.0.113.8', label: 'other-prod-ingress' },
+    { id: 'rip-7', subnet: '203.0.113.7', label: L('acme', 'prod') },
+    { id: 'rip-8', subnet: '203.0.113.8', label: L('other', 'prod') },
   ];
 
   it('lists, matches the address, and deletes that one by id', async () => {
@@ -224,24 +292,37 @@ describe('VultrProvider.deleteReservedIpByAddress', () => {
     );
     expect(deletes(calls)).toEqual([]);
   });
+
+  it('refuses one still assigned to an instance, and sends no delete', async () => {
+    const calls = api({
+      ips: [{ id: 'rip-7', subnet: '203.0.113.7', label: L('acme', 'prod'), instance_id: 'i-9' }],
+    });
+    expect(await new VultrProvider('tok').deleteReservedIpByAddress('203.0.113.7')).toEqual({
+      released: false,
+      held: true,
+      region: null,
+      reason: 'it is still assigned to instance i-9',
+    });
+    expect(deletes(calls)).toEqual([]);
+  });
 });
 
 describe('VultrProvider.reservedIpLabelMatch', () => {
   const ips = [
-    { id: 'rip-7', subnet: '203.0.113.7', label: 'acme-prod-ingress' },
-    { id: 'rip-8', subnet: '203.0.113.8', label: 'acme-prod-ingress', instance_id: 'inst-42' },
+    { id: 'rip-7', subnet: '203.0.113.7', label: L('acme', 'prod') },
+    { id: 'rip-8', subnet: '203.0.113.8', label: L('acme', 'prod'), instance_id: 'inst-42' },
     { id: 'rip-9', subnet: '203.0.113.9', label: '' },
   ];
   const match = (address: string, labels: Record<string, string>) => {
-    api({ ips });
+    api({ ips, instances: { 'inst-42': TAGS('acme', 'prod') } });
     return new VultrProvider('tok').reservedIpLabelMatch(address, labels);
   };
 
-  it('a reserved IP labelled acme-prod-ingress is project acme, environment prod', async () => {
+  it('a reserved IP labelled project:acme:environment:prod is project acme, environment prod', async () => {
     expect(await match('203.0.113.7', OURS)).toEqual({
       found: true,
       matches: true,
-      tags: ['acme-prod-ingress'],
+      tags: [L('acme', 'prod')],
       holder: null,
     });
   });
@@ -254,14 +335,14 @@ describe('VultrProvider.reservedIpLabelMatch', () => {
     ['only a project', { project: 'acme' }],
   ])('does not match %s', async (_, labels) => {
     const out = await match('203.0.113.7', labels as Record<string, string>);
-    expect(out).toMatchObject({ found: true, matches: false, tags: ['acme-prod-ingress'] });
+    expect(out).toMatchObject({ found: true, matches: false, tags: [L('acme', 'prod')] });
   });
 
   it('names the instance an assigned one is held by', async () => {
     expect(await match('203.0.113.8', OURS)).toEqual({
       found: true,
       matches: true,
-      tags: ['acme-prod-ingress'],
+      tags: [L('acme', 'prod')],
       holder: 'instance inst-42',
     });
   });
@@ -289,11 +370,11 @@ describe('VultrProvider.reservedIpLabelMatch', () => {
 
 describe('VultrProvider.deleteReservedIpsByLabels', () => {
   const LANDSCAPE = [
-    { id: 'rip-1', subnet: '203.0.113.1', label: 'acme-prod-ingress' },
-    { id: 'rip-2', subnet: '203.0.113.2', label: 'acme-prod2-ingress' },
-    { id: 'rip-3', subnet: '203.0.113.3', label: 'acme-prod-primary-ingress' },
-    { id: 'rip-4', subnet: '203.0.113.4', label: 'xacme-prod-ingress' },
-    { id: 'rip-5', subnet: '203.0.113.5', label: 'acme-prod-ingress-old' },
+    { id: 'rip-1', subnet: '203.0.113.1', label: L('acme', 'prod') },
+    { id: 'rip-2', subnet: '203.0.113.2', label: L('acme', 'prod2') },
+    { id: 'rip-3', subnet: '203.0.113.3', label: L('acme-prod', 'primary') },
+    { id: 'rip-4', subnet: '203.0.113.4', label: L('xacme', 'prod') },
+    { id: 'rip-5', subnet: '203.0.113.5', label: 'acme-prod-ingress' },
     { id: 'rip-6', subnet: '203.0.113.6', label: '' },
   ];
 
@@ -316,7 +397,8 @@ describe('VultrProvider.deleteReservedIpsByLabels', () => {
 
   it('an assigned one is held and never deleted', async () => {
     const calls = api({
-      ips: [{ id: 'rip-1', subnet: '203.0.113.1', label: 'acme-prod-ingress', instance_id: 'i-9' }],
+      ips: [{ id: 'rip-1', subnet: '203.0.113.1', label: L('acme', 'prod'), instance_id: 'i-9' }],
+      instances: { 'i-9': TAGS('acme', 'prod') },
     });
     expect(await new VultrProvider('tok').deleteReservedIpsByLabels(OURS)).toEqual({
       deleted: [],
@@ -367,5 +449,126 @@ describe('VultrProvider.deleteReservedIpsByLabels', () => {
       new VultrProvider('tok').deleteReservedIpsByLabels({ project: 'acme', environment: '' }),
     ).rejects.toThrow(/refusing to sweep by labels/);
     expect(fetchWithRetryMock).not.toHaveBeenCalled();
+  });
+});
+
+// The label names one stack, and the instance an IP is assigned to says
+// whose the address is: vultr-k8s.js tags every instance with the stack's
+// project and environment. A stack's destroy never releases, or reports as
+// held, an IP whose holder is another stack's.
+describe('two stacks whose names join to the same string', () => {
+  const HA = { project: 'acme', environment: 'prod-primary' };
+  const OTHER = { project: 'acme-prod', environment: 'primary' };
+  const ha = { id: 'rip-1', subnet: '203.0.113.1', label: L('acme', 'prod-primary') };
+  const other = { id: 'rip-2', subnet: '203.0.113.2', label: L('acme-prod', 'primary') };
+  const assigned = {
+    ips: [
+      { ...ha, instance_id: 'i-ha' },
+      { ...other, instance_id: 'i-other' },
+    ],
+    instances: { 'i-ha': TAGS('acme', 'prod-primary'), 'i-other': TAGS('acme-prod', 'primary') },
+  };
+
+  it.each([
+    ['acme prod-primary', HA, '203.0.113.1', '/reserved-ips/rip-1'],
+    ['acme-prod primary', OTHER, '203.0.113.2', '/reserved-ips/rip-2'],
+  ])('unassigned: %s releases its own IP and not the other', async (_, labels, own, path) => {
+    const calls = api({ ips: [ha, other] });
+    expect(await new VultrProvider('tok').deleteReservedIpsByLabels(labels)).toEqual({
+      deleted: [own],
+      failed: [],
+    });
+    expect(deletes(calls)).toEqual([path]);
+  });
+
+  it.each([
+    ['acme prod-primary', HA, '203.0.113.1', 'i-ha'],
+    ['acme-prod primary', OTHER, '203.0.113.2', 'i-other'],
+  ])(
+    'assigned: %s reports only its own IP as held, and deletes nothing',
+    async (_, labels, own, holder) => {
+      const calls = api(assigned);
+      expect(await new VultrProvider('tok').deleteReservedIpsByLabels(labels)).toEqual({
+        deleted: [],
+        failed: [
+          {
+            address: own,
+            held: true,
+            reason: `it is still assigned to instance ${holder}, which was not deleted`,
+          },
+        ],
+      });
+      expect(deletes(calls)).toEqual([]);
+    },
+  );
+
+  it("assigned: each stack's saved address of the other's IP does not match", async () => {
+    api(assigned);
+    const p = new VultrProvider('tok');
+    expect(await p.reservedIpLabelMatch('203.0.113.2', HA)).toMatchObject({ matches: false });
+    expect(await p.reservedIpLabelMatch('203.0.113.1', OTHER)).toMatchObject({ matches: false });
+    expect(await p.reservedIpLabelMatch('203.0.113.1', HA)).toMatchObject({
+      matches: true,
+      holder: 'instance i-ha',
+    });
+  });
+});
+
+describe("a reserved IP labelled ours, held by another stack's instance", () => {
+  const ip = { id: 'rip-1', subnet: '203.0.113.1', label: L('acme', 'prod'), instance_id: 'i-9' };
+
+  it('does not match, and says whose its holder is', async () => {
+    api({ ips: [ip], instances: { 'i-9': TAGS('other', 'prod') } });
+    expect(await new VultrProvider('tok').reservedIpLabelMatch('203.0.113.1', OURS)).toEqual({
+      found: true,
+      matches: false,
+      tags: [L('acme', 'prod'), 'held by instance i-9, which is project other, environment prod'],
+      holder: 'instance i-9',
+    });
+  });
+
+  it('a holder with no project tag is not ours either', async () => {
+    api({ ips: [ip], instances: { 'i-9': ['laptop'] } });
+    const out = await new VultrProvider('tok').reservedIpLabelMatch('203.0.113.1', OURS);
+    expect(out).toMatchObject({ matches: false });
+    expect((out as { tags: string[] }).tags[1]).toBe(
+      'held by instance i-9, which is no vibecarbon project',
+    );
+  });
+
+  it('the label sweep leaves it out: not released, not reported held', async () => {
+    const calls = api({ ips: [ip], instances: { 'i-9': TAGS('acme', 'prod2') } });
+    expect(await new VultrProvider('tok').deleteReservedIpsByLabels(OURS)).toEqual({
+      deleted: [],
+      failed: [],
+    });
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it('a holder Vultr no longer lists (404) leaves the IP ours and held', async () => {
+    api({ ips: [ip] });
+    expect(await new VultrProvider('tok').reservedIpLabelMatch('203.0.113.1', OURS)).toMatchObject({
+      matches: true,
+      holder: 'instance i-9',
+    });
+  });
+
+  it('a holder it cannot read: the match throws, the sweep reports it unverified', async () => {
+    const calls = api({ ips: [ip], instanceStatus: 500 });
+    const p = new VultrProvider('tok');
+    await expect(p.reservedIpLabelMatch('203.0.113.1', OURS)).rejects.toThrow(
+      'Vultr did not answer for instance i-9, which holds it (HTTP 500)',
+    );
+    expect(await p.deleteReservedIpsByLabels(OURS)).toEqual({
+      deleted: [],
+      failed: [
+        {
+          address: '203.0.113.1',
+          held: null,
+          reason: 'Vultr did not answer for instance i-9, which holds it (HTTP 500)',
+        },
+      ],
+    });
+    expect(deletes(calls)).toEqual([]);
   });
 });

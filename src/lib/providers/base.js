@@ -39,34 +39,40 @@ export function deleteFailure(providerName, status) {
 }
 
 /**
- * The body of `deleteNetworkByName` on a provider whose `listNetworks` gives
- * each VPC a `name` and that deletes one at `DELETE /vpcs/{id}`
+ * The body of `deleteNetworkByName` on a provider whose VPCs each have a
+ * `name` (listNetworksDetailed) and that deletes one at `DELETE /vpcs/{id}`
  * (DigitalOcean, Linode, Vultr). The VPC is the one whose name is exactly
  * `name`. A 2xx or 404 is deleted. Any other answer is the provider refusing,
  * most often because a server is still in the VPC: an ordering bug in the
  * caller, never a not-found, so it comes back as `apiError` for the caller
- * to report. Never throws.
- * @param {{listNetworks: () => Promise<Array<{id: string|number, name: string}>>, bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
+ * to report. A listing that cannot be read whole throws instead: a VPC
+ * missing from part of the list is not proven gone, and the caller reports
+ * that it could not confirm it (deleteBackstopNetwork).
+ * @param {{listNetworksDetailed: () => Promise<{items: Array<{id: string|number, name: string}>, complete: boolean, status?: number}>, bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
  * @param {string} name
  * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+ * @throws when the VPC listing cannot be read whole
  */
 export async function deleteVpcByName(provider, name) {
-  let everExisted = false;
+  const { items: vpcs, complete, status } = await provider.listNetworksDetailed();
+  if (!complete) {
+    throw new Error(
+      `the VPC listing could not be read whole (${status ? `HTTP ${status}` : 'it stopped early'})`,
+    );
+  }
+  const vpc = vpcs.find((v) => v.name === name);
+  if (!vpc) return { deleted: false, everExisted: false, apiError: null };
   try {
-    const vpcs = await provider.listNetworks();
-    const vpc = vpcs.find((v) => v.name === name);
-    if (!vpc) return { deleted: false, everExisted: false, apiError: null };
-    everExisted = true;
     const res = await provider.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
-    if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
+    if (res.ok || res.status === 404) return { deleted: true, everExisted: true, apiError: null };
     const body = await res.text().catch(() => '');
     return {
       deleted: false,
-      everExisted,
+      everExisted: true,
       apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
     };
   } catch (err) {
-    return { deleted: false, everExisted, apiError: err };
+    return { deleted: false, everExisted: true, apiError: err };
   }
 }
 

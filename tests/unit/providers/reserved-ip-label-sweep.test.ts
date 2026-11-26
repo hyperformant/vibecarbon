@@ -24,6 +24,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { encodeLabel as linodeLabel } from '../../../src/lib/providers/linode.js';
 import { encodeLabel as scalewayLabel } from '../../../src/lib/providers/scaleway.js';
+import { reservedIpLabel as vultrLabel } from '../../../src/lib/providers/vultr.js';
 
 beforeEach(() => {
   fetchWithRetryMock.mockReset();
@@ -117,29 +118,35 @@ const rows: Record<string, Row> = {
   },
   vultr: {
     // A Vultr reserved IP takes no tags, only a label: vultr-k8s.js labels
-    // it `<project>-<environment>-ingress`, the label the sweep matches
-    // exactly. An IP with only some of the labels gets a label that is not
-    // that one.
+    // it `project:<project>:environment:<environment>` (reservedIpLabel),
+    // the label the sweep matches exactly. An IP with only some of the
+    // labels gets a label that is not that one. The instance an IP is
+    // assigned to carries the IP's own labels as tags, as one of the stack's
+    // instances does.
     serve: (ips, { listStatus = 200, deleteStatus = 204 } = {}) =>
-      api(
-        () =>
-          json(
-            {
-              reserved_ips: ips.map((ip) => ({
-                id: `rip-${idOf(ip.address)}`,
-                subnet: ip.address,
-                instance_id: ip.server ? `inst-${ip.server}` : '',
-                label:
-                  ip.labels.project && ip.labels.environment
-                    ? `${ip.labels.project}-${ip.labels.environment}-ingress`
-                    : (ip.labels.project ?? ''),
-              })),
-              meta: { links: { next: '' } },
-            },
-            listStatus,
-          ),
-        deleteStatus,
-      ),
+      api((url) => {
+        const server = /\/instances\/inst-(\d+)$/.exec(url)?.[1];
+        if (server) {
+          const ip = ips.find((i) => i.server === Number(server));
+          const tags = Object.entries(ip?.labels ?? {}).map(([k, v]) => `${k}:${v}`);
+          return json({ instance: { id: `inst-${server}`, tags } });
+        }
+        return json(
+          {
+            reserved_ips: ips.map((ip) => ({
+              id: `rip-${idOf(ip.address)}`,
+              subnet: ip.address,
+              instance_id: ip.server ? `inst-${ip.server}` : '',
+              label:
+                ip.labels.project && ip.labels.environment
+                  ? vultrLabel({ project: ip.labels.project, environment: ip.labels.environment })
+                  : (ip.labels.project ?? ''),
+            })),
+            meta: { links: { next: '' } },
+          },
+          listStatus,
+        );
+      }, deleteStatus),
     deletedBy: (call, ips) => {
       const m = call.method === 'DELETE' && call.url.match(/\/reserved-ips\/rip-(\d+)$/);
       return m ? (ips.find((ip) => idOf(ip.address) === Number(m[1]))?.address ?? '?') : null;
