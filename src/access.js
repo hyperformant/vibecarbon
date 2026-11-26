@@ -126,10 +126,10 @@ function formatRelative(isoDate, now) {
 }
 
 /**
- * The environments with a firewall to push: those that record a server. A
- * skeleton left by a first deploy that stopped before any server existed is
- * passed over (envHasServers): it has no firewall to update and nothing to
- * protect, so it neither fails the push nor needs its provider's token.
+ * The environments that record a server (envHasServers). Their firewalls
+ * must take every push, so these, and only these, need their provider's
+ * token before the list changes. The rest are skeletons a first deploy left
+ * before any server was recorded, pushed best-effort (pushToFirewalls).
  */
 function deployedEnvNames(projectConfig) {
   return Object.entries(projectConfig?.environments ?? {})
@@ -138,18 +138,28 @@ function deployedEnvNames(projectConfig) {
 }
 
 /**
- * Push the list to the named environments' firewalls (every deployed one by
+ * Push the list to the named environments' firewalls (every one by
  * default), both sides of an HA one, each with its own provider's token: a
  * project can mix providers. Each push records what that environment now
  * allows (pushOperatorCidrs). One failing environment does not stop the
  * rest: an `access remove` that stopped there would leave the CIDR open on
  * every environment after it.
  *
- * Anything short of every side updated is a failure: a push that throws
- * (a missing token among them, which applyToFirewall refuses), and a side
- * the provider did not find, since its lookup answers "not found" for an API
- * error too. Counted as done, either would let `access remove` exit 0 while
- * a firewall still admits the CIDR.
+ * For a deployed environment, anything short of every side updated is a
+ * failure: a push that throws (a missing token among them, which
+ * applyToFirewall refuses), and a side the provider did not find, since its
+ * lookup answers "not found" for an API error too. Counted as done, either
+ * would let `access remove` exit 0 while a firewall still admits the CIDR.
+ *
+ * A skeleton (no server recorded yet) is pushed best-effort. Its firewall
+ * may exist: a single-k8s first deploy records its servers only in its final
+ * save, so one that failed after Pulumi made the cluster left a firewall
+ * that allows the list of its day. So it is pushed when its provider's token
+ * is there, and recorded as usual; a side not found is skipped, since most
+ * skeletons never got that far; and with no token it is skipped with a note,
+ * since a deploy that stopped before its servers must not hold every access
+ * run to a token. A push that throws is still a failure: the firewall was
+ * found and may still admit the CIDR.
  *
  * @param {object} projectConfig
  * @param {Array<{cidr: string}>} list
@@ -162,7 +172,7 @@ async function pushToFirewalls(
   projectConfig,
   list,
   spinner,
-  names = deployedEnvNames(projectConfig),
+  names = Object.keys(projectConfig?.environments ?? {}),
 ) {
   if (names.length === 0) {
     spinner?.stop('No deployed environments, nothing to push to.');
@@ -173,12 +183,28 @@ async function pushToFirewalls(
       'Cannot push an empty CIDR list; that would lock everyone out of every environment.',
     );
   }
-  const envs = names.map((name) => [name, projectConfig.environments[name]]);
-  const clusters = envs.flatMap(([name, cfg]) => envFirewallSides(name, cfg)).length;
+  const envs = [];
+  for (const name of names) {
+    const cfg = projectConfig.environments[name];
+    const deployed = envHasServers(cfg);
+    const apiToken = providerTokenFor(cfg);
+    if (!deployed && !apiToken) {
+      p.log.info(
+        `Skipped ${name}: it has no servers yet, and ${providerFor(cfg).TOKEN_ENV} is not set to look for its firewall.`,
+      );
+      continue;
+    }
+    envs.push({ name, cfg, deployed, apiToken });
+  }
+  if (envs.length === 0) {
+    spinner?.stop('No deployed environments, nothing to push to.');
+    return [];
+  }
+  const clusters = envs.flatMap(({ name, cfg }) => envFirewallSides(name, cfg)).length;
   spinner?.start(`Updating firewall on ${clusters} cluster(s)...`);
   let updated = 0;
   const failed = [];
-  for (const [environment, cfg] of envs) {
+  for (const { name: environment, cfg, deployed, apiToken } of envs) {
     const sides = envFirewallSides(environment, cfg);
     try {
       const done = await pushOperatorCidrs({
@@ -186,13 +212,13 @@ async function pushToFirewalls(
         environment,
         sides,
         operatorCidrs: list,
-        apiToken: providerTokenFor(cfg),
+        apiToken,
       });
       updated += done.length;
       const missed = sides
         .map((side) => firewallName(projectConfig.projectName, side))
         .filter((name) => !done.includes(name));
-      if (missed.length > 0) {
+      if (deployed && missed.length > 0) {
         failed.push({
           name: environment,
           reason: `${providerFor(cfg).NAME} did not find ${missed.join(' or ')}`,
@@ -287,10 +313,11 @@ async function addAction(projectConfig, cidr) {
  * The environments that may still let `cidr` in after it left the list: the
  * ones whose record still holds it (their last push failed, or came before
  * the removal), and the ones with no record (pushed before records existed,
- * or a first push that failed).
+ * or a first push that failed). Skeletons are among them: one may have a
+ * firewall, pushed best-effort (pushToFirewalls).
  */
 function envsStillAllowing(projectConfig, cidr) {
-  return deployedEnvNames(projectConfig).filter((name) => {
+  return Object.keys(projectConfig?.environments ?? {}).filter((name) => {
     const record = projectConfig.environments[name]?.operatorCidrsPushed;
     return !Array.isArray(record) || record.includes(cidr);
   });
@@ -429,8 +456,8 @@ export async function run(args = []) {
 
   // The list action doesn't need a token; the others push every deployed
   // environment's firewall, each with its own provider's token, so each must
-  // be there before the list changes. A skeleton environment is not pushed,
-  // so its provider's token is not needed.
+  // be there before the list changes. A skeleton environment is pushed
+  // best-effort (pushToFirewalls), so its provider's token is not required.
   if (subcommand !== 'list') {
     const missing = deployedEnvNames(projectConfig).filter(
       (name) => !providerTokenFor(projectConfig.environments[name]),

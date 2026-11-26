@@ -514,39 +514,88 @@ describe('vibecarbon access', () => {
     expect(m.pushes).toEqual([]);
   });
 
-  it('a skeleton environment (no servers yet) is skipped: add and remove exit 0 and never ask for its token', async () => {
-    // A first deploy of staging that stopped before any server existed left
-    // its skeleton entry: no firewall, nothing to protect.
-    writeProject({ prod: prod(), staging: staging({ servers: [], status: 'deploying' }) }, [
-      TEAMMATE,
-      ME,
+  // A skeleton: the entry a first deploy writes before any server is
+  // recorded. Its firewall may exist (a single-k8s first deploy that failed
+  // after Pulumi made the cluster) or not (one that stopped earlier), so it
+  // is pushed best-effort: never a failure, never a token demand.
+  const skeleton = (extra = {}) => staging({ servers: [], status: 'deploying', ...extra });
+
+  it('a skeleton whose firewall exists is pushed by remove, and recorded, exit 0', async () => {
+    writeProject({ prod: prod(), staging: skeleton() }, [TEAMMATE, ME, REMOVED]);
+    expect(await access(['remove', REMOVED])).toBeNull();
+    expect(pushedTo()).toEqual([
+      'demo-prod-primary-firewall',
+      'demo-prod-standby-firewall',
+      'demo-staging-firewall',
     ]);
-    m.token.mockImplementation((id: string) => (id === 'digitalocean' ? undefined : `token-${id}`));
+    expect(m.pushes.find((p) => p.firewallName === 'demo-staging-firewall')?.token).toBe(
+      'token-digitalocean',
+    );
+    expect(onDisk().environments.staging.operatorCidrsPushed).toEqual(sorted(TEAMMATE, ME));
+  });
+
+  it('a skeleton whose firewall does not exist: exit 0, no failure line, no record', async () => {
+    writeProject({ prod: prod(), staging: skeleton() }, [TEAMMATE, ME, REMOVED]);
     m.absent.add('demo-staging-firewall');
+    expect(await access(['remove', REMOVED])).toBeNull();
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+    expect(logged(m.log.error)).toBe('');
+    expect(onDisk().environments.staging).not.toHaveProperty('operatorCidrsPushed');
+  });
+
+  it('a skeleton on another provider with no token: add and remove exit 0 with one note naming it, never asking for the token', async () => {
+    writeProject({ prod: prod(), staging: skeleton() }, [TEAMMATE, ME]);
+    m.token.mockImplementation((id: string) => (id === 'digitalocean' ? undefined : `token-${id}`));
     const prodSides = ['demo-prod-primary-firewall', 'demo-prod-standby-firewall'];
 
     expect(await access(['add', REMOVED])).toBeNull();
     expect(pushedTo()).toEqual(prodSides);
+    const note = (calls: string) => calls.split('\n').filter((l) => l.includes('staging'));
+    expect(note(logged(m.log.info))).toEqual([
+      expect.stringMatching(/staging.*DIGITALOCEAN_API_TOKEN/),
+    ]);
+
     m.pushes.length = 0;
+    m.log.info.mockClear();
     expect(await access(['remove', REMOVED])).toBeNull();
     expect(pushedTo()).toEqual(prodSides);
+    expect(note(logged(m.log.info))).toHaveLength(1);
 
+    // Neither run asked for it: no error line, no refusal before the list changed.
     expect(logged(m.log.error)).toBe('');
-    expect(m.token).not.toHaveBeenCalledWith('digitalocean');
     expect(onDisk().environments.staging).not.toHaveProperty('operatorCidrsPushed');
   });
 
-  it('a rerun of remove skips a skeleton environment too', async () => {
+  it('a skeleton whose firewall was found but failed to update fails remove, exit 1', async () => {
+    // Found and not updated, it may still admit the CIDR: not a silent skip.
+    writeProject({ prod: prod(), staging: skeleton() }, [TEAMMATE, ME, REMOVED]);
+    m.failing.add('demo-staging-firewall');
+    expect(await access(['remove', REMOVED])).toBe(1);
+    expect(logged(m.log.error)).toMatch(/staging \(firewall API answered 503\)/);
+    expect(onDisk().environments.staging).not.toHaveProperty('operatorCidrsPushed');
+  });
+
+  it('a rerun of remove pushes a skeleton best-effort too', async () => {
     writeProject(
       {
         prod: prod({ operatorCidrsPushed: sorted(TEAMMATE, ME) }),
-        staging: staging({ servers: [] }), // no record, but nothing to protect
+        staging: skeleton(), // no record: its firewall, if any, may still allow it
       },
       [TEAMMATE, ME],
     );
     expect(await access(['remove', REMOVED])).toBeNull();
+    expect(pushedTo()).toEqual(['demo-staging-firewall']);
+
+    // No firewall there: the rerun still exits 0, with no failure line.
+    m.pushes.length = 0;
+    m.absent.add('demo-staging-firewall');
+    writeProject(
+      { prod: prod({ operatorCidrsPushed: sorted(TEAMMATE, ME) }), staging: skeleton() },
+      [TEAMMATE, ME],
+    );
+    expect(await access(['remove', REMOVED])).toBeNull();
     expect(m.pushes).toEqual([]);
-    expect(logged(m.log.warn)).toContain(`${REMOVED} is not in the list, nothing to remove.`);
+    expect(logged(m.log.error)).toBe('');
   });
 
   it('a k8s-HA environment whose clusters are recorded only under ha.primary/ha.standby still counts as deployed', async () => {

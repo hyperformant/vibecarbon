@@ -301,13 +301,15 @@ export function envFirewallSides(environment, envConfig) {
 }
 
 /**
- * Whether an environment records any server, so has a firewall to push: the
- * flat `servers` list (every mode's final save, and the early writes of
- * compose and compose-HA), or an address on an HA side (k8s-HA writes
+ * Whether an environment records any server, so is deployed: the flat
+ * `servers` list (every mode's final save, and the early writes of compose
+ * and compose-HA), or an address on an HA side (k8s-HA writes
  * `ha.primary`/`ha.standby` once both clusters are up, before its final
  * save). An environment with neither is the skeleton of a first deploy that
- * stopped before any server existed: nothing to protect, so `status` and
- * `vibecarbon access` pass over it.
+ * stopped before its servers were recorded. `status` passes over it, having
+ * nothing to read; `vibecarbon access` pushes it best-effort, since a
+ * single-k8s first deploy records its servers only in its final save and
+ * may have left a firewall.
  *
  * @param {{ servers?: unknown[], ha?: Record<string, any> } | undefined} envConfig
  * @returns {boolean}
