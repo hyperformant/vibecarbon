@@ -68,7 +68,7 @@ describe('Flux Kustomization paths', () => {
 
     it('clones the project itself, so its paths are relative to the project root', () => {
       expect(repos.map((r) => r.spec?.url)).toEqual([
-        'https://github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}',
+        'ssh://git@github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}',
       ]);
     });
 

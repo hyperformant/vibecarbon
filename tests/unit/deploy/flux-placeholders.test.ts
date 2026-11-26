@@ -285,7 +285,9 @@ describe('deployK8sGitOps refuses a tree Flux would apply with a token', () => {
   it('a consistent tree deploys, with the Flux URL pointed at the real owner', async () => {
     const { project, origin } = gitopsProject();
     await deploy(project);
-    expect(git(origin, 'show', `main:${PRIMARY}`)).toContain('url: https://github.com/acme/proj\n');
+    expect(git(origin, 'show', `main:${PRIMARY}`)).toContain(
+      'url: ssh://git@github.com/acme/proj\n',
+    );
   });
 
   it('a project with the add-ons that join k8s/base deploys', async () => {

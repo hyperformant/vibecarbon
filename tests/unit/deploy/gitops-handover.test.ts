@@ -7,7 +7,7 @@
  * handover faked, and its spinner and git's push lines kept off the terminal.
  */
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gitSafeEnv } from '../../../src/lib/command.js';
@@ -28,6 +28,9 @@ vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({ handOverCluster
 const github = await import('../../../src/lib/github-environments.js');
 const { handOverCluster } = await import('../../../src/lib/deploy/k8s/flux-handover.js');
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
+const { FLUX_CLUSTER_FILE } = await import(
+  '../../../src/lib/deploy/k8s/unrendered-placeholders.js'
+);
 const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
 /** Whether the bare origin has a main branch yet. */
@@ -83,10 +86,14 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
     });
     const result = await deploy(project);
     expect(handOverCluster).toHaveBeenCalledTimes(1);
+    // The repo the deploy key goes on: the owner given, the repo the
+    // project is named for (no GitHub remote to ask here).
     expect(handOverCluster).toHaveBeenCalledWith({
       projectDir: project,
       envName: 'prod',
       kubeconfigPath: join(project, 'kubeconfig'),
+      owner: 'acme',
+      repo: 'proj',
     });
     expect(originHadMain).toEqual([true]);
     expect(github.triggerDeployWorkflow).not.toHaveBeenCalled();
@@ -102,5 +109,33 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
       (e: Error) => e,
     );
     expect(err?.message).toBe('flux did not finish');
+  });
+
+  it('a cluster file that still clones over https is refused before anything is written, naming upgrade', async () => {
+    vi.mocked(handOverCluster).mockResolvedValue(undefined);
+    const { project, origin } = gitopsProject();
+    const clusterFile = join(project, FLUX_CLUSTER_FILE);
+    const https = readFileSync(clusterFile, 'utf-8').replace(
+      'url: ssh://git@github.com/proj/proj',
+      'url: https://github.com/proj/proj',
+    );
+    writeFileSync(clusterFile, https);
+    const err = await deploy(project).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err?.message).toBe(
+      `${FLUX_CLUSTER_FILE} still has flux read your repo over https, which needs a token github ` +
+        'takes back after every workflow run. run vibecarbon upgrade and take the new ' +
+        `${FLUX_CLUSTER_FILE}, then rerun vibecarbon configure cicd prod`,
+    );
+    // Nothing written, pushed, seeded or handed over.
+    expect(readFileSync(clusterFile, 'utf-8')).toBe(https);
+    expect(JSON.parse(readFileSync(join(project, '.vibecarbon.json'), 'utf-8'))).toEqual({
+      projectName: 'proj',
+    });
+    expect(hasMain(origin)).toBe(false);
+    expect(github.seedEnvironmentSecrets).not.toHaveBeenCalled();
+    expect(handOverCluster).not.toHaveBeenCalled();
   });
 });

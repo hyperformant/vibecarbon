@@ -8,10 +8,10 @@
  *   2. git add k8s/ && git commit && git push.
  *   3. Seed GitHub Environment secrets + vars + upload KUBECONFIG_B64.
  *   4. Hand the cluster to Flux from this machine (handOverCluster in
- *      ./flux-handover.js): install Flux, apply the root GitRepository and
- *      Kustomization, wait for the first sync. No workflow is dispatched: a
- *      GitHub runner cannot reach the k8s API, which admits only the
- *      operator's addresses.
+ *      ./flux-handover.js): install Flux, give it the cluster's own
+ *      read-only deploy key, apply the root GitRepository and Kustomization,
+ *      wait for the first sync. No workflow is dispatched: a GitHub runner
+ *      cannot reach the k8s API, which admits only the operator's addresses.
  *
  * The objects Flux leaves to the CLI (the namespace, the backup CronJob and
  * its settings, the vibecarbon-app-secrets / vibecarbon-infra-secrets
@@ -52,7 +52,11 @@ import { GITHUB_REF_FILES, originGitHubRepo, writeGitHubRefs } from '../../templ
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { handOverCluster } from './flux-handover.js';
 import { k8sTlsIdentity } from './k3s.js';
-import { describeFluxPlaceholders, fluxPlaceholders } from './unrendered-placeholders.js';
+import {
+  describeFluxPlaceholders,
+  FLUX_CLUSTER_FILE,
+  fluxPlaceholders,
+} from './unrendered-placeholders.js';
 
 /**
  * Build the operator-facing warning when observability is installed but this
@@ -172,6 +176,26 @@ export function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
     'GitOps deploy stopped before changing anything: Flux applies the committed k8s/ tree as it is and ' +
       `cannot fill placeholders. ${describeFluxPlaceholders(findings).join('; ')}. ` +
       `${steps.join('. ')}. Then run this again.`,
+  );
+}
+
+/**
+ * Refuse, before anything is written or committed, a Flux cluster file that
+ * still clones the repo over https. Its Secret held the deploy workflow's
+ * GITHUB_TOKEN, which GitHub revokes when the job ends; the cluster file this
+ * vibecarbon ships clones over ssh with the cluster's own deploy key.
+ *
+ * @param {string} projectDir
+ * @param {string} environment - the cluster (`prod`, `prod-standby`)
+ */
+export function refuseHttpsFluxSource(projectDir, environment) {
+  const path = join(projectDir, FLUX_CLUSTER_FILE);
+  if (!existsSync(path)) return;
+  if (!/^\s*url:\s*["']?https:\/\/github\.com\//m.test(readFileSync(path, 'utf-8'))) return;
+  throw new Error(
+    `${FLUX_CLUSTER_FILE} still has flux read your repo over https, which needs a token github ` +
+      'takes back after every workflow run. run vibecarbon upgrade and take the new ' +
+      `${FLUX_CLUSTER_FILE}, then rerun vibecarbon configure cicd ${environmentForStack(environment)}`,
   );
 }
 
@@ -438,11 +462,13 @@ export async function deployK8sGitOps(args) {
 
   // Before anything is written, committed or seeded: a deploy.yml that would
   // write a stale provider token, a tree Flux would apply with a token in it,
-  // and a malformed backup config, fail here.
+  // a cluster file that still clones over https, and a malformed backup
+  // config, fail here.
   refuseLegacyProviderTokenStep(projectDir, ProviderClass);
   refuseFluxPlaceholders(projectDir, {
     fills: imageTag ? { [APP_DEPLOYMENT]: ['{{IMAGE_TAG}}'] } : {},
   });
+  refuseHttpsFluxSource(projectDir, environment);
   const backupSettings = resolveBackupSettings(backupConfig);
   // The Certificate deploy.yml renders, validated before anything is seeded.
   const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
@@ -528,10 +554,17 @@ export async function deployK8sGitOps(args) {
 
   // 4. Hand the cluster to Flux from here, after the push: its first sync
   // reads main. The firewall admits the operator's address, so this machine
-  // reaches the k8s API where a GitHub runner never could.
+  // reaches the k8s API where a GitHub runner never could. Flux clones the
+  // repo the refs were just pointed at, with a deploy key on that repo.
   s.start(`handing ${environment} to flux`);
   try {
-    await handOverCluster({ projectDir, envName: environment, kubeconfigPath });
+    await handOverCluster({
+      projectDir,
+      envName: environment,
+      kubeconfigPath,
+      owner: repoOwner,
+      repo: repoName,
+    });
   } catch (err) {
     s.error(`flux has not taken over ${environment}`);
     throw err;

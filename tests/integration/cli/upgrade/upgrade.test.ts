@@ -525,7 +525,7 @@ describe('vibecarbon upgrade after configure cicd', () => {
     const r = runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 });
     assertSuccess(r);
     for (const cluster of CLUSTERS) {
-      expect(read(fluxFile(cluster))).toContain(`url: https://github.com/${OWNER}/test-app`);
+      expect(read(fluxFile(cluster))).toContain(`url: ssh://git@github.com/${OWNER}/test-app`);
     }
   }
 

@@ -8,7 +8,9 @@
  * Install Flux once (installFluxIfAbsent), apply the root GitRepository and
  * Kustomization (applyFluxRoot), then have each reconcile and wait until it
  * has (awaitFluxReconcile). Every step is idempotent, so a rerun of
- * `configure cicd <env>` walks them again safely.
+ * `configure cicd <env>` walks them again safely. Between the install and the
+ * root, flux-deploy-key.js writes the Secret Flux clones with
+ * (replaceWholeSecret).
  */
 
 import { randomBytes } from 'node:crypto';
@@ -100,6 +102,32 @@ export async function applyFluxRoot({ env, projectDir }) {
     captureStdout: true,
     description: 'flux: apply the root GitRepository and Kustomization',
   });
+}
+
+/**
+ * Write a Secret whole: `replace` when it exists, `create` when it does not,
+ * so it ends up holding exactly the manifest's keys. An apply would merge,
+ * and keep a key an earlier writer left (deploy.yml put a username and
+ * password in flux-system). Missing is an empty answer (`--ignore-not-found`),
+ * so a first write prints no NotFound error; an unreachable API fails here,
+ * before anything is written. The manifest goes to kubectl on stdin only.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, namespace: string, name: string, manifest: string }} args
+ * @returns {Promise<'created' | 'replaced'>}
+ */
+export async function replaceWholeSecret({ env, namespace, name, manifest }) {
+  const found = await runKubectlWithRetry(
+    ['get', 'secret', name, '-n', namespace, '--ignore-not-found', '-o', 'name'],
+    { env, captureStdout: true, description: `flux: look for Secret/${name}` },
+  );
+  const verb = found.trim() ? 'replace' : 'create';
+  await runKubectlWithRetry([verb, '-f', '-'], {
+    env,
+    input: manifest,
+    captureStdout: true,
+    description: `flux: ${verb} Secret/${name}`,
+  });
+  return verb === 'replace' ? 'replaced' : 'created';
 }
 
 /** The root objects, in the order they reconcile: the source, then the base. */

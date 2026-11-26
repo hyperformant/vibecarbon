@@ -98,6 +98,14 @@ describe('rewriteGitHubRefs and restoreGitHubRefs', () => {
     );
   });
 
+  it('rewrites the ssh clone url to the real owner', () => {
+    const text = 'url: ssh://git@github.com/x/test-app\n';
+    expect(rewriteGitHubRefs(text, REFS)).toBe('url: ssh://git@github.com/acme/shop\n');
+    expect(restoreGitHubRefs(rewriteGitHubRefs(text, REFS), REFS)).toBe(
+      'url: ssh://git@github.com/test-app/test-app\n',
+    );
+  });
+
   it('restore leaves a ref to another owner alone', () => {
     const text = 'image: ghcr.io/someone/shop:main\n';
     expect(restoreGitHubRefs(text, REFS)).toBe(text);
@@ -122,7 +130,7 @@ describe('writeGitHubRefs', () => {
     expect(changed.sort()).toEqual([...GITHUB_REF_FILES].sort());
     expect(config(dir).github).toEqual({ owner: 'acme', repo: 'shop' });
     expect(readFileSync(join(dir, 'k8s/flux/clusters/primary/vibecarbon.yaml'), 'utf-8')).toContain(
-      'url: https://github.com/acme/shop\n',
+      'url: ssh://git@github.com/acme/shop\n',
     );
     expect(writeGitHubRefs(dir, REFS)).toEqual([]);
   });

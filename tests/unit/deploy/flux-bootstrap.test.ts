@@ -26,8 +26,14 @@ vi.mock('../../../src/lib/deploy/k8s/k3s.js', async (orig) => ({
   },
 }));
 
-const { FLUX_INSTALL_URL, FLUX_VERSION, applyFluxRoot, awaitFluxReconcile, installFluxIfAbsent } =
-  await import('../../../src/lib/deploy/k8s/flux-bootstrap.js');
+const {
+  FLUX_INSTALL_URL,
+  FLUX_VERSION,
+  applyFluxRoot,
+  awaitFluxReconcile,
+  installFluxIfAbsent,
+  replaceWholeSecret,
+} = await import('../../../src/lib/deploy/k8s/flux-bootstrap.js');
 const { FLUX_CLUSTER_FILE } = await import(
   '../../../src/lib/deploy/k8s/unrendered-placeholders.js'
 );
@@ -122,6 +128,62 @@ describe('applyFluxRoot', () => {
     await applyFluxRoot({ env, projectDir: '/project' });
     expect(argsOf()).toEqual([[...SERVER_SIDE, '-f', join('/project', FLUX_CLUSTER_FILE)]]);
     expect(k.calls[0].env).toBe(env);
+  });
+});
+
+describe('replaceWholeSecret', () => {
+  const GET = [
+    'get',
+    'secret',
+    'flux-system',
+    '-n',
+    'flux-system',
+    '--ignore-not-found',
+    '-o',
+    'name',
+  ];
+  const manifest = [
+    'apiVersion: v1',
+    'kind: Secret',
+    'metadata:',
+    '  name: flux-system',
+    '  namespace: flux-system',
+    'type: Opaque',
+    'stringData:',
+    '  identity: "-----BEGIN PRIVATE KEY-----\\nMC4CAQ\\n-----END PRIVATE KEY-----\\n"',
+  ].join('\n');
+  const write = () =>
+    replaceWholeSecret({ env, namespace: 'flux-system', name: 'flux-system', manifest });
+
+  it('writes a Secret whole: replace when it exists, create when not, the manifest on stdin', async () => {
+    // Whole, not applied: a key an earlier writer left (deploy.yml's
+    // username and password) goes with the old Secret.
+    k.answer = (args) => (args[0] === 'get' ? 'secret/flux-system\n' : '');
+    await expect(write()).resolves.toBe('replaced');
+    expect(argsOf()).toEqual([GET, ['replace', '-f', '-']]);
+    expect(k.calls.map((c) => c.input)).toEqual([undefined, manifest]);
+
+    // Missing is an empty answer (--ignore-not-found), so a first handover
+    // prints no NotFound error under the spinner.
+    k.calls.length = 0;
+    k.answer = () => '';
+    await expect(write()).resolves.toBe('created');
+    expect(argsOf()).toEqual([GET, ['create', '-f', '-']]);
+    expect(k.calls.map((c) => c.input)).toEqual([undefined, manifest]);
+    expect(k.calls.every((c) => c.env === env)).toBe(true);
+    expect(argsOf().flat().join(' ')).not.toContain('PRIVATE KEY');
+  });
+
+  it('an unreachable API fails before anything is written', async () => {
+    const down = kubectlFailed(
+      GET,
+      'Unable to connect to the server: dial tcp 203.0.113.20:6443: i/o timeout',
+    );
+    k.answer = () => {
+      throw down;
+    };
+    await expect(write()).rejects.toBe(down);
+    expect(argsOf()).toEqual([GET]);
   });
 });
 

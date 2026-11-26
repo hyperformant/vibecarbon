@@ -1910,15 +1910,25 @@ export async function readAppSecretVersions({ env }) {
   return versions.join(',');
 }
 
-/** A Secret manifest for `kubectl apply -f -`, values JSON-quoted, never on argv. */
-function secretManifest(name, stringData, namespace = 'vibecarbon') {
+/**
+ * A Secret manifest for kubectl to read on stdin (`-f -`), values
+ * JSON-quoted, never on argv.
+ *
+ * @param {string} name
+ * @param {Record<string, string>} stringData
+ * @param {string} [namespace]
+ * @param {string} [type] - Opaque, or a type whose keys Kubernetes checks
+ *   (kubernetes.io/dockerconfigjson)
+ * @returns {string}
+ */
+export function secretManifest(name, stringData, namespace = 'vibecarbon', type = 'Opaque') {
   return [
     'apiVersion: v1',
     'kind: Secret',
     'metadata:',
     `  name: ${name}`,
     `  namespace: ${namespace}`,
-    'type: Opaque',
+    `type: ${type}`,
     'stringData:',
     ...Object.entries(stringData).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
   ].join('\n');
