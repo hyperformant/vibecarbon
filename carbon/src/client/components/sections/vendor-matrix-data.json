@@ -139,27 +139,18 @@
     },
     "scaleway": {
       "run": {
-        "id": "c82715d",
-        "date": "2026-11-20",
+        "id": "51573d5",
+        "date": "2026-11-26",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 144141,
-          "warm-deploy": 19325,
-          "scale": 128502,
-          "backup": 4689,
-          "destroy": 20479,
-          "restore": 125827
-        },
-        "compose-ha": {
-          "deploy": 181606,
-          "warm-deploy": 37961,
-          "scale": 196495,
-          "backup": 4135,
-          "destroy": 33144,
-          "restore": 235021,
-          "failover": 76036
+          "deploy": 147099,
+          "warm-deploy": 17531,
+          "scale": 150119,
+          "backup": 5550,
+          "destroy": 21330,
+          "restore": 132233
         }
       }
     }

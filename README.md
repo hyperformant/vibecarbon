@@ -298,9 +298,9 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | | `k8s` | 4m 51s | 8.1s | 28.6s | 1m 17s | 9m 22s | 1m 24s | — |
 | | `k8s-ha` | 5m 32s | 21.9s | 12.6s | 2m 18s | 18m 22s | 1m 24s | 3m 22s |
 | Vultr | `compose` | 2m 46s | 16.4s | 6.7s | 2m 42s | 4m 11s | 20.6s | — |
-| Scaleway | `compose` | 2m 24s | 19.3s | 4.7s | 2m 6s | 2m 9s | 20.5s | — |
+| Scaleway | `compose` | 2m 27s | 17.5s | 5.6s | 2m 12s | 2m 30s | 21.3s | — |
 
-_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `f7fac70` (2026-11-20) · Vultr `cc553a2` (2026-11-25) · Scaleway `c82715d` (2026-11-20) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `f7fac70` (2026-11-20) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
