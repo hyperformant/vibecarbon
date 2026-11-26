@@ -512,8 +512,12 @@ const CSI_REPO: Record<string, string> = {
   scaleway: 'scaleway/scaleway-csi',
 };
 
-/** A repo file under carbon/cloud-init/k3s, as committed. */
-const k3sFile = (file: string) => readRepoFile(`carbon/cloud-init/k3s/${file}`);
+/** A provider's committed CSI render, as committed (EMBEDDED_CSI_FILES). */
+const embeddedRender = (provider: string) => {
+  const files = Object.keys(EMBEDDED_CSI_FILES).filter((f) => EMBEDDED_CSI_FILES[f] === provider);
+  expect(files, `${provider}'s committed render`).toHaveLength(1);
+  return readRepoFile(files[0]);
+};
 /** A committed render's header: the comment lines before its first document. */
 const headerOf = (text: string) => text.slice(0, text.indexOf('\n---\n') + 1);
 
@@ -610,17 +614,30 @@ describe('cloud-init starts every CSI container on the ref the deploy re-pin set
         expect(decodes, 'one embedded manifest decode').toHaveLength(1);
         const [, carried, to] = decodes[0];
         expect(to).toBe(embedded.path);
-        const committed = k3sFile(embedded.file);
+        const committed = embeddedRender(provider);
         expect(gunzipSync(Buffer.from(carried, 'base64')).toString('utf8')).toBe(committed);
         expect(headerOf(committed)).toContain(
           `\n# Rendered from https://github.com/${CSI_REPO[provider]} ${version}\n`,
         );
         // Helm names no namespace on a namespaced object, so the apply does,
-        // and the render names no other one.
+        // and the render names no other one: not on an object, and not on a
+        // binding's subject, which would grant a ServiceAccount elsewhere.
         expect(namespace).toBe('-n kube-system ');
-        for (const doc of loadAll(committed) as { metadata?: { namespace?: string } }[]) {
-          expect([undefined, 'kube-system']).toContain(doc?.metadata?.namespace);
+        type Doc = {
+          kind?: string;
+          metadata?: { name?: string; namespace?: string };
+          subjects?: { namespace?: string }[];
+        };
+        const docs = loadAll(committed) as Doc[];
+        for (const doc of docs) {
+          const at = `${doc?.kind}/${doc?.metadata?.name}`;
+          expect([undefined, 'kube-system'], at).toContain(doc?.metadata?.namespace);
+          for (const subject of doc?.subjects ?? []) {
+            expect([undefined, 'kube-system'], `${at} subject`).toContain(subject.namespace);
+          }
         }
+        // Not vacuous: the render binds its ServiceAccount.
+        expect(docs.some((doc) => (doc?.subjects ?? []).length > 0)).toBe(true);
       } else {
         expect(
           embedded,
@@ -646,7 +663,7 @@ describe('cloud-init starts every CSI container on the ref the deploy re-pin set
       // A fetched manifest is recorded from its URL by hand; a committed one
       // is here, so the record is held to it, and the master's own rewrite
       // runs over it whole, not over a manifest built from the record.
-      const committed = k3sFile(EMBEDDED_CSI_MANIFESTS[provider].file);
+      const committed = embeddedRender(provider);
       const upstream = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
         .workloads as Record<string, Record<string, string>>;
       expect(imagesByContainer(committed)).toEqual(imagesByContainer(csiManifest(upstream)));

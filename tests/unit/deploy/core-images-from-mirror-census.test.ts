@@ -95,6 +95,14 @@ const ALLOWLIST: Record<string, string> = {
   [DIAG_NETSHOOT_IMAGE]: 'diagnose-only probe',
   // Runs on the operator's machine (the arm64 binfmt hint), never a server.
   [BINFMT_IMAGE]: 'operator-local binfmt hint',
+};
+
+/**
+ * Refs allowed only at a site in a committed CSI render (EMBEDDED_CSI_FILES),
+ * each with its reason. Anywhere else, a k8s manifest or src, the same ref is
+ * a Docker Hub pull like any other.
+ */
+const EMBEDDED_ALLOWLIST: Record<string, string> = {
   // A CSI driver's own container, in the render the Scaleway master carries.
   // Every provider's driver image stays upstream by design (CSI_SIDECAR_MIRRORS,
   // src/lib/images.js); the others are only unseen here because their
@@ -182,13 +190,23 @@ function jsSites(rel: string, text = readRepoFile(rel)): Site[] {
   return out;
 }
 
-const fromMirrorOrIndirect = (ref: string) =>
-  ref.startsWith(MIRROR_PREFIX) || ref.startsWith('{{') || ref.startsWith('${') || ref in ALLOWLIST;
+/** The file a site is in: `where` is `<file>:<line>`, or a JS file alone. */
+const siteFile = (where: string) => where.replace(/:\d+$/, '');
+
+/** ALLOWLIST anywhere; EMBEDDED_ALLOWLIST only at a site in a committed render. */
+const allowedAt = ({ where, ref }: Site) =>
+  ref in ALLOWLIST || (ref in EMBEDDED_ALLOWLIST && siteFile(where) in EMBEDDED_CSI_FILES);
+
+const fromMirrorOrIndirect = (site: Site) =>
+  site.ref.startsWith(MIRROR_PREFIX) ||
+  site.ref.startsWith('{{') ||
+  site.ref.startsWith('${') ||
+  allowedAt(site);
 
 /** Rule (b). */
 function dockerHubOffenders(sites: Site[]): string[] {
   return sites
-    .filter(({ ref }) => !fromMirrorOrIndirect(ref))
+    .filter((site) => !fromMirrorOrIndirect(site))
     .map(
       ({ where, ref }) =>
         `${where}: core-path image ${ref} pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`,
@@ -311,14 +329,37 @@ describe('core-path images come from our ghcr mirror', () => {
       const judged = cloudInitSites(file);
       // Every rewrite has its site, and what is left upstream is the allowlist.
       expect(new Set(raw.map((s) => s.ref))).toEqual(
-        new Set([...rewrites.keys(), ...raw.map((s) => s.ref).filter((r) => r in ALLOWLIST)]),
+        new Set([
+          ...rewrites.keys(),
+          ...raw.map((s) => s.ref).filter((r) => r in EMBEDDED_ALLOWLIST),
+        ]),
       );
       expect(judged.filter((s) => !s.ref.startsWith(MIRROR_PREFIX)).map((s) => s.ref)).toEqual(
-        raw.filter((s) => s.ref in ALLOWLIST).map((s) => s.ref),
+        raw.filter((s) => s.ref in EMBEDDED_ALLOWLIST).map((s) => s.ref),
       );
       // Unmapped, the sidecars would be named: the mapping is what passes them.
       expect(dockerHubOffenders(raw).length).toBeGreaterThan(0);
       expect(dockerHubOffenders(judged)).toEqual([]);
+    }
+  });
+
+  it('bites: a ref allowed in a committed render is a Docker Hub pull anywhere else', () => {
+    const [file] = Object.keys(EMBEDDED_CSI_FILES);
+    for (const ref of Object.keys(EMBEDDED_ALLOWLIST)) {
+      expect(ref in ALLOWLIST, ref).toBe(false);
+      expect(dockerHubOffenders([{ where: `${file}:1`, ref }])).toEqual([]);
+      const named = (where: string) => [
+        `${where}: core-path image ${ref} pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`,
+      ];
+      // The same line in a k8s base manifest, and in a JS template literal.
+      expect(
+        dockerHubOffenders(textSites('carbon/k8s/base/probe.yaml', `image: "${ref}"`)),
+      ).toEqual(named('carbon/k8s/base/probe.yaml:1'));
+      expect(
+        dockerHubOffenders(jsSites('src/lib/probe.js', `const x = \`image: ${ref}\`;`)),
+      ).toEqual(named('src/lib/probe.js'));
+      // A file whose name only starts like the render's is not it.
+      expect(dockerHubOffenders([{ where: `${file}.bak:1`, ref }])).toEqual(named(`${file}.bak:1`));
     }
   });
 

@@ -49,10 +49,11 @@ const ADDONS = (JSON.parse(readRepoFile('services/index.json')) as Array<{ name:
 );
 const isAddon = (f: string) =>
   ADDONS.some((a) => f.includes(`/k8s/base/${a}/`) || f.includes(`docker-compose.${a}.`));
+const CLOUD_INIT = gitFiles('carbon/cloud-init');
 const TEMPLATES = [
   'carbon/docker-compose.prod.yml',
   ...gitFiles('carbon/k8s').filter((f) => /\.ya?ml$/.test(f)),
-  ...gitFiles('carbon/cloud-init').filter((f) => !(f in EMBEDDED_CSI_FILES)),
+  ...CLOUD_INIT.filter((f) => !(f in EMBEDDED_CSI_FILES)),
 ].filter((f) => !isAddon(f));
 
 /** The env-var form compose takes the set's refs in, by name. */
@@ -121,6 +122,15 @@ describe('no template image bypasses the resolved set', () => {
         'carbon/k8s/infra/traefik-crds/kustomization.yaml',
         'carbon/cloud-init/k3s/master-init.sh',
       ]),
+    );
+    // The skip takes out a file the walk held, and only that: a renamed
+    // render must not leave the skip naming nothing.
+    const embedded = Object.keys(EMBEDDED_CSI_FILES);
+    expect(embedded.length).toBeGreaterThan(0);
+    expect(CLOUD_INIT).toEqual(expect.arrayContaining(embedded));
+    expect(TEMPLATES.filter((f) => f in EMBEDDED_CSI_FILES)).toEqual([]);
+    expect(TEMPLATES.filter((f) => f.startsWith('carbon/cloud-init/')).length).toBe(
+      CLOUD_INIT.length - embedded.length,
     );
     expect(TEMPLATES.flatMap((f) => imageSites(f)).length).toBeGreaterThan(10);
     expect(SET_TOKENS.size).toBe(5);

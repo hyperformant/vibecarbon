@@ -133,10 +133,25 @@ describe('getServer: a refusal carries its status, for the token check', () => {
     expect(urls()).toEqual(ZONES.map((z) => `${ScalewayProvider.API_BASE}${probe(z)}`));
   });
 
-  it('a zone that answered 403 makes it 403: the token may not read there', async () => {
-    answer({ 'fr-par-2': 403 });
+  it('a zone that answered 403 makes it 403, worded as that refusal', async () => {
+    answer({ 'fr-par-2': 403, 'nl-ams-2': 403 });
     const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
-    expect(err).toMatchObject({ status: 403 });
+    expect(err).toMatchObject({
+      status: 403,
+      message:
+        'Failed to get server: fr-par-2, nl-ams-2 refused the read of server srv-1 (HTTP 403), ' +
+        'and no other zone has it',
+    });
+    expect(urls()).toHaveLength(ZONES.length);
+  });
+
+  it('every zone answering 403 says so', async () => {
+    answer(Object.fromEntries(ZONES.map((z) => [z, 403])));
+    const err = await new ScalewayProvider('tok').getServer('srv-1').catch((e: Error) => e);
+    expect(err).toMatchObject({
+      status: 403,
+      message: 'Failed to get server: every zone refused the read of server srv-1 (HTTP 403)',
+    });
     expect(urls()).toHaveLength(ZONES.length);
   });
 

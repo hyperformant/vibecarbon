@@ -1001,22 +1001,22 @@ export class ScalewayProvider extends BaseProvider {
    * (a 403 is a zone the token may not read); any other failure throws at
    * once, with its HTTP status on the error.
    * @param {string} serverId
-   * @returns {Promise<{zone: string} | {zone: null, refused: 403|404}>} the
-   *   zone, or none, with 403 when any zone refused and 404 otherwise
+   * @returns {Promise<{zone: string} | {zone: null, refusedIn: string[]}>} the
+   *   zone, or none, with the zones that answered 403
    */
   async _probeServerZone(serverId) {
     this._zoneCache ??= new Map();
     const cached = this._zoneCache.get(serverId);
     if (cached) return { zone: cached };
-    /** @type {403|404} */
-    let refused = 404;
+    /** @type {string[]} */
+    const refusedIn = [];
     for (const zone of ScalewayProvider._zones()) {
       const res = await this.bareRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
       if (res.ok) {
         this._zoneCache.set(serverId, zone);
         return { zone };
       }
-      if (res.status === 403) refused = 403;
+      if (res.status === 403) refusedIn.push(zone);
       else if (res.status !== 404) {
         const body = await res.text().catch(() => '');
         throw Object.assign(
@@ -1025,7 +1025,7 @@ export class ScalewayProvider extends BaseProvider {
         );
       }
     }
-    return { zone: null, refused };
+    return { zone: null, refusedIn };
   }
 
   /**
@@ -1348,15 +1348,23 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<object>}
    */
   async getServer(serverId) {
-    // A server no zone has throws with the probes' status, 404, or 403 when
-    // a zone refused the token: either is a token that can't see the server
-    // (assertTokenSeesCluster), as a failed probe's own status is.
-    const { zone, refused } = await this._probeServerZone(serverId);
+    // A server no zone has throws with the probes' status: 404, or 403 when a
+    // zone refused the token, worded as the refusal it is. Either is a token
+    // that can't see the server (assertTokenSeesCluster), as a failed probe's
+    // own status is.
+    const { zone, refusedIn = [] } = await this._probeServerZone(serverId);
     if (!zone) {
-      throw Object.assign(
-        new Error(`Failed to get server: server ${serverId} not found in any zone`),
-        { status: refused },
-      );
+      const zones = ScalewayProvider._zones();
+      const message =
+        refusedIn.length === 0
+          ? `server ${serverId} not found in any zone`
+          : refusedIn.length === zones.length
+            ? `every zone refused the read of server ${serverId} (HTTP 403)`
+            : `${refusedIn.join(', ')} refused the read of server ${serverId} (HTTP 403), ` +
+              'and no other zone has it';
+      throw Object.assign(new Error(`Failed to get server: ${message}`), {
+        status: refusedIn.length === 0 ? 404 : 403,
+      });
     }
     const response = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (!response.ok) {

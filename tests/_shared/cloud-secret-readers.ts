@@ -26,6 +26,7 @@
  */
 import { vi } from 'vitest';
 import { EMBEDDED_CSI_MANIFESTS } from '../../src/lib/iac/cloud-init.js';
+import { EMBEDDED_CSI_FILES } from './csi-install-rewrite.js';
 
 export type SecretRef = {
   /** The reader, `kind/name`. */
@@ -157,25 +158,25 @@ export const CLOUD_SECRET_READERS: Record<string, CloudSecretReaders> = {
   },
 };
 
-/** The repo directory a committed manifest lives in. */
-const EMBEDDED_DIR = 'carbon/cloud-init/k3s';
-
 /**
  * The manifests a master boot script applies by URL, in its order: straight
  * from the URL, or a CSI driver's through `csi_fetch_mirrored`, which
  * downloads it and moves its images onto the mirrors before the apply. A
  * `file://` URL is a manifest the master decoded from its user data: it is
- * named by the committed file it came from (EMBEDDED_CSI_MANIFESTS), and one
- * the table does not hold throws.
+ * named by the committed file it came from (EMBEDDED_CSI_MANIFESTS' path, to
+ * EMBEDDED_CSI_FILES' repo path), and one the table does not hold throws.
  */
 export const manifestUrls = (script: string) =>
   [...script.matchAll(/(?:kubectl apply -f|csi_fetch_mirrored) ((?:https|file):\/\/[^\s;]+)/g)].map(
     ([, url]) => {
       if (url.startsWith('https://')) return url;
       const path = url.slice('file://'.length);
-      const embedded = Object.values(EMBEDDED_CSI_MANIFESTS).find((m) => m.path === path);
-      if (!embedded) throw new Error(`no EMBEDDED_CSI_MANIFESTS entry decodes to ${path}`);
-      return `${EMBEDDED_DIR}/${embedded.file}`;
+      const provider = Object.keys(EMBEDDED_CSI_MANIFESTS).find(
+        (id) => EMBEDDED_CSI_MANIFESTS[id].path === path,
+      );
+      const file = Object.keys(EMBEDDED_CSI_FILES).find((f) => EMBEDDED_CSI_FILES[f] === provider);
+      if (!file) throw new Error(`no EMBEDDED_CSI_MANIFESTS entry decodes to ${path}`);
+      return file;
     },
   );
 

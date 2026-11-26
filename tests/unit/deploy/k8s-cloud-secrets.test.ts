@@ -435,8 +435,9 @@ describe('k8sCloudSecrets is exactly what the upstream manifests read', () => {
         PROVIDERS.scaleway.k8sCloudSecrets({ token: TOKEN, region: region as string }),
       ).toThrow(/zone/);
     }
-    // Empty, not undefined: an empty value reads as unset (readOperatorVar),
-    // and stubEnv's delete misses a process.env something replaced.
+    // Empty, not undefined: in this file `vi.stubEnv(key, undefined)` left the
+    // stubbed value in place (the cause was not found), and readOperatorVar
+    // reads '' as unset.
     vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', '');
     expect(() => cloudSecretsOf(PROVIDERS.scaleway, TOKEN)).toThrow(
       /^Scaleway needs SCALEWAY_DEFAULT_PROJECT_ID set alongside SCALEWAY_SECRET_KEY/,
@@ -1053,8 +1054,21 @@ describe('applyCloudSecrets', () => {
       async (status) => {
         rotation(PROVIDERS.scaleway);
         apiStatus = status;
-        await expect(apply(PROVIDERS.scaleway)).rejects.toThrow(
-          `Your Scaleway API token can't see prod's cluster: Scaleway answered HTTP ${status} `,
+        const err = await apply(PROVIDERS.scaleway).catch((e: Error) => e);
+        expect((err as Error).message).toMatch(
+          new RegExp(
+            `^Your Scaleway API token can't see prod's cluster: Scaleway answered HTTP ${status} `,
+          ),
+        );
+        // The line under it is getServer's own: a 403 in every zone is a
+        // refusal, a 401 the probe's answer.
+        const tail = (err as Error).message.split('\n').at(-1);
+        expect(tail).toEqual(
+          status === 403
+            ? `Failed to get server: every zone refused the read of server ${MASTER_ID} (HTTP 403)`
+            : expect.stringMatching(
+                new RegExp(`^Scaleway API error resolving server ${MASTER_ID} \\(401\\): `),
+              ),
         );
         expectMasterReads('scaleway', PROVIDERS.scaleway);
         expect(applies()).toEqual([]);
