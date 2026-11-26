@@ -52,6 +52,7 @@
  * API Documentation: https://www.scaleway.com/en/developers/api/instance/
  */
 
+import { canonicalIpRange } from '../cidr.js';
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
@@ -76,16 +77,43 @@ const K8S_API_PORT = 6443;
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 
 /**
+ * A security group rule in one form, however it is spelled: what every
+ * comparison of a listed rule reads, never the raw fields. The Instance API
+ * lists a rule in its own form: a host range bare (`1.2.3.0` for
+ * `1.2.3.0/32`, an IPv6 /128 as the bare address) and a single port as
+ * `dest_port_to: null` (terraform-provider-scaleway v2.92.1 cassettes,
+ * internal/services/instance/testdata/security-group-basic and
+ * security-group-rules-ip-ranges). The CLI writes `/32` and both ports. So
+ * the range is canonicalIpRange's (null when it is none), and a missing
+ * `dest_port_to` is `dest_port_from`. Ports are numbers, or null.
+ * @param {{action?: string, protocol?: string, direction?: string, ip_range?: string,
+ *   dest_port_from?: number|string|null, dest_port_to?: number|string|null}} rule
+ * @returns {{action?: string, protocol?: string, direction?: string, ip_range: string|null,
+ *   dest_port_from: number|null, dest_port_to: number|null}}
+ */
+export function canonicalScalewayRule(rule) {
+  const port = (value) => (value === null || value === undefined ? null : Number(value));
+  const from = port(rule.dest_port_from);
+  return {
+    action: rule.action,
+    protocol: rule.protocol,
+    direction: rule.direction,
+    ip_range: canonicalIpRange(rule.ip_range),
+    dest_port_from: from,
+    dest_port_to: port(rule.dest_port_to) ?? from,
+  };
+}
+
+/**
  * An inbound TCP rule on an operator-locked port: the rules
  * applyOperatorCidrs rebuilds, and writes after every other.
- * @param {{direction?: string, protocol?: string, dest_port_from?: number|string}} rule
+ * @param {object} rule a rule as listed or as built
  * @returns {boolean}
  */
 function isOperatorLockedRule(rule) {
+  const r = canonicalScalewayRule(rule);
   return (
-    rule.direction === 'inbound' &&
-    rule.protocol === 'TCP' &&
-    OPERATOR_LOCKED_PORTS.has(Number(rule.dest_port_from))
+    r.direction === 'inbound' && r.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(r.dest_port_from)
   );
 }
 
@@ -463,7 +491,11 @@ export class ScalewayProvider extends BaseProvider {
    */
   static K8S_STORAGE_CLASS = 'sbs-default';
 
-  /** Compose-only: no k8s program exists to pin a VPC CIDR against. @type {string} */
+  /**
+   * No fixed range: scaleway-k8s.js derives a /24 per cluster
+   * (vpcCidrForCluster) for its Private Network and exports it as `vpcCidr`,
+   * the value deployK3s reads. @type {string}
+   */
   static DEFAULT_VPC_CIDR = '';
 
   /**
@@ -1466,18 +1498,25 @@ export class ScalewayProvider extends BaseProvider {
     if (!zone) {
       throw new Error(`Scaleway security group ${firewallId} not found in any zone`);
     }
+    // Scaleway's own rules (the six outbound SMTP drops every group lists
+    // first, `editable: false`) are never sent back. A PUT that leaves them
+    // out keeps them, as Terraform's do (its cassettes' PUT bodies carry only
+    // its own rules), and they count positions of their own: the editable
+    // rules number theirs from 1.
     // Normalize: fresh rules carry no id (null ⇒ create), editable defaults
     // true (the API ignores a non-editable rule, so pinning it avoids a
     // silently-dropped rule), and each rule's position is its place in the
     // list. Set last: a kept rule still carries the position it was read
     // with, and two rules on one position leave their order to the API, so
     // the order the caller built would not be the order on the group.
-    const wireRules = rules.map((rule, i) => ({
-      id: null,
-      editable: true,
-      ...rule,
-      position: i + 1,
-    }));
+    const wireRules = rules
+      .filter((rule) => rule.editable !== false)
+      .map((rule, i) => ({
+        id: null,
+        editable: true,
+        ...rule,
+        position: i + 1,
+      }));
     const response = await this.apiRequest(
       `/instance/v1/zones/${zone}/security_groups/${firewallId}/rules`,
       { method: 'PUT', body: JSON.stringify({ rules: wireRules }) },
@@ -1510,10 +1549,18 @@ export class ScalewayProvider extends BaseProvider {
    */
   buildReplicationFirewallRules(firewall, peerIp) {
     const rules = replaceWireguardPeerRules(firewall.rules || [], peerIp, {
-      isWireguardRule: (r) =>
-        r.protocol === 'UDP' && r.direction === 'inbound' && Number(r.dest_port_from) === WG_PORT,
-      admitsOnlyPeer: (r, ip) =>
-        r.action === 'accept' && r.ip_range === `${ip}/32` && Number(r.dest_port_to) === WG_PORT,
+      isWireguardRule: (rule) => {
+        const r = canonicalScalewayRule(rule);
+        return r.protocol === 'UDP' && r.direction === 'inbound' && r.dest_port_from === WG_PORT;
+      },
+      // The peer's rule as listed reads `<ip>` with no dest_port_to; as
+      // built, `<ip>/32` and 51821. Both are the one rule.
+      admitsOnlyPeer: (rule, ip) => {
+        const r = canonicalScalewayRule(rule);
+        return (
+          r.action === 'accept' && r.ip_range === canonicalIpRange(ip) && r.dest_port_to === WG_PORT
+        );
+      },
       buildPeerRule: (ip) => ({
         action: 'accept',
         protocol: 'UDP',
@@ -1548,16 +1595,20 @@ export class ScalewayProvider extends BaseProvider {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
 
-    const isRetiredDbPort = (r) =>
-      r.direction === 'inbound' &&
-      r.protocol === 'TCP' &&
-      RETIRED_DB_PORTS.has(Number(r.dest_port_from));
+    const isRetiredDbPort = (rule) => {
+      const r = canonicalScalewayRule(rule);
+      return (
+        r.direction === 'inbound' && r.protocol === 'TCP' && RETIRED_DB_PORTS.has(r.dest_port_from)
+      );
+    };
     const kept = (fw.rules || [])
       .filter((r) => !isOperatorLockedRule(r) && !isRetiredDbPort(r))
       .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
       ...new Set(
-        (fw.rules || []).filter(isOperatorLockedRule).map((r) => Number(r.dest_port_from)),
+        (fw.rules || [])
+          .filter(isOperatorLockedRule)
+          .map((r) => canonicalScalewayRule(r).dest_port_from),
       ),
     ];
     const rebuilt = lockedPorts.flatMap((port) =>

@@ -636,8 +636,10 @@ export async function openReplicationFirewallForPeers({
     try {
       const firewall = await provider.findFirewallByName(firewallName);
       if (!firewall) {
-        // findFirewallByName soft-fails to null on a non-ok response, so this
-        // is "absent OR unreadable" — either way the peer rule is not open.
+        // Null is "no firewall by that name", or, on a provider whose group
+        // listing still returns null on an error status (Hetzner, Vultr),
+        // "unreadable": either way the peer rule is not open. Scaleway
+        // throws on a short listing instead, and the catch below says so.
         p.log.warn(
           `Could not resolve firewall ${firewallName}, WireGuard UDP 51821 may not be ` +
             "open to the peer, and HA replication won't work until it is.",

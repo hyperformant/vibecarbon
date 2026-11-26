@@ -22,6 +22,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => ({
 import { openWireguardPortHetznerFirewall } from '../../../src/lib/deploy/compose/ha.js';
 import { K8S_HA_EFFECTS } from '../../../src/lib/deploy/effects/k8s-ha.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
+import { listedRange, SCALEWAY_SMTP_DROPS } from '../../_shared/scaleway-listed-rules.js';
 
 const NAME = 'acme-prod-primary-firewall';
 const PEER = '198.51.100.7';
@@ -34,16 +35,24 @@ const json = (body: unknown, status = 200) => ({
   text: async () => JSON.stringify(body),
 });
 
+/** A single-port inbound rule as the listing returns it (scaleway-listed-rules.ts). */
 const rule = (port: number, ipRange: string, protocol = 'TCP') => ({
   id: `r-${port}-${ipRange}`,
   action: 'accept',
   protocol,
   direction: 'inbound',
-  ip_range: ipRange,
+  ip_range: listedRange(ipRange),
   dest_port_from: port,
-  dest_port_to: port,
+  dest_port_to: null,
 });
-const WEB = [rule(80, '0.0.0.0/0'), rule(80, '::/0'), rule(443, '0.0.0.0/0'), rule(443, '::/0')];
+/** A whole listing: Scaleway's own SMTP drops, then the web. */
+const WEB = [
+  ...SCALEWAY_SMTP_DROPS,
+  rule(80, '0.0.0.0/0'),
+  rule(80, '::/0'),
+  rule(443, '0.0.0.0/0'),
+  rule(443, '::/0'),
+];
 
 type Api = {
   /** Per zone: the group pages, or a status the listing fails with at `failAt`. */

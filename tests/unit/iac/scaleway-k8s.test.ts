@@ -7,6 +7,7 @@
 import * as pulumi from '@pulumi/pulumi';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
+import { listedRules } from '../../_shared/scaleway-listed-rules.js';
 
 type Opts = { dependsOn?: unknown[]; deleteBeforeReplace?: boolean; replacementTrigger?: unknown };
 type Built = { name: string; resource: object; opts?: Opts };
@@ -52,7 +53,11 @@ import {
 import { timedTypeName } from '../../../src/lib/iac/resource-timing.js';
 import { vpcCidrForCluster } from '../../../src/lib/iac/vpc-cidr.js';
 import { firewallName } from '../../../src/lib/operator-ip.js';
-import { decodeLabels, ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
+import {
+  canonicalScalewayRule,
+  decodeLabels,
+  ScalewayProvider,
+} from '../../../src/lib/providers/scaleway.js';
 import { checkScaleUpsLeftFirewalls } from '../../e2e/checks/scale-ha.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: mock inputs of every resource shape
@@ -224,30 +229,32 @@ const expectedRules = (ssh: string[], api: string[], peer?: string) => [
 ];
 
 /**
- * The declared rules as Scaleway's rules listing returns them, each with the
- * id and position the API gives it: what the refresh reads back and what
- * findFirewallByName hands the REST writers.
+ * The declared rules as Scaleway's rules listing returns them: the six
+ * non-editable outbound SMTP drops first, then each rule with the id and
+ * position the API gives it, a host range bare and `dest_port_to: null`
+ * (tests/_shared/scaleway-listed-rules.ts cites the cassettes). What the
+ * refresh reads back and what findFirewallByName hands the REST writers.
  */
-const asListed = (rules: Rule[]) =>
-  rules.map((r, i) => ({
-    id: `rule-${i + 1}`,
-    position: i + 1,
-    editable: true,
-    action: r.action,
-    protocol: r.protocol,
-    direction: 'inbound',
-    ip_range: r.ipRange,
-    dest_port_from: r.port,
-    dest_port_to: r.port,
-  }));
+const asListed = (rules: Rule[]) => listedRules(rules as Parameters<typeof listedRules>[0]);
 
-/** A REST rule list back in the program's `inboundRules` form, in its order. */
-const asDeclared = (rules: Rule[]) =>
-  rules.map((r) => {
-    expect(r.direction).toBe('inbound');
-    expect(r.dest_port_to).toBe(r.dest_port_from);
-    return { action: r.action, protocol: r.protocol, port: r.dest_port_from, ipRange: r.ip_range };
-  });
+/**
+ * Two rule lists compare in the provider's canonical rule form, in order:
+ * the API's spelling of a rule and the CLI's are the same rule.
+ */
+const canonical = (rules: Rule[]) => rules.map(canonicalScalewayRule);
+
+/** The program's declared rules, as REST rules in canonical form. */
+const declaredAsRest = (rules: Rule[]) =>
+  canonical(
+    rules.map((r) => ({
+      action: r.action,
+      protocol: r.protocol,
+      direction: 'inbound',
+      ip_range: r.ipRange,
+      dest_port_from: r.port,
+      dest_port_to: r.port,
+    })),
+  );
 
 const group = (name: string, rules: Rule[]) => ({ id: 'sg-uuid', name, zone: ZONE, rules });
 
@@ -273,6 +280,10 @@ async function capturePut(write: (provider: ScalewayProvider) => Promise<unknown
     net.fetch = null;
   }
   expect(puts).toHaveLength(1);
+  // Scaleway's own rules are never sent back: a PUT without them keeps them
+  // (Terraform's PUT bodies, in the cassettes, carry only its own rules).
+  expect(puts[0].filter((r) => r.editable === false)).toEqual([]);
+  expect(puts[0].filter((r) => r.direction === 'outbound')).toEqual([]);
   // The array order is the order on the group: each rule's position is its
   // place in the list, never the position a kept rule was read with.
   expect(puts[0].map((r) => r.position)).toEqual(puts[0].map((_r, i) => i + 1));
@@ -395,9 +406,11 @@ describe('buildScalewayK8sProgram resource graph', () => {
       region: 'fr-par',
       vpcId: 'fr-par/vpc-uuid',
       ipv4Subnet: { subnet: VPC_CIDR },
+      // Pinned off: the boot refuses a Private Network NIC that carries the
+      // default route (_scaleway-metadata.sh), so the source says so too.
+      enableDefaultRoutePropagation: false,
       tags: expect.arrayContaining(['project:acme', 'environment:prod']),
     });
-    expect(pn.enableDefaultRoutePropagation).toBeUndefined();
     expect(outputs.vpcCidr).toBe(VPC_CIDR);
   });
 
@@ -579,7 +592,7 @@ describe('the security group declares every rule the REST writers leave, in thei
         }),
       ).toBe(true);
     });
-    expect(asDeclared(put)).toEqual(after);
+    expect(canonical(put)).toEqual(declaredAsRest(after));
     // And the replication opener finds nothing to write on what the up declares.
     expect(
       new ScalewayProvider('t').buildReplicationFirewallRules(
@@ -600,7 +613,35 @@ describe('the security group declares every rule the REST writers leave, in thei
       await provider.setFirewallRules(fw.id, rules as Rule[], fw);
     });
     const nextUp = await declaredRules({ ...side, replicationPeerIp: PEER });
-    expect(asDeclared(put)).toEqual(nextUp);
+    expect(canonical(put)).toEqual(declaredAsRest(nextUp));
+  });
+
+  // The API lists the peer's rule as `198.51.100.7` with `dest_port_to:
+  // null`, where the CLI wrote `198.51.100.7/32` and 51821: the same rule.
+  it('a listing that already holds the peer rule, in the API form, needs no write', async () => {
+    const side = { ...baseConfig, environment: 'prod-standby', replicationPeerIp: PEER };
+    const fw = group('acme-prod-standby-firewall', asListed(await declaredRules(side)));
+    expect(fw.rules).toContainEqual(
+      expect.objectContaining({ ip_range: PEER, dest_port_from: 51821, dest_port_to: null }),
+    );
+    expect(new ScalewayProvider('t').buildReplicationFirewallRules(fw, PEER)).toBeNull();
+  });
+
+  it('a listed peer rule over a port range, or for another address, is rewritten', async () => {
+    const side = { ...baseConfig, environment: 'prod-standby', replicationPeerIp: PEER };
+    const listed = asListed(await declaredRules(side));
+    const peerAt = listed.findIndex((r) => r.dest_port_from === 51821);
+    for (const change of [{ dest_port_to: 51822 }, { ip_range: '198.51.100.8' }]) {
+      const rules = listed.map((r, i) => (i === peerAt ? { ...r, ...change } : r));
+      const written = new ScalewayProvider('t').buildReplicationFirewallRules(
+        group('acme-prod-standby-firewall', rules),
+        PEER,
+      );
+      expect(written).not.toBeNull();
+      expect(canonical((written as Rule[]).filter((r) => r.editable !== false))).toEqual(
+        declaredAsRest(await declaredRules(side)),
+      );
+    }
   });
 });
 

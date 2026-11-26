@@ -1,8 +1,10 @@
 /**
  * IPv4 and IPv6 address math: the operator access list's matching
  * (operator-ip.js), the canonical network a Vultr firewall rule is matched on
- * (vultrRuleKey, providers/vultr.js), and the Private Network address a
- * Scaleway k8s program picks (iac/programs/scaleway-k8s.js). No imports, so
+ * (vultrRuleKey, providers/vultr.js), the range a Scaleway security group
+ * rule is compared on (canonicalScalewayRule, providers/scaleway.js), and
+ * the Private Network address a Scaleway k8s program picks
+ * (iac/programs/scaleway-k8s.js). No imports, so
  * a Pulumi program can use it without loading the provider registry.
  */
 
@@ -98,6 +100,20 @@ export function canonicalCidr(cidr) {
   const mask = bits === 0 ? 0 : (-1 << (32 - bits)) >>> 0;
   const network = (n & mask) >>> 0;
   return `${[24, 16, 8, 0].map((shift) => (network >>> shift) & 255).join('.')}/${bits}`;
+}
+
+/**
+ * A firewall source range in canonicalCidr's form, however it is spelled: a
+ * CIDR, or a bare address, which is its host network (`/32` or `/128`).
+ * Scaleway lists a host range bare (canonicalScalewayRule,
+ * providers/scaleway.js). Null when it is neither.
+ * @param {unknown} range e.g. `198.51.100.7` (gives `198.51.100.7/32`)
+ * @returns {string | null}
+ */
+export function canonicalIpRange(range) {
+  if (typeof range !== 'string') return null;
+  if (range.includes('/')) return canonicalCidr(range);
+  return canonicalCidr(`${range}/${range.includes(':') ? 128 : 32}`);
 }
 
 /**

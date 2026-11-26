@@ -2,9 +2,11 @@
  * canonicalCidr: one string per network, however the CIDR is spelled. A
  * Vultr firewall rule is matched on it (vultrRuleKey), so a rule Vultr
  * stores in another spelling than the one a push sends is still found.
+ * canonicalIpRange: the same for a range that may be a bare address, as
+ * Scaleway lists a host range (canonicalScalewayRule).
  */
 import { describe, expect, it } from 'vitest';
-import { canonicalCidr } from '../../../src/lib/cidr.js';
+import { canonicalCidr, canonicalIpRange } from '../../../src/lib/cidr.js';
 
 describe('canonicalCidr', () => {
   it.each([
@@ -45,5 +47,32 @@ describe('canonicalCidr', () => {
     '1:2:3:4:5:6:7:8:9/128',
   ])('%s is not a CIDR', (cidr) => {
     expect(canonicalCidr(cidr)).toBeNull();
+  });
+});
+
+describe('canonicalIpRange', () => {
+  it.each([
+    // A bare address is its host network: how Scaleway lists a /32 or /128.
+    ['198.51.100.7', '198.51.100.7/32'],
+    ['198.51.100.7/32', '198.51.100.7/32'],
+    ['2001:db8::1', '2001:db8::1/128'],
+    ['2001:0DB8:0:0:0:0:0:1', '2001:db8::1/128'],
+    ['2001:db8::1/128', '2001:db8::1/128'],
+    // Any other range as canonicalCidr gives it.
+    ['0.0.0.0/0', '0.0.0.0/0'],
+    ['::/0', '::/0'],
+    ['1.2.3.4/16', '1.2.0.0/16'],
+    ['2002:0:0:1234::/64', '2002:0:0:1234::/64'],
+  ])('%s is %s', (range, canonical) => {
+    expect(canonicalIpRange(range)).toBe(canonical);
+  });
+
+  it.each(['', '256.0.0.1', '2001:db8:::1', '203.0.113.5/33', 'any'])('%s is no range', (range) => {
+    expect(canonicalIpRange(range)).toBeNull();
+  });
+
+  it('a value that is no string is no range', () => {
+    expect(canonicalIpRange(null)).toBeNull();
+    expect(canonicalIpRange(undefined)).toBeNull();
   });
 });

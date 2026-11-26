@@ -205,6 +205,10 @@ export function buildScalewayK8sProgram(config) {
       region,
       vpcId: vpc.id,
       ipv4Subnet: { subnet: vpcCidr },
+      // No default route over the network: the boot refuses a Private
+      // Network NIC that carries one (_scaleway-metadata.sh), so the source
+      // pins it off rather than leave it to the API's default.
+      enableDefaultRoutePropagation: false,
       tags: encodeLabels(labels),
     });
 

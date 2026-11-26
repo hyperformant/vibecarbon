@@ -1033,15 +1033,18 @@ export class BaseProvider {
    * @param {string} name - Firewall name
    * @returns {Promise<object|null>} The firewall, or null when no firewall
    *   has the name: callers use that as the "does this env's firewall exist
-   *   yet?" check for a not-yet-deployed environment. A short listing must
-   *   never read as that, nor as the firewall's whole rule set, since
+   *   yet?" check for a not-yet-deployed environment. A short rules listing
+   *   must never read as the firewall's whole rule set, since
    *   applyOperatorCidrs and the replication write PUT back a list built
-   *   from it. Scaleway, whose group and rules listings can stop early,
-   *   throws on either; Vultr marks a short rules listing
-   *   (`rulesComplete: false`) and its rule builders refuse it. Every
-   *   caller catches the throw (the autoscaler's _lookupFirewallId, both
-   *   replication openers, and deleteFirewallByName, which reports it as
-   *   its apiError) or passes it on (applyOperatorCidrs, to operator-ip.js).
+   *   from it: Scaleway throws on one, and Vultr marks it
+   *   (`rulesComplete: false`) and its rule builders refuse it. A short
+   *   group listing is where providers differ. Scaleway's throws, so its
+   *   null means no such group. Hetzner's request and Vultr's group walk
+   *   still return null on an error status, so on those two null can also
+   *   mean the listing could not be read. Every caller catches the throw
+   *   (the autoscaler's _lookupFirewallId, both replication openers, and
+   *   deleteFirewallByName, which reports it as its apiError) or passes it
+   *   on (applyOperatorCidrs, to operator-ip.js).
    */
   async findFirewallByName(_name) {
     throw new Error('findFirewallByName() must be implemented by subclass');
