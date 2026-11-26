@@ -1816,7 +1816,7 @@ must stay a pure read.
 `tests/unit/status/operator-ip-detect-budget.test.ts` and
 `tests/unit/access/operator-ip-everywhere.test.ts`.
 
-#### 2026-11-26: CI/CD on k8s is pull only
+#### 2026-11-26: CI/CD on k8s is pull only (#591)
 
 `vibecarbon configure cicd <env>` hands each k8s cluster to Flux from the
 operator's machine: it installs Flux, gives each cluster its own read-only
