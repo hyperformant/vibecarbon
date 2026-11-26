@@ -136,6 +136,9 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
   // test:e2e`") — the e2e matrix never exercises them at all:
   //   PULUMI_BACKEND_URL — opt-in Pulumi Cloud override; e2e always uses the
   //                       provider's own S3 state backend, never Pulumi Cloud.
+  //   GHCR_PULL_TOKEN   — the app image's pull token for a headless
+  //                       `configure cicd <env>`; the e2e matrix never runs
+  //                       configure cicd.
   // (ACME_CA_SERVER used to sit here; it is runtime-config in `.env` since the
   // 2026-09-19 whole-branch review, so it is no longer an operator-secret key
   // at all and needs no exemption. The harness still sets it programmatically
@@ -143,6 +146,7 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
   const REGISTRY_ONLY_OPERATOR_KEYS = new Set([
     'PULUMI_BACKEND_URL',
     'VIBECARBON_STATE_PASSPHRASE',
+    'GHCR_PULL_TOKEN',
   ]);
 
   it('.env.e2e.example carries no legacy spelling', () => {

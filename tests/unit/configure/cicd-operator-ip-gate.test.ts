@@ -19,6 +19,8 @@ const m = vi.hoisted(() => ({
   gate: vi.fn(),
   deploy: vi.fn(),
   note: vi.fn(),
+  pull: vi.fn(),
+  targets: vi.fn(),
 }));
 
 vi.mock('@clack/prompts', async (orig) =>
@@ -61,8 +63,12 @@ vi.mock('../../../src/lib/deploy/app-storage-credential.js', () => ({
 }));
 vi.mock('../../../src/lib/deploy/k8s/gitops-deploy.js', () => ({
   deployK8sGitOps: m.deploy,
-  gitopsTargets: (envName: string) => [{ suffix: null, envName, role: 'primary' }],
+  gitopsTargets: m.targets,
   noteUnreadTokenSecrets: m.note,
+  resolveOwnerAndRepo: () => ({ owner: 'acme', name: 'proj' }),
+}));
+vi.mock('../../../src/lib/deploy/k8s/ghcr-pull-secret.js', () => ({
+  resolveGhcrPull: m.pull,
 }));
 
 const { runConfigureCicd } = await import('../../../src/configure.js');
@@ -96,6 +102,11 @@ beforeEach(() => {
     m.order.push('note');
     return [];
   });
+  m.targets.mockImplementation((envName: string) => [{ suffix: null, envName, role: 'primary' }]);
+  m.pull.mockImplementation(async () => {
+    m.order.push('pull');
+    return { mode: 'public' };
+  });
   m.deploy.mockImplementation(async () => {
     m.order.push('deploy');
     return { pushed: true };
@@ -112,7 +123,16 @@ describe('configure cicd <k8s env> lets the operator in first', () => {
   it('gates the environment before any GitOps step, headless without a terminal', async () => {
     setTTY(undefined);
     await runConfigureCicd('prod');
-    expect(m.order).toEqual(['gate', 'note', 'deploy']);
+    // The pull credential once, before the per-cluster handover gets it.
+    expect(m.order).toEqual(['gate', 'note', 'pull', 'deploy']);
+    expect(m.pull.mock.calls[0][0]).toMatchObject({
+      owner: 'acme',
+      repo: 'proj',
+      projectName: 'proj',
+      envName: 'prod',
+      clusters: [{ envName: 'prod', kubeconfigPath: expect.stringMatching(/kubeconfig-prod$/) }],
+    });
+    expect(m.deploy.mock.calls[0][0].ghcrPull).toEqual({ mode: 'public' });
     expect(m.gate).toHaveBeenCalledWith({
       projectConfig: m.projectConfig,
       envName: 'prod',
@@ -132,6 +152,20 @@ describe('configure cicd <k8s env> lets the operator in first', () => {
     m.gate.mockRejectedValue(new Error('the firewall check failed'));
     await expect(runConfigureCicd('prod')).rejects.toThrow('the firewall check failed');
     expect(m.note).not.toHaveBeenCalled();
+    expect(m.pull).not.toHaveBeenCalled();
+    expect(m.deploy).not.toHaveBeenCalled();
+  });
+
+  it('with no cluster kubeconfig to hand over, it asks for no pull token', async () => {
+    // A k8s-ha environment whose two sides were never deployed from here:
+    // the loop skips both, so a token asked for now would be stored nowhere.
+    setTTY(true);
+    m.targets.mockImplementation((envName: string) => [
+      { suffix: 'primary', envName: `${envName}-primary`, role: 'primary' },
+      { suffix: 'standby', envName: `${envName}-standby`, role: 'standby' },
+    ]);
+    await runConfigureCicd('prod');
+    expect(m.pull).not.toHaveBeenCalled();
     expect(m.deploy).not.toHaveBeenCalled();
   });
 });

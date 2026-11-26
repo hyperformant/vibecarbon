@@ -164,7 +164,7 @@ export async function listDeployKeys({ owner, repo }) {
 /**
  * @param {{ owner: string, repo: string, id: number }} args
  */
-export async function deleteDeployKey({ owner, repo, id }) {
+async function deleteDeployKey({ owner, repo, id }) {
   await gh(['api', '-X', 'DELETE', `repos/${owner}/${repo}/keys/${id}`]);
 }
 

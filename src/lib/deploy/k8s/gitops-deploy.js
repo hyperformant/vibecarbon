@@ -9,7 +9,8 @@
  *   3. Seed GitHub Environment secrets + vars + upload KUBECONFIG_B64.
  *   4. Hand the cluster to Flux from this machine (handOverCluster in
  *      ./flux-handover.js): install Flux, give it the cluster's own
- *      read-only deploy key, apply the root GitRepository and Kustomization,
+ *      read-only deploy key, put the app image's pull Secret in place (a
+ *      private package's), apply the root GitRepository and Kustomization,
  *      wait for the first sync. No workflow is dispatched: a GitHub runner
  *      cannot reach the k8s API, which admits only the operator's addresses.
  *
@@ -112,7 +113,7 @@ function renderInPlace(path, vars) {
  * need the real owner/repo wired in at deploy time, which is what this
  * helper handles.
  */
-function resolveOwnerAndRepo(projectDir) {
+export function resolveOwnerAndRepo(projectDir) {
   try {
     const out = execFileSync(
       'gh',
@@ -429,6 +430,9 @@ export async function noteUnreadTokenSecrets({ projectDir, ProviderClass }) {
  * @param {typeof import('../../providers/base.js').BaseProvider} args.ProviderClass - the
  *   environment's provider: the refusal of a deploy.yml that still writes kube-system/hcloud
  *   names its own token (refuseLegacyProviderTokenStep)
+ * @param {import('./ghcr-pull-secret.js').GhcrPull} args.ghcrPull - the app image's pull
+ *   credential, resolved once for every cluster of the environment (resolveGhcrPull); the
+ *   handover puts it in this cluster's ghcr-pull-secret
  * @returns {Promise<{ pushed: boolean }>} whether a new deploy commit was pushed
  */
 export async function deployK8sGitOps(args) {
@@ -445,6 +449,7 @@ export async function deployK8sGitOps(args) {
     role = 'primary',
     skipCi = false,
     ProviderClass,
+    ghcrPull,
   } = args;
   if (
     typeof ProviderClass?.NAME !== 'string' ||
@@ -564,6 +569,7 @@ export async function deployK8sGitOps(args) {
       kubeconfigPath,
       owner: repoOwner,
       repo: repoName,
+      ghcrPull,
     });
   } catch (err) {
     s.error(`flux has not taken over ${environment}`);

@@ -9,8 +9,8 @@
  * Kustomization (applyFluxRoot), then have each reconcile and wait until it
  * has (awaitFluxReconcile). Every step is idempotent, so a rerun of
  * `configure cicd <env>` walks them again safely. Between the install and the
- * root, flux-deploy-key.js writes the Secret Flux clones with
- * (replaceWholeSecret).
+ * root, flux-deploy-key.js writes the Secret Flux clones with, and
+ * ghcr-pull-secret.js the app image's pull Secret (replaceWholeSecret).
  */
 
 import { randomBytes } from 'node:crypto';

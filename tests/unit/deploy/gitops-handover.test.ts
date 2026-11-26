@@ -56,6 +56,9 @@ function gitopsProject() {
   return made;
 }
 
+/** The pull credential configure cicd resolved, handed through as it is. */
+const GHCR_PULL = { mode: 'token', username: 'octo', token: 'pull-token-fixture' };
+
 const deploy = async (project: string) => {
   // git push reports to stderr, which execFileSync passes on to ours.
   const pushLines = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -69,6 +72,7 @@ const deploy = async (project: string) => {
       appStorage: { accessKey: 'a', secretKey: 'b' },
       githubOwner: 'acme',
       ProviderClass: PROVIDERS.hetzner,
+      ghcrPull: GHCR_PULL,
     });
   } finally {
     pushLines.mockRestore();
@@ -94,7 +98,9 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
       kubeconfigPath: join(project, 'kubeconfig'),
       owner: 'acme',
       repo: 'proj',
+      ghcrPull: GHCR_PULL,
     });
+    expect(vi.mocked(handOverCluster).mock.calls[0][0].ghcrPull).toBe(GHCR_PULL);
     expect(originHadMain).toEqual([true]);
     expect(github.triggerDeployWorkflow).not.toHaveBeenCalled();
     expect(github.waitForLatestWorkflowRun).not.toHaveBeenCalled();

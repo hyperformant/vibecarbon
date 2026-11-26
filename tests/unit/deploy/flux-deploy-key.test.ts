@@ -463,6 +463,8 @@ describe('handOverCluster with the deploy key', () => {
       kubeconfigPath,
       owner: 'acme',
       repo: 'shop',
+      // A public package: the pull Secret step writes nothing.
+      ghcrPull: { mode: 'public' },
     }).then(
       () => null,
       (e: Error) => e,

@@ -1632,9 +1632,8 @@ export async function runConfigureCicd(envName) {
   // this machine. This is the body that orchestrator.js used to run inline
   // when --gitops was passed (deleted in PR 5).
   p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
-  const { deployK8sGitOps, gitopsTargets, noteUnreadTokenSecrets } = await import(
-    './lib/deploy/k8s/gitops-deploy.js'
-  );
+  const { deployK8sGitOps, gitopsTargets, noteUnreadTokenSecrets, resolveOwnerAndRepo } =
+    await import('./lib/deploy/k8s/gitops-deploy.js');
   const { getImageTag } = await import('./lib/ci-setup.js');
   const imageTag = getImageTag(cwd);
   // The app pod's object-storage pair, per environment: the env's own key
@@ -1694,6 +1693,45 @@ export async function runConfigureCicd(envName) {
   // deployK8sGitOps's refusal to name.
   await noteUnreadTokenSecrets({ projectDir: cwd, ProviderClass });
 
+  // Once per run too: what the clusters pull a private app image with. Both
+  // sides of k8s-ha get the same token, so the operator is asked at most
+  // once, and not at all for a public package or a token a cluster already
+  // holds that still passes the checks. With no cluster to hand over (the
+  // loop below skips each one), nothing is asked: a token would be stored
+  // nowhere.
+  const clusters = targets
+    .map((target) => ({
+      envName: target.envName,
+      kubeconfigPath: localKubeconfigPath(cwd, target.envName),
+    }))
+    .filter((cluster) => existsSync(cluster.kubeconfigPath));
+  let ghcrPull = null;
+  if (clusters.length > 0) {
+    const { resolveGhcrPull } = await import('./lib/deploy/k8s/ghcr-pull-secret.js');
+    const recorded = projectConfig.github;
+    const repoRef =
+      resolveOwnerAndRepo(cwd) ??
+      (recorded?.owner && recorded?.repo ? { owner: recorded.owner, name: recorded.repo } : null);
+    if (!repoRef) {
+      p.log.error(
+        `could not tell which github repo ${envName} pulls its app image from. point origin at github.com, then run vibecarbon configure cicd ${envName}`,
+      );
+      process.exit(1);
+    }
+    try {
+      ghcrPull = await resolveGhcrPull({
+        owner: repoRef.owner,
+        repo: repoRef.name,
+        projectName: projectConfig.projectName,
+        envName,
+        clusters,
+      });
+    } catch (err) {
+      p.log.error(err.message);
+      process.exit(1);
+    }
+  }
+
   for (const target of targets) {
     const targetKubeconfig = localKubeconfigPath(cwd, target.envName);
     if (!existsSync(targetKubeconfig)) {
@@ -1716,6 +1754,7 @@ export async function runConfigureCicd(envName) {
       tlsSnapshotPrefix,
       role: target.role,
       ProviderClass,
+      ghcrPull,
     });
   }
 
