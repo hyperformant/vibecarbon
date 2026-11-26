@@ -84,7 +84,6 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/deploy/k8s/k3s.js buildK3sBuildInputs https://{*}',
       'src/lib/deploy/k8s/k3s.js configYaml https://{*}',
       'src/lib/deploy/k8s/k3s.js applyK3sManifests https://{*}',
-      'src/lib/deploy/k8s/gitops-deploy.js perEnvVars https://{*}',
       'src/lib/deploy/orchestrator.js envCorsOrigins https://{*}',
     ],
   },

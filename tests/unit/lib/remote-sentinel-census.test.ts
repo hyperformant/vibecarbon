@@ -50,9 +50,9 @@ const LINES_ARRAY = /^(?:lines|[\w$]*Lines)$/;
  * Not remote sentinels, each with the reason. `file::text` of the literal.
  */
 const ALLOWED: Record<string, string> = {
-  // A list of GitHub variable NAMES, not command output.
-  "src/lib/deploy/k8s/gitops-deploy.js::'TLS_CERT_ISSUER'":
-    'names.includes over a variable-name list, not command output',
+  // A list of GitHub secret NAMES, not command output.
+  "src/lib/deploy/k8s/gitops-deploy.js::'KUBECONFIG_B64'":
+    'secretNames.includes over a secret-name list from gh secret list, not command output',
   // wal-archive.sh's failure log: tagged lines behind a timestamp prefix,
   // read from the log file's content, never a command's message.
   "src/lib/status/backup-health.js::'WAL_ARCHIVE_OVERWRITE_REFUSED'":

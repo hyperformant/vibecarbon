@@ -1,58 +1,51 @@
 /**
- * Phase 4.3c of the GitOps refactor: the thin GitOps-driven deploy path.
+ * The GitOps layer `vibecarbon configure cicd <env>` puts on a running k8s
+ * cluster. It is pull only: nothing at GitHub ever connects to the cluster.
  *
  * stale-deploy-ignore: historical context — describes what this file replaced.
- * Replaces the ~2000 LOC imperative `applyKubernetesManifests` with:
+ * It replaced the ~2000 LOC imperative `applyKubernetesManifests`, and then
+ * the deploy.yml workflow it seeded GitHub Environments for, with:
  *   1. Render deploy-time-varying manifests into the customer's k8s/ tree
- *      (the image tag in the app Deployment).
+ *      (the image tag in the app Deployment, the real owner and repo).
  *   2. git add k8s/ && git commit && git push.
- *   3. Seed GitHub Environment secrets + vars + upload KUBECONFIG_B64.
- *   4. Hand the cluster to Flux from this machine (handOverCluster in
+ *   3. Hand the cluster to Flux from this machine (handOverCluster in
  *      ./flux-handover.js): install Flux, give it the cluster's own
  *      read-only deploy key, put the app image's pull Secret in place (a
  *      private package's), apply the root GitRepository and Kustomization,
- *      wait for the first sync. No workflow is dispatched: a GitHub runner
- *      cannot reach the k8s API, which admits only the operator's addresses.
+ *      wait for the first sync. A GitHub runner never could: the k8s API
+ *      admits only the operator's addresses.
  *
  * The objects Flux leaves to the CLI (the namespace, the backup CronJob and
  * its settings, the vibecarbon-app-secrets / vibecarbon-infra-secrets
  * Secrets, cert-manager, the Traefik CRDs, the TLS Certificate) are applied by
- * every `vibecarbon deploy <env>`, as on a cluster without GitOps. No cloud
- * provider Secret goes through GitHub: `vibecarbon deploy` hands the provider
- * API token to the cluster itself (applyCloudSecrets in ./k3s.js), so this
- * CLI puts no copy at GitHub. A copy an earlier one put there is refused
- * while deploy.yml still reads it (refuseLegacyProviderTokenStep) and named
- * once nothing does (noteUnreadTokenSecrets).
- * Flux reconciles the rest from the committed k8s/ tree.
+ * every `vibecarbon deploy <env>`, as on a cluster without GitOps, from the
+ * operator's own .env.local. Nothing is copied to GitHub for them, and no
+ * cloud provider token goes there: `vibecarbon deploy` hands it to the
+ * cluster itself (applyCloudSecrets in ./k3s.js).
  *
- * Callers: `vibecarbon configure cicd <env>` (PR 7) layers this onto an
- * already-running local-first cluster. Pre-PR-5 it was the default for
- * `vibecarbon deploy --k8s --gitops`; that flag was retired with PR 5.
+ * What an earlier vibecarbon copied to GitHub is named once per run and
+ * never deleted here: the repo's provider token secret
+ * (noteUnreadTokenSecrets) and the secrets and variables it seeded into each
+ * GitHub Environment for its deploy.yml, with that workflow file
+ * (noteLeftoverGitopsCopies).
+ * Flux reconciles the rest from the committed k8s/ tree.
  */
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import { tlsCertificateVars } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { spinner } from '../../cli/progress.js';
 import { gitSafeEnv } from '../../command.js';
-import { loadProjectConfig } from '../../config.js';
-import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
-import { parseDotenv } from '../../dotenv.js';
 import { environmentForStack } from '../../environment-name.js';
 import {
+  listEnvironmentSecretNames,
   listEnvironmentVariables,
   listRepoSecretNames,
-  seedEnvironmentSecrets,
-  uploadKubeconfig,
 } from '../../github-environments.js';
-import { alpineK8sImageRef, traefikVersion } from '../../images.js';
 import { GITHUB_REF_FILES, originGitHubRepo, writeGitHubRefs } from '../../template-edits.js';
-import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { handOverCluster } from './flux-handover.js';
-import { k8sTlsIdentity } from './k3s.js';
+import { SECRET_KEYS } from './k3s.js';
 import {
   describeFluxPlaceholders,
   FLUX_CLUSTER_FILE,
@@ -154,7 +147,7 @@ const APP_DEPLOYMENT = 'k8s/base/app/deployment.yaml';
  * @param {{ fills?: Record<string, string[]> }} [opts] - tokens this deploy
  *   fills itself before it commits, per file (the app's `{{IMAGE_TAG}}`)
  */
-export function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
+function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
   const findings = fluxPlaceholders(projectDir)
     .map((f) => ({
       ...f,
@@ -189,7 +182,7 @@ export function refuseFluxPlaceholders(projectDir, { fills = {} } = {}) {
  * @param {string} projectDir
  * @param {string} environment - the cluster (`prod`, `prod-standby`)
  */
-export function refuseHttpsFluxSource(projectDir, environment) {
+function refuseHttpsFluxSource(projectDir, environment) {
   const path = join(projectDir, FLUX_CLUSTER_FILE);
   if (!existsSync(path)) return;
   if (!/^\s*url:\s*["']?https:\/\/github\.com\//m.test(readFileSync(path, 'utf-8'))) return;
@@ -229,12 +222,11 @@ function commitAndPushManifests(cwd, message) {
 }
 
 /**
- * The repo's Actions secret every deploy.yml before this one wrote
- * kube-system/hcloud from, on every provider: an earlier deployK8sGitOps
- * seeded it from the operator's HETZNER_API_TOKEN, whatever the
- * environment's provider.
+ * The repo's Actions secret the retired deploy.yml once wrote kube-system/hcloud
+ * from, on every provider: an earlier deployK8sGitOps seeded it from the
+ * operator's HETZNER_API_TOKEN, whatever the environment's provider.
  */
-export const LEGACY_TOKEN_SECRET = 'HETZNER_API_TOKEN';
+const LEGACY_TOKEN_SECRET = 'HETZNER_API_TOKEN';
 
 /**
  * Every workflow GitHub would run for this project, as text: each
@@ -286,7 +278,7 @@ function workflowTexts(projectDir) {
 /**
  * Whether a workflow's text reads this Actions secret by name,
  * `secrets.NAME` or `secrets['NAME']` (a whole `toJSON(secrets)` is not a
- * read of one: deploy.yml takes the cloud tokens out of it).
+ * read of one: the retired deploy.yml took the cloud tokens out of it).
  *
  * @param {string} text
  * @param {string} name - an Actions secret name, [A-Z0-9_]
@@ -295,81 +287,19 @@ function readsSecret(text, name) {
   return new RegExp(`\\bsecrets\\s*(?:\\.\\s*${name}\\b|\\[\\s*['"]${name}['"]\\s*\\])`).test(text);
 }
 
-/**
- * Every deploy.yml before this one wrote kube-system/hcloud from the repo's
- * HETZNER_API_TOKEN secret (LEGACY_TOKEN_SECRET), which deployK8sGitOps
- * seeded on every run. The CLI no longer seeds it (deployK3s hands the
- * provider's token to the cluster itself), so in such a project that copy
- * only goes stale. On Hetzner, whose cluster reads kube-system/hcloud,
- * after a token rotation a run of that workflow would write the revoked
- * token back over the one the deploy applied, and the cloud controller and
- * CSI driver would read it at their next start. On another
- * provider nothing reads that Secret and a deploy removes it
- * (K8S_RETIRED_CLOUD_SECRETS), so each run of the workflow would only put a
- * copy of whatever Hetzner token the secret holds back into the cluster.
- * Refused either way, naming the environment's own token and the way out,
- * before anything is committed, pushed or seeded. Both the committed
- * deploy.yml (what the push sends to main, the workflow GitHub runs) and the
- * working tree's are read.
- *
- * @param {string} projectDir
- * @param {typeof import('../../providers/base.js').BaseProvider} ProviderClass
- */
-function refuseLegacyProviderTokenStep(projectDir, ProviderClass) {
-  const path = join(projectDir, '.github', 'workflows', 'deploy.yml');
-  const working = existsSync(path) ? readFileSync(path, 'utf-8') : '';
-  let committed = '';
-  try {
-    committed = execFileSync('git', ['show', 'HEAD:.github/workflows/deploy.yml'], {
-      cwd: projectDir,
-      env: gitSafeEnv(),
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    // Not committed (or no commit yet): the working tree's is all there is.
-  }
-  const ref = `secrets.${LEGACY_TOKEN_SECRET}`;
-  if (![working, committed].some((yml) => yml.includes(ref))) return;
-  const wayOut =
-    'Run `vibecarbon upgrade` for a deploy.yml without that step, or delete every step that ' +
-    `reads ${ref} yourself; commit the change and run this again. Then remove the copy: ` +
-    `\`gh secret delete ${LEGACY_TOKEN_SECRET}\`.`;
-  const readsHcloud = ProviderClass.k8sCloudSecrets({ token: '-' }).some(
-    ({ namespace, name }) => namespace === 'kube-system' && name === 'hcloud',
-  );
-  if (readsHcloud) {
-    throw new Error(
-      `Your .github/workflows/deploy.yml still writes your ${ProviderClass.NAME} API token into ` +
-        `the cluster from a GitHub copy of it (${ref}). \`vibecarbon deploy\` hands the token ` +
-        'to the cluster itself now and no longer updates that copy, so after you rotate the token, ' +
-        `a run of this workflow would write the old one back. ${wayOut}`,
-    );
-  }
-  throw new Error(
-    'Your .github/workflows/deploy.yml still writes a kube-system/hcloud Secret into the cluster ' +
-      `from your repo's ${LEGACY_TOKEN_SECRET} Actions secret (${ref}), which an earlier ` +
-      `vibecarbon filled from your ${LEGACY_TOKEN_SECRET}, a Hetzner Cloud token, whatever the ` +
-      `provider. Your ${ProviderClass.NAME} cluster reads neither: \`vibecarbon deploy\` hands it ` +
-      `your ${ProviderClass.NAME} API token (${ProviderClass.TOKEN_ENV}) itself and removes that ` +
-      `Secret, so each run of this workflow would only put it back. ${wayOut}`,
-  );
-}
-
-/** The one gh call noteUnreadTokenSecrets makes, at most this long. */
+/** Each gh call a note makes, at most this long: a stalled gh holds up no setup for advice. */
 const NOTE_GH_TIMEOUT_MS = 20_000;
 
 /**
  * Say once, without deleting anything, which provider token secrets the
  * repo still holds at GitHub that no workflow reads: LEGACY_TOKEN_SECRET,
  * which an earlier vibecarbon seeded, and the environment's own token
- * variable (ProviderClass.TOKEN_ENV), should one be there. A project whose
- * deploy.yml was already upgraded never meets refuseLegacyProviderTokenStep,
- * so without this it would never learn the copy is still there. A secret a
+ * variable (ProviderClass.TOKEN_ENV), should one be there. A secret a
  * workflow still reads (workflowTexts, readsSecret) is not named: that one
- * is the refusal's, or the operator's own. Names only: `gh secret list`
- * returns no value. A list that fails says nothing, since the note is only
- * advice.
+ * is the operator's own, or the old deploy.yml's, which
+ * noteLeftoverGitopsCopies names, and once it is gone this names the
+ * secret. Names only: `gh secret list` returns no value. A list that fails
+ * says nothing, since the note is only advice.
  *
  * @param {{
  *   projectDir: string,
@@ -381,7 +311,6 @@ export async function noteUnreadTokenSecrets({ projectDir, ProviderClass }) {
   const candidates = [...new Set([LEGACY_TOKEN_SECRET, ProviderClass.TOKEN_ENV].filter(Boolean))];
   let listed;
   try {
-    // Bounded, as the refresh's gh calls are: a stalled gh holds up no setup for advice.
     listed = await listRepoSecretNames({ timeout: NOTE_GH_TIMEOUT_MS });
   } catch {
     return [];
@@ -406,57 +335,143 @@ export async function noteUnreadTokenSecrets({ projectDir, ProviderClass }) {
 }
 
 /**
- * Full GitOps deploy: render manifests, commit + push, seed GitHub
- * Environment, then hand the cluster to Flux and wait for its first sync.
+ * What the retired GitHub Environment seeding wrote for deploy.yml: the
+ * names noteLeftoverGitopsCopies may name.
+ */
+const RETIRED_GITOPS_COPIES = Object.freeze({
+  secrets: Object.freeze([
+    ...new Set([
+      'KUBECONFIG_B64',
+      ...SECRET_KEYS,
+      'S3_ACCESS_KEY',
+      'S3_SECRET_KEY',
+      'VIBECARBON_ENV',
+    ]),
+  ]),
+  vars: Object.freeze([
+    'SITE_URL',
+    'BACKUP_SCHEDULE',
+    'BACKUP_RETENTION_DAYS',
+    'TLS_SNAPSHOT_S3_PREFIX',
+    'TLS_CERT_ISSUER',
+    'TLS_CERT_EFFECTIVE_ISSUER',
+    'TLS_CERT_DNS_NAMES',
+    'KUBECTL_IMAGE',
+    'TRAEFIK_VERSION',
+  ]),
+});
+
+/** The workflow an earlier `configure cicd` installed, which nothing dispatches now. */
+const RETIRED_DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
+
+/** `n word`, with an s past one. */
+const counted = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** `a`, `a and b`, `a, b and c`. */
+const andList = (items) =>
+  items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+
+/**
+ * Say once, without deleting anything, what an earlier vibecarbon copied to
+ * GitHub for its deploy.yml and nothing reads now: in each GitHub
+ * Environment named (one per cluster: `prod`, or `prod-primary` and
+ * `prod-standby`), the secrets and variables its seeding wrote
+ * (RETIRED_GITOPS_COPIES), KUBECONFIG_B64 (cluster-admin credentials) first;
+ * and the workflow file itself, when the repo still has it. A name the old
+ * seeding never wrote is the operator's own and is left out. Names only:
+ * `gh secret list` and `gh variable list` return no value. Each gh call is
+ * bounded, and any failure says nothing, since the note is only advice.
+ *
+ * @param {{ projectDir: string, envNames: string[] }} args
+ * @returns {Promise<string[]>} each copy it named, as `<env>:<NAME>`, then the
+ *   workflow file when named
+ */
+export async function noteLeftoverGitopsCopies({ projectDir, envNames }) {
+  const bound = { timeout: NOTE_GH_TIMEOUT_MS };
+  const found = [];
+  try {
+    for (const env of envNames) {
+      const [secrets, vars] = await Promise.all([
+        listEnvironmentSecretNames(env, bound),
+        listEnvironmentVariables(env, bound),
+      ]);
+      const ours = (names, kind) =>
+        RETIRED_GITOPS_COPIES[kind].filter((name) => names.includes(name));
+      const secretNames = ours(secrets, 'secrets');
+      const varNames = ours(vars, 'vars');
+      if (secretNames.length + varNames.length > 0) found.push({ env, secretNames, varNames });
+    }
+  } catch {
+    return [];
+  }
+  const workflow = existsSync(join(projectDir, RETIRED_DEPLOY_WORKFLOW));
+  if (found.length === 0 && !workflow) return [];
+
+  const kubeconfig = 'KUBECONFIG_B64 (admin access to the cluster)';
+  const parts = found.map(({ env, secretNames, varNames }) => {
+    const hasKubeconfig = secretNames.includes('KUBECONFIG_B64');
+    const others = secretNames.length - (hasKubeconfig ? 1 : 0);
+    const items = [
+      ...(hasKubeconfig ? [kubeconfig] : []),
+      ...(others > 0 ? [counted(others, hasKubeconfig ? 'more secret' : 'secret')] : []),
+      ...(varNames.length > 0 ? [counted(varNames.length, 'variable')] : []),
+    ];
+    return `${env} has ${andList(items)}`;
+  });
+  if (workflow)
+    parts.push(`${parts.length > 0 ? 'and ' : ''}your repo has ${RETIRED_DEPLOY_WORKFLOW}`);
+
+  const withKubeconfig = found.find(({ secretNames }) => secretNames.includes('KUBECONFIG_B64'));
+  const withSecret = found.find(({ secretNames }) => secretNames.length > 0);
+  const example = withKubeconfig
+    ? `gh secret delete KUBECONFIG_B64 --env ${withKubeconfig.env}`
+    : withSecret
+      ? `gh secret delete ${withSecret.secretNames[0]} --env ${withSecret.env}`
+      : found.length > 0
+        ? `gh variable delete ${found[0].varNames[0]} --env ${found[0].env}`
+        : `git rm ${RETIRED_DEPLOY_WORKFLOW}`;
+  p.log.info(
+    `github still holds copies an earlier vibecarbon made for its old deploy workflow: ${parts.join('; ')}. ` +
+      'nothing reads them now: vibecarbon deploy applies your secrets from .env.local, and flux ' +
+      'pulls from inside the cluster. this command leaves them alone, so delete them when you ' +
+      `like, for example: ${example}`,
+  );
+  return [
+    ...found.flatMap(({ env, secretNames, varNames }) =>
+      [...secretNames, ...varNames].map((name) => `${env}:${name}`),
+    ),
+    ...(workflow ? [RETIRED_DEPLOY_WORKFLOW] : []),
+  ];
+}
+
+/**
+ * GitOps on a running cluster: render the image tag and the real owner and
+ * repo into k8s/, commit and push, then hand the cluster to Flux and wait for
+ * its first sync. Nothing goes to GitHub but the push.
  *
  * @param {object} args
  * @param {string} args.projectDir - customer repo root
- * @param {string} args.environment - "dev" | "staging" | "prod"
- * @param {string} args.domain - deployed domain
+ * @param {string} args.environment - the cluster's stack: "prod", or "prod-primary" / "prod-standby"
  * @param {string} args.projectName
  * @param {string} args.kubeconfigPath - path to kubeconfig fetched from the cluster
- * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
- *   app's own storage pair (storedAppStoragePair), seeded per environment
- * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
- *   seeded as the environment's BACKUP_SCHEDULE / BACKUP_RETENTION_DAYS vars, which deploy.yml renders
- *   into the backup CronJob and its settings ConfigMap (never into the shared committed k8s/base)
- * @param {string} [args.tlsSnapshotPrefix] - tlsSnapshotS3Prefix for this environment: seeded as the
- *   TLS_SNAPSHOT_S3_PREFIX var, which deploy.yml renders into vibecarbon-backup-settings for the
- *   CronJob's TLS snapshot step. Omitted: no snapshot is taken.
- * @param {'primary'|'standby'} [args.role] - this cluster's current role (k8s-ha; default primary).
- *   A standby's Certificate issues from the local self-signed issuer, with the real ACME issuer in
- *   the promote annotation, exactly as the CLI deploy renders it.
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
- * @param {typeof import('../../providers/base.js').BaseProvider} args.ProviderClass - the
- *   environment's provider: the refusal of a deploy.yml that still writes kube-system/hcloud
- *   names its own token (refuseLegacyProviderTokenStep)
+ * @param {string} [args.githubOwner] - the repo's owner, when `gh repo view` cannot say
  * @param {import('./ghcr-pull-secret.js').GhcrPull} args.ghcrPull - the app image's pull
  *   credential, resolved once for every cluster of the environment (resolveGhcrPull); the
  *   handover puts it in this cluster's ghcr-pull-secret
+ * @param {boolean} [args.skipCi] - mark the deploy commit [skip ci]
  * @returns {Promise<{ pushed: boolean }>} whether a new deploy commit was pushed
  */
 export async function deployK8sGitOps(args) {
   const {
     projectDir,
     environment,
-    domain,
     projectName,
     kubeconfigPath,
-    appStorage,
     imageTag,
-    backupConfig,
-    tlsSnapshotPrefix,
-    role = 'primary',
     skipCi = false,
-    ProviderClass,
     ghcrPull,
   } = args;
-  if (
-    typeof ProviderClass?.NAME !== 'string' ||
-    typeof ProviderClass.k8sCloudSecrets !== 'function'
-  ) {
-    throw new TypeError("deployK8sGitOps needs the environment's ProviderClass");
-  }
 
   // H-9: loudly warn (before any spinner) if observability is installed — the
   // gitops path won't reconcile it until its Flux wiring lands (tracked follow-up).
@@ -465,18 +480,12 @@ export async function deployK8sGitOps(args) {
     p.log.warn(obsWarning);
   }
 
-  // Before anything is written, committed or seeded: a deploy.yml that would
-  // write a stale provider token, a tree Flux would apply with a token in it,
-  // a cluster file that still clones over https, and a malformed backup
-  // config, fail here.
-  refuseLegacyProviderTokenStep(projectDir, ProviderClass);
+  // Before anything is written or committed: a tree Flux would apply with a
+  // token in it, and a cluster file that still clones over https, fail here.
   refuseFluxPlaceholders(projectDir, {
     fills: imageTag ? { [APP_DEPLOYMENT]: ['{{IMAGE_TAG}}'] } : {},
   });
   refuseHttpsFluxSource(projectDir, environment);
-  const backupSettings = resolveBackupSettings(backupConfig);
-  // The Certificate deploy.yml renders, validated before anything is seeded.
-  const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -523,41 +532,7 @@ export async function deployK8sGitOps(args) {
   const pushed = commitAndPushManifests(projectDir, commitMsg);
   s.stop(pushed ? 'Pushed new deploy commit' : 'Tree already clean, no new commit');
 
-  // 3. Seed GitHub Environment secrets + upload kubeconfig. Env secrets +
-  // KUBECONFIG_B64 get written fresh every deploy (rotation path). No
-  // repo-level secret: the provider token never goes to GitHub.
-  s.start(`Seeding GitHub Environment '${environment}'`);
-
-  const envLocal = parseEnvLocal(projectDir);
-  // VIBECARBON_ENV: the operator's environment name, for the app's restart
-  // notice (deploy.yml's APP_KEYS pick it into the app Secret).
-  const perEnvSecrets = {
-    ...buildPerEnvSecrets(envLocal, { appStorage }),
-    VIBECARBON_ENV: environmentForStack(environment),
-  };
-  const perEnvVars = {
-    SITE_URL: domain ? `https://${domain}` : '',
-    // Per environment, never in the committed k8s/base every environment
-    // shares: deploy.yml renders the backup CronJob and its settings from
-    // these (scripts/render-backup-settings.mjs).
-    BACKUP_SCHEDULE: backupSettings.schedule,
-    BACKUP_RETENTION_DAYS: String(backupSettings.retentionDays),
-    // Where the backup CronJob saves the TLS certificate; deploy.yml puts it
-    // in the same settings ConfigMap. Empty (no backup bucket): not seeded.
-    TLS_SNAPSHOT_S3_PREFIX: tlsSnapshotPrefix || '',
-    // The deploy-owned vibecarbon-tls Certificate (Flux drops it from its
-    // build); deploy.yml renders and applies it from these.
-    ...tlsCertVars,
-    // The two values deploy.yml renders itself, from this environment's
-    // version set: the backup CronJob's kubectl and the Traefik CRDs' tag.
-    KUBECTL_IMAGE: alpineK8sImageRef(),
-    TRAEFIK_VERSION: traefikVersion(),
-  };
-  await seedEnvironmentSecrets(environment, perEnvSecrets, perEnvVars);
-  await uploadKubeconfig(environment, kubeconfigPath);
-  s.stop(`GitHub Environment '${environment}' seeded`);
-
-  // 4. Hand the cluster to Flux from here, after the push: its first sync
+  // 3. Hand the cluster to Flux from here, after the push: its first sync
   // reads main. The firewall admits the operator's address, so this machine
   // reaches the k8s API where a GitHub runner never could. Flux clones the
   // repo the refs were just pointed at, with a deploy key on that repo.
@@ -581,10 +556,11 @@ export async function deployK8sGitOps(args) {
 }
 
 /**
- * The GitHub Environments of an environment, one per cluster, each with its
- * cluster's CURRENT role: a k8s-ha env has `<env>-primary` and
- * `<env>-standby`, and a failover swaps which stack is primary
- * (envConfig.ha.primary.stack); any other env has one, the primary.
+ * The clusters of an environment, by stack name, each with its CURRENT role:
+ * a k8s-ha env has `<env>-primary` and `<env>-standby`, and a failover swaps
+ * which stack is primary (envConfig.ha.primary.stack); any other env has
+ * one, the primary. The names are the GitHub Environments an earlier
+ * vibecarbon seeded for its deploy.yml, too (noteLeftoverGitopsCopies).
  *
  * @param {string} envName
  * @param {object} envConfig
@@ -600,165 +576,4 @@ export function gitopsTargets(envName, envConfig) {
     envName: `${envName}-${suffix}`,
     role: roleOf(`${envName}-${suffix}`),
   }));
-}
-
-/**
- * The TLS_CERT_* vars deploy.yml renders the vibecarbon-tls Certificate from
- * (scripts/render-tls-certificate.mjs): the same issuer and names the CLI
- * deploy renders, validated. A standby issues from the local self-signed
- * issuer, with the real ACME issuer in the promote annotation. Throws when
- * there is no domain.
- *
- * @param {{ projectDir: string, domain?: string|null,
- *   role?: 'primary'|'standby' }} args
- * @returns {{ TLS_CERT_ISSUER: string, TLS_CERT_EFFECTIVE_ISSUER: string, TLS_CERT_DNS_NAMES: string }}
- */
-export function gitopsTlsCertificateVars({ projectDir, domain, role = 'primary' }) {
-  // No fallback name: a Certificate for another name than the env's is one
-  // the cluster would issue and serve, and never trusted.
-  if (!domain) throw new Error('the TLS Certificate needs a domain, and this environment has none');
-  const { issuerName, dnsNames } = k8sTlsIdentity({ projectDir, domain });
-  return tlsCertificateVars({
-    dnsNames,
-    issuerName,
-    effectiveIssuer: role === 'standby' ? STANDBY_SELFSIGNED_ISSUER : issuerName,
-  });
-}
-
-/** Bound of each gh call when a failover refreshes the GitOps TLS vars. */
-const REFRESH_GH_TIMEOUT_MS = 20_000;
-
-/** Bound of the whole refresh: each call gets at most what is left of it. */
-const REFRESH_DEADLINE_MS = 60_000;
-
-/** A gh call refused for lack of time, reported as GitHub not answering. */
-class RefreshDeadlineError extends Error {
-  constructor() {
-    super('GitHub did not answer in time');
-    this.timedOut = true;
-  }
-}
-
-/**
- * After a k8s-ha failover swapped the roles: re-seed the TLS_CERT_* vars of
- * each GitHub Environment `vibecarbon configure cicd` seeded (the ones that
- * hold TLS_CERT_ISSUER), from the roles .vibecarbon.json now records, so the
- * next GitOps deploy renders each cluster's Certificate for its new role.
- * Environments without the vars are not GitOps-managed and are left alone.
- * Each gh call is bounded (20s), and so is the whole refresh (60s): a call
- * gets at most what is left. Never throws and never logs: the caller prints
- * the one warning, with the command that repairs it.
- *
- * @param {{ envName: string, projectDir: string,
- *   deps?: { loadConfig?: Function, listVars?: Function, seed?: Function, timeoutMs?: number,
- *     deadlineMs?: number, now?: () => number } }} args
- * @returns {Promise<{ ok: true, refreshed: string[] } | { ok: false, reason: string }>}
- */
-export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
-  const {
-    loadConfig = loadProjectConfig,
-    listVars = listEnvironmentVariables,
-    seed = seedEnvironmentSecrets,
-    timeoutMs = REFRESH_GH_TIMEOUT_MS,
-    deadlineMs = REFRESH_DEADLINE_MS,
-    now = Date.now,
-  } = deps;
-  const deadline = now() + deadlineMs;
-  /** The bound of the next gh call; throws once the deadline is spent. */
-  const bound = () => {
-    const left = deadline - now();
-    if (left <= 0) throw new RefreshDeadlineError();
-    return { timeout: Math.min(timeoutMs, left) };
-  };
-  try {
-    const projectConfig = loadConfig(projectDir);
-    const envConfig = projectConfig?.environments?.[envName];
-    if (!envConfig) return { ok: false, reason: `no ${envName} in .vibecarbon.json` };
-    const refreshed = [];
-    for (const target of gitopsTargets(envName, envConfig)) {
-      const names = await listVars(target.envName, bound());
-      if (!names.includes('TLS_CERT_ISSUER')) continue;
-      const subEnvConfig = projectConfig.environments?.[target.envName] ?? envConfig;
-      const vars = gitopsTlsCertificateVars({
-        projectDir,
-        domain: subEnvConfig.domain || envConfig.domain,
-        role: target.role,
-      });
-      await seed(target.envName, {}, vars, bound());
-      refreshed.push(target.envName);
-    }
-    return { ok: true, refreshed };
-  } catch (err) {
-    const line = String(err?.message ?? err).split('\n')[0];
-    return { ok: false, reason: err?.timedOut ? 'GitHub did not answer in time' : line };
-  }
-}
-
-/**
- * Minimal .env.local parser. Handles double-quoted, single-quoted, and
- * bare values; ignores comments and blank lines. Mirrors the readDotenv
- * helper in src/lib/deploy/k8s/index.js — kept as a small duplicate here
- * to avoid a cross-module import dependency that forces bringing the
- * full k8s deploy module into GitOps flow.
- */
-/**
- * Build the per-environment GitHub Environment secret map from a parsed
- * .env.local. Generated infra secrets are enumerated here; every configure-managed
- * feature key (billing/OAuth/SMTP — secret and non-secret) is folded in from
- * the config-registry so a new feature secret propagates with no edit here.
- *
- * Values that are undefined/empty are dropped by setSecretFromBodyFile, so
- * unconfigured features upload nothing. Canonical SMTP key is SMTP_PASS (no
- * SMTP_PASSWORD rename — the app and manifests read SMTP_PASS).
- *
- * `appStorage` is the env app's own object-storage pair. It is seeded at
- * environment scope as S3_ACCESS_KEY / S3_SECRET_KEY, which the workflow's
- * APP_KEYS pick into the app Secret; the infra pair is never seeded for it.
- *
- * @param {Record<string,string>} envLocal
- * @param {{ appStorage?: { accessKey: string, secretKey: string } }} [opts]
- * @returns {Record<string,string|undefined>}
- */
-export function buildPerEnvSecrets(envLocal, { appStorage } = {}) {
-  const infra = {
-    DB_PASSWORD: envLocal.DB_PASSWORD,
-    // The app's own database role's password (app_service); the owner
-    // password above reaches only the migrate init container.
-    APP_DB_PASSWORD: envLocal.APP_DB_PASSWORD,
-    // The app's session signing key; the app pod envFrom's the Secret.
-    BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
-    ADMIN_EMAIL: envLocal.ADMIN_EMAIL,
-    ADMIN_PASSWORD: envLocal.ADMIN_PASSWORD,
-    // The add-on roles' own database passwords; empty (and so not uploaded)
-    // when the add-on is not installed.
-    METABASE_DB_PASSWORD: envLocal.METABASE_DB_PASSWORD,
-    N8N_DB_PASSWORD: envLocal.N8N_DB_PASSWORD,
-    N8N_ENCRYPTION_KEY: envLocal.N8N_ENCRYPTION_KEY,
-  };
-  /** @type {Record<string,string|undefined>} */
-  const features = {};
-  for (const key of [...featureSecretKeys(), ...featureConfigKeys()]) {
-    features[key] = envLocal[key];
-  }
-  return {
-    ...infra,
-    ...features,
-    S3_ACCESS_KEY: appStorage?.accessKey,
-    S3_SECRET_KEY: appStorage?.secretKey,
-  };
-}
-
-/**
- * The project's `.env.local` as a plain object; `{}` when the file is absent
- * (CI supplies the env another way, so a missing file is not an error here —
- * unlike k3s.js's loadEnvLocal, which is the deploy path's precondition).
- * Parsing is `parseDotenv` (src/lib/dotenv.js), the codebase's one dotenv
- * reader.
- * @param {string} projectDir
- * @returns {Record<string, string>}
- */
-function parseEnvLocal(projectDir) {
-  const path = join(projectDir, '.env.local');
-  if (!existsSync(path)) return {};
-  return parseDotenv(readFileSync(path, 'utf-8'));
 }

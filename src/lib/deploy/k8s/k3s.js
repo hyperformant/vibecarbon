@@ -3973,7 +3973,7 @@ export function renderK8sBase(
  */
 function completeK8sBase(rendered, { backupConfig, tls, replicationHostPort, hasRegistry }) {
   // The backup CronJob's schedule is per environment (deploy-owned, Flux does
-  // not build it): filled in by the renderer deploy.yml also runs.
+  // not build it): filled in here, on a GitOps cluster too.
   const cronjob = join(rendered, 'backup', 'cronjob.yaml');
   if (existsSync(cronjob)) {
     writeFileSync(
@@ -4932,9 +4932,9 @@ export async function applyK3sManifests({
   };
   // 1. Install cert-manager: ONE apply of the upstream manifest with our
   //    settings rendered in as kustomize patches
-  //    (carbon/scripts/render-cert-manager.mjs, shared with the GitOps
-  //    workflow): the controller flag (a 5 minute minimum backoff) and the
-  //    control-plane pin of all three Deployments.
+  //    (carbon/scripts/render-cert-manager.mjs): the controller flag (a 5
+  //    minute minimum backoff) and the control-plane pin of all three
+  //    Deployments.
   //
   //    Nothing patches a cert-manager Deployment after this apply
   //    (tests/unit/deploy/cert-manager-no-post-apply-patch-census.test.ts).

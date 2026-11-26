@@ -8,7 +8,6 @@
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { APP_RUNTIME_KEYS } from '../../../src/lib/deploy/app-runtime-env.js';
-import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK } from '../../../src/lib/project.js';
 import { readRepoFile } from '../../_shared/source-files.js';
 
@@ -82,23 +81,15 @@ describe('k8s: the app pod reads auth config from vibecarbon-app-secrets', () =>
     );
   });
 
-  // vibecarbon-app-secrets is built from APP_RUNTIME_KEYS (dev-push) and from the
-  // GitHub Environment secrets buildPerEnvSecrets seeds (GitOps). Both must
-  // carry what the app's auth reads, or the pod boots without a session key
-  // or the deploy waits forever for an admin that cannot be created.
+  // vibecarbon-app-secrets is built from APP_RUNTIME_KEYS by every deploy, a
+  // GitOps cluster's too. It must carry what the app's auth reads, or the pod
+  // boots without a session key or the deploy waits forever for an admin
+  // that cannot be created.
   it('vibecarbon-app-secrets carries the session secret and the admin credentials', () => {
     for (const key of ['BETTER_AUTH_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
       expect(APP_RUNTIME_KEYS, key).toContain(key);
     }
     expect(APP_RUNTIME_KEYS).not.toContain('ADMIN_PASSWORD_HASH');
-    const perEnv = buildPerEnvSecrets({
-      BETTER_AUTH_SECRET: 's'.repeat(64),
-      ADMIN_EMAIL: 'admin@example.com',
-      ADMIN_PASSWORD: 'test-password',
-    });
-    expect(perEnv.BETTER_AUTH_SECRET).toBe('s'.repeat(64));
-    expect(perEnv.ADMIN_EMAIL).toBe('admin@example.com');
-    expect(perEnv.ADMIN_PASSWORD).toBe('test-password');
   });
 
   it('no retired auth-provider keys are rendered', () => {

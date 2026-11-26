@@ -43,10 +43,8 @@ coverage
 volumes/db/data
 
 # Secrets path retired 2026-04-20: vibecarbon-secrets is no longer
-# rendered into the repo at create-time. It's applied at deploy-time by
-# the vibecarbon CLI (imperative path) or
-# .github/workflows/deploy.yml (GitOps path, reads from GitHub
-# Environments). See plans/gitops-refactor-2026-04-20.md.
+# rendered into the repo at create-time. `vibecarbon deploy <env>` applies
+# the cluster's secrets from .env.local, on a GitOps cluster too.
 
 # `vibecarbon upgrade` writes these (src/upgrade.js): .upgrade-backup is
 # your pre-upgrade copy of a file it replaced, .upgrade-new is the incoming

@@ -12,8 +12,8 @@
  * every environment Flux reconciles from the branch, so the CronJob is
  * DEPLOY-owned: Flux's vibecarbon-base drops it, the retention lives in a
  * per-cluster vibecarbon-backup-settings ConfigMap, and ONE renderer
- * (carbon/scripts/render-backup-settings.mjs) fills both in for the CLI deploy
- * and for deploy.yml (from the GitHub Environment vars the GitOps deploy seeds).
+ * (carbon/scripts/render-backup-settings.mjs) fills both in for the CLI
+ * deploy, which applies them on a GitOps cluster too.
  *
  * Halves, so none can pass alone:
  * - the walk (tests/unit/helpers/runtime-reach-walk.ts, shared with the deploy
@@ -22,25 +22,20 @@
  * - rendered output: the compose crontab line, the k8s CronJob and ConfigMap
  *   for two environments with different settings, the committed tree carrying
  *   neither;
- * - the deploy workflow applies the settings from the environment vars the
- *   GitOps deploy seeds, and Flux cannot revert the CLI's values.
+ * - Flux cannot revert the CLI's values.
  */
-import { spawnSync } from 'node:child_process';
-import { cpSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { loadAll, load as loadYaml } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
-  renderBackupManifests,
+  renderBackupCronJob,
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
 import { resolveBackupConfig } from '../../../src/lib/deploy/prompts.js';
-import { alpineK8sImageRef } from '../../../src/lib/images.js';
-import { createTempDir } from '../../_shared/temp-dir.js';
 import {
   formatReachSites,
   loadSourceTree,
@@ -88,8 +83,6 @@ describe('every collected backup setting reaches the runtime', () => {
   }
 });
 
-const tmp = createTempDir('vc-backup-cfg-');
-
 describe('the configured backup renders into both runtimes, per environment', () => {
   it('compose: the crontab line carries the schedule and the days', async () => {
     const runScript = vi.fn();
@@ -101,8 +94,13 @@ describe('the configured backup renders into both runtimes, per environment', ()
   });
 
   it('two environments with different settings each render their own CronJob and ConfigMap', () => {
+    // The two objects, as the CLI deploy renders them (completeK8sBase and
+    // the settings apply in k3s.js).
+    const cronjob = readFileSync('carbon/k8s/base/backup/cronjob.yaml', 'utf8');
     const render = (cfg: unknown) =>
-      loadAll(renderBackupManifests('carbon/k8s/base', resolveBackupSettings(cfg))) as Array<{
+      loadAll(
+        `${renderBackupCronJob(cronjob, resolveBackupSettings(cfg)).trimEnd()}\n---\n${renderBackupSettingsConfigMap(resolveBackupSettings(cfg))}`,
+      ) as Array<{
         kind: string;
         metadata: { name: string };
         spec?: { schedule: string };
@@ -213,59 +211,7 @@ describe('the configured backup renders into both runtimes, per environment', ()
   });
 });
 
-describe('Flux cannot revert a deploy-owned backup, and the workflow applies it from env vars', () => {
-  const wf = readFileSync('carbon/.github/workflows/deploy.yml', 'utf8');
-
-  it('deploy.yml renders with the shared script from the environment vars and applies it', () => {
-    expect(wf).toMatch(/BACKUP_SCHEDULE: \$\{\{ vars\.BACKUP_SCHEDULE \}\}/);
-    expect(wf).toMatch(/BACKUP_RETENTION_DAYS: \$\{\{ vars\.BACKUP_RETENTION_DAYS \}\}/);
-    expect(wf).toContain('node scripts/render-backup-settings.mjs k8s/base');
-    expect(wf).toMatch(
-      /kubectl apply --namespace=vibecarbon[^\n]*\\\n[^\n]*-f "\$RUNNER_TEMP\/backup\.yaml"/,
-    );
-  });
-
-  it('the renderer refuses to run without the vars, naming the fix', () => {
-    const dir = join(tmp, 'norun');
-    cpSync('carbon/k8s/base', join(dir, 'k8s/base'), { recursive: true });
-    cpSync(RENDERER, join(dir, 'render.mjs'));
-    const env = { PATH: process.env.PATH ?? '' };
-    const none = spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
-      encoding: 'utf8',
-      env,
-    });
-    expect(none.status).toBe(1);
-    expect(none.stderr).toMatch(
-      /BACKUP_SCHEDULE, BACKUP_RETENTION_DAYS and KUBECTL_IMAGE are not set/,
-    );
-    expect(none.stderr).toContain('vibecarbon configure cicd');
-    const ok = spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
-      encoding: 'utf8',
-      env: {
-        ...env,
-        BACKUP_SCHEDULE: '15 3 * * *',
-        BACKUP_RETENTION_DAYS: '21',
-        KUBECTL_IMAGE: alpineK8sImageRef(),
-      },
-    });
-    expect(ok.status, ok.stderr).toBe(0);
-    expect(ok.stdout).toContain(`image: "${alpineK8sImageRef()}"`);
-    expect(ok.stdout).toContain('schedule: "15 3 * * *"');
-    expect(ok.stdout).toContain('BACKUP_RETENTION_DAYS: "21"');
-    writeFileSync(join(dir, 'out.yaml'), ok.stdout);
-    const bad = spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
-      encoding: 'utf8',
-      env: {
-        ...env,
-        BACKUP_SCHEDULE: '15 3 * * *',
-        BACKUP_RETENTION_DAYS: '0',
-        KUBECTL_IMAGE: alpineK8sImageRef(),
-      },
-    });
-    expect(bad.status).toBe(1);
-    expect(bad.stderr).toMatch(/positive whole number of days/);
-  });
-
+describe('Flux cannot revert a deploy-owned backup', () => {
   // The Flux Kustomizations of both clusters (and the production overlay) drop the
   // CronJob with $patch: delete and the object carries prune: disabled: proved on
   // the kustomize build in tests/unit/deploy/flux-base-placeholder-census.test.ts.
@@ -312,38 +258,4 @@ describe('the TLS snapshot prefix rides in vibecarbon-backup-settings', () => {
       );
     },
   );
-
-  it('script mode reads an optional TLS_SNAPSHOT_S3_PREFIX', () => {
-    const dir = join(tmp, 'tlsrun');
-    cpSync('carbon/k8s/base', join(dir, 'k8s/base'), { recursive: true });
-    cpSync(RENDERER, join(dir, 'render.mjs'));
-    const env = {
-      PATH: process.env.PATH ?? '',
-      BACKUP_SCHEDULE: '15 3 * * *',
-      BACKUP_RETENTION_DAYS: '21',
-      KUBECTL_IMAGE: alpineK8sImageRef(),
-    };
-    const run = (extra: Record<string, string>) =>
-      spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
-        encoding: 'utf8',
-        env: { ...env, ...extra },
-      });
-    const withPrefix = run({ TLS_SNAPSHOT_S3_PREFIX: 's3://b/backups/p/e/tls/prod' });
-    expect(withPrefix.status, withPrefix.stderr).toBe(0);
-    const cm = (
-      loadAll(withPrefix.stdout) as Array<{ kind: string; data?: Record<string, string> }>
-    ).find((d) => d.kind === 'ConfigMap');
-    expect(cm?.data?.TLS_SNAPSHOT_S3_PREFIX).toBe('s3://b/backups/p/e/tls/prod');
-    const without = run({ TLS_SNAPSHOT_S3_PREFIX: '' });
-    expect(without.status, without.stderr).toBe(0);
-    const cmWithout = (
-      loadAll(without.stdout) as Array<{ kind: string; data?: Record<string, string> }>
-    ).find((d) => d.kind === 'ConfigMap');
-    expect(cmWithout?.data).toEqual({ BACKUP_RETENTION_DAYS: '21' });
-  });
-
-  it('deploy.yml passes the environment var to the renderer', () => {
-    const wf = readFileSync('carbon/.github/workflows/deploy.yml', 'utf8');
-    expect(wf).toMatch(/TLS_SNAPSHOT_S3_PREFIX: \$\{\{ vars\.TLS_SNAPSHOT_S3_PREFIX \}\}/);
-  });
 });

@@ -2,9 +2,10 @@
  * `configure cicd <env>` hands the cluster to Flux from the operator's
  * machine (handOverCluster) instead of dispatching a GitHub workflow that
  * would reach the cluster from a runner the firewall never lets in. The push
- * comes first: Flux's first sync reads main. Runs deployK8sGitOps for real
- * (a real git repo and a local bare origin) with the GitHub calls and the
- * handover faked, and its spinner and git's push lines kept off the terminal.
+ * comes first: Flux's first sync reads main, and the push is all that goes
+ * to GitHub. Runs deployK8sGitOps for real (a real git repo and a local bare
+ * origin) with the GitHub calls and the handover faked, and its spinner and
+ * git's push lines kept off the terminal.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -27,11 +28,18 @@ vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({ handOverCluster
 
 const github = await import('../../../src/lib/github-environments.js');
 const { handOverCluster } = await import('../../../src/lib/deploy/k8s/flux-handover.js');
-const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
+const { deployK8sGitOps, gitopsTargets } = await import(
+  '../../../src/lib/deploy/k8s/gitops-deploy.js'
+);
 const { FLUX_CLUSTER_FILE } = await import(
   '../../../src/lib/deploy/k8s/unrendered-placeholders.js'
 );
-const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
+
+/** Every call made at GitHub, by function: the push is all that goes there. */
+const githubCalls = () =>
+  Object.entries(github).flatMap(([name, fn]) =>
+    vi.isMockFunction(fn) ? fn.mock.calls.map((call) => [name, call]) : [],
+  );
 
 /** Whether the bare origin has a main branch yet. */
 const hasMain = (origin: string) => {
@@ -66,12 +74,9 @@ const deploy = async (project: string) => {
     return await deployK8sGitOps({
       projectDir: project,
       environment: 'prod',
-      domain: 'app.example.test',
       projectName: 'proj',
       kubeconfigPath: join(project, 'kubeconfig'),
-      appStorage: { accessKey: 'a', secretKey: 'b' },
       githubOwner: 'acme',
-      ProviderClass: PROVIDERS.hetzner,
       ghcrPull: GHCR_PULL,
     });
   } finally {
@@ -82,7 +87,7 @@ const deploy = async (project: string) => {
 beforeEach(() => vi.clearAllMocks());
 
 describe('deployK8sGitOps hands the cluster to Flux itself', () => {
-  it('pushes first, then hands the cluster to Flux, and dispatches no workflow', async () => {
+  it('pushes first, then hands the cluster to Flux, and copies nothing to GitHub', async () => {
     const { project, origin } = gitopsProject();
     const originHadMain: boolean[] = [];
     vi.mocked(handOverCluster).mockImplementation(async () => {
@@ -102,8 +107,8 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
     });
     expect(vi.mocked(handOverCluster).mock.calls[0][0].ghcrPull).toBe(GHCR_PULL);
     expect(originHadMain).toEqual([true]);
-    expect(github.triggerDeployWorkflow).not.toHaveBeenCalled();
-    expect(github.waitForLatestWorkflowRun).not.toHaveBeenCalled();
+    // No secret, variable or kubeconfig copy, and no workflow to dispatch.
+    expect(githubCalls()).toEqual([]);
     expect(result).toEqual({ pushed: true });
   });
 
@@ -135,13 +140,31 @@ describe('deployK8sGitOps hands the cluster to Flux itself', () => {
         'takes back after every workflow run. run vibecarbon upgrade and take the new ' +
         `${FLUX_CLUSTER_FILE}, then rerun vibecarbon configure cicd prod`,
     );
-    // Nothing written, pushed, seeded or handed over.
+    // Nothing written, pushed or handed over.
     expect(readFileSync(clusterFile, 'utf-8')).toBe(https);
     expect(JSON.parse(readFileSync(join(project, '.vibecarbon.json'), 'utf-8'))).toEqual({
       projectName: 'proj',
     });
     expect(hasMain(origin)).toBe(false);
-    expect(github.seedEnvironmentSecrets).not.toHaveBeenCalled();
+    expect(githubCalls()).toEqual([]);
     expect(handOverCluster).not.toHaveBeenCalled();
+  });
+});
+
+describe('gitopsTargets', () => {
+  it('reads the roles from ha.primary.stack, so a failed-over pair hands the promoted side over as primary', () => {
+    expect(gitopsTargets('prod', { deployMode: 'k8s-ha' })).toEqual([
+      { suffix: 'primary', envName: 'prod-primary', role: 'primary' },
+      { suffix: 'standby', envName: 'prod-standby', role: 'standby' },
+    ]);
+    expect(
+      gitopsTargets('prod', { deployMode: 'k8s-ha', ha: { primary: { stack: 'prod-standby' } } }),
+    ).toEqual([
+      { suffix: 'primary', envName: 'prod-primary', role: 'standby' },
+      { suffix: 'standby', envName: 'prod-standby', role: 'primary' },
+    ]);
+    expect(gitopsTargets('dev', { deployMode: 'k8s' })).toEqual([
+      { suffix: null, envName: 'dev', role: 'primary' },
+    ]);
   });
 });

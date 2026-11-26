@@ -860,8 +860,7 @@ async function main(cliArgs) {
     // the user took one out of reads as create made it, and is still
     // theirs). Without one: the user's, unless it is byte for byte a CI
     // workflow some release of `configure cicd` installed before it
-    // recorded checksums (an old deploy.yml applies k8s/infra/traefik-crds
-    // raw, a file upgrade moves to its {{TRAEFIK_VERSION}} token).
+    // recorded checksums.
     const userModified = storedHash
       ? recordedHash(relPath, currentContent) !== storedHash
       : !isShippedWorkflow(relPath, currentContent);

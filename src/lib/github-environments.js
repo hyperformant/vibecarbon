@@ -1,82 +1,75 @@
 /**
- * Helpers for managing GitHub Environments + secrets/vars on the customer's
- * repo. Used by Phase 4.3b of the GitOps refactor — the deploy workflow
- * (.github/workflows/deploy.yml) reads per-environment `${{ secrets.X }}`
- * + `${{ vars.Y }}` to apply the vibecarbon-app-secrets and
- * vibecarbon-infra-secrets Secrets into the cluster. No cloud provider token
- * goes to GitHub: `vibecarbon deploy` hands it to the cluster itself
- * (applyCloudSecrets in src/lib/deploy/k8s/k3s.js).
+ * What the CLI reads and writes at GitHub through the `gh` CLI (argv form, no
+ * shell interpolation).
  *
- * All calls go through the `gh` CLI (argv form, no shell interpolation) so
- * secret values never leak through ps/logs/shell history. Secret upload
- * pipes the value through stdin — `gh secret set NAME` (no --body) reads
- * stdin — to keep the value off argv.
+ * The one write is seedBuildVars: the repo-level VITE_* variables the build
+ * workflow (vibecarbon-build.yml) bakes into the app image. Nothing at GitHub
+ * reaches a cluster any more: `configure cicd <env>` hands each k8s cluster
+ * to Flux from the operator's machine, `vibecarbon deploy <env>` applies its
+ * secrets from .env.local, and no provider token goes to GitHub
+ * (applyCloudSecrets in src/lib/deploy/k8s/k3s.js hands it to the cluster).
  *
- * Every secret is per environment. The last repo-level one, the Hetzner
- * Cloud API token deploy.yml once wrote into kube-system/hcloud, went with
- * that step; a repo an earlier vibecarbon seeded may still hold it, and
- * `configure cicd` says so (listRepoSecretNames, noteUnreadTokenSecrets in
- * src/lib/deploy/k8s/gitops-deploy.js) but never deletes it.
- *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, APP_DB_PASSWORD, BETTER_AUTH_SECRET,
- *                    S3_ACCESS_KEY / S3_SECRET_KEY (the env app's own storage
- *                    key, from appStorageCredential's resolution; never the
- *                    infra pair on a provider that scopes keys),
- *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*, and the add-ons'
- *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD / N8N_ENCRYPTION_KEY when installed
- *   Per-env vars:    SITE_URL, the backup and TLS certificate settings,
- *                    KUBECTL_IMAGE and TRAEFIK_VERSION (deployK8sGitOps)
+ * The rest only list names, never values (GitHub returns none), for the notes
+ * `configure cicd` prints about copies an earlier vibecarbon left there: the
+ * repo's provider token secret (noteUnreadTokenSecrets) and what it seeded
+ * into each GitHub Environment for the retired deploy.yml, KUBECONFIG_B64
+ * among it (noteLeftoverGitopsCopies, both in src/lib/deploy/k8s/gitops-deploy.js).
+ * Neither deletes anything.
  */
 
 import { runCommandAsync } from './command.js';
-import { withCompressionDisabled } from './kubeconfig.js';
 
-/**
- * Get the current repo's `owner/name` from the gh CLI. Relies on a git
- * remote being configured (which `vibecarbon create` sets up).
- */
-async function getRepoSlug({ timeout } = {}) {
-  const out = await runCommandAsync(
-    ['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { cleanEnv: true, silent: true, timeout },
-  );
-  return out.toString().trim();
+/** The `-q .[].name` lines of a `gh ... list --json name` answer. */
+function nameLines(out) {
+  return String(out ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 /**
- * Ensure a GitHub Environment exists on the customer's repo. Idempotent.
- * `gh api -X PUT` creates if missing, no-op if present.
- */
-export async function ensureEnvironment(envName, { timeout } = {}) {
-  const repo = await getRepoSlug({ timeout });
-  await runCommandAsync(['gh', 'api', `repos/${repo}/environments/${envName}`, '-X', 'PUT'], {
-    cleanEnv: true,
-    silent: true,
-    timeout,
-  });
-}
-
-/**
- * The names of the variables a GitHub Environment holds; [] when the
- * environment does not exist (gh answers HTTP 404). Any other failure throws.
+ * The names of the secrets or variables (`kind`) a GitHub Environment holds,
+ * never a value; [] when the environment does not exist (gh answers HTTP 404).
+ * Any other failure throws.
  *
+ * @param {'secret'|'variable'} kind
  * @param {string} envName
- * @param {{ timeout?: number }} [options] - per gh call, in ms
+ * @param {number} [timeout] - for the gh call, in ms
  * @returns {Promise<string[]>}
  */
-export async function listEnvironmentVariables(envName, { timeout } = {}) {
+async function environmentNames(kind, envName, timeout) {
   try {
     const out = await runCommandAsync(
-      ['gh', 'variable', 'list', '--env', envName, '--json', 'name', '-q', '.[].name'],
+      ['gh', kind, 'list', '--env', envName, '--json', 'name', '-q', '.[].name'],
       { cleanEnv: true, silent: true, timeout },
     );
-    return String(out ?? '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
+    return nameLines(out);
   } catch (err) {
     if (/HTTP 404|Not Found/i.test(String(err?.stderr ?? ''))) return [];
     throw err;
   }
+}
+
+/**
+ * The names of the secrets a GitHub Environment holds (environmentNames).
+ *
+ * @param {string} envName
+ * @param {{ timeout?: number }} [options] - for the gh call, in ms
+ * @returns {Promise<string[]>}
+ */
+export function listEnvironmentSecretNames(envName, { timeout } = {}) {
+  return environmentNames('secret', envName, timeout);
+}
+
+/**
+ * The names of the variables a GitHub Environment holds (environmentNames).
+ *
+ * @param {string} envName
+ * @param {{ timeout?: number }} [options] - for the gh call, in ms
+ * @returns {Promise<string[]>}
+ */
+export function listEnvironmentVariables(envName, { timeout } = {}) {
+  return environmentNames('variable', envName, timeout);
 }
 
 /**
@@ -92,44 +85,20 @@ export async function listRepoSecretNames({ timeout } = {}) {
     silent: true,
     timeout,
   });
-  return String(out ?? '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return nameLines(out);
 }
 
 /**
- * Set a secret value via `gh secret set`, piping the value through stdin.
- *
- * Pipes stdin instead of passing the value on argv — `gh secret set NAME`
- * (no --body) reads from stdin. Previously used `--body-file <path>` but
- * that flag was removed from `gh` (verified 2026-04-22: only `-b/--body`,
- * `-f/--env-file`, and stdin remain). Stdin has the same security
- * properties as a 0600 temp file — never on argv, never on disk.
- *
- * `env` = undefined → repo-level secret; `env` = "prod" → environment-level.
- *
- * Returns false if the value is empty (skips the call — GH rejects empty
- * secrets). True on successful write.
+ * Set a repo-level variable (non-secret). `gh variable set` takes no stdin
+ * body, so the value goes on argv: acceptable for these, which are shipped to
+ * browsers anyway.
  */
-async function setSecretFromBodyFile(key, value, env, { timeout } = {}) {
-  if (!value) return false;
-  const args = ['gh', 'secret', 'set', key];
-  if (env) args.push('--env', env);
-  await runCommandAsync(args, { cleanEnv: true, silent: true, input: value, timeout });
-  return true;
-}
-
-/**
- * Set a variable (non-secret) value. `gh variable set` doesn't support
- * --body-file, so the value goes on argv. Acceptable since these are
- * non-secret (network IDs, URLs).
- */
-async function setVariable(key, value, env, { timeout } = {}) {
+async function setVariable(key, value) {
   if (value === undefined || value === null || value === '') return false;
-  const args = ['gh', 'variable', 'set', key, '--body', String(value)];
-  if (env) args.push('--env', env);
-  await runCommandAsync(args, { cleanEnv: true, silent: true, timeout });
+  await runCommandAsync(['gh', 'variable', 'set', key, '--body', String(value)], {
+    cleanEnv: true,
+    silent: true,
+  });
   return true;
 }
 
@@ -160,206 +129,4 @@ export async function seedBuildVars(viteArgs) {
     if (await setVariable(key, value)) applied.push(key);
   }
   return applied;
-}
-
-/**
- * Seed the per-environment secrets + variables. `envVars` are sourced from
- * .env.local (read by the caller) so we can re-use the same values as the
- * imperative deploy path sources.
- *
- * @param {string} envName - "dev" | "staging" | "prod"
- * @param {object} secrets - Key-value map of secret names → values.
- * @param {object} vars - Key-value map of variable names → values.
- * @param {{ timeout?: number }} [options] - bound of each gh call, in ms
- *   (none by default; a failover passes one so it never waits on GitHub)
- */
-export async function seedEnvironmentSecrets(envName, secrets, vars = {}, { timeout } = {}) {
-  await ensureEnvironment(envName, { timeout });
-
-  const appliedSecrets = [];
-  for (const [key, value] of Object.entries(secrets)) {
-    if (await setSecretFromBodyFile(key, value, envName, { timeout })) appliedSecrets.push(key);
-  }
-
-  const appliedVars = [];
-  for (const [key, value] of Object.entries(vars)) {
-    if (await setVariable(key, value, envName, { timeout })) appliedVars.push(key);
-  }
-  return { secrets: appliedSecrets, vars: appliedVars };
-}
-
-/**
- * Upload the cluster kubeconfig as a base64-encoded env secret. The deploy
- * workflow base64-decodes it with `printf ... | base64 -d` into a file and
- * points `$KUBECONFIG` at it. Base64 is used (rather than raw YAML) because
- * the downstream shell interpolation needs a single-line value. Response
- * compression is turned off in the uploaded copy (src/lib/kubeconfig.js says
- * why), in memory: the local file is only read, never rewritten.
- */
-export async function uploadKubeconfig(envName, kubeconfigPath) {
-  const { readFileSync } = await import('node:fs');
-  const raw = withCompressionDisabled(readFileSync(kubeconfigPath, 'utf-8'));
-  const b64 = Buffer.from(raw, 'utf-8').toString('base64');
-  await ensureEnvironment(envName);
-  await setSecretFromBodyFile('KUBECONFIG_B64', b64, envName);
-}
-
-/**
- * Trigger the customer's deploy workflow for a given environment and
- * optionally wait for it to complete. `gh workflow run` fires it; the
- * workflow's concurrency group serializes per-env so only one runs at a
- * time.
- */
-export async function triggerDeployWorkflow(envName) {
-  await runCommandAsync(
-    ['gh', 'workflow', 'run', 'deploy.yml', '--ref', 'main', '-F', `environment=${envName}`],
-    { cleanEnv: true, silent: true },
-  );
-}
-
-/**
- * The latest deploy.yml run's `--json` fields, as `gh run list` prints them
- * (an array of at most one run), or null when gh failed.
- */
-function latestDeployRun(fields) {
-  return runCommandAsync(
-    ['gh', 'run', 'list', '--workflow', 'deploy.yml', '--limit', '1', '--json', fields],
-    { cleanEnv: true, silent: true, ignoreError: true },
-  );
-}
-
-/**
- * Block until the most recent run of deploy.yml completes. Polls
- * `gh run list` every 5s; surfaces the final status when done.
- */
-export async function waitForLatestWorkflowRun(timeoutSec = 1800) {
-  const deadline = Date.now() + timeoutSec * 1000;
-  const startedAt = Date.now();
-  // Give GitHub a couple seconds to register the run before we poll.
-  await new Promise((r) => setTimeout(r, 3000));
-  // Periodic state snapshot — every 2 min, log which workflow step is
-  // currently in-progress. Without this, a 60-minute wait is a black
-  // box; with it, the deploy log shows where the workflow spent its
-  // time. Captured by the deploy logger (#6) so it persists past
-  // teardown. Snapshot every ~24th poll (5s × 24 = 120s) — short enough
-  // to catch a mid-step hang, long enough to not spam.
-  let lastSnapshotAt = 0;
-  while (Date.now() < deadline) {
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    if (Date.now() - lastSnapshotAt >= 120_000) {
-      try {
-        const stateOut = await latestDeployRun('databaseId,status,conclusion,jobs');
-        if (stateOut) {
-          const info = JSON.parse(stateOut.toString())[0];
-          const jobs = (info?.jobs ?? [])
-            .map((j) => {
-              const inFlight =
-                j.steps?.find((s) => s.status === 'in_progress')?.name ??
-                (j.status === 'completed' ? `(done: ${j.conclusion})` : `(${j.status})`);
-              return `    ${j.name}: ${inFlight}`;
-            })
-            .join('\n');
-          console.log(
-            `[wait ${elapsed}s] deploy.yml run=${info?.databaseId ?? '?'} status=${info?.status ?? '?'}\n${jobs}`,
-          );
-        }
-      } catch {
-        /* snapshot is best-effort — never break the wait */
-      }
-      lastSnapshotAt = Date.now();
-    }
-    const out = (await latestDeployRun('status,conclusion,databaseId'))?.toString() ?? '[]';
-    let run;
-    try {
-      run = JSON.parse(out)[0];
-    } catch {
-      run = null;
-    }
-    if (run?.status === 'completed') {
-      if (run.conclusion === 'success') return { ok: true, runId: run.databaseId };
-      // Fetch the failing-step log inline so the caller has something to
-      // act on. The throwaway repo used by e2e tests is destroyed
-      // right after a failure; post-mortem `gh run view` then 404s. Even
-      // outside e2e, surfacing the actual failure at throw time is
-      // far more useful than a "go look at this URL" pointer the operator
-      // then has to re-fetch manually. Best-effort — if the log fetch
-      // itself fails (403, run not yet indexed), proceed with the short
-      // error so we don't hide the original failure.
-      let logTail = '';
-      try {
-        const logOut = await runCommandAsync(
-          ['gh', 'run', 'view', String(run.databaseId), '--log-failed'],
-          { cleanEnv: true, silent: true, ignoreError: true, timeout: 60_000 },
-        );
-        if (logOut) {
-          const text = logOut.toString();
-          // Tail size 20KB — deploy.yml's failure dump (CoreDNS config +
-          // CoreDNS logs + CCM logs + node info + pod network probes) can
-          // total 10-15KB; a 3KB tail truncates every useful line and
-          // leaves only the final error marker.
-          const tail = text.length > 20000 ? `…\n${text.slice(-20000)}` : text;
-          logTail = `\n--- failing-step log (last 20KB) ---\n${tail}`;
-        }
-      } catch {
-        /* best-effort */
-      }
-      throw new Error(
-        `deploy.yml run ${run.databaseId} finished with conclusion=${run.conclusion}. ` +
-          `Inspect: gh run view ${run.databaseId} --log-failed${logTail}`,
-      );
-    }
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-  // Timeout: grab a log tail of the still-running workflow inline. In
-  // e2e runs the throwaway repo is deleted seconds after this
-  // throws, so a post-hoc `gh run view` 404s — we need the state now or
-  // we fly blind. Best-effort; a dry runId pointer is better than
-  // nothing when the log fetch itself fails.
-  let runId = null;
-  let logTail = '';
-  try {
-    const out = await latestDeployRun('databaseId,status');
-    if (out) {
-      const parsed = JSON.parse(out.toString())[0];
-      runId = parsed?.databaseId ?? null;
-      if (runId) {
-        // `gh run view --log` 404s on in-flight runs — the archive doesn't
-        // exist until the run completes. For in-flight state, parse the
-        // structured jobs JSON: it gives each job's status + per-step
-        // conclusion + timing, which is exactly the "which step is hung"
-        // signal we need.
-        const jobsOut = await runCommandAsync(
-          ['gh', 'run', 'view', String(runId), '--json', 'status,conclusion,jobs,url,createdAt'],
-          { cleanEnv: true, silent: true, ignoreError: true, timeout: 60_000 },
-        );
-        if (jobsOut) {
-          try {
-            const info = JSON.parse(jobsOut.toString());
-            const stepSummary = (info.jobs ?? [])
-              .map((j) => {
-                const steps = (j.steps ?? [])
-                  .map(
-                    (s) =>
-                      `    ${s.conclusion ?? s.status}  ${s.name}${s.startedAt ? ` (${s.startedAt})` : ''}`,
-                  )
-                  .join('\n');
-                return `  job: ${j.name} [${j.status}${j.conclusion ? `/${j.conclusion}` : ''}]\n${steps}`;
-              })
-              .join('\n');
-            logTail =
-              `\n--- in-flight run ${runId} @ ${info.url ?? '(no url)'} ---\n` +
-              `  status=${info.status} conclusion=${info.conclusion ?? '(pending)'} started=${info.createdAt}\n` +
-              stepSummary;
-          } catch {
-            /* JSON parse failed — silent */
-          }
-        }
-      }
-    }
-  } catch {
-    /* best-effort */
-  }
-  throw new Error(
-    `deploy.yml run did not complete within ${timeoutSec}s.${runId ? ` run=${runId}` : ''}${logTail}`,
-  );
 }

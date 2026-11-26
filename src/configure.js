@@ -21,7 +21,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { backupsTargetOf } from './lib/backups-bucket.js';
 import { formatAmount, listStripePrices } from './lib/billing/stripe-catalog.js';
 import { writeBillingCatalog } from './lib/billing/write-catalog.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
@@ -40,6 +39,7 @@ import {
 import { promptProviders } from './lib/configure-providers.js';
 import { dotenvValueProblem } from './lib/dotenv.js';
 import { envSummaryLines } from './lib/env-summary.js';
+import { environmentForStack } from './lib/environment-name.js';
 import {
   addLocale,
   BASE_LOCALE,
@@ -49,11 +49,7 @@ import {
   SUPPORTED_LOCALES,
 } from './lib/globalization.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
-import {
-  normalizeOperatorValue,
-  readOperatorVar,
-  validateOperatorValue,
-} from './lib/operator-env.js';
+import { normalizeOperatorValue, validateOperatorValue } from './lib/operator-env.js';
 import { requireEnvOperatorIpAccess } from './lib/operator-ip-gate.js';
 import {
   buildGitAddArgv,
@@ -62,7 +58,6 @@ import {
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { useRecordedImageSet } from './lib/version-channel.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 export const SPEC = {
@@ -911,7 +906,7 @@ async function promptPlausible(env, ctx = {}) {
  *   2. Resolve owner: existing remote → use it; otherwise prompt + create repo
  *      via `gh repo create` (with `git init` + initial commit if needed)
  *   3. Rewrite ghcr.io / github.com image refs in compose + k8s manifests
- *   4. Install `.github/workflows/vibecarbon-build.yml` + `deploy.yml`
+ *   4. Install `.github/workflows/vibecarbon-build.yml`
  *   5. Set `cicdEnabled: true` in `.vibecarbon.json`
  *
  * After this, `vibecarbon deploy` for compose prompts Direct/Push per-deploy
@@ -920,27 +915,21 @@ async function promptPlausible(env, ctx = {}) {
  * purely additive: it adds the git-push deploy path for compose, and lays
  * down GHA workflow files in the repo for teams that want them.
  *
- * No secret is seeded here: a k8s environment's GitHub Environment is seeded
- * by `deployK8sGitOps`, so secrets only land in GitHub when the user layers
- * GitOps onto a running cluster, not when they merely configure. The cloud
- * provider token never goes to GitHub at all (`vibecarbon deploy` hands it to
- * the cluster itself).
+ * No secret goes to GitHub, here or in `configure cicd <env>`: a k8s cluster
+ * pulls with Flux, and `vibecarbon deploy <env>` applies its secrets from
+ * .env.local. The cloud provider token never goes to GitHub at all
+ * (`vibecarbon deploy` hands it to the cluster itself).
  */
 async function promptCicd() {
   p.log.info(c.bold('CI/CD (GitHub Actions)'));
   p.log.info(
     c.dim(
-      'Bootstraps the GitHub repo (if needed) and installs build + deploy workflows so this project can ship via git push. Optional in all modes, k8s/k8s-ha deploys are local-first and never need CI/CD; compose deploys use git-push when configured, otherwise a local build sideloaded to the server.',
+      'Bootstraps the GitHub repo (if needed) and installs the build workflow so this project can ship via git push. Optional in all modes, k8s/k8s-ha deploys are local-first and never need CI/CD; compose deploys use git-push when configured, otherwise a local build sideloaded to the server.',
     ),
   );
 
-  const {
-    detectGitHubUsername,
-    getGitHubRepo,
-    installDeployWorkflowFile,
-    installWorkflowFile,
-    updateImageReferences,
-  } = await import('./lib/ci-setup.js');
+  const { detectGitHubUsername, getGitHubRepo, installWorkflowFile, updateImageReferences } =
+    await import('./lib/ci-setup.js');
   const { checkDependency, runCommand } = await import('./lib/command.js');
 
   if (!checkDependency('gh', 'GitHub CLI')) {
@@ -1046,10 +1035,6 @@ async function promptCicd() {
     s.start('Installing .github/workflows/vibecarbon-build.yml');
     const installedBuild = installWorkflowFile(cwd);
     s.stop(installedBuild ? 'Build workflow installed' : 'Build workflow already present');
-
-    s.start('Installing .github/workflows/deploy.yml');
-    const installedDeploy = installDeployWorkflowFile(cwd);
-    s.stop(installedDeploy ? 'Deploy workflow installed' : 'Deploy workflow already present');
   } catch (err) {
     s.stop(`Failed to install workflow files: ${err.message}`);
     return null;
@@ -1500,8 +1485,8 @@ async function main(cliArgs) {
  * Set up CI/CD, in one or two stages depending on what the project runs.
  *
  * There is ONE CI/CD feature here, not two. Stage 1 installs the GitHub
- * Actions build + deploy workflows and is identical to the interactive
- * wizard's CI/CD entry (it calls the same function). Stage 2 layers Flux onto
+ * Actions build workflow and is identical to the interactive wizard's CI/CD
+ * entry (it calls the same function). Stage 2 layers Flux onto
  * a live Kubernetes cluster so future commits reconcile from inside it.
  *
  * The two stages differ in WHERE the deploy happens, which is why Stage 2 is
@@ -1557,15 +1542,11 @@ export async function runConfigureCicd(envName) {
     );
     process.exit(1);
   }
-  // deploy.yml renders the set's kubectl and Traefik CRD tag from what this
-  // seeds, so it must be what the environment runs.
-  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
-
-  // Template lockstep, k8s only: the GitOps workflow and Flux apply the
-  // project's k8s manifests to the cluster as they are, and this CLI moves the
-  // wal-g role through a file those manifests' scripts parse. A scaffold from
-  // before that file reads a role env this CLI no longer sets. Checked before
-  // Stage 1, which installs the workflow that applies them.
+  // Template lockstep, k8s only: Flux applies the project's k8s manifests to
+  // the cluster as they are, and this CLI moves the wal-g role through a file
+  // those manifests' scripts parse. A scaffold from before that file reads a
+  // role env this CLI no longer sets. Checked before Stage 1, so nothing is
+  // installed for a project Flux could not run.
   {
     const { isK8sTier, resolveTier } = await import('./lib/deploy/tier-registry.js');
     // An unknown deployMode is not a k8s env; the mode check below speaks for it.
@@ -1628,70 +1609,32 @@ export async function runConfigureCicd(envName) {
     yes: !process.stdin.isTTY,
   });
 
-  // Stage 2: seed the GH Environment, then hand each cluster to Flux from
-  // this machine. This is the body that orchestrator.js used to run inline
-  // when --gitops was passed (deleted in PR 5).
-  p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
-  const { deployK8sGitOps, gitopsTargets, noteUnreadTokenSecrets, resolveOwnerAndRepo } =
-    await import('./lib/deploy/k8s/gitops-deploy.js');
+  // Stage 2: hand each cluster to Flux from this machine. This is the body
+  // that orchestrator.js used to run inline when --gitops was passed
+  // (deleted in PR 5).
+  p.log.step('Stage 2: install flux on the cluster and let it pull from your repo');
+  const {
+    deployK8sGitOps,
+    gitopsTargets,
+    noteLeftoverGitopsCopies,
+    noteUnreadTokenSecrets,
+    resolveOwnerAndRepo,
+  } = await import('./lib/deploy/k8s/gitops-deploy.js');
   const { getImageTag } = await import('./lib/ci-setup.js');
   const imageTag = getImageTag(cwd);
-  // The app pod's object-storage pair, per environment: the env's own key
-  // where the provider scopes one (security plan R2), never the infra pair
-  // there. Read from what deploy recorded and stored; no mint here.
-  const { storedAppStoragePair, localAppStorageSecrets } = await import(
-    './lib/deploy/app-storage-credential.js'
-  );
   const { getProviderClass } = await import('./lib/providers/index.js');
-  const storageProviderId = (envConfig.provider || 'hetzner').toLowerCase();
-  const ProviderClass = getProviderClass(storageProviderId);
-  const [accessEnv, secretEnv] = ProviderClass.OBJECT_STORAGE_ENV;
-  const infraStoragePair = {
-    accessKey: (accessEnv && readOperatorVar(accessEnv).value) || '',
-    secretKey: (secretEnv && readOperatorVar(secretEnv).value) || '',
-  };
-  let appStorage;
-  try {
-    // One app key per environment; both HA stacks run the same app.
-    appStorage = await storedAppStoragePair({
-      provider: storageProviderId,
-      environment: envName,
-      envConfig,
-      infraCredential: infraStoragePair,
-      secrets: localAppStorageSecrets(cwd),
-    });
-  } catch (err) {
-    p.log.error(err.message);
-    process.exit(1);
-  }
-
-  // Where the backup CronJob saves the TLS certificate: the backup bucket the
-  // deploy recorded (never created or derived here) under
-  // backups/<project>/<env>/tls/<ca>, the folder the CLI deploy renders. One
-  // for both HA clusters: the standby never writes (its Secret is the
-  // self-signed one).
-  const { caSlug, tlsSnapshotS3Prefix } = await import('./lib/deploy/tls-snapshot.js');
-  const backupBucket = backupsTargetOf(envConfig)?.bucket;
-  const tlsSnapshotPrefix = backupBucket
-    ? tlsSnapshotS3Prefix({
-        backupBucket,
-        projectName: projectConfig.projectName,
-        envName,
-        ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
-      })
-    : '';
+  const ProviderClass = getProviderClass((envConfig.provider || 'hetzner').toLowerCase());
 
   // HA clusters split into <env>-primary and <env>-standby kubeconfigs;
   // each needs its own GitOps handover. The orchestrator used to iterate
   // over `[{suffix:'primary'}, {suffix:'standby'}]` in HA, single in non-HA.
-  // Each cluster's Certificate follows its CURRENT role (a failover swaps
-  // which stack is primary), as the CLI deploy renders it.
   const targets = gitopsTargets(envName, envConfig);
 
-  // Once per run, not per cluster: a token copy an earlier vibecarbon left
-  // at GitHub that no workflow reads any more. One a workflow still reads is
-  // deployK8sGitOps's refusal to name.
+  // Once per run, not per cluster: the copies an earlier vibecarbon left at
+  // GitHub that nothing reads any more, the provider token secret and what
+  // it seeded into each cluster's GitHub Environment for deploy.yml.
   await noteUnreadTokenSecrets({ projectDir: cwd, ProviderClass });
+  await noteLeftoverGitopsCopies({ projectDir: cwd, envNames: targets.map((t) => t.envName) });
 
   // Once per run too: what the clusters pull a private app image with. Both
   // sides of k8s-ha get the same token, so the operator is asked at most
@@ -1740,25 +1683,23 @@ export async function runConfigureCicd(envName) {
       );
       continue;
     }
-    const subEnvConfig = projectConfig.environments?.[target.envName] ?? envConfig;
     p.log.info(`Configuring GitOps for ${c.bold(target.envName)}`);
     await deployK8sGitOps({
       projectDir: cwd,
       environment: target.envName,
-      domain: subEnvConfig.domain || envConfig.domain,
       projectName: projectConfig.projectName,
       kubeconfigPath: targetKubeconfig,
-      appStorage,
       imageTag,
-      backupConfig: subEnvConfig.backup || envConfig.backup,
-      tlsSnapshotPrefix,
-      role: target.role,
-      ProviderClass,
       ghcrPull,
     });
   }
 
-  p.outro(c.success(`GitOps layered onto ${envName}. Future commits to main reconcile via Flux.`));
+  const env = environmentForStack(envName);
+  p.outro(
+    c.success(
+      `flux now pulls main into ${env}. push under k8s/ to deploy. after you change a secret, run vibecarbon deploy ${env}`,
+    ),
+  );
 }
 
 // ============================================================================

@@ -305,7 +305,6 @@ const REGISTRY = [
       'src/destroy.js', // -purge and its holders, the preview facts
       'src/lib/destroy/preview.js', // the preview's backups line
       'src/lib/destroy/s3-credential-check.js', // the pre-teardown credential check
-      'src/configure.js', // the GitOps TLS snapshot prefix
       'src/lib/deploy/app-storage-credential.js', // unfenced-bucket marks
       'src/lib/deploy/orchestrator.js', // the deploy's skeleton record
       'tests/e2e/checks/backup-evidence.ts', // the e2e backup checks

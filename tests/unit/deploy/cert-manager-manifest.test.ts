@@ -170,32 +170,6 @@ describe('the rendered cert-manager manifest', () => {
   });
 });
 
-describe('the script form (GitOps workflow)', () => {
-  it('writes the same kustomization the CLI applies', () => {
-    const dir = createTempDir('vc-cert-manager-');
-    dirs.push(dir);
-    const res = spawnSync(
-      process.execPath,
-      [join(REPO_ROOT, 'carbon/scripts/render-cert-manager.mjs'), join(dir, 'k')],
-      { encoding: 'utf-8' },
-    );
-    expect(res.status).toBe(0);
-    expect(readFileSync(join(dir, 'k', 'kustomization.yaml'), 'utf-8')).toBe(
-      renderCertManagerKustomization(),
-    );
-  });
-
-  it('refuses without a target directory', () => {
-    const res = spawnSync(
-      process.execPath,
-      [join(REPO_ROOT, 'carbon/scripts/render-cert-manager.mjs')],
-      { encoding: 'utf-8' },
-    );
-    expect(res.status).toBe(1);
-    expect(res.stderr).toMatch(/usage/);
-  });
-});
-
 describe('the kubectl floor (lib/runtime-floors.js)', () => {
   it('the k8s deploy preflight checks it right after the tool lookup', () => {
     const k3s = readRepoFile('src/lib/deploy/k8s/k3s.js');

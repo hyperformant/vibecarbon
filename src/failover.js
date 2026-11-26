@@ -800,8 +800,8 @@ export function promoteTlsKubectl(ip, sshKeyPath, { makeQuiet = quietSshKubectl 
  * renders for this domain and issuer, the Certificate is re-created from the
  * Secret's issuer annotation and those names in the deploy's order
  * (certificateDnsNames), so it finds a matching Secret and issues nothing,
- * and the GitOps workflow's server-side apply of the same Certificate does
- * not conflict on dnsNames. Otherwise the operator is told the Certificate is
+ * and the next deploy's apply of the same Certificate does not conflict on
+ * dnsNames. Otherwise the operator is told the Certificate is
  * missing and how to bring it back. Never throws.
  *
  * @returns {Promise<boolean>} true when the Certificate was re-created
@@ -2335,9 +2335,6 @@ export async function failoverHA(
     restoreTls = restorePromotedTls,
     promoteIssuer = promoteAcmeIssuer,
     tlsSnapshotInputs = k8sTlsSnapshotInputs,
-    // Dynamic: the GitOps module pulls in the k8s deploy (R6a).
-    refreshGitopsTls = async (args) =>
-      (await import('./lib/deploy/k8s/gitops-deploy.js')).refreshGitopsTlsVars(args),
     addonRollouts = checkPromotedAddonRollouts,
     writeFence = (srv, key) =>
       writeK8sBackupFence({ ip: srv.standby.ip, sshKeyPath: key, primaryNode: srv.standby.ip }),
@@ -3086,32 +3083,6 @@ export async function failoverHA(
       `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
         'next status, failover or deploy that reaches it fences it',
     );
-  }
-
-  // GitOps: each cluster's TLS_CERT_* vars name its Certificate's issuer by
-  // role, and the roles just swapped. Re-seed them now, or the next GitOps
-  // deploy applies the old roles' Certificates and fails on the conflict.
-  // Never fails the failover: a miss prints the command that repairs it.
-  if (projectConfig?.cicdEnabled === true) {
-    let refresh;
-    try {
-      refresh = await refreshGitopsTls({ envName, projectDir: process.cwd() });
-    } catch (err) {
-      refresh = { ok: false, reason: firstErrorLine(err) };
-    }
-    if (!refresh?.ok) {
-      p.log.warn(
-        `could not update the GitOps TLS settings for the new roles (${refresh?.reason ?? 'unknown'}). ` +
-          'A GitOps deploy fails on the TLS Certificate until you run:',
-      );
-      p.log.message(`vibecarbon configure cicd ${envName}`);
-    } else if (!refresh.refreshed?.length) {
-      p.log.warn(
-        `no GitHub Environment of ${envName} holds the GitOps TLS settings, so none was updated ` +
-          'for the new roles. If this environment deploys through GitOps, run:',
-      );
-      p.log.message(`vibecarbon configure cicd ${envName}`);
-    }
   }
 
   // Every add-on's rollout, now that it no longer holds the outage open.

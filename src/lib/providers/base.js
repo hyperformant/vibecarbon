@@ -622,9 +622,9 @@ export class BaseProvider {
 
   /**
    * Environment variable vibecarbon reads/writes for this provider's API
-   * token. For Hetzner this is externally pinned as a customer-visible CI
-   * secret name (see github-environments.test.ts, deploy-workflow-secret-sync.test.ts)
-   * — never derive or rename it.
+   * token. It is also the repo secret name `configure cicd` looks for in a
+   * copy an earlier vibecarbon left at GitHub (noteUnreadTokenSecrets,
+   * gitops-provider-token.test.ts), so never derive or rename it.
    * @type {string}
    */
   static TOKEN_ENV = '';

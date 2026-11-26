@@ -70,7 +70,7 @@ spec:
         kind: StatefulSet
         name: db
     # The backup CronJob is DEPLOY-owned: its schedule and retention are per
-    # environment (the CLI deploy and deploy.yml fill them in from the
+    # environment (`vibecarbon deploy <env>` fills them in from the
     # environment's backup config, scripts/render-backup-settings.mjs), while
     # this k8s/base is shared by every environment on the branch. The live
     # object carries kustomize.toolkit.fluxcd.io/prune: disabled.

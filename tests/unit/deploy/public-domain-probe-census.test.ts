@@ -86,7 +86,6 @@ const NOT_A_PROBE: Record<string, string> = {
     'SITE_URL written into the app env; the app serves it, the CLI never requests it',
   'lib/deploy/compose/build-args.js:collectComposeBuildArgs':
     'VITE_PUBLIC_URL baked into the client build',
-  'lib/deploy/k8s/gitops-deploy.js:deployK8sGitOps': 'SITE_URL in the GitOps ConfigMap values',
   'lib/deploy/k8s/k3s.js:buildK3sBuildInputs': 'siteUrl handed to the image build',
   'lib/deploy/k8s/k3s.js:applyObservabilitySecrets': 'SITE_URL in the grafana-config ConfigMap',
   'lib/deploy/k8s/k3s.js:applyK3sManifests':

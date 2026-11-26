@@ -1,13 +1,9 @@
-#!/usr/bin/env node
 /**
- * The cert-manager install a k8s cluster runs with. ONE renderer for both
- * ways a cluster gets it:
- *
- * - the vibecarbon CLI imports this module when it applies a cluster
- *   (applyK3sManifests writes the kustomization into a temp dir and renders
- *   it here, then applies the result on the master);
- * - the GitOps deploy workflow (.github/workflows/deploy.yml) runs it as a
- *   script and applies the same directory.
+ * The cert-manager install a k8s cluster runs with. The vibecarbon CLI
+ * imports this module when it applies a cluster (applyK3sManifests writes the
+ * kustomization into a temp dir and renders it here, then applies the result
+ * on the master); on a GitOps cluster too, where `vibecarbon deploy <env>`
+ * installs it.
  *
  * The upstream install manifest is the one resource; our settings are
  * kustomize patches rendered INTO it, so a single apply yields the final
@@ -18,13 +14,9 @@
  * controller twice per deploy, warm redeploys included, and a controller
  * handoff can miss a restored Secret/vibecarbon-tls in its cache and issue a
  * brand-new certificate. Rendered in, an identical re-apply is a no-op.
- *
- * Script usage: `node scripts/render-cert-manager.mjs <dir>` writes
- * `<dir>/kustomization.yaml`; then `kubectl apply -k <dir>`.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 /**
  * The cert-manager release. Re-cut the fixture
@@ -150,13 +142,4 @@ export function writeCertManagerKustomization(dir, options) {
   const path = join(dir, 'kustomization.yaml');
   writeFileSync(path, renderCertManagerKustomization(options));
   return path;
-}
-
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const dir = process.argv[2];
-  if (!dir) {
-    process.stderr.write('usage: node scripts/render-cert-manager.mjs <dir>\n');
-    process.exit(1);
-  }
-  writeCertManagerKustomization(dir);
 }

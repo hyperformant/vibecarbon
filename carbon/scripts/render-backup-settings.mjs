@@ -1,31 +1,15 @@
-#!/usr/bin/env node
 /**
  * The backup schedule and retention a k8s cluster runs with, and the two
- * objects that carry them. ONE renderer for both ways a cluster gets them:
- *
- * - the vibecarbon CLI imports this module when it applies a cluster
- *   (applyK3sManifests), from `envConfig.backup`;
- * - the GitOps deploy workflow (.github/workflows/deploy.yml) runs it as a
- *   script, from the GitHub Environment vars BACKUP_SCHEDULE,
- *   BACKUP_RETENTION_DAYS and KUBECTL_IMAGE that `vibecarbon configure` seeds
- *   per environment.
+ * objects that carry them. The vibecarbon CLI imports this module when it
+ * applies a cluster (applyK3sManifests), from `envConfig.backup`; on a GitOps
+ * cluster too, where `vibecarbon deploy <env>` applies them.
  *
  * The settings are per environment, but the committed `k8s/base` is shared by
  * every environment Flux reconciles from the same branch, so they cannot live
  * there. The backup CronJob is therefore DEPLOY-owned: Flux's vibecarbon-base
  * Kustomization drops it (`$patch: delete`, k8s/flux/clusters/*), and the
  * retention days live in a per-cluster ConfigMap that is in no manifest tree.
- *
- * Script usage: `node scripts/render-backup-settings.mjs [k8s/base]` prints the
- * CronJob (its schedule filled in) and the settings ConfigMap as YAML on
- * stdout; pipe it to `kubectl apply -n vibecarbon -f -`. The three env vars are
- * required: no value is invented on a cluster that was never told one. An
- * optional TLS_SNAPSHOT_S3_PREFIX lands in the ConfigMap for the CronJob TLS
- * snapshot step.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 /** What a deploy records when nothing is given (the documented defaults). */
 export const DEFAULT_BACKUP_SCHEDULE = '0 */6 * * *';
@@ -123,36 +107,4 @@ export function renderBackupSettingsConfigMap(settings) {
     ...(prefix ? [`  TLS_SNAPSHOT_S3_PREFIX: "${prefix}"`] : []),
     '',
   ].join('\n');
-}
-
-/** Both objects for a `k8s/base` directory, one YAML stream. */
-export function renderBackupManifests(baseDir, settings) {
-  const template = readFileSync(join(baseDir, 'backup', 'cronjob.yaml'), 'utf-8');
-  return `${renderBackupCronJob(template, settings).trimEnd()}\n---\n${renderBackupSettingsConfigMap(settings)}`;
-}
-
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { BACKUP_SCHEDULE, BACKUP_RETENTION_DAYS, KUBECTL_IMAGE: kubectlImage } = process.env;
-  if (!BACKUP_SCHEDULE || !BACKUP_RETENTION_DAYS || !kubectlImage) {
-    console.error(
-      'BACKUP_SCHEDULE, BACKUP_RETENTION_DAYS and KUBECTL_IMAGE are not set for this environment. ' +
-        'Run `vibecarbon configure cicd <env>` from the project to seed them, then re-run this workflow.',
-    );
-    process.exit(1);
-  }
-  try {
-    const settings = {
-      ...resolveBackupSettings({
-        schedule: BACKUP_SCHEDULE,
-        retentionDays: BACKUP_RETENTION_DAYS,
-      }),
-      kubectlImage,
-      // Optional: the TLS snapshot folder `vibecarbon configure cicd` seeds.
-      tlsSnapshotPrefix: process.env.TLS_SNAPSHOT_S3_PREFIX || '',
-    };
-    process.stdout.write(renderBackupManifests(process.argv[2] || 'k8s/base', settings));
-  } catch (err) {
-    console.error(err.message);
-    process.exit(1);
-  }
 }

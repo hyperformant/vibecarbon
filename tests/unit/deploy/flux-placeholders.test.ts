@@ -30,24 +30,21 @@ vi.mock('@clack/prompts', async (orig) =>
     log: ['info', 'success', 'warn', 'error'],
   }),
 );
-vi.mock('../../../src/lib/github-environments.js', () => ({
-  listEnvironmentVariables: vi.fn(async () => []),
-  listRepoSecretNames: vi.fn(async () => []),
-  seedEnvironmentSecrets: vi.fn(async () => {}),
-  uploadKubeconfig: vi.fn(async () => {}),
-}));
+vi.mock('../../../src/lib/github-environments.js', async (orig) =>
+  Object.fromEntries(
+    Object.keys((await orig()) as Record<string, unknown>).map((name) => [name, vi.fn()]),
+  ),
+);
 // The cluster half of the deploy (flux-handover.test.ts); this file reads
 // what it pushes.
 vi.mock('../../../src/lib/deploy/k8s/flux-handover.js', () => ({
   handOverCluster: vi.fn(async () => {}),
 }));
 
-const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environments.js');
+const github = await import('../../../src/lib/github-environments.js');
 const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
-const { PROVIDERS } = await import('../../../src/lib/providers/index.js');
 
 const SERVICES = join(REPO_ROOT, 'services');
-const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
 const PRIMARY = 'k8s/flux/clusters/primary/vibecarbon.yaml';
 const STANDBY = 'k8s/flux/clusters/standby/vibecarbon.yaml';
 const TRAEFIK = 'k8s/base/traefik/deployment.yaml';
@@ -158,10 +155,10 @@ describe('fluxPlaceholders', () => {
     expect(fluxClusterFilesApplied(none)).toEqual([]);
   });
 
-  it('a project with no deploy workflow still has its cluster file checked', () => {
+  it('a project with no workflow still has its cluster file checked', () => {
     // The CLI applies the cluster file itself, so no workflow has to name it.
     const dir = createdProject();
-    rmSync(join(dir, DEPLOY_WORKFLOW));
+    expect(existsSync(join(dir, '.github'))).toBe(false);
     expect(fluxClusterFilesApplied(dir)).toEqual([PRIMARY]);
   });
 
@@ -241,24 +238,20 @@ describe('deployK8sGitOps refuses a tree Flux would apply with a token', () => {
       return await deployK8sGitOps({
         projectDir: project,
         environment: 'prod',
-        domain: 'app.example.test',
         projectName: 'proj',
         kubeconfigPath: join(project, 'kubeconfig'),
-        appStorage: { accessKey: 'a', secretKey: 'b' },
         imageTag,
         githubOwner: 'acme',
-        ProviderClass: PROVIDERS.hetzner,
       });
     } finally {
       pushLines.mockRestore();
     }
   };
 
-  it('stops before anything is written, committed, pushed or seeded, naming the file, the token and the way out', async () => {
+  it('stops before anything is written, committed or pushed, naming the file, the token and the way out', async () => {
     const { project, origin } = gitopsProject();
     edit(project, PRIMARY, (t) => t.replace(TRAEFIK_STRIP, ''));
     const before = snapshot(project);
-    vi.mocked(seedEnvironmentSecrets).mockClear();
     const err = await deploy(project).then(
       () => null,
       (e: Error) => e,
@@ -273,7 +266,7 @@ describe('deployK8sGitOps refuses a tree Flux would apply with a token', () => {
     expect(snapshot(project)).toEqual(before);
     expect(() => git(origin, 'rev-parse', '--verify', '-q', 'main')).toThrow();
     expect(() => git(project, 'rev-parse', '--verify', '-q', 'HEAD')).toThrow();
-    expect(seedEnvironmentSecrets).not.toHaveBeenCalled();
+    for (const fn of Object.values(github)) expect(fn).not.toHaveBeenCalled();
   });
 
   it('a token no template version strips is named with its own way out, not upgrade', async () => {

@@ -34,10 +34,6 @@ vi.mock('../../../src/lib/cli/intro.js', () => ({ introCommand: () => {} }));
 vi.mock('../../../src/lib/project-guard.js', () => ({
   assertInProjectDir: () => m.projectConfig,
 }));
-vi.mock('../../../src/lib/version-channel.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  useRecordedImageSet: () => {},
-}));
 vi.mock('../../../src/lib/deploy/preflight.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   assertScaffoldSupportsRoleFile: () => {},
@@ -52,18 +48,14 @@ vi.mock('../../../src/lib/ci-setup.js', () => ({
   detectGitHubUsername: () => 'acme',
   getGitHubRepo: () => ({ owner: 'acme', name: 'proj' }),
   getImageTag: () => 'main',
-  installDeployWorkflowFile: () => false,
   installWorkflowFile: () => false,
   updateImageReferences: () => {},
 }));
 vi.mock('../../../src/lib/operator-ip-gate.js', () => ({ requireEnvOperatorIpAccess: m.gate }));
-vi.mock('../../../src/lib/deploy/app-storage-credential.js', () => ({
-  localAppStorageSecrets: () => ({}),
-  storedAppStoragePair: async () => ({ accessKey: 'a', secretKey: 'b' }),
-}));
 vi.mock('../../../src/lib/deploy/k8s/gitops-deploy.js', () => ({
   deployK8sGitOps: m.deploy,
   gitopsTargets: m.targets,
+  noteLeftoverGitopsCopies: async () => [],
   noteUnreadTokenSecrets: m.note,
   resolveOwnerAndRepo: () => ({ owner: 'acme', name: 'proj' }),
 }));

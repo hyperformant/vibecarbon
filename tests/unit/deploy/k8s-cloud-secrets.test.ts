@@ -58,7 +58,7 @@
  * leaves of the retired ones, needs a real apiserver:
  * tests/integration/docker/k8s-cloud-secrets-takeover.test.ts.
  */
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -66,8 +66,7 @@ import { CLOUD_SECRET_READERS, manifestUrls } from '../../_shared/cloud-secret-r
 import { legacyGitopsSecrets } from '../../_shared/legacy-gitops-secrets.js';
 import { LEGACY_MASTER_INIT_SECRETS } from '../../_shared/legacy-master-init-secrets.js';
 import { masterInitSecrets } from '../../_shared/master-init-secrets.js';
-import { escapeRegExp } from '../../_shared/regexp.js';
-import { readRepoFile } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 type Call = { argv: string[]; input?: string; env?: NodeJS.ProcessEnv };
@@ -414,15 +413,13 @@ describe('K8S_RETIRED_CLOUD_SECRETS is what the old boot scripts and deploy.yml 
     );
   });
 
-  it("the old deploy.yml's record is one Secret, holding a repo secret, and the template writes it no more", () => {
+  it("the old deploy.yml's record is one Secret, holding a repo secret, and the template has no deploy.yml", () => {
     const made = legacyGitopsSecrets();
     expect(made.map(({ namespace, name }) => `${namespace}/${name}`)).toEqual([
       'kube-system/hcloud',
     ]);
     expect(Object.values(made[0].keys)).toContain('secrets.HETZNER_API_TOKEN');
-    const template = readRepoFile('carbon/.github/workflows/deploy.yml');
-    for (const { name } of made)
-      expect(template).not.toMatch(new RegExp(`create secret generic ${escapeRegExp(name)}\\b`));
+    expect(existsSync(join(REPO_ROOT, 'carbon/.github/workflows/deploy.yml'))).toBe(false);
   });
 
   it.each(K8S_PROVIDERS)('%s: the old Secrets and keys less the current ones', (id, Provider) => {
