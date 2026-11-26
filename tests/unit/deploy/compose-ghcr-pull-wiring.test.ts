@@ -5,8 +5,8 @@
  * (orchestrator.js, after the image is resolved). The resolve only reads
  * (each recorded server's ghcr.io login, over ssh). A refusal there (a
  * headless run with no GHCR_PULL_TOKEN, a token with more than read:packages)
- * stops the deploy before any server is created or provisioned. Local and direct builds pull nothing
- * from ghcr: their plan still runs the ghcr-login step, with a null
+ * stops the deploy before any server is created or provisioned. Local and
+ * direct builds pull nothing from ghcr: their plan still runs the ghcr-login step, with a null
  * credential, so a gh token an older vibecarbon left on the server goes.
  *
  * Drives the REAL executeDeployment with the REAL plans (the harness of

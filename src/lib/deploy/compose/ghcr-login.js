@@ -40,7 +40,7 @@ export const COMPOSE_WHERE = {
   readers: 'anyone with root on the server',
   puller: 'the server',
   ghTokenLeft:
-    'that is likely the gh token an earlier vibecarbon left there, and it reaches every repo you can: ' +
+    'that is likely the gh token an earlier vibecarbon left there, and it reaches every repo you can push to: ' +
     'if anyone else may have had root on that server',
 };
 

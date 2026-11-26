@@ -1201,8 +1201,14 @@ async function readOldServerEnv(ip, sshKeyPath, projectName) {
       timeout: OLD_ENV_READ_TIMEOUT_MS,
     });
   } catch (err) {
+    // A changed operator IP fails every later ssh step too: its own message
+    // names the cause, where this one would blame the old server.
+    if (err?.code === 'OPERATOR_IP_CHANGED') throw err;
+    const why = err?.timedOut
+      ? `it did not answer within ${OLD_ENV_READ_TIMEOUT_MS / 1000} s`
+      : errorReason(err);
     throw new Error(
-      `could not read .env on the old server ${ip} (${errorReason(err)}), so scale stopped before building a new server. run scale again once the old server answers.`,
+      `could not read .env on the old server ${ip} (${why}), so scale stopped before building a new server. run scale again once the old server answers.`,
     );
   }
 }

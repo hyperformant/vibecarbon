@@ -36,6 +36,8 @@ const h = vi.hoisted(() => {
     envText: null as string | null,
     envDown: new Set<string>(),
     envReadTimeouts: [] as number[],
+    // What the .env read throws instead of answering (the operator-IP guard).
+    envThrow: null as Error | null,
     // The image the new server's bundle was rendered with.
     setupImage: null as string | null,
   };
@@ -259,6 +261,7 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
         h.events.push(`envRead:${ip}`);
         h.state.envReadTimeouts.push(opts.timeout ?? 0);
+        if (h.state.envThrow) throw h.state.envThrow;
         if (h.state.envDown.has(ip)) {
           const stderr = `ssh: connect to host ${ip} port 22: Connection timed out`;
           throw Object.assign(new Error(`Command failed: ssh root@${ip} cat\n${stderr}`), {
@@ -384,6 +387,7 @@ function reset({ localDocker = true, deltaFails = false } = {}) {
   h.state.envText = null;
   h.state.envDown.clear();
   h.state.envReadTimeouts = [];
+  h.state.envThrow = null;
   h.state.setupImage = null;
   h.ghcrLogins.length = 0;
   h.password.mockClear();
@@ -627,5 +631,31 @@ describe('compose scale: the old server .env is read once, before anything is bu
     expect(h.events.some((e) => e.startsWith('localBuild:'))).toBe(false);
     // Bounded for a read of a running server, not ssh's 120 s default.
     expect(h.state.envReadTimeouts).toEqual([30_000]);
+  });
+
+  it('an old server that takes too long says it timed out', async () => {
+    reset();
+    // A host that accepts the connection and then hangs: ssh prints nothing.
+    h.state.envThrow = Object.assign(new Error('Command failed: ssh root@1.1.1.1 cat'), {
+      status: null,
+      stderr: '',
+      timedOut: true,
+    });
+    await expect(SCALE_EFFECTS.scaleServers(makeCtx())).rejects.toThrow(
+      'could not read .env on the old server 1.1.1.1 (it did not answer within 30 s), so scale stopped before building a new server. run scale again once the old server answers.',
+    );
+  });
+
+  it('a changed operator IP during the read stops scale with its own message', async () => {
+    reset();
+    const changed = Object.assign(new Error('Your public IP changed during this command'), {
+      code: 'OPERATOR_IP_CHANGED',
+    });
+    h.state.envThrow = changed;
+    const ctx = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toBe(changed);
+    expect(
+      (ctx.provider as { createServer: ReturnType<typeof vi.fn> }).createServer,
+    ).not.toHaveBeenCalled();
   });
 });

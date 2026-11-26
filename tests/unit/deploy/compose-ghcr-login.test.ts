@@ -316,7 +316,7 @@ describe('a stale token an earlier vibecarbon left on a compose server', () => {
     [TOKEN]: 'read:packages',
   };
   const REVOKE =
-    'that is likely the gh token an earlier vibecarbon left there, and it reaches every repo you can: ' +
+    'that is likely the gh token an earlier vibecarbon left there, and it reaches every repo you can push to: ' +
     "if anyone else may have had root on that server, revoke GitHub CLI's token at https://github.com/settings/applications";
   const fetcher = async (url: string, init: { headers?: Record<string, string> } = {}) => {
     const authz = init.headers?.Authorization ?? '';
