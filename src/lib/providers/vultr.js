@@ -4,9 +4,9 @@
  * Compose + compose-ha provider (PR 2 of the 2026-08 provider expansion +
  * tier-parity wave 1 — see
  * the vultr-provider-step0-audit plan for the
- * sourced capability audit and live-probe results). The k8s statics throw
- * provider-specific errors (Vultr's k8s tier is unbuilt, not forgotten —
- * 4-mode headroom is recorded in the audit).
+ * sourced capability audit and live-probe results). The k8s user-data
+ * statics render the vultr-*-init.sh boot scripts; getK8sProgram throws a
+ * provider-specific error, as the k8s tier is not sold yet.
  *
  * Vultr-shape notes (vs the Hetzner/DO/Linode templates):
  * - API v2 uses CURSOR pagination (`meta.links.next` → `&cursor=`), not
@@ -303,22 +303,54 @@ export class VultrProvider extends BaseProvider {
   /** Compose-only: no k8s program/image literal to byte-match. @type {string} */
   static K8S_IMAGE = '';
 
-  // ── k8s statics — compose-only, provider-specific throws ────────────────
+  // ── k8s boot user-data (carbon/cloud-init/k3s/vultr-*-init.sh) ──────────
 
-  /** @returns {Promise<never>} */
-  static async getK8sMasterUserData() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s master boot script. No API token: deployK3s hands the
+   * CSI driver's credential to the cluster itself (applyCloudSecrets). No
+   * project tag either: Vultr block volumes take no tags.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   * }} vars - The caller's whole share of the template's var set.
+   * @returns {Promise<string>}
+   */
+  static async getK8sMasterUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('vultr-master-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sWorkerUserData() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s worker boot script.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - master_ip is the master's private (VPC) IP.
+   * @returns {Promise<string>}
+   */
+  static async getK8sWorkerUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('vultr-worker-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sDbUserData() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s database-node boot script: the worker script loaded as
+   * the db role, which adds the dedicated=db label and taint at join time
+   * (AGENT_ROLES in cloud-init.js).
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - Same set as getK8sWorkerUserData.
+   * @returns {Promise<string>}
+   */
+  static async getK8sDbUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('vultr-worker-init.sh', { role: 'db' }), vars);
   }
+
+  // ── k8s program — compose-only, provider-specific throw ─────────────────
 
   /** @returns {Promise<never>} */
   static async getK8sProgram() {

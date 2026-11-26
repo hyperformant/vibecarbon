@@ -27,8 +27,8 @@ import { join } from 'node:path';
 import * as pulumi from '@pulumi/pulumi';
 import * as rpc from '@pulumi/pulumi/runtime/rpc.js';
 import { describe, expect, it } from 'vitest';
-import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { k8sBootScripts, ROLES } from '../../_shared/k3s-boot-scripts.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { unsealMockInput } from '../../_shared/pulumi-secrets.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
@@ -102,9 +102,10 @@ function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: bo
   };
 }
 
-const k8sProviders = Object.entries(PROVIDERS as unknown as Record<string, K8sProvider>).filter(
-  ([, P]) => P.SUPPORTED_TIERS.includes('k8s'),
-);
+/** Whose boot scripts are walked: the k8s providers and those built ahead. */
+const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+/** Whose programs are run: the k8s sellers. A built-ahead provider's program may not exist yet. */
+const k8sPrograms = k8sProviders.filter(([, P]) => P.SUPPORTED_TIERS.includes('k8s'));
 
 describe('the k3s boot scripts take no credential but the k3s join token', () => {
   const scripts = readdirSync(K3S_DIR)
@@ -140,10 +141,10 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
 
 describe('the k8s programs record no provider API token', () => {
   it('there are k8s providers to check', () => {
-    expect(k8sProviders.length).toBeGreaterThan(0);
+    expect(k8sPrograms.length).toBeGreaterThan(0);
   });
 
-  it.each(k8sProviders)('%s', async (_id, Provider) => {
+  it.each(k8sPrograms)('%s', async (_id, Provider) => {
     registered.length = 0;
     const node = Provider.DEFAULT_K8S_NODE_TYPE;
     const program = await Provider.getK8sProgram({
