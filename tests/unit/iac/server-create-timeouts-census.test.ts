@@ -97,6 +97,7 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
     config: { ...k8s, location: 'nyc3' },
   },
   'vultr-compose.js': { builder: 'buildVultrComposeProgram', config: { ...base, location: 'ewr' } },
+  'vultr-k8s.js': { builder: 'buildVultrK8sProgram', config: { ...k8s, location: 'ewr' } },
   'linode-compose.js': {
     builder: 'buildLinodeComposeProgram',
     config: { ...base, location: 'us-east' },
@@ -380,7 +381,10 @@ describe('server-class create timeouts (census)', () => {
   // minutes behind the master's resize (2026-11-08, scale 872 s). The trigger
   // keeps the value state already holds, so it replaces nothing and still
   // counts (proved on real Pulumi, 2026-11-08).
-  const K8S = ['hetzner-k8s.js', 'linode-k8s.js', 'digitalocean-k8s.js'];
+  const K8S = ['hetzner-k8s.js', 'linode-k8s.js', 'digitalocean-k8s.js', 'vultr-k8s.js'];
+  // DigitalOcean and Vultr pin no private address, so on a deploy the db and
+  // workers are rendered from the master's own, and wait for it.
+  const WAIT_ON_MASTER_ADDRESS = ['digitalocean-k8s.js', 'vultr-k8s.js'];
   const PRIOR = { id: '5000001', privateIp: '10.0.1.2' };
 
   /** What a node is built from, as `<resource>.<property>` refs and plain text. */
@@ -418,7 +422,8 @@ describe('server-class create timeouts (census)', () => {
     for (const dep of opts.dependsOn ?? []) out.push(String((dep as { urn: unknown }).urn));
     return out.join('\n');
   }
-  const MASTER_REF = /\bmaster\.(id|urn|ipv4AddressPrivate|ipv4Address|ipAddress)\b/;
+  const MASTER_REF =
+    /\bmaster\.(id|urn|ipv4AddressPrivate|ipv4Address|ipAddress|internalIp|mainIp)\b/;
 
   it.each(K8S)(
     '%s: a scale or failover resizes its db and workers alongside the master',
@@ -438,10 +443,11 @@ describe('server-class create timeouts (census)', () => {
       }
 
       // Non-vacuous: a deploy (no priorMaster) still builds every worker's
-      // trigger from the live master, and DO's db and workers its address.
+      // trigger from the live master, and DO's and Vultr's db and workers its
+      // address.
       const deployed = nodesOf(await runProgram(file));
       for (const node of deployed) {
-        if (node.name === 'db' && !file.startsWith('digitalocean-')) continue;
+        if (node.name === 'db' && !WAIT_ON_MASTER_ADDRESS.includes(file)) continue;
         expect(await builtFrom(node), `${file}: ${node.name}`).toMatch(MASTER_REF);
       }
     },
@@ -455,21 +461,27 @@ describe('server-class create timeouts (census)', () => {
     expect(outputs.masterPrivateIp).toBeDefined();
   });
 
-  it('digitalocean-k8s.js: a first deploy keeps the trigger, its workers wait on the master anyway', async () => {
-    const fresh = {
-      ...PROGRAMS['digitalocean-k8s.js'].config,
-      k3sToken: 'derived-token',
-      k3sTokenReplayed: false,
-    };
-    const resources = await runProgram('digitalocean-k8s.js', fresh);
-    const workers = resources.filter(
-      (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
-    );
-    expect(workers.length).toBeGreaterThan(0);
-    for (const w of workers) {
-      expect(w.opts, `worker "${w.name}"`).toHaveProperty('replacementTrigger');
-    }
-  });
+  it.each(WAIT_ON_MASTER_ADDRESS)(
+    '%s: a first deploy keeps the trigger, its workers wait on the master anyway',
+    async (file) => {
+      const fresh = {
+        ...PROGRAMS[file].config,
+        k3sToken: 'derived-token',
+        k3sTokenReplayed: false,
+      };
+      const resources = await runProgram(file, fresh);
+      const workers = resources.filter(
+        (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
+      );
+      expect(workers.length).toBeGreaterThan(0);
+      for (const w of workers) {
+        expect(w.opts, `worker "${w.name}"`).toHaveProperty('replacementTrigger');
+        // Leaving the trigger out would gain nothing: the worker is built
+        // from the live master's address all the same.
+        expect(await builtFrom(w), `worker "${w.name}"`).toMatch(MASTER_REF);
+      }
+    },
+  );
 
   it.each(Object.keys(PROGRAMS))(
     '%s: every VM-shaped class is a known server class',

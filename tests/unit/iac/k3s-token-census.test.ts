@@ -1,7 +1,7 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
 /**
@@ -12,8 +12,9 @@ import { REPO_ROOT } from '../../_shared/source-files.js';
  * token differs from the one a failed earlier up's servers booted with, and
  * no node made after it could join (ruling R23).
  *
- * Walked from PROVIDERS, so a provider that gains the k8s tier is in it, and
- * checked against the k8s programs on disk, so none is left out.
+ * Walked from PROVIDERS (k8sCensusProviders: the k8s sellers and the programs
+ * built ahead of their tier), so a provider that gains the k8s tier is in it,
+ * and checked against the k8s programs on disk, so none is left out.
  */
 
 const { created } = vi.hoisted(() => ({
@@ -28,6 +29,9 @@ vi.mock('@pulumi/digitalocean', async () =>
 vi.mock('@pulumi/linode', async () =>
   (await import('../../_shared/pulumi-recorder.js')).recorderModule('linode', created),
 );
+vi.mock('@ediri/vultr', async () =>
+  (await import('../../_shared/pulumi-recorder.js')).recorderModule('vultr', created),
+);
 
 // A region each k8s provider sells. A provider that gains the k8s tier needs a
 // row: the census fails until it has one.
@@ -35,6 +39,7 @@ const LOCATION: Record<string, string> = {
   hetzner: 'fsn1',
   digitalocean: 'nyc3',
   linode: 'us-east',
+  vultr: 'ewr',
 };
 
 const config = (location: string) => ({
@@ -55,9 +60,7 @@ const config = (location: string) => ({
   k3sToken: 'SENTINEL-k3s-token',
 });
 
-const k8sProviders = Object.entries(PROVIDERS).filter(([, P]) =>
-  (P.SUPPORTED_TIERS as string[]).includes('k8s'),
-);
+const k8sProviders = k8sCensusProviders();
 
 describe('no k8s program makes its own k3s token (census)', () => {
   it('walks every k8s program on disk', () => {

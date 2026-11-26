@@ -56,6 +56,9 @@ pulumi.runtime.setMocks(
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
           ipAddress: ip,
           address: ip,
+          mainIp: ip,
+          internalIp: `10.10.0.${counter % 250}`,
+          subnet: ip,
         },
       };
     },
@@ -102,10 +105,11 @@ function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: bo
   };
 }
 
-/** Whose boot scripts are walked: the k8s providers and those built ahead. */
+/**
+ * Whose boot scripts are walked and whose programs are run: the k8s providers
+ * and those built ahead of their tier.
+ */
 const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
-/** Whose programs are run: the k8s sellers. A built-ahead provider's program may not exist yet. */
-const k8sPrograms = k8sProviders.filter(([, P]) => P.SUPPORTED_TIERS.includes('k8s'));
 
 describe('the k3s boot scripts take no credential but the k3s join token', () => {
   const scripts = readdirSync(K3S_DIR)
@@ -141,10 +145,10 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
 
 describe('the k8s programs record no provider API token', () => {
   it('there are k8s providers to check', () => {
-    expect(k8sPrograms.length).toBeGreaterThan(0);
+    expect(k8sProviders.length).toBeGreaterThan(0);
   });
 
-  it.each(k8sPrograms)('%s', async (_id, Provider) => {
+  it.each(k8sProviders)('%s', async (_id, Provider) => {
     registered.length = 0;
     const node = Provider.DEFAULT_K8S_NODE_TYPE;
     const program = await Provider.getK8sProgram({

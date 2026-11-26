@@ -19,6 +19,7 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { K8S_BUILT_AHEAD } from '../../_shared/k8s-built-ahead.js';
 import { REPO_ROOT, readRepoFile } from '../../_shared/source-files.js';
 
 const PROGRAMS_DIR = 'src/lib/iac/programs';
@@ -34,7 +35,9 @@ const ROWS = Object.entries(PROVIDERS).flatMap(([id, Provider]) =>
     name: Provider.NAME,
     kind,
     method,
-    built: Provider.SUPPORTED_TIERS.includes(tier),
+    // A k8s program built ahead of its tier is dispatched already.
+    built:
+      Provider.SUPPORTED_TIERS.includes(tier) || (kind === 'k8s' && K8S_BUILT_AHEAD.includes(id)),
     program: `${PROGRAMS_DIR}/${id}-${kind}.js`,
   })),
 );

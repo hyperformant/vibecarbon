@@ -5,8 +5,9 @@
  * tier-parity wave 1 — see
  * the vultr-provider-step0-audit plan for the
  * sourced capability audit and live-probe results). The k8s user-data
- * statics render the vultr-*-init.sh boot scripts; getK8sProgram throws a
- * provider-specific error, as the k8s tier is not sold yet.
+ * statics render the vultr-*-init.sh boot scripts, and getK8sProgram builds
+ * iac/programs/vultr-k8s.js, ahead of the k8s tier being sold
+ * (SUPPORTED_TIERS is still compose-only).
  *
  * Vultr-shape notes (vs the Hetzner/DO/Linode templates):
  * - API v2 uses CURSOR pagination (`meta.links.next` → `&cursor=`), not
@@ -297,11 +298,20 @@ export class VultrProvider extends BaseProvider {
    */
   static K8S_STORAGE_CLASS = 'vultr-block-storage';
 
-  /** Compose-only: no k8s program exists to pin a VPC CIDR against. @type {string} */
+  /**
+   * No fixed range: vultr-k8s.js derives a /24 per cluster
+   * (vpcCidrForCluster) and exports it as `vpcCidr`, the value deployK3s
+   * reads. @type {string}
+   */
   static DEFAULT_VPC_CIDR = '';
 
-  /** Compose-only: no k8s program/image literal to byte-match. @type {string} */
-  static K8S_IMAGE = '';
+  /**
+   * The k8s node image: os_id 2760, "Ubuntu 26.04 LTS x64" (public
+   * GET /v2/os), the compose image. A string for interface parity;
+   * vultr-k8s.js and the autoscaler's createServer convert with Number().
+   * @type {string}
+   */
+  static K8S_IMAGE = '2760';
 
   // ── k8s boot user-data (carbon/cloud-init/k3s/vultr-*-init.sh) ──────────
 
@@ -350,11 +360,17 @@ export class VultrProvider extends BaseProvider {
     return renderScript(loadCloudInit('vultr-worker-init.sh', { role: 'db' }), vars);
   }
 
-  // ── k8s program — compose-only, provider-specific throw ─────────────────
+  // ── k8s program ─────────────────────────────────────────────────────────
 
-  /** @returns {Promise<never>} */
-  static async getK8sProgram() {
-    throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Lazily build the Pulumi Automation-API program for a single Vultr k3s
+   * cluster (dynamic import, never top-level).
+   * @param {import('../iac/programs/vultr-k8s.js').K8sStackConfig} config
+   * @returns {Promise<() => Promise<{masterIp: string, masterId: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   */
+  static async getK8sProgram(config) {
+    const { buildVultrK8sProgram } = await import('../iac/programs/vultr-k8s.js');
+    return buildVultrK8sProgram(config);
   }
 
   // ── Compose-tier replacement-server identity ────────────────────────────

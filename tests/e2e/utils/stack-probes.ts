@@ -18,6 +18,7 @@
  *   read from outputs/inputs (an import id "<vpc>,<subnet>" is accepted too).
  * - vultr FirewallRule: the numeric rule id, the group from inputs/outputs
  *   (or an import id "<group>,<rule>"); a gone group means a gone rule.
+ *   Vpc and ReservedIp: the API uuid (vpc.js, reservedIp.js import notes).
  * - scaleway instance resources: "<zone>/<uuid>"; iam SshKey: a bare uuid.
  *
  * The token comes from the caller; this module never reads an env file.
@@ -131,6 +132,8 @@ const PROBES: Record<string, Record<string, TypeProbe>> = {
     [typeOf(vultr.FirewallGroup)]: plain(VULTR, 'firewalls'),
     [typeOf(vultr.SSHKey)]: plain(VULTR, 'ssh-keys'),
     [typeOf(vultr.FirewallRule)]: vultrRule,
+    [typeOf(vultr.Vpc)]: plain(VULTR, 'vpcs'),
+    [typeOf(vultr.ReservedIp)]: plain(VULTR, 'reserved-ips'),
   },
   scaleway: {
     [typeOf(scaleway.instance.Server)]: zoned('servers'),

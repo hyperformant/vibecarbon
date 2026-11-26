@@ -123,7 +123,8 @@ export const EXPECTED: Record<
       networkEnvVar: '',
     },
     k8sStorageClass: 'vultr-block-storage',
-    k8sImage: '',
+    // Ubuntu 26.04 LTS x64, the compose image (vultr-k8s.js osId).
+    k8sImage: '2760',
   },
   scaleway: {
     name: 'Scaleway',
