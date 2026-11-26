@@ -21,6 +21,49 @@ describe('carbonAutoscalerSecretYaml', () => {
     );
   });
 
+  it("writes each of the provider's autoscaler env entries as its own key, one line each, after config.json", () => {
+    const configJson = '{"nodeGroups":{}}';
+    const yaml = carbonAutoscalerSecretYaml({
+      token: 'tok',
+      configJson,
+      env: { SCALEWAY_DEFAULT_PROJECT_ID: '11111111-2222-3333-4444-555555555555', OTHER_ID: 'a"b' },
+    });
+    expect(yaml).toBe(
+      [
+        'apiVersion: v1',
+        'kind: Secret',
+        'metadata:',
+        '  name: carbon-autoscaler-config',
+        '  namespace: kube-system',
+        'type: Opaque',
+        'stringData:',
+        '  token: "tok"',
+        `  config.json: ${JSON.stringify(configJson)}`,
+        '  SCALEWAY_DEFAULT_PROJECT_ID: "11111111-2222-3333-4444-555555555555"',
+        '  OTHER_ID: "a\\"b"',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('with no env, or an empty one, is byte-identical to the two-key Secret', () => {
+    const args = { token: 'tok', configJson: '{"a":1}' };
+    const twoKeys = [
+      'apiVersion: v1',
+      'kind: Secret',
+      'metadata:',
+      '  name: carbon-autoscaler-config',
+      '  namespace: kube-system',
+      'type: Opaque',
+      'stringData:',
+      '  token: "tok"',
+      `  config.json: ${JSON.stringify('{"a":1}')}`,
+      '',
+    ].join('\n');
+    expect(carbonAutoscalerSecretYaml(args)).toBe(twoKeys);
+    expect(carbonAutoscalerSecretYaml({ ...args, env: {} })).toBe(twoKeys);
+  });
+
   it('both writers build it here: deploy and the scale re-patch', async () => {
     for (const f of ['src/lib/deploy/k8s/k3s.js', 'src/scale.js']) {
       const src = readRepoFile(`${f}`);

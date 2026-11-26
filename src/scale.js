@@ -2793,9 +2793,13 @@ async function waitForApiServer(kubeconfigPath, label) {
  * master, and the reads below would otherwise fail while it is down. A failure
  * after that is a warning, not an abort: the servers are already resized and
  * the scale still has to record them. The warning names the deploy that writes
- * the settings again (the k3s-apply gate keys on them).
+ * the settings again (the k3s-apply gate keys on them). `Provider` is the
+ * cluster's provider class: the Secret is written with its
+ * `k8sAutoscalerEnv()` keys, as deploy writes it, since a client-side apply
+ * without one would delete it.
  */
 async function repatchClusterAutoscaler({
+  Provider,
   clusterEnv,
   label,
   newMin,
@@ -2853,7 +2857,11 @@ async function repatchClusterAutoscaler({
     const mutatedConfigJson = applyCaBoundsToConfig(configJson, { newMin, newMax, newType });
     // The Secret applyK3sManifests writes, piped via stdin so neither the
     // token nor the JSON reaches argv.
-    const caSecretYaml = carbonAutoscalerSecretYaml({ token, configJson: mutatedConfigJson });
+    const caSecretYaml = carbonAutoscalerSecretYaml({
+      token,
+      configJson: mutatedConfigJson,
+      env: Provider.k8sAutoscalerEnv(),
+    });
     runCommand(kubectlArgv(kubeconfigPath, ['apply', '-f', '-']), {
       silent: true,
       input: caSecretYaml,
@@ -3083,6 +3091,7 @@ async function scaleApplyK8sChanges(ctx) {
   for (const repatch of caRepatches) {
     await repatchClusterAutoscaler({
       ...repatch,
+      Provider,
       environment,
       workerTypeChanged: changes.includes('workerType'),
     });

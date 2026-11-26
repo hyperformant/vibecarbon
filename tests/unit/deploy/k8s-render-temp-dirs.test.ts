@@ -96,6 +96,7 @@ function args() {
       PROVIDER_ID_PREFIX: 'hcloud://',
       K8S_IMAGE: 'ubuntu-26.04',
       K8S_STORAGE_CLASS: 'hcloud-volumes',
+      k8sAutoscalerEnv: () => ({}),
       async getK8sWorkerUserData() {
         return '#cloud-config\n';
       },

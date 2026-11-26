@@ -579,6 +579,26 @@ export class BaseProvider {
   }
 
   /**
+   * The operator variables the in-cluster provider reads besides its API
+   * token, with their values: what the carbon-autoscaler pod needs in its env
+   * for createServer to work. Each entry goes into the
+   * kube-system/carbon-autoscaler-config Secret under its own name, which
+   * deploy and scale's bounds re-patch both write (carbonAutoscalerSecretYaml),
+   * and carbon/k8s/base/cluster-autoscaler/deployment.yaml maps it into the
+   * carbon-autoscaler container as an optional secretKeyRef of the same name
+   * (tests/unit/autoscaler/autoscaler-env-census.test.ts holds the two to
+   * each other). Only what the autoscaler reaches: createServer,
+   * deleteServer, listServers, listNetworks and findFirewallByName. None
+   * here: every other provider's API takes the token alone. An override
+   * throws, naming the variable, when one is unset: applyK3sManifests reads
+   * it before anything is applied, so the deploy stops there.
+   * @returns {Record<string, string>}
+   */
+  static k8sAutoscalerEnv() {
+    return {};
+  }
+
+  /**
    * Cloud Secrets, and keys of them, that an earlier vibecarbon wrote and
    * nothing reads any more. A deploy removes them once its apply has
    * handed the token over, and keeps one a Deployment, StatefulSet,

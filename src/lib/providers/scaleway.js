@@ -42,8 +42,9 @@
  *   is SBS and a naive delete leaks a billed volume every time. Flexible
  *   IPv4s likewise survive server deletion and keep billing. deleteServer
  *   is therefore a full teardown chain (terminate → wait gone → delete
- *   detached SBS volumes → release surviving flexible IPs), not a bare
- *   DELETE — billing-leak safety is first-class, not best-effort.
+ *   the detached SBS root volume → release surviving flexible IPs), not a
+ *   bare DELETE — billing-leak safety is first-class, not best-effort. Any
+ *   other attached volume is a CSI volume, kept for its PVC.
  * - STALE-DOCS HAZARD: Scaleway's prose docs measurably lag its live APIs
  *   (audit design flag 6). Every literal in this class was pinned from the
  *   live public catalog/availability APIs or the Go SDK source, never from
@@ -636,6 +637,22 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
+   * The project id: createServer refuses without it (servers and flexible
+   * IPs are created in a project), and listNetworks lists only that
+   * project's Private Networks with it (_walkVpcApi), so the worker joins
+   * this cluster's network and never another project's of the same name. It
+   * is the only operator variable the autoscaler reaches: SSH keys are
+   * created and deleted from the CLI, and the Instance API takes the secret
+   * key alone (X-Auth-Token). Read with
+   * scalewayOperatorIds, as buildIacEnv reads it, so an unset one throws
+   * that helper's message. See BaseProvider.k8sAutoscalerEnv.
+   * @returns {{SCALEWAY_DEFAULT_PROJECT_ID: string}}
+   */
+  static k8sAutoscalerEnv() {
+    return { SCALEWAY_DEFAULT_PROJECT_ID: scalewayOperatorIds().projectId };
+  }
+
+  /**
    * What the deploy.yml of an earlier vibecarbon's GitOps layer wrote into
    * every cluster, whatever the provider (`configure cicd`): kube-system/hcloud,
    * from the repo's HETZNER_API_TOKEN Actions secret. Nothing on a Scaleway
@@ -1140,7 +1157,8 @@ export class ScalewayProvider extends BaseProvider {
    * Create a new Scaleway Instance. The chain is genuinely multi-step on
    * Scaleway (create leaves the server STOPPED, user data is a separate
    * sub-resource, and boot is an explicit action):
-   *   POST /servers → PATCH user_data/cloud-init → POST action poweron.
+   *   POST /servers → PATCH user_data/cloud-init → POST /ips → POST
+   *   private_nics (one per network) → POST action poweron.
    *
    * No ssh-key field exists — keys are Project-level and auto-propagate at
    * boot (class header; the dedicated-Project doctrine makes that the
@@ -1154,6 +1172,13 @@ export class ScalewayProvider extends BaseProvider {
    * COMPOSE_ROOT_VOLUME_GB — BASIC3 admits no local SSD, and leaving the
    * size to the image default under-provisions the compose stack.
    *
+   * Each `networks` entry is a Private Network the server joins before it
+   * boots: an autoscaled k8s worker's boot script waits for that NIC (MAC
+   * prefix 02:00:00) and gives up without it. An attach Scaleway refuses
+   * leaves nothing behind: the server is deleted, its flexible IP with it,
+   * as when the IP cannot be reserved. The body sends no hostname; Scaleway
+   * takes the server's name.
+   *
    * @param {object} config
    * @param {string} config.name
    * @param {string} config.region - ZONE (fr-par-1 …)
@@ -1165,14 +1190,14 @@ export class ScalewayProvider extends BaseProvider {
    * @param {object} [config.labels]
    * @param {string} [config.userData] - RAW cloud-init YAML (plain text on
    *   the wire; ASCII-guarded)
-   * @param {(string|number)[]} [config.networks] - interface parity;
-   *   compose instances join no private network (documented no-op)
+   * @param {(string|number)[]} [config.networks] - Private Network ids to
+   *   attach before power-on (a k8s worker's; a compose server has none)
    * @param {(string|number)[]} [config.firewalls] - at most ONE security
    *   group id (attached at create — no unfirewalled window)
    * @returns {Promise<{id: string, server: object, reused?: boolean}>}
    */
   async createServer(config) {
-    const { name, region, serverType, image, labels, userData, firewalls } = config;
+    const { name, region, serverType, image, labels, userData, networks, firewalls } = config;
 
     const [existing] = await this.findServersByName(name);
     if (existing) {
@@ -1263,6 +1288,24 @@ export class ScalewayProvider extends BaseProvider {
       throw new Error(`Scaleway flexible IP failed: ${error.message || 'Unknown error'}`);
     }
 
+    // Before first boot, so the NIC is there when the boot script looks for
+    // it. A server left stopped and labelled would count as running at the
+    // autoscaler's next refresh, so a failed attach removes it.
+    for (const networkId of Array.isArray(networks) ? networks : []) {
+      const nicRes = await this.apiRequest(
+        `/instance/v1/zones/${region}/servers/${server.id}/private_nics`,
+        { method: 'POST', body: JSON.stringify({ private_network_id: String(networkId) }) },
+      );
+      if (!nicRes.ok) {
+        const error = await nicRes.json().catch(() => ({}));
+        await this.deleteServer(server.id).catch(() => {});
+        throw new Error(
+          `Scaleway Private Network attach failed for ${networkId} (HTTP ${nicRes.status}): ` +
+            `${error.message || 'Unknown error'}`,
+        );
+      }
+    }
+
     // Create leaves the server stopped — boot it.
     const bootRes = await this.apiRequest(
       `/instance/v1/zones/${region}/servers/${server.id}/action`,
@@ -1282,9 +1325,14 @@ export class ScalewayProvider extends BaseProvider {
    *   2. `terminate` action (falls back to plain DELETE when the state
    *      machine refuses, e.g. a never-booted stopped server).
    *   3. Poll until the server record is gone.
-   *   4. Delete every captured `sbs_volume` via the Block Storage API —
-   *      terminate only DETACHES SBS volumes (SDK verbatim), and our types
-   *      are SBS-only, so skipping this leaks a billed volume EVERY time.
+   *   4. Delete the root volume (`volumes['0']`, when it is an
+   *      `sbs_volume`) via the Block Storage API — terminate only DETACHES
+   *      SBS volumes (SDK verbatim), and our types are SBS-only, so skipping
+   *      this leaks a billed volume EVERY time. Only the root: any other
+   *      attached volume is a CSI volume (`pvc-*`) whose data outlives a
+   *      worker the autoscaler removes, as the Pulumi provider's own server
+   *      delete deletes only the root volume. Destroy reaps CSI volumes
+   *      through the PV capture.
    *   5. Release any captured flexible IP that survived (GET 200 after the
    *      server is gone ⇒ flexible, €0.005/hr forever; dynamic IPs 404
    *      here because Scaleway auto-released them).
@@ -1324,9 +1372,8 @@ export class ScalewayProvider extends BaseProvider {
     const getRes = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (getRes.ok) {
       const { server } = await getRes.json();
-      sbsVolumeIds = Object.values(server.volumes ?? {})
-        .filter((v) => v?.volume_type === 'sbs_volume' && v?.id)
-        .map((v) => v.id);
+      const root = server.volumes?.['0'];
+      sbsVolumeIds = root?.volume_type === 'sbs_volume' && root?.id ? [root.id] : [];
       publicIpIds = (server.public_ips ?? []).map((ip) => ip?.id).filter(Boolean);
     } else if (getRes.status === 404) {
       return waitUntilGone ? false : undefined;
@@ -1373,9 +1420,9 @@ export class ScalewayProvider extends BaseProvider {
     if (terminated) serversStillTerminating.delete(String(serverId));
     else serversStillTerminating.add(String(serverId));
 
-    // 4. Delete the detached SBS volumes (Block Storage API — a different
-    // product than the Instance API's legacy volumes endpoint). Brief
-    // retry: the detach can trail the server 404 by a few seconds.
+    // 4. Delete the detached SBS root volume (Block Storage API — a
+    // different product than the Instance API's legacy volumes endpoint).
+    // Brief retry: the detach can trail the server 404 by a few seconds.
     for (const volumeId of sbsVolumeIds) {
       let lastStatus;
       await pollUntil(

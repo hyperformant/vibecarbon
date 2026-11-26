@@ -686,6 +686,59 @@ describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volu
   });
 });
 
+describe('deleteServer keeps every volume but the root', () => {
+  // An autoscaler scale-down deletes a worker that can still hold a PVC's
+  // volume (scaleway-csi names them pvc-<uuid>): the server's own delete
+  // removes the root volume only, as the Pulumi provider's does. Destroy reaps
+  // CSI volumes on its own, through the PV capture.
+  it('deleteServer deletes the root volume and never a pvc- volume still attached', async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    let serverGone = false;
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method });
+      if (/\/instance\/v1\/zones\/fr-par-1\/servers\/srv-1$/.test(url) && method === 'GET') {
+        return serverGone
+          ? jsonResp({}, 404)
+          : jsonResp({
+              server: {
+                id: 'srv-1',
+                zone: 'fr-par-1',
+                volumes: {
+                  '0': { id: 'root', volume_type: 'sbs_volume' },
+                  '1': {
+                    id: 'pvc-vol',
+                    volume_type: 'sbs_volume',
+                    name: 'pvc-4b1f0c2e-9d1a-4c55-8a3e-2f0d6c7b9e10',
+                  },
+                },
+                public_ips: [],
+              },
+            });
+      }
+      if (/\/servers\/srv-1$/.test(url) && method === 'GET') return jsonResp({}, 404);
+      if (url.endsWith('/servers/srv-1/action') && method === 'POST') {
+        serverGone = true;
+        return jsonResp({ task: { id: 't1' } });
+      }
+      if (url.includes('/block/v1/') && method === 'DELETE') return jsonResp({}, 204);
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+
+    await new ScalewayProvider('tok').deleteServer('srv-1', { waitUntilGone: true });
+
+    const blockDeletes = calls.filter((c) => c.method === 'DELETE' && c.url.includes('/block/v1/'));
+    expect(blockDeletes.map((c) => new URL(c.url).pathname)).toEqual([
+      '/block/v1/zones/fr-par-1/volumes/root',
+    ]);
+  });
+});
+
 // A zone that answers 403 is one the token may not read, so a server no zone
 // showed while one refused may be in it: never "already gone". The delete
 // throws the refusal, as a refused DELETE does on the other providers

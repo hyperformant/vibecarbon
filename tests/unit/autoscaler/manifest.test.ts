@@ -24,7 +24,7 @@ const RBAC_PATH = join(DIR, 'rbac.yaml');
 interface K8sEnvVar {
   name: string;
   value?: string;
-  valueFrom?: { secretKeyRef?: { name: string; key: string } };
+  valueFrom?: { secretKeyRef?: { name: string; key: string; optional?: boolean } };
 }
 
 interface K8sContainer {
@@ -197,6 +197,27 @@ describe('cluster-autoscaler deployment.yaml — carbon-autoscaler sidecar', () 
       key: 'token',
     });
     expect(byName.CARBON_AUTOSCALER_CONFIG?.value).toBe('/config-ca/config.json');
+  });
+
+  it("env maps Scaleway's project id from the same Secret, optional so every other provider's pod starts without it", () => {
+    const sidecar = containerNamed('carbon-autoscaler');
+    expect(sidecar.env).toEqual([
+      {
+        name: 'PROVIDER_API_TOKEN',
+        valueFrom: { secretKeyRef: { name: 'carbon-autoscaler-config', key: 'token' } },
+      },
+      {
+        name: 'SCALEWAY_DEFAULT_PROJECT_ID',
+        valueFrom: {
+          secretKeyRef: {
+            name: 'carbon-autoscaler-config',
+            key: 'SCALEWAY_DEFAULT_PROJECT_ID',
+            optional: true,
+          },
+        },
+      },
+      { name: 'CARBON_AUTOSCALER_CONFIG', value: '/config-ca/config.json' },
+    ]);
   });
 
   it('mounts autoscaler-config at /config-ca readOnly', () => {

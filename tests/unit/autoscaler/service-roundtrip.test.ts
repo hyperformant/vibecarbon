@@ -78,7 +78,7 @@ function createProvider(overrides: Record<string, unknown> = {}) {
     createServer: vi.fn().mockResolvedValue({ id: 'srv-default' }),
     deleteServer: vi.fn().mockResolvedValue(undefined),
     listServers: vi.fn().mockResolvedValue([]),
-    findFirewallByName: vi.fn().mockResolvedValue(null),
+    findFirewallByName: vi.fn().mockResolvedValue({ id: 777 }),
     listNetworks: vi.fn().mockResolvedValue([{ id: 999, name: 'acme-prod-network' }]),
     getServerType: vi
       .fn()

@@ -165,13 +165,14 @@ Every consumer is found with `grep -rn --exclude='.env*' "K8S_BUILT_AHEAD\|k8sCe
 
 ## Review Focus
 
-Five failure modes most likely to reach a real user that no existing test exercises; each test lands in its task.
+Six failure modes most likely to reach a real user that no existing test exercises; each test lands in its task.
 
 1. **No autoscaled worker is ever created.** The pod has no `SCALEWAY_DEFAULT_PROJECT_ID`, so every in-cluster `createServer` refuses before its first POST, and the cluster never grows. This one is certain, not conditional, and Task 5's other tests stub the env, so they would pass anyway. Task 5: `an autoscaled Scaleway create runs with only the pod's env`.
 2. **An autoscaler scale-down deletes a database or app volume.** `deleteServer` deletes every SBS volume on the server, so a PVC volume still attached to a removed worker is destroyed. Task 5: `deleteServer deletes the root volume and never a pvc- volume still attached`.
 3. **A short rules listing wipes 80 and 443.** An incomplete rules walk makes `applyOperatorCidrs` or the replication write PUT a partial list, and the site goes dark. Task 2: `findFirewallByName refuses an incomplete group or rules walk, and nothing is written`.
 4. **Two environments reach each other's private ports.** A shared routed VPC with no PN filter exposes kubelet, flannel and Postgres across environments. Task 2: `every cluster has its own VPC and its Private Network sits in it`, including both sides of a k8s-ha pair.
 5. **A reboot renames the private NIC** and flannel, pinned to the old name, cuts the node off its pods. Task 1: `vc-flannel-iface finds the NIC by MAC after a rename`, and no `--flannel-iface` on the command line.
+6. **An autoscaled node is created without the cluster's firewall (RC12, every provider).** `src/autoscaler/groups.js` `_lookupFirewallId` answered a not-found or a failed lookup with null, `_resolveFirewallId` cached that null for the cycle, and every later create went out with no `firewalls`: the project's default security group on Scaleway, no firewall at all on Hetzner. It now throws, naming the firewall, a rejected lookup is not cached, and the create records `errorInfo` (`firewall-not-found`), as a network failure does. Every provider's autoscaler config carries `firewallName: ${clusterName}-firewall` (`renderCarbonAutoscalerConfig`, required by `src/autoscaler/config.js`), and every k8s program declares that firewall unconditionally, so a healthy cluster never refuses. Task 5: `tests/unit/autoscaler/groups.test.ts`, `no create ever reaches createServer without a firewall id`, with the refusal cases (null, no id, a rejected lookup) and `a failed lookup is not remembered`.
 
 The foreign-IP case left this list, because it needs a foreign IP at the exact address. Its tests stay in Task 4.
 
@@ -439,6 +440,7 @@ then Vultr's 3-try FATAL loop with `csi_fetch_mirrored file:///root/scaleway-csi
 - Modify: `src/lib/images.js` (`CARBON_AUTOSCALER_TAG = '0.1.7'`, history line `0.1.7: Scaleway createServer attaches the cluster's Private Network before power-on and cleans up after a failed attach, and deleteServer keeps attached PVC volumes. Its pod now gets SCALEWAY_DEFAULT_PROJECT_ID from the carbon-autoscaler-config Secret.`)
 - Modify: `tests/unit/autoscaler/image-ref.test.ts`, `tests/unit/autoscaler/manifest.test.ts` (`:189`, the sidecar env gains the entry), `tests/unit/deploy/autoscaler-secret.test.ts`, `tests/unit/deploy/host-reporter-census.test.ts`, `tests/unit/providers/scaleway.test.ts` (the billing-leak cases keep passing), `tests/unit/lib/operator-env-census.test.ts` if it flags the new container env name (its `PROVIDER_API_TOKEN` note at `:162-165` is the model)
 - Create: `tests/unit/providers/scaleway-create-server.test.ts`, `tests/unit/autoscaler/autoscaler-env-census.test.ts`
+- Modify (RC12, controller ruling): `src/autoscaler/groups.js` `_lookupFirewallId` throws on not-found and on a lookup error, naming the firewall; `_resolveFirewallId` drops a rejected lookup from `_firewallIdPromise`; `_createInBackground` records `errorInfo` `firewall-not-found` and never calls `createServer` without `firewalls`. Tests: `tests/unit/autoscaler/groups.test.ts` (Review Focus 6), with the stubs in `service-roundtrip.test.ts` and `healthcheck.test.ts` given a firewall.
 
 **Interfaces:**
 - Produces: `k8sAutoscalerEnv()` on every provider class; `carbonAutoscalerSecretYaml({ token, configJson, env })`.

@@ -84,7 +84,7 @@ async function withServer(testFn: (ctx: { bind: string; client: any }) => Promis
 
   const provider = {
     listServers: vi.fn().mockResolvedValue([]),
-    findFirewallByName: vi.fn().mockResolvedValue(null),
+    findFirewallByName: vi.fn().mockResolvedValue({ id: 777 }),
     listNetworks: vi.fn().mockResolvedValue([{ id: 999, name: 'acme-prod-network' }]),
     getServerType: vi
       .fn()

@@ -97,7 +97,10 @@ const { waitForKubeletsRenewing } = await import('../../../src/lib/deploy/k8s/ku
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
 const { runCommand } = await import('../../../src/lib/command.js');
 
-const Provider = { K8S_ASSETS: { csiNodeDaemonSet: 'daemonset/hcloud-csi-node' } };
+const Provider = {
+  K8S_ASSETS: { csiNodeDaemonSet: 'daemonset/hcloud-csi-node' },
+  k8sAutoscalerEnv: () => ({}),
+};
 
 const baseApplyCtx = {
   environment: 'prod',
@@ -293,6 +296,32 @@ describe('scaleApplyK8sChanges — role-aware HA stack/region resolution', () =>
     // jsonpath={.data.token}` call returns — round-tripped, not re-derived
     // from ctx.apiToken ('tok' in baseApplyCtx).
     expect(token).toBe('tok-secret');
+  });
+
+  it("re-writes the provider's autoscaler env keys: a client-side apply without one would delete it", async () => {
+    const envConfig = { minWorkers: 1, maxWorkers: 2 };
+    const k8sAutoscalerEnv = vi.fn(() => ({ SCALEWAY_DEFAULT_PROJECT_ID: 'proj-uuid' }));
+    await SCALE_EFFECTS.scaleApplyK8sChanges({
+      ...baseApplyCtx,
+      Provider: { ...Provider, k8sAutoscalerEnv },
+      envConfig,
+      region: 'fr-par-1',
+      secondaryRegion: undefined,
+      isHA: false,
+    });
+
+    expect(k8sAutoscalerEnv).toHaveBeenCalled();
+    const applyCall = vi
+      .mocked(runCommand)
+      .mock.calls.find(
+        ([args, options]) =>
+          Array.isArray(args) &&
+          args.includes('apply') &&
+          typeof (options as { input?: string } | undefined)?.input === 'string',
+      );
+    if (!applyCall) throw new Error('expected an `apply -f -` call with input');
+    const yaml = (applyCall[1] as { input: string }).input;
+    expect(yaml.split('\n')).toContain('  SCALEWAY_DEFAULT_PROJECT_ID: "proj-uuid"');
   });
 });
 

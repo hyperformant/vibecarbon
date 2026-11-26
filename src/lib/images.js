@@ -205,9 +205,14 @@ export const CARBON_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/carbon-autoscaler';
 //   0.1.5 — Linode createServer joins a VPC with a legacy config interface and
 //           the cluster firewall; listNetworks items carry `name`.
 //   0.1.6 — Vultr createServer joins the cluster VPC (attach_vpc) and sets the hostname.
-export const CARBON_AUTOSCALER_TAG = '0.1.6';
+//   0.1.7: Scaleway createServer attaches the cluster's Private Network before power-on
+//          and cleans up after a failed attach, and deleteServer keeps attached PVC
+//          volumes. Its pod now gets SCALEWAY_DEFAULT_PROJECT_ID from the
+//          carbon-autoscaler-config Secret. On every provider, a create whose
+//          firewall lookup fails is refused, never made without the firewall.
+export const CARBON_AUTOSCALER_TAG = '0.1.7';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.6" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.7" */
 export function carbonAutoscalerImageRef() {
   return `${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`;
 }
