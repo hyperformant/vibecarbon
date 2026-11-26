@@ -1,5 +1,6 @@
 /**
- * Post-destroy orphan sweep for the Scaleway scenario (s1).
+ * Post-destroy orphan sweep for the Scaleway scenarios (s1 compose, s3 k8s,
+ * s4 k8s-ha).
  *
  * Counterpart to `sweepOrphanedVultrResources` (sweep-vultr.ts) — see that
  * module's header, and sweep-digitalocean.ts's, for the 2026-08-07
@@ -173,7 +174,7 @@ export async function sweepOrphanedScalewayResources(
   deps: ScalewaySweepDeps,
 ): Promise<{ counts: SweepBreakdown; enumFailed: boolean }> {
   // The guard, the opening line, the counts and the incomplete flag
-  // (sweep-core.ts). Placement groups are never provisioned by our Scaleway paths; `firewalls` counts security groups, `floatingIps` flexible IPs (real here: €0.005/hr survivors) and `networks` Private Networks.
+  // (sweep-core.ts). Placement groups are never provisioned by our Scaleway paths; `firewalls` counts security groups, `floatingIps` flexible IPs (real here: €0.005/hr survivors) and `networks` Private Networks and VPCs.
   const sweep = createSweep(tag, 'Scaleway', projectName, { loadBalancers: 0 });
   const { markIncomplete } = sweep;
 
@@ -327,9 +328,8 @@ export async function sweepOrphanedScalewayResources(
       (await provider.releaseFlexibleIP(ip.id, ip.zone)) || `Flexible IP ${ip.id} release failed`,
   });
 
-  // 6. Load balancers + Private Networks — never provisioned by the
-  // compose tier, enumerated so a future tier's leak can't hide behind a
-  // stub (same reasoning as the sibling sweeps).
+  // 6. Load balancers, Private Networks and VPCs. The compose tier makes
+  // none; the k8s tiers make a Private Network and its VPC per cluster.
   // Listed by this sweep's own walk, not provider.listLoadBalancers(): that
   // method answers [] when the API call fails (its contract for destroy), so
   // an unreadable listing read as "no load balancers" and the class went
@@ -384,6 +384,33 @@ export async function sweepOrphanedScalewayResources(
         return `Private Network ${net.id} delete failed`;
       },
       thrown: (net) => `Private Network ${net.id} delete failed`,
+    });
+  }
+
+  // VPCs, after the Private Networks they hold (a VPC holding one cannot
+  // go): scaleway-k8s.js makes one per cluster, named like its Private
+  // Network, and they count as networks too. Deleted in the region they are
+  // listed in. A project's default VPC (`is_default`, named `default`) is
+  // never deleted, whatever it is named.
+  for (const region of SWEEP_S3_REGIONS) {
+    await sweepClass(sweep, {
+      listing: `VPC list (${region})`,
+      cleanupFailed: `VPC cleanup failed (${region})`,
+      count: 'networks',
+      list: () =>
+        walkPageSize<{ id: string; name?: string; is_default?: boolean }>(
+          `/vpc/v2/regions/${region}/vpcs`,
+          'vpcs',
+        ),
+      owned: (vpc) => vpc.is_default !== true && (vpc.name ?? '').startsWith(projectName),
+      announce: (vpc) => `Deleting orphaned VPC ${vpc.id} (${vpc.name ?? ''}) in ${region}`,
+      remove: async (vpc) => {
+        const res = await fetchImpl(`${API_BASE}/vpc/v2/regions/${region}/vpcs/${vpc.id}`, {
+          method: 'DELETE',
+        });
+        return res.ok || `VPC ${vpc.id} delete failed (HTTP ${res.status})`;
+      },
+      thrown: (vpc) => `VPC ${vpc.id} delete failed`,
     });
   }
 

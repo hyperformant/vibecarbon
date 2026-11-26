@@ -686,6 +686,92 @@ describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volu
   });
 });
 
+// A zone that answers 403 is one the token may not read, so a server no zone
+// showed while one refused may be in it: never "already gone". The delete
+// throws the refusal, as a refused DELETE does on the other providers
+// (deleteServerAt), and destroy reports the server instead of moving on.
+describe('a server lookup a zone refused is never read as gone', () => {
+  const ZONES = Object.keys(ScalewayProvider.REGIONS);
+  const answer = (byZone: Record<string, number>) =>
+    fetchWithRetryMock.mockImplementation(async (url: string) => {
+      const zone = ZONES.find((z) => url.endsWith(`/instance/v1/zones/${z}/servers/srv-x`));
+      return jsonResp({ message: 'nope' }, zone ? (byZone[zone] ?? 404) : 404);
+    });
+  const sent = (method: string) =>
+    fetchWithRetryMock.mock.calls.filter(
+      (c: unknown[]) => ((c[1] as RequestInit | undefined)?.method ?? 'GET') === method,
+    );
+  const everyZone403 = () => Object.fromEntries(ZONES.map((z) => [z, 403]));
+
+  it.each([
+    ['waitUntilGone', { waitUntilGone: true }],
+    ['the default mode', {}],
+  ])(
+    'deleteServer (%s): every zone refusing throws the refusal, and terminates nothing',
+    async (_, options) => {
+      answer(everyZone403());
+      const err = await new ScalewayProvider('tok')
+        .deleteServer('srv-x', options)
+        .catch((e: Error) => e);
+      expect(err).toMatchObject({
+        status: 403,
+        message: 'Failed to delete server: every zone refused the read of server srv-x (HTTP 403)',
+      });
+      expect(sent('POST')).toEqual([]);
+      expect(sent('DELETE')).toEqual([]);
+    },
+  );
+
+  it('deleteServer: one zone refusing and none having it throws, naming that zone', async () => {
+    answer({ 'fr-par-2': 403 });
+    await expect(
+      new ScalewayProvider('tok').deleteServer('srv-x', { waitUntilGone: true }),
+    ).rejects.toMatchObject({
+      status: 403,
+      message:
+        'Failed to delete server: fr-par-2 refused the read of server srv-x (HTTP 403), ' +
+        'and no other zone has it',
+    });
+    expect(sent('POST')).toEqual([]);
+  });
+
+  it('renameServer: a refusal is worded as one, a server in no zone as not found', async () => {
+    answer(everyZone403());
+    await expect(new ScalewayProvider('tok').renameServer('srv-x', 'n')).rejects.toMatchObject({
+      status: 403,
+      message: 'Failed to rename server: every zone refused the read of server srv-x (HTTP 403)',
+    });
+    answer({});
+    await expect(new ScalewayProvider('tok').renameServer('srv-x', 'n')).rejects.toMatchObject({
+      status: 404,
+      message: 'Failed to rename server: server srv-x not found in any zone',
+    });
+    expect(sent('PATCH')).toEqual([]);
+  });
+
+  it('a destroy sweep reports the refused server as a leak, never as deleted', async () => {
+    const { sweepEnvironmentServers } = await import('../../../src/lib/destroy/server-sweep.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const provider = new ScalewayProvider('tok');
+    vi.spyOn(provider, 'listServersDetailed').mockResolvedValue({
+      items: [{ id: 'srv-x', name: 'acme-prod', zone: 'fr-par-1', tags: [] }],
+      complete: true,
+    } as never);
+    answer(everyZone403());
+    const leaks = createLeakLedger();
+    const out = await sweepEnvironmentServers({
+      provider,
+      leaks,
+      projectName: 'acme',
+      environment: 'prod',
+    });
+    expect(out).toMatchObject({ deleted: [] });
+    expect(leaks.entries).toHaveLength(1);
+    expect(leaks.entries[0]).toMatchObject({ severity: 'leak', resourceClass: 'server' });
+    expect(leaks.entries[0].reason).toContain('every zone refused the read of server srv-x');
+  });
+});
+
 // terminate only DETACHES an SBS volume, and deleteServer deletes it after.
 // One it cannot delete in 60 s bills on, and nothing finds it again: a later
 // deleteServer finds the server gone (404) and reads no volumes. So it is a

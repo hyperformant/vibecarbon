@@ -949,7 +949,7 @@ describe('applyCloudSecrets', () => {
     /**
      * How many reads the check makes when the API answers `status`: one, the
      * master's, except on Scaleway, whose getServer finds the master's zone
-     * first, one probe per zone until one answers (_findServerZone). So two
+     * first, one probe per zone until one answers (_probeServerZone). So two
      * when it answers, one on a 401 (the probe throws), and every zone on a
      * 403 or 404.
      */

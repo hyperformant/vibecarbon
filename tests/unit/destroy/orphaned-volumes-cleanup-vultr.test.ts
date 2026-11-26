@@ -84,7 +84,7 @@ describe('cleanupOrphanedVolumes on Vultr', () => {
         match: 'pvc-in-cluster-region',
         blockedBy: 'no-owner-signal',
         blocked:
-          "Vultr volumes carry no tags, so only a captured id proves one is this environment's",
+          "Vultr CSI volumes carry no tags, so only a captured id proves one is this environment's",
       },
     ]);
   });
@@ -208,7 +208,7 @@ describe('a Vultr k8s destroy whose PersistentVolume capture failed', () => {
     expect(entry).toMatchObject({ severity: 'unverified' });
     expect(entry?.resource).toContain('pvc-0123456789abcdef');
     expect(entry?.reason).toContain(
-      "Vultr volumes carry no tags, so only a captured id proves one is this environment's",
+      "Vultr CSI volumes carry no tags, so only a captured id proves one is this environment's",
     );
     expect(leaks.exitCode()).not.toBe(0);
   });

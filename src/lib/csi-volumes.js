@@ -77,6 +77,14 @@
  *       only proof a volume is this environment's
  *       (VultrProvider.ORPHAN_VOLUME_REGION_GUESS).
  *
+ *   scaleway-csi v0.3.6 (`csi.scaleway.com`)
+ *     - `spec.csi.volumeHandle` = `<zone>/<Block volume uuid>`
+ *       (pkg/driver/helpers.go:38-61).
+ *     - topology segment key `topology.csi.scaleway.com/zone`.
+ *     - the volume is named `pvc-<uuid>` and carries NO TAGS, so the
+ *       captured id is the only proof one is this environment's
+ *       (ScalewayProvider.ORPHAN_VOLUME_REGION_GUESS).
+ *
  * Net: Hetzner CSI volumes created from the v2.18.1 bump onward DO carry
  * ownership labels; DigitalOcean's carry nothing, and neither does any Hetzner
  * volume created before the bump. Identity capture from the cluster is
@@ -90,8 +98,11 @@
 import { existsSync as nodeExistsSync } from 'node:fs';
 import { runCommand as nodeRunCommand } from './command.js';
 
-/** A UUID, as Vultr spells its block storage ids (lowercase hex). */
+/** A UUID, as Vultr and Scaleway spell their block storage ids (lowercase hex). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A Scaleway zone, as scaleway-csi writes it in a volumeHandle (`fr-par-1`). */
+const SCALEWAY_ZONE_RE = /^[a-z]{2}-[a-z]{3,7}-\d{1,2}$/;
 
 /**
  * CSI drivers whose `volumeHandle` we know how to hand to a provider's
@@ -131,6 +142,19 @@ const CSI_DRIVERS = {
     // The handle is the block storage id, a UUID (vultr-csi v0.19.1
     // driver/controller.go). Anything else is not one we can delete by.
     volumeId: (handle) => (UUID_RE.test(handle) ? handle : null),
+  },
+  'csi.scaleway.com': {
+    providerId: 'scaleway',
+    regionKeys: ['topology.csi.scaleway.com/zone'],
+    // The handle is `<zone>/<volume uuid>` (scaleway-csi v0.3.6
+    // pkg/driver/helpers.go): the Block volume id is the uuid, deleted in
+    // whichever zone holds it (ScalewayProvider.deleteVolume).
+    volumeId: (handle) => {
+      const [zone, uuid, ...rest] = handle.split('/');
+      return rest.length === 0 && SCALEWAY_ZONE_RE.test(zone) && UUID_RE.test(uuid ?? '')
+        ? uuid
+        : null;
+    },
   },
 };
 

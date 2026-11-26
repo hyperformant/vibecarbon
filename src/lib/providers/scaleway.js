@@ -59,7 +59,9 @@ import { pollUntil } from '../retry.js';
 import {
   BaseProvider,
   deleteFailure,
+  deleteNetworkAt,
   deleteRefused,
+  networkListingWhole,
   normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
@@ -148,6 +150,65 @@ const SBS_DELETE_WAIT_MS = 60_000;
  * @type {Set<string>}
  */
 const serversStillTerminating = new Set();
+
+/**
+ * One listing over several scopes (the zones, or the VPC API's regions),
+ * merged: complete only when every scope's walk completed, with the status
+ * of the last scope that answered non-ok.
+ * @param {string[]} scopes
+ * @param {(scope: string) => Promise<{items: object[], complete: boolean, status?: number}>} walkOne
+ * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+ */
+async function mergeWalks(scopes, walkOne) {
+  const items = [];
+  let complete = true;
+  let status;
+  for (const scope of scopes) {
+    const res = await walkOne(scope);
+    items.push(...res.items);
+    if (!res.complete) {
+      complete = false;
+      if (res.status !== undefined) status = res.status;
+    }
+  }
+  return status === undefined ? { items, complete } : { items, complete, status };
+}
+
+/**
+ * The error for a server no zone showed (_probeServerZone): not found, with
+ * status 404, when every zone answered 404; a refusal, worded as one, with
+ * status 403, when a zone answered 403. A server a zone refused to show may
+ * be in that zone, so a refusal is never "not found" or "already gone".
+ * @param {string} failure - what failed, e.g. 'Failed to get server'
+ * @param {string} serverId
+ * @param {string[]} refusedIn - the zones that answered 403
+ * @returns {Error & {status: number}}
+ */
+function serverZoneError(failure, serverId, refusedIn) {
+  const message =
+    refusedIn.length === 0
+      ? `server ${serverId} not found in any zone`
+      : refusedIn.length === ScalewayProvider._zones().length
+        ? `every zone refused the read of server ${serverId} (HTTP 403)`
+        : `${refusedIn.join(', ')} refused the read of server ${serverId} (HTTP 403), ` +
+          'and no other zone has it';
+  return Object.assign(new Error(`${failure}: ${message}`), {
+    status: refusedIn.length === 0 ? 404 : 403,
+  });
+}
+
+/**
+ * The tags a stack's flexible IPs and servers carry for `labels`: the
+ * project and the environment, each its own tag (encodeLabel). null unless
+ * both have a value, so no partial label set matches anything.
+ * @param {Object<string,string>|undefined} labels
+ * @returns {string[]|null}
+ */
+function stackTags(labels) {
+  const { project, environment } = labels ?? {};
+  if (!project || !environment) return null;
+  return [encodeLabel('project', project), encodeLabel('environment', environment)];
+}
 
 /**
  * The operator's Scaleway access key and project id: what the Pulumi
@@ -575,6 +636,15 @@ export class ScalewayProvider extends BaseProvider {
   static ORPHAN_VOLUME_REGION_GUESS = false;
 
   /**
+   * A deploy that failed partway (the flexible IPs, VPC and Private Network
+   * made, the master never ready) can leave them, the security group and
+   * the SSH key outside what `pulumi destroy` removes, as on DigitalOcean,
+   * Linode and Vultr, so destroy also removes them by name, address and tag
+   * (sweepK8sBackstopTargets, destroy.js). @type {boolean}
+   */
+  static K8S_DESTROY_BACKSTOP = true;
+
+  /**
    * No fixed range: scaleway-k8s.js derives a /24 per cluster
    * (vpcCidrForCluster) for its Private Network and exports it as `vpcCidr`,
    * the value deployK3s reads. @type {string}
@@ -980,26 +1050,40 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
    */
   async _walkAllZones(path, key) {
-    const items = [];
-    let complete = true;
-    let status;
-    for (const zone of ScalewayProvider._zones()) {
-      const res = await this._walkZone(path, key, zone);
-      items.push(...res.items);
-      if (!res.complete) {
-        complete = false;
-        if (res.status !== undefined) status = res.status;
-      }
-    }
-    return status === undefined ? { items, complete } : { items, complete, status };
+    return mergeWalks(ScalewayProvider._zones(), (zone) => this._walkZone(path, key, zone));
+  }
+
+  /** The VPC API's regions: the REGIONS zones' distinct regions (fr-par-1 is in fr-par). */
+  static _regions() {
+    return [...new Set(ScalewayProvider._zones().map((z) => z.replace(/-\d+$/, '')))];
+  }
+
+  /**
+   * Walk one VPC API collection (`private-networks`, `vpcs`) in every
+   * region, merged as _walkAllZones does, each row stamped with its region:
+   * a delete goes to the region it is listed in. Scoped to
+   * SCALEWAY_DEFAULT_PROJECT_ID when it is set, as deleteSSHKeyByName is, so
+   * another project's network of the same name is never listed.
+   * @param {string} collection - 'private-networks' or 'vpcs'
+   * @param {string} key - response array key ('private_networks', 'vpcs')
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async _walkVpcApi(collection, key) {
+    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
+    const query = projectId ? `project_id=${encodeURIComponent(projectId)}` : '';
+    return mergeWalks(ScalewayProvider._regions(), async (region) => {
+      const walk = await this._walkPageSize(`/vpc/v2/regions/${region}/${collection}`, key, query);
+      return { ...walk, items: walk.items.map((row) => ({ region, ...row })) };
+    });
   }
 
   /**
    * Resolve which zone a server UUID lives in (UUIDs are zone-scoped —
    * class header). Probes GET per zone, caching hits for the lifetime of
-   * this provider instance. A zone that answers 403 or 404 does not have it
-   * (a 403 is a zone the token may not read); any other failure throws at
-   * once, with its HTTP status on the error.
+   * this provider instance. A zone that answers 404 does not have it; one
+   * that answers 403 is a zone the token may not read, named in `refusedIn`,
+   * so a caller never reads a server it hid as gone (serverZoneError). Any
+   * other failure throws at once, with its HTTP status on the error.
    * @param {string} serverId
    * @returns {Promise<{zone: string} | {zone: null, refusedIn: string[]}>} the
    *   zone, or none, with the zones that answered 403
@@ -1026,15 +1110,6 @@ export class ScalewayProvider extends BaseProvider {
       }
     }
     return { zone: null, refusedIn };
-  }
-
-  /**
-   * The zone a server UUID lives in (_probeServerZone).
-   * @param {string} serverId
-   * @returns {Promise<string|null>} zone, or null when no zone has it
-   */
-  async _findServerZone(serverId) {
-    return (await this._probeServerZone(serverId)).zone;
   }
 
   /**
@@ -1200,13 +1275,24 @@ export class ScalewayProvider extends BaseProvider {
    * (destroy turns it into a ledger leak), or warned on stderr when no one
    * asked. Nothing finds it again: a later deleteServer finds the server
    * gone and reads no volumes, so the line names the console delete.
+   *
+   * Already gone only when every zone answered 404. A server no zone showed
+   * while a zone refused the read (403) may be in that zone, so the delete
+   * throws that refusal, with status 403, as a refused DELETE throws on the
+   * other providers (deleteServerAt): destroy reports the server, never
+   * reads it as deleted (serverZoneError).
    * @param {string} serverId
    * @param {{waitUntilGone?: boolean, onLeftover?: (line: import('./base.js').ServerLeftover) => void}} [options]
    * @returns {Promise<void|boolean>}
+   * @throws when a zone refused the read and no zone showed the server
    */
   async deleteServer(serverId, { waitUntilGone = false, onLeftover } = {}) {
-    const zone = await this._findServerZone(serverId);
-    if (!zone) return waitUntilGone ? false : undefined; // already gone
+    const { zone, refusedIn = [] } = await this._probeServerZone(serverId);
+    if (!zone) {
+      if (refusedIn.length > 0)
+        throw serverZoneError('Failed to delete server', serverId, refusedIn);
+      return waitUntilGone ? false : undefined; // already gone
+    }
 
     // 1. Capture teardown targets before the record disappears.
     let sbsVolumeIds = [];
@@ -1324,14 +1410,15 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * Rename a server — PATCH of the `name` field.
+   * Rename a server — PATCH of the `name` field. A server no zone showed
+   * throws, worded as not found or as the zones' refusal (serverZoneError).
    * @param {string} serverId
    * @param {string} name
    * @returns {Promise<void>}
    */
   async renameServer(serverId, name) {
-    const zone = await this._findServerZone(serverId);
-    if (!zone) throw new Error(`Failed to rename server: server ${serverId} not found in any zone`);
+    const { zone, refusedIn = [] } = await this._probeServerZone(serverId);
+    if (!zone) throw serverZoneError('Failed to rename server', serverId, refusedIn);
     const response = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`, {
       method: 'PATCH',
       body: JSON.stringify({ name }),
@@ -1353,19 +1440,7 @@ export class ScalewayProvider extends BaseProvider {
     // that can't see the server (assertTokenSeesCluster), as a failed probe's
     // own status is.
     const { zone, refusedIn = [] } = await this._probeServerZone(serverId);
-    if (!zone) {
-      const zones = ScalewayProvider._zones();
-      const message =
-        refusedIn.length === 0
-          ? `server ${serverId} not found in any zone`
-          : refusedIn.length === zones.length
-            ? `every zone refused the read of server ${serverId} (HTTP 403)`
-            : `${refusedIn.join(', ')} refused the read of server ${serverId} (HTTP 403), ` +
-              'and no other zone has it';
-      throw Object.assign(new Error(`Failed to get server: ${message}`), {
-        status: refusedIn.length === 0 ? 404 : 403,
-      });
-    }
+    if (!zone) throw serverZoneError('Failed to get server', serverId, refusedIn);
     const response = await this.apiRequest(`/instance/v1/zones/${zone}/servers/${serverId}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -1795,24 +1870,60 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * List ALL Private Networks (soft-fail []) — never provisioned by the
-   * compose tier, enumerated so a future tier's leak can't hide behind a
-   * stub. Region-scoped API (VPC), walked over the REGIONS zones' distinct
-   * regions.
+   * List ALL Private Networks (soft-fail []). The k8s tiers make one per
+   * stack, named `${clusterName}-network` (scaleway-k8s.js), in a VPC of the
+   * same name; destroy and the autoscaler find it by that name, and destroy
+   * reads cluster membership from servers' private_nics (serverNetworkIds).
+   * The compose tier makes none.
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
-    const regions = [...new Set(ScalewayProvider._zones().map((z) => z.replace(/-\d+$/, '')))];
-    const items = [];
-    for (const region of regions) {
-      const walk = await this._walkPageSize(
-        `/vpc/v2/regions/${region}/private-networks`,
-        'private_networks',
+    const { items, status } = await this.listNetworksDetailed();
+    return status === undefined ? items : [];
+  }
+
+  /**
+   * listNetworks with the walk's completeness signal, for a caller that must
+   * not read part of the list as the whole (deleteNetworkByName). Region-
+   * scoped API (VPC), walked over every region and project-scoped
+   * (_walkVpcApi); each row carries its `region`.
+   * @returns {Promise<{items: object[], complete: boolean, status?: number}>}
+   */
+  async listNetworksDetailed() {
+    return this._walkVpcApi('private-networks', 'private_networks');
+  }
+
+  /**
+   * Delete a cluster's network by its exact name: the Private Network, then
+   * the VPC holding it (scaleway-k8s.js names both `${clusterName}-network`),
+   * since a VPC holding a Private Network cannot go. Both listings are read
+   * whole before any DELETE, and each object is deleted in the region it is
+   * listed in. A project's default VPC (`is_default`) is never matched,
+   * whatever it is named. The shared contract of deleteVpcByName otherwise:
+   * a 2xx or 404 is deleted, any other answer is `apiError` and stops there
+   * (deleteNetworkAt), and a listing that cannot be read whole throws
+   * (networkListingWhole), so destroy reports it could not confirm the
+   * network is gone.
+   * @param {string} name
+   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   * @throws when the Private Network or VPC listing cannot be read whole
+   */
+  async deleteNetworkByName(name) {
+    const networks = networkListingWhole(await this.listNetworksDetailed(), 'Private Network');
+    const vpcs = networkListingWhole(await this._walkVpcApi('vpcs', 'vpcs'), 'VPC');
+    const targets = [
+      ['private-networks', networks.find((n) => n.name === name)],
+      ['vpcs', vpcs.find((v) => v.name === name && v.is_default !== true)],
+    ].filter(([, row]) => row);
+    if (targets.length === 0) return { deleted: false, everExisted: false, apiError: null };
+    for (const [collection, row] of targets) {
+      const apiError = await deleteNetworkAt(
+        this,
+        `/vpc/v2/regions/${row.region}/${collection}/${row.id}`,
       );
-      if (walk.status !== undefined) return [];
-      items.push(...walk.items);
+      if (apiError) return { deleted: false, everExisted: true, apiError };
     }
-    return items;
+    return { deleted: true, everExisted: true, apiError: null };
   }
 
   /**
@@ -1929,17 +2040,135 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
+   * Every flexible IP across the REGIONS zones (listFlexibleIPsDetailed),
+   * read whole. A partial listing must not pass for the whole: destroy reads
+   * an address missing from it as already released, and a label sweep as
+   * nothing left.
+   * @returns {Promise<Array<{id: string, address: string, zone: string, tags?: string[], server?: {id: string, name?: string}|null}>>}
+   * @throws when a zone cannot be read, or holds more than the walk reads
+   */
+  async _listFlexibleIps() {
+    const { items, complete, status } = await this.listFlexibleIPsDetailed();
+    if (complete) return items;
+    throw new Error(
+      status === undefined
+        ? 'a zone holds more flexible IPs than vibecarbon reads'
+        : `GET /ips failed: HTTP ${status}`,
+    );
+  }
+
+  /**
+   * Delete one listed, unattached flexible IP in its zone, answered as a
+   * ReservedIpRelease: 2xx or 404 is released, a 4xx is a refusal (still
+   * held), and any other status, a 5xx that outlasted fetchWithRetry's
+   * retries, proves nothing either way (deleteRefused). releaseFlexibleIP
+   * answers only true or false, so the status would be lost there.
+   * @param {{id: string, zone: string}} ip
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
+   */
+  async _deleteFlexibleIp(ip) {
+    const res = await this.bareRequest(`/instance/v1/zones/${ip.zone}/ips/${ip.id}`, {
+      method: 'DELETE',
+    });
+    if (res.ok || res.status === 404) return { released: true };
+    return {
+      released: false,
+      held: deleteRefused(res.status) ? true : null,
+      region: ip.zone,
+      reason: deleteFailure(ScalewayProvider.NAME, res.status),
+    };
+  }
+
+  /**
+   * Release a flexible IP by address, answered as a ReservedIpRelease
+   * (providers/base.js) so destroy reads every provider one way. Scaleway
+   * deletes by id in a zone, so this lists and matches `address` first; an
+   * address the account no longer holds is already released. One still
+   * attached to a server is refused here, with no delete sent: an address is
+   * never taken off a server, whoever asks.
+   * @param {string} address
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
+   * @throws when the listing cannot be read whole
+   */
+  async deleteReservedIpByAddress(address) {
+    const ip = (await this._listFlexibleIps()).find((i) => i.address === address);
+    if (!ip) return { released: true };
+    if (ip.server) {
+      return {
+        released: false,
+        held: true,
+        region: ip.zone,
+        reason: `it is still attached to server ${ip.server.name ?? ip.server.id}`,
+      };
+    }
+    return this._deleteFlexibleIp(ip);
+  }
+
+  /**
+   * Whether the flexible IP at `address` is still this project's and
+   * environment's: its tags carry both stackTags(labels), and the server it
+   * is attached to, if any, carries the same two (scaleway-k8s.js tags every
+   * server with them). Destroy asks before it releases an address saved at
+   * deploy time: a released address can be reissued to another account or
+   * project by then, and one of ours still attached to a server the teardown
+   * did not delete must never be taken off it. Labels without both a project
+   * and an environment match nothing. A holding server no zone lists (404)
+   * holds it on its way out, so the IP stays this stack's and held; one a
+   * zone refused to show is never read as gone, and the match throws.
+   * @param {string} address
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
+   *   found is false when the account holds no flexible IP at that address;
+   *   holder names the server it is attached to, null when unattached; tags
+   *   are the IP's, and what its holder is when that is someone else
+   * @throws when the listing, or the server holding a tagged one, cannot be read
+   */
+  async reservedIpLabelMatch(address, labels) {
+    const wanted = stackTags(labels);
+    const ip = (await this._listFlexibleIps()).find((i) => i.address === address);
+    if (!ip) return { found: false };
+    const tags = ip.tags ?? [];
+    const holder = ip.server ? `server ${ip.server.name ?? ip.server.id} (${ip.server.id})` : null;
+    if (wanted === null || !wanted.every((t) => tags.includes(t))) {
+      return { found: true, matches: false, tags, holder };
+    }
+    if (!ip.server) return { found: true, matches: true, tags, holder };
+    let server;
+    try {
+      server = await this.getServer(ip.server.id);
+    } catch (err) {
+      if (err.status === 404) return { found: true, matches: true, tags, holder };
+      const why = err.status ? `HTTP ${err.status}` : err.message;
+      throw new Error(`could not read ${holder}, which holds it (${why})`);
+    }
+    const serverTags = server?.tags ?? [];
+    if (wanted.every((t) => serverTags.includes(t))) {
+      return { found: true, matches: true, tags, holder };
+    }
+    const { project, environment } = decodeLabels(serverTags);
+    const whose = project
+      ? `project ${project}, environment ${environment ?? 'none'}`
+      : 'no vibecarbon project';
+    return {
+      found: true,
+      matches: false,
+      tags: [...tags, `held by ${holder}, which is ${whose}`],
+      holder,
+    };
+  }
+
+  /**
    * Release every flexible IP whose tags carry ALL of the given labels (the
-   * encodeLabel encoding the compose program tags its IP with). The compose
-   * program creates the IP before the server, and destroy deletes the server
-   * by its API, which releases only an IP attached to it: a deploy killed in
-   * between leaves the IP attached to nothing and named nowhere but here.
-   * Filters client-side over every zone's listing. A label without a value
-   * is refused (sweepLabels). One still attached to a server is left alone: destroy runs
-   * after the server deletes, so that server is one they did not delete, or
-   * one this process asked to terminate that was still terminating when
-   * deleteServer stopped waiting (`serverTerminating`: the next destroy finds
-   * it gone and releases the IP).
+   * encodeLabel encoding the compose and k8s programs tag their IPs with).
+   * The compose program creates the IP before the server, and destroy
+   * deletes the server by its API, which releases only an IP attached to
+   * it: a deploy killed in between leaves the IP attached to nothing and
+   * named nowhere but here. Filters client-side over every zone's listing.
+   * A label without a value is refused (sweepLabels). One still attached to
+   * a server is left alone: destroy runs after the server deletes, so that
+   * server is one they did not delete, or one this process asked to
+   * terminate that was still terminating when deleteServer stopped waiting
+   * (`serverTerminating`: the next destroy finds it gone and releases the IP).
    * @param {Object<string,string>} labels
    * @param {{except?: string[]}} [options] - addresses the caller already handled
    * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
@@ -1947,14 +2176,7 @@ export class ScalewayProvider extends BaseProvider {
    */
   async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
     const wanted = encodeLabels(Object.fromEntries(sweepLabels(labels)));
-    const { items, complete, status } = await this.listFlexibleIPsDetailed();
-    if (!complete) {
-      throw new Error(
-        status === undefined
-          ? 'a zone holds more flexible IPs than vibecarbon reads'
-          : `GET /ips failed: HTTP ${status}`,
-      );
-    }
+    const items = await this._listFlexibleIps();
     const skip = new Set(except);
     const deleted = [];
     const failed = [];
@@ -1980,17 +2202,9 @@ export class ScalewayProvider extends BaseProvider {
         }
         continue;
       }
-      const res = await this.bareRequest(`/instance/v1/zones/${ip.zone}/ips/${ip.id}`, {
-        method: 'DELETE',
-      });
-      if (res.ok || res.status === 404) deleted.push(ip.address);
-      else {
-        failed.push({
-          address: ip.address,
-          held: deleteRefused(res.status) ? true : null,
-          reason: deleteFailure(ScalewayProvider.NAME, res.status),
-        });
-      }
+      const outcome = await this._deleteFlexibleIp(ip);
+      if (outcome.released) deleted.push(ip.address);
+      else failed.push({ address: ip.address, held: outcome.held, reason: outcome.reason });
     }
     return { deleted, failed };
   }
@@ -1998,13 +2212,15 @@ export class ScalewayProvider extends BaseProvider {
   // ── Destroy-sweep field accessors ───────────────────────────────────────
 
   /**
-   * Compose-tier Scaleway instances join no Private Network — always []
-   * (private NICs are a separate sub-resource our tiers never create).
-   * @param {object} _server
+   * Private Network ids the server has a NIC in: Scaleway's server object
+   * lists them as `private_nics: [{id, private_network_id, ...}]`
+   * (scaleway-sdk-go instance_sdk.go Server.PrivateNics). [] for a server in
+   * no Private Network (every compose instance).
+   * @param {object} server
    * @returns {string[]}
    */
-  serverNetworkIds(_server) {
-    return [];
+  serverNetworkIds(server) {
+    return (server?.private_nics ?? []).map((n) => n.private_network_id);
   }
 
   /**

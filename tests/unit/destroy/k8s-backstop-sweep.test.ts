@@ -1,5 +1,5 @@
 /**
- * The k8s destroy backstop on Linode and Vultr, plus the census that keeps a
+ * The k8s destroy backstop on Linode, Vultr and Scaleway, plus the census that keeps a
  * new k8s provider from silently skipping it.
  *
  * Review focus: a deploy that failed after the master was created but before
@@ -24,6 +24,10 @@ import {
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
+import {
+  ScalewayProvider,
+  encodeLabels as scalewayLabels,
+} from '../../../src/lib/providers/scaleway.js';
 import { reservedIpLabel, VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 
@@ -430,6 +434,171 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
       expect(deleteUrls()).toEqual([]);
       expect(results.leaks.entries).toHaveLength(0);
     });
+  });
+});
+
+describe('sweepK8sBackstopTargets on Scaleway', () => {
+  type ScalewayIp = {
+    id: string;
+    address: string;
+    tags: string[];
+    server?: { id: string; name: string } | null;
+  };
+  /** The tags scaleway-k8s.js gives a node's flexible IP and its server. */
+  const tags = (project: string, environment: string, role = 'master') =>
+    scalewayLabels({ project, environment, role });
+  /**
+   * GET /instance/v1/zones/fr-par-1/ips lists `ips` (every other zone none),
+   * GET .../zones/fr-par-1/servers/{id} answers the tags in `servers` (404
+   * for any other id or zone); a DELETE succeeds.
+   */
+  const scalewayIps = (ips: ScalewayIp[], servers: Record<string, string[]> = {}) =>
+    fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') return { ok: true, status: 204 };
+      const path = new URL(url).pathname;
+      const list = /^\/instance\/v1\/zones\/([^/]+)\/ips$/.exec(path);
+      if (list) {
+        const rows = list[1] === 'fr-par-1' ? ips.map((ip) => ({ server: null, ...ip })) : [];
+        return { ok: true, status: 200, json: async () => ({ ips: rows }) };
+      }
+      const server = /^\/instance\/v1\/zones\/([^/]+)\/servers\/([^/]+)$/.exec(path);
+      if (server) {
+        const found = server[1] === 'fr-par-1' ? servers[server[2]] : undefined;
+        return found
+          ? {
+              ok: true,
+              status: 200,
+              json: async () => ({ server: { id: server[2], tags: found } }),
+            }
+          : { ok: false, status: 404, json: async () => ({}), text: async () => '' };
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+  const scaleway = () => {
+    const provider = new ScalewayProvider('token');
+    const byName = {
+      firewall: vi
+        .spyOn(provider, 'deleteFirewallByName')
+        .mockResolvedValue({ deleted: true, everExisted: true, apiError: null }),
+      sshKey: vi.spyOn(provider, 'deleteSSHKeyByName').mockResolvedValue(true),
+      network: vi
+        .spyOn(provider, 'deleteNetworkByName')
+        .mockResolvedValue({ deleted: true, everExisted: true, apiError: null }),
+    };
+    return { provider, byName };
+  };
+  const sweepSingle = async (provider: ScalewayProvider, floatingIp?: string) => {
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: planK8sBackstopTargets({
+        plan: { tier: 'k8s', stackEnvs: ['prod'] },
+        envConfig: {
+          provider: 'scaleway',
+          region: 'fr-par-1',
+          ...(floatingIp ? { floatingIp } : {}),
+        },
+        projectConfig: { projectName: 'proj' },
+      }),
+      results,
+      s: spinner(),
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    return results;
+  };
+  const IP_7 = 'https://api.scaleway.com/instance/v1/zones/fr-par-1/ips/ip-7';
+
+  it('asks for the security group, SSH key, flexible IP by address and network by name once each, the network last', async () => {
+    const { provider, byName } = scaleway();
+    const byAddress = vi.spyOn(provider, 'deleteReservedIpByAddress');
+    const byLabel = vi.spyOn(provider, 'deleteReservedIpsByLabels');
+    scalewayIps([{ id: 'ip-7', address: '203.0.113.7', tags: tags('proj', 'prod') }]);
+
+    const results = await sweepSingle(provider, '203.0.113.7');
+
+    expect(byName.firewall).toHaveBeenCalledExactlyOnceWith('proj-prod-firewall');
+    expect(byName.sshKey).toHaveBeenCalledExactlyOnceWith('proj-prod-fr-par-1-key');
+    expect(byAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
+    expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network');
+    // The label sweep leaves the recorded address to the address path.
+    expect(byLabel).toHaveBeenCalledExactlyOnceWith(
+      { project: 'proj', environment: 'prod' },
+      { except: ['203.0.113.7'] },
+    );
+    expect(deleteUrls()).toEqual([IP_7]);
+    const networkAt = byName.network.mock.invocationCallOrder[0];
+    for (const spy of [byName.firewall, byName.sshKey, byAddress, byLabel]) {
+      expect(spy.mock.invocationCallOrder[0]).toBeLessThan(networkAt);
+    }
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it('a flexible IP no record names is released by its tags, and no other', async () => {
+    const { provider } = scaleway();
+    scalewayIps([
+      { id: 'ip-8', address: '203.0.113.8', tags: tags('proj', 'prod', 'worker') },
+      { id: 'ip-9', address: '203.0.113.9', tags: tags('proj', 'prod2') },
+      { id: 'ip-10', address: '203.0.113.10', tags: tags('other', 'prod') },
+    ]);
+    const results = await sweepSingle(provider);
+    expect(deleteUrls()).toEqual(['https://api.scaleway.com/instance/v1/zones/fr-par-1/ips/ip-8']);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it('a recorded address now tagged for another stack is left alone, and reported', async () => {
+    const { provider } = scaleway();
+    scalewayIps([{ id: 'ip-7', address: '203.0.113.7', tags: tags('proj', 'prod-standby') }]);
+    const results = await sweepSingle(provider, '203.0.113.7');
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries.map((e: { severity: string }) => e.severity)).toEqual(['foreign']);
+    expect(results.leaks.entries[0].reason).toContain('environment:prod-standby');
+    expect(results.unreleasedReservedIps).toEqual([]);
+  });
+
+  it('a recorded address of ours still attached to its server is never released, and keeps the record', async () => {
+    const { provider } = scaleway();
+    scalewayIps(
+      [
+        {
+          id: 'ip-7',
+          address: '203.0.113.7',
+          tags: tags('proj', 'prod'),
+          server: { id: 'srv-1', name: 'proj-prod-master' },
+        },
+      ],
+      { 'srv-1': tags('proj', 'prod') },
+    );
+    const results = await sweepSingle(provider, '203.0.113.7');
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries).toHaveLength(1);
+    expect(results.leaks.entries[0]).toMatchObject({ severity: 'leak', resource: '203.0.113.7' });
+    expect(results.leaks.entries[0].reason).toBe(
+      'not released: it is still assigned to server proj-prod-master (srv-1), which was not deleted',
+    );
+    expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
+  });
+
+  it("a recorded address tagged ours on another stack's server is foreign, never held or released", async () => {
+    const { provider } = scaleway();
+    scalewayIps(
+      [
+        {
+          id: 'ip-7',
+          address: '203.0.113.7',
+          tags: tags('proj', 'prod'),
+          server: { id: 'srv-9', name: 'other-prod-master' },
+        },
+      ],
+      { 'srv-9': tags('other', 'prod') },
+    );
+    const results = await sweepSingle(provider, '203.0.113.7');
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries.map((e: { severity: string }) => e.severity)).toEqual(['foreign']);
+    expect(results.leaks.entries[0].reason).toContain(
+      'held by server other-prod-master (srv-9), which is project other, environment prod',
+    );
+    expect(results.unreleasedReservedIps).toEqual([]);
   });
 });
 
@@ -1115,15 +1284,19 @@ describe('K8S_DESTROY_BACKSTOP census', () => {
       [string, { K8S_DESTROY_BACKSTOP?: boolean }]
     >;
     expect(providers.map(([id]) => id)).toContain('vultr');
+    expect(providers.map(([id]) => id)).toContain('scaleway');
     for (const [id, Provider] of providers) {
       if (id === 'hetzner') continue;
       expect(Provider.K8S_DESTROY_BACKSTOP, id).toBe(true);
     }
   });
 
-  it('is set on DigitalOcean, Linode and Vultr', () => {
+  it('is set on DigitalOcean, Linode, Vultr and Scaleway', () => {
     expect(PROVIDERS.digitalocean.K8S_DESTROY_BACKSTOP).toBe(true);
     expect(PROVIDERS.linode.K8S_DESTROY_BACKSTOP).toBe(true);
     expect((PROVIDERS.vultr as { K8S_DESTROY_BACKSTOP?: boolean }).K8S_DESTROY_BACKSTOP).toBe(true);
+    expect((PROVIDERS.scaleway as { K8S_DESTROY_BACKSTOP?: boolean }).K8S_DESTROY_BACKSTOP).toBe(
+      true,
+    );
   });
 });

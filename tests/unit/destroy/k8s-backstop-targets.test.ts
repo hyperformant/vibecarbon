@@ -236,13 +236,16 @@ describe('planK8sBackstopTargets on k8s-ha reads an environment-level address to
   });
 });
 
-// The Linode and Vultr k8s programs name their firewall, SSH key and VPC as
-// DigitalOcean's does (`${clusterName}-firewall`, `-${location}-key`,
-// `-network`; vultr-k8s.js describes its group and VPC with them), so the
-// backstop's targets are the same names on each.
+// The Linode, Vultr and Scaleway k8s programs name their firewall, SSH key
+// and VPC as DigitalOcean's does (`${clusterName}-firewall`,
+// `-${location}-key`, `-network`; vultr-k8s.js describes its group and VPC
+// with them, and scaleway-k8s.js names its security group, its VPC and the
+// VPC's Private Network with them), so the backstop's targets are the same
+// names on each.
 describe.each([
   ['Linode', 'linode', 'us-iad'],
   ['Vultr', 'vultr', 'ewr'],
+  ['Scaleway', 'scaleway', 'fr-par-1'],
 ])('planK8sBackstopTargets on %s', (name, provider, region) => {
   it(`gives ${name} the same target names as DigitalOcean, single and HA`, () => {
     const single = {

@@ -331,6 +331,8 @@ fetch GET /lb/v1/zones/nl-ams-1/lbs?page_size=100&page=1
 fetch GET /lb/v1/zones/nl-ams-2/lbs?page_size=100&page=1
 fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
 fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
+fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
 warn  [t] [sweep] REGRESSION: could not enumerate one or more Scaleway resource types — orphan check is incomplete, treat as a destroy regression.
 result {"counts":{"servers":0,"volumes":0,"placementGroups":0,"firewalls":0,"floatingIps":0,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"
 `;
@@ -371,6 +373,10 @@ fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
 warn  [t] [sweep] private-network list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
 warn  [t] [sweep] private-network list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
+fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
+warn  [t] [sweep] VPC list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
+fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
+warn  [t] [sweep] VPC list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] REGRESSION: destroy left 3 Scaleway orphan resource(s) (instances=1, volumes=1, security-groups=0, flexible-ips=1, load-balancers=0, private-networks=0, buckets=0, ssh-keys=0). vibecarbon destroy did not free these — fix the corresponding destroy code path.
 result {"counts":{"servers":1,"volumes":1,"placementGroups":0,"firewalls":0,"floatingIps":1,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"
 `;
@@ -445,6 +451,8 @@ warn  [t] [sweep] Private Network n-3 delete failed
 log   [t] [sweep] Orphaned Private Network n-4 (testapp-tr-net-throws) — deleting
 fetch DELETE /vpc/v2/regions/fr-par/private-networks/n-4
 warn  [t] [sweep] Private Network n-4 delete failed: connect ETIMEDOUT
+fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
+fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
 warn  [t] [sweep] REGRESSION: destroy left 10 Scaleway orphan resource(s) (instances=1, volumes=3, security-groups=2, flexible-ips=1, load-balancers=1, private-networks=1, buckets=0, ssh-keys=1). vibecarbon destroy did not free these — fix the corresponding destroy code path.
 result {"counts":{"servers":1,"volumes":3,"placementGroups":0,"firewalls":2,"floatingIps":1,"networks":1,"s3Buckets":0,"sshKeys":1,"loadBalancers":1},"enumFailed":true}"
 `;
@@ -483,6 +491,10 @@ fetch GET /vpc/v2/regions/fr-par/private-networks?page_size=100&page=1
 warn  [t] [sweep] private-network list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
 fetch GET /vpc/v2/regions/nl-ams/private-networks?page_size=100&page=1
 warn  [t] [sweep] private-network list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
+fetch GET /vpc/v2/regions/fr-par/vpcs?page_size=100&page=1
+warn  [t] [sweep] VPC list (fr-par) enumeration incomplete — residue past the last readable page cannot be ruled out
+fetch GET /vpc/v2/regions/nl-ams/vpcs?page_size=100&page=1
+warn  [t] [sweep] VPC list (nl-ams) enumeration incomplete — residue past the last readable page cannot be ruled out
 warn  [t] [sweep] REGRESSION: could not enumerate one or more Scaleway resource types — orphan check is incomplete, treat as a destroy regression.
 result {"counts":{"servers":0,"volumes":0,"placementGroups":0,"firewalls":0,"floatingIps":0,"networks":0,"s3Buckets":0,"sshKeys":0,"loadBalancers":0},"enumFailed":true}"
 `;

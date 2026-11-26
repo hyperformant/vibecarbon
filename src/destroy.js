@@ -934,15 +934,15 @@ const idKey = (id) => String(id);
  *     is by definition not ours. Defer + report, never delete.
  *   - a `foreignRegions` entry => some server we do not own is still running
  *     in that region, so a live cluster may own this volume. Defer + report.
- *   - a provider with `ORPHAN_VOLUME_REGION_GUESS` false (Vultr, whose
- *     volumes carry no tags) => a `pvc-in-cluster-region` match is the only
- *     signal left, and it proves nothing about the environment. Defer +
- *     report.
+ *   - a provider with `ORPHAN_VOLUME_REGION_GUESS` false (Vultr and
+ *     Scaleway, whose CSI volumes carry no tags) => a
+ *     `pvc-in-cluster-region` match is the only signal left, and it proves
+ *     nothing about the environment. Defer + report.
  * Deferrals are loud and land in the destroy summary with the exact volume
  * names, and the operator deletes them in the provider's console once no
  * live cluster owns them (the hint says so). No later vibecarbon command
- * collects one: nothing new proves whose it is by then, and on Vultr, whose
- * volumes carry no tags, nothing ever can.
+ * collects one: nothing new proves whose it is by then, and on Vultr and
+ * Scaleway, whose CSI volumes carry no tags, nothing ever can.
  *
  * ATTACHMENT ORDERING (2026-07-30 — six detached, unlabeled `pvc-*` volumes
  * survived a fully green Hetzner k8s run's final destroy). A volume that still
@@ -1086,7 +1086,7 @@ async function cleanupOrphanedVolumes(
     ) {
       return {
         code: 'no-owner-signal',
-        why: `${provider.constructor.NAME} volumes carry no tags, so only a captured id proves one is this environment's`,
+        why: `${provider.constructor.NAME} CSI volumes carry no tags, so only a captured id proves one is this environment's`,
       };
     }
     return null;
@@ -4003,7 +4003,8 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  * destroy time the saved address can be another project's. A provider whose
  * reserved IPs carry the k8s program's labels (`reservedIpLabelMatch`:
  * Linode by its tags, Vultr by its one label and the tags of the instance
- * holding it) is asked, and only an IP carrying this project's labels and
+ * holding it, Scaleway by its tags and those of the server holding it) is
+ * asked, and only an IP carrying this project's labels and
  * those of one of `stackEnvs` counts as ours. One of ours that is still
  * assigned (to a Linode or a Vultr instance, or any entity) is `held`: this
  * runs after the teardown, so whatever holds it is something the teardown
@@ -4293,12 +4294,12 @@ export async function sweepTaggedReservedIps({
  * that died before the cluster was ready (no kubeconfig) is swept just the
  * same.
  *
- * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode, Vultr), whose
+ * - On a provider with `K8S_DESTROY_BACKSTOP` (DigitalOcean, Linode, Vultr, Scaleway), whose
  *   `pulumi destroy` has been seen to skip them: the firewall and SSH key by
  *   name, each recorded reserved IP by address (releaseRecordedReservedIp),
  *   then the VPC last.
  * - On every provider whose reserved IPs carry the program's labels
- *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr): the IPs labelled for the
+ *   (`deleteReservedIpsByLabels`: Hetzner, Linode, Vultr, Scaleway): the IPs labelled for the
  *   stack that no record names (sweepTaggedReservedIps), before the VPC.
  *
  * Exported for unit testing (destroyK8sTier itself is not).

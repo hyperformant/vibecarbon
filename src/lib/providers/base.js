@@ -39,41 +39,61 @@ export function deleteFailure(providerName, status) {
 }
 
 /**
+ * The rows of a network listing read whole, for a delete by name: a network
+ * missing from part of the list is not proven gone, so a listing that
+ * stopped early throws, and the caller reports that it could not confirm it
+ * (deleteBackstopNetwork).
+ * @template T
+ * @param {{items: T[], complete: boolean, status?: number}} listing
+ * @param {string} what - the listing, as the error names it ('VPC')
+ * @returns {T[]}
+ * @throws when the listing is not complete
+ */
+export function networkListingWhole({ items, complete, status }, what) {
+  if (complete) return items;
+  throw new Error(
+    `the ${what} listing could not be read whole (${status ? `HTTP ${status}` : 'it stopped early'})`,
+  );
+}
+
+/**
+ * DELETE one listed network object, bare. A 2xx or 404 is gone (null). Any
+ * other answer is the provider refusing, most often because a server is
+ * still in the network: an ordering bug in the caller, never a not-found, so
+ * it comes back as the error for the caller to report as `apiError`.
+ * @param {{bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
+ * @param {string} endpoint - the object's path under API_BASE
+ * @returns {Promise<Error|null>}
+ */
+export async function deleteNetworkAt(provider, endpoint) {
+  try {
+    const res = await provider.bareRequest(endpoint, { method: 'DELETE' });
+    if (res.ok || res.status === 404) return null;
+    const body = await res.text().catch(() => '');
+    return new Error(`DELETE ${endpoint} failed: HTTP ${res.status} ${body}`.trim());
+  } catch (err) {
+    return err;
+  }
+}
+
+/**
  * The body of `deleteNetworkByName` on a provider whose VPCs each have a
  * `name` (listNetworksDetailed) and that deletes one at `DELETE /vpcs/{id}`
  * (DigitalOcean, Linode, Vultr). The VPC is the one whose name is exactly
- * `name`. A 2xx or 404 is deleted. Any other answer is the provider refusing,
- * most often because a server is still in the VPC: an ordering bug in the
- * caller, never a not-found, so it comes back as `apiError` for the caller
- * to report. A listing that cannot be read whole throws instead: a VPC
- * missing from part of the list is not proven gone, and the caller reports
- * that it could not confirm it (deleteBackstopNetwork).
+ * `name`. A 2xx or 404 is deleted; any other answer is `apiError`
+ * (deleteNetworkAt). A listing that cannot be read whole throws instead
+ * (networkListingWhole).
  * @param {{listNetworksDetailed: () => Promise<{items: Array<{id: string|number, name: string}>, complete: boolean, status?: number}>, bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
  * @param {string} name
  * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
  * @throws when the VPC listing cannot be read whole
  */
 export async function deleteVpcByName(provider, name) {
-  const { items: vpcs, complete, status } = await provider.listNetworksDetailed();
-  if (!complete) {
-    throw new Error(
-      `the VPC listing could not be read whole (${status ? `HTTP ${status}` : 'it stopped early'})`,
-    );
-  }
+  const vpcs = networkListingWhole(await provider.listNetworksDetailed(), 'VPC');
   const vpc = vpcs.find((v) => v.name === name);
   if (!vpc) return { deleted: false, everExisted: false, apiError: null };
-  try {
-    const res = await provider.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
-    if (res.ok || res.status === 404) return { deleted: true, everExisted: true, apiError: null };
-    const body = await res.text().catch(() => '');
-    return {
-      deleted: false,
-      everExisted: true,
-      apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
-    };
-  } catch (err) {
-    return { deleted: false, everExisted: true, apiError: err };
-  }
+  const apiError = await deleteNetworkAt(provider, `/vpcs/${vpc.id}`);
+  return { deleted: apiError === null, everExisted: true, apiError };
 }
 
 /**

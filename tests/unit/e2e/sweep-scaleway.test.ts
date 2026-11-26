@@ -252,6 +252,153 @@ describe('sweepOrphanedScalewayResources', () => {
     expect(counts.floatingIps).toBe(1);
   });
 
+  it("sweeps a k8s cluster's leftovers by prefix", async () => {
+    // scaleway-k8s.js names every resource from `<project>-<env>` and tags
+    // each node's flexible IP with the project and environment as two tags.
+    // Its CSI volumes carry no tags (scaleway-csi sets none), so an
+    // unattached one is reported, never deleted.
+    const deleteServer = vi.fn().mockResolvedValue(undefined);
+    const deleteVolume = vi.fn().mockResolvedValue(true);
+    const releaseFlexibleIP = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const k8sTags = (role: string) => ['project:acme', 'environment:s3', `role:${role}`];
+    const provider = fakeProvider({
+      listServersDetailed: vi.fn().mockResolvedValue({
+        items: [
+          { id: 'srv-1', name: 'acme-s3-master', zone: 'fr-par-1' },
+          { id: 'srv-2', name: 'acme-s3-db', zone: 'fr-par-1' },
+          { id: 'srv-3', name: 'acme-s3-worker-1', zone: 'fr-par-1' },
+          { id: 'srv-4', name: 'someone-elses-master', zone: 'fr-par-1' },
+        ],
+        complete: true,
+      }),
+      deleteServer,
+      listVolumesDetailed: vi.fn().mockResolvedValue({
+        items: [
+          {
+            id: 'vol-1',
+            name: 'pvc-01234567-89ab-cdef-0123-456789abcdef',
+            zone: 'fr-par-1',
+            server: null,
+            tags: [],
+          },
+        ],
+        complete: true,
+      }),
+      deleteVolume,
+      listFlexibleIPsDetailed: vi.fn().mockResolvedValue({
+        items: [
+          { id: 'ip-1', zone: 'fr-par-1', server: null, tags: k8sTags('master') },
+          { id: 'ip-2', zone: 'fr-par-1', server: null, tags: k8sTags('worker') },
+          { id: 'ip-3', zone: 'fr-par-1', server: null, tags: ['project:other', 'environment:s3'] },
+        ],
+        complete: true,
+      }),
+      releaseFlexibleIP,
+    });
+    const fetchImpl = fakeFetch({
+      '/zones/fr-par-1/security_groups': {
+        security_groups: [
+          { id: 'sg-1', name: 'acme-s3-firewall' },
+          { id: 'sg-2', name: 'Default security group', project_default: true },
+        ],
+      },
+      '/iam/v1alpha1/ssh-keys': {
+        ssh_keys: [
+          { id: 'key-1', name: 'acme-s3-fr-par-1-key' },
+          { id: 'key-2', name: 'laptop' },
+        ],
+      },
+      '/vpc/v2/regions/fr-par/private-networks': {
+        private_networks: [
+          { id: 'pn-1', name: 'acme-s3-network' },
+          { id: 'pn-2', name: 'other-network' },
+        ],
+      },
+      '/vpc/v2/regions/fr-par/vpcs': {
+        vpcs: [
+          { id: 'vpc-def', name: 'default', is_default: true },
+          { id: 'vpc-1', name: 'acme-s3-network' },
+          // Adversarial: a default VPC whose name carries the prefix stays.
+          { id: 'vpc-3', name: 'acme-default', is_default: true },
+          { id: 'vpc-2', name: 'other-network' },
+        ],
+      },
+    });
+
+    try {
+      const { counts, enumFailed } = await sweepOrphanedScalewayResources(TAG, 'acme', {
+        provider,
+        objectStorageByRegion: fakeStores(),
+        fetchImpl,
+      });
+
+      expect(deleteServer.mock.calls.map(([id]) => id)).toEqual(['srv-1', 'srv-2', 'srv-3']);
+      expect(provider.deleteFirewallByName).toHaveBeenCalledExactlyOnceWith('acme-s3-firewall');
+      expect(provider.deleteSSHKeyByName).toHaveBeenCalledExactlyOnceWith('acme-s3-fr-par-1-key');
+      expect(releaseFlexibleIP.mock.calls).toEqual([
+        ['ip-1', 'fr-par-1'],
+        ['ip-2', 'fr-par-1'],
+      ]);
+      const deletes = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+        .map(([url]) => String(url));
+      // The Private Network goes before its VPC: a VPC holding one cannot go.
+      expect(deletes).toEqual([
+        'https://api.scaleway.com/vpc/v2/regions/fr-par/private-networks/pn-1',
+        'https://api.scaleway.com/vpc/v2/regions/fr-par/vpcs/vpc-1',
+      ]);
+      expect(deleteVolume).not.toHaveBeenCalled();
+      expect(warn.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+        'Unattached CSI volume pvc-01234567-89ab-cdef-0123-456789abcdef carries no project=acme tag',
+      );
+      expect(counts).toMatchObject({
+        servers: 3,
+        volumes: 0,
+        firewalls: 1,
+        floatingIps: 2,
+        sshKeys: 1,
+        networks: 2,
+      });
+      expect(enumFailed).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a VPC delete Scaleway refuses fails the sweep, naming the VPC', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (init?.method === 'DELETE') return { ok: false, status: 412, json: async () => ({}) };
+      if (u.includes('/vpc/v2/regions/nl-ams/vpcs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ vpcs: [{ id: 'vpc-1', name: 'acme-s3-network' }] }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    try {
+      const { counts } = await sweepOrphanedScalewayResources(TAG, 'acme', {
+        provider: fakeProvider(),
+        objectStorageByRegion: fakeStores(),
+        fetchImpl,
+      });
+      expect(counts.networks).toBe(0);
+      expect(warn.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+        'VPC vpc-1 delete failed',
+      );
+      const deletes = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+        .map(([u]) => String(u));
+      expect(deletes).toEqual(['https://api.scaleway.com/vpc/v2/regions/nl-ams/vpcs/vpc-1']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('sweeps prefix-matching buckets across BOTH Object Storage regions', async () => {
     const frDelete = vi.fn().mockResolvedValue({ objectsRemoved: 3 });
     const amsDelete = vi.fn().mockResolvedValue({ objectsRemoved: 1 });

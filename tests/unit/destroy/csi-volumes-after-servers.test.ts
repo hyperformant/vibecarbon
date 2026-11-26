@@ -261,6 +261,7 @@ const PROVIDERS: Array<[string, string, boolean]> = [
   ['hetzner', 'Hetzner', false],
   ['linode', 'Linode', true],
   ['vultr', 'Vultr', true],
+  ['scaleway', 'Scaleway', true],
 ];
 
 // The rows stand for the real classes: every provider with k8s code, with its
