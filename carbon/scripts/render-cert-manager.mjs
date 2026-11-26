@@ -67,13 +67,16 @@ export const CERT_MANAGER_DEPLOYMENTS = Object.freeze([
 ]);
 
 /**
- * Every cert-manager Deployment runs on the control-plane node. The
- * in-cluster `kubernetes` Endpoints advertises the master's PUBLIC IP (k3s
- * installs with --node-ip=<public>), and the cloud firewall admits public
- * :6443 from operator CIDRs only, so an apiserver-dependent pod scheduled
- * onto any other node times out on 10.43.0.1 forever (RCA 2026-07-17 e4 rig:
- * cainjector CrashLoopBackOff, webhook readiness 500). The toleration rides
- * along for distros that taint the control plane.
+ * Every cert-manager Deployment runs on the control-plane node. Every master
+ * installs k3s with --advertise-address on its private IP (Hetzner 10.0.1.1
+ * in master-init.sh; the VPC IP in do-master-init.sh and
+ * linode-master-init.sh), and the private range is open in every cluster
+ * firewall, so the `kubernetes` Endpoints is reachable from any node. The pin
+ * was added for RCA 2026-07-17 (e4 rig: the Endpoints then carried the public
+ * IP, cainjector CrashLoopBackOff, webhook readiness 500), which the private
+ * advertise address fixed. It stays because removing it changes scheduling on
+ * every cluster for no gain and would need a real-server run. The toleration
+ * rides along for distros that taint the control plane.
  */
 const CONTROL_PLANE_PIN = Object.freeze({
   nodeSelector: { 'node-role.kubernetes.io/control-plane': 'true' },
