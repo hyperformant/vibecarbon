@@ -1111,7 +1111,7 @@ describe('K8S_DESTROY_BACKSTOP census', () => {
   // observed to leak them. Every other provider that offers k8s, or has its
   // k8s code built ahead of the tier, must opt in.
   it('every provider that supports k8s sets the flag, or is Hetzner', () => {
-    const providers = k8sCensusProviders() as unknown as Array<
+    const providers = k8sCensusProviders('destroy') as unknown as Array<
       [string, { K8S_DESTROY_BACKSTOP?: boolean }]
     >;
     expect(providers.map(([id]) => id)).toContain('vultr');

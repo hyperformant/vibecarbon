@@ -1,28 +1,43 @@
 /**
- * Providers whose k8s code is landing before their k8s tier is sold, so the
- * censuses that pick providers by `SUPPORTED_TIERS.includes('k8s')` walk that
- * code the day it lands instead of the day the tier turns on. A census
- * switches to k8sCensusProviders() once the code it checks exists for every
- * entry here. The guard (tests/unit/providers/k8s-built-ahead.test.ts) fails
- * for an entry that is not a registered provider or already sells k8s, so the
- * list empties when the tier turns on.
+ * Providers whose k8s code is landing before their k8s tier is sold, part by
+ * part, so the censuses that pick providers by `SUPPORTED_TIERS.includes('k8s')`
+ * walk each part the day it lands instead of the day the tier turns on. Every
+ * census names the part it checks: one that runs a boot script takes 'boot',
+ * a Pulumi program 'program', the CSI manifest or `k8sCloudSecrets` 'csi',
+ * and destroy code 'destroy'. The guard
+ * (tests/unit/providers/k8s-built-ahead.test.ts) fails for an entry that is
+ * not a registered provider, already sells k8s or names an unknown part, and
+ * for a census that names no part, so the table empties when the tier turns
+ * on.
  */
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 
-// Empty since Vultr's k8s tiers turned on (2026-11-26). Kept with the
-// mechanism: Scaleway's k8s code lands next, ahead of its tier.
-export const K8S_BUILT_AHEAD: readonly string[] = [];
+export const K8S_PARTS = ['boot', 'program', 'csi', 'destroy'] as const;
+export type K8sPart = (typeof K8S_PARTS)[number];
+
+// Scaleway's k8s code lands part by part (Part C): its boot scripts first,
+// then its program, its CSI driver and its destroy code, each adding its part.
+export const K8S_BUILT_AHEAD: Readonly<Record<string, readonly K8sPart[]>> = {
+  scaleway: ['boot'],
+};
 
 type Entry = [string, (typeof PROVIDERS)[keyof typeof PROVIDERS]];
 
 /**
- * The `[id, ProviderClass]` entries of PROVIDERS that sell k8s, then those in
- * K8S_BUILT_AHEAD, each group in registry order.
+ * The `[id, ProviderClass]` entries of PROVIDERS that sell k8s, then those
+ * built ahead whose parts hold `part`, each group in registry order. Throws
+ * on a missing or unknown part: vitest does not type-check, so a census left
+ * without one must fail loudly, never quietly walk the sellers alone.
  */
-export function k8sCensusProviders(): Entry[] {
+export function k8sCensusProviders(part: K8sPart): Entry[] {
+  if (!(K8S_PARTS as readonly unknown[]).includes(part)) {
+    throw new Error(
+      `k8sCensusProviders: part must be one of ${K8S_PARTS.join(', ')}, not ${JSON.stringify(part)}`,
+    );
+  }
   const entries = Object.entries(PROVIDERS) as Entry[];
   return [
     ...entries.filter(([, P]) => P.SUPPORTED_TIERS.includes('k8s')),
-    ...entries.filter(([id]) => K8S_BUILT_AHEAD.includes(id)),
+    ...entries.filter(([id]) => (K8S_BUILT_AHEAD[id] ?? []).includes(part)),
   ];
 }

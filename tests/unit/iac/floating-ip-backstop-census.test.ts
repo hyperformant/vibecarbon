@@ -70,7 +70,7 @@ type AnyProvider = {
 };
 const providers = Object.entries(PROVIDERS as unknown as Record<string, AnyProvider>);
 /** The k8s sellers, and the programs built ahead of their tier. */
-const k8sProviders = k8sCensusProviders() as unknown as [string, AnyProvider][];
+const k8sProviders = k8sCensusProviders('program') as unknown as [string, AnyProvider][];
 
 const LABELS = { project: 'acme', environment: 'prod' };
 const common = {

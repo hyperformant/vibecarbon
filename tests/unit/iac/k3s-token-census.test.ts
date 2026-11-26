@@ -60,7 +60,7 @@ const config = (location: string) => ({
   k3sToken: 'SENTINEL-k3s-token',
 });
 
-const k8sProviders = k8sCensusProviders();
+const k8sProviders = k8sCensusProviders('program');
 
 describe('no k8s program makes its own k3s token (census)', () => {
   it('walks every k8s program on disk', () => {

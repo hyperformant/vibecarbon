@@ -96,7 +96,7 @@ const READERS: Record<string, string[]> = Object.fromEntries(
   ]),
 );
 
-const K8S_PROVIDERS = k8sCensusProviders();
+const K8S_PROVIDERS = k8sCensusProviders('csi');
 
 const { run, must } = dockerRunner({ timeoutMs: LONG });
 

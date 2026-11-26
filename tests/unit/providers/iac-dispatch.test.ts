@@ -37,7 +37,8 @@ const ROWS = Object.entries(PROVIDERS).flatMap(([id, Provider]) =>
     method,
     // A k8s program built ahead of its tier is dispatched already.
     built:
-      Provider.SUPPORTED_TIERS.includes(tier) || (kind === 'k8s' && K8S_BUILT_AHEAD.includes(id)),
+      Provider.SUPPORTED_TIERS.includes(tier) ||
+      (kind === 'k8s' && (K8S_BUILT_AHEAD[id] ?? []).includes('program')),
     program: `${PROGRAMS_DIR}/${id}-${kind}.js`,
   })),
 );

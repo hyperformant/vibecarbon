@@ -507,22 +507,56 @@ export class ScalewayProvider extends BaseProvider {
     return ScalewayProvider.DEFAULT_TYPE;
   }
 
-  // ── k8s statics — compose-only, provider-specific throws ────────────────
+  // ── k8s boot user-data (carbon/cloud-init/k3s/scaleway-*-init.sh) ───────
 
-  /** @returns {Promise<never>} */
-  static async getK8sMasterUserData() {
-    throw new Error("Scaleway's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s master boot script. No API token: deployK3s hands the
+   * cluster its cloud credential itself (applyCloudSecrets, k8sCloudSecrets).
+   * The node finds its own identity and Private Network interface at boot
+   * (_scaleway-metadata.sh), so no address or subnet is rendered in.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   * }} vars - The template's whole var set.
+   * @returns {Promise<string>}
+   */
+  static async getK8sMasterUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('scaleway-master-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sWorkerUserData() {
-    throw new Error("Scaleway's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s worker boot script. The autoscaler's workers boot from
+   * this same render (renderCarbonAutoscalerConfig).
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - master_ip is the master's Private Network address.
+   * @returns {Promise<string>}
+   */
+  static async getK8sWorkerUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('scaleway-worker-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sDbUserData() {
-    throw new Error("Scaleway's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s database-node boot script: the worker script loaded as
+   * the db role, which adds the dedicated=db label and taint at join time
+   * (AGENT_ROLES in cloud-init.js).
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - Same set as getK8sWorkerUserData.
+   * @returns {Promise<string>}
+   */
+  static async getK8sDbUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('scaleway-worker-init.sh', { role: 'db' }), vars);
   }
+
+  // ── k8s program: not built yet, refuses by name ─────────────────────────
 
   /** @returns {Promise<never>} */
   static async getK8sProgram() {

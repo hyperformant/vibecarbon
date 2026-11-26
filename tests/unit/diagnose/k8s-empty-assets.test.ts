@@ -61,7 +61,7 @@ const valueAfter = (args: string[], flag: string) => {
   return i === -1 ? undefined : args[i + 1];
 };
 
-const K8S_PROVIDERS = k8sCensusProviders() as unknown as Array<
+const K8S_PROVIDERS = k8sCensusProviders('csi') as unknown as Array<
   [string, { NAME: string; K8S_ASSETS: Record<string, string> }]
 >;
 

@@ -58,7 +58,7 @@ type K8sProvider = {
 };
 
 /** The k8s sellers, and the programs built ahead of their tier. */
-const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+const k8sProviders = k8sCensusProviders('program') as unknown as [string, K8sProvider][];
 
 describe('k8s program outputs match K8S_FLOATING_IP', () => {
   it('there are k8s providers on both sides of the flag', () => {

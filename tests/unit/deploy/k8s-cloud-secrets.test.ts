@@ -295,7 +295,7 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
   });
 }
 
-const K8S_PROVIDERS = k8sCensusProviders();
+const K8S_PROVIDERS = k8sCensusProviders('csi');
 const OTHER_PROVIDERS = Object.entries(PROVIDERS).filter(
   ([id]) => !K8S_PROVIDERS.some(([k8sId]) => k8sId === id),
 );

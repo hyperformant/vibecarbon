@@ -88,6 +88,8 @@ describe('loadCloudInit include directive', () => {
       'linode-worker-init.sh',
       'vultr-master-init.sh',
       'vultr-worker-init.sh',
+      'scaleway-master-init.sh',
+      'scaleway-worker-init.sh',
     ]) {
       expect(loadCloudInit(name), name).not.toMatch(/^#\s*@include\b/m);
     }
@@ -96,6 +98,7 @@ describe('loadCloudInit include directive', () => {
       'do-worker-init.sh',
       'linode-worker-init.sh',
       'vultr-worker-init.sh',
+      'scaleway-worker-init.sh',
     ]) {
       expect(loadCloudInit(name, { role: 'db' }), name).not.toMatch(/^#\s*@include\b/m);
     }
@@ -120,7 +123,13 @@ describe('loadCloudInit roles', () => {
     '--node-taint="dedicated=db:NoSchedule"',
   ];
 
-  it.each(['worker-init.sh', 'do-worker-init.sh', 'linode-worker-init.sh', 'vultr-worker-init.sh'])(
+  it.each([
+    'worker-init.sh',
+    'do-worker-init.sh',
+    'linode-worker-init.sh',
+    'vultr-worker-init.sh',
+    'scaleway-worker-init.sh',
+  ])(
     '%s: the worker load fills every role slot with the worker, the db load with the db node',
     (name) => {
       const worker = loadCloudInit(name);

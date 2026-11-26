@@ -14,6 +14,7 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { csiImageRewriteVars, loadCloudInit, renderScript } from '../../src/lib/iac/cloud-init.js';
+import { CSI_SIDECAR_MIRRORS } from '../../src/lib/images.js';
 import { PROVIDERS } from '../../src/lib/providers/index.js';
 import { k8sCensusProviders } from './k8s-built-ahead.js';
 
@@ -51,8 +52,8 @@ export function loadBootScript(file: string, role: Role): string | null {
   }
 }
 
-/** The providers with a k8s tier, and those built ahead of it, by id. */
-const k8sProviderIds = (): string[] => k8sCensusProviders().map(([id]) => id);
+/** The providers with a k8s tier, and those whose boot scripts are built ahead of it, by id. */
+const k8sProviderIds = (): string[] => k8sCensusProviders('boot').map(([id]) => id);
 
 /**
  * Every k8s provider and node role, with its user data (nothing
@@ -67,7 +68,12 @@ export async function k8sBootScripts(): Promise<
     const P = PROVIDERS[provider] as unknown as UserDataGetters;
     for (const role of ROLES) {
       const userData = await P[GETTER[role]]({});
-      const added = role === 'master' ? csiImageRewriteVars(provider) : {};
+      // A provider built ahead of its CSI part has no image rewrites yet
+      // (csiImageRewriteVars throws), and its master names none.
+      const added =
+        role === 'master' && Object.hasOwn(CSI_SIDECAR_MIRRORS, provider)
+          ? csiImageRewriteVars(provider)
+          : {};
       const files = bootScriptFiles().filter((file) => {
         const script = loadBootScript(file, role);
         return script !== null && renderScript(script, added) === userData;

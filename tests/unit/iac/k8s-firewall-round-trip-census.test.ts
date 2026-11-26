@@ -172,7 +172,7 @@ const INLINE: Record<
   },
 };
 
-const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+const k8sProviders = k8sCensusProviders('program') as unknown as [string, K8sProvider][];
 const inlineProviders = k8sProviders.filter(([, P]) => !P.K8S_OPERATOR_RULES_AFTER_UP);
 const restOnlyProviders = k8sProviders.filter(([, P]) => P.K8S_OPERATOR_RULES_AFTER_UP);
 

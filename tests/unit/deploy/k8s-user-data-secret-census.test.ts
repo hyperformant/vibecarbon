@@ -106,10 +106,12 @@ function userDataOf(inputs: Record<string, unknown>): { text: string; sealed: bo
 }
 
 /**
- * Whose boot scripts are walked and whose programs are run: the k8s providers
- * and those built ahead of their tier.
+ * Whose boot scripts are walked: the k8s providers and those whose boot
+ * scripts are built ahead of their tier.
  */
-const k8sProviders = k8sCensusProviders() as unknown as [string, K8sProvider][];
+const bootProviders = k8sCensusProviders('boot') as unknown as [string, K8sProvider][];
+/** Whose programs are run: the k8s providers and those whose program is built ahead. */
+const programProviders = k8sCensusProviders('program') as unknown as [string, K8sProvider][];
 
 describe('the k3s boot scripts take no credential but the k3s join token', () => {
   const scripts = readdirSync(K3S_DIR)
@@ -120,8 +122,8 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
     // From the providers: what each renders is one of these templates, so
     // the walk below covers every node of every k8s provider.
     const boot = await k8sBootScripts();
-    expect(boot).toHaveLength(k8sProviders.length * ROLES.length);
-    expect(k8sProviders.length).toBeGreaterThan(0);
+    expect(boot).toHaveLength(bootProviders.length * ROLES.length);
+    expect(bootProviders.length).toBeGreaterThan(0);
     const names = scripts.map(([f]) => f);
     for (const { provider, role, files } of boot) {
       expect(files, `${provider}'s ${role}`).toHaveLength(1);
@@ -145,10 +147,10 @@ describe('the k3s boot scripts take no credential but the k3s join token', () =>
 
 describe('the k8s programs record no provider API token', () => {
   it('there are k8s providers to check', () => {
-    expect(k8sProviders.length).toBeGreaterThan(0);
+    expect(programProviders.length).toBeGreaterThan(0);
   });
 
-  it.each(k8sProviders)('%s', async (_id, Provider) => {
+  it.each(programProviders)('%s', async (_id, Provider) => {
     registered.length = 0;
     const node = Provider.DEFAULT_K8S_NODE_TYPE;
     const program = await Provider.getK8sProgram({
