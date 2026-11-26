@@ -215,11 +215,35 @@ describe('VultrProvider.setFirewallRules: a minimal diff', () => {
     expect(live(api)).toEqual(wanted([SSH_B]));
   });
 
-  it('refuses an empty target, which would leave the group unenforced', async () => {
+  it('refuses an empty target on a group with rules, which would leave it unenforced', async () => {
     const api = group([HTTPS, SSH_A]);
-    await expect(new VultrProvider('t').setFirewallRules('gid-1', [])).rejects.toThrow(/no rules/);
+    await expect(new VultrProvider('t').setFirewallRules('gid-1', [])).rejects.toThrow(
+      /delete every rule/,
+    );
     expect(api.calls).toEqual([]);
     expect(api.rules.size).toBe(2);
+  });
+
+  // A deploy killed between the group's create and its first rule's leaves a
+  // group with none. The retry's access push (a skeleton environment has no
+  // record, so its gate pushes) finds nothing to keep and no operator port,
+  // so its target is empty too. That changes nothing, and must not fail, or
+  // every retry would stop there until a destroy.
+  it('an empty target on a group with no rules does nothing', async () => {
+    const api = group([]);
+    await new VultrProvider('t').setFirewallRules('gid-1', []);
+    expect(api.calls).toEqual([]);
+  });
+
+  it('an access push to the group a killed deploy left with no rules succeeds and writes nothing', async () => {
+    const api = group([]);
+    expect(
+      await new VultrProvider('t').applyOperatorCidrs({
+        firewallName: 'acme-prod-firewall',
+        cidrs: ['203.0.113.5/32'],
+      }),
+    ).toBe(true);
+    expect(api.calls).toEqual([]);
   });
 
   it('a target naming one rule twice makes it once', async () => {
@@ -259,5 +283,115 @@ describe('VultrProvider.setFirewallRules: a minimal diff', () => {
     await new VultrProvider('t').setFirewallRules('gid-1', target);
     expect(live(api)).toEqual(wanted(target));
     expect(api.state.emptied).toBe(false);
+  });
+});
+
+// access.js accepts an IPv4 CIDR with host bits (203.0.113.5/24) and IPv6 in
+// any spelling. Matched verbatim, a rule Vultr stores in another form is
+// never found again: every later push POSTs it once more, and Vultr refuses
+// it as already defined. Both sides are matched by their canonical network.
+describe('VultrProvider.setFirewallRules matches a network however it is spelled', () => {
+  const op = (subnet: string, size: number, port = '22') => ({
+    ip_type: subnet.includes(':') ? 'v6' : 'v4',
+    protocol: 'tcp',
+    subnet,
+    subnet_size: size,
+    port,
+    notes: `operator-${port}`,
+  });
+  function group(live: Record<string, unknown>[]) {
+    const api = vultrFirewallApi({ groupId: 'gid-1', description: 'acme-prod-firewall' });
+    for (const r of live) {
+      if (!api.create(r)) throw new Error(`fixture refused: ${JSON.stringify(r)}`);
+    }
+    api.calls.length = 0;
+    fetchWithRetry.mockImplementation(api.fetch);
+    return api;
+  }
+
+  it.each([
+    ['v4 host bits, read back zeroed', '203.0.113.5/24', op('203.0.113.0', 24)],
+    ['v4 zeroed, read back with host bits', '203.0.113.0/24', op('203.0.113.5', 24)],
+    ['v6 upper case and uncompressed', '2001:DB8:0:0:0:0:0:1/128', op('2001:db8::1', 128)],
+    ['v6 leading zeros', '2001:0db8::0001/128', op('2001:db8::1', 128)],
+    ['v6 host bits', '2001:db8:abcd:12::5/48', op('2001:db8:abcd::', 48)],
+    ['v6 read back uncompressed', '2001:db8::1/128', op('2001:0DB8:0000::1', 128)],
+  ])('%s: no write', async (_case, cidr, stored) => {
+    const https = {
+      ip_type: 'v4',
+      protocol: 'tcp',
+      subnet: '0.0.0.0',
+      subnet_size: 0,
+      port: '443',
+    };
+    const api = group([{ ...https, notes: 'https' }, stored]);
+    expect(
+      await new VultrProvider('t').applyOperatorCidrs({
+        firewallName: 'acme-prod-firewall',
+        cidrs: [cidr],
+      }),
+    ).toBe(true);
+    expect(api.calls).toEqual([]);
+  });
+
+  it('two spellings of one network in the list make one rule', async () => {
+    const api = group([op('198.51.100.9', 32, '443')]);
+    await new VultrProvider('t').applyOperatorCidrs({
+      firewallName: 'acme-prod-firewall',
+      cidrs: ['203.0.113.5/24', '203.0.113.9/24'],
+      ports: ['22'],
+    });
+    expect(api.calls.map((c) => c.method)).toEqual(['POST']);
+  });
+});
+
+// The rules a rewrite keeps come from findFirewallByName's listing. Built
+// from part of it, the rewrite would hand setFirewallRules (which lists
+// every rule) a set missing the rest, and the minimal diff would delete
+// them: real rules, silently.
+describe('a rewrite refuses a firewall whose rules listing broke off', () => {
+  const HTTPS = { ip_type: 'v4', protocol: 'tcp', subnet: '0.0.0.0', subnet_size: 0, port: '443' };
+  const VPC = { ip_type: 'v4', protocol: 'tcp', subnet: '10.181.32.0', subnet_size: 24 };
+  const SSH = {
+    ip_type: 'v4',
+    protocol: 'tcp',
+    subnet: '203.0.113.5',
+    subnet_size: 32,
+    port: '22',
+  };
+  function partial() {
+    const api = vultrFirewallApi({ groupId: 'gid-1', description: 'acme-prod-firewall' });
+    api.create({ ...HTTPS, notes: 'https' });
+    api.create({ ...VPC, port: '1:65535', notes: 'vpc-tcp' });
+    api.create({ ...SSH, notes: 'operator-22' });
+    api.calls.length = 0;
+    // Only the read the rewrite builds from breaks off; the next is whole.
+    api.state.partialListings = 1;
+    fetchWithRetry.mockImplementation(api.fetch);
+    return api;
+  }
+
+  it.each([
+    ['an access push', {}],
+    ["the deploy's push after the up", { ports: ['22', '6443'] }],
+  ])('%s: refuses, saying why, and writes nothing', async (_case, extra) => {
+    const api = partial();
+    await expect(
+      new VultrProvider('t').applyOperatorCidrs({
+        firewallName: 'acme-prod-firewall',
+        cidrs: ['198.51.100.9/32'],
+        ...extra,
+      }),
+    ).rejects.toThrow(/acme-prod-firewall.*incomplete/);
+    expect(api.calls).toEqual([]);
+    expect(api.rules.size).toBe(3);
+  });
+
+  it('the replication rule refuses too', async () => {
+    const api = partial();
+    const provider = new VultrProvider('t');
+    const fw = await provider.findFirewallByName('acme-prod-firewall');
+    expect(() => provider.buildReplicationFirewallRules(fw, '198.51.100.7')).toThrow(/incomplete/);
+    expect(api.calls).toEqual([]);
   });
 });

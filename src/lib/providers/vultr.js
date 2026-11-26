@@ -25,6 +25,7 @@
  * API Documentation: https://www.vultr.com/api/
  */
 
+import { canonicalCidr } from '../cidr.js';
 import { fetchWithRetry } from '../fetch-retry.js';
 import {
   BaseProvider,
@@ -55,12 +56,34 @@ const WG_PORT = '51821';
 /**
  * What Vultr treats as one firewall rule: it refuses a second with the same
  * fields. Read rows and create bodies give the same key (an icmp rule reads
- * back with port '').
+ * back with port ''). The network is compared canonically (canonicalCidr):
+ * `vibecarbon access` takes an IPv4 CIDR with host bits and IPv6 in any
+ * spelling, and Vultr may read either back in another form. Matched
+ * verbatim, such a rule is never found again, and every push would POST it
+ * once more, which Vultr refuses as already defined.
  * @param {{ip_type: string, protocol: string, subnet: string, subnet_size: number, port?: string}} r
  * @returns {string}
  */
 function vultrRuleKey(r) {
-  return [r.ip_type, r.protocol, `${r.subnet}/${r.subnet_size}`, r.port ?? ''].join(' ');
+  const cidr = `${r.subnet}/${r.subnet_size}`;
+  return [r.ip_type, r.protocol, canonicalCidr(cidr) ?? cidr, r.port ?? ''].join(' ');
+}
+
+/**
+ * Refuse to build a rewrite from a firewall whose rules listing broke off.
+ * setFirewallRules lists every rule and deletes those its target lacks, so
+ * a target built from part of the list would delete the rest.
+ * @param {{description?: string, id?: string, rulesComplete?: boolean}} firewall
+ *   the group findFirewallByName returns
+ */
+function requireCompleteRules(firewall) {
+  if (firewall.rulesComplete === false) {
+    throw new Error(
+      `Vultr's rules listing for firewall ${firewall.description ?? firewall.id} came back ` +
+        'incomplete, so its rules were left as they are: a rewrite built from part of the ' +
+        'list would delete the rules it did not see. Run the command again.',
+    );
+  }
 }
 
 /**
@@ -832,9 +855,10 @@ export class VultrProvider extends BaseProvider {
    * Look up a firewall GROUP by its exact description (Vultr's identity
    * field for groups). The returned object is AUGMENTED with `rules` (the
    * group's inbound rule list, fetched here) so
-   * buildReplicationFirewallRules/applyOperatorCidrs can operate on it —
+   * buildReplicationFirewallRules/applyOperatorCidrs can operate on it:
    * Vultr keeps rules as separate sub-resources, unlike the siblings'
-   * embedded rule arrays.
+   * embedded rule arrays. `rulesComplete` is false when that listing broke
+   * off; both rule builders then refuse (requireCompleteRules).
    * @param {string} name
    * @returns {Promise<object|null>}
    */
@@ -845,7 +869,7 @@ export class VultrProvider extends BaseProvider {
     if (!group) return null;
 
     const rulesWalk = await this._walkCursor(`/firewalls/${group.id}/rules`, 'firewall_rules');
-    return { ...group, rules: rulesWalk.items };
+    return { ...group, rules: rulesWalk.items, rulesComplete: rulesWalk.complete };
   }
 
   /**
@@ -861,12 +885,14 @@ export class VultrProvider extends BaseProvider {
    * an empty group lets every packet in. So the group never empties on the
    * way (between the creates and the deletes it holds both sets, the old
    * one's addresses still let in for those few calls), and an empty set is
-   * refused. It ends where the delete-all-then-recreate it took over from
-   * ended: the group holds exactly the set given.
+   * refused on a group that has rules (on one with none it is already
+   * true, and nothing is done). It ends where the delete-all-then-recreate
+   * it took over from ended: the group holds exactly the set given.
    *
    * A rule is matched on the fields Vultr refuses to repeat (ip_type,
-   * protocol, subnet, subnet_size, port): a set naming one twice makes it
-   * once, and a live rule matching one keeps its notes.
+   * protocol, the network, port; vultrRuleKey, which compares the network
+   * canonically): a set naming one twice makes it once, and a live rule
+   * matching one keeps its notes.
    * @param {string} firewallId - group id
    * @param {object[]} rules - full INBOUND rule set, Vultr shape
    *   {ip_type, protocol, port, subnet, subnet_size, notes?}; read rows work
@@ -905,17 +931,22 @@ export class VultrProvider extends BaseProvider {
         ...(r.notes ? { notes: r.notes } : {}),
       };
     });
-    if (wanted.length === 0) {
-      throw new Error(
-        `Refusing to leave Vultr firewall ${firewallId} with no rules: Vultr does not ` +
-          'enforce a group with none, so its servers would take traffic on every port.',
-      );
-    }
 
     const existing = await this._walkCursor(`/firewalls/${firewallId}/rules`, 'firewall_rules');
     if (!existing.complete) {
       throw new Error(
         `Vultr firewall ${firewallId} rules listing incomplete, refusing a partial replace`,
+      );
+    }
+    // An empty set on a group with no rules is already true: a deploy killed
+    // between the group's create and its first rule's leaves one, and the
+    // retry's access push finds nothing to write. On a group with rules it
+    // would delete them all.
+    if (wanted.length === 0) {
+      if (existing.items.length === 0) return;
+      throw new Error(
+        `Refusing to delete every rule of Vultr firewall ${firewallId}: Vultr does not ` +
+          'enforce a group with none, so its servers would take traffic on every port.',
       );
     }
 
@@ -967,6 +998,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {object[]|null}
    */
   buildReplicationFirewallRules(firewall, peerIp) {
+    requireCompleteRules(firewall);
     const rules = replaceWireguardPeerRules(firewall.rules || [], peerIp, {
       isWireguardRule: (r) => r.protocol === 'udp' && String(r.port) === WG_PORT,
       admitsOnlyPeer: (r, ip) => r.subnet === ip && Number(r.subnet_size) === 32,
@@ -989,7 +1021,8 @@ export class VultrProvider extends BaseProvider {
    * the locked ones the group has rules on, plus `ports`: a k8s cluster's
    * group has neither 22 nor 6443 until the deploy writes them after its up
    * (writeOperatorRulesAfterUp, K8S_OPERATOR_RULES_AFTER_UP). The write is
-   * setFirewallRules' minimal diff, so an unchanged rule keeps its id.
+   * setFirewallRules' minimal diff, so an unchanged rule keeps its id. A
+   * group whose rules listing broke off is refused (requireCompleteRules).
    * @param {{firewallName: string, cidrs: string[], ports?: string[]}} args
    * @returns {Promise<boolean>} true if found and updated
    */
@@ -1003,6 +1036,7 @@ export class VultrProvider extends BaseProvider {
     }
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
+    requireCompleteRules(fw);
 
     const kept = (fw.rules || [])
       .filter((r) => !(r.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(String(r.port))))

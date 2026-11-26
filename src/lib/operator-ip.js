@@ -32,6 +32,7 @@
  *     stderr, warn-and-continue form (`shell`, `diagnose`, `status`)
  */
 
+import { ipv4ToInt, ipv6ToBigInt } from './cidr.js';
 import { readProjectConfigFile, updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
@@ -131,36 +132,6 @@ export function cidrContainsIp(cidr, ip, version) {
   if (bits === 128) return baseNum === ipNum;
   const shift = BigInt(128 - bits);
   return baseNum >> shift === ipNum >> shift;
-}
-
-function ipv4ToInt(ip) {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return null;
-  let n = 0;
-  for (const p of parts) {
-    const num = Number(p);
-    if (!Number.isInteger(num) || num < 0 || num > 255) return null;
-    n = (n << 8) | num;
-  }
-  return n >>> 0;
-}
-
-function ipv6ToBigInt(ip) {
-  const halves = ip.split('::');
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(':') : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
-  if (head.length + tail.length > 8) return null;
-  if (halves.length === 1 && head.length !== 8) return null;
-  const fillCount = halves.length === 2 ? 8 - head.length - tail.length : 0;
-  const groups = [...head, ...new Array(fillCount).fill('0'), ...tail];
-  if (groups.length !== 8) return null;
-  let result = 0n;
-  for (const g of groups) {
-    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
-    result = (result << 16n) | BigInt(Number.parseInt(g, 16));
-  }
-  return result;
 }
 
 // ============================================================================

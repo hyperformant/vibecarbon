@@ -8,6 +8,9 @@
  *
  * `emptied` records whether a DELETE ever left the group with no rule: Vultr
  * does not enforce a group that has none, so its nodes would be open.
+ * `partialListings` makes that many of the next rules listings break off
+ * after their first page: one rule, then a 503 for the next page. With 1,
+ * the read a rewrite builds from is partial and the one after it is whole.
  */
 
 /** A rule as Vultr's rules listing returns it. */
@@ -45,7 +48,7 @@ export function vultrFirewallApi({
   let nextId = 1;
   const rules = new Map<number, VultrRuleRow>();
   const calls: { method: 'POST' | 'DELETE'; id: number; rule: string }[] = [];
-  const state = { emptied: false };
+  const state = { emptied: false, partialListings: 0 };
 
   /** Make a rule, as Vultr's create endpoint does; null when it refuses. */
   function create(body: Record<string, unknown>): VultrRuleRow | null {
@@ -75,12 +78,16 @@ export function vultrFirewallApi({
 
   async function fetch(url: string, init?: RequestInit) {
     const method = init?.method ?? 'GET';
-    const path = url.startsWith(API) ? url.slice(API.length).split('?')[0] : url;
+    const [path, query = ''] = (url.startsWith(API) ? url.slice(API.length) : url).split('?');
     if (method === 'GET' && path === '/firewalls') {
       return json({ firewall_groups: [{ id: groupId, description }], meta: {} });
     }
     if (method === 'GET' && path === `/firewalls/${groupId}/rules`) {
-      return json({ firewall_rules: [...rules.values()].map((r) => ({ ...r })), meta: {} });
+      const rows = [...rules.values()].map((r) => ({ ...r }));
+      if (new URLSearchParams(query).get('cursor')) return json({ error: 'unavailable' }, 503);
+      if (state.partialListings === 0) return json({ firewall_rules: rows, meta: {} });
+      state.partialListings -= 1;
+      return json({ firewall_rules: rows.slice(0, 1), meta: { links: { next: 'page-2' } } });
     }
     if (method === 'POST' && path === `/firewalls/${groupId}/rules`) {
       const row = create(JSON.parse(String(init?.body)));
