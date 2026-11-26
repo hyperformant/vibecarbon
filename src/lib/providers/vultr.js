@@ -726,14 +726,24 @@ export class VultrProvider extends BaseProvider {
    * @param {string|number} [config.sshKeyId] - single-entry fallback
    * @param {object} [config.labels]
    * @param {string} [config.userData] - RAW cloud-init YAML; base64'd here
-   * @param {(string|number)[]} [config.networks] - interface parity; Vultr
-   *   compose instances join no VPC (documented no-op)
+   * @param {(string|number)[]} [config.networks] - VPC ids; each becomes
+   *   `attach_vpc` (the autoscaler passes the cluster VPC; compose passes none)
    * @param {(string|number)[]} [config.firewalls]
    * @returns {Promise<{id: string, server: object, reused?: boolean}>}
    */
   async createServer(config) {
-    const { name, region, serverType, image, sshKeys, sshKeyId, labels, userData, firewalls } =
-      config;
+    const {
+      name,
+      region,
+      serverType,
+      image,
+      sshKeys,
+      sshKeyId,
+      labels,
+      userData,
+      firewalls,
+      networks,
+    } = config;
 
     const [existing] = await this.findServersByName(name);
     if (existing) {
@@ -756,6 +766,7 @@ export class VultrProvider extends BaseProvider {
 
     const body = {
       label: name,
+      hostname: name,
       region,
       plan: serverType,
       os_id: Number(image),
@@ -764,6 +775,9 @@ export class VultrProvider extends BaseProvider {
     };
     if (userData) {
       body.user_data = Buffer.from(userData, 'utf-8').toString('base64');
+    }
+    if (Array.isArray(networks) && networks.length > 0) {
+      body.attach_vpc = networks.map(String);
     }
     if (fwList.length === 1) {
       body.firewall_group_id = String(fwList[0]);

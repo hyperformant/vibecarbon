@@ -15,6 +15,7 @@ import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { bootScriptFiles, k8sBootScripts } from '../../_shared/k3s-boot-scripts.js';
 
 const runCommandAsync = vi.hoisted(() => vi.fn());
@@ -48,6 +49,7 @@ describe('host reporter: k8s workers install it after the k3s install', () => {
     ['hetzner', HetznerProvider, 'nbg1', 'cx23'],
     ['digitalocean', DigitalOceanProvider, 'nyc3', 's-2vcpu-4gb'],
     ['linode', LinodeProvider, 'us-ord', 'g6-standard-2'],
+    ['vultr', VultrProvider, 'ewr', 'vc2-2c-4gb'],
   ])(
     '%s: autoscaler-created workers boot with it',
     async (providerId, ProviderClass, region, type) => {
@@ -103,6 +105,7 @@ describe('host reporter: the db node takes it over SSH, not from its user data',
     ['hetzner', HetznerProvider],
     ['digitalocean', DigitalOceanProvider],
     ['linode', LinodeProvider],
+    ['vultr', VultrProvider],
   ])('%s: the db node boots without it, from the worker script', async (_id, P) => {
     expect(await P.getK8sWorkerUserData({})).toContain(MARK);
     expect(await P.getK8sDbUserData({})).not.toContain(MARK);
