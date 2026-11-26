@@ -562,7 +562,7 @@ export async function noteLeftoverGitopsCopies({ projectDir, envNames }) {
  * @param {string} args.kubeconfigPath - path to kubeconfig fetched from the cluster
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {string} [args.githubOwner] - the repo's owner, when `gh repo view` cannot say
- * @param {import('./ghcr-pull-secret.js').GhcrPull} args.ghcrPull - the app image's pull
+ * @param {import('../ghcr-pull.js').GhcrPull} args.ghcrPull - the app image's pull
  *   credential, resolved once for every cluster of the environment (resolveGhcrPull); the
  *   handover puts it in this cluster's ghcr-pull-secret
  * @param {boolean} [args.skipCi] - mark the deploy commit [skip ci]

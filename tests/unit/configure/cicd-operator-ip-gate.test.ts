@@ -90,11 +90,15 @@ vi.mock('../../../src/lib/deploy/k8s/gitops-deploy.js', async (orig) => ({
   noteUnreadTokenSecrets: m.note,
   resolveOwnerAndRepo: () => ({ owner: 'acme', name: 'proj' }),
 }));
-vi.mock('../../../src/lib/deploy/k8s/ghcr-pull-secret.js', () => ({
+vi.mock('../../../src/lib/deploy/ghcr-pull.js', () => ({
   resolveGhcrPull: m.pull,
 }));
 
 const { runConfigureCicd } = await import('../../../src/configure.js');
+
+/** The places the pull credential was asked to look for a stored token. */
+const storeNames = () =>
+  (m.pull.mock.calls[0][0].stores as { name: string }[]).map((store) => store.name);
 
 const envConfig = {
   status: 'deployed',
@@ -197,8 +201,9 @@ describe('configure cicd <k8s env> lets the operator in first', () => {
       repo: 'proj',
       projectName: 'proj',
       envName: 'prod',
-      clusters: [{ envName: 'prod', kubeconfigPath: expect.stringMatching(/kubeconfig-prod$/) }],
+      keptAs: 'in the cluster as ghcr-pull-secret',
     });
+    expect(storeNames()).toEqual(["in prod's cluster"]);
     expect(m.deploy.mock.calls[0][0].ghcrPull).toEqual({ mode: 'public' });
     expect(m.gate).toHaveBeenCalledWith({
       projectConfig: m.projectConfig,
@@ -239,10 +244,7 @@ describe('configure cicd <k8s-ha env> hands over each side whose kubeconfig is h
     await run();
     expect(m.order).toEqual(['gate', 'note', 'leftover', 'pull', 'deploy', 'deploy']);
     expect(m.pull).toHaveBeenCalledTimes(1);
-    expect(m.pull.mock.calls[0][0].clusters).toEqual([
-      { envName: 'prod-primary', kubeconfigPath: expect.stringMatching(PRIMARY) },
-      { envName: 'prod-standby', kubeconfigPath: expect.stringMatching(STANDBY) },
-    ]);
+    expect(storeNames()).toEqual(["in prod-primary's cluster", "in prod-standby's cluster"]);
     expect(m.deploy.mock.calls.map(([a]) => [a.environment, a.kubeconfigPath])).toEqual([
       ['prod-primary', expect.stringMatching(PRIMARY)],
       ['prod-standby', expect.stringMatching(STANDBY)],
@@ -267,9 +269,7 @@ describe('configure cicd <k8s-ha env> hands over each side whose kubeconfig is h
     // The gate, the notes and the pull credential cover the primary only.
     expect(m.gate.mock.calls[0][0].sides).toEqual(['prod-primary']);
     expect(m.leftover.mock.calls[0][0].envNames).toEqual(['prod-primary']);
-    expect(m.pull.mock.calls[0][0].clusters).toEqual([
-      { envName: 'prod-primary', kubeconfigPath: expect.stringMatching(PRIMARY) },
-    ]);
+    expect(storeNames()).toEqual(["in prod-primary's cluster"]);
     // Said once, before the gate: which side, why, and how to fetch it.
     expect(said(m.log.warn)).toEqual([
       'skipping prod-standby: its kubeconfig (.vibecarbon/kubeconfig-prod-standby) is not on ' +
