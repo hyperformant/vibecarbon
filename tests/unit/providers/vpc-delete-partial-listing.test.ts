@@ -42,8 +42,14 @@ type Row = {
   firstPage: () => ReturnType<typeof ok>;
   /** The listing read first, as its error names it. */
   listing?: string;
-  /** The GETs of that listing; any other GET is unexpected. */
+  /** The GETs of that listing. */
   listed?: RegExp;
+  /**
+   * The provider's other listings a k8s destroy reads (its reserved or
+   * flexible IPs, for the label sweep), answered empty and complete; any
+   * GET that is neither is unexpected.
+   */
+  others?: Array<[RegExp, unknown]>;
 };
 const rows: Array<[string, Row]> = [
   [
@@ -62,6 +68,7 @@ const rows: Array<[string, Row]> = [
     {
       make: () => new LinodeProvider('tok'),
       firstPage: () => ok({ data: [{ id: 1, label: NAME }], page: 1, pages: 2 }),
+      others: [[/\/networking\/reserved\/ips(\?|$)/, { data: [], page: 1, pages: 1 }]],
     },
   ],
   [
@@ -70,6 +77,7 @@ const rows: Array<[string, Row]> = [
       make: () => new VultrProvider('tok'),
       firstPage: () =>
         ok({ vpcs: [{ id: 'vpc-1', description: NAME }], meta: { links: { next: 'NEXT' } } }),
+      others: [[/\/reserved-ips(\?|$)/, { reserved_ips: [], meta: { links: { next: '' } } }]],
     },
   ],
   [
@@ -86,12 +94,20 @@ const rows: Array<[string, Row]> = [
         }),
       listing: 'Private Network',
       listed: /\/vpc\/v2\/regions\/[^/]+\/private-networks\?/,
+      others: [[/\/instance\/v1\/zones\/[^/]+\/ips\?/, { ips: [] }]],
     },
   ],
 ];
 
-/** The listing's GETs (GET /vpcs by default) answer `pages` in order; every DELETE succeeds. */
-function api(pages: Array<ReturnType<typeof ok> | ReturnType<typeof failed>>, listed: RegExp) {
+/**
+ * The listing's GETs (GET /vpcs by default) answer `pages` in order, the
+ * row's other listings answer empty, and every DELETE succeeds.
+ */
+function api(
+  pages: Array<ReturnType<typeof ok> | ReturnType<typeof failed>>,
+  listed: RegExp,
+  others: Array<[RegExp, unknown]> = [],
+) {
   const deletes: string[] = [];
   let at = 0;
   fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
@@ -99,6 +115,8 @@ function api(pages: Array<ReturnType<typeof ok> | ReturnType<typeof failed>>, li
       deletes.push(url);
       return { ok: true, status: 204 };
     }
+    const other = others.find(([re]) => re.test(url));
+    if (other) return ok(other[1]);
     if (!listed.test(url)) throw new Error(`unexpected GET ${url}`);
     return pages[Math.min(at++, pages.length - 1)];
   });
@@ -128,13 +146,15 @@ describe.each(rows)(
     });
 
     it('destroy reports it could not confirm the VPC is gone, never "already gone"', async () => {
-      api([failed(503)], listed);
+      api([failed(503)], listed, row.others);
       const provider = row.make() as InstanceType<typeof VultrProvider>;
       for (const m of ['deleteFirewallByName', 'deleteSSHKeyByName'] as const) {
         vi.spyOn(provider, m).mockResolvedValue({ deleted: true } as never);
       }
       const stops: string[] = [];
       const results = {
+        firewalls: [] as string[],
+        sshKeys: [] as string[],
         leaks: createLeakLedger(),
         unreleasedReservedIps: [] as string[],
       };
@@ -158,6 +178,8 @@ describe.each(rows)(
         (e: { resourceClass: string }) => e.resourceClass === 'network',
       );
       expect(network).toHaveLength(1);
+      // Nothing else is reported: every other read answered as expected.
+      expect(results.leaks.entries).toEqual(network);
       expect(network[0]).toMatchObject({ severity: 'unverified', resource: NAME });
       expect(network[0].reason).toContain('could not confirm it is gone');
       expect(stops).not.toContain('VPC already gone (Pulumi)');

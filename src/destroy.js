@@ -4354,7 +4354,7 @@ export async function sweepK8sBackstopTargets({
       });
       if (released) swept.add(target.stackEnv);
     }
-    if (byName && (await deleteBackstopNetwork({ provider, target, results, s }))) {
+    if (byName && (await deleteBackstopNetwork({ provider, target, results, s, projectName }))) {
       swept.add(target.stackEnv);
     }
   }
@@ -4465,15 +4465,31 @@ async function sweepByName({ provider, target, results, s, projectName, environm
  * By this point Pulumi + every sweep above should have cleared every member;
  * a refusal here is therefore a genuine ordering bug elsewhere, not a
  * not-found, so it is surfaced loudly rather than swallowed.
- * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}}} args
+ *
+ * The stack's project and environment go with the name: a provider whose
+ * networks carry them as tags deletes only one carrying both, and answers
+ * `foreign` for one by that name it left alone (Scaleway), which is
+ * reported and does not fail the exit code.
+ * @param {{provider: object, target: ReturnType<typeof planK8sBackstopTargets>[number], results: object, s: {start: Function, stop: Function}, projectName?: string}} args
  * @returns {Promise<boolean>} whether this call deleted the VPC
  */
-async function deleteBackstopNetwork({ provider, target, results, s }) {
+async function deleteBackstopNetwork({ provider, target, results, s, projectName }) {
   const Provider = provider.constructor;
   const networkName = target.networkName;
   s.start(`Verifying ${Provider.NAME} VPC is gone: ${networkName}`);
   try {
-    const result = await provider.deleteNetworkByName(networkName);
+    const result = await provider.deleteNetworkByName(networkName, {
+      project: projectName,
+      environment: target.stackEnv,
+    });
+    if (result.foreign) {
+      results.leaks.foreign({
+        resourceClass: 'network',
+        resource: networkName,
+        reason: result.foreign,
+        hint: `If it is this cluster's after all, delete it in the ${Provider.NAME} console.`,
+      });
+    }
     if (result.deleted) {
       s.stop('VPC deleted (backstop)');
       return true;
@@ -4487,7 +4503,7 @@ async function deleteBackstopNetwork({ provider, target, results, s }) {
         hint: `Check the ${Provider.NAME} console for leftover servers, load balancers or managed databases in this VPC, delete them, then delete the VPC manually.`,
       });
     } else {
-      s.stop('VPC already gone (Pulumi)');
+      s.stop(result.foreign ? "VPC left alone: not this stack's" : 'VPC already gone (Pulumi)');
     }
   } catch (error) {
     s.stop(`VPC backstop check failed: ${error.message}`);

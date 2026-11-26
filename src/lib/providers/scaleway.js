@@ -198,6 +198,16 @@ function serverZoneError(failure, serverId, refusedIn) {
 }
 
 /**
+ * The server a flexible IP is attached to, as destroy names it
+ * (`server <name> (<id>)`), or null when it is attached to none.
+ * @param {{server?: {id: string, name?: string}|null}} ip
+ * @returns {string|null}
+ */
+function flexibleIpHolderName(ip) {
+  return ip.server ? `server ${ip.server.name ?? ip.server.id} (${ip.server.id})` : null;
+}
+
+/**
  * The tags a stack's flexible IPs and servers carry for `labels`: the
  * project and the environment, each its own tag (encodeLabel). null unless
  * both have a value, so no partial label set matches anything.
@@ -208,6 +218,20 @@ function stackTags(labels) {
   const { project, environment } = labels ?? {};
   if (!project || !environment) return null;
   return [encodeLabel('project', project), encodeLabel('environment', environment)];
+}
+
+/**
+ * Whose a resource is by its tags, as a destroy line says it: `project
+ * <p>, environment <e>`, or `no vibecarbon project` when it carries no
+ * project tag.
+ * @param {string[]|undefined} tags
+ * @returns {string}
+ */
+function tagOwner(tags) {
+  const { project, environment } = decodeLabels(tags ?? []);
+  return project
+    ? `project ${project}, environment ${environment ?? 'none'}`
+    : 'no vibecarbon project';
 }
 
 /**
@@ -1894,36 +1918,62 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * Delete a cluster's network by its exact name: the Private Network, then
-   * the VPC holding it (scaleway-k8s.js names both `${clusterName}-network`),
-   * since a VPC holding a Private Network cannot go. Both listings are read
-   * whole before any DELETE, and each object is deleted in the region it is
-   * listed in. A project's default VPC (`is_default`) is never matched,
-   * whatever it is named. The shared contract of deleteVpcByName otherwise:
-   * a 2xx or 404 is deleted, any other answer is `apiError` and stops there
+   * Delete a cluster's network by its exact name and the stack's tags: the
+   * Private Network, then the VPC holding it (scaleway-k8s.js names both
+   * `${clusterName}-network` and tags both with the stack's project and
+   * environment), since a VPC holding a Private Network cannot go. Both
+   * listings are read whole before any DELETE, and each object is deleted in
+   * the region it is listed in. A name is not proof: `acme` on stack
+   * `prod-primary` and `acme-prod` on `primary` name the same network, and an
+   * organization-wide key with no project id lists every project's. So only
+   * an object carrying both stackTags(labels) is deleted; one by that name
+   * without them is left alone and named in `foreign` for destroy to report,
+   * and labels without a project and an environment match nothing. A
+   * project's default VPC (`is_default`) is never matched, whatever it is
+   * named. The shared contract of deleteVpcByName otherwise: a 2xx or 404 is
+   * deleted, any other answer is `apiError` and stops there
    * (deleteNetworkAt), and a listing that cannot be read whole throws
    * (networkListingWhole), so destroy reports it could not confirm the
    * network is gone.
    * @param {string} name
-   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   * @param {{project?: string, environment?: string}} [labels] - the stack's
+   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null), foreign?: string}>}
+   *   everExisted: one of this stack's was found; foreign: what was left alone
    * @throws when the Private Network or VPC listing cannot be read whole
    */
-  async deleteNetworkByName(name) {
+  async deleteNetworkByName(name, labels) {
     const networks = networkListingWhole(await this.listNetworksDetailed(), 'Private Network');
     const vpcs = networkListingWhole(await this._walkVpcApi('vpcs', 'vpcs'), 'VPC');
-    const targets = [
-      ['private-networks', networks.find((n) => n.name === name)],
-      ['vpcs', vpcs.find((v) => v.name === name && v.is_default !== true)],
-    ].filter(([, row]) => row);
-    if (targets.length === 0) return { deleted: false, everExisted: false, apiError: null };
+    const wanted = stackTags(labels);
+    const ours = (row) => wanted?.every((t) => (row.tags ?? []).includes(t)) === true;
+    // Every Private Network before every VPC: the delete order.
+    const named = [
+      ...networks.filter((n) => n.name === name).map((row) => ['private-networks', row]),
+      ...vpcs.filter((v) => v.name === name && v.is_default !== true).map((row) => ['vpcs', row]),
+    ];
+    const strangers = named
+      .filter(([, row]) => !ours(row))
+      .map(([collection, row]) => {
+        const kind = collection === 'vpcs' ? 'VPC' : 'Private Network';
+        return `${kind} ${row.id} in ${row.region} carries ${tagOwner(row.tags)}`;
+      });
+    const stack = wanted
+      ? `not project ${labels.project}, environment ${labels.environment}`
+      : 'and no project and environment were given to check its tags against';
+    const foreign =
+      strangers.length === 0 ? {} : { foreign: `left alone: ${strangers.join('; ')}, ${stack}` };
+    const targets = named.filter(([, row]) => ours(row));
+    if (targets.length === 0) {
+      return { deleted: false, everExisted: false, apiError: null, ...foreign };
+    }
     for (const [collection, row] of targets) {
       const apiError = await deleteNetworkAt(
         this,
         `/vpc/v2/regions/${row.region}/${collection}/${row.id}`,
       );
-      if (apiError) return { deleted: false, everExisted: true, apiError };
+      if (apiError) return { deleted: false, everExisted: true, apiError, ...foreign };
     }
-    return { deleted: true, everExisted: true, apiError: null };
+    return { deleted: true, everExisted: true, apiError: null, ...foreign };
   }
 
   /**
@@ -2105,16 +2155,46 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
+   * What holds a flexible IP tagged for a stack, and whether it is theirs.
+   * The compose and k8s programs tag every server with the same project and
+   * environment tags as its IP (encodeLabels), so the server an IP of theirs
+   * is attached to carries every `wanted` tag. One that does not is someone
+   * else's, whatever the IP's tags say, and the address is never released or
+   * reported as held by this stack. A server no zone lists (404) holds it on
+   * its way out, so the IP stays this stack's and held; one a zone refused to
+   * show is never read as gone (serverZoneError), and this throws.
+   * @param {{server?: {id: string, name?: string}|null}} ip
+   * @param {string[]} wanted - the stack's tags, as the IP carries them
+   * @returns {Promise<{holder: string|null, foreign: string|null}>}
+   *   holder names the server, null when unattached; foreign, when set, says
+   *   whose that server is instead
+   * @throws when the holding server cannot be read
+   */
+  async _flexibleIpHolder(ip, wanted) {
+    const holder = flexibleIpHolderName(ip);
+    if (!holder) return { holder: null, foreign: null };
+    let server;
+    try {
+      server = await this.getServer(ip.server.id);
+    } catch (err) {
+      if (err.status === 404) return { holder, foreign: null };
+      const why = err.status ? `HTTP ${err.status}` : err.message;
+      throw new Error(`could not read ${holder}, which holds it (${why})`);
+    }
+    const serverTags = server?.tags ?? [];
+    if (wanted.every((t) => serverTags.includes(t))) return { holder, foreign: null };
+    return { holder, foreign: `held by ${holder}, which is ${tagOwner(serverTags)}` };
+  }
+
+  /**
    * Whether the flexible IP at `address` is still this project's and
    * environment's: its tags carry both stackTags(labels), and the server it
-   * is attached to, if any, carries the same two (scaleway-k8s.js tags every
-   * server with them). Destroy asks before it releases an address saved at
-   * deploy time: a released address can be reissued to another account or
-   * project by then, and one of ours still attached to a server the teardown
-   * did not delete must never be taken off it. Labels without both a project
-   * and an environment match nothing. A holding server no zone lists (404)
-   * holds it on its way out, so the IP stays this stack's and held; one a
-   * zone refused to show is never read as gone, and the match throws.
+   * is attached to, if any, carries the same two (_flexibleIpHolder).
+   * Destroy asks before it releases an address saved at deploy time: a
+   * released address can be reissued to another account or project by then,
+   * and one of ours still attached to a server the teardown did not delete
+   * must never be taken off it. Labels without both a project and an
+   * environment match nothing.
    * @param {string} address
    * @param {Object<string,string>} labels
    * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
@@ -2128,33 +2208,12 @@ export class ScalewayProvider extends BaseProvider {
     const ip = (await this._listFlexibleIps()).find((i) => i.address === address);
     if (!ip) return { found: false };
     const tags = ip.tags ?? [];
-    const holder = ip.server ? `server ${ip.server.name ?? ip.server.id} (${ip.server.id})` : null;
     if (wanted === null || !wanted.every((t) => tags.includes(t))) {
-      return { found: true, matches: false, tags, holder };
+      return { found: true, matches: false, tags, holder: flexibleIpHolderName(ip) };
     }
-    if (!ip.server) return { found: true, matches: true, tags, holder };
-    let server;
-    try {
-      server = await this.getServer(ip.server.id);
-    } catch (err) {
-      if (err.status === 404) return { found: true, matches: true, tags, holder };
-      const why = err.status ? `HTTP ${err.status}` : err.message;
-      throw new Error(`could not read ${holder}, which holds it (${why})`);
-    }
-    const serverTags = server?.tags ?? [];
-    if (wanted.every((t) => serverTags.includes(t))) {
-      return { found: true, matches: true, tags, holder };
-    }
-    const { project, environment } = decodeLabels(serverTags);
-    const whose = project
-      ? `project ${project}, environment ${environment ?? 'none'}`
-      : 'no vibecarbon project';
-    return {
-      found: true,
-      matches: false,
-      tags: [...tags, `held by ${holder}, which is ${whose}`],
-      holder,
-    };
+    const { holder, foreign } = await this._flexibleIpHolder(ip, wanted);
+    if (foreign) return { found: true, matches: false, tags: [...tags, foreign], holder };
+    return { found: true, matches: true, tags, holder };
   }
 
   /**
@@ -2165,10 +2224,13 @@ export class ScalewayProvider extends BaseProvider {
    * it: a deploy killed in between leaves the IP attached to nothing and
    * named nowhere but here. Filters client-side over every zone's listing.
    * A label without a value is refused (sweepLabels). One still attached to
-   * a server is left alone: destroy runs after the server deletes, so that
-   * server is one they did not delete, or one this process asked to
-   * terminate that was still terminating when deleteServer stopped waiting
-   * (`serverTerminating`: the next destroy finds it gone and releases the IP).
+   * a server is never deleted. A server this process asked to terminate
+   * that was still terminating when deleteServer stopped waiting holds it
+   * (`serverTerminating`: the next destroy finds it gone and releases the
+   * IP). Otherwise, if the server carries the same tags it is one the
+   * teardown did not delete, and the IP is reported held; if it carries
+   * anyone else's, the IP is not this stack's and is left out, with no entry
+   * (_flexibleIpHolder).
    * @param {Object<string,string>} labels
    * @param {{except?: string[]}} [options] - addresses the caller already handled
    * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
@@ -2193,13 +2255,21 @@ export class ScalewayProvider extends BaseProvider {
               `it is still attached to server ${server}, which was still terminating when ` +
               `vibecarbon stopped waiting after ${TERMINATE_WAIT_MS / 60_000} minutes`,
           });
-        } else {
-          failed.push({
-            address: ip.address,
-            held: true,
-            reason: `it is still attached to server ${server}, which was not deleted`,
-          });
+          continue;
         }
+        let held;
+        try {
+          held = await this._flexibleIpHolder(ip, wanted);
+        } catch (err) {
+          failed.push({ address: ip.address, held: null, reason: err.message });
+          continue;
+        }
+        if (held.foreign) continue;
+        failed.push({
+          address: ip.address,
+          held: true,
+          reason: `it is still attached to server ${server}, which was not deleted`,
+        });
         continue;
       }
       const outcome = await this._deleteFlexibleIp(ip);

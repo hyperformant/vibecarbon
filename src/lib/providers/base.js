@@ -502,9 +502,10 @@ export class BaseProvider {
    * cleanupOrphanedVolumes, destroy.js). True keeps that backstop, which is
    * how a volume detached before a failed capture is still collected on
    * Hetzner, DigitalOcean and Linode. False makes such a match a reported
-   * deferral (`no-owner-signal`) that fails the destroy: Vultr's volumes
-   * carry no tags, so only a captured id proves one is this environment's,
-   * and a region-wide guess there could delete another cluster's disk.
+   * deferral (`no-owner-signal`) that fails the destroy: Vultr's and
+   * Scaleway's CSI volumes carry no tags, so only a captured id proves one is
+   * this environment's, and a region-wide guess there could delete another
+   * cluster's disk.
    * @type {boolean}
    */
   static ORPHAN_VOLUME_REGION_GUESS = true;

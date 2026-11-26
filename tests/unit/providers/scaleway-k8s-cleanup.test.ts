@@ -33,8 +33,8 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-type Pn = { id: string; name: string; region?: string };
-type Vpc = { id: string; name: string; region?: string; is_default?: boolean };
+type Pn = { id: string; name: string; region?: string; tags?: string[] };
+type Vpc = { id: string; name: string; region?: string; is_default?: boolean; tags?: string[] };
 type Ip = {
   id: string;
   address: string;
@@ -193,19 +193,22 @@ describe('ScalewayProvider.listNetworksDetailed', () => {
 
 describe('ScalewayProvider.deleteNetworkByName', () => {
   const NAME = 'acme-prod-network';
+  /** The tags scaleway-k8s.js gives a stack's VPC and Private Network. */
+  const NET = (project: string, environment: string) =>
+    encodeLabels({ project, environment, 'managed-by': 'vibecarbon' });
   const pns = [
-    { id: 'pn-1', name: NAME },
-    { id: 'pn-2', name: `${NAME}-old` },
+    { id: 'pn-1', name: NAME, tags: NET('acme', 'prod') },
+    { id: 'pn-2', name: `${NAME}-old`, tags: NET('acme', 'prod') },
   ];
   const vpcs = [
-    { id: 'vpc-def', name: 'default', is_default: true },
-    { id: 'vpc-1', name: NAME },
-    { id: 'vpc-2', name: `${NAME}-old` },
+    { id: 'vpc-def', name: 'default', is_default: true, tags: [] },
+    { id: 'vpc-1', name: NAME, tags: NET('acme', 'prod') },
+    { id: 'vpc-2', name: `${NAME}-old`, tags: NET('acme', 'prod') },
   ];
 
   it('deletes the Private Network, then its VPC, each matched exactly by name', async () => {
     const calls = api({ pns, vpcs });
-    expect(await provider().deleteNetworkByName(NAME)).toEqual({
+    expect(await provider().deleteNetworkByName(NAME, OURS)).toEqual({
       deleted: true,
       everExisted: true,
       apiError: null,
@@ -219,7 +222,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('reads both listings whole before any delete', async () => {
     const calls = api({ pns, vpcs });
-    await provider().deleteNetworkByName(NAME);
+    await provider().deleteNetworkByName(NAME, OURS);
     const firstDelete = calls.findIndex((c) => c.method === 'DELETE');
     const listed = calls.slice(0, firstDelete).map((c) => c.path);
     expect(listed).toEqual([
@@ -232,10 +235,10 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('deletes them in the region they are listed in', async () => {
     const calls = api({
-      pns: [{ id: 'pn-9', name: NAME, region: 'nl-ams' }],
-      vpcs: [{ id: 'vpc-9', name: NAME, region: 'nl-ams' }],
+      pns: [{ id: 'pn-9', name: NAME, region: 'nl-ams', tags: NET('acme', 'prod') }],
+      vpcs: [{ id: 'vpc-9', name: NAME, region: 'nl-ams', tags: NET('acme', 'prod') }],
     });
-    await provider().deleteNetworkByName(NAME);
+    await provider().deleteNetworkByName(NAME, OURS);
     expect(deletes(calls)).toEqual([
       '/vpc/v2/regions/nl-ams/private-networks/pn-9',
       '/vpc/v2/regions/nl-ams/vpcs/vpc-9',
@@ -245,7 +248,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
   it('both listings carry project_id when SCALEWAY_DEFAULT_PROJECT_ID is set', async () => {
     vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', PROJECT_ID);
     const calls = api({ pns, vpcs });
-    await provider().deleteNetworkByName(NAME);
+    await provider().deleteNetworkByName(NAME, OURS);
     const listings = calls.filter((c) => c.method === 'GET');
     expect(listings).toHaveLength(4);
     for (const c of listings) expect(c.query.get('project_id'), c.path).toBe(PROJECT_ID);
@@ -253,20 +256,22 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('a VPC named default is never matched, even by its own name', async () => {
     const calls = api({ pns, vpcs });
-    expect(await provider().deleteNetworkByName('default')).toEqual({
+    expect(await provider().deleteNetworkByName('default', OURS)).toEqual({
       deleted: false,
       everExisted: false,
       apiError: null,
     });
     // Nor a project's default VPC renamed to ours.
-    const renamed = api({ vpcs: [{ id: 'vpc-def', name: NAME, is_default: true }] });
-    expect((await provider().deleteNetworkByName(NAME)).everExisted).toBe(false);
+    const renamed = api({
+      vpcs: [{ id: 'vpc-def', name: NAME, is_default: true, tags: NET('acme', 'prod') }],
+    });
+    expect((await provider().deleteNetworkByName(NAME, OURS)).everExisted).toBe(false);
     expect([...deletes(calls), ...deletes(renamed)]).toEqual([]);
   });
 
   it('neither by that exact name: nothing deleted, never existed', async () => {
     const calls = api({ pns, vpcs });
-    expect(await provider().deleteNetworkByName('acme-prod')).toEqual({
+    expect(await provider().deleteNetworkByName('acme-prod', OURS)).toEqual({
       deleted: false,
       everExisted: false,
       apiError: null,
@@ -276,7 +281,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('a VPC whose Private Network is already gone is deleted alone', async () => {
     const calls = api({ vpcs });
-    expect((await provider().deleteNetworkByName(NAME)).deleted).toBe(true);
+    expect((await provider().deleteNetworkByName(NAME, OURS)).deleted).toBe(true);
     expect(deletes(calls)).toEqual(['/vpc/v2/regions/fr-par/vpcs/vpc-1']);
   });
 
@@ -289,7 +294,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
         '/vpc/v2/regions/fr-par/vpcs/vpc-1': 404,
       },
     });
-    expect((await provider().deleteNetworkByName(NAME)).deleted).toBe(true);
+    expect((await provider().deleteNetworkByName(NAME, OURS)).deleted).toBe(true);
   });
 
   it('a refused Private Network delete is apiError, and the VPC is not tried', async () => {
@@ -298,7 +303,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
       vpcs,
       del: { '/vpc/v2/regions/fr-par/private-networks/pn-1': 409 },
     });
-    const out = await provider().deleteNetworkByName(NAME);
+    const out = await provider().deleteNetworkByName(NAME, OURS);
     expect(out.deleted).toBe(false);
     expect(out.everExisted).toBe(true);
     expect(out.apiError?.message).toBe(
@@ -309,7 +314,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('a refused VPC delete is apiError', async () => {
     api({ pns, vpcs, del: { '/vpc/v2/regions/fr-par/vpcs/vpc-1': 412 } });
-    const out = await provider().deleteNetworkByName(NAME);
+    const out = await provider().deleteNetworkByName(NAME, OURS);
     expect(out).toMatchObject({ deleted: false, everExisted: true });
     expect(out.apiError?.message).toMatch(
       /^DELETE \/vpc\/v2\/regions\/fr-par\/vpcs\/vpc-1 failed: HTTP 412/,
@@ -318,7 +323,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('a partial Private Network listing throws, and sends no delete', async () => {
     const calls = api({ pns, vpcs, get: { '/vpc/v2/regions/nl-ams/private-networks': 503 } });
-    await expect(provider().deleteNetworkByName(NAME)).rejects.toThrow(
+    await expect(provider().deleteNetworkByName(NAME, OURS)).rejects.toThrow(
       'the Private Network listing could not be read whole (HTTP 503)',
     );
     expect(deletes(calls)).toEqual([]);
@@ -326,7 +331,7 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('a Private Network listing that runs into its page guard throws, and sends no delete', async () => {
     const calls = api({ pns, vpcs, get: { '/vpc/v2/regions/fr-par/private-networks': 'full' } });
-    await expect(provider().deleteNetworkByName(NAME)).rejects.toThrow(
+    await expect(provider().deleteNetworkByName(NAME, OURS)).rejects.toThrow(
       'the Private Network listing could not be read whole (it stopped early)',
     );
     expect(deletes(calls)).toEqual([]);
@@ -334,11 +339,80 @@ describe('ScalewayProvider.deleteNetworkByName', () => {
 
   it('a complete Private Network listing with a partial VPC listing throws, and sends no delete', async () => {
     const calls = api({ pns, vpcs, get: { '/vpc/v2/regions/nl-ams/vpcs': 500 } });
-    await expect(provider().deleteNetworkByName(NAME)).rejects.toThrow(
+    await expect(provider().deleteNetworkByName(NAME, OURS)).rejects.toThrow(
       'the VPC listing could not be read whole (HTTP 500)',
     );
     // The Private Network was found on a listing read whole, and still
     // nothing is deleted: the VPC listing is read before any delete.
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  // A name is not proof. `acme` on stack prod-primary and `acme-prod` on
+  // primary name the same network, and an organization-wide key with no
+  // project id lists every project's: only the stack's tags say whose it is.
+  const THEIRS = NET('acme-prod', 'primary');
+
+  it("one by that name carrying another stack's tags is left alone, and named in foreign", async () => {
+    const calls = api({
+      pns: [{ id: 'pn-7', name: NAME, tags: THEIRS }],
+      vpcs: [{ id: 'vpc-7', name: NAME, tags: THEIRS }],
+    });
+    expect(await provider().deleteNetworkByName(NAME, OURS)).toEqual({
+      deleted: false,
+      everExisted: false,
+      apiError: null,
+      foreign:
+        'left alone: Private Network pn-7 in fr-par carries project acme-prod, environment ' +
+        'primary; VPC vpc-7 in fr-par carries project acme-prod, environment primary, not ' +
+        'project acme, environment prod',
+    });
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it("ours and another stack's by the same name: deletes ours, and names the other", async () => {
+    const calls = api({
+      pns: [...pns, { id: 'pn-7', name: NAME, region: 'nl-ams', tags: THEIRS }],
+      vpcs: [...vpcs, { id: 'vpc-7', name: NAME, region: 'nl-ams', tags: THEIRS }],
+    });
+    const out = await provider().deleteNetworkByName(NAME, OURS);
+    expect(out).toMatchObject({ deleted: true, everExisted: true, apiError: null });
+    expect(out.foreign).toContain('Private Network pn-7 in nl-ams carries project acme-prod');
+    expect(deletes(calls)).toEqual([
+      '/vpc/v2/regions/fr-par/private-networks/pn-1',
+      '/vpc/v2/regions/fr-par/vpcs/vpc-1',
+    ]);
+  });
+
+  it('an untagged one by that name is no vibecarbon project, and left alone', async () => {
+    const calls = api({ pns: [{ id: 'pn-7', name: NAME, tags: [] }] });
+    const out = await provider().deleteNetworkByName(NAME, OURS);
+    expect(out).toMatchObject({ deleted: false, everExisted: false, apiError: null });
+    expect(out.foreign).toBe(
+      'left alone: Private Network pn-7 in fr-par carries no vibecarbon project, ' +
+        'not project acme, environment prod',
+    );
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it('one carrying our project and another environment is not ours', async () => {
+    const calls = api({ pns: [{ id: 'pn-7', name: NAME, tags: NET('acme', 'prod2') }] });
+    expect((await provider().deleteNetworkByName(NAME, OURS)).foreign).toContain(
+      'carries project acme, environment prod2',
+    );
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it.each([
+    ['no labels', undefined],
+    ['only a project', { project: 'acme' }],
+    ['an empty environment', { project: 'acme', environment: '' }],
+  ])('with %s, nothing is ours: every name match is left alone', async (_, labels) => {
+    const calls = api({ pns, vpcs });
+    const out = await provider().deleteNetworkByName(NAME, labels);
+    expect(out).toMatchObject({ deleted: false, everExisted: false, apiError: null });
+    expect(out.foreign).toMatch(
+      /, and no project and environment were given to check its tags against$/,
+    );
     expect(deletes(calls)).toEqual([]);
   });
 });
@@ -534,6 +608,54 @@ describe("a flexible IP tagged ours, attached to another stack's server", () => 
       'could not read server other-prod-master (srv-9), which holds it (HTTP 403)',
     );
   });
+
+  it('the label sweep leaves it out: not released, not reported held', async () => {
+    const calls = api({ ips: [ip], servers: { 'srv-9': TAGS('acme', 'prod2') } });
+    expect(await provider().deleteReservedIpsByLabels(OURS)).toEqual({ deleted: [], failed: [] });
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it('the label sweep reports one on a server carrying our tags as held, and deletes nothing', async () => {
+    const calls = api({ ips: [ip], servers: { 'srv-9': TAGS('acme', 'prod', 'worker') } });
+    expect(await provider().deleteReservedIpsByLabels(OURS)).toEqual({
+      deleted: [],
+      failed: [
+        {
+          address: '203.0.113.1',
+          held: true,
+          reason: 'it is still attached to server other-prod-master, which was not deleted',
+        },
+      ],
+    });
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it('the label sweep reports one whose server no zone lists (404) as held', async () => {
+    api({ ips: [ip] });
+    expect(await provider().deleteReservedIpsByLabels(OURS)).toMatchObject({
+      deleted: [],
+      failed: [{ address: '203.0.113.1', held: true }],
+    });
+  });
+
+  it('the label sweep reports one whose server a zone refuses to show as unverified', async () => {
+    const zones = Object.keys(ScalewayProvider.REGIONS);
+    const calls = api({
+      ips: [ip],
+      get: Object.fromEntries(zones.map((z) => [`/instance/v1/zones/${z}/servers/srv-9`, 403])),
+    });
+    expect(await provider().deleteReservedIpsByLabels(OURS)).toEqual({
+      deleted: [],
+      failed: [
+        {
+          address: '203.0.113.1',
+          held: null,
+          reason: 'could not read server other-prod-master (srv-9), which holds it (HTTP 403)',
+        },
+      ],
+    });
+    expect(deletes(calls)).toEqual([]);
+  });
 });
 
 describe('two stacks whose names join to the same string', () => {
@@ -568,6 +690,36 @@ describe('two stacks whose names join to the same string', () => {
         failed: [],
       });
       expect(deletes(calls)).toEqual([path]);
+    },
+  );
+
+  it.each([
+    ['acme prod-primary', HA, '203.0.113.1', 'srv-ha'],
+    ['acme-prod primary', OTHER, '203.0.113.2', 'srv-other'],
+  ])(
+    'attached: the label sweep for %s reports only its own IP held, and deletes nothing',
+    async (_, labels, own, holder) => {
+      const calls = api({
+        ips: [
+          { ...ips[0], server: { id: 'srv-ha', name: 'srv-ha' } },
+          { ...ips[1], server: { id: 'srv-other', name: 'srv-other' } },
+        ],
+        servers: {
+          'srv-ha': TAGS('acme', 'prod-primary'),
+          'srv-other': TAGS('acme-prod', 'primary'),
+        },
+      });
+      expect(await provider().deleteReservedIpsByLabels(labels)).toEqual({
+        deleted: [],
+        failed: [
+          {
+            address: own,
+            held: true,
+            reason: `it is still attached to server ${holder}, which was not deleted`,
+          },
+        ],
+      });
+      expect(deletes(calls)).toEqual([]);
     },
   );
 });

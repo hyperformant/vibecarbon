@@ -38,6 +38,8 @@ beforeEach(() => {
 });
 
 const spinner = () => ({ start: vi.fn(), stop: vi.fn() });
+/** The stack's project and environment, which go with every network name. */
+const PROD = { project: 'proj', environment: 'prod' };
 const makeResults = () => ({
   firewalls: [],
   sshKeys: [],
@@ -100,7 +102,7 @@ describe('sweepK8sBackstopTargets on Linode', () => {
     expect(deleteFirewallByName).toHaveBeenCalledExactlyOnceWith('proj-prod-firewall');
     expect(deleteSSHKeyByName).toHaveBeenCalledExactlyOnceWith('proj-prod-us-iad-key');
     expect(deleteReservedIpByAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
-    expect(deleteNetworkByName).toHaveBeenCalledExactlyOnceWith('proj-prod-network');
+    expect(deleteNetworkByName).toHaveBeenCalledExactlyOnceWith('proj-prod-network', PROD);
     expect(results.leaks.entries).toHaveLength(0);
   });
 
@@ -233,7 +235,7 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
     expect(byName.firewall).toHaveBeenCalledExactlyOnceWith('proj-prod-firewall');
     expect(byName.sshKey).toHaveBeenCalledExactlyOnceWith('proj-prod-ewr-key');
     expect(byAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
-    expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network');
+    expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network', PROD);
     // The label sweep leaves the recorded address to the address path.
     expect(byLabel).toHaveBeenCalledExactlyOnceWith(
       { project: 'proj', environment: 'prod' },
@@ -327,8 +329,8 @@ describe('sweepK8sBackstopTargets on Vultr', () => {
       'https://api.vultr.com/v2/reserved-ips/rip-2',
     ]);
     expect(byName.network.mock.calls).toEqual([
-      ['proj-prod-primary-network'],
-      ['proj-prod-standby-network'],
+      ['proj-prod-primary-network', { project: 'proj', environment: 'prod-primary' }],
+      ['proj-prod-standby-network', { project: 'proj', environment: 'prod-standby' }],
     ]);
     expect(results.leaks.entries).toHaveLength(0);
   });
@@ -520,7 +522,7 @@ describe('sweepK8sBackstopTargets on Scaleway', () => {
     expect(byName.firewall).toHaveBeenCalledExactlyOnceWith('proj-prod-firewall');
     expect(byName.sshKey).toHaveBeenCalledExactlyOnceWith('proj-prod-fr-par-1-key');
     expect(byAddress).toHaveBeenCalledExactlyOnceWith('203.0.113.7');
-    expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network');
+    expect(byName.network).toHaveBeenCalledExactlyOnceWith('proj-prod-network', PROD);
     // The label sweep leaves the recorded address to the address path.
     expect(byLabel).toHaveBeenCalledExactlyOnceWith(
       { project: 'proj', environment: 'prod' },
@@ -579,6 +581,43 @@ describe('sweepK8sBackstopTargets on Scaleway', () => {
     expect(results.unreleasedReservedIps).toEqual(['203.0.113.7']);
   });
 
+  it("a network by our name carrying another stack's tags is reported foreign, and the exit code stays clean", async () => {
+    const { provider, byName } = scaleway();
+    const foreign =
+      'left alone: Private Network pn-7 in fr-par carries project proj-prod, environment ' +
+      'primary, not project proj, environment prod';
+    byName.network.mockResolvedValue({
+      deleted: false,
+      everExisted: false,
+      apiError: null,
+      foreign,
+    } as never);
+    scalewayIps([]);
+    const s = spinner();
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: planK8sBackstopTargets({
+        plan: { tier: 'k8s', stackEnvs: ['prod'] },
+        envConfig: { provider: 'scaleway', region: 'fr-par-1' },
+        projectConfig: { projectName: 'proj' },
+      }),
+      results,
+      s,
+      projectName: 'proj',
+      environment: 'prod',
+    });
+    expect(results.leaks.entries).toHaveLength(1);
+    expect(results.leaks.entries[0]).toMatchObject({
+      severity: 'foreign',
+      resourceClass: 'network',
+      resource: 'proj-prod-network',
+      reason: foreign,
+    });
+    expect(results.leaks.exitCode()).toBe(0);
+    expect(s.stop.mock.calls.map(([m]) => m)).not.toContain('VPC already gone (Pulumi)');
+  });
+
   it("a recorded address tagged ours on another stack's server is foreign, never held or released", async () => {
     const { provider } = scaleway();
     scalewayIps(
@@ -598,6 +637,25 @@ describe('sweepK8sBackstopTargets on Scaleway', () => {
     expect(results.leaks.entries[0].reason).toContain(
       'held by server other-prod-master (srv-9), which is project other, environment prod',
     );
+    expect(results.unreleasedReservedIps).toEqual([]);
+  });
+
+  it("an unrecorded one tagged ours on another stack's server is left out of the label sweep: no delete, no entry", async () => {
+    const { provider } = scaleway();
+    scalewayIps(
+      [
+        {
+          id: 'ip-7',
+          address: '203.0.113.7',
+          tags: tags('proj', 'prod'),
+          server: { id: 'srv-9', name: 'other-prod-master' },
+        },
+      ],
+      { 'srv-9': tags('other', 'prod') },
+    );
+    const results = await sweepSingle(provider);
+    expect(deleteUrls()).toEqual([]);
+    expect(results.leaks.entries).toHaveLength(0);
     expect(results.unreleasedReservedIps).toEqual([]);
   });
 });

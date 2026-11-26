@@ -261,6 +261,7 @@ describe('sweepOrphanedScalewayResources', () => {
     const deleteVolume = vi.fn().mockResolvedValue(true);
     const releaseFlexibleIP = vi.fn().mockResolvedValue(true);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const k8sTags = (role: string) => ['project:acme', 'environment:s3', `role:${role}`];
     const provider = fakeProvider({
       listServersDetailed: vi.fn().mockResolvedValue({
@@ -363,11 +364,13 @@ describe('sweepOrphanedScalewayResources', () => {
       expect(enumFailed).toBe(false);
     } finally {
       warn.mockRestore();
+      log.mockRestore();
     }
   });
 
   it('a VPC delete Scaleway refuses fails the sweep, naming the VPC', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       const u = String(url);
       if (init?.method === 'DELETE') return { ok: false, status: 412, json: async () => ({}) };
@@ -396,6 +399,7 @@ describe('sweepOrphanedScalewayResources', () => {
       expect(deletes).toEqual(['https://api.scaleway.com/vpc/v2/regions/nl-ams/vpcs/vpc-1']);
     } finally {
       warn.mockRestore();
+      log.mockRestore();
     }
   });
 

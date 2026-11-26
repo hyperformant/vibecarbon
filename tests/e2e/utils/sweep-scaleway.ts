@@ -452,7 +452,8 @@ export async function sweepOrphanedScalewayResources(
     ['security-groups', 'firewalls'],
     ['flexible-ips', 'floatingIps'],
     ['load-balancers', 'loadBalancers'],
-    ['private-networks', 'networks'],
+    // `networks` counts the Private Networks and the VPCs both.
+    ['private-networks-and-vpcs', 'networks'],
     ['buckets', 's3Buckets'],
     ['ssh-keys', 'sshKeys'],
   ]);
