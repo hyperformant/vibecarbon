@@ -71,6 +71,20 @@
 - [ ] **Step 4: Run the gate** (`pnpm lint && pnpm test:unit`). Expected: PASS.
 - [ ] **Step 5: Commit.** Subject `test(e2e): verify-scale checks k8s-ha replication and its firewall rule`.
 
+## Rulings made during execution
+
+- The REST opener named firewalls by role. After a failover it wrote each cluster's own database address into its own firewall, so both sides admitted only themselves. It now names them by stack (`${projectName}-${stack}-firewall`), the name the programs use.
+- Scale carries the addresses its up returned (`ctx.convergedDb`) into the tunnel rebuild and the REST re-open. A replaced database node's new `dbIp`/`dbPrivateIp` is saved on `ha.<role>` in the same config write as the types, so the next up never declares a stale peer. Every provider resizes in place today, so this path is unreachable for now.
+- A k8s-ha scale with infrastructure changes checks both sides' recorded peer addresses before the token prompt and any up. A bounds-only scale runs no up and skips the check.
+- A record without `ha.*.stack` falls back to `<env>-primary`/`<env>-standby`, as deploy and scale already resolve it.
+- "Last" means "in the order the REST writers produce". It is last for Hetzner, DigitalOcean and Linode. Scaleway (Part C) declares 51821 after 443 and before 22, because its `applyOperatorCidrs` writes `[...kept, ...rebuilt]`. The round-trip census compares in order and walks the registry, so it holds Scaleway to whichever order its writers share.
+- e2e checks:
+  - verify-scale checks the end state (replication streaming, and both firewalls admit the peer).
+  - verify-scale also requires the scale's ups to have planned no create, update or replace of a firewall resource on inline-rule providers. It reads the `scale.k8s.<stack>.upStack` per-resource markers and fails if a side has none. Without it, the scale's own REST re-open would hide a program that stopped declaring the rule.
+  - verify-failover, verify-failback and reconverge-deploy read both firewalls by stack.
+  - Part C confirms that Scaleway's Pulumi type name matches `/Firewall|SecurityGroup/`.
+- The investigation this plan cites lives in a git-ignored workspace. Its findings are restated in Global Constraints above, which is the durable record.
+
 ## Out of scope
 
 - compose-ha (not shipping); its programs never run an up on a recorded server.
