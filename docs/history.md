@@ -1844,7 +1844,7 @@ possibly the operator's own.
 `tests/unit/deploy/flux-deploy-key.test.ts` and
 `tests/unit/deploy/ghcr-pull-secret.test.ts`.
 
-#### 2026-11-26: A compose server holds only a read:packages token
+#### 2026-11-26: A compose server holds only a read:packages token (#592)
 
 Compose deploys, compose-ha deploys and compose scale resolve the ghcr pull
 credential once, before any server is created or provisioned. A public image
