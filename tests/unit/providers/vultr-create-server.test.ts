@@ -70,9 +70,22 @@ describe('VultrProvider.createServer: VPC, firewall and hostname', () => {
     const { provider, posted } = stubbedProvider();
     await provider.createServer({ ...base });
     expect(posted[0]).not.toHaveProperty('attach_vpc');
-    const empty = stubbedProvider();
-    await empty.provider.createServer({ ...base, networks: [] });
-    expect(empty.posted[0]).not.toHaveProperty('attach_vpc');
+  });
+
+  it('sends no attach_vpc for an empty networks list', async () => {
+    const { provider, posted } = stubbedProvider();
+    await provider.createServer({ ...base, networks: [] });
+    expect(posted[0]).not.toHaveProperty('attach_vpc');
+  });
+
+  it('sends a 63-character name as the hostname and leaves a longer one out', async () => {
+    const at63 = stubbedProvider();
+    await at63.provider.createServer({ ...base, name: 'a'.repeat(63) });
+    expect(at63.posted[0].hostname).toBe('a'.repeat(63));
+    const over = stubbedProvider();
+    await over.provider.createServer({ ...base, name: 'a'.repeat(64) });
+    expect(over.posted[0]).not.toHaveProperty('hostname');
+    expect(over.posted[0].label).toBe('a'.repeat(64));
   });
 });
 

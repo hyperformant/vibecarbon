@@ -766,13 +766,19 @@ export class VultrProvider extends BaseProvider {
 
     const body = {
       label: name,
-      hostname: name,
       region,
       plan: serverType,
       os_id: Number(image),
       sshkey_id: resolvedSshKeys,
       tags: encodeLabels(labels),
     };
+    // A hostname is one DNS label, at most 63 characters. A longer name (a
+    // 63-character project's `-prod-db-new` scale replacement) keeps Vultr's
+    // default hostname rather than failing the create; k8s boot scripts set
+    // their own with hostnamectl anyway.
+    if (name.length <= 63) {
+      body.hostname = name;
+    }
     if (userData) {
       body.user_data = Buffer.from(userData, 'utf-8').toString('base64');
     }
