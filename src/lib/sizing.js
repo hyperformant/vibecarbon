@@ -559,11 +559,12 @@ export function haClassMessage(Provider, sides) {
  * `rankStandbyLocations` does. With the primary's types, a partner must fit
  * them without shrinking (a cpx32 primary pairs where cpx32 is stocked).
  * Ties keep `conventional` (the provider's static pair) first, then
- * `REGION_CONTINENT` order. `conventional` stands when no catalog is loaded
- * or no partner qualifies; the deploy wizard then refuses at type resolution.
- * A conventional pair the roles cannot use (a k8s-less region, as
- * `regionFits` says) gives way to the first same-continent partner that can,
- * offline too: Vultr pairs lax with sjc, where its k8s tiers do not run.
+ * `REGION_CONTINENT` order. When no catalog is loaded, or no partner
+ * qualifies, the fallback stands: `conventional` where the roles can run,
+ * else the first same-continent partner that can (a k8s-less region, as
+ * `regionFits` says, gives way even offline: Vultr pairs lax with sjc,
+ * where its k8s tiers do not run). The deploy wizard then refuses at type
+ * resolution when the fallback cannot place the roles.
  *
  * @param {object} Provider - a provider class
  * @param {string} primaryRegion

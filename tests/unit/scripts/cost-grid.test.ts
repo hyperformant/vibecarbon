@@ -352,8 +352,16 @@ describe('billing extras', () => {
       perGbMonthly: 0.1,
       gb: 10,
       source: 'https://www.vultr.com/products/block-storage/',
-      checked: '2026-11-25',
+      checked: '2026-11-26',
     });
+    // The page refused every automated read, so the price is not yet one
+    // read from it, and the table says so (as Scaleway's root volume does).
+    expect(volume.verified).toBe(false);
+    expect(String(volume.note)).toMatch(/403/);
+    expect(String(volume.note)).toMatch(/2026-11-25 and 2026-11-26/);
+    expect(String(volume.note)).toMatch(/not yet read from this page/);
+    // The reserved IP rate was read from its page on 2026-11-26.
+    expect(ip).not.toHaveProperty('verified');
     // The same per-cluster rule as Linode's, taken from the table's shape.
     expect(extrasFor(VultrProvider).perCluster('ewr')).toBeCloseTo(0.004 * 730 + 0.1 * 10, 10);
     expect(extrasFor(VultrProvider).perServer).toBe(0);

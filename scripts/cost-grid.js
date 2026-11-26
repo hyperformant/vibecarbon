@@ -90,14 +90,16 @@ export const BILLING_EXTRAS = {
   },
   vultr: {
     // The db PVC, 10Gi on NVMe block storage (vultr-block-storage-vibecarbon,
-    // which Vultr sells from 10 GB), one per cluster. $1 per 10 GB a month:
-    // read on the plan's 2026-11-25 pass; the 2026-11-26 re-read was refused
-    // (HTTP 403 to an automated fetch).
+    // which Vultr sells from 10 GB), one per cluster. $1 per 10 GB a month is
+    // the price the plan states, not yet read from this page: it refused
+    // every automated read (HTTP 403) on 2026-11-25 and 2026-11-26.
     volume: {
       perGbMonthly: 0.1,
       gb: 10,
       source: 'https://www.vultr.com/products/block-storage/',
-      checked: '2026-11-25',
+      checked: '2026-11-26',
+      verified: false,
+      note: 'www.vultr.com refused automated reads (403) on 2026-11-25 and 2026-11-26; $1 per 10 GB not yet read from this page',
     },
     // The ingress reserved IP, one per cluster: "billed at $0.004 per hour,
     // which amounts to $3 per month".

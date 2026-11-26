@@ -305,7 +305,7 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 _Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `c7cfa3a` (2026-11-26) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
-`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
+`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, Linode, and Vultr today.
 
 ---
 

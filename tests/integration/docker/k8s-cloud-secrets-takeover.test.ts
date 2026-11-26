@@ -27,7 +27,8 @@
  * removes also run the old GitOps deploy.yml's step
  * (tests/_shared/legacy-gitops-secrets.ts) with this machine's kubectl, as a
  * runner did, on every provider: it wrote kube-system/hcloud whatever the
- * provider, and nothing on a DigitalOcean or Linode cluster reads it. applyCloudSecrets runs from here.
+ * provider, and nothing on a DigitalOcean, Linode or Vultr cluster reads it.
+ * applyCloudSecrets runs from here.
  * It must take the Secrets over with exactly the keys it writes, delete the
  * Secrets it no longer writes (and never call a retired key kept that the
  * takeover itself dropped, though something reads it), and leave no
