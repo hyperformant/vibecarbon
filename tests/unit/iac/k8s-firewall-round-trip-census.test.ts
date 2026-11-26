@@ -36,6 +36,7 @@ import * as pulumi from '@pulumi/pulumi';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildProgramConfig } from '../../../src/lib/scale-plan.js';
 import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
+import { escapeRegExp } from '../../_shared/regexp.js';
 import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { CODE, findCalls, functionRanges, lex, matchBracket } from '../helpers/js-call-scan.js';
 
@@ -437,9 +438,7 @@ function isTheRead(text: string, field: { at: number } | { name: string }, readA
   } else {
     name = field.name;
   }
-  return new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*=\\s*$`).test(
-    text.slice(0, readAt),
-  );
+  return new RegExp(`(?<![\\w$.])${escapeRegExp(name)}\\s*=\\s*$`).test(text.slice(0, readAt));
 }
 
 describe('every k8s program build site declares the peer from the one helper', () => {
