@@ -62,7 +62,27 @@ describe('_scaleway-metadata.sh (executed)', () => {
     }
     const sandboxed = scalewayHost('vc-scaleway-sandbox-');
     try {
-      expect(() => sandboxed.sandbox('mkdir -p /etc/ssh/sshd_config.d\n')).toThrow(/\/etc\/ssh/);
+      // Any absolute path outside the temp root is refused, not only /etc and /usr.
+      for (const [script, path] of [
+        ['mkdir -p /etc/ssh/sshd_config.d\n', '/etc/ssh/sshd_config.d'],
+        ['echo 0 > /proc/sys/net/ipv6/x\n', '/proc/sys/net/ipv6/x'],
+        ['rm -rf "/var/lib/rancher"\n', '/var/lib/rancher'],
+        ['cat /home/someone/.ssh/id_ed25519\n', '/home/someone/.ssh/id_ed25519'],
+      ]) {
+        expect(() => sandboxed.sandbox(script), script).toThrow(path);
+      }
+      // /dev/null, a URL's path, a relative path and an awk regex pass.
+      for (const script of [
+        'curl -sf http://169.254.42.42/conf?format=json 2>/dev/null\n',
+        'awk \'{ sub(/:$/, "", n); split($4, a, "/") }\' ./here/x\n',
+      ]) {
+        expect(() => sandboxed.sandbox(script), script).not.toThrow();
+      }
+      // The shebang the include writes is moved under the root too.
+      expect(sandboxed.sandbox("echo '#!/bin/bash'\n")).toBe(
+        `echo '#!${sandboxed.root}/bin/bash'\n`,
+      );
+      expect(() => sandboxed.sandbox(INCLUDE)).not.toThrow();
     } finally {
       sandboxed.cleanup();
     }
@@ -91,6 +111,53 @@ describe('_scaleway-metadata.sh (executed)', () => {
     );
     expect(r.stderr).toBe('');
     expect(r.stdout).toBe('ens5 10.130.5.3');
+  });
+
+  it('the address is the one the finder saw: a lease that flaps on the next read cannot empty it', () => {
+    // The finder's own read (1) holds the address; a second read (2) would
+    // print nothing. --node-ip "" would put k3s on the public address.
+    const r = run(METADATA, [PUBLIC_NIC, { ...PN_NIC, addressMissingOnRead: 2 }]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(`203.0.113.10 10.130.5.3 ens5 ${UUID} fr-par-1 acme-prod-master`);
+  });
+
+  it('a finder that hands back no address: FATAL, never an empty --node-ip', () => {
+    // The include's own guard, under a finder that names only the NIC.
+    const finder = /^scw_private_iface\(\) \{\n[\s\S]*?\n\}\n/m;
+    expect(INCLUDE).toMatch(finder);
+    host = scalewayHost('vc-scaleway-metadata-');
+    host.setMetadata(METADATA);
+    host.setNics([PUBLIC_NIC, PN_NIC]);
+    const broken = INCLUDE.replace(finder, 'scw_private_iface() { echo ens5; }\n');
+    const r = host.run(
+      `set -euo pipefail\nK3S_UNIT=k3s-agent\n${host.sandbox(broken)}\necho booted\n`,
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('FATAL: no IPv4 address on the Private Network interface "ens5"');
+    expect(r.stdout).toBe('');
+  });
+
+  it('the only 02:00:00 NIC carries the default route: FATAL at once, it is the public one', () => {
+    const r = run(METADATA, [{ ...PUBLIC_NIC, mac: '02:00:00:11:22:33' }]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(
+      'FATAL: ens2 (MAC 02:00:00:...) carries the default route, so it is the public interface',
+    );
+    expect(r.stdout).toBe('');
+    // No wait: a public interface never turns into the Private Network one.
+    expect(host?.linkReads()).toBe(1);
+  });
+
+  it('the 02:00:00 NIC holds the public address: FATAL', () => {
+    const r = run(METADATA, [
+      { ...PUBLIC_NIC, cidr: '198.51.100.4/32' },
+      { ...PN_NIC, cidr: '203.0.113.10/32' },
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(
+      'FATAL: the Private Network interface ens5 holds the public address 203.0.113.10',
+    );
+    expect(r.stdout).toBe('');
   });
 
   it('no 02:00:00 NIC: FATAL after the wait', () => {
@@ -177,8 +244,23 @@ describe('_scaleway-metadata.sh (executed)', () => {
     host?.setNics([PUBLIC_NIC]);
     const start = host?.runFile(START_SCRIPT);
     expect(start?.status).toBe(1);
-    expect(start?.stderr).toContain('FATAL: no Private Network interface');
+    expect(start?.stderr).toContain(
+      'FATAL: no single Private Network interface (MAC 02:00:00:...) with an address after 60 s',
+    );
     // The last good name stays; ExecStartPre failing keeps k3s down.
+    expect(host?.read(FLANNEL_IFACE)).toBe('flannel-iface: ens5\n');
+  });
+
+  it('vc-flannel-iface refuses a NIC that now carries the default route', () => {
+    const r = run(METADATA, [PUBLIC_NIC, PN_NIC]);
+    expect(r.status).toBe(0);
+    host?.setNics([
+      { ...PUBLIC_NIC, defaultRoute: false },
+      { ...PN_NIC, defaultRoute: true },
+    ]);
+    const start = host?.runFile(START_SCRIPT);
+    expect(start?.status).toBe(1);
+    expect(start?.stderr).toContain('FATAL: ens5 (MAC 02:00:00:...) carries the default route');
     expect(host?.read(FLANNEL_IFACE)).toBe('flannel-iface: ens5\n');
   });
 });

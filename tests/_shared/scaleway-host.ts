@@ -5,12 +5,13 @@
  *
  * - PATH is one temp directory: a fake metadata service (`curl`), a fake
  *   kernel (`ip`), a `sleep` that returns at once, and links to the real
- *   python3, awk, grep, seq, mkdir, chmod and cat. Nothing else resolves, so
- *   no systemctl, hostnamectl or k3s on this machine can run.
+ *   bash, python3, awk, grep, seq, mkdir, chmod and cat. Nothing else
+ *   resolves, so no systemctl, hostnamectl or k3s on this machine can run.
  * - The script's system roots (/usr/local/sbin, /etc/rancher, /etc/systemd)
- *   are rewritten to the same paths under the temp directory before it runs,
- *   and `sandbox` refuses a script that would still write anywhere under
- *   /etc or /usr.
+ *   and the /bin/bash it writes as a shebang are rewritten to the same paths
+ *   under the temp directory before it runs. `sandbox` refuses a script that
+ *   still names any other absolute path, /dev/null and a URL's path aside.
+ * - Every run starts in the temp directory, so a relative path lands there.
  */
 import { spawnSync } from 'node:child_process';
 import {
@@ -25,17 +26,30 @@ import { join } from 'node:path';
 import { cleanupTempDir, createTempDir } from './temp-dir.js';
 
 export const SCALEWAY_SYSTEM_ROOTS = ['/usr/local/sbin', '/etc/rancher', '/etc/systemd'] as const;
-const REAL_TOOLS = ['python3', 'awk', 'grep', 'seq', 'mkdir', 'chmod', 'cat'];
+/** Moved under the root with the system roots: the shebang of a script the include writes. */
+const SANDBOXED_INTERPRETER = '/bin/bash';
+/** Absolute paths a script may name outside the sandbox: they hold nothing of this machine's. */
+const OUTSIDE_PATHS_ALLOWED = new Set(['/dev/null']);
+const REAL_TOOLS = ['bash', 'python3', 'awk', 'grep', 'seq', 'mkdir', 'chmod', 'cat'];
 
 /** A network interface: its kernel name, MAC and IPv4 address (none yet when left out). */
 export interface Nic {
   name: string;
   mac: string;
   cidr?: string;
+  /** The default route leaves by this interface. */
+  defaultRoute?: boolean;
+  /** The read of its address, counted from 1, that prints nothing: a lease that flaps. */
+  addressMissingOnRead?: number;
 }
 
-/** The public NIC every Scaleway instance boots with. */
-export const PUBLIC_NIC: Nic = { name: 'ens2', mac: 'de:00:00:11:22:33', cidr: '203.0.113.10/32' };
+/** The public NIC every Scaleway instance boots with, carrying the default route. */
+export const PUBLIC_NIC: Nic = {
+  name: 'ens2',
+  mac: 'de:00:00:11:22:33',
+  cidr: '203.0.113.10/32',
+  defaultRoute: true,
+};
 
 /** The first executable called `name` on this process's PATH. */
 function realTool(name: string): string {
@@ -67,7 +81,10 @@ function realPython(): string {
   return executable;
 }
 
-/** `ip -o link show` and `ip -o -4 addr show dev <name>` lines for `nics`, as files. */
+/**
+ * `ip -o link show`, `ip -o -4 addr show dev <name>` and
+ * `ip -o route show default` lines for `nics`, as files.
+ */
 function kernelFiles(nics: Nic[]): Record<string, string> {
   const links = [
     '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00',
@@ -76,11 +93,22 @@ function kernelFiles(nics: Nic[]): Record<string, string> {
         `${i + 2}: ${name}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\\    link/ether ${mac} brd ff:ff:ff:ff:ff:ff`,
     ),
   ];
-  const files: Record<string, string> = { links: `${links.join('\n')}\n` };
-  nics.forEach(({ name, cidr }, i) => {
+  const routes = nics
+    .filter(({ defaultRoute }) => defaultRoute)
+    .map(
+      ({ name, cidr }) =>
+        `default via 62.210.0.1 dev ${name} proto dhcp src ${cidr?.split('/')[0] ?? '0.0.0.0'} metric 100 `,
+    );
+  const files: Record<string, string> = {
+    links: `${links.join('\n')}\n`,
+    routes: routes.map((line) => `${line}\n`).join(''),
+  };
+  nics.forEach(({ name, cidr, addressMissingOnRead }, i) => {
     files[`addr-${name}`] = cidr
       ? `${i + 2}: ${name}    inet ${cidr} metric 100 brd + scope global dynamic ${name}\\       valid_lft 86185sec preferred_lft 86185sec\n`
       : '';
+    files[`addr-${name}.reads`] = '0\n';
+    if (addressMissingOnRead) files[`addr-${name}.missing-${addressMissingOnRead}`] = '';
   });
   return files;
 }
@@ -138,9 +166,11 @@ export function scalewayHost(prefix = 'vc-scaleway-host-'): ScalewayHost {
       `echo "$*" >> '${calls}'`,
       'case "$*" in',
       `  '-o link show') cat '${kernel}/links' ;;`,
+      `  '-o route show default') cat '${kernel}/routes' ;;`,
       `  '-o -4 addr show dev '*) f='${kernel}'/addr-"\${!#}"`,
       `    [ -f "$f" ] || { echo "Device \\"\${!#}\\" does not exist." >&2; exit 1; }`,
-      '    cat "$f" ;;',
+      '    n=$(($(cat "$f.reads") + 1)); echo "$n" > "$f.reads"',
+      '    if [ ! -f "$f.missing-$n" ]; then cat "$f"; fi ;;',
       '  *) echo "fake ip: unexpected: $*" >&2; exit 1 ;;',
       'esac',
     ].join('\n'),
@@ -152,9 +182,11 @@ export function scalewayHost(prefix = 'vc-scaleway-host-'): ScalewayHost {
     `for f in '${late}'/*; do [ -f "$f" ] && cat "$f" > '${kernel}'/"\${f##*/}"; done; exit 0`,
   );
 
-  const masked = (text: string) => text.replaceAll(root, '<root>');
+  // A word in place of the root, so a path under it reads as relative below.
+  const masked = (text: string) => text.replaceAll(root, '__ROOT__');
   const run = (command: string, args: string[]) => {
     const r = spawnSync(command, args, {
+      cwd: root,
       env: { PATH: bin, HOME: root },
       encoding: 'utf8',
       timeout: 20_000,
@@ -177,12 +209,20 @@ export function scalewayHost(prefix = 'vc-scaleway-host-'): ScalewayHost {
     shim,
     sandbox(script) {
       let out = script;
-      for (const systemRoot of SCALEWAY_SYSTEM_ROOTS) {
-        out = out.replaceAll(systemRoot, `${root}${systemRoot}`);
+      for (const moved of [...SCALEWAY_SYSTEM_ROOTS, SANDBOXED_INTERPRETER]) {
+        out = out.replaceAll(moved, `${root}${moved}`);
       }
-      const stray = masked(out).match(/(?<!<root>)\/(?:etc|usr)\/\S*/);
-      if (stray)
-        throw new Error(`scaleway-host: the script still writes ${stray[0]} on this machine`);
+      // An absolute path: a slash that starts a word (no word character, dot,
+      // colon or slash before it, so neither a URL's path nor a relative
+      // path) with a path character after it.
+      const stray = [...masked(out).matchAll(/(?<![\w.:/-])\/[\w.-][^\s'"`;|&()<>]*/g)]
+        .map(([path]) => path)
+        .filter((path) => !OUTSIDE_PATHS_ALLOWED.has(path));
+      if (stray.length > 0) {
+        throw new Error(
+          `scaleway-host: the script still names ${stray.join(', ')} on this machine`,
+        );
+      }
       return out;
     },
     path: (systemPath) => `${root}${systemPath}`,

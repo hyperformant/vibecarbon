@@ -90,9 +90,7 @@ describe('ScalewayProvider k8s user-data statics', () => {
       expect(rendered).not.toContain('--flannel-backend');
       expect(rendered).not.toContain('--disable-cloud-controller');
       expect(rendered).not.toContain('cloud-provider=external');
-      // The shared includes' comments may name the provider they were
-      // written for; no other provider's command runs here.
-      expect(commandsOf(rendered)).not.toMatch(
+      expect(rendered).not.toMatch(
         /vultr|linode|digitalocean|hetzner|hcloud|droplet|eth1|169\.254\.169\.254/i,
       );
     },
