@@ -1393,10 +1393,14 @@ export class HetznerProvider extends BaseProvider {
   /**
    * Compute the updated Hetzner firewall rule set admitting the peer db
    * node's WireGuard tunnel endpoint (udp/51821), or null when no update is
-   * needed. Pure: deployK8sHA fetches the firewall, calls this, and PUTs the
-   * result — for BOTH clusters with the peer swapped (the post-failover
-   * reverse re-seed dials the promoted standby, so its firewall must admit the
-   * old primary too; neither failover.js nor restore.js touches firewalls).
+   * needed. Pure: its callers (k8s-ha's openReplicationFirewallForPeers, run
+   * by the deploy and by scale's tunnel rebuild, and compose-ha's deploy)
+   * fetch the firewall, call this, and PUT the result, for BOTH sides with the
+   * peer swapped (the post-failover reverse re-seed dials the promoted
+   * standby, so its firewall must admit the old primary too). failover.js and
+   * restore.js write no firewall rule over REST; a k8s-ha failover's converge
+   * up keeps this rule because the k8s program declares it
+   * (replicationPeerIpFor).
    *
    * Replication moved from a public-IP TCP connection to a point-to-point
    * WireGuard tunnel (wireguard.js — WG_PORT=51821; 51820 is flannel-wg's), so

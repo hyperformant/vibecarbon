@@ -160,7 +160,7 @@ export function buildLinodeK8sProgram(config) {
   // (replicationPeerIpFor) so an up keeps what the deploy's REST step wrote:
   // the rules PUT replaces the whole ordered list. Field for field
   // LinodeProvider.buildReplicationFirewallRules's rule, its label included,
-  // and last, where that reconcile appends it
+  // in the order the REST writers produce
   // (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). None until the
   // peer is on record: the deploy's REST step opens it then.
   const replicationRules = config.replicationPeerIp

@@ -2964,8 +2964,9 @@ async function scaleApplyK8sChanges(ctx) {
           label,
         });
         // The database node as this up left it: a resize that replaced it
-        // gave it a new address, which the record does not have yet. The
-        // k8s-ha tunnel rebuild and its firewall re-open read it from here
+        // gave it a new address, which the record takes only at the scale's
+        // end (scaleUpdateK8sConfig). The k8s-ha tunnel rebuild and its
+        // firewall re-open run before that and read it from here
         // (scaleReestablishHaTunnel).
         ctx.convergedDb = {
           ...ctx.convergedDb,
@@ -3100,7 +3101,8 @@ async function scaleApplyK8sChanges(ctx) {
  * built to (openReplicationFirewallForPeers, the deploy's writer). The ups
  * keep the rule the record names (each program declares it,
  * replicationPeerIpFor), but a resize that replaced a database node gave it a
- * new address the record does not have yet: the converge's outputs
+ * new address the record takes only at the scale's end (scaleUpdateK8sConfig
+ * saves it, so the next up declares it): the converge's outputs
  * (scaleApplyK8sChanges, ctx.convergedDb) win over the record here, and the
  * peer's firewall moves to the new address. A no-op when nothing moved.
  *
@@ -3476,7 +3478,9 @@ done`,
  * .vibecarbon.json. Hetzner server_type changes are in-place resizes (not
  * replaces) per the master-replace guard's design comment above — the public
  * IP survives the type bump, so the persisted `servers[]` block still points
- * at the right hosts after scale; only the sizing inputs need updating.
+ * at the right hosts after scale; only the sizing inputs need updating. On
+ * k8s-ha, a database node the up did replace (no provider does today) has its
+ * new addresses saved on its side's `ha` record in the same write.
  */
 async function scaleUpdateK8sConfig(ctx) {
   const { environment, newValues, isHA } = ctx;
@@ -3484,6 +3488,25 @@ async function scaleUpdateK8sConfig(ctx) {
   // in-memory envConfig predates everything this scale saved.
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[environment] ?? ctx.envConfig;
+    // Each side's database node as this scale's up left it
+    // (scaleApplyK8sChanges, ctx.convergedDb). A resize that replaced one gave
+    // it a new address, and the next up declares the peer's replication rule
+    // from this record (replicationPeerIpFor): a stale address there would
+    // move the peer's firewall back to the old node. Only a defined value that
+    // differs from the record is saved.
+    const movedDb = (role) => {
+      const recorded = envConfig.ha?.[role];
+      const converged = ctx.convergedDb?.[role];
+      if (!isHA || !recorded || !converged) return null;
+      const moved = Object.fromEntries(
+        ['dbIp', 'dbPrivateIp']
+          .filter((key) => converged[key] && converged[key] !== recorded[key])
+          .map((key) => [key, converged[key]]),
+      );
+      return Object.keys(moved).length > 0 ? moved : null;
+    };
+    const primaryDb = movedDb('primary');
+    const standbyDb = movedDb('standby');
     const updatedEnvFields = {
       ...(newValues.workerType && {
         workerServerType: newValues.workerType,
@@ -3508,9 +3531,14 @@ async function scaleUpdateK8sConfig(ctx) {
       // new types too: scaleApplyK8sChanges resized both clusters, and a
       // redeploy builds each side from its record, so a stale one would undo
       // this scale (and, after a failover, resize the live primary back).
+      // A side whose database node moved takes its new addresses (movedDb).
       ...(isHA &&
         envConfig.ha &&
-        (newValues.workerType || newValues.masterType || newValues.dbType) && {
+        (newValues.workerType ||
+          newValues.masterType ||
+          newValues.dbType ||
+          primaryDb ||
+          standbyDb) && {
           ha: {
             ...envConfig.ha,
             ...(envConfig.ha.primary && {
@@ -3519,14 +3547,16 @@ async function scaleUpdateK8sConfig(ctx) {
                 ...(newValues.masterType && { masterServerType: newValues.masterType }),
                 ...(newValues.dbType && { dbServerType: newValues.dbType }),
                 ...(newValues.workerType && { workerServerType: newValues.workerType }),
+                ...primaryDb,
               },
             }),
             ...(envConfig.ha.standby &&
-              (newValues.masterType || newValues.dbType) && {
+              (newValues.masterType || newValues.dbType || standbyDb) && {
                 standby: {
                   ...envConfig.ha.standby,
                   ...(newValues.masterType && { masterServerType: newValues.masterType }),
                   ...(newValues.dbType && { dbServerType: newValues.dbType }),
+                  ...standbyDb,
                 },
               }),
             ...(newValues.workerType && {

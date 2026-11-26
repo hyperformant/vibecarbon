@@ -113,7 +113,7 @@ export function buildHetznerK8sProgram(config) {
   // database node), declared from the peer's recorded address
   // (replicationPeerIpFor) so an up keeps what the deploy's REST step wrote.
   // Field for field HetznerProvider.buildReplicationFirewallRules's rule, so
-  // no description, and last, where that reconcile appends it
+  // no description, in the order the REST writers produce
   // (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). None until the
   // peer is on record: the deploy's REST step opens it then.
   const replicationRules = config.replicationPeerIp

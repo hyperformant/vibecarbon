@@ -19,7 +19,7 @@ import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
-import { getProvider } from '../../../src/lib/providers/index.js';
+import { getProvider, getProviderClass } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { addonAttemptId, checkAddonsReady } from '../checks/addons-ready.js';
 import { runAppApiChecks } from '../checks/app-api.js';
@@ -89,7 +89,12 @@ import {
   runRestoreDeployContinuityCheck,
   writeReplicationMarker,
 } from '../checks/replication.js';
-import { checkReplicationFirewalls, runScaleHaChecks } from '../checks/scale-ha.js';
+import {
+  checkReplicationFirewalls,
+  checkScaleUpsLeftFirewalls,
+  runHaFirewallChecks,
+  runScaleHaChecks,
+} from '../checks/scale-ha.js';
 import {
   checkN8nKeyShared,
   checkPromotedAddonsReady,
@@ -953,6 +958,20 @@ export async function runLifecycle(
     return computeToken;
   };
   const hcloudEnv = hcloudChildEnv(config.provider ?? 'hetzner', computeToken);
+
+  // k8s-ha: each side's firewall, read for the other side's recorded database
+  // address. verify-scale, verify-failover and reconverge-deploy run it;
+  // checks/scale-ha.ts says what the read proves after each.
+  const readReplicationFirewalls = () => {
+    const fwProviderName = config.provider ?? 'hetzner';
+    const fwToken = providerTokenFor(fwProviderName);
+    return checkReplicationFirewalls({
+      provider: fwToken ? getProvider(fwProviderName, fwToken) : null,
+      projectName: config.projectName,
+      envName: config.envPrefix,
+      envConfig: readEnvConfig(config.projectDir, config.envPrefix),
+    });
+  };
 
   // The one place a lifecycle step runs `vibecarbon deploy`. Every deploy
   // after the first RE-SEEDS .vibecarbon.json from these settings
@@ -1855,8 +1874,9 @@ export async function runLifecycle(
         // - verify-failover: streaming is intentionally gone (the old primary is
         //   scaled down by design, no reverse reseed), so we assert ONLY data
         //   CONTINUITY — the marker written on the old primary just before
-        //   failover must survive onto the promoted primary. app-serves is
-        //   covered by the shared health/app checks above.
+        //   failover must survive onto the promoted primary, and on k8s-ha each
+        //   side's replication firewall rule (checks/scale-ha.ts). app-serves
+        //   is covered by the shared health/app checks above.
         const isHaMode = config.mode === 'compose-ha' || config.mode === 'k8s-ha';
         if (isHaMode) {
           const { primaryIp, standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
@@ -1974,6 +1994,16 @@ export async function runLifecycle(
                 retiredIp: standbyIp,
                 sshKeyPath,
               }),
+            );
+            // k8s-ha: each side's firewall still admits UDP 51821 from the
+            // other side's database node. The failover's converge up on the
+            // promoted side is the only writer since the last REST write, so
+            // this proves the program declares the rule (checks/scale-ha.ts).
+            replResults.push(
+              ...(await runHaFirewallChecks({
+                mode: config.mode,
+                firewalls: readReplicationFirewalls,
+              })),
             );
           } else if (stepName === 'verify-deploy' || stepName === 'verify-restore') {
             replResults.push(
@@ -2541,7 +2571,6 @@ EOF`;
           // Derived from the provider registry (TOKEN_ENV + OBJECT_STORAGE_ENV)
           // rather than a hand-listed ternary, so provider N+1's scenarios
           // seed the right credentials with no edit here (2026-08-07 audit).
-          const { getProviderClass } = await import('../../../src/lib/providers/index.js');
           const ProviderClass = getProviderClass(config.provider ?? 'hetzner');
           const providerCredentialKeys: string[] = [
             ProviderClass.TOKEN_ENV,
@@ -3385,12 +3414,21 @@ EOF`;
           }
           console.log(`${tag} [verify-scale] backup evidence OK after scale`);
 
-          // 5b. k8s-ha: the scale's ups left replication and the replication
-          //     firewall rule intact. Each side's firewall is read for the
-          //     other side's recorded database address, which `serverIps`'
-          //     refresh and the scale's config rewrite have already updated.
+          // 5b. k8s-ha, three checks (checks/scale-ha.ts):
+          //     - replication still streams and carries a fresh write;
+          //     - each side's firewall admits UDP 51821 from the other side's
+          //       recorded database node. This scale changes the database
+          //       type, so its tunnel rebuild re-opens the rule by REST after
+          //       both ups: the read proves the scale ENDS with the rule open,
+          //       whatever the programs declared;
+          //     - on a provider whose program declares its rules inline, the
+          //       scale's ups changed no firewall resource, read from their
+          //       per-resource markers in this scale's output. That is the
+          //       proof the ups kept the rule the program declares.
           const haScaleResults = await runScaleHaChecks({
             mode: config.mode,
+            inlineFirewallRules: !getProviderClass(config.provider ?? 'hetzner')
+              .K8S_OPERATOR_RULES_AFTER_UP,
             replication: () => {
               const { primaryIp, standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
               return runReplicationChecks({
@@ -3402,24 +3440,22 @@ EOF`;
                 markerId: buildMarkerId(scenarioId, 'verify-scale', Date.now()),
               });
             },
-            firewalls: () => {
-              const fwProviderName = config.provider ?? 'hetzner';
-              const fwToken = providerTokenFor(fwProviderName);
-              return checkReplicationFirewalls({
-                provider: fwToken ? getProvider(fwProviderName, fwToken) : null,
-                projectName: config.projectName,
+            firewalls: readReplicationFirewalls,
+            scaleUps: () =>
+              checkScaleUpsLeftFirewalls({
+                output: `${stdoutClean}\n${stderrClean}`,
                 envName: config.envPrefix,
                 envConfig: readEnvConfig(config.projectDir, config.envPrefix),
-              });
-            },
+              }),
           });
           collector.recordVerifications(stepId, haScaleResults);
           const haScaleFails = haScaleResults.filter((r) => r.status === 'fail');
           if (haScaleFails.length > 0) {
             throw new Error(
-              `verify-scale: k8s-ha replication broke after scale — ${haScaleFails
-                .map((f) => `${f.checkName}: ${f.errorMessage ?? 'failed'}`)
-                .join('; ')}`,
+              `verify-scale: after the scale, the replication rule is missing or replication ` +
+                `is not streaming: ${haScaleFails
+                  .map((f) => `${f.checkName}: ${f.errorMessage ?? 'failed'}`)
+                  .join('; ')}`,
             );
           }
 
@@ -3859,7 +3895,9 @@ EOF`;
     // checks), data CONTINUITY (replication_failover_continuity: the marker
     // written on the old primary before failover survived onto the promoted
     // primary), the DNS flip read back through the provider API
-    // (dns_flip_verified) and the old primary disarmed (old_primary_disarmed).
+    // (dns_flip_verified), the old primary disarmed (old_primary_disarmed) and,
+    // on k8s-ha, each side's replication firewall rule
+    // (replication_firewall:<stack>, checks/scale-ha.ts).
     // It deliberately does NOT assert streaming replication: after promotion
     // the old primary is retired by design and nothing reseeds it until the
     // reconverge deploy, so there is no standby streaming from the new
@@ -4163,7 +4201,8 @@ EOF`;
 
             // DR restored: the rebuilt side streams from the promoted primary
             // and a fresh write propagates to it; the promoted primary's slot
-            // is capped. A skip (no handle) is a failure here: HA always has one.
+            // is capped; on k8s-ha each firewall admits its peer. A skip (no
+            // handle) is a failure here: HA always has one.
             requireAllPass(stepId, 'reconverge-deploy', [
               ...(await runReplicationChecks({
                 mode: config.mode,
@@ -4179,6 +4218,13 @@ EOF`;
                 primaryIp: newPrimaryIp,
                 sshKeyPath,
               }),
+              // k8s-ha: the reconverge's stack-named REST opener, after both
+              // sides' ups, left each firewall admitting the OTHER side's
+              // database node with the roles swapped (checks/scale-ha.ts).
+              ...(await runHaFirewallChecks({
+                mode: config.mode,
+                firewalls: readReplicationFirewalls,
+              })),
             ]);
 
             if (config.mode === 'k8s-ha') {

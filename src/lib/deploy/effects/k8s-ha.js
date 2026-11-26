@@ -605,10 +605,10 @@ function startStandbyImageCopy(ctx) {
  * the wrong peer and wrote each cluster's own database address into its own
  * firewall. It is attached to all that cluster's nodes incl. the
  * database/WG node. provider.buildReplicationFirewallRules emits the
- * udp/51821 rule (Hetzner also scrubs stale TCP 5432/5433/30432
- * rules from the retired public-IP TLS transport — see HetznerProvider's
- * implementation). Non-fatal per cluster (manual firewall config may
- * suffice). Idempotent — no set_rules PUT when the rules already match.
+ * udp/51821 rule (Hetzner also scrubs stale TCP 5433/30432 rules from the
+ * retired public-IP TLS transport; see HetznerProvider's implementation).
+ * Non-fatal per cluster (manual firewall config may suffice). Idempotent: no
+ * set_rules PUT when the rules already match.
  *
  * @param {object} args
  * @param {object|null} args.provider a provider instance; null skips the step

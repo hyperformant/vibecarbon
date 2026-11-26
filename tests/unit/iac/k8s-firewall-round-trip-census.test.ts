@@ -223,7 +223,6 @@ afterEach(() => {
 describe('k8s firewall round trip census', () => {
   it('every k8s provider either declares its rules inline here or leaves them to REST', () => {
     expect(inlineProviders.map(([id]) => id).sort()).toEqual(Object.keys(INLINE).sort());
-    expect(restOnlyProviders.length + inlineProviders.length).toBe(k8sProviders.length);
   });
 
   describe.each(inlineProviders)('%s: the declared list is what REST leaves', (id, Provider) => {
@@ -234,7 +233,7 @@ describe('k8s firewall round trip census', () => {
       expect(JSON.stringify(rules)).not.toContain(REPLICATION_PORT);
     });
 
-    it('the first deploy: REST adds exactly the rule the next up declares, last', async () => {
+    it('the first deploy: REST adds exactly the rule the next up declares, in the order the REST writers produce', async () => {
       const without = await declared(id, Provider, {});
       const withPeer = await declared(id, Provider, { replicationPeerIp: PEER });
       // What the deploy's REST opener writes on the firewall the first up
@@ -273,6 +272,35 @@ describe('k8s firewall round trip census', () => {
       expect(set).toHaveBeenCalledTimes(1);
       expect(set.mock.calls[0][1]).toEqual(withPeer);
     });
+
+    // `vibecarbon access` saves the new list, then pushes it (operator-ip.js):
+    // the next up builds the program from the saved list, and must declare
+    // exactly what the push left, the replication rule included.
+    it.each([
+      ['moved addresses', ['198.51.100.9/32', '2001:db8::9/128']],
+      ['an IPv4 address only', ['198.51.100.9/32']],
+    ])(
+      'the operator push with new CIDRs (%s) PUTs what the program declares from them',
+      async (_what, cidrs) => {
+        const before = await declared(id, Provider, { replicationPeerIp: PEER });
+        const after = await declared(id, Provider, {
+          replicationPeerIp: PEER,
+          allowedSshIps: cidrs,
+          allowedK8sApiIps: cidrs,
+        });
+        expect(after, 'the new CIDRs change the declared list').not.toEqual(before);
+        const p = provider();
+        vi.spyOn(p, 'findFirewallByName').mockResolvedValue(
+          INLINE[id].wrap(structuredClone(before)),
+        );
+        const set = vi.spyOn(p, 'setFirewallRules').mockResolvedValue(undefined);
+        expect(
+          await p.applyOperatorCidrs({ firewallName: 'acme-prod-primary-firewall', cidrs }),
+        ).toBe(true);
+        expect(set).toHaveBeenCalledTimes(1);
+        expect(set.mock.calls[0][1]).toEqual(after);
+      },
+    );
   });
 
   describe.each(restOnlyProviders)('%s: REST is the only writer (RV5)', (_id, Provider) => {

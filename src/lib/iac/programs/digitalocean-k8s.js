@@ -191,8 +191,8 @@ export function buildDigitalOceanK8sProgram(config) {
   // database node), declared from the peer's recorded address
   // (replicationPeerIpFor) so an up keeps what the deploy's REST step wrote:
   // the firewall PUT replaces the whole rule set. Field for field
-  // DigitalOceanProvider.buildReplicationFirewallRules's rule, and last,
-  // where that reconcile appends it
+  // DigitalOceanProvider.buildReplicationFirewallRules's rule, in the order
+  // the REST writers produce
   // (tests/unit/iac/k8s-firewall-round-trip-census.test.ts). None until the
   // peer is on record: the deploy's REST step opens it then.
   const replicationRules = config.replicationPeerIp
