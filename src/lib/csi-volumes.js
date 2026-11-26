@@ -67,6 +67,16 @@
  *       (`if d.doTag != "" { volumeReq.Tags = append(...) }`); do-master-init.sh
  *       does not pass it, so DO CSI volumes carry no tags at all.
  *
+ *   vultr-csi v0.19.1 (`block.csi.vultr.com`)
+ *     - `spec.csi.volumeHandle` = the Vultr block storage UUID
+ *       (`VolumeId: volume.ID`, driver/controller.go).
+ *     - topology segment key `region` (driver/node.go NodeGetInfo).
+ *     - the volume's label is the CSI request name, `pvc-<16 hex>`
+ *       (csi-provisioner `--volume-name-uuid-length=16`).
+ *     - NO TAGS: Vultr block storage takes none, so the captured id is the
+ *       only proof a volume is this environment's
+ *       (VultrProvider.ORPHAN_VOLUME_REGION_GUESS).
+ *
  * Net: Hetzner CSI volumes created from the v2.18.1 bump onward DO carry
  * ownership labels; DigitalOcean's carry nothing, and neither does any Hetzner
  * volume created before the bump. Identity capture from the cluster is
@@ -79,6 +89,9 @@
 
 import { existsSync as nodeExistsSync } from 'node:fs';
 import { runCommand as nodeRunCommand } from './command.js';
+
+/** A UUID, as Vultr spells its block storage ids (lowercase hex). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * CSI drivers whose `volumeHandle` we know how to hand to a provider's
@@ -112,6 +125,13 @@ const CSI_DRIVERS = {
     // volume as not ours (live 2026-11-08).
     volumeId: (handle) => /^(\d+)-./.exec(handle)?.[1] ?? null,
   },
+  'block.csi.vultr.com': {
+    providerId: 'vultr',
+    regionKeys: ['region', 'topology.kubernetes.io/region'],
+    // The handle is the block storage id, a UUID (vultr-csi v0.19.1
+    // driver/controller.go). Anything else is not one we can delete by.
+    volumeId: (handle) => (UUID_RE.test(handle) ? handle : null),
+  },
 };
 
 /**
@@ -134,19 +154,20 @@ const GENERIC_REGION_KEYS = [
 const CSI_VOLUME_NAME_RE = /^pvc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * Linode's CSI driver labels volumes `pvc-` plus 16 hex characters (the
- * PV name truncated to fit Linode's 32 character label limit).
+ * `pvc-` plus 16 hex characters: the PV name's UUID with its dashes dropped,
+ * cut to 16. Two drivers name their volumes this way: Linode's
+ * (linode-blockstorage-csi-driver, to fit Linode's 32 character label
+ * limit) and Vultr's (vultr-csi, whose provisioner runs with
+ * `--volume-name-uuid-length=16`).
  */
-const LINODE_CSI_LABEL_RE = /^pvc-[0-9a-f]{16}$/;
+const PVC_LABEL_16_RE = /^pvc-[0-9a-f]{16}$/;
 
 /**
  * @param {unknown} name
  * @returns {boolean} true when `name` is a CSI-provisioned volume name.
  */
 export function isCsiVolumeName(name) {
-  return (
-    typeof name === 'string' && (CSI_VOLUME_NAME_RE.test(name) || LINODE_CSI_LABEL_RE.test(name))
-  );
+  return typeof name === 'string' && (CSI_VOLUME_NAME_RE.test(name) || PVC_LABEL_16_RE.test(name));
 }
 
 /**

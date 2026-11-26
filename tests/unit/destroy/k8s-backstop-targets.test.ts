@@ -236,18 +236,25 @@ describe('planK8sBackstopTargets on k8s-ha reads an environment-level address to
   });
 });
 
-describe('planK8sBackstopTargets on Linode', () => {
-  it('gives Linode the same target names as DigitalOcean, single and HA', () => {
+// The Linode and Vultr k8s programs name their firewall, SSH key and VPC as
+// DigitalOcean's does (`${clusterName}-firewall`, `-${location}-key`,
+// `-network`; vultr-k8s.js describes its group and VPC with them), so the
+// backstop's targets are the same names on each.
+describe.each([
+  ['Linode', 'linode', 'us-iad'],
+  ['Vultr', 'vultr', 'ewr'],
+])('planK8sBackstopTargets on %s', (name, provider, region) => {
+  it(`gives ${name} the same target names as DigitalOcean, single and HA`, () => {
     const single = {
       plan: { tier: 'k8s', stackEnvs: ['e3'] },
-      envConfig: { region: 'us-iad', floatingIp: '203.0.113.7' },
+      envConfig: { provider, region, floatingIp: '203.0.113.7' },
       projectConfig,
     };
     expect(planK8sBackstopTargets(single)).toEqual([
       {
         stackEnv: 'e3',
         firewallName: 'proj-e3-firewall',
-        sshKeyName: 'proj-e3-us-iad-key',
+        sshKeyName: `proj-e3-${region}-key`,
         reservedIps: [{ address: '203.0.113.7', stacks: ['e3'] }],
         networkName: 'proj-e3-network',
       },
@@ -255,7 +262,8 @@ describe('planK8sBackstopTargets on Linode', () => {
     const ha = planK8sBackstopTargets({
       plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
       envConfig: {
-        region: 'us-iad',
+        provider,
+        region,
         ha: {
           primary: { stack: 'e4-primary', floatingIp: '203.0.113.10' },
           standby: { stack: 'e4-standby', floatingIp: '203.0.113.20' },

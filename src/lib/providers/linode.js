@@ -19,6 +19,7 @@ import {
   BaseProvider,
   deleteFailure,
   deleteRefused,
+  deleteVpcByName,
   normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
@@ -1379,23 +1380,7 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
    */
   async deleteNetworkByName(name) {
-    let everExisted = false;
-    try {
-      const vpcs = await this.listNetworks();
-      const vpc = vpcs.find((v) => v.name === name);
-      if (!vpc) return { deleted: false, everExisted: false, apiError: null };
-      everExisted = true;
-      const res = await this.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
-      if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
-      const body = await res.text().catch(() => '');
-      return {
-        deleted: false,
-        everExisted,
-        apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
-      };
-    } catch (err) {
-      return { deleted: false, everExisted, apiError: err };
-    }
+    return deleteVpcByName(this, name);
   }
 
   /**

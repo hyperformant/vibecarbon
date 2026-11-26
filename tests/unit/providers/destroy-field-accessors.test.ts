@@ -185,8 +185,12 @@ describe('LinodeProvider destroy-sweep field accessors', () => {
 });
 
 describe('VultrProvider destroy-sweep field accessors', () => {
-  it('serverNetworkIds is always [] — compose instances join no VPC', () => {
-    expect(vultr.serverNetworkIds({ id: 'uuid-1', region: 'ewr' })).toEqual([]);
+  it('serverNetworkIds reads vpcs[].id, [] when none', () => {
+    // A k8s instance lists the VPC it is attached to (govultr Instance.VPCs,
+    // `vpcs: [{id, subnet}]`); a compose instance joins none.
+    const server = { id: 'uuid-1', vpcs: [{ id: 'vpc-1', subnet: '10.140.7.0' }] };
+    expect(vultr.serverNetworkIds(server)).toEqual(['vpc-1']);
+    expect(vultr.serverNetworkIds({ id: 'uuid-1', region: 'ewr', vpcs: [] })).toEqual([]);
     expect(vultr.serverNetworkIds({})).toEqual([]);
   });
 
@@ -230,6 +234,14 @@ describe('VultrProvider destroy-sweep field accessors', () => {
       '2026-08-08T00:00:00+00:00',
     );
     expect(vultr.volumeCreatedAt({})).toBeNull();
+  });
+
+  it('volumeName reads label', () => {
+    // A CSI volume's label is its request name, `pvc-<16 hex>` (vultr-csi).
+    expect(vultr.volumeName({ id: 'uuid-1', label: 'pvc-0123456789abcdef' })).toBe(
+      'pvc-0123456789abcdef',
+    );
+    expect(vultr.volumeName({ id: 'uuid-1' })).toBeNull();
   });
 });
 

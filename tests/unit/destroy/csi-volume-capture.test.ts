@@ -6,6 +6,7 @@ import {
   parseCsiPersistentVolumes,
 } from '../../../src/lib/csi-volumes.js';
 import { linodePv } from '../../_shared/linode-csi-pv.js';
+import { vultrPv } from '../../_shared/vultr-csi-pv.js';
 
 /**
  * Layer 1 of the CSI-volume destroy leak fix: capture the PROVIDER volume ids
@@ -373,6 +374,38 @@ describe('parseCsiPersistentVolumes — linode-blockstorage-csi-driver v1.1.5 fi
       '100604631',
       '506f78a4-e098-11e5-ad9f-000f53306ae1',
     ]);
+  });
+});
+
+describe('parseCsiPersistentVolumes — vultr-csi v0.19.1 fixtures', () => {
+  const UUID = '6d3a8f2e-1b4c-4e5f-9a7b-0c1d2e3f4a5b';
+
+  it('takes the block storage UUID from the volumeHandle and the bare `region` key', () => {
+    const { volumes, unreadable } = parseCsiPersistentVolumes({ items: [vultrPv(PVC_A, UUID)] });
+    expect(unreadable).toEqual([]);
+    expect(volumes).toEqual([
+      {
+        pvName: PVC_A,
+        driver: 'block.csi.vultr.com',
+        providerId: 'vultr',
+        volumeId: UUID,
+        regions: ['ewr'],
+        phase: 'Bound',
+        reclaimPolicy: 'Delete',
+      },
+    ]);
+  });
+
+  it('reports a handle that is not a UUID instead of guessing at an id', () => {
+    for (const handle of ['pvc-0123456789abcdef', '6d3a8f2e', `${UUID}-x`, `x${UUID}`]) {
+      const { volumes, unreadable } = parseCsiPersistentVolumes({
+        items: [vultrPv(PVC_A, handle)],
+      });
+      expect(volumes, handle).toEqual([]);
+      expect(unreadable, handle).toEqual([
+        { pvName: PVC_A, driver: 'block.csi.vultr.com', volumeHandle: handle },
+      ]);
+    }
   });
 });
 

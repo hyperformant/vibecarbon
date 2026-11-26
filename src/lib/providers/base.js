@@ -39,6 +39,38 @@ export function deleteFailure(providerName, status) {
 }
 
 /**
+ * The body of `deleteNetworkByName` on a provider whose `listNetworks` gives
+ * each VPC a `name` and that deletes one at `DELETE /vpcs/{id}`
+ * (DigitalOcean, Linode, Vultr). The VPC is the one whose name is exactly
+ * `name`. A 2xx or 404 is deleted. Any other answer is the provider refusing,
+ * most often because a server is still in the VPC: an ordering bug in the
+ * caller, never a not-found, so it comes back as `apiError` for the caller
+ * to report. Never throws.
+ * @param {{listNetworks: () => Promise<Array<{id: string|number, name: string}>>, bareRequest: (endpoint: string, init?: object) => Promise<Response>}} provider
+ * @param {string} name
+ * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+ */
+export async function deleteVpcByName(provider, name) {
+  let everExisted = false;
+  try {
+    const vpcs = await provider.listNetworks();
+    const vpc = vpcs.find((v) => v.name === name);
+    if (!vpc) return { deleted: false, everExisted: false, apiError: null };
+    everExisted = true;
+    const res = await provider.bareRequest(`/vpcs/${vpc.id}`, { method: 'DELETE' });
+    if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
+    const body = await res.text().catch(() => '');
+    return {
+      deleted: false,
+      everExisted,
+      apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
+    };
+  } catch (err) {
+    return { deleted: false, everExisted, apiError: err };
+  }
+}
+
+/**
  * What a provider's `deleteReservedIpByAddress` says about the address.
  * `released`: it is off the account. Otherwise `held` is true when it is
  * still on the account (still listed, or the delete refused) and null when
@@ -435,6 +467,21 @@ export class BaseProvider {
    * @type {number}
    */
   static K8S_MIN_VOLUME_GI = 0;
+
+  /**
+   * Whether a k8s destroy may delete a detached `pvc-*` CSI volume in one of
+   * the cluster's regions when nothing proves whose it is: the identity
+   * capture of the cluster's PersistentVolumes failed, and no server of
+   * another owner runs in that region (the `pvc-in-cluster-region` match in
+   * cleanupOrphanedVolumes, destroy.js). True keeps that backstop, which is
+   * how a volume detached before a failed capture is still collected on
+   * Hetzner, DigitalOcean and Linode. False makes such a match a reported
+   * deferral (`no-owner-signal`) that fails the destroy: Vultr's volumes
+   * carry no tags, so only a captured id proves one is this environment's,
+   * and a region-wide guess there could delete another cluster's disk.
+   * @type {boolean}
+   */
+  static ORPHAN_VOLUME_REGION_GUESS = true;
 
   /**
    * Whether this provider's k8s program gives each cluster a floating (or

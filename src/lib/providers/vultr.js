@@ -29,9 +29,13 @@ import { canonicalCidr } from '../cidr.js';
 import { fetchWithRetry } from '../fetch-retry.js';
 import {
   BaseProvider,
+  deleteFailure,
+  deleteRefused,
+  deleteVpcByName,
   normalizePublicKey,
   replaceWireguardPeerRules,
   standbyPairOrNeighbour,
+  sweepLabels,
   waitUntilServerUp,
 } from './base.js';
 import { deleteServerAt } from './delete-server.js';
@@ -127,6 +131,10 @@ export function cidrToVultrRuleFields(cidr) {
   return { ip_type: isV6 ? 'v6' : 'v4', subnet, subnet_size };
 }
 
+/** walkCursor's page size and page guard: it reads at most 10,000 of a kind. */
+const WALK_PAGE_SIZE = 500;
+const WALK_MAX_PAGES = 20;
+
 /**
  * Cursor-paginated collection walk (Vultr's `meta.links.next` idiom), the
  * single pagination implementation every listing in this file shares.
@@ -141,9 +149,9 @@ async function walkCursor(init, path, key) {
   const items = [];
   const sep = path.includes('?') ? '&' : '?';
   let cursor = '';
-  for (let guard = 0; guard < 20; guard++) {
+  for (let guard = 0; guard < WALK_MAX_PAGES; guard++) {
     const response = await fetchWithRetry(
-      `${VultrProvider.API_BASE}${path}${sep}per_page=500${cursor ? `&cursor=${cursor}` : ''}`,
+      `${VultrProvider.API_BASE}${path}${sep}per_page=${WALK_PAGE_SIZE}${cursor ? `&cursor=${cursor}` : ''}`,
       init,
     );
     if (!response.ok) return { items, complete: false, status: response.status };
@@ -154,6 +162,36 @@ async function walkCursor(init, path, key) {
     cursor = next;
   }
   return { items, complete: false };
+}
+
+/**
+ * The label vultr-k8s.js gives a cluster's reserved IP, `${clusterName}-ingress`
+ * (clusterName is `<project>-<environment>`, stackIdentity), for labels that
+ * name exactly a project and an environment, each with a value; null for any
+ * other key set. A Vultr reserved IP takes a label and no tags, so on Vultr
+ * an IP is "labelled project P, environment E" exactly when its label is
+ * `P-E-ingress`, and a label it cannot carry (a role, a third key) can never
+ * be proven.
+ * @param {Object<string, string|undefined|null>|undefined|null} labels
+ * @returns {string|null}
+ */
+function ingressLabel(labels) {
+  const keys = Object.keys(labels ?? {}).sort();
+  if (keys.join(',') !== 'environment,project') return null;
+  const { project, environment } = labels;
+  if (typeof project !== 'string' || typeof environment !== 'string') return null;
+  if (!project || !environment) return null;
+  return `${project}-${environment}-ingress`;
+}
+
+/**
+ * What a reserved IP is assigned to, as a phrase, or null when it is
+ * unassigned (Vultr answers `instance_id: ''`).
+ * @param {{instance_id?: string|null}} ip
+ * @returns {string|null}
+ */
+function reservedIpHolder(ip) {
+  return ip.instance_id ? `instance ${ip.instance_id}` : null;
 }
 
 export class VultrProvider extends BaseProvider {
@@ -392,6 +430,23 @@ export class VultrProvider extends BaseProvider {
    * of the group has one writer (see BaseProvider). @type {boolean}
    */
   static K8S_OPERATOR_RULES_AFTER_UP = true;
+
+  /**
+   * A deploy that failed partway (the reserved IP and VPC made, the master
+   * never ready) can leave the reserved IP, VPC, firewall group and SSH key
+   * outside what `pulumi destroy` removes, as on DigitalOcean and Linode, so
+   * destroy also removes them by name, address and label
+   * (sweepK8sBackstopTargets, destroy.js). @type {boolean}
+   */
+  static K8S_DESTROY_BACKSTOP = true;
+
+  /**
+   * Vultr block volumes carry no tags, so a detached `pvc-*` volume in the
+   * cluster's region could be any cluster's: destroy reports one no capture
+   * names instead of deleting it (BaseProvider.ORPHAN_VOLUME_REGION_GUESS).
+   * @type {boolean}
+   */
+  static ORPHAN_VOLUME_REGION_GUESS = false;
 
   // ── k8s boot user-data (carbon/cloud-init/k3s/vultr-*-init.sh) ──────────
 
@@ -1142,13 +1197,156 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
-   * List ALL VPCs (soft-fail []) — never provisioned by the compose tier,
-   * enumerated so a future tier's leak can't hide behind a stub.
+   * List ALL VPCs (soft-fail []). The k8s tiers make one per stack,
+   * described `${clusterName}-network` (vultr-k8s.js); `name` is the
+   * provider-neutral identity callers match on (autoscaler groups.js,
+   * destroy.js), and Vultr calls it `description`. The compose tier makes
+   * none.
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
     const { items, status } = await this._walkCursor('/vpcs', 'vpcs');
     return status === undefined ? items.map((n) => ({ ...n, name: n.description })) : [];
+  }
+
+  /**
+   * Delete a VPC by its exact description (listNetworks' `name`). Vultr
+   * refuses while an instance is still attached to it; that comes back as
+   * `apiError` (an ordering bug in the caller), never as a not-found
+   * (deleteVpcByName).
+   * @param {string} name
+   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   */
+  async deleteNetworkByName(name) {
+    return deleteVpcByName(this, name);
+  }
+
+  /**
+   * Every reserved IP on the account (cursor walk of GET /reserved-ips).
+   * An account past the walk's guard is not read in full, and a partial
+   * listing must not pass for the whole: destroy reads an address missing
+   * from it as already released (reservedIpLabelMatch).
+   * @returns {Promise<Array<{id: string, subnet: string, label?: string, instance_id?: string, region?: string}>>}
+   *   `subnet` is the address
+   * @throws when a page cannot be read, or there are more pages than the guard reads
+   */
+  async _listReservedIps() {
+    const { items, complete, status } = await this._walkCursor('/reserved-ips', 'reserved_ips');
+    if (status !== undefined) throw new Error(`GET /reserved-ips failed: HTTP ${status}`);
+    if (complete) return items;
+    throw new Error(
+      `the Vultr account has more reserved IPs than vibecarbon reads (${WALK_MAX_PAGES * WALK_PAGE_SIZE})`,
+    );
+  }
+
+  /**
+   * Delete one listed reserved IP by its id, answered as a ReservedIpRelease:
+   * 2xx or 404 is released, a 4xx is a refusal (still held), and any other
+   * status, a 5xx that outlasted fetchWithRetry's retries, proves nothing
+   * either way (deleteRefused).
+   * @param {{id: string}} ip
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
+   */
+  async _deleteReservedIp(ip) {
+    const response = await this.bareRequest(`/reserved-ips/${ip.id}`, { method: 'DELETE' });
+    if (response.ok || response.status === 404) return { released: true };
+    return {
+      released: false,
+      held: deleteRefused(response.status) ? true : null,
+      region: null,
+      reason: deleteFailure(VultrProvider.NAME, response.status),
+    };
+  }
+
+  /**
+   * Release a reserved IP by address, answered as a ReservedIpRelease
+   * (providers/base.js) so destroy reads every provider one way. Vultr
+   * deletes by id, so this lists and matches `subnet` (the address) first;
+   * an address the account no longer holds is already released. Destroy
+   * asks reservedIpLabelMatch before it calls this, so an address of
+   * another project's, or one still assigned, never reaches it.
+   * @param {string} address
+   * @returns {Promise<import('./base.js').ReservedIpRelease>}
+   * @throws when the listing cannot be read whole
+   */
+  async deleteReservedIpByAddress(address) {
+    const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
+    if (!ip) return { released: true };
+    return this._deleteReservedIp(ip);
+  }
+
+  /**
+   * Whether the reserved IP at `address` is still labelled for `labels` (a
+   * project and an environment: its label is `<project>-<environment>-ingress`,
+   * ingressLabel), and what it is assigned to. Destroy asks before it
+   * releases an address saved at deploy time: a released address can be
+   * reissued to another account or project by then, and one of ours still
+   * assigned to an instance the teardown did not delete must never be taken
+   * off it. Labels that are not exactly a project and an environment match
+   * nothing. `tags` is the IP's label, the one attribution it carries.
+   * @param {string} address
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[], holder: string|null }>}
+   *   found is false when the account holds no reserved IP at that address;
+   *   holder names the instance the address is assigned to, null when unassigned
+   * @throws when the listing cannot be read whole
+   */
+  async reservedIpLabelMatch(address, labels) {
+    const wanted = ingressLabel(labels);
+    const ip = (await this._listReservedIps()).find((i) => i.subnet === address);
+    if (!ip) return { found: false };
+    return {
+      found: true,
+      matches: wanted !== null && ip.label === wanted,
+      tags: ip.label ? [ip.label] : [],
+      holder: reservedIpHolder(ip),
+    };
+  }
+
+  /**
+   * Release every reserved IP labelled for this project and environment:
+   * its label is exactly `<project>-<environment>-ingress` (ingressLabel),
+   * never a prefix match, so another environment's or project's IP is never
+   * touched. A label without a value is refused (sweepLabels), and so is any
+   * key set other than exactly project and environment, which a Vultr IP's
+   * one label cannot prove. One still assigned to an instance is left alone:
+   * destroy runs after the teardown, so that instance is one the teardown
+   * did not delete, and an address is never taken off a running server.
+   * @param {Object<string,string>} labels
+   * @param {{except?: string[]}} [options] - addresses the caller already handled
+   * @returns {Promise<import('./base.js').TaggedReservedIpSweep>}
+   * @throws when the labels are refused (before any read), or the listing cannot be read whole
+   */
+  async deleteReservedIpsByLabels(labels, { except = [] } = {}) {
+    const wanted = ingressLabel(Object.fromEntries(sweepLabels(labels)));
+    if (wanted === null) {
+      throw new Error(
+        `refusing to sweep Vultr reserved IPs by ${Object.keys(labels).join(', ')}: a Vultr ` +
+          'reserved IP carries one label and no tags, so it is found only by project and ' +
+          'environment, and nothing was listed or released',
+      );
+    }
+    const skip = new Set(except);
+    const matches = (await this._listReservedIps()).filter(
+      (ip) => ip.label === wanted && !skip.has(ip.subnet),
+    );
+    const deleted = [];
+    const failed = [];
+    for (const ip of matches) {
+      const holder = reservedIpHolder(ip);
+      if (holder) {
+        failed.push({
+          address: ip.subnet,
+          held: true,
+          reason: `it is still assigned to ${holder}, which was not deleted`,
+        });
+        continue;
+      }
+      const outcome = await this._deleteReservedIp(ip);
+      if (outcome.released) deleted.push(ip.subnet);
+      else failed.push({ address: ip.subnet, held: outcome.held, reason: outcome.reason });
+    }
+    return { deleted, failed };
   }
 
   /**
@@ -1189,13 +1387,14 @@ export class VultrProvider extends BaseProvider {
   // ── Destroy-sweep field accessors ───────────────────────────────────────
 
   /**
-   * Compose-tier Vultr instances join no VPC — always [] (VPC attribution
-   * lives on the VPC side of Vultr's API anyway).
-   * @param {object} _server
+   * VPC ids the instance is attached to: Vultr's instance object lists them
+   * as `vpcs: [{id, subnet}]` (govultr Instance.VPCs). [] for an instance in
+   * no VPC (every compose instance).
+   * @param {object} server
    * @returns {string[]}
    */
-  serverNetworkIds(_server) {
-    return [];
+  serverNetworkIds(server) {
+    return Array.isArray(server?.vpcs) ? server.vpcs.map((v) => v.id) : [];
   }
 
   /**
@@ -1234,6 +1433,16 @@ export class VultrProvider extends BaseProvider {
    */
   volumeAttachedServerIds(volume) {
     return volume.attached_to_instance ? [volume.attached_to_instance] : [];
+  }
+
+  /**
+   * Vultr names a block volume with `label`; a CSI volume's is its request
+   * name, `pvc-<16 hex>` (vultr-csi).
+   * @param {object} volume
+   * @returns {string|null}
+   */
+  volumeName(volume) {
+    return volume.label ?? null;
   }
 
   /**

@@ -260,7 +260,19 @@ const PROVIDERS: Array<[string, string, boolean]> = [
   ['digitalocean', 'DigitalOcean', true],
   ['hetzner', 'Hetzner', false],
   ['linode', 'Linode', true],
+  ['vultr', 'Vultr', true],
 ];
+
+// The rows stand for the real classes: every provider with k8s code, with its
+// K8S_DESTROY_BACKSTOP, so a new one cannot skip this census. (The NAME is
+// only what the fake reports in its lines.)
+it('the table is every k8s provider, with its backstop flag', async () => {
+  const { k8sCensusProviders } = await import('../../_shared/k8s-built-ahead.js');
+  const real = (
+    k8sCensusProviders() as unknown as Array<[string, { K8S_DESTROY_BACKSTOP?: boolean }]>
+  ).map(([id, P]) => `${id} ${P.K8S_DESTROY_BACKSTOP === true}`);
+  expect(PROVIDERS.map(([id, , backstop]) => `${id} ${backstop}`).sort()).toEqual(real.sort());
+});
 
 describe.each(PROVIDERS)('%s', (providerId, NAME, backstop) => {
   it.each(['k8s', 'k8s-ha'] as const)(

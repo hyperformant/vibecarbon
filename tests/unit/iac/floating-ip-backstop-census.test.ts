@@ -9,9 +9,11 @@
  * (deleteReservedIpsByLabels, asked by sweepTaggedReservedIps). So each
  * program is RUN here (Pulumi's mock runtime, no cloud) and every IP it
  * registers is held to that:
- *   - it carries both labels (Hetzner's `labels`, or `project:` and
- *     `environment:` tags), so the sweep scoped to this environment finds it
- *     and no other environment's sweep does;
+ *   - it carries both labels (Hetzner's `labels`, `project:` and
+ *     `environment:` tags, or, on Vultr, whose reserved IPs take only a
+ *     label, the label `<project>-<environment>-ingress`), so the sweep
+ *     scoped to this environment finds it and no other environment's sweep
+ *     does;
  *   - its provider has `deleteReservedIpsByLabels`;
  *   - a compose program makes one exactly when its provider says so
  *     (COMPOSE_FLOATING_IP), the flag destroy asks before it looks.
@@ -19,6 +21,7 @@
 import * as pulumi from '@pulumi/pulumi';
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { k8sCensusProviders } from '../../_shared/k8s-built-ahead.js';
 
 let counter = 0;
 const registered: { type: string; name: string; inputs: Record<string, unknown> }[] = [];
@@ -34,6 +37,8 @@ pulumi.runtime.setMocks(
           ...args.inputs,
           ipv4Address: ip,
           ipv4AddressPrivate: `10.10.0.${counter % 250}`,
+          // A Vultr instance's VPC address; vultr-k8s.js refuses a master without one.
+          internalIp: `10.10.0.${counter % 250}`,
           ipAddress: ip,
           address: ip,
           mainIp: ip,
@@ -62,6 +67,8 @@ type AnyProvider = {
   getComposeProgram: (config: object) => Promise<() => Promise<Record<string, unknown>>>;
 };
 const providers = Object.entries(PROVIDERS as unknown as Record<string, AnyProvider>);
+/** The k8s sellers, and the programs built ahead of their tier. */
+const k8sProviders = k8sCensusProviders() as unknown as [string, AnyProvider][];
 
 const LABELS = { project: 'acme', environment: 'prod' };
 const common = {
@@ -86,8 +93,16 @@ async function ipsOf(program: () => Promise<Record<string, unknown>>) {
   return registered.filter((r) => IP_TYPE.test(r.type));
 }
 
-/** Whether a registered IP carries both labels, as labels or as `key:value` tags. */
-function carriesBoth(inputs: Record<string, unknown>) {
+/**
+ * Whether a registered IP carries both labels: as labels, as `key:value`
+ * tags, or (a Vultr ReservedIp, which takes only a label) as the label
+ * VultrProvider.deleteReservedIpsByLabels matches exactly.
+ */
+function carriesBoth(ip: { type: string; inputs: Record<string, unknown> }) {
+  const { inputs } = ip;
+  if (ip.type.startsWith('vultr:')) {
+    return inputs.label === `${LABELS.project}-${LABELS.environment}-ingress`;
+  }
   const labels = (inputs.labels ?? {}) as Record<string, string>;
   const tags = (inputs.tags ?? []) as string[];
   return Object.entries(LABELS).every(([k, v]) => labels[k] === v || tags.includes(`${k}:${v}`));
@@ -95,9 +110,7 @@ function carriesBoth(inputs: Record<string, unknown>) {
 
 function holdsToTheSweep(id: string, P: AnyProvider, ips: Awaited<ReturnType<typeof ipsOf>>) {
   for (const ip of ips) {
-    expect(carriesBoth(ip.inputs), `${id} ${ip.type} carries the project and environment`).toBe(
-      true,
-    );
+    expect(carriesBoth(ip), `${id} ${ip.type} carries the project and environment`).toBe(true);
     expect(
       typeof P.prototype.deleteReservedIpsByLabels,
       `${id} makes ${ip.type}: destroy needs deleteReservedIpsByLabels to find one no record names`,
@@ -106,10 +119,9 @@ function holdsToTheSweep(id: string, P: AnyProvider, ips: Awaited<ReturnType<typ
 }
 
 describe('floating and reserved IPs a program makes are found by their labels', () => {
-  const k8s = providers.filter(([, P]) => P.SUPPORTED_TIERS.includes('k8s'));
   const compose = providers.filter(([, P]) => P.SUPPORTED_TIERS.includes('compose'));
 
-  it.each(k8s)('k8s: %s', async (id, P) => {
+  it.each(k8sProviders)('k8s: %s', async (id, P) => {
     const node = P.DEFAULT_K8S_NODE_TYPE as string;
     const program = await P.getK8sProgram({
       ...common,
@@ -142,23 +154,21 @@ describe('floating and reserved IPs a program makes are found by their labels', 
 
   it('the census sees IPs on both tiers, so a broken type match cannot pass on nothing', async () => {
     const seen = new Set<string>();
-    for (const [, P] of providers) {
-      if (P.SUPPORTED_TIERS.includes('k8s')) {
-        const node = P.DEFAULT_K8S_NODE_TYPE as string;
-        const program = await P.getK8sProgram({
-          ...common,
-          location: Object.keys(P.REGIONS)[0],
-          masterServerType: node,
-          dbServerType: node,
-          workerServerType: node,
-          minWorkers: 1,
-          maxWorkers: 2,
-          k3sVersion: 'v1.37.2+k3s1',
-          k3sToken: 'SENTINEL-k3s-token',
-          labels: {},
-        });
-        for (const ip of await ipsOf(program)) seen.add(`k8s ${ip.type}`);
-      }
+    for (const [, P] of k8sProviders) {
+      const node = P.DEFAULT_K8S_NODE_TYPE as string;
+      const program = await P.getK8sProgram({
+        ...common,
+        location: Object.keys(P.REGIONS)[0],
+        masterServerType: node,
+        dbServerType: node,
+        workerServerType: node,
+        minWorkers: 1,
+        maxWorkers: 2,
+        k3sVersion: 'v1.37.2+k3s1',
+        k3sToken: 'SENTINEL-k3s-token',
+        labels: {},
+      });
+      for (const ip of await ipsOf(program)) seen.add(`k8s ${ip.type}`);
     }
     for (const [, P] of providers) {
       if (P.COMPOSE_FLOATING_IP !== true) continue;
@@ -173,6 +183,7 @@ describe('floating and reserved IPs a program makes are found by their labels', 
       'compose scaleway:instance/ip:Ip',
       'k8s hcloud:index/floatingIp:FloatingIp',
       'k8s linode:index/reservedIp:ReservedIp',
+      'k8s vultr:index/reservedIp:ReservedIp',
     ]);
   });
 });

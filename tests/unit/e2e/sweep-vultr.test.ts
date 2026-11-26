@@ -316,6 +316,88 @@ describe('sweepOrphanedVultrResources', () => {
     }
   });
 
+  it("sweeps a k8s cluster's leftovers by prefix", async () => {
+    // vultr-k8s.js names every resource from `<project>-<env>`; the e2e
+    // project name is the prefix. Its CSI volumes carry no tags (Vultr block
+    // storage takes none), so an unattached one is reported, never deleted.
+    const deleteServer = vi.fn().mockResolvedValue(undefined);
+    const deleteVolume = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = fakeProvider({
+      listServersDetailed: vi.fn().mockResolvedValue({
+        items: [
+          { id: 'i-1', label: 'acme-v3-master' },
+          { id: 'i-2', label: 'acme-v3-db' },
+          { id: 'i-3', label: 'acme-v3-worker-1' },
+          { id: 'i-4', label: 'someone-elses-master' },
+        ],
+        complete: true,
+      }),
+      deleteServer,
+      listVolumesDetailed: vi.fn().mockResolvedValue({
+        items: [{ id: 'blk-1', label: 'pvc-0123456789abcdef', attached_to_instance: '' }],
+        complete: true,
+      }),
+      deleteVolume,
+    });
+    const list = (key: string, items: unknown[]) => ({
+      [key]: items,
+      meta: { links: { next: '' } },
+    });
+    const fetchImpl = fakeFetch({
+      '/vpcs': list('vpcs', [
+        { id: 'vpc-1', description: 'acme-v3-network' },
+        { id: 'vpc-2', description: 'other-network' },
+      ]),
+      '/reserved-ips': list('reserved_ips', [
+        { id: 'rip-1', label: 'acme-v3-ingress', subnet: '203.0.113.7' },
+        { id: 'rip-2', label: 'other-ingress', subnet: '203.0.113.8' },
+      ]),
+      '/firewalls': list('firewall_groups', [
+        { id: 'fw-1', description: 'acme-v3-firewall' },
+        { id: 'fw-2', description: 'other-firewall' },
+      ]),
+      '/ssh-keys': list('ssh_keys', [
+        { id: 'key-1', name: 'acme-v3-ewr-key' },
+        { id: 'key-2', name: 'laptop' },
+      ]),
+    });
+
+    try {
+      const { counts, enumFailed } = await sweepOrphanedVultrResources(TAG, 'acme-v3', {
+        provider,
+        objectStorage: fakeStorage(),
+        fetchImpl,
+      });
+
+      expect(deleteServer.mock.calls.map(([id]) => id)).toEqual(['i-1', 'i-2', 'i-3']);
+      expect(provider.deleteFirewallByName).toHaveBeenCalledExactlyOnceWith('acme-v3-firewall');
+      expect(provider.deleteSSHKeyByName).toHaveBeenCalledExactlyOnceWith('acme-v3-ewr-key');
+      const deletes = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+        .map(([url]) => String(url));
+      expect(deletes).toEqual([
+        'https://api.vultr.com/v2/reserved-ips/rip-1',
+        'https://api.vultr.com/v2/vpcs/vpc-1',
+      ]);
+      expect(deleteVolume).not.toHaveBeenCalled();
+      expect(warn.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+        'Unattached CSI volume pvc-0123456789abcdef carries no project=acme-v3 tag',
+      );
+      expect(counts).toMatchObject({
+        servers: 3,
+        volumes: 0,
+        firewalls: 1,
+        floatingIps: 1,
+        sshKeys: 1,
+        networks: 1,
+      });
+      expect(enumFailed).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('pins the protected-bucket set empty — Vultr has no subscription-anchor bucket', () => {
     expect([...PROTECTED_OBJECT_STORAGE_BUCKETS]).toEqual([]);
   });

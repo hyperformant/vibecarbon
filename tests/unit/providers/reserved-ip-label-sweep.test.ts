@@ -115,6 +115,36 @@ const rows: Record<string, Row> = {
       return m ? m[1] : null;
     },
   },
+  vultr: {
+    // A Vultr reserved IP takes no tags, only a label: vultr-k8s.js labels
+    // it `<project>-<environment>-ingress`, the label the sweep matches
+    // exactly. An IP with only some of the labels gets a label that is not
+    // that one.
+    serve: (ips, { listStatus = 200, deleteStatus = 204 } = {}) =>
+      api(
+        () =>
+          json(
+            {
+              reserved_ips: ips.map((ip) => ({
+                id: `rip-${idOf(ip.address)}`,
+                subnet: ip.address,
+                instance_id: ip.server ? `inst-${ip.server}` : '',
+                label:
+                  ip.labels.project && ip.labels.environment
+                    ? `${ip.labels.project}-${ip.labels.environment}-ingress`
+                    : (ip.labels.project ?? ''),
+              })),
+              meta: { links: { next: '' } },
+            },
+            listStatus,
+          ),
+        deleteStatus,
+      ),
+    deletedBy: (call, ips) => {
+      const m = call.method === 'DELETE' && call.url.match(/\/reserved-ips\/rip-(\d+)$/);
+      return m ? (ips.find((ip) => idOf(ip.address) === Number(m[1]))?.address ?? '?') : null;
+    },
+  },
   scaleway: {
     // Every zone is walked; the IPs live in the first one.
     serve: (ips, { listStatus = 200, deleteStatus = 204 } = {}) =>
