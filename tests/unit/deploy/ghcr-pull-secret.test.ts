@@ -207,6 +207,46 @@ describe('the token scope check', () => {
     expect(problem).toMatch(/lives in your cluster/);
   });
 
+  it('the k8s refusals are worded as ever', () => {
+    const page = 'https://github.com/settings/tokens/new?scopes=read:packages';
+    expect(pullTokenProblem(['read:packages', 'repo'])).toBe(
+      'that token can also repo, and it lives in your cluster as ghcr-pull-secret, where anyone ' +
+        `who can read Secrets can use it. make a classic token with only read:packages here: ${page}`,
+    );
+    expect(pullTokenProblem(['workflow'])).toBe(
+      'that token can also workflow, and it lives in your cluster as ghcr-pull-secret, where ' +
+        `anyone who can read Secrets can use it. make a classic token with only read:packages here: ${page}`,
+    );
+    expect(pullTokenProblem([])).toBe(
+      `that token cannot read packages, so the cluster could not pull with it. make a classic token with only read:packages here: ${page}`,
+    );
+  });
+
+  it('a refusal for a store that is not a cluster names none of the cluster words', async () => {
+    const where = {
+      lives: "on the server in docker's login file",
+      readers: 'anyone with root on the server',
+      puller: 'the server',
+    };
+    const wide = pullTokenProblem(['read:packages', 'repo'], where) as string;
+    const none = pullTokenProblem([], where) as string;
+    expect(wide).toContain("it lives on the server in docker's login file, where anyone with root");
+    expect(none).toContain('so the server could not pull with it');
+    // The same wording reaches the operator through the resolver.
+    const err = await resolveGhcrPull({
+      ...resolveArgs,
+      stores: [],
+      where,
+      isTTY: true,
+      prompt: promptAnswering(TOKEN),
+      fetcher: registry({ scopes: 'read:packages, repo' }).fetcher,
+    }).catch((e) => e);
+    for (const text of [wide, none, err.message]) {
+      expect(text).not.toMatch(/cluster|Secret|ghcr-pull-secret/i);
+    }
+    expect(err.message).toContain('anyone with root on the server');
+  });
+
   it('write:packages is refused too: read only', () => {
     expect(pullTokenProblem(['write:packages', 'read:packages'])).toMatch(
       /can also write:packages/,

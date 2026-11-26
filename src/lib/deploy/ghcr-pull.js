@@ -37,8 +37,8 @@ const TOKEN_ENV = 'GHCR_PULL_TOKEN';
 const READ_PACKAGES_TOKEN_PAGE = 'https://github.com/settings/tokens/new?scopes=read:packages';
 
 /**
- * The new-token page, with a description that says which cluster the token
- * is for.
+ * The new-token page, with a description that says which environment's
+ * image pulls the token is for.
  *
  * @param {{ projectName: string, envName: string }} args - envName is the
  *   operator's environment (`prod`)
@@ -144,11 +144,28 @@ export async function githubTokenScopes(token, { fetcher = fetchWithRetry } = {}
 }
 
 /**
+ * Where a pull token lives, in the words a refusal uses: `lives` follows "it
+ * lives", `readers` is who can read it there, `puller` is what pulls with it.
+ *
+ * @typedef {{ lives: string, readers: string, puller: string }} TokenWhere
+ */
+
+/** A cluster's: the Secret in the vibecarbon namespace. */
+const CLUSTER_WHERE = {
+  lives: 'in your cluster as ghcr-pull-secret',
+  readers: 'anyone who can read Secrets',
+  puller: 'the cluster',
+};
+
+/**
  * What keeps a token with these scopes from being the pull token: `said`
  * follows "the token", `why` says what it means. Null when its one scope is
  * read:packages.
+ *
+ * @param {string[] | null} scopes
+ * @param {TokenWhere} where
  */
-function scopeShortfall(scopes) {
+function scopeShortfall(scopes, where) {
   if (scopes === null) {
     return { said: 'is not a classic token', why: 'so github will not say what it may do' };
   }
@@ -156,11 +173,11 @@ function scopeShortfall(scopes) {
   if (extra.length > 0) {
     return {
       said: `can also ${extra.join(', ')}`,
-      why: `and it lives in your cluster as ghcr-pull-secret, where anyone who can read Secrets can use it`,
+      why: `and it lives ${where.lives}, where ${where.readers} can use it`,
     };
   }
   if (!scopes.includes('read:packages')) {
-    return { said: 'cannot read packages', why: 'so the cluster could not pull with it' };
+    return { said: 'cannot read packages', why: `so ${where.puller} could not pull with it` };
   }
   return null;
 }
@@ -170,10 +187,11 @@ function scopeShortfall(scopes) {
  * one scope is read:packages.
  *
  * @param {string[] | null} scopes - githubTokenScopes's; null is not classic
+ * @param {TokenWhere} [where] - where the token will live; a cluster's by default
  * @returns {string | null}
  */
-export function pullTokenProblem(scopes) {
-  const shortfall = scopeShortfall(scopes);
+export function pullTokenProblem(scopes, where = CLUSTER_WHERE) {
+  const shortfall = scopeShortfall(scopes, where);
   if (!shortfall) return null;
   return (
     `that token ${shortfall.said}, ${shortfall.why}. ` +
@@ -273,7 +291,8 @@ async function storedTokenShortfall({ owner, repo, stored, fetcher }) {
     if (err.shortfall) return err.shortfall;
     throw err;
   }
-  const shortfall = scopeShortfall(scopes);
+  // Only `said` is used here, so the where does not matter.
+  const shortfall = scopeShortfall(scopes, CLUSTER_WHERE);
   if (shortfall) return shortfall.said;
   if (!(await ghcrAcceptsToken({ owner, repo, ...stored, fetcher }))) {
     return 'is one ghcr.io no longer accepts';
@@ -346,12 +365,13 @@ async function newPullToken({ image, envName, projectName, keptAs, isTTY, prompt
  * written here.
  *
  * @param {{ owner: string, repo: string, projectName: string, envName: string,
- *   stores: PullStore[], keptAs: string,
+ *   stores: PullStore[], keptAs: string, where?: TokenWhere,
  *   isTTY?: boolean, prompt?: (opts: { message: string,
  *   validate: (value: string) => string | undefined }) => Promise<unknown>,
  *   fetcher?: typeof fetchWithRetry }} args - envName is the operator's
  *   environment; stores are where it may already be kept (both sides of
- *   k8s-ha); keptAs completes "it lives ___" in the ask
+ *   k8s-ha); keptAs completes "it lives ___" in the ask, and where words a
+ *   refused token (a cluster's by default)
  * @returns {Promise<GhcrPull>}
  */
 export async function resolveGhcrPull({
@@ -361,6 +381,7 @@ export async function resolveGhcrPull({
   envName,
   stores,
   keptAs,
+  where = CLUSTER_WHERE,
   isTTY = process.stdin.isTTY,
   prompt = (opts) => p.password(opts),
   fetcher = fetchWithRetry,
@@ -397,7 +418,7 @@ export async function resolveGhcrPull({
   } catch (err) {
     throw refuse(err.message);
   }
-  const problem = pullTokenProblem(scopes);
+  const problem = pullTokenProblem(scopes, where);
   if (problem) throw refuse(problem);
   if (!(await ghcrAcceptsToken({ owner, repo, username: login, token, fetcher }))) {
     throw refuse(
