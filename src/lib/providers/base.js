@@ -1043,12 +1043,17 @@ export class BaseProvider {
   /**
    * Make a firewall's rule set the given one. Atomic where the provider has
    * a set-style write; Vultr, which has none, applies it as a create-first
-   * minimal diff that keeps the rules it keeps.
+   * minimal diff that keeps the rules it keeps, and deletes only rules
+   * `basis` held, so a rule another writer made since the read stays.
    * @param {string|number} firewallId - Firewall ID
    * @param {object[]} rules - Full replacement rule list
+   * @param {object} [basis] - the firewall as this provider's
+   *   findFirewallByName read it, which `rules` was built from. Callers pass
+   *   the object, never its rules, as for buildReplicationFirewallRules. Only
+   *   Vultr reads it; the set-style writes replace the whole list.
    * @returns {Promise<void>}
    */
-  async setFirewallRules(_firewallId, _rules) {
+  async setFirewallRules(_firewallId, _rules, _basis) {
     throw new Error('setFirewallRules() must be implemented by subclass');
   }
 

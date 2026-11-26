@@ -973,7 +973,8 @@ export async function openWireguardPortHetznerFirewall(serverName, peerIp, provi
     if (!firewall) return;
     const updatedRules = provider.buildReplicationFirewallRules(firewall, peerIp);
     if (!updatedRules) return; // already correct
-    await provider.setFirewallRules(firewall.id, updatedRules);
+    // The read the rules were built from: Vultr deletes only what it held.
+    await provider.setFirewallRules(firewall.id, updatedRules, firewall);
   } catch (err) {
     p.log.warn(
       `Could not open WireGuard port 51821 on cloud firewall ${firewallName}: ${err.message}. ` +

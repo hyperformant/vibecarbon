@@ -31,6 +31,8 @@
  *     created and only the ones it drops are deleted, creates first, so the
  *     group never has no rule. An empty target is refused.
  *  4. The end state is the target, as the wholesale rewrite left it.
+ *  5. Handed the read the target was built from (its basis), it deletes
+ *     only rules that read held: a rule another writer made since stays.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -176,6 +178,11 @@ describe('VultrProvider.setFirewallRules: a minimal diff', () => {
   const wanted = (target: Record<string, unknown>[]) =>
     [...new Set(target.map((r) => `${ruleFields(r)} ${r.notes}`))].sort();
 
+  /** The group as findFirewallByName read it: the basis a caller hands over. */
+  function read(api: ReturnType<typeof vultrFirewallApi>) {
+    return { id: 'gid-1', rules: [...api.rules.values()].map((r) => ({ ...r })) };
+  }
+
   it('an unchanged set writes nothing', async () => {
     const api = group([HTTPS, VPC, ICMP, SSH_A]);
     await new VultrProvider('t').setFirewallRules('gid-1', [HTTPS, VPC, ICMP, SSH_A]);
@@ -271,18 +278,96 @@ describe('VultrProvider.setFirewallRules: a minimal diff', () => {
 
   // Compose's group (vultr-compose.js: operator-22 per CIDR, http and https
   // from the world) and the k8s-ha replication write: whatever the live set,
-  // the group ends as the target, as the wholesale rewrite left it.
-  it.each([
+  // the group ends as the target, as the wholesale rewrite left it. Handed
+  // the read the target was built from, it ends there too.
+  const ENDS_AS_TARGET = [
     ['an access push to a new address', [HTTPS, HTTPS6, SSH_A], [HTTPS, HTTPS6, SSH_B]],
     ['an access push adding an address', [HTTPS, HTTPS6, SSH_A], [HTTPS, HTTPS6, SSH_A, SSH_B]],
     ['the replication write', [HTTPS, HTTPS6, SSH_A], [HTTPS, HTTPS6, SSH_A, WG]],
     ['a target sharing no rule', [HTTPS, SSH_A], [VPC, ICMP, WG]],
     ['an unchanged set', [HTTPS, SSH_A], [SSH_A, HTTPS]],
-  ])('%s ends as the target', async (_case, before, target) => {
-    const api = group(before);
-    await new VultrProvider('t').setFirewallRules('gid-1', target);
-    expect(live(api)).toEqual(wanted(target));
+  ] as const;
+  it.each(ENDS_AS_TARGET)('%s ends as the target', async (_case, before, target) => {
+    const api = group([...before]);
+    await new VultrProvider('t').setFirewallRules('gid-1', [...target]);
+    expect(live(api)).toEqual(wanted([...target]));
     expect(api.state.emptied).toBe(false);
+  });
+  it.each(ENDS_AS_TARGET)(
+    '%s, given its read, ends as the target',
+    async (_case, before, target) => {
+      const api = group([...before]);
+      await new VultrProvider('t').setFirewallRules('gid-1', [...target], read(api));
+      expect(live(api)).toEqual(wanted([...target]));
+      expect(api.state.emptied).toBe(false);
+    },
+  );
+
+  // Every caller builds its target from an earlier read and hands that read
+  // over. A rule another writer makes between the read and this write (the
+  // replication rule from a parallel HA step, an access push from another
+  // terminal) is not in it, so it is not this write's to delete.
+  describe('given the read its target was built from, it deletes only what that read held', () => {
+    it('a rule made after the read, and absent from the target, survives', async () => {
+      const api = group([HTTPS, SSH_A]);
+      const basis = read(api);
+      api.create(WG); // another writer, after the read
+      api.calls.length = 0;
+
+      await new VultrProvider('t').setFirewallRules('gid-1', [HTTPS, SSH_B], basis);
+
+      expect(api.calls.map((c) => `${c.method} ${c.rule}`)).toEqual([
+        'POST v4 tcp 198.51.100.9/32 22',
+        'DELETE v4 tcp 203.0.113.5/32 22',
+      ]);
+      expect(live(api)).toEqual(wanted([HTTPS, SSH_B, WG]));
+    });
+
+    it('a rule the read held and the target drops is deleted', async () => {
+      const api = group([HTTPS, SSH_A, WG]);
+
+      await new VultrProvider('t').setFirewallRules('gid-1', [HTTPS, SSH_B], read(api));
+
+      expect(api.calls.map((c) => `${c.method} ${c.rule}`)).toEqual([
+        'POST v4 tcp 198.51.100.9/32 22',
+        'DELETE v4 tcp 203.0.113.5/32 22',
+        'DELETE v4 udp 198.51.100.7/32 51821',
+      ]);
+      expect(live(api)).toEqual(wanted([HTTPS, SSH_B]));
+    });
+
+    it("an access push keeps the replication rule a parallel HA step made after the push's read", async () => {
+      const api = group([HTTPS, SSH_A]);
+      // The push's read is the first rules listing; the replication write
+      // lands right after it, before the push writes.
+      let listings = 0;
+      fetchWithRetry.mockImplementation(async (url: string, init?: RequestInit) => {
+        const res = await api.fetch(url, init);
+        if ((init?.method ?? 'GET') === 'GET' && /\/rules(\?|$)/.test(url) && ++listings === 1) {
+          api.create(WG);
+        }
+        return res;
+      });
+
+      await new VultrProvider('t').applyOperatorCidrs({
+        firewallName: 'acme-prod-firewall',
+        cidrs: ['198.51.100.9/32'],
+      });
+
+      expect(live(api)).toEqual(wanted([HTTPS, SSH_B, WG]));
+    });
+
+    it("the replication write keeps an access push's rule made after its read", async () => {
+      const api = group([HTTPS, SSH_A]);
+      const provider = new VultrProvider('t');
+      const fw = await provider.findFirewallByName('acme-prod-firewall');
+      const rules = provider.buildReplicationFirewallRules(fw, '198.51.100.7');
+      api.create(SSH_B); // `vibecarbon access add` from another terminal
+
+      await provider.setFirewallRules(fw.id, rules, fw);
+
+      expect(live(api)).toEqual(wanted([HTTPS, SSH_A, SSH_B, WG]));
+    });
   });
 });
 
@@ -346,9 +431,10 @@ describe('VultrProvider.setFirewallRules matches a network however it is spelled
 });
 
 // The rules a rewrite keeps come from findFirewallByName's listing. Built
-// from part of it, the rewrite would hand setFirewallRules (which lists
-// every rule) a set missing the rest, and the minimal diff would delete
-// them: real rules, silently.
+// from part of it, the rewrite would miss the rest: with no basis the
+// minimal diff would delete them, real rules, silently; with that part as
+// its basis it would leave them, an address the push was told to drop
+// among them.
 describe('a rewrite refuses a firewall whose rules listing broke off', () => {
   const HTTPS = { ip_type: 'v4', protocol: 'tcp', subnet: '0.0.0.0', subnet_size: 0, port: '443' };
   const VPC = { ip_type: 'v4', protocol: 'tcp', subnet: '10.181.32.0', subnet_size: 24 };

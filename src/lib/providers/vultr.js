@@ -16,7 +16,8 @@
  *   rules are INBOUND-ONLY, separate resources with no replace-all PUT:
  *   setFirewallRules is a create-first minimal diff, so a rule it keeps
  *   keeps its id and the group never has none (an empty group is not
- *   enforced).
+ *   enforced), and handed the caller's read it deletes only rules that
+ *   read held.
  * - Instances attach at most ONE firewall group (`firewall_group_id`).
  * - Object-storage keys are per-subscription (see vultr-objectstorage.js).
  * - Rate limit: 400-request burst bucket, 1s reset (live headers
@@ -75,8 +76,10 @@ function vultrRuleKey(r) {
 
 /**
  * Refuse to build a rewrite from a firewall whose rules listing broke off.
- * setFirewallRules lists every rule and deletes those its target lacks, so
- * a target built from part of the list would delete the rest.
+ * A target built from part of the list misses the rest: handed that part as
+ * its basis, setFirewallRules leaves the rules it never saw, an operator
+ * address the rewrite was told to drop among them; handed none, it deletes
+ * them all.
  * @param {{description?: string, id?: string, rulesComplete?: boolean}} firewall
  *   the group findFirewallByName returns
  */
@@ -1075,12 +1078,21 @@ export class VultrProvider extends BaseProvider {
    * protocol, the network, port; vultrRuleKey, which compares the network
    * canonically): a set naming one twice makes it once, and a live rule
    * matching one keeps its notes.
+   *
+   * Every caller builds the set from an earlier read of the group, and
+   * other writers change the group's rules between that read and this
+   * write: the replication rule from a parallel HA step, an access push
+   * from another terminal. Handed that read as `basis`, this deletes only
+   * the rules the read held and the set drops, so a rule made since is
+   * kept. Without one it deletes every live rule the set lacks.
    * @param {string} firewallId - group id
    * @param {object[]} rules - full INBOUND rule set, Vultr shape
    *   {ip_type, protocol, port, subnet, subnet_size, notes?}; read rows work
+   * @param {{rules?: object[]}} [basis] - the group as findFirewallByName
+   *   read it, the read `rules` was built from
    * @returns {Promise<void>}
    */
-  async setFirewallRules(firewallId, rules) {
+  async setFirewallRules(firewallId, rules, basis) {
     // Project every row to the documented create shape BEFORE the first
     // write. Both in-repo rule builders (buildReplicationFirewallRules,
     // applyOperatorCidrs) recycle rows read back from the rules listing,
@@ -1133,14 +1145,21 @@ export class VultrProvider extends BaseProvider {
     }
 
     const target = new Map(wanted.map((r) => [vultrRuleKey(r), r]));
+    // The rules this write may drop: those the caller's read held. One made
+    // since is another writer's, so it stays.
+    const read = basis ? new Set((basis.rules || []).map(vultrRuleKey)) : null;
     const live = new Map();
     const dropped = [];
     for (const rule of existing.items) {
       const key = vultrRuleKey(rule);
-      // A second live rule with the same fields (Vultr refuses to make one,
-      // so only a race leaves it) goes with the dropped ones.
-      if (target.has(key) && !live.has(key)) live.set(key, rule);
-      else dropped.push(rule);
+      if (target.has(key)) {
+        // A second live rule with the same fields (Vultr refuses to make
+        // one, so only a race leaves it) goes: the first still lets it in.
+        if (live.has(key)) dropped.push(rule);
+        else live.set(key, rule);
+      } else if (!read || read.has(key)) {
+        dropped.push(rule);
+      }
     }
 
     for (const [key, rule] of target) {
@@ -1203,7 +1222,8 @@ export class VultrProvider extends BaseProvider {
    * the locked ones the group has rules on, plus `ports`: a k8s cluster's
    * group has neither 22 nor 6443 until the deploy writes them after its up
    * (writeOperatorRulesAfterUp, K8S_OPERATOR_RULES_AFTER_UP). The write is
-   * setFirewallRules' minimal diff, so an unchanged rule keeps its id. A
+   * setFirewallRules' minimal diff, so an unchanged rule keeps its id, and
+   * it is handed this read, so a rule another writer made since stays. A
    * group whose rules listing broke off is refused (requireCompleteRules).
    * @param {{firewallName: string, cidrs: string[], ports?: string[]}} args
    * @returns {Promise<boolean>} true if found and updated
@@ -1241,7 +1261,7 @@ export class VultrProvider extends BaseProvider {
       })),
     );
 
-    await this.setFirewallRules(fw.id, [...kept, ...rebuilt]);
+    await this.setFirewallRules(fw.id, [...kept, ...rebuilt], fw);
     return true;
   }
 
@@ -1545,6 +1565,7 @@ export class VultrProvider extends BaseProvider {
    * @returns {string[]}
    */
   serverNetworkIds(server) {
+    // govultr PR #481 (Vultr's, merged 2026-10-22): Instance.VPCs `json:"vpcs"`, each {id, subnet}.
     return Array.isArray(server?.vpcs) ? server.vpcs.map((v) => v.id) : [];
   }
 
