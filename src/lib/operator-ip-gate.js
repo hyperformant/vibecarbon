@@ -6,8 +6,9 @@
  *
  * The other callers of ensureOperatorIpAccess differ on purpose and stay
  * their own: `deploy` runs it under a spinner and throws, `destroy` warns and
- * continues (it is the escape hatch), and `diagnose` and `shell` write to
- * stderr and continue (ensureOperatorIpAccessWarn).
+ * continues (it is the escape hatch), and `diagnose`, `shell` and `status`
+ * write to stderr and continue (ensureOperatorIpAccessWarn, and for status,
+ * every deployed environment at once, ensureOperatorIpAccessWarnAll).
  */
 
 import * as p from '@clack/prompts';

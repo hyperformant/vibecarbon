@@ -181,7 +181,7 @@ The same steps rotate `DIGITALOCEAN_API_TOKEN` and `LINODE_API_TOKEN`, each in i
 
 #### Operator-IP firewall lock (H-2)
 
-Every interactive vibecarbon command that needs SSH or k8s API access (`deploy`, `shell`, `diagnose`, `scale`, `failover`, `backup`, `restore`) auto-detects the operator's public IP, persists it under `operatorCidrs`, and patches the live Hetzner firewall via the Cloud API. Subsequent commands from the same IP are silent.
+Every interactive vibecarbon command that needs SSH or k8s API access (`deploy`, `shell`, `diagnose`, `status`, `scale`, `failover`, `backup`, `restore`) auto-detects the operator's public IP, persists it under `operatorCidrs`, and patches the live Hetzner firewall via the Cloud API. Subsequent commands from the same IP are silent. Each environment also records the list its firewall was last given (`operatorCidrsPushed`), so `status`, `shell` and `diagnose` push an environment that missed a change made from another one.
 
 The list lives in `.vibecarbon.json`:
 

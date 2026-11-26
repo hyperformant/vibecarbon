@@ -20,14 +20,19 @@
  *   - loadOperatorCidrs / addCidr / removeCidr / pruneCidrs
  *   - findMatchingCidr — checks if an IP is contained by any persisted CIDR
  *   - applyToFirewall — patches the live Hetzner firewall via the Cloud API
+ *   - envFirewallSides / providerTokenFor / pushOperatorCidrs — push one
+ *     environment's firewalls with its own token and record what it now
+ *     allows (`operatorCidrsPushed`)
  *   - ensureOperatorIpAccess — the all-in-one helper for command run()s
+ *   - ensureOperatorIpAccessWarn / ensureOperatorIpAccessWarnAll — the
+ *     stderr, warn-and-continue form (`shell`, `diagnose`, `status`)
  */
 
 import { updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
 import { armOperatorIpGuard } from './operator-ip-guard.js';
-import { providerFor } from './providers/index.js';
+import { providerFor, providerIdFor, resolveProviderToken } from './providers/index.js';
 
 // ============================================================================
 // IP DETECTION
@@ -271,6 +276,87 @@ export async function applyToFirewall({
   return updated;
 }
 
+/**
+ * The firewall names' environment part for one environment as its record
+ * describes it: both sides of compose-HA and k8s HA, the one otherwise.
+ *
+ * @param {string} environment user-facing environment name
+ * @param {{ deployMode?: string, ha?: { enabled?: boolean } } | undefined} envConfig
+ * @returns {string[]}
+ */
+export function envFirewallSides(environment, envConfig) {
+  return envConfig?.deployMode === 'compose-ha' || envConfig?.ha?.enabled
+    ? [`${environment}-primary`, `${environment}-standby`]
+    : [environment];
+}
+
+/**
+ * The operator's token for an environment's own provider. A project can mix
+ * providers, so a push to several environments looks it up per environment.
+ *
+ * @param {{ provider?: string } | undefined} envConfig
+ * @returns {string | null | undefined}
+ */
+export function providerTokenFor(envConfig) {
+  return resolveProviderToken(providerIdFor(envConfig));
+}
+
+/** The CIDRs of a list, sorted: the form `operatorCidrsPushed` keeps. */
+function sortedCidrs(operatorCidrs) {
+  return operatorCidrs.map((e) => e.cidr).sort();
+}
+
+/**
+ * Push the list to one environment's firewalls (applyToFirewall), then record
+ * on that environment, in .vibecarbon.json and in memory, the CIDRs its
+ * firewalls now allow (`operatorCidrsPushed`, sorted). The list is saved
+ * project-wide, but most pushes reach one environment, so the record is how
+ * ensureOperatorIpAccessWarnAll finds an environment that lags the list.
+ *
+ * Recorded only when every side was found and updated: a provider's firewall
+ * lookup answers "not found" for an API error too, and a record written then
+ * would keep the next run from trying again.
+ *
+ * Every push goes through here, so every push is recorded
+ * (tests/unit/access/operator-ip-everywhere.test.ts holds the other callers
+ * of applyToFirewall to none).
+ *
+ * @param {object} o
+ * @param {object} o.projectConfig loaded .vibecarbon.json
+ * @param {string} o.environment user-facing environment name
+ * @param {string[]} o.sides the firewall names' environment parts
+ * @param {Array<{cidr: string}>} o.operatorCidrs
+ * @param {string | null | undefined} o.apiToken the environment's provider token
+ * @param {string} [o.cwd] the project directory whose .vibecarbon.json is updated
+ * @returns {Promise<string[]>} the firewalls updated
+ */
+export async function pushOperatorCidrs({
+  projectConfig,
+  environment,
+  sides,
+  operatorCidrs,
+  apiToken,
+  cwd,
+}) {
+  const updated = await applyToFirewall({
+    projectName: projectConfig.projectName,
+    environments: sides,
+    operatorCidrs,
+    apiToken,
+    envConfig: projectConfig.environments?.[environment],
+  });
+  if (updated.length === sides.length) {
+    const pushed = sortedCidrs(operatorCidrs);
+    updateProjectConfig((config) => {
+      const env = config.environments?.[environment];
+      if (env) env.operatorCidrsPushed = pushed;
+    }, cwd);
+    const inMemory = projectConfig.environments?.[environment];
+    if (inMemory) inMemory.operatorCidrsPushed = pushed;
+  }
+  return updated;
+}
+
 // ============================================================================
 // AUTO-ADD HELPER
 // ============================================================================
@@ -394,15 +480,13 @@ export async function ensureOperatorIpAccess({
   // the firewall with the right CIDRs from the persisted list.
   const envDeployed = !!projectConfig?.environments?.[environment];
   if (envDeployed && apiToken) {
-    const environments = isHA
-      ? [`${environment}-primary`, `${environment}-standby`]
-      : [environment];
-    await applyToFirewall({
-      projectName: projectConfig.projectName,
-      environments,
+    await pushOperatorCidrs({
+      projectConfig,
+      environment,
+      sides: isHA ? [`${environment}-primary`, `${environment}-standby`] : [environment],
       operatorCidrs: updatedList,
       apiToken,
-      envConfig: projectConfig.environments[environment],
+      cwd,
     });
   }
 
@@ -423,32 +507,116 @@ export function parseAllowedSshIpsEnv(envVar) {
 }
 
 /**
- * ensureOperatorIpAccess with the stderr feedback style shared by the debug
- * commands (`diagnose`, `shell`). Info goes to console.error so it never
- * pollutes stdout (diagnose tees a report; shell prints an rcfile banner),
- * and a failed check warns-and-continues — the operator may be debugging
- * exactly the case where the firewall API is unreachable.
+ * ensureOperatorIpAccessWarnAll for the one environment a debug command
+ * (`diagnose`, `shell`) works on, with the token the command resolved.
  *
  * No-op when the project config or token is missing.
  */
 export async function ensureOperatorIpAccessWarn({ projectConfig, environment, apiToken }) {
   if (!projectConfig || !apiToken) return;
+  await ensureOperatorIpAccessWarnAll({
+    projectConfig,
+    environments: [environment],
+    yes: false,
+    tokenFor: () => apiToken,
+  });
+}
+
+/**
+ * Let the operator's current address through every named environment's
+ * firewall before a command reads them remotely (`status`, and through
+ * ensureOperatorIpAccessWarn `diagnose` and `shell`).
+ *
+ * ensureOperatorIpAccess runs once, pushing nothing, to detect and save the
+ * address. Then every named environment whose record (`operatorCidrsPushed`)
+ * differs from the saved list is pushed, both sides of an HA one, each with
+ * its own provider's token, in one loop: a failure on any of them, the first
+ * too, still lets the others through. "Already listed" is not enough: deploy,
+ * diagnose and shell save an address project-wide but push only their own
+ * environment. An environment with no record counts as differing.
+ *
+ * Under CI (`yes` and CI=true) it does nothing: the runner's address is
+ * ephemeral, so the saved list is trusted and nothing is detected, saved or
+ * pushed. That keeps `status -json` in CI a pure read.
+ *
+ * Every line goes to console.error, so stdout stays clean (status -json,
+ * diagnose's teed report, shell's rcfile banner), and any failure warns and
+ * continues: the operator may be looking into exactly the case where the
+ * firewall API is unreachable.
+ *
+ * @param {object} o
+ * @param {object} o.projectConfig loaded .vibecarbon.json
+ * @param {string[]} o.environments user-facing environment names
+ * @param {boolean} [o.yes] non-interactive (status passes true)
+ * @param {string} [o.cwd] the project directory whose .vibecarbon.json is updated
+ * @param {(envConfig: object) => string | null | undefined} [o.tokenFor]
+ * @returns {Promise<void>}
+ */
+export async function ensureOperatorIpAccessWarnAll({
+  projectConfig,
+  environments,
+  yes = true,
+  cwd,
+  tokenFor = providerTokenFor,
+}) {
+  if (!projectConfig || environments.length === 0) return;
+  if (!shouldAutoDetectOperatorIp({ yes })) return;
   const { c } = await import('./colors.js');
+  const mayTimeOut = '  Continuing, kubectl/SSH may time out if your IP is not allowlisted.';
+
+  let result;
   try {
-    const isHA = !!projectConfig.environments?.[environment]?.ha?.enabled;
-    const result = await ensureOperatorIpAccess({
+    result = await ensureOperatorIpAccess({
       projectConfig,
-      environment,
-      isHA,
-      apiToken,
-      yes: false,
+      environment: environments[0],
+      apiToken: null,
+      yes,
       onMessage: (msg) => console.error(`${c.info('i')} ${msg}`),
+      cwd,
     });
-    if (result.added) {
-      console.error(`${c.success('✓')} Firewall updated: SSH/k8s API now allow ${result.cidr}`);
-    }
   } catch (err) {
     console.error(`${c.warning('!')} Operator-IP check failed: ${err.message}`);
-    console.error('  Continuing, kubectl/SSH may time out if your IP is not allowlisted.');
+    console.error(mayTimeOut);
+    return;
+  }
+
+  const listed = sortedCidrs(result.list).join(',');
+  for (const environment of environments) {
+    const envConfig = projectConfig.environments?.[environment];
+    if (!envConfig) continue;
+    const record = envConfig.operatorCidrsPushed;
+    if (Array.isArray(record) && record.join(',') === listed) continue;
+    const apiToken = tokenFor(envConfig);
+    if (!apiToken) {
+      console.error(
+        `${c.warning('!')} Firewall of ${environment} not updated: ${providerFor(envConfig).TOKEN_ENV} is not set.`,
+      );
+      console.error(mayTimeOut);
+      continue;
+    }
+    const sides = envFirewallSides(environment, envConfig);
+    try {
+      const updated = await pushOperatorCidrs({
+        projectConfig,
+        environment,
+        sides,
+        operatorCidrs: result.list,
+        apiToken,
+        cwd,
+      });
+      if (updated.length === sides.length) {
+        console.error(
+          `${c.success('✓')} Firewall of ${environment} updated: SSH/k8s API now allow ${result.cidr ?? 'the saved list'}`,
+        );
+      } else {
+        console.error(
+          `${c.warning('!')} Firewall of ${environment} not fully updated: ${providerFor(envConfig).NAME} found ${updated.length} of its ${sides.length} firewalls.`,
+        );
+        console.error(mayTimeOut);
+      }
+    } catch (err) {
+      console.error(`${c.warning('!')} Firewall of ${environment} not updated: ${err.message}`);
+      console.error(mayTimeOut);
+    }
   }
 }

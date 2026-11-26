@@ -1784,6 +1784,28 @@ would strand the existing compose-ha environments.
 
 **Guard:** `tests/unit/docs/unoffered-tier-surface-census.test.ts`.
 
+#### 2026-11-25: Status lets your address through before its remote reads
+
+`vibecarbon status` now refreshes the operator allowlist before its first
+remote read, for every deployed environment in one pass, as `shell` and
+`diagnose` do for theirs. Each environment records the list its firewall was
+last pushed (`operatorCidrsPushed`), and status pushes every environment whose
+record differs from the saved list, each with its own provider's token. Under
+`CI=true` it changes nothing. `vibecarbon access` now pushes each environment
+with its own provider's token too, where it used Hetzner's for all of them.
+
+**Why:** from a new address every SSH read timed out, and remote health showed
+as unavailable with no reason. Deploy, diagnose and shell save an address for
+the whole project but push only their own environment, so "already listed"
+was not enough: the other environments stayed closed to it.
+
+**Do not undo:** making status read-only again brings the unexplained
+"unavailable" back. Pushing only when the address is new leaves every
+environment but the one that saved it closed.
+
+**Guard:** `tests/unit/status/operator-ip-access.test.ts` and
+`tests/unit/access/operator-ip-everywhere.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |

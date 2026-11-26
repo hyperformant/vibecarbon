@@ -2,11 +2,12 @@
  * Vibecarbon Access Command
  *
  * Manage the project-level operator-CIDR allowlist that locks SSH (port 22)
- * and the Kubernetes API (port 6443) on all deployed environments' Hetzner
- * firewalls. Most operators won't run this directly — `vibecarbon deploy`,
- * `vibecarbon shell`, etc. auto-add the current operator's IP on first use
- * (interactive flows only). This command exists for explicit management:
- * adding a teammate's CIDR, pruning stale entries, or showing the list.
+ * and the Kubernetes API (port 6443) on all deployed environments'
+ * firewalls, each pushed with its own provider's token. Most operators won't
+ * run this directly — `vibecarbon deploy`, `vibecarbon shell`, etc. auto-add
+ * the current operator's IP on first use (interactive flows only). This
+ * command exists for explicit management: adding a teammate's CIDR, pruning
+ * stale entries, or showing the list.
  *
  * Usage:
  *   vibecarbon access                  # List current CIDRs (default)
@@ -25,16 +26,18 @@ import { spinner } from './lib/cli/progress.js';
 import { c, printBanner } from './lib/colors.js';
 import {
   addCidr,
-  applyToFirewall,
   cidrFromIp,
   detectOperatorIp,
+  envFirewallSides,
   loadOperatorCidrs,
+  providerTokenFor,
   pruneCidrs,
+  pushOperatorCidrs,
   removeCidr,
   updateOperatorCidrs,
 } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
+import { providerFor } from './lib/providers/index.js';
 import { printUpdateNotice } from './lib/telemetry/update-check.js';
 
 const VALID_SUBCOMMANDS = new Set(['list', 'add', 'remove', 'prune']);
@@ -95,23 +98,6 @@ function isValidCidrFormat(cidr) {
   });
 }
 
-/**
- * Build the list of full env identifiers whose firewalls should be patched.
- * For HA envs, include both -primary and -standby.
- */
-function deployedFirewallEnvs(projectConfig) {
-  const envs = [];
-  const environments = projectConfig?.environments ?? {};
-  for (const [name, cfg] of Object.entries(environments)) {
-    if (cfg?.ha?.enabled) {
-      envs.push(`${name}-primary`, `${name}-standby`);
-    } else {
-      envs.push(name);
-    }
-  }
-  return envs;
-}
-
 function formatEntry(entry, currentDetectedCidr, now) {
   const labelOwn = currentDetectedCidr === entry.cidr ? c.bold('you') : c.dim('unknown');
   const addedAt = formatRelative(entry.addedAt, now);
@@ -137,8 +123,13 @@ function formatRelative(isoDate, now) {
   return `${Math.floor(days / 365)} years ago`;
 }
 
-async function pushToAllFirewalls(projectConfig, list, apiToken, spinner) {
-  const envs = deployedFirewallEnvs(projectConfig);
+/**
+ * Push the list to every deployed environment's firewalls (both sides of an
+ * HA one), each with its own provider's token: a project can mix providers.
+ * Each push records what that environment now allows (pushOperatorCidrs).
+ */
+async function pushToAllFirewalls(projectConfig, list, spinner) {
+  const envs = Object.entries(projectConfig?.environments ?? {});
   if (envs.length === 0) {
     spinner?.stop('No deployed environments, nothing to push to.');
     return [];
@@ -148,19 +139,20 @@ async function pushToAllFirewalls(projectConfig, list, apiToken, spinner) {
       'Cannot push an empty CIDR list; that would lock everyone out of every environment.',
     );
   }
-  spinner?.start(`Updating firewall on ${envs.length} cluster(s)...`);
-  const updated = await applyToFirewall({
-    projectName: projectConfig.projectName,
-    environments: envs,
-    operatorCidrs: list,
-    apiToken,
-    // access pushes to every deployed env from one project-level command.
-    // Project-level config has no .provider field (provider is environment-scoped),
-    // so applyToFirewall always resolves 'hetzner' here. This entire fan-out
-    // assumes a single provider + single apiToken per project; must be reworked
-    // before mixed-provider projects can use access.
-    envConfig: projectConfig,
-  });
+  const clusters = envs.flatMap(([name, cfg]) => envFirewallSides(name, cfg)).length;
+  spinner?.start(`Updating firewall on ${clusters} cluster(s)...`);
+  const updated = [];
+  for (const [environment, cfg] of envs) {
+    updated.push(
+      ...(await pushOperatorCidrs({
+        projectConfig,
+        environment,
+        sides: envFirewallSides(environment, cfg),
+        operatorCidrs: list,
+        apiToken: providerTokenFor(cfg),
+      })),
+    );
+  }
   spinner?.stop(`Updated ${updated.length} firewall(s).`);
   return updated;
 }
@@ -199,7 +191,7 @@ async function listAction(projectConfig) {
   }
 }
 
-async function addAction(projectConfig, cidr, apiToken) {
+async function addAction(projectConfig, cidr) {
   if (!cidr) throw new Error('Missing CIDR. Usage: vibecarbon access add <cidr>');
   if (!isValidCidrFormat(cidr)) {
     throw new Error(`Invalid CIDR format: ${cidr}. Expected e.g. "1.2.3.4/32" or "10.0.0.0/8".`);
@@ -216,10 +208,10 @@ async function addAction(projectConfig, cidr, apiToken) {
   }
 
   const s = spinner();
-  await pushToAllFirewalls(projectConfig, newList, apiToken, s);
+  await pushToAllFirewalls(projectConfig, newList, s);
 }
 
-async function removeAction(projectConfig, cidr, apiToken) {
+async function removeAction(projectConfig, cidr) {
   if (!cidr) throw new Error('Missing CIDR. Usage: vibecarbon access remove <cidr>');
   const list = loadOperatorCidrs(projectConfig);
   if (!list.some((e) => e.cidr === cidr)) {
@@ -266,10 +258,10 @@ async function removeAction(projectConfig, cidr, apiToken) {
   p.log.success(`Removed ${cidr} from the operator allowlist.`);
 
   const s = spinner();
-  await pushToAllFirewalls(projectConfig, newList, apiToken, s);
+  await pushToAllFirewalls(projectConfig, newList, s);
 }
 
-async function pruneAction(projectConfig, apiToken) {
+async function pruneAction(projectConfig) {
   const list = loadOperatorCidrs(projectConfig);
   const now = new Date();
   const newList = pruneCidrs(list, now, 90);
@@ -287,7 +279,7 @@ async function pruneAction(projectConfig, apiToken) {
   p.log.success(`Pruned ${dropped} stale entr${dropped === 1 ? 'y' : 'ies'}.`);
 
   const s = spinner();
-  await pushToAllFirewalls(projectConfig, written, apiToken, s);
+  await pushToAllFirewalls(projectConfig, written, s);
 }
 
 // ============================================================================
@@ -321,13 +313,20 @@ export async function run(args = []) {
   printBanner();
   printUpdateNotice();
 
-  const apiToken = resolveProviderToken(providerIdFor(projectConfig));
-  // The list action doesn't need a token; the others do for the firewall push.
-  if (subcommand !== 'list' && !apiToken) {
-    p.log.error(
-      "Hetzner API token not found. Set HETZNER_API_TOKEN in your shell or the project's .env.local.",
+  // The list action doesn't need a token; the others push every deployed
+  // environment's firewall, each with its own provider's token, so each must
+  // be there before the list changes.
+  if (subcommand !== 'list') {
+    const missing = Object.entries(projectConfig.environments ?? {}).filter(
+      ([, cfg]) => !providerTokenFor(cfg),
     );
-    process.exit(1);
+    for (const [name, cfg] of missing) {
+      const Provider = providerFor(cfg);
+      p.log.error(
+        `${Provider.NAME} API token not found (needed to update ${name}'s firewall). Set ${Provider.TOKEN_ENV} in your shell or the project's .env.local.`,
+      );
+    }
+    if (missing.length > 0) process.exit(1);
   }
 
   try {
@@ -336,13 +335,13 @@ export async function run(args = []) {
         await listAction(projectConfig);
         break;
       case 'add':
-        await addAction(projectConfig, cidr, apiToken);
+        await addAction(projectConfig, cidr);
         break;
       case 'remove':
-        await removeAction(projectConfig, cidr, apiToken);
+        await removeAction(projectConfig, cidr);
         break;
       case 'prune':
-        await pruneAction(projectConfig, apiToken);
+        await pruneAction(projectConfig);
         break;
       default:
         process.stdout.write(renderHelp(SPEC));
