@@ -11,7 +11,8 @@
  * registers is held to that:
  *   - it carries both labels (Hetzner's `labels`, `project:` and
  *     `environment:` tags, or, on Vultr, whose reserved IPs take only a
- *     label, the label `<project>-<environment>-ingress`), so the sweep
+ *     label, the label `project:<project>:environment:<environment>`,
+ *     reservedIpLabel), so the sweep
  *     scoped to this environment finds it and no other environment's sweep
  *     does;
  *   - its provider has `deleteReservedIpsByLabels`;

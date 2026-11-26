@@ -1387,6 +1387,7 @@ export class LinodeProvider extends BaseProvider {
    * the caller), never as a not-found.
    * @param {string} name
    * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   * @throws when the VPC listing cannot be read whole (deleteVpcByName)
    */
   async deleteNetworkByName(name) {
     return deleteVpcByName(this, name);
