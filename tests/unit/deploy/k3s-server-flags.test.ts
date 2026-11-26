@@ -17,6 +17,16 @@ const scriptsFor = (roles: Role[]) =>
 const SERVER_SCRIPTS = scriptsFor(['master']);
 const AGENT_SCRIPTS = scriptsFor(['worker', 'db']);
 
+const read = (file: string) => readFileSync(`carbon/cloud-init/k3s/${file}`, 'utf8');
+/** Every variable a script names, filled with its own name, so any line reads. */
+const named = (text: string) =>
+  Object.fromEntries(
+    [...text.matchAll(/\$\{(\w+)\}|\$(\w+)/g)].map(([, braced, bare]) => [
+      braced ?? bare,
+      `<${braced ?? bare}>`,
+    ]),
+  );
+
 const script = readFileSync('carbon/cloud-init/k3s/master-init.sh', 'utf8');
 const VARS = {
   k3s_token: 'token',
@@ -99,15 +109,6 @@ describe('k3sServerFlags', () => {
     // datastore, CA keys included, is left to k3s: it makes a random one on
     // the master, and no second server ever joins. The Docker tier runs it:
     // tests/integration/docker/k3s-agent-token.test.ts.
-    const read = (file: string) => readFileSync(`carbon/cloud-init/k3s/${file}`, 'utf8');
-    /** Every variable a script names, filled with its own name, so any line reads. */
-    const named = (text: string) =>
-      Object.fromEntries(
-        [...text.matchAll(/\$\{(\w+)\}|\$(\w+)/g)].map(([, braced, bare]) => [
-          braced ?? bare,
-          `<${braced ?? bare}>`,
-        ]),
-      );
     /** The line a script installs k3s with, the env before `sh -s -` included. */
     const installLine = (text: string, role: 'server' | 'agent') =>
       text.split('\n').find((line) => new RegExp(`\\bsh -s - ${role} \\\\$`).test(line)) ?? '';
@@ -139,6 +140,19 @@ describe('k3sServerFlags', () => {
       const line = installLine(read(file), 'agent');
       expect(line).toContain(`K3S_TOKEN="\${k3s_token}"`);
       expect(line).not.toContain('K3S_AGENT_TOKEN');
+    });
+  });
+
+  describe('the apiserver advertises a private address', () => {
+    // Pods reach 10.43.0.1 through the `kubernetes` Endpoints, which carry the
+    // advertise address. A public one is firewalled to the operator CIDRs.
+    it.each(SERVER_SCRIPTS)('%s: --advertise-address is private, never the public IP', (file) => {
+      const text = read(file);
+      const flags = k3sServerFlags(text, named(text));
+      expect(flags).toContain('--advertise-address');
+      const addr = flags[flags.indexOf('--advertise-address') + 1];
+      expect(addr).not.toBe('<PUBLIC_IP>');
+      expect(addr).toMatch(/^(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|<PRIVATE_IP>)$/);
     });
   });
 

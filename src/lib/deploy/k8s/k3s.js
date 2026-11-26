@@ -4934,11 +4934,15 @@ export async function applyK3sManifests({
   //    a controller handoff can miss the restored Secret/vibecarbon-tls and
   //    issue a new certificate. Rendered in, a warm re-apply is a no-op.
   //
-  //    The pin: the in-cluster `kubernetes` Endpoints advertises the master's
-  //    PUBLIC IP (k3s installs with --node-ip=<public>), and the firewall
-  //    admits public :6443 from operator CIDRs only, so an apiserver-dependent
-  //    pod scheduled onto any other node times out on 10.43.0.1 forever (RCA
-  //    2026-07-17 e4 rig: cainjector CrashLoopBackOff, webhook readiness 500).
+  //    The pin: every master installs k3s with --advertise-address on its
+  //    private IP (Hetzner 10.0.1.1 in master-init.sh; the VPC IP in
+  //    do-master-init.sh and linode-master-init.sh), and the private range is
+  //    open in every cluster firewall, so the `kubernetes` Endpoints is
+  //    reachable from any node. The pin was added for RCA 2026-07-17 (e4 rig:
+  //    the Endpoints then carried the public IP, cainjector
+  //    CrashLoopBackOff, webhook readiness 500), which the private advertise
+  //    address fixed. It stays because removing it changes scheduling on
+  //    every cluster for no gain and would need a real-server run.
   const certManagerDir = makeTempDir('vibecarbon-cert-manager-');
   try {
     writeCertManagerKustomization(certManagerDir);
