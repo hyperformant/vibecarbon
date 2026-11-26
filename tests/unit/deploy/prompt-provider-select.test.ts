@@ -279,14 +279,20 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     ]);
   });
 
-  it('deploys compose on scaleway without a mode select, since it is the one mode offered', async () => {
+  it('offers every recommended deploy mode for scaleway (k8s lift)', async () => {
     clackMock.select.mockResolvedValueOnce('scaleway'); // provider select
     const { envConfig } = await resolveProvider(noFlags, {});
+    expect(envConfig.provider).toBe('scaleway');
 
-    const result = await resolveDeployMode(noFlags, envConfig);
-    expect(result).toEqual({ deployMode: 'compose', ha: false });
-    // Only the provider select ran.
-    expect(clackMock.select).toHaveBeenCalledTimes(1);
+    clackMock.select.mockResolvedValueOnce('compose'); // deploy-mode select
+    await resolveDeployMode(noFlags, envConfig);
+
+    const modeCall = clackMock.select.mock.calls[1][0];
+    expect(modeCall.options.map((o: { value: string }) => o.value)).toEqual([
+      'compose',
+      'kubernetes',
+      'kubernetes-ha',
+    ]);
   });
 
   it('offers every recommended deploy mode for hetzner', async () => {

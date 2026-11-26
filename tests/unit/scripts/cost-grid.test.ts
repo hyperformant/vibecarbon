@@ -47,8 +47,8 @@ const fixture = {
       rows: {
         compose: { monthly: 21.84, locations: ['fr-par-1'] },
         'compose-ha': { monthly: 43.68, locations: ['fr-par-1', 'nl-ams-1'] },
-        k8s: 'unsupported' as const,
-        'k8s-ha': 'unsupported' as const,
+        k8s: { monthly: 58.27, locations: ['fr-par-1'] },
+        'k8s-ha': { monthly: 94.71, locations: ['fr-par-1', 'nl-ams-1'] },
       },
     },
   ],
@@ -61,7 +61,7 @@ describe('renderCostGrid', () => {
       '| Hetzner (USD account) | $23.59 (nbg1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |',
     );
     expect(renderCostGrid(fixture)).toContain(
-      '| Scaleway | €21.84 (fr-par-1) | not yet | not yet |',
+      '| Scaleway | €21.84 (fr-par-1) | €58.27 (fr-par-1) | €94.71 (fr-par-1 + nl-ams-1) |',
     );
   });
 
@@ -147,7 +147,11 @@ describe('on the 2026-10-22 catalogs', () => {
       'linode',
       '| Linode | $24 (us-iad) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |',
     ],
-    [ScalewayProvider, 'scaleway', '| Scaleway | €21.84 (fr-par-1) | not yet | not yet |'],
+    [
+      ScalewayProvider,
+      'scaleway',
+      '| Scaleway | €21.84 (fr-par-1) | €58.27 (fr-par-1) | €94.71 (fr-par-1 + nl-ams-1) |',
+    ],
   ] as const;
 
   it('an HA cell prices the pair the wizard creates, one CPU class on both sides', () => {
@@ -249,6 +253,18 @@ describe('on the 2026-10-22 catalogs', () => {
     });
     expect(computeEnvMonthly(ScalewayProvider, 'compose-ha')).toEqual({
       monthly: 43.68,
+      locations: ['fr-par-1', 'nl-ams-1'],
+    });
+    // DEV1-M twice and DEV1-S, each with a billed IPv4 and a 40 GB root
+    // volume, plus the db volume: 2 * 14.74308 + 6.55248 + 3 * 3.65 +
+    // 3 * 3.4456 + 0.000118 * 11 * 730.
+    expect(computeEnvMonthly(ScalewayProvider, 'k8s')).toEqual({
+      monthly: 58.27,
+      locations: ['fr-par-1'],
+    });
+    // Plus a standby DEV1-M and DEV1-S, two IPv4, two roots and its own volume.
+    expect(computeEnvMonthly(ScalewayProvider, 'k8s-ha')).toEqual({
+      monthly: 94.71,
       locations: ['fr-par-1', 'nl-ams-1'],
     });
   });
@@ -379,6 +395,22 @@ describe('billing extras', () => {
     expect(String(root.note)).toMatch(/€3\.45/);
     expect(String(root.note)).toMatch(/€3\.80/);
     expect(String(root.note)).toMatch(/Low Latency 5K/);
+  });
+
+  it('the Scaleway db volume names its source and date, and is marked unverified', () => {
+    const volume = BILLING_EXTRAS.scaleway.volume as Record<string, unknown>;
+    expect(volume).toMatchObject({
+      perGbHour: 0.000118,
+      gb: 11,
+      hoursPerMonth: 730,
+      source: 'https://www.scaleway.com/en/pricing/storage/',
+      checked: '2026-10-22',
+      verified: false,
+    });
+    expect(String(volume.note)).toMatch(/10\.74 GB, billed as 11/);
+    // One per cluster, on top of the root volume every server carries.
+    expect(extrasFor(ScalewayProvider).perCluster('fr-par-1')).toBeCloseTo(0.000118 * 11 * 730, 10);
+    expect(extrasFor(ScalewayProvider).perServer).toBeCloseTo(0.000118 * 40 * 730, 10);
   });
 
   it('every declared extra names its source and the date it was checked', () => {

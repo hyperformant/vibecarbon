@@ -19,6 +19,8 @@ const clackMock = await vi.hoisted(async () => {
 vi.mock('@clack/prompts', () => clackMock);
 
 import { resolveDeployMode } from '../../../src/lib/deploy/prompts.js';
+import { BaseProvider } from '../../../src/lib/providers/base.js';
+import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
 const noFlags = { compose: false, k8s: false, ha: false, yes: false };
 
@@ -95,22 +97,39 @@ describe('resolveDeployMode', () => {
     clackMock.select.mockClear();
   });
 
-  it.each([['scaleway', 'Scaleway']])(
-    'deploys compose on %s without asking, since it is the one mode offered',
-    async (provider, name) => {
-      // Scaleway supports compose and compose-ha; with compose-ha not
-      // offered, a select would have one choice, so the picker says what it
-      // picked instead.
+  it('offers Scaleway the three shipping modes, Kubernetes included', async () => {
+    clackMock.select.mockResolvedValueOnce('kubernetes');
+    const result = await resolveDeployMode(noFlags, { provider: 'scaleway' });
+
+    expect(result).toEqual({ deployMode: 'kubernetes', ha: false });
+    const options = clackMock.select.mock.calls[0][0].options as { value: string }[];
+    expect(options.map((o) => o.value)).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
+    clackMock.select.mockClear();
+  });
+
+  it('deploys compose without asking on a provider that offers the one mode', async () => {
+    // A provider that sells compose and compose-ha only: with compose-ha not
+    // offered, a select would have one choice, so the picker says what it
+    // picked instead. No registered provider is like this today, so a stub
+    // stands in.
+    class ComposeOnly extends BaseProvider {
+      static NAME = 'Acme Cloud';
+      static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+    }
+    (PROVIDERS as Record<string, unknown>).acme = ComposeOnly;
+    try {
       clackMock.log.info.mockClear();
-      const result = await resolveDeployMode(noFlags, { provider });
+      const result = await resolveDeployMode(noFlags, { provider: 'acme' });
 
       expect(result).toEqual({ deployMode: 'compose', ha: false });
       expect(clackMock.select).not.toHaveBeenCalled();
       expect(clackMock.log.info).toHaveBeenCalledWith(
-        `Deploy mode: Docker Compose (Fast), the one mode ${name} offers`,
+        'Deploy mode: Docker Compose (Fast), the one mode Acme Cloud offers',
       );
-    },
-  );
+    } finally {
+      delete (PROVIDERS as Record<string, unknown>).acme;
+    }
+  });
 
   it('still resolves compose-ha when it is passed explicitly by flag', async () => {
     const result = await resolveDeployMode({ ...noFlags, compose: true, ha: true }, {});

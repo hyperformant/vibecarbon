@@ -262,7 +262,7 @@ export async function resolveDeployMode(args, envConfig) {
       ? { deployMode: 'kubernetes', ha: true }
       : { deployMode: mode, ha: false };
 
-  // One mode to offer (Scaleway: compose): say so, don't ask.
+  // One mode to offer (a provider with one tier): say so, don't ask.
   if (options.length === 1) {
     p.log.info(`Deploy mode: ${options[0].label}, the one mode ${Provider.NAME} offers`);
     return chosen(options[0].value);

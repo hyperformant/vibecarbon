@@ -230,8 +230,7 @@ export const testConfig = {
           'vhf-2c-4gb': 'vhf-3c-8gb',
         },
       },
-      // Scaleway runs compose + compose-ha (2026-08 expansion PR 3 +
-      // tier-parity wave 1 — see ScalewayProvider.SUPPORTED_TIERS). "Regions"
+      // Scaleway runs all four modes (see ScalewayProvider.SUPPORTED_TIERS). "Regions"
       // are ZONES (Scaleway's Instance API is zone-scoped): the audited
       // four that carry the compose candidates (BASIC3, DEV1) and whose S3
       // regions (fr-par, nl-ams) have all three storage classes.
@@ -244,7 +243,7 @@ export const testConfig = {
       // (getDefaultStandbyRegion on the live catalog).
       scaleway: {
         regions: ['fr-par-1', 'nl-ams-1', 'fr-par-2', 'nl-ams-2'] as const,
-        scaleTo: { 'DEV1-M': 'DEV1-L', 'BASIC3-X2C-4G': 'BASIC3-X4C-8G' },
+        scaleTo: { 'DEV1-M': 'DEV1-L', 'BASIC3-X2C-4G': 'BASIC3-X4C-8G', 'DEV1-S': 'DEV1-M' },
       },
     },
     // ---------------------------------------------------------------------
@@ -377,10 +376,7 @@ export const testConfig = {
         ],
         defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
-      // Compose + compose-ha (2026-08 expansion PR 3 + tier-parity wave 1 —
-      // ScalewayProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode
-      // headroom recorded in
-      // the scaleway-provider-step0-audit plan).
+      // Compose, compose-ha, k8s and k8s-ha (ScalewayProvider.SUPPORTED_TIERS).
       // The credential is a TRIPLE, not a token: the Pulumi provider
       // requires SCALEWAY_ACCESS_KEY + SCALEWAY_SECRET_KEY + SCALEWAY_DEFAULT_PROJECT_ID
       // together (ScalewayProvider.buildIacEnv fails deploy-start naming
@@ -415,8 +411,18 @@ export const testConfig = {
             dnsProvider: 'scaleway' as const,
             envPrefix: 's2',
           },
+          {
+            mode: 'k8s' as const,
+            dnsProvider: 'scaleway' as const,
+            envPrefix: 's3',
+          },
+          {
+            mode: 'k8s-ha' as const,
+            dnsProvider: 'scaleway' as const,
+            envPrefix: 's4',
+          },
         ],
-        defaultSelection: ['compose'],
+        defaultSelection: ['compose', 'k8s', 'k8s-ha'],
       },
     },
   },

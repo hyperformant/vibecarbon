@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   addSeeds,
   budgetFromSamples,
@@ -13,10 +13,22 @@ import {
   renderReport,
   seededRow,
 } from '../../../scripts/calibrate-deploy-budgets.js';
+import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 import { checkDeployBudget } from '../../e2e/checks/deploy-budget.js';
 
 const s = (ownedS: number, tlsS = 5) => ({ ownedS, tlsS });
+
+// Every registered provider runs all four modes now, so the tests of what the
+// calibration skips for a mode a provider does not run need a stand-in:
+// Scaleway, held to its two compose tiers for this file.
+const SCALEWAY_TIERS = ScalewayProvider.SUPPORTED_TIERS;
+beforeAll(() => {
+  ScalewayProvider.SUPPORTED_TIERS = ['compose', 'compose-ha'];
+});
+afterAll(() => {
+  ScalewayProvider.SUPPORTED_TIERS = SCALEWAY_TIERS;
+});
 
 describe('the budget rule', () => {
   it('ceil5 rounds up to a multiple of 5', () => {

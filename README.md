@@ -301,6 +301,8 @@ The rows are the deploy scenarios a default CI run covers on each provider. _pen
 | | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | Scaleway | `compose` | 2m 27s | 17.5s | 5.6s | 2m 12s | 2m 30s | 21.3s | — |
+| | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 
 _Latest green CI runs: Hetzner Cloud `63a8d3d` (2026-11-20) · DigitalOcean `f505645` (2026-11-25) · Linode `c7cfa3a` (2026-11-26) · Vultr `cc553a2` (2026-11-25) · Scaleway `51573d5` (2026-11-26) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
@@ -330,7 +332,7 @@ You pay your cloud provider directly, and vibecarbon starts every new project on
 | DigitalOcean | $24 (nyc3) | $61 (nyc3) | $98 (nyc3 + tor1) |
 | Vultr | $20 (ewr) | $53.92 (ewr) | $87.84 (ewr + ord) |
 | Linode | $24 (us-iad) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
-| Scaleway | €21.84 (fr-par-1) | not yet | not yet |
+| Scaleway | €21.84 (fr-par-1) | €58.27 (fr-par-1) | €94.71 (fr-par-1 + nl-ams-1) |
 
 Plus object storage for backups and uploads, billed once per provider account and shared by every project on it: Hetzner $7.99 (this USD account; €6.49 on EUR accounts), DigitalOcean $5, Vultr $18, Linode $5, Scaleway usage-based (cents at this size).
 

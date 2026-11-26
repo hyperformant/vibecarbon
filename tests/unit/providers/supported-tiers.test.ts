@@ -24,10 +24,20 @@ describe('assertTierSupported', () => {
     expect(() => assertTierSupported(VultrProvider, tier)).not.toThrow();
   });
 
+  it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'])('scaleway supports %s', (tier) => {
+    expect(() => assertTierSupported(ScalewayProvider, tier)).not.toThrow();
+  });
+
   it('names only offered tiers in the supported list (compose-ha works but is not offered)', () => {
-    expect(() => assertTierSupported(ScalewayProvider, 'k8s')).toThrow(
-      "Scaleway does not support the 'k8s' deploy tier. Supported: compose. (k8s: Hetzner Cloud, DigitalOcean, Linode, Vultr only)",
+    // A provider that sells compose and compose-ha only: the refusal lists
+    // compose, never compose-ha, and names every provider that does run k8s.
+    class ComposeOnlyProvider extends StubProvider {
+      static NAME = 'Acme Cloud';
+      static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+    }
+    expect(() => assertTierSupported(ComposeOnlyProvider, 'k8s')).toThrow(
+      "Acme Cloud does not support the 'k8s' deploy tier. Supported: compose. (k8s: Hetzner Cloud, DigitalOcean, Linode, Vultr, Scaleway only)",
     );
-    expect(() => assertTierSupported(ScalewayProvider, 'compose-ha')).not.toThrow();
+    expect(() => assertTierSupported(ComposeOnlyProvider, 'compose-ha')).not.toThrow();
   });
 });

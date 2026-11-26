@@ -51,11 +51,11 @@ describe('K8S_BUILT_AHEAD', () => {
     },
   );
 
-  it.each(K8S_PARTS)("k8sCensusProviders('%s') is the k8s sellers then scaleway", (part) => {
-    // Scaleway's boot scripts, program, CSI driver and destroy code have
-    // all landed; the table empties when its k8s tiers turn on.
-    expect(sellers).toEqual(['hetzner', 'digitalocean', 'linode', 'vultr']);
-    expect(ids(part)).toEqual([...sellers, 'scaleway']);
+  it.each(K8S_PARTS)('k8sCensusProviders(part) is the k8s sellers for every part (%s)', (part) => {
+    // Every provider's k8s tiers are on, so nothing is built ahead.
+    expect(sellers).toEqual(['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']);
+    expect(K8S_BUILT_AHEAD).toEqual({});
+    expect(ids(part)).toEqual(sellers);
   });
 
   it("k8sCensusProviders() and k8sCensusProviders('nope') throw", () => {

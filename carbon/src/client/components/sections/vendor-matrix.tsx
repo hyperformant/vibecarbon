@@ -90,7 +90,7 @@ const PROVIDERS: ProviderRow[] = [
     name: 'Scaleway',
     logo: scalewayLogo,
     badge: { text: 'New', tone: 'success' },
-    tiers: { compose: 'yes', 'compose-ha': 'yes', k8s: 'soon', 'k8s-ha': 'soon' },
+    tiers: { compose: 'yes', 'compose-ha': 'yes', k8s: 'yes', 'k8s-ha': 'yes' },
   },
 ];
 

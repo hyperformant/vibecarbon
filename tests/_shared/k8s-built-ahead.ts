@@ -15,11 +15,9 @@ import { PROVIDERS } from '../../src/lib/providers/index.js';
 export const K8S_PARTS = ['boot', 'program', 'csi', 'destroy'] as const;
 export type K8sPart = (typeof K8S_PARTS)[number];
 
-// Scaleway's k8s code lands part by part (Part C): its boot scripts first,
-// then its program, its CSI driver and its destroy code, each adding its part.
-export const K8S_BUILT_AHEAD: Readonly<Record<string, readonly K8sPart[]>> = {
-  scaleway: ['boot', 'program', 'csi', 'destroy'],
-};
+// Empty since Scaleway's tiers turned on (Part C). A provider whose k8s code
+// lands before its tier is sold goes back in, one entry, part by part.
+export const K8S_BUILT_AHEAD: Readonly<Record<string, readonly K8sPart[]>> = {};
 
 type Entry = [string, (typeof PROVIDERS)[keyof typeof PROVIDERS]];
 

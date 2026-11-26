@@ -158,7 +158,7 @@ export function displayApiTokenGuide(projectName) {
       '',
       `${c.bold('2.')} Create an ${c.boldCyan('IAM application')} as the key's bearer, and ${c.boldYellow('ATTACH A POLICY to it')}:`,
       `${c.dim('   ├─')} ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/applications'))} ${c.dim('→ Create application, name it e.g.')} ${c.info(`"${appName}"`)} ${c.dim('(a non-human identity; the credential outlives people and rotates independently).')}`,
-      `${c.dim('   ├─')} ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/policies'))} ${c.dim('→ Create policy: principal = the application; rule =')} ${c.info('AllProductsFullAccess')} ${c.dim('(or minimally Instances + BlockStorage + ObjectStorage + SSHKeys FullAccess), scope =')} ${c.bold('the dedicated Project')}${c.dim('.')}`,
+      `${c.dim('   ├─')} ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/policies'))} ${c.dim('→ Create policy: principal = the application; rule =')} ${c.info('AllProductsFullAccess')} ${c.dim('(or minimally Instances + BlockStorage + ObjectStorage + SSHKeys FullAccess, plus PrivateNetworksFullAccess, VPCFullAccess and IPAMReadOnly for Kubernetes: the cluster gets its own Private Network and its nodes read their addresses), scope =')} ${c.bold('the dedicated Project')}${c.dim('.')}`,
       `${c.dim('   └─')} ${c.boldYellow('⚠️  Without a policy the application has ZERO permissions')} ${c.dim('; its key 401/403s every call. Object Storage permissions can take ~5 minutes to apply.')}`,
       '',
       `${c.bold('3.')} Generate the API key: ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/api-keys'))} ${c.dim(', one dialog, four decisions:')}`,

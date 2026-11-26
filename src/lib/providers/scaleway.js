@@ -414,13 +414,11 @@ export class ScalewayProvider extends BaseProvider {
   // parity with the sibling providers.
   static S3_REGION_ENV = 'SCALEWAY_STORAGE_REGION';
 
-  // Compose tiers only (compose-ha added in the 2026-08 tier-parity wave 1 —
-  // the HA surface here was contract-complete since expansion PR 3;
-  // effects/compose-ha is provider-generic). 4-mode headroom
-  // (CCM/CSI/block-storage/DNS-flip) recorded in the audit. The k8s tiers'
-  // code lands ahead of them, part by part (boot scripts, the program);
-  // they are not declared until all of it has.
-  static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+  // All four tiers. compose-ha was added in the 2026-08 tier-parity wave 1
+  // (effects/compose-ha is provider-generic); k8s and k8s-ha came with the
+  // k3s boot scripts, the Pulumi program, the block storage CSI driver, the
+  // destroy code and the autoscaler's private-network join.
+  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
   static SERVER_RESOURCE_TYPE = 'scaleway:instance/server:Server';
 
@@ -493,13 +491,17 @@ export class ScalewayProvider extends BaseProvider {
   // like BASIC3, so an SBS root too) from the same endpoint on 2026-10-22.
   // DEV1-L (4 vCPU, 8 GB, an 80 GB bundled volume) is DEV1-M's next size
   // up, the type `scale -type` moves a default box to; same endpoint and
-  // date, x86_64 in all four REGIONS zones.
+  // date, x86_64 in all four REGIONS zones. DEV1-S (2 vCPU, 2 GB) and
+  // PLAY2-PICO (1 vCPU, 2 GB), the k8s db candidates, are from the same
+  // endpoint and the 2026-10-22 fixture: x86_64, volumes min_size 0.
   static FALLBACK_SERVER_TYPES = {
     'BASIC3-X2C-4G': { vcpu: 2, ram: 4, disk: 40 },
     'BASIC3-X4C-8G': { vcpu: 4, ram: 8, disk: 40 },
     'DEV1-M': { vcpu: 3, ram: 4, disk: 40 },
     'DEV1-L': { vcpu: 4, ram: 8, disk: 80 },
     'PLAY2-NANO': { vcpu: 2, ram: 4, disk: 40 },
+    'DEV1-S': { vcpu: 2, ram: 2, disk: 20 },
+    'PLAY2-PICO': { vcpu: 1, ram: 2, disk: 40 },
   };
 
   // Live catalog populated by fetchServerTypes(); object map (name → spec).
@@ -520,8 +522,16 @@ export class ScalewayProvider extends BaseProvider {
   // Paris zones). DEV1-M takes the 40 GB SBS root the compose program
   // provisions: its volumes_constraint.min_size is 0 (no local volume
   // required) and it has block bandwidth.
+  // The k8s roles: the master and workers take the compose candidates, and
+  // the db takes the smallest 2 GB type of each CPU class (DEV1-S €6.55,
+  // PLAY2-PICO €10.42 on 2026-10-22), BASIC3-X2C-4G last since no smaller
+  // BASIC3 type is sold. DEV1-S, like DEV1-M, needs no local volume
+  // (min_size 0) and has block bandwidth.
   static ROLE_CANDIDATES = {
     compose: ['BASIC3-X2C-4G', 'DEV1-M', 'PLAY2-NANO'],
+    master: ['BASIC3-X2C-4G', 'DEV1-M', 'PLAY2-NANO'],
+    worker: ['BASIC3-X2C-4G', 'DEV1-M', 'PLAY2-NANO'],
+    db: ['DEV1-S', 'PLAY2-PICO', 'BASIC3-X2C-4G'],
   };
 
   // x86 CPU classes (see BaseProvider.CPU_CLASSES): the instance families,
@@ -550,7 +560,7 @@ export class ScalewayProvider extends BaseProvider {
 
   // ── Engine-literal statics ──────────────────────────────────────────────
   static DEFAULT_COMPOSE_TYPE = 'BASIC3-X2C-4G';
-  // Pinned for EXPECTED-table completeness; unread while compose-only.
+  // The k8s node type when nothing is picked live (the offline default).
   static DEFAULT_K8S_NODE_TYPE = 'BASIC3-X2C-4G';
 
   /**
@@ -829,8 +839,7 @@ export class ScalewayProvider extends BaseProvider {
   // ── k8s program (iac/programs/scaleway-k8s.js) ─────────────────────────
 
   /**
-   * Build the k8s Pulumi program, built ahead of the tier (SUPPORTED_TIERS
-   * turns it on).
+   * Build the k8s Pulumi program.
    * @param {object} config
    * @returns {Promise<() => Promise<Record<string, unknown>>>}
    */
