@@ -22,6 +22,8 @@ Each environment is bound to one cloud provider, picked the first time you deplo
 
 `k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner, DigitalOcean, Linode, and Vultr. Kubernetes on Linode runs in every region except Newark (`us-east`) and Atlanta (`us-southeast`). Kubernetes on Vultr runs in every region except Silicon Valley (`sjc`).
 
+On Vultr, `k8s` and `k8s-ha` need your API key's Access Control open to any address (`0.0.0.0/0`, and `::/0` if the page lists IPv6). The cluster's storage driver and autoscaler call the Vultr API from its own servers, whose addresses aren't known ahead and change as workers come and go: a key kept to your machine's IP deploys, then the database volume is never made and autoscaling does nothing. A `compose` project can keep it to your machine's IP. The trade-off: with Access Control open, a leaked key works from anywhere, so rotate it as soon as you suspect a leak.
+
 `-provider` selects the cloud for a **new** environment; existing environments keep the provider they were first deployed with. It is required alongside `-y` when you create a new environment non-interactively — otherwise the deploy prompt asks. `-region` takes the provider's own region id, so the value is only meaningful next to the provider it belongs to:
 
 ```bash

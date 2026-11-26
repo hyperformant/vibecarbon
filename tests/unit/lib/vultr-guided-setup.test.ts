@@ -83,6 +83,24 @@ describe('vultr-guided-setup guides', () => {
       expect(text).toContain('0.0.0.0/0');
     });
 
+    // On k8s the cluster calls the API too: vultr-csi and carbon-autoscaler,
+    // from the nodes' public IPs, which change as workers come and go. A key
+    // kept to this machine deploys, then the db PVC stays Pending and
+    // autoscaling does nothing. Compose, where only the CLI calls, can keep it.
+    it('says k8s needs Access Control open to any address, and why; compose can keep this machine', () => {
+      displayApiTokenGuide('my-project');
+      const text = strip(clackMock.note.mock.calls[0][0]);
+      const lines = text.split('\n').map((l) => l.trimEnd());
+      expect(text).toContain('k8s and k8s-ha: the storage driver and the autoscaler call the API');
+      expect(text).toContain("from the cluster's own servers, whose addresses aren't known ahead");
+      expect(text).toContain('and change as workers come and go, so allow any: 0.0.0.0/0');
+      expect(text).toContain('plus IPv6, if the page lists it: ::/0');
+      expect(text).toContain("compose: only the CLI calls it, so this machine's public IP will do");
+      // A value to copy ends its line.
+      expect(lines.filter((l) => l.endsWith('0.0.0.0/0') || l.endsWith('::/0'))).toHaveLength(2);
+      expect(text).not.toMatch(/[\u2013\u2014]/);
+    });
+
     it('does NOT recommend a per-project key — Vultr issues one key per account', () => {
       // The sibling guides all suggest a dedicated token per project. Vultr
       // cannot: separation is Sub-Accounts, and "create another key" would

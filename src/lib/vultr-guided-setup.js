@@ -90,7 +90,13 @@ const API_TOKEN = {
  * Step 3 is the Access Control gotcha rather than Linode's copy-once
  * warning: Vultr keys stay readable in the portal, but the API silently
  * refuses calls from any IP outside the allowed-subnets list, which reads
- * as "my brand-new key doesn't work".
+ * as "my brand-new key doesn't work". On k8s and k8s-ha the cluster calls
+ * the API too (vultr-csi and carbon-autoscaler, from the nodes' public
+ * IPs, which are not known ahead and change as workers come and go), so a
+ * list holding only this machine breaks the cluster once it is up: the db
+ * PVC stays Pending and autoscaling does nothing. Those modes need Access
+ * Control open to any address; compose, where only the CLI calls the API,
+ * can keep it to this machine's IP.
  */
 export function displayApiTokenGuide(_projectName) {
   p.note(
@@ -102,7 +108,11 @@ export function displayApiTokenGuide(_projectName) {
       `${c.dim('   └─')} ${c.dim('Vultr issues ONE key per account; use Sub-Accounts, not a second key, to separate environments.')}`,
       '',
       `${c.bold('3.')} ${c.boldYellow('⚠️  Check Access Control on the same page')} ${c.dim('; the API rejects calls from any IP outside the allowed subnets.')}`,
-      `${c.dim('   └─')} Add this machine's public IP ${c.dim('(or')} ${c.info('0.0.0.0/0')} ${c.dim('to allow any).')}`,
+      `${c.dim('   ├─')} k8s and k8s-ha: ${c.dim('the storage driver and the autoscaler call the API')}`,
+      `${c.dim('   │')}  ${c.dim("from the cluster's own servers, whose addresses aren't known ahead")}`,
+      `${c.dim('   │')}  ${c.dim('and change as workers come and go, so allow any:')} ${c.info('0.0.0.0/0')}`,
+      `${c.dim('   │')}  ${c.dim('plus IPv6, if the page lists it:')} ${c.info('::/0')}`,
+      `${c.dim('   └─')} compose: ${c.dim("only the CLI calls it, so this machine's public IP will do")}`,
       '',
       c.dim('Paste the key below. You can rotate it any time from the same page.'),
     ].join('\n'),
