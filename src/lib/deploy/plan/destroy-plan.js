@@ -34,9 +34,10 @@
 import { defineStep } from './step.js';
 
 // The shared teardown tail (decomposed from the former `finishDestroy`), in the
-// exact order finishDestroy ran its blocks. `delete-github-env` and
-// `print-summary` were k8s-only in finishDestroy (the deleteGithubEnv/showSummary
-// booleans), so they appear only in the k8s tail.
+// exact order finishDestroy ran its blocks. `print-summary` was k8s-only in
+// finishDestroy (the showSummary boolean), so it appears only in the k8s tail.
+// No tail deletes a GitHub Environment: vibecarbon creates none, so one there
+// is the operator's own.
 const composeTail = () => [
   // The env's app storage key goes before its bucket, on every destroy, and
   // before the stack state below: a key that is not revoked keeps the
@@ -85,7 +86,6 @@ const k8sTail = () => [
   // -purge deletes it.
   defineStep({ name: 'retain-state-bucket', effect: 'retainStateBucket' }),
   defineStep({ name: 'handle-backup-bucket', effect: 'handleBackupBucket' }),
-  defineStep({ name: 'delete-github-env', effect: 'deleteGithubEnv' }),
   defineStep({ name: 'update-project-config', effect: 'updateProjectConfig' }),
   defineStep({ name: 'cleanup-local-files', effect: 'cleanupLocalFiles' }),
   defineStep({ name: 'print-summary', effect: 'printSummary' }),

@@ -3,8 +3,9 @@ import { clientBuildKeys, featureRuntimeKeys } from '../../../src/lib/config-reg
 import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 
 // The guarantee: every configure-managed runtime key the registry declares is
-// propagated by the k8s deploy (a GitOps cluster gets its Secrets from it too). If someone adds a feature key to the
-// registry but forgets a path, one of these fails — not a silent prod no-op.
+// propagated by the k8s deploy (a GitOps cluster gets its Secrets from it
+// too). If someone adds a feature key to the registry but forgets a path, one
+// of these fails — not a silent prod no-op.
 
 describe('k8s local — applyVibecarbonSecrets allowlist', () => {
   it('SECRET_KEYS ⊇ every feature runtime key (secret + non-secret)', () => {

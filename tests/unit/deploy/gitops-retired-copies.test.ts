@@ -8,14 +8,16 @@
  * What an earlier vibecarbon copied there for its old deploy.yml is still
  * there, KUBECONFIG_B64 (admin access to the cluster) first among it. The
  * CLI names those copies once per run, with the command that deletes one,
- * and deletes nothing itself (noteLeftoverGitopsCopies).
+ * and deletes nothing itself (noteLeftoverGitopsCopies). Only names the old
+ * seeding wrote count: one it never wrote is the operator's own. And since
+ * vibecarbon makes no GitHub Environment, `vibecarbon destroy` deletes none.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CICD_WORKFLOW_FILES } from '../../../src/lib/ci-setup.js';
 import { SHIPPED_WORKFLOWS } from '../../../src/lib/shipped-workflows.js';
-import { readRepoFile } from '../../_shared/source-files.js';
+import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
@@ -28,6 +30,20 @@ vi.mock('../../../src/lib/github-environments.js', () => ({
 const github = await import('../../../src/lib/github-environments.js');
 const { noteLeftoverGitopsCopies } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
 const p = await import('@clack/prompts');
+
+/**
+ * Each string literal naming a GitHub Environments API path in a `gh` call
+ * that deletes (DELETE within the call's reach).
+ */
+function environmentDeletes(text: string): string[] {
+  const hits: string[] = [];
+  for (const m of text.matchAll(/['"`][^'"`\n]*\/environments\b[^'"`\n]*['"`]/g)) {
+    const at = m.index ?? 0;
+    const call = text.slice(Math.max(0, at - 200), at + m[0].length + 200);
+    if (/['"`]gh['"`]|\bgh api\b/.test(call) && /\bDELETE\b/.test(call)) hits.push(m[0]);
+  }
+  return hits;
+}
 
 const BUILD_WORKFLOW = '.github/workflows/vibecarbon-build.yml';
 const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
@@ -58,6 +74,36 @@ describe('nothing at GitHub reaches the cluster', () => {
     for (const name of ['buildPerEnvSecrets', 'refreshGitopsTlsVars', 'gitopsTlsCertificateVars']) {
       expect(Object.keys(gitops), name).not.toContain(name);
     }
+  });
+
+  it('nothing in src deletes a GitHub Environment, so destroy leaves GitHub alone', () => {
+    // An Environment vibecarbon did not make is the operator's own, with its
+    // protection rules and secrets; leftover copies are the note's to name.
+    const files = sourceFiles(join(REPO_ROOT, 'src'), {
+      exts: ['.js', '.mjs'],
+      relativeTo: REPO_ROOT,
+    });
+    expect(files.length).toBeGreaterThan(100);
+    const hits = files.flatMap((rel) =>
+      environmentDeletes(readFileSync(join(REPO_ROOT, rel), 'utf8')).map((hit) => `${rel}: ${hit}`),
+    );
+    expect(hits).toEqual([]);
+  });
+
+  it('the guard bites a gh delete at an Environments path, and spares a read', () => {
+    // Source text fed to the guard as input, so its `${}` stays literal.
+    const deletes = [
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: sample source fed to the guard
+      "runCommand(['gh', 'api', `repos/${repo}/environments/${env}`, '-X', 'DELETE'], {});",
+      "run('gh api --method DELETE repos/acme/app/environments/prod');",
+    ];
+    for (const text of deletes) expect(environmentDeletes(text), text).toHaveLength(1);
+    const reads = [
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: sample source fed to the guard
+      "run(['gh', 'api', `repos/${repo}/environments/${env}`]);",
+      "run(['gh', 'secret', 'list', '--env', env]);",
+    ];
+    for (const text of reads) expect(environmentDeletes(text), text).toEqual([]);
   });
 
   it('a failover leaves GitHub alone', () => {
@@ -185,11 +231,13 @@ describe('configure cicd names what an earlier vibecarbon left at GitHub, once, 
         envNames: ['prod'],
       }),
     ).toEqual([DEPLOY_WORKFLOW]);
-    expect(infos).toHaveLength(1);
-    expect(infos[0]).toContain(
-      'for its old deploy workflow: your repo has .github/workflows/deploy.yml. nothing reads',
-    );
-    expect(infos[0].endsWith('for example: git rm .github/workflows/deploy.yml')).toBe(true);
+    // One repo file: said as one, not as copies at GitHub, the command last.
+    expect(infos).toEqual([
+      'your repo still has .github/workflows/deploy.yml, the deploy workflow an earlier ' +
+        'vibecarbon installed. nothing dispatches it now: vibecarbon deploy applies your secrets ' +
+        'from .env.local, and flux pulls from inside the cluster. this command leaves it alone, ' +
+        'so remove it when you like with: git rm .github/workflows/deploy.yml',
+    ]);
   });
 
   it("leaves out a secret of the operator's own", async () => {
@@ -213,6 +261,61 @@ describe('configure cicd names what an earlier vibecarbon left at GitHub, once, 
     expect(infos[0].endsWith('for example: gh variable delete KUBECTL_IMAGE --env prod')).toBe(
       true,
     );
+  });
+
+  it("names only what the old seeding wrote: a key it never wrote is the operator's, wherever it sits", async () => {
+    // GitHub lists the operator's own first; the example must still be a real copy.
+    holds(
+      { prod: ['REPL_PASSWORD', 'CORS_ORIGINS', 'DB_PASSWORD', 'N8N_ENCRYPTION_KEY'] },
+      { prod: ['CORS_ORIGINS', 'DNS_PROVIDER'] },
+    );
+    expect(await noteLeftoverGitopsCopies({ projectDir: project(), envNames: ['prod'] })).toEqual([
+      'prod:DB_PASSWORD',
+      'prod:N8N_ENCRYPTION_KEY',
+      'prod:DNS_PROVIDER',
+    ]);
+    expect(infos).toHaveLength(1);
+    expect(infos[0]).toContain('prod has 2 secrets and 1 variable. nothing reads them now');
+    expect(infos[0]).not.toMatch(/REPL_PASSWORD|CORS_ORIGINS/);
+    expect(infos[0].endsWith('for example: gh secret delete DB_PASSWORD --env prod')).toBe(true);
+
+    // Variables the seeding wrote before it dropped them are leftovers too.
+    infos.length = 0;
+    holds({}, { prod: ['DNS_PROVIDER', 'HCLOUD_NETWORK_ID'] });
+    expect(await noteLeftoverGitopsCopies({ projectDir: project(), envNames: ['prod'] })).toEqual([
+      'prod:DNS_PROVIDER',
+      'prod:HCLOUD_NETWORK_ID',
+    ]);
+    expect(infos[0].endsWith('for example: gh variable delete DNS_PROVIDER --env prod')).toBe(true);
+
+    // The keys the cluster's Secret holds that the seeding never wrote, and
+    // SITE_URL as a secret (the seeding wrote it as a variable): none counts.
+    infos.length = 0;
+    const neverSeeded = [
+      'REPL_PASSWORD',
+      'SITE_URL',
+      'CORS_ORIGINS',
+      'MAGIC_LINK_ENABLED',
+      'TRUSTED_PROXY_HOPS',
+      'PROJECT_NAME',
+      'REDIS_ENABLED',
+      'N8N_ENABLED',
+      'METABASE_ENABLED',
+      'OBSERVABILITY_ENABLED',
+      'VITE_PLAUSIBLE_DOMAIN',
+      'VITE_PLAUSIBLE_SCRIPT_URL',
+    ];
+    holds({ prod: neverSeeded });
+    expect(await noteLeftoverGitopsCopies({ projectDir: project(), envNames: ['prod'] })).toEqual(
+      [],
+    );
+    expect(infos).toEqual([]);
+  });
+
+  it('the list is frozen: it follows neither SECRET_KEYS nor the registry', () => {
+    const src = readRepoFile('src/lib/deploy/k8s/gitops-deploy.js');
+    expect(src).not.toMatch(/import\s*\{[^}]*\bSECRET_KEYS\b[^}]*\}\s*from/);
+    expect(src).not.toMatch(/from\s+['"][^'"]*config-registry\.js['"]/);
   });
 
   it('nothing left: says nothing', async () => {

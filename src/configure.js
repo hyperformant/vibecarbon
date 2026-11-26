@@ -13,7 +13,7 @@
  *                                           #   e.g. vibecarbon configure email resend
  *                                           #        vibecarbon configure payments stripe
  *                                           #        vibecarbon configure oauth google
- *   vibecarbon configure cicd               # Install GitHub Actions build + deploy workflows
+ *   vibecarbon configure cicd               # Install the GitHub Actions build workflow
  *   vibecarbon configure cicd <env>         # ...and layer Flux GitOps if <env> is a k8s cluster
  *   vibecarbon configure -h                 # Show help
  */

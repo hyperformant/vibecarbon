@@ -569,7 +569,8 @@ vibecarbon destroy prod -y -confirm myapp-prod
 The following are deleted from the environment's cloud provider: servers and
 all data on them, volumes (orphaned PVCs), firewalls, and SSH keys (deployment
 keys only) — plus DNS records and health checks at whichever DNS provider the
-environment uses, and GitHub environment secrets.
+environment uses. GitHub is left alone: vibecarbon makes no GitHub environment,
+so it deletes none.
 
 > Production environments (`prod` or `production`) require a type-to-confirm
 > prompt **even with `-y`**. This is a hard guard that can't be bypassed —

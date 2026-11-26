@@ -45,7 +45,6 @@ import {
 } from '../../github-environments.js';
 import { GITHUB_REF_FILES, originGitHubRepo, writeGitHubRefs } from '../../template-edits.js';
 import { handOverCluster } from './flux-handover.js';
-import { SECRET_KEYS } from './k3s.js';
 import {
   describeFluxPlaceholders,
   FLUX_CLUSTER_FILE,
@@ -335,27 +334,100 @@ export async function noteUnreadTokenSecrets({ projectDir, ProviderClass }) {
 }
 
 /**
- * What the retired GitHub Environment seeding wrote for deploy.yml: the
- * names noteLeftoverGitopsCopies may name.
+ * Every name the retired GitHub Environment seeding ever wrote for deploy.yml
+ * (seedEnvironmentSecrets and uploadKubeconfig, fed by deployK8sGitOps and
+ * buildPerEnvSecrets, and the TLS re-seed after a failover): the names
+ * noteLeftoverGitopsCopies may name, and no others. A name the seeding never
+ * wrote is the operator's own.
+ *
+ * Read from git history, every version of src/lib/deploy/k8s/gitops-deploy.js
+ * and src/lib/github-environments.js from 32afb12d to deac42c2, with the
+ * feature keys of every src/lib/config-registry.js version in that range
+ * (32afb12d, 075a91df, 932266fe, 0e327785, 717211ef, c30d120c, 14c0895e,
+ * 3a000149, 12c76b22, deac42c2). FROZEN: the seeding is gone, so a key the
+ * registry or SECRET_KEYS gains later must never widen this list.
+ *
+ * Left out: three secrets of the stack before 0e327785 and one feature key of
+ * its auth server, whose names the terminology census keeps out of src
+ * (tests/unit/lib/terminology-census.test.ts). Any Environment that holds
+ * them was seeded before 0e327785 and holds KUBECONFIG_B64 too, so the note
+ * still names it.
  */
 const RETIRED_GITOPS_COPIES = Object.freeze({
   secrets: Object.freeze([
-    ...new Set([
-      'KUBECONFIG_B64',
-      ...SECRET_KEYS,
-      'S3_ACCESS_KEY',
-      'S3_SECRET_KEY',
-      'VIBECARBON_ENV',
-    ]),
+    // Every version, 32afb12d to deac42c2.
+    'KUBECONFIG_B64',
+    'DB_PASSWORD',
+    'ADMIN_EMAIL',
+    'ADMIN_PASSWORD',
+    // Before the lean stack, 32afb12d to f2058f5d (0e327785 dropped them).
+    'DB_ENC_KEY',
+    'JWT_SECRET',
+    'LOGFLARE_API_KEY',
+    'PG_META_CRYPTO_KEY',
+    'VAULT_ENC_KEY',
+    // From 0e327785.
+    'BETTER_AUTH_SECRET',
+    'METABASE_DB_PASSWORD',
+    'N8N_DB_PASSWORD',
+    // From 717211ef: the app's own role and its storage pair.
+    'APP_DB_PASSWORD',
+    'S3_ACCESS_KEY',
+    'S3_SECRET_KEY',
+    // From 4b02b38d.
+    'N8N_ENCRYPTION_KEY',
+    // From 6095af55.
+    'VIBECARBON_ENV',
+    // The registry's feature keys (featureSecretKeys, featureConfigKeys), the
+    // union over every version above.
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_PRICE_STARTER',
+    'STRIPE_PRICE_PRO',
+    'PADDLE_API_KEY',
+    'PADDLE_WEBHOOK_SECRET',
+    'PADDLE_ENVIRONMENT',
+    'PADDLE_PRICE_STARTER',
+    'PADDLE_PRICE_PRO',
+    'POLAR_ACCESS_TOKEN',
+    'POLAR_WEBHOOK_SECRET',
+    'POLAR_ORGANIZATION_ID',
+    'POLAR_PRICE_STARTER',
+    'POLAR_PRICE_PRO',
+    'BILLING_PROVIDER',
+    'GOOGLE_ENABLED',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'MICROSOFT_ENABLED',
+    'MICROSOFT_CLIENT_ID',
+    'MICROSOFT_CLIENT_SECRET',
+    'MICROSOFT_TENANT_ID',
+    'SMTP_HOST',
+    'SMTP_PORT',
+    'SMTP_USER',
+    'SMTP_PASS',
+    'SMTP_ADMIN_EMAIL',
+    'SMTP_SENDER_NAME',
+    // From 932266fe.
+    'ACME_CA_SERVER',
+    'ALLOWED_SSH_IPS',
   ]),
   vars: Object.freeze([
+    // Every version.
     'SITE_URL',
+    // 32afb12d to 8b3c41f7 (c30d120c dropped it).
+    'DNS_PROVIDER',
+    // 32afb12d to c198a4fd (e237e3ea dropped it).
+    'HCLOUD_NETWORK_ID',
+    // From 63717682.
     'BACKUP_SCHEDULE',
     'BACKUP_RETENTION_DAYS',
+    // From 8b3c41f7, also written by the failover re-seed.
     'TLS_SNAPSHOT_S3_PREFIX',
     'TLS_CERT_ISSUER',
     'TLS_CERT_EFFECTIVE_ISSUER',
     'TLS_CERT_DNS_NAMES',
+    // From 14c0895e.
     'KUBECTL_IMAGE',
     'TRAEFIK_VERSION',
   ]),
@@ -406,6 +478,16 @@ export async function noteLeftoverGitopsCopies({ projectDir, envNames }) {
   }
   const workflow = existsSync(join(projectDir, RETIRED_DEPLOY_WORKFLOW));
   if (found.length === 0 && !workflow) return [];
+  if (found.length === 0) {
+    // One repo file, nothing at GitHub's settings: say so, not "copies".
+    p.log.info(
+      `your repo still has ${RETIRED_DEPLOY_WORKFLOW}, the deploy workflow an earlier vibecarbon ` +
+        'installed. nothing dispatches it now: vibecarbon deploy applies your secrets from ' +
+        '.env.local, and flux pulls from inside the cluster. this command leaves it alone, so ' +
+        `remove it when you like with: git rm ${RETIRED_DEPLOY_WORKFLOW}`,
+    );
+    return [RETIRED_DEPLOY_WORKFLOW];
+  }
 
   const kubeconfig = 'KUBECONFIG_B64 (admin access to the cluster)';
   const parts = found.map(({ env, secretNames, varNames }) => {
@@ -427,9 +509,7 @@ export async function noteLeftoverGitopsCopies({ projectDir, envNames }) {
     ? `gh secret delete KUBECONFIG_B64 --env ${withKubeconfig.env}`
     : withSecret
       ? `gh secret delete ${withSecret.secretNames[0]} --env ${withSecret.env}`
-      : found.length > 0
-        ? `gh variable delete ${found[0].varNames[0]} --env ${found[0].env}`
-        : `git rm ${RETIRED_DEPLOY_WORKFLOW}`;
+      : `gh variable delete ${found[0].varNames[0]} --env ${found[0].env}`;
   p.log.info(
     `github still holds copies an earlier vibecarbon made for its old deploy workflow: ${parts.join('; ')}. ` +
       'nothing reads them now: vibecarbon deploy applies your secrets from .env.local, and flux ' +

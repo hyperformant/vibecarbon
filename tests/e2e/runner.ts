@@ -397,8 +397,8 @@ interface RunnerResult {
 /**
  * Fail fast if a host-side dep needed by the selected scenarios is missing.
  * `pulumi` is always required. `kubectl` is only required for k8s / k8s-ha.
- * `gh` is not required: no scenario deploys in push mode, and destroy's
- * GitHub environment cleanup is best-effort try/catch.
+ * `gh` is not required: no scenario deploys in push mode, and destroy
+ * leaves GitHub alone.
  */
 function checkLocalDependencies(modes: DeployMode[]): void {
   const which = (bin: string): boolean => {

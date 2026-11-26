@@ -88,9 +88,12 @@ describe('destroy.js SPEC — teardown bullets derive from Provider.NAME (sancti
     expect(DESTROY_SPEC.description).toContain('  • Hetzner Cloud SSH keys (deployment keys only)');
   });
 
-  it('leaves the non-provider bullets (Cloudflare, GitHub) untouched', () => {
+  it('leaves the non-provider bullet (Cloudflare) untouched, and deletes nothing at GitHub', () => {
     expect(DESTROY_SPEC.description).toContain('  • Cloudflare DNS records and health checks');
-    expect(DESTROY_SPEC.description).toContain('  • GitHub environment secrets');
+    expect(DESTROY_SPEC.description).not.toMatch(/• GitHub/);
+    expect(DESTROY_SPEC.description).toContain(
+      'GitHub is left alone: vibecarbon makes no GitHub environment, so it deletes none.',
+    );
   });
 });
 
