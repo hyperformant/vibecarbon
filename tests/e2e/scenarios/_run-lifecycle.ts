@@ -89,6 +89,7 @@ import {
   runRestoreDeployContinuityCheck,
   writeReplicationMarker,
 } from '../checks/replication.js';
+import { checkReplicationFirewalls, runScaleHaChecks } from '../checks/scale-ha.js';
 import {
   checkN8nKeyShared,
   checkPromotedAddonsReady,
@@ -1847,8 +1848,10 @@ export async function runLifecycle(
         // burst (plus the transient-SSH retry inside the checks) avoids the
         // saturation window entirely.
         //
-        // - verify-deploy / verify-scale / verify-restore: assert streaming +
-        //   data propagation primary→standby.
+        // - verify-deploy / verify-restore: assert streaming + data propagation
+        //   primary→standby. verify-scale is its own step and asserts the same
+        //   for k8s-ha, plus each side's replication firewall rule
+        //   (checks/scale-ha.ts).
         // - verify-failover: streaming is intentionally gone (the old primary is
         //   scaled down by design, no reverse reseed), so we assert ONLY data
         //   CONTINUITY — the marker written on the old primary just before
@@ -3381,6 +3384,44 @@ EOF`;
             );
           }
           console.log(`${tag} [verify-scale] backup evidence OK after scale`);
+
+          // 5b. k8s-ha: the scale's ups left replication and the replication
+          //     firewall rule intact. Each side's firewall is read for the
+          //     other side's recorded database address, which `serverIps`'
+          //     refresh and the scale's config rewrite have already updated.
+          const haScaleResults = await runScaleHaChecks({
+            mode: config.mode,
+            replication: () => {
+              const { primaryIp, standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
+              return runReplicationChecks({
+                mode: config.mode,
+                projectName: config.projectName,
+                primaryIp,
+                standbyIp,
+                sshKeyPath,
+                markerId: buildMarkerId(scenarioId, 'verify-scale', Date.now()),
+              });
+            },
+            firewalls: () => {
+              const fwProviderName = config.provider ?? 'hetzner';
+              const fwToken = providerTokenFor(fwProviderName);
+              return checkReplicationFirewalls({
+                provider: fwToken ? getProvider(fwProviderName, fwToken) : null,
+                projectName: config.projectName,
+                envName: config.envPrefix,
+                envConfig: readEnvConfig(config.projectDir, config.envPrefix),
+              });
+            },
+          });
+          collector.recordVerifications(stepId, haScaleResults);
+          const haScaleFails = haScaleResults.filter((r) => r.status === 'fail');
+          if (haScaleFails.length > 0) {
+            throw new Error(
+              `verify-scale: k8s-ha replication broke after scale — ${haScaleFails
+                .map((f) => `${f.checkName}: ${f.errorMessage ?? 'failed'}`)
+                .join('; ')}`,
+            );
+          }
 
           // 6. The certificate survived the scale (compose replaces the
           //    server and restores the snapshot; k8s resizes in place): the
