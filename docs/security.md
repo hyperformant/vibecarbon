@@ -181,7 +181,7 @@ The same steps rotate `DIGITALOCEAN_API_TOKEN` and `LINODE_API_TOKEN`, each in i
 
 #### Operator-IP firewall lock (H-2)
 
-Every interactive vibecarbon command that needs SSH or k8s API access (`deploy`, `shell`, `diagnose`, `status`, `scale`, `failover`, `backup`, `restore`) auto-detects the operator's public IP, persists it under `operatorCidrs`, and patches the live Hetzner firewall via the Cloud API. Subsequent commands from the same IP are silent. Each environment also records the list its firewall was last given (`operatorCidrsPushed`), so `status`, `shell` and `diagnose` push an environment that missed a change made from another one.
+Every vibecarbon command that needs SSH or k8s API access (`deploy`, `shell`, `diagnose`, `scale`, `failover`, `backup`, `restore`, `update`, `destroy`) detects the operator's public IP and saves it under `operatorCidrs`. A `-y` run under CI trusts the saved list instead, since a CI runner's address changes every run. Each environment records the list its firewall was last given (`operatorCidrsPushed`). When that record lacks your address, the command pushes the saved list to the environment's firewall through its own provider's API, so an address saved by a command on another environment still gets in. Once the record holds your address, later commands from it leave the firewall alone. `status` does the same for every deployed environment at once, but only when run in a terminal outside CI, so a status from cron, a CI job or a pipe stays a pure read. A command only ever lets its operator in: taking an entry off the firewalls is `vibecarbon access remove`'s job.
 
 The list lives in `.vibecarbon.json`:
 

@@ -352,7 +352,8 @@ export async function ensureDestroyOperatorAccess(
       yes,
       onMessage: (msg) => log.info(msg),
     });
-    if (result.added) log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
+    if (result.added || result.pushed)
+      log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
   } catch (err) {
     log.warn(
       `Operator-IP check failed: ${err instanceof Error ? err.message : String(err)}. ` +

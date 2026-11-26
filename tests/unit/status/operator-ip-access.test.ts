@@ -1,8 +1,9 @@
 /**
- * `status` lets the operator's current address through every deployed
- * environment's firewall before its first remote read, as `shell` and
- * `diagnose` do. Without it, status from a new address showed remote health
- * as unavailable with no reason.
+ * `status`, run in a terminal outside CI, lets the operator's current
+ * address through every deployed environment's firewall before its first
+ * remote read, as `shell` and `diagnose` do. Without it, status from a new
+ * address showed remote health as unavailable with no reason. A status run
+ * by cron, a CI job or a pipe never detects, saves or pushes.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -63,6 +64,11 @@ async function status(argv: string[]) {
   await expect(run(argv)).rejects.toBeInstanceOf(Exit);
 }
 
+const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+function setTTY(isTTY: boolean) {
+  Object.defineProperty(process.stdout, 'isTTY', { value: isTTY, configurable: true });
+}
+
 beforeEach(() => {
   dir = createTempDir('vc-status-ip-');
   // The deploy key exists, so status gets as far as a remote read.
@@ -83,15 +89,20 @@ beforeEach(() => {
   }) as never);
   // The -json document.
   vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  // An operator's terminal, outside CI (the unit tier runs with CI=true).
+  setTTY(true);
+  vi.stubEnv('CI', '');
 });
 
 afterEach(() => {
+  if (ttyDescriptor) Object.defineProperty(process.stdout, 'isTTY', ttyDescriptor);
+  else delete (process.stdout as { isTTY?: boolean }).isTTY;
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
 describe('status and the operator address', () => {
-  it('lets the address through before the first remote read', async () => {
+  it('in a terminal outside CI, lets the address through before the first remote read', async () => {
     project({ prod: deployed('prod') });
     await status(['-json']);
     expect(m.order[0]).toBe('operator-ip');
@@ -125,5 +136,20 @@ describe('status and the operator address', () => {
     project({ prod: deployed('prod'), staging: deployed('staging') });
     await status(['-env', 'prod', '-json']);
     expect(m.warnAll).toHaveBeenCalledWith(expect.objectContaining({ environments: ['prod'] }));
+  });
+
+  it('not in a terminal (cron, a pipe, -json | jq): no address check, still the remote reads', async () => {
+    setTTY(false);
+    project({ prod: deployed('prod') });
+    await status(['-json']);
+    expect(m.warnAll).not.toHaveBeenCalled();
+    expect(m.order).toContain('remote');
+  });
+
+  it('in a terminal under CI: no address check', async () => {
+    vi.stubEnv('CI', 'true');
+    project({ prod: deployed('prod') });
+    await status(['-json']);
+    expect(m.warnAll).not.toHaveBeenCalled();
   });
 });

@@ -1228,7 +1228,9 @@ export async function executeDeployment(args, gatheredConfig) {
   accessSpinner.stop(
     accessResult.added
       ? `Operator access list updated (${accessResult.cidr})`
-      : 'Operator IP access verified',
+      : accessResult.pushed
+        ? `Operator firewall updated (${accessResult.cidr})`
+        : 'Operator IP access verified',
   );
   if (accessResult.added && accessResult.fromEnv) {
     p.log.info(`Bootstrapped operator CIDRs from ALLOWED_SSH_IPS env var: ${accessResult.cidr}`);

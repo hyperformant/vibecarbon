@@ -1786,22 +1786,30 @@ would strand the existing compose-ha environments.
 
 #### 2026-11-25: Status lets your address through before its remote reads
 
-`vibecarbon status` now refreshes the operator allowlist before its first
-remote read, for every deployed environment in one pass, as `shell` and
-`diagnose` do for theirs. Each environment records the list its firewall was
-last pushed (`operatorCidrsPushed`), and status pushes every environment whose
-record differs from the saved list, each with its own provider's token. Under
-`CI=true` it changes nothing. `vibecarbon access` now pushes each environment
-with its own provider's token too, where it used Hetzner's for all of them.
+`vibecarbon status`, run in a terminal outside CI, now refreshes the operator
+allowlist before its first remote read, for every deployed environment in one
+pass, as `shell` and `diagnose` do for theirs. Each environment records the
+list its firewall was last pushed (`operatorCidrsPushed`). Status, and every
+command that needs SSH (deploy, backup, restore, update, failover, scale,
+destroy), pushes the saved list to an environment whose record lacks the
+operator's own CIDR, with that environment's own provider token. A status from
+cron, a CI job or a pipe changes nothing. `vibecarbon access` now pushes each
+environment with its own provider's token too, where it used Hetzner's for all
+of them, and carries on past a failing environment, then names each one.
 
 **Why:** from a new address every SSH read timed out, and remote health showed
-as unavailable with no reason. Deploy, diagnose and shell save an address for
-the whole project but push only their own environment, so "already listed"
-was not enough: the other environments stayed closed to it.
+as unavailable with no reason. A command saves an address for the whole
+project but pushes only its own environment, so "already listed" was not
+enough: after `deploy prod` saved an address, `backup staging` from it stayed
+locked out. And an `access remove` that stopped at its first failing
+environment left the CIDR open on every environment after it.
 
 **Do not undo:** making status read-only again brings the unexplained
 "unavailable" back. Pushing only when the address is new leaves every
-environment but the one that saved it closed.
+environment but the one that saved it closed. Pushing whenever the record
+differs from the saved list turns a routine command into a sync of the local
+list to every firewall: a stale checkout would re-open a CIDR someone removed
+with `access remove`, or drop a teammate's newer one.
 
 **Guard:** `tests/unit/status/operator-ip-access.test.ts` and
 `tests/unit/access/operator-ip-everywhere.test.ts`.

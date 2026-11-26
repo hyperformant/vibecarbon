@@ -1,8 +1,8 @@
 /**
  * Vibecarbon Status Command
- * Shows project and deployment status (non-interactive). Before its remote
- * reads it lets the operator's current address through the deployed
- * environments' firewalls, as `shell` and `diagnose` do.
+ * Shows project and deployment status (it never prompts). Run in a terminal
+ * outside CI, it first lets the operator's current address through the
+ * deployed environments' firewalls, as `shell` and `diagnose` do.
  *
  * Usage:
  *   vibecarbon status                    # Show all status info
@@ -45,7 +45,7 @@ import { parseDotenv } from './lib/dotenv.js';
 import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
 import { findOrphanStacks, listVibecarbonStacks } from './lib/local-stacks.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
-import { ensureOperatorIpAccessWarnAll } from './lib/operator-ip.js';
+import { ensureOperatorIpAccessWarnAll, shouldAutoDetectOperatorIp } from './lib/operator-ip.js';
 import { formatOrphanNotice } from './lib/orphan-stack-notice.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
@@ -70,9 +70,9 @@ const SPEC = {
   name: 'status',
   summary: 'Show project and deployment status',
   description: [
-    'A summary of project and environment health. It first lets your',
-    'current address through the firewall, as `shell` and `diagnose` do,',
-    'so the remote checks can connect.',
+    'A summary of project and environment health. Run in a terminal outside',
+    'CI, it first lets your current address through the firewall, as `shell`',
+    'and `diagnose` do, so the remote checks can connect.',
     '',
     'MODES',
     '  Run from outside a project:  Shows summary of all registered projects',
@@ -1759,13 +1759,15 @@ async function main(argv = []) {
   // Let the operator's current address through every deployed environment's
   // firewall before the first remote read, as `shell` and `diagnose` do:
   // from a new address every SSH read would time out, and remote health
-  // would show as unavailable with no reason. yes: true because `status
-  // -json` runs in CI and scripts; under CI=true the saved list is trusted
-  // and nothing is detected, saved or pushed. Messages go to stderr.
+  // would show as unavailable with no reason. Only in an interactive
+  // terminal outside CI: a status run by cron, a CI job or a pipe (`-json |
+  // jq`) never detects, saves or pushes, so it stays a pure read. Messages
+  // go to stderr.
   const deployedEnvNames = envEntries
     .filter(([, envConfig]) => (envConfig.servers ?? []).length > 0)
     .map(([envName]) => envName);
-  if (deployedEnvNames.length > 0) {
+  const interactive = !!process.stdout.isTTY && shouldAutoDetectOperatorIp({ yes: true });
+  if (interactive && deployedEnvNames.length > 0) {
     await ensureOperatorIpAccessWarnAll({
       projectConfig,
       environments: deployedEnvNames,

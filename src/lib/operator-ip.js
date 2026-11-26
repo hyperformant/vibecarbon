@@ -311,7 +311,8 @@ function sortedCidrs(operatorCidrs) {
  * on that environment, in .vibecarbon.json and in memory, the CIDRs its
  * firewalls now allow (`operatorCidrsPushed`, sorted). The list is saved
  * project-wide, but most pushes reach one environment, so the record is how
- * ensureOperatorIpAccessWarnAll finds an environment that lags the list.
+ * a later command finds an environment whose firewall does not let the
+ * operator's address in yet (recordAllows).
  *
  * Recorded only when every side was found and updated: a provider's firewall
  * lookup answers "not found" for an API error too, and a record written then
@@ -357,13 +358,36 @@ export async function pushOperatorCidrs({
   return updated;
 }
 
+/**
+ * Whether an environment's record says its firewall was last pushed a list
+ * holding `cidr`. No record (an environment last pushed before records
+ * existed, or never) counts as not.
+ *
+ * This, not "the record differs from the saved list", is what makes a
+ * command push: a command lets its operator in and nothing more. Pushing
+ * every difference would turn a routine command into a sync of the local
+ * list to every firewall, so a stale checkout would re-open a CIDR someone
+ * removed, or drop a teammate's newer one. Removals stay `vibecarbon
+ * access`'s job.
+ *
+ * @param {{ operatorCidrsPushed?: string[] } | undefined} envConfig
+ * @param {string | null} cidr
+ */
+function recordAllows(envConfig, cidr) {
+  const record = envConfig?.operatorCidrsPushed;
+  return Array.isArray(record) && record.includes(cidr);
+}
+
 // ============================================================================
 // AUTO-ADD HELPER
 // ============================================================================
 
 /**
  * Ensure the current operator's IP is covered by the project's CIDR list,
- * persisting + applying to the live firewall if not.
+ * persisting it if not, and push the list to this environment's firewall
+ * when its record (`operatorCidrsPushed`) lacks the operator's CIDR: a new
+ * address, or one another environment's command saved and pushed only
+ * there (`deploy prod` saved it, so `backup staging` must open staging).
  *
  * Inputs:
  *   projectConfig — loaded .vibecarbon.json (must include projectName and
@@ -378,11 +402,12 @@ export async function pushOperatorCidrs({
  *     new CIDR is added (caller wires this to its logger)
  *   cwd — the project directory whose .vibecarbon.json is updated
  *
- * Returns { added, cidr, list, fromEnv }:
+ * Returns { added, cidr, list, fromEnv, pushed }:
  *   added — true if the list was modified this call
  *   cidr — the CIDR that was added (or matched, when added=false)
  *   list — the updated list
  *   fromEnv — true if the list was bootstrapped from ALLOWED_SSH_IPS env var
+ *   pushed — true if this call updated a firewall of this environment
  */
 /**
  * Whether to auto-detect the operator's current public IP and ensure it's on
@@ -464,23 +489,21 @@ export async function ensureOperatorIpAccess({
   armOperatorIpGuard({ ip });
 
   const match = findMatchingCidr(list, ip, version);
-  if (match) {
-    // addCidr refreshes lastUsedAt, and re-adds the entry if another terminal
-    // removed it meanwhile (this operator is connecting from it right now).
-    const refreshed = persist(projectConfig, (fresh) => addCidr(fresh, match.cidr), cwd);
-    return { added: false, cidr: match.cidr, list: refreshed };
-  }
+  const added = !match;
+  const cidr = match ? match.cidr : cidrFromIp(ip, version);
+  if (added && onMessage) onMessage(`Detected your IP: ${cidr}, adding to access list...`);
+  // addCidr appends a new CIDR, or refreshes a matched one's lastUsedAt and
+  // re-adds it if another terminal removed it meanwhile (this operator is
+  // connecting from it right now).
+  const updatedList = persist(projectConfig, (fresh) => addCidr(fresh, cidr), cwd);
 
-  const newCidr = cidrFromIp(ip, version);
-  if (onMessage) onMessage(`Detected your IP: ${newCidr}, adding to access list...`);
-  const updatedList = persist(projectConfig, (fresh) => addCidr(fresh, newCidr), cwd);
-
-  // Apply to Hetzner firewall when the env is already deployed (firewall
-  // exists). For first-deploy bootstrap, the deploy flow itself will create
-  // the firewall with the right CIDRs from the persisted list.
-  const envDeployed = !!projectConfig?.environments?.[environment];
-  if (envDeployed && apiToken) {
-    await pushOperatorCidrs({
+  // Push when the env is already deployed (its firewall exists) and its
+  // record lacks this CIDR. For first-deploy bootstrap, the deploy flow
+  // itself creates the firewall with the right CIDRs from the persisted list.
+  const envConfig = projectConfig?.environments?.[environment];
+  let pushed = false;
+  if (envConfig && apiToken && !recordAllows(envConfig, cidr)) {
+    const updated = await pushOperatorCidrs({
       projectConfig,
       environment,
       sides: isHA ? [`${environment}-primary`, `${environment}-standby`] : [environment],
@@ -488,9 +511,10 @@ export async function ensureOperatorIpAccess({
       apiToken,
       cwd,
     });
+    pushed = updated.length > 0;
   }
 
-  return { added: true, cidr: newCidr, list: updatedList };
+  return { added, cidr, list: updatedList, pushed };
 }
 
 function persist(projectConfig, change, cwd) {
@@ -529,11 +553,12 @@ export async function ensureOperatorIpAccessWarn({ projectConfig, environment, a
  *
  * ensureOperatorIpAccess runs once, pushing nothing, to detect and save the
  * address. Then every named environment whose record (`operatorCidrsPushed`)
- * differs from the saved list is pushed, both sides of an HA one, each with
- * its own provider's token, in one loop: a failure on any of them, the first
- * too, still lets the others through. "Already listed" is not enough: deploy,
- * diagnose and shell save an address project-wide but push only their own
- * environment. An environment with no record counts as differing.
+ * lacks the operator's CIDR is pushed the saved list, both sides of an HA
+ * one, each with its own provider's token, in one loop: a failure on any of
+ * them, the first too, still lets the others through. "Already listed" is not
+ * enough: a command saves an address project-wide but pushes only its own
+ * environment. An environment with no record counts as lacking it. Any other
+ * difference is left alone (recordAllows says why).
  *
  * Under CI (`yes` and CI=true) it does nothing: the runner's address is
  * ephemeral, so the saved list is trusted and nothing is detected, saved or
@@ -580,12 +605,11 @@ export async function ensureOperatorIpAccessWarnAll({
     return;
   }
 
-  const listed = sortedCidrs(result.list).join(',');
+  // Detection failed (and the saved list was trusted): no CIDR to check for.
+  if (!result.cidr) return;
   for (const environment of environments) {
     const envConfig = projectConfig.environments?.[environment];
-    if (!envConfig) continue;
-    const record = envConfig.operatorCidrsPushed;
-    if (Array.isArray(record) && record.join(',') === listed) continue;
+    if (!envConfig || recordAllows(envConfig, result.cidr)) continue;
     const apiToken = tokenFor(envConfig);
     if (!apiToken) {
       console.error(
@@ -606,7 +630,7 @@ export async function ensureOperatorIpAccessWarnAll({
       });
       if (updated.length === sides.length) {
         console.error(
-          `${c.success('✓')} Firewall of ${environment} updated: SSH/k8s API now allow ${result.cidr ?? 'the saved list'}`,
+          `${c.success('✓')} Firewall of ${environment} updated: SSH/k8s API now allow ${result.cidr}`,
         );
       } else {
         console.error(

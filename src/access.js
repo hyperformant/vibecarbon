@@ -124,13 +124,27 @@ function formatRelative(isoDate, now) {
 }
 
 /**
- * Push the list to every deployed environment's firewalls (both sides of an
- * HA one), each with its own provider's token: a project can mix providers.
- * Each push records what that environment now allows (pushOperatorCidrs).
+ * Push the list to the named environments' firewalls (every deployed one by
+ * default), both sides of an HA one, each with its own provider's token: a
+ * project can mix providers. Each push records what that environment now
+ * allows (pushOperatorCidrs). One failing environment does not stop the
+ * rest: an `access remove` that stopped there would leave the CIDR open on
+ * every environment after it.
+ *
+ * @param {object} projectConfig
+ * @param {Array<{cidr: string}>} list
+ * @param {{ start: Function, stop: Function } | undefined} spinner
+ * @param {string[]} [names] the environments to push
+ * @returns {Promise<Array<{ name: string, reason: string }>>} the environments
+ *   whose push failed
  */
-async function pushToAllFirewalls(projectConfig, list, spinner) {
-  const envs = Object.entries(projectConfig?.environments ?? {});
-  if (envs.length === 0) {
+async function pushToFirewalls(
+  projectConfig,
+  list,
+  spinner,
+  names = Object.keys(projectConfig?.environments ?? {}),
+) {
+  if (names.length === 0) {
     spinner?.stop('No deployed environments, nothing to push to.');
     return [];
   }
@@ -139,22 +153,44 @@ async function pushToAllFirewalls(projectConfig, list, spinner) {
       'Cannot push an empty CIDR list; that would lock everyone out of every environment.',
     );
   }
+  const envs = names.map((name) => [name, projectConfig.environments[name]]);
   const clusters = envs.flatMap(([name, cfg]) => envFirewallSides(name, cfg)).length;
   spinner?.start(`Updating firewall on ${clusters} cluster(s)...`);
-  const updated = [];
+  let updated = 0;
+  const failed = [];
   for (const [environment, cfg] of envs) {
-    updated.push(
-      ...(await pushOperatorCidrs({
+    try {
+      const done = await pushOperatorCidrs({
         projectConfig,
         environment,
         sides: envFirewallSides(environment, cfg),
         operatorCidrs: list,
         apiToken: providerTokenFor(cfg),
-      })),
-    );
+      });
+      updated += done.length;
+    } catch (err) {
+      failed.push({ name: environment, reason: err?.message || String(err) });
+    }
   }
-  spinner?.stop(`Updated ${updated.length} firewall(s).`);
-  return updated;
+  if (failed.length === 0) {
+    spinner?.stop(`Updated ${updated} firewall(s).`);
+  } else {
+    spinner?.stop(`Updated ${updated} firewall(s), ${failed.length} environment(s) failed.`, 1);
+  }
+  return failed;
+}
+
+/**
+ * The error for a push that left environments behind: what their firewalls
+ * still do, each environment with its reason, and the command that retries.
+ *
+ * @param {Array<{ name: string, reason: string }>} failed
+ * @param {string} state e.g. "Removed 1.2.3.4/32 from the list, but these firewalls still allow it"
+ * @param {string} retry e.g. "rerun `vibecarbon access remove 1.2.3.4/32`"
+ */
+function pushFailed(failed, state, retry) {
+  const named = failed.map((f) => `${f.name} (${f.reason})`).join('; ');
+  return new Error(`${state}: ${named}. Fix the cause, then ${retry} to push again.`);
 }
 
 // ============================================================================
@@ -207,15 +243,50 @@ async function addAction(projectConfig, cidr) {
     p.log.success(`Added ${cidr} to the operator allowlist.`);
   }
 
-  const s = spinner();
-  await pushToAllFirewalls(projectConfig, newList, s);
+  const failed = await pushToFirewalls(projectConfig, newList, spinner());
+  if (failed.length > 0) {
+    throw pushFailed(
+      failed,
+      `${cidr} is in the list, but these firewalls do not allow it yet`,
+      `rerun \`vibecarbon access add ${cidr}\``,
+    );
+  }
+}
+
+/**
+ * The environments that may still let `cidr` in after it left the list: the
+ * ones whose record still holds it (their last push failed, or came before
+ * the removal), and the ones with no record (pushed before records existed,
+ * or a first push that failed).
+ */
+function envsStillAllowing(projectConfig, cidr) {
+  return Object.entries(projectConfig?.environments ?? {})
+    .filter(([, cfg]) => {
+      const record = cfg?.operatorCidrsPushed;
+      return !Array.isArray(record) || record.includes(cidr);
+    })
+    .map(([name]) => name);
 }
 
 async function removeAction(projectConfig, cidr) {
   if (!cidr) throw new Error('Missing CIDR. Usage: vibecarbon access remove <cidr>');
   const list = loadOperatorCidrs(projectConfig);
+  const retry = `rerun \`vibecarbon access remove ${cidr}\``;
   if (!list.some((e) => e.cidr === cidr)) {
-    p.log.warn(`${cidr} is not in the list, nothing to remove.`);
+    // Already gone from the list, maybe by a remove whose push failed: push
+    // the list again to every environment that may still let it in.
+    const behind = envsStillAllowing(projectConfig, cidr);
+    if (behind.length === 0) {
+      p.log.warn(`${cidr} is not in the list, nothing to remove.`);
+      return;
+    }
+    p.log.info(
+      `${cidr} is not in the list, but ${behind.join(', ')} may still allow it. Pushing the list there.`,
+    );
+    const failed = await pushToFirewalls(projectConfig, list, spinner(), behind);
+    if (failed.length > 0) {
+      throw pushFailed(failed, `These firewalls still allow ${cidr}`, retry);
+    }
     return;
   }
   if (list.length === 1) {
@@ -257,8 +328,14 @@ async function removeAction(projectConfig, cidr) {
   const newList = updateOperatorCidrs(projectConfig, (fresh) => removeCidr(fresh, cidr));
   p.log.success(`Removed ${cidr} from the operator allowlist.`);
 
-  const s = spinner();
-  await pushToAllFirewalls(projectConfig, newList, s);
+  const failed = await pushToFirewalls(projectConfig, newList, spinner());
+  if (failed.length > 0) {
+    throw pushFailed(
+      failed,
+      `Removed ${cidr} from the list, but these firewalls still allow it`,
+      retry,
+    );
+  }
 }
 
 async function pruneAction(projectConfig) {
@@ -278,8 +355,17 @@ async function pruneAction(projectConfig) {
   const written = updateOperatorCidrs(projectConfig, (fresh) => pruneCidrs(fresh, now, 90));
   p.log.success(`Pruned ${dropped} stale entr${dropped === 1 ? 'y' : 'ies'}.`);
 
-  const s = spinner();
-  await pushToAllFirewalls(projectConfig, written, s);
+  const failed = await pushToFirewalls(projectConfig, written, spinner());
+  if (failed.length > 0) {
+    // A rerun of prune finds nothing stale; a remove of each pruned CIDR
+    // pushes the environments that may still allow it.
+    const pruned = list.filter((e) => !written.some((w) => w.cidr === e.cidr)).map((e) => e.cidr);
+    throw pushFailed(
+      failed,
+      `Pruned ${pruned.join(', ')} from the list, but these firewalls still allow them`,
+      `run \`vibecarbon access remove <cidr>\` for each of them`,
+    );
+  }
 }
 
 // ============================================================================

@@ -45,7 +45,7 @@ export async function requireOperatorIpAccess({
       yes,
       onMessage: (msg) => p.log.info(msg),
     });
-    if (result.added) {
+    if (result.added || result.pushed) {
       p.log.success(`Firewall updated: ${opened} ${result.cidr}`);
     }
   } catch (err) {
