@@ -630,7 +630,7 @@ export async function deployK8sGitOps(args) {
     s.error(`flux has not taken over ${environment}`);
     throw err;
   }
-  s.stop(`flux has ${environment}, so a push to main deploys it from here on`);
+  s.stop(`flux has ${environment}, so a push under k8s/ to main deploys it from here on`);
 
   return { pushed };
 }

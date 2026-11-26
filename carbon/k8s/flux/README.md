@@ -19,7 +19,7 @@ carbon/k8s/
 
 ## How `configure cicd` wires Flux
 
-1. `vibecarbon configure cicd <env>` runs on each cluster from your machine, since the k8s API admits only your saved addresses (a k8s-ha primary and standby each get their own run). In order, it:
+1. `vibecarbon configure cicd <env>` runs on each cluster from your machine, since the k8s API admits only your saved addresses (one call covers a k8s-ha primary and standby, and each gets its own pass). In order, it:
    - applies the Flux v2.10.0 release manifest when Flux is not already installed, then waits for the four flux-system controllers (`source`, `helm`, `kustomize`, `notification`);
    - adds a new read-only deploy key to your repo, titled `vibecarbon flux <cluster>` (`prod`, or `prod-primary` and `prod-standby`), writes its private half with GitHub's host keys into the `flux-system/flux-system` Secret the GitRepository names, then removes every other key with that title;
    - writes `vibecarbon/ghcr-pull-secret` (a classic token with only `read:packages`) when the app image is private;

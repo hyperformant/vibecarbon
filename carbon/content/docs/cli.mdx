@@ -375,8 +375,8 @@ it leaves the commit to you: it prints the `git add` to run. `vibecarbon
 upgrade` reads these edits as its own, not yours: a file only the CLI changed is
 upgraded like an untouched one and keeps your owner and repo.
 
-Before stage 2 changes anything, it checks what Flux would build from your
-`k8s/` tree through the cluster file it applies
+Before it commits anything or touches a cluster, stage 2 checks what Flux
+would build from your `k8s/` tree through the cluster file it applies
 (`k8s/flux/clusters/primary/vibecarbon.yaml`). Flux applies the files as they
 are and can't fill a placeholder such as `{{TRAEFIK_IMAGE}}`, so if one would
 reach the cluster, the command stops and names the file and the placeholder.
@@ -395,8 +395,10 @@ Then, once per run, it names what an earlier vibecarbon left at GitHub and
 works out how the clusters pull your app image (both below). Then, on each
 cluster (the primary and the standby on k8s-ha), it:
 
-1. points `k8s/` at your owner and repo, commits `k8s/` and pushes it to
-   `main`, so the first sync reads it;
+1. points `k8s/` at your owner and repo, commits `k8s/` and pushes your
+   current HEAD to `main` (`git push origin HEAD:main`), so the first sync
+   reads it. Run it from `main`: any other commit on your branch goes to
+   `main` too;
 2. installs Flux v2.10.0 with `kubectl`, unless Flux is already there (you
    don't need the `flux` CLI);
 3. gives Flux a new read-only deploy key of that cluster's own (below);
@@ -645,7 +647,16 @@ The following are deleted from the environment's cloud provider: servers and
 all data on them, volumes (orphaned PVCs), firewalls, and SSH keys (deployment
 keys only) — plus DNS records and health checks at whichever DNS provider the
 environment uses. GitHub is left alone: vibecarbon makes no GitHub environment,
-so it deletes none.
+so it deletes none. A k8s environment that ran `configure cicd` leaves each
+cluster's `vibecarbon flux <cluster>` deploy key on your repo. A left key opens
+nothing, since its private half was only in the destroyed cluster, and a later
+`configure cicd` for a cluster of the same name (the same environment, in the
+same mode) removes it. To delete one now, find its id with
+`gh repo deploy-key list`, then run:
+
+```bash
+gh repo deploy-key delete <id>
+```
 
 > Production environments (`prod` or `production`) require a type-to-confirm
 > prompt **even with `-y`**. This is a hard guard that can't be bypassed —
@@ -1036,7 +1047,8 @@ checkout: a list that is behind would re-open an entry someone removed.
 `CI=true`), since CI runners have ephemeral IPs that would pollute the list.
 That is `-y` on the commands that take it, and any `configure cicd <env>` run
 with no terminal on stdin. Outside CI such a run still detects, and `shell` and
-`diagnose` always do. In CI, either commit a populated `operatorCidrs` to
+`diagnose` always do when they have the environment's provider token (without
+one they skip the check). In CI, either commit a populated `operatorCidrs` to
 `.vibecarbon.json` or set `ALLOWED_SSH_IPS="1.2.3.4/32,5.6.7.8/32"` once on the
 first deploy.
 

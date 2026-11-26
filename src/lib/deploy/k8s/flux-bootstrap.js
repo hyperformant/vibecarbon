@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { runKubectlWithRetry } from './k3s.js';
 import { FLUX_CLUSTER_FILE } from './unrendered-placeholders.js';
 
-/** The Flux release the deploy workflow installed; bump it deliberately. */
+/** The Flux release `configure cicd <env>` installs; bump it deliberately. */
 export const FLUX_VERSION = 'v2.10.0';
 
 export const FLUX_INSTALL_URL = `https://github.com/fluxcd/flux2/releases/download/${FLUX_VERSION}/install.yaml`;

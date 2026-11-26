@@ -928,7 +928,7 @@ async function promptCicd() {
   p.log.info(c.bold('CI/CD (GitHub Actions)'));
   p.log.info(
     c.dim(
-      'Bootstraps the GitHub repo (if needed) and installs the build workflow so this project can ship via git push. Optional in all modes, k8s/k8s-ha deploys are local-first and never need CI/CD; compose deploys use git-push when configured, otherwise a local build sideloaded to the server.',
+      'Bootstraps the GitHub repo (if needed) and installs the build workflow, which builds your app image on every push to main. Optional in every mode, since deploys are local-first: a compose deploy in push mode ships the image the workflow built instead of building here, and `vibecarbon configure cicd <env>` lets a k8s cluster pull from your repo.',
     ),
   );
 
@@ -1580,8 +1580,9 @@ export async function runConfigureCicd(envName) {
   }
 
   // Stage 2 is Flux, a Kubernetes controller. A Compose project has nothing to
-  // install: its CD is push-based through the Actions workflow Stage 1 just
-  // wrote. That is a finished setup, so this exits 0.
+  // install: the workflow Stage 1 just wrote builds its image on every push
+  // to main, and `vibecarbon deploy <env>` in push mode ships that image.
+  // That is a finished setup, so this exits 0.
   const isK8s =
     envConfig.deployMode === 'kubernetes' ||
     envConfig.deployMode === 'kubernetes-ha' ||
@@ -1589,9 +1590,13 @@ export async function runConfigureCicd(envName) {
     envConfig.deployMode === 'k8s-ha';
   if (!isK8s) {
     p.log.info(
-      `Environment "${envName}" is ${envConfig.deployMode || 'unknown'} mode, which deploys by push from GitHub Actions. There is no Flux step to add.`,
+      `${envName} is ${envConfig.deployMode || 'unknown'} mode, and flux runs only on kubernetes, so there is no flux step to add.`,
     );
-    p.outro(c.success(`CI/CD is set up for ${envName}. Push to main to build and deploy.`));
+    p.outro(
+      c.success(
+        `the build workflow builds your app image on every push to main, and a deploy in push mode ships it. to ship it now, run vibecarbon deploy ${envName}`,
+      ),
+    );
     return;
   }
 
