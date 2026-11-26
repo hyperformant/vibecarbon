@@ -133,7 +133,14 @@ export const testConfig = {
         // guard.test.ts. A US perf record run is still possible by passing
         // `regions: ash,hil` at workflow dispatch (E2E_REGIONS); it is just
         // no longer the default anywhere.
-        regions: ['nbg1', 'hel1', 'fsn1'] as const,
+        //
+        // No hel1: Hetzner stopped new buckets in Helsinki on 2026-11-19
+        // (status.hetzner.com, "use FSN or NBG"), and a deploy creates its
+        // buckets in the primary's location, so a hel1 primary fails at
+        // bucket creation. This list picks the primary only: an HA standby
+        // goes where a customer's would (getDefaultStandbyRegion), which can
+        // still be hel1, and that is fine because a standby creates no bucket.
+        regions: ['nbg1', 'fsn1'] as const,
         // EU defaults stay on the current generation (cx*3, cpx*2): the
         // legacy cpx*1 line costs more than its successor since the
         // repricing. cpx21 and cpx11 are the ash/hil (US) defaults, reached
