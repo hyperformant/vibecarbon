@@ -40,17 +40,15 @@ const WORKFLOW_TEMPLATE_PATH = join(
 );
 
 const PROJECT_WORKFLOW_PATH = '.github/workflows/vibecarbon-build.yml';
-const PROJECT_DEPLOY_WORKFLOW_PATH = '.github/workflows/deploy.yml';
 
 /**
- * The workflows `configure cicd` installs into a project (create does not).
- * Before their checksums were recorded at install, upgrade read every one of
- * them as yours; it replaces one that has none, keeping a backup.
+ * The workflows `configure cicd` installs into a project (create does not):
+ * the build workflow only. Nothing at GitHub deploys to a k8s cluster, which
+ * pulls with Flux. Before their checksums were recorded at install, upgrade
+ * read every one of them as yours; it replaces one that has none, keeping a
+ * backup.
  */
-export const CICD_WORKFLOW_FILES = Object.freeze([
-  PROJECT_WORKFLOW_PATH,
-  PROJECT_DEPLOY_WORKFLOW_PATH,
-]);
+export const CICD_WORKFLOW_FILES = Object.freeze([PROJECT_WORKFLOW_PATH]);
 
 // The build workflow resolves its Node version from the project's `.nvmrc`
 // (`node-version-file`), so that file is a hard prerequisite — setup-node
@@ -60,17 +58,6 @@ export const CICD_WORKFLOW_FILES = Object.freeze([
 // the first CI run after an upgrade dies on a missing file.
 const NODE_VERSION_TEMPLATE_PATH = join(__dirname, '..', '..', 'carbon', '.nvmrc');
 const PROJECT_NODE_VERSION_PATH = '.nvmrc';
-
-// Deploy workflow template (lives alongside the build workflow in carbon/).
-const DEPLOY_WORKFLOW_TEMPLATE_PATH = join(
-  __dirname,
-  '..',
-  '..',
-  'carbon',
-  '.github',
-  'workflows',
-  'deploy.yml',
-);
 
 /**
  * Check whether CI/CD is configured for the project.
@@ -110,12 +97,14 @@ export function ciAvailable(cwd = process.cwd()) {
  *                the new VPS. Slower (sequential after upStack) but works
  *                when the operator has no local Docker. Selected via
  *                `--direct`, or auto-fallback when `docker` is missing.
- *   - 'push'   — compose: commit + push triggers GitHub Actions build
- *                and deploy. Default when CI/CD is configured.
+ *   - 'push'   - compose: GitHub Actions builds the image (a push to main
+ *                triggers it), and the deploy has the server pull it from
+ *                ghcr.io. The workflow never deploys. Default when CI/CD is
+ *                configured.
  *
- * K8s/k8s-ha is always 'local'. Layer in Flux + GHA via
- * `vibecarbon configure cicd <env>` after the cluster is up — that
- * doesn't go through this function.
+ * K8s/k8s-ha is always 'local'. `vibecarbon configure cicd <env>` hands a
+ * running cluster to Flux, which pulls k8s/ from the repo; that doesn't go
+ * through this function.
  *
  * Compose modes auto-detect the default. The interactive compose prompt
  * (lib/deploy/prompts.js) lets the operator override by mutating
@@ -428,31 +417,6 @@ export function installCiFiles(cwd = process.cwd()) {
 }
 
 /**
- * Install `.github/workflows/deploy.yml` from the CLI-bundled template.
- *
- * This workflow drives the K8s push-deploy path: applies env-secrets,
- * bootstraps Flux, triggers reconciliation. Only relevant for K8s deploys
- * but installed unconditionally during `vibecarbon configure` → CI/CD so
- * the project can flip to K8s later without a second configure step.
- *
- * Returns true if newly installed, false if already present (idempotent).
- */
-export function installDeployWorkflowFile(cwd = process.cwd()) {
-  const target = join(cwd, PROJECT_DEPLOY_WORKFLOW_PATH);
-  if (existsSync(target)) return false;
-  if (!existsSync(DEPLOY_WORKFLOW_TEMPLATE_PATH)) {
-    throw new Error(
-      `Deploy workflow template not found at ${DEPLOY_WORKFLOW_TEMPLATE_PATH}, vibecarbon install is incomplete`,
-    );
-  }
-  const content = readFileSync(DEPLOY_WORKFLOW_TEMPLATE_PATH, 'utf-8');
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, content);
-  recordInstalledFile(cwd, PROJECT_DEPLOY_WORKFLOW_PATH, content);
-  return true;
-}
-
-/**
  * Point the Docker/K8s image refs and the Flux GitRepository URLs at the real
  * GitHub owner and repo. At `vibecarbon create` time GITHUB_OWNER defaults
  * to the project name (see create.js); `configure` → CI/CD learns the real
@@ -647,8 +611,7 @@ export async function ensureCIImageReady(options = {}) {
       // Inline the build workflow's state so the operator isn't sent to
       // `gh run list` — in e2e-test runs the throwaway repo is
       // deleted seconds after this throws, so post-hoc `gh run view`
-      // 404s. Mirrors the same pattern in waitForLatestWorkflowRun
-      // (src/lib/github-environments.js). Each gh probe is wrapped
+      // 404s. Each gh probe is wrapped
       // independently so a single failure (e.g., empty run list) doesn't
       // erase the rest of the diagnostic — the whole point of this block
       // is to ALWAYS leave a trace of why CI didn't publish.

@@ -52,7 +52,7 @@ k8s/
 2. **Cloudflare Account** with API token and domain
 3. **kubectl** installed locally
 4. **kustomize** installed (or use `kubectl -k`)
-5. **Flux CLI** (optional, for GitOps)
+5. Nothing extra for GitOps: `vibecarbon configure cicd <env>` installs Flux with `kubectl`, so you don't need the `flux` CLI
 
 ## Deployment Steps
 
@@ -129,6 +129,24 @@ kubectl get svc -n vibecarbon
 # Check ingress/load balancer
 kubectl get svc traefik -n vibecarbon
 ```
+
+## GitOps (optional)
+
+Once the cluster is up, let it deploy itself from your repo:
+
+```bash
+vibecarbon configure cicd production
+```
+
+From your machine, the command installs Flux on each cluster (a k8s-ha standby
+too), gives it a read-only deploy key of its own on your repo, adds the app
+image's pull Secret when the image is private, applies
+`flux/clusters/primary/vibecarbon.yaml`, and waits for the first sync. From
+then on the cluster pulls `main` and applies `k8s/base` itself, so nothing at
+GitHub ever connects to it. Flux leaves your secrets, the database, the TLS
+certificate, the backup schedule and the Traefik and registry Deployments to
+`vibecarbon deploy`, so run it again after you change a secret. See
+[flux/README.md](flux/README.md) for the details.
 
 ## Autoscaling
 

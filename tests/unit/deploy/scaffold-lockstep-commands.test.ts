@@ -200,7 +200,7 @@ describe('a scaffold that predates the wal-g role file', () => {
     expect(remote.operatorIp).toHaveBeenCalled();
   });
 
-  it('configure cicd <k8s env> refuses before Stage 1 installs the workflow that applies k8s/', async () => {
+  it('configure cicd <k8s env> refuses before Stage 1, so Flux is never handed a k8s/ it cannot run', async () => {
     projectConfig = { projectName: 'proj', environments: { prod: k8sHa() } };
     const { runConfigureCicd } = await import('../../../src/configure.js');
     await expectRefusedBeforeRemote(() => runConfigureCicd('prod'));

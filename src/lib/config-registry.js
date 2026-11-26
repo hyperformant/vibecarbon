@@ -762,6 +762,21 @@ export const CONFIG_KEYS = [
     where: 'operator shell',
     scope: 'registry',
   },
+  {
+    // The app image's pull token for a private ghcr.io package, stored only
+    // in the cluster (ghcr-pull-secret). `configure cicd <env>` uses it when
+    // exported; on a terminal without it, configure asks. The scope check
+    // (exactly read:packages) is GitHub's answer, not a shape.
+    key: 'GHCR_PULL_TOKEN',
+    class: 'operator-secret',
+    feature: 'providers',
+    kind: 'token',
+    optional: true,
+    shape: { minLen: 40, describe: 'a GitHub classic token with only read:packages' },
+    sample: 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    where: 'operator shell',
+    scope: 'registry',
+  },
 
   // ---- State: Pulumi backend override ----
   // Opt-in backend override (src/lib/iac/index.js resolveBackendUrl) —

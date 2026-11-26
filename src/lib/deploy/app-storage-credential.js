@@ -324,42 +324,6 @@ export async function revokeAppStorageCredential({ provider, envConfig, apiToken
 }
 
 /**
- * The pair the app holds today, from what is recorded and stored here, with
- * no network and no mint. GitOps seeds this into the env's GitHub
- * Environment, so the app pod gets the same key the CLI deploy rendered.
- *
- * @param {{ provider: string, environment: string, envConfig: object, infraCredential: { accessKey: string, secretKey: string }, secrets: { get(key: string): string|undefined } }} args
- * @returns {Promise<{ accessKey: string, secretKey: string }>}
- */
-export async function storedAppStoragePair({
-  provider,
-  environment,
-  envConfig,
-  infraCredential,
-  secrets,
-}) {
-  const { scoping } = await scopingOf(provider);
-  const record = envConfig?.s3?.appKey;
-  const names = appStorageSecretKeys(environment);
-  if (scoping !== 'none' && record) {
-    const accessKey = secrets.get(names.accessKey);
-    const secretKey = secrets.get(names.secretKey);
-    if (!accessKey || !secretKey) {
-      throw new Error(
-        `the app storage key for ${environment} is not stored on this machine, so GitOps would hand the app the account-wide key. Run \`vibecarbon deploy ${environment}\` here first; it mints or picks up the key.`,
-      );
-    }
-    return { accessKey, secretKey };
-  }
-  if (scoping === 'mint') {
-    throw new Error(
-      `${environment} has no app storage key yet. Run \`vibecarbon deploy ${environment}\` first; it mints one limited to the env bucket.`,
-    );
-  }
-  return { accessKey: infraCredential.accessKey, secretKey: infraCredential.secretKey };
-}
-
-/**
  * Record, on every env that references one, the buckets the last fence sync
  * had to skip (absent, and no env finished a deploy into them), and clear
  * the record everywhere else. Mutates and returns `projectConfig`.

@@ -2,13 +2,10 @@
 # Committed to git; safe to reconcile via Flux.
 #
 # The vibecarbon-app-secrets and vibecarbon-infra-secrets Secrets are
-# created at deploy time — either by the vibecarbon CLI (imperative
-# deploy) or by the GitHub Actions deploy workflow
-# (.github/workflows/deploy.yml, GitOps deploy). Those Secrets are NOT
-# reconciled by Flux — it's owned by field-manager=github-actions-deploy
-# (workflow) or field-manager=kubectl-client-side-apply (CLI), and Flux
-# leaves it alone. This lets us rotate secrets via `gh secret set --env
-# prod KEY=value` without a git commit.
+# created at deploy time by `vibecarbon deploy <env>`, from the operator's
+# .env.local, on a GitOps cluster as on any other. They are not in this
+# tree, so Flux never reconciles them. To change a secret, edit .env.local
+# and run `vibecarbon deploy <env>`: no git commit, and nothing at GitHub.
 ---
 apiVersion: v1
 kind: ConfigMap

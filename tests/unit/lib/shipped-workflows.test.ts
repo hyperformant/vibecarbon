@@ -70,11 +70,12 @@ describe('SHIPPED_WORKFLOWS', () => {
   }
 
   it('isShippedWorkflow: byte for byte only, and only for its own path', () => {
-    const rel = '.github/workflows/deploy.yml';
+    const rel = '.github/workflows/vibecarbon-build.yml';
     const text = readRepoFile('carbon', rel);
     expect(isShippedWorkflow(rel, text)).toBe(true);
     expect(isShippedWorkflow(rel, `${text}\n`)).toBe(false);
-    expect(isShippedWorkflow('.github/workflows/vibecarbon-build.yml', text)).toBe(false);
+    // The retired deploy workflow is listed no more: upgrade has no copy to replace one with.
+    expect(isShippedWorkflow('.github/workflows/deploy.yml', text)).toBe(false);
     expect(isShippedWorkflow('k8s/base/kustomization.yaml', text)).toBe(false);
   });
 });

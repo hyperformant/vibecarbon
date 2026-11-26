@@ -22,8 +22,7 @@ import { PROVIDERS } from '../../../src/lib/providers/index.js';
 // Each row pins the literal values a provider's identity/credentials
 // statics must hold. This is the "customer-visible contract" surface —
 // TOKEN_ENV in particular is pinned externally as a CI secret name (see
-// github-environments.test.ts, deploy-workflow-secret-sync.test.ts) and
-// must never be silently renamed.
+// gitops-provider-token.test.ts) and must never be silently renamed.
 import { EXPECTED } from '../../_shared/provider-expected.js';
 
 describe('Provider registry vs EXPECTED table', () => {

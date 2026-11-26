@@ -66,6 +66,9 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/telemetry/update-check.js base https://vibecarbon.com',
       'src/lib/ci-setup.js res https://ghcr.io/token?scope=repository:{*}/{*}:pull',
       'src/lib/ci-setup.js url https://ghcr.io/v2/{*}/{*}/manifests/{*}',
+      'src/lib/deploy/k8s/ghcr-pull-secret.js ghcrEndpoints https://ghcr.io/token?scope=repository:{*}:pull&service=ghcr.io',
+      'src/lib/deploy/k8s/ghcr-pull-secret.js ghcrEndpoints https://ghcr.io/v2/{*}/tags/list',
+      'src/lib/deploy/k8s/ghcr-pull-secret.js ghcrEndpoints https://ghcr.io/v2/{*}/manifests/{*}',
       'src/lib/providers/linode-objectstorage.js endpointUrl https://{*}',
       'src/add.js GITHUB_RAW_BASE https://raw.githubusercontent.com/{*}/{*}',
       'src/lib/kubeconfig.js operatorKubeconfigText https://{*}:6443',
@@ -82,7 +85,6 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/deploy/k8s/k3s.js buildK3sBuildInputs https://{*}',
       'src/lib/deploy/k8s/k3s.js configYaml https://{*}',
       'src/lib/deploy/k8s/k3s.js applyK3sManifests https://{*}',
-      'src/lib/deploy/k8s/gitops-deploy.js perEnvVars https://{*}',
       'src/lib/deploy/orchestrator.js envCorsOrigins https://{*}',
     ],
   },
@@ -108,7 +110,13 @@ const ALLOW: { why: string; sites: string[] }[] = [
     sites: [
       'src/lib/ci-setup.js ensureCIImageReady https://cli.github.com/',
       'src/lib/iac/create-timeout.js status statusUrl',
+      'src/lib/deploy/k8s/ghcr-pull-secret.js githubTokenScopes READ_PACKAGES_TOKEN_PAGE',
+      'src/lib/deploy/k8s/ghcr-pull-secret.js pullTokenProblem READ_PACKAGES_TOKEN_PAGE',
     ],
+  },
+  {
+    why: 'a URL built from a URL constant, returned to callers that print it through link()',
+    sites: ['src/lib/deploy/k8s/ghcr-pull-secret.js newPullTokenUrl READ_PACKAGES_TOKEN_PAGE'],
   },
 ];
 

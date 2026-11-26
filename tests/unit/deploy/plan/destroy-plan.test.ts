@@ -13,7 +13,8 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // Pulumi teardown) is a first-class property of the plan, pinned by the
 // sequence tests below.
 
-// compose / compose-ha: no GitHub environment delete, no summary note.
+// compose / compose-ha: no summary note. No tier deletes a GitHub Environment:
+// vibecarbon creates none, so one there is the operator's own.
 // remove-stack-state sits between the teardown and the buckets: the compose
 // teardown reaps via direct provider APIs (no `pulumi destroy`), so its stack
 // record must be reconciled explicitly. It keeps the stack exactly when the
@@ -45,8 +46,8 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'finish-outro',
 ];
 
-// k8s / k8s-ha: adds the GitHub-environment delete + the deleted-resources
-// summary note (the two tail steps compose tiers never ran). k8s and k8s-ha
+// k8s / k8s-ha: adds the deleted-resources summary note (the tail step
+// compose tiers never ran). k8s and k8s-ha
 // share ONE teardown effect — the both-cluster (primary + standby) fan-out is
 // data-driven by ctx.plan.stackEnvs (see planDestroyTargets), not a distinct
 // step.
@@ -56,7 +57,6 @@ const EXPECTED_K8S_SEQUENCE = [
   'delete-app-bucket',
   'retain-state-bucket',
   'handle-backup-bucket',
-  'delete-github-env',
   'update-project-config',
   'cleanup-local-files',
   'print-summary',
@@ -76,10 +76,8 @@ describe('planDestroy(compose)', () => {
     expect(first.effect).toBe('destroyComposeServices');
   });
 
-  it('omits the k8s-only GitHub-env delete and summary note', () => {
-    const names = planStepNames(planDestroy('compose'));
-    expect(names).not.toContain('delete-github-env');
-    expect(names).not.toContain('print-summary');
+  it('omits the k8s-only summary note', () => {
+    expect(planStepNames(planDestroy('compose'))).not.toContain('print-summary');
   });
 });
 
@@ -96,7 +94,7 @@ describe('planDestroy(compose-ha)', () => {
 });
 
 describe('planDestroy(k8s)', () => {
-  it('produces the k8s teardown step sequence (adds github-env + summary)', () => {
+  it('produces the k8s teardown step sequence (adds the summary)', () => {
     expect(planStepNames(planDestroy('k8s'))).toEqual(EXPECTED_K8S_SEQUENCE);
   });
 
@@ -118,6 +116,18 @@ describe('planDestroy(k8s-ha)', () => {
     // The primary+standby fan-out is data-driven, so the STEP list matches k8s.
     expect(planStepNames(planDestroy('k8s-ha'))).toEqual(planStepNames(planDestroy('k8s')));
   });
+});
+
+describe('planDestroy leaves GitHub alone', () => {
+  // vibecarbon creates no GitHub Environment, so a destroy deleting one would
+  // be deleting the operator's own, with its protection rules and secrets.
+  it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const)(
+    '%s plans no GitHub step',
+    (tier) => {
+      const steps = planDestroy(tier);
+      expect(steps.filter((s) => /github/i.test(`${s.name} ${s.effect}`))).toEqual([]);
+    },
+  );
 });
 
 describe('planDestroy — buckets-last safety ordering', () => {

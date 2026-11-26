@@ -193,16 +193,15 @@ describe('only a deploy reads the channel', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it.each(['src/restore.js', 'src/failover.js', 'src/scale.js', 'src/configure.js'])(
+  it.each(['src/restore.js', 'src/failover.js', 'src/scale.js'])(
     '%s runs the recorded set',
     (rel) => {
       expect(readRepoFile(rel)).toMatch(/useRecordedImageSet\(envConfig/);
     },
   );
 
-  it('the commands that use a set are exactly the deploy and those four', () => {
+  it('the commands that use a set are exactly the deploy and those three', () => {
     expect(importersOf('useRecordedImageSet')).toEqual([
-      'src/configure.js',
       'src/failover.js',
       'src/lib/version-channel.js',
       'src/restore.js',

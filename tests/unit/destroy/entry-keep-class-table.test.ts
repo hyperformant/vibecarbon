@@ -150,8 +150,8 @@ vi.mock('../../../src/lib/deploy/k8s/index.js', async (orig) => {
   return { ...real, destroyK8s: async () => ({ destroyed: false }) };
 });
 
-// Nothing here may run a real command (gh, kubectl): a GitHub environment
-// delete against this repository would be real.
+// Nothing here may run a real command (gh, kubectl, ssh) against this
+// machine or repository.
 vi.mock('../../../src/lib/command.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
   return {

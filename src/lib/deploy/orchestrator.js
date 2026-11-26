@@ -530,6 +530,34 @@ export function assertBucketReady(result, role) {
 const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
 
 /**
+ * The note a k8s deploy ends with: where its kubeconfig is, the master, and
+ * what to run next. A single cluster has one kubeconfig; a k8s-ha deploy
+ * writes one per side, named for each side's stack (`kubeconfig-<env>-primary`
+ * and `-standby`, fetchKubeconfig) and none for the environment itself.
+ *
+ * @param {{ projectDir: string, environment: string, ha: boolean,
+ *   masterIp?: string | null }} args
+ * @returns {string[]} the lines, for formatCommandNote
+ */
+export function k8sReadyNoteLines({ projectDir, environment, ha, masterIp }) {
+  const stacks = ha ? [`${environment}-primary`, `${environment}-standby`] : [environment];
+  const [first, ...rest] = stacks.map((stack) => localKubeconfigPath(projectDir, stack));
+  return [
+    `Kubeconfig:  ${first}`,
+    ...rest.map((path) => `             ${path}`),
+    `Master IP:   ${masterIp ?? '(unknown: check Pulumi output)'}`,
+    '',
+    'Next steps:',
+    `  vibecarbon shell ${environment}    # bash with KUBECONFIG set`,
+    `  vibecarbon diagnose ${environment} # full cluster state dump`,
+    `  vibecarbon destroy ${environment}  # tear down when done`,
+    '',
+    `# To let Flux pull your repo into ${ha ? 'both clusters' : 'the cluster'}:`,
+    `  vibecarbon configure cicd ${environment}`,
+  ];
+}
+
+/**
  * The orchestrator's entry region guard, right after the tier gate: for the
  * k8s tiers the region and standby region must be ones the provider runs
  * Kubernetes in. Throws before any provider API or Pulumi work.
@@ -2502,29 +2530,18 @@ export async function executeDeployment(args, gatheredConfig) {
   }
 
   if (isK8sTier(tier)) {
-    {
-      const kubeconfigPath = localKubeconfigPath(process.cwd(), environment);
-      const masterIp = deployResult.primary?.masterIp || deployResult.masterIp;
-      p.log.success('Local-first deploy complete. App is delivered + running on the cluster.');
-      p.note(
-        formatCommandNote([
-          `Kubeconfig:  ${kubeconfigPath}`,
-          `Master IP:   ${masterIp ?? '(unknown: check Pulumi output)'}`,
-          '',
-          'Next steps:',
-          `  vibecarbon shell ${environment}    # bash with KUBECONFIG set`,
-          `  vibecarbon diagnose ${environment} # full cluster state dump`,
-          `  vibecarbon destroy ${environment}  # tear down when done`,
-          '',
-          '# To layer in Flux + GitHub Actions:',
-          `  vibecarbon configure cicd ${environment}`,
-        ]),
-        'Cluster + app ready',
-      );
-      // Fall through to Step 6 so .vibecarbon.json persists the serverlist —
-      // without it, `vibecarbon destroy` can't find the master/database IPs
-      // and the cluster leaks.
-    }
+    p.log.success('Local-first deploy complete. App is delivered + running on the cluster.');
+    p.note(
+      formatCommandNote(
+        k8sReadyNoteLines({
+          projectDir: process.cwd(),
+          environment,
+          ha: isHaTier(tier),
+          masterIp: deployResult.primary?.masterIp || deployResult.masterIp,
+        }),
+      ),
+      'Cluster + app ready',
+    );
 
     // --- Post-deploy DNS barrier (single k8s) ---
     // The dnsWarmupPromise (started in Step 4) created records pointing at
@@ -2547,10 +2564,10 @@ export async function executeDeployment(args, gatheredConfig) {
     }
 
     // --- Verifiable success gate for k8s ---
-    // The GHA deploy workflow already waits for Flux reconciliation; this
-    // extra probe confirms the app is reachable from the public internet
-    // (not just healthy inside the cluster). DNS propagation and ingress
-    // routing need to land before a user can actually load the URL, and
+    // The deploy's rollout proved the app healthy inside the cluster; this
+    // probe confirms it is reachable from the public internet. DNS
+    // propagation and ingress routing need to land before a user can
+    // actually load the URL, and
     // either one failing mid-deploy would leave us exiting 0 while the URL
     // returns 5xx. Certificate issuance is judged separately (the TLS phase
     // below) and never fails the deploy.

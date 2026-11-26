@@ -6,9 +6,8 @@
 # stays at zero replicas until a failover. The path layout + templating is
 # identical: one Kustomization, vibecarbon-base, at ./k8s/base.
 #
-# The deploy workflow (.github/workflows/deploy.yml) applies
-# clusters/primary/vibecarbon.yaml on every cluster, the standby's too, so
-# today no workflow applies this file.
+# `vibecarbon configure cicd <env>` applies clusters/primary/vibecarbon.yaml
+# on every cluster, the standby's too, so nothing applies this file today.
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -16,9 +15,12 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
-  url: https://github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
+  url: ssh://git@github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
   ref:
     branch: main
+  # Written by `vibecarbon configure cicd`: this cluster's own read-only
+  # deploy key (identity, identity.pub) and GitHub's published host keys
+  # (known_hosts). Each run puts a new key in and removes the old one.
   secretRef:
     name: flux-system
 ---
@@ -58,7 +60,7 @@ spec:
         kind: StatefulSet
         name: db
     # The backup CronJob is DEPLOY-owned: its schedule and retention are per
-    # environment (the CLI deploy and deploy.yml fill them in from the
+    # environment (`vibecarbon deploy <env>` fills them in from the
     # environment's backup config, scripts/render-backup-settings.mjs), while
     # this k8s/base is shared by every environment on the branch. The live
     # object carries kustomize.toolkit.fluxcd.io/prune: disabled.

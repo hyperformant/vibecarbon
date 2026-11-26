@@ -14,7 +14,6 @@ import * as p from '@clack/prompts';
 import { backupsBucketHolders, backupsTargetOf } from './lib/backups-bucket.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
-import { runCommand } from './lib/command.js';
 import { knownHostsPath } from './lib/host-keys.js';
 
 // Handle Ctrl+C — without this, SIGINT is swallowed during subprocess/fetch
@@ -196,7 +195,11 @@ const SPEC = {
     `  • ${destroySpecProviderName} firewalls`,
     `  • ${destroySpecProviderName} SSH keys (deployment keys only)`,
     '  • Cloudflare DNS records and health checks',
-    '  • GitHub environment secrets',
+    'GitHub is left alone: destroy changes nothing there. A k8s cluster that ran',
+    '`configure cicd` leaves its read-only "vibecarbon flux <cluster>" deploy key on',
+    'your repo, which opens nothing once the cluster is gone. To find its id, then delete it:',
+    '  gh repo deploy-key list',
+    '  gh repo deploy-key delete <id>',
   ].join('\n'),
   positional: [
     {
@@ -1194,28 +1197,6 @@ async function cleanupOrphanedVolumes(
 }
 
 // ============================================================================
-// GITHUB CLEANUP
-// ============================================================================
-
-function deleteGitHubEnvironment(envName) {
-  try {
-    const repoInfo = runCommand(
-      ['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-      { cleanEnv: true, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim();
-
-    runCommand(['gh', 'api', `repos/${repoInfo}/environments/${envName}`, '-X', 'DELETE'], {
-      cleanEnv: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ============================================================================
 // BACKUP BUCKET CLEANUP
 // ============================================================================
 
@@ -1836,9 +1817,10 @@ export function destroyOutro(envName, timeStr, results) {
  * from and mutating the shared destroy `ctx` (envConfig, projectConfig,
  * environment, args, results, spinner, tracker, cwd, isK8s).
  *
- * Tier divergence is carried on ctx.isK8s: only k8s tiers delete the GitHub
- * environment and print the summary note — and the k8s-only steps
- * (delete-github-env, print-summary) appear only in the k8s destroy plan.
+ * Tier divergence is carried on ctx.isK8s: only k8s tiers print the summary
+ * note, and the k8s-only step (print-summary) appears only in the k8s destroy
+ * plan. No tier touches GitHub: vibecarbon creates no GitHub Environment, so
+ * destroy deletes none (one there is the operator's own).
  */
 
 /** Names of the project's environments other than the one being destroyed. */
@@ -2230,26 +2212,6 @@ async function handleBackupBucketEffect(ctx) {
   if (outcome?.purged) results.backupsPurged = true;
 }
 
-// 4. GitHub environment (k8s only — this step is absent from the compose plans).
-//
-// Deliberately NOT tallied. `deleteGitHubEnvironment` returns false for both
-// "no such environment" and "gh has no access to this repo" — indistinguishable
-// from here — and neither outcome is a cloud resource that bills or blocks the
-// next deploy. Reporting it as a leak would make every destroy run outside a
-// GitHub-connected checkout exit non-zero.
-async function deleteGithubEnvEffect(ctx) {
-  const { environment, results, spinner } = ctx;
-  spinner.start(`Deleting GitHub environment: ${environment}`);
-  try {
-    results.github = deleteGitHubEnvironment(environment);
-    spinner.stop(
-      results.github ? 'GitHub environment deleted' : 'GitHub environment not found (or no access)',
-    );
-  } catch (error) {
-    spinner.stop(`Failed to delete GitHub environment: ${error.message}`);
-  }
-}
-
 /**
  * Distinct addresses for one line: "X", "X and Y", "X, Y and Z".
  * @param {string[]} addresses - each once
@@ -2400,10 +2362,6 @@ export const ENTRY_KEEP_BY_CLASS = Object.freeze({
         byHand: () =>
           "If you asked for -purge, delete this environment's backups in your provider's " +
           'object storage console; they keep billing until removed.',
-      },
-      'delete-github-env': {
-        byHand: (env) =>
-          `Delete the GitHub environment ${env} in the repository's settings if it is still there.`,
       },
       'update-project-config': {
         byHand: (env, args) =>
@@ -2668,7 +2626,7 @@ async function cleanupLocalFilesEffect(ctx) {
 
 // 7. Summary note (k8s only — this step is absent from the compose plans).
 async function printSummaryEffect(ctx) {
-  const { environment, results } = ctx;
+  const { results } = ctx;
   const deletedCount =
     results.servers.length +
     results.volumes.length +
@@ -2677,8 +2635,7 @@ async function printSummaryEffect(ctx) {
     results.dns.length +
     results.healthChecks.length +
     results.loadBalancers.length +
-    (results.s3Bucket ? 1 : 0) +
-    (results.github ? 1 : 0);
+    (results.s3Bucket ? 1 : 0);
 
   p.note(
     `
@@ -2691,7 +2648,6 @@ ${c.success('Deleted resources:')}
     Health Checks:  ${results.healthChecks.length > 0 ? results.healthChecks.join(', ') : 'None'}
     Load Balancers: ${results.loadBalancers.length > 0 ? results.loadBalancers.join(', ') : 'None'}
     S3 Bucket:      ${results.s3Bucket || 'None'}
-    GitHub Env:     ${results.github ? environment : 'None'}
 
 ${c.dim(`Total: ${deletedCount} resources deleted`)}
   `,
@@ -5547,7 +5503,6 @@ export const DESTROY_EFFECTS = {
   deleteAppBucket: finishThenReport('delete-app-bucket', deleteAppBucketEffect),
   retainStateBucket: finishThenReport('retain-state-bucket', retainStateBucketEffect),
   handleBackupBucket: finishThenReport('handle-backup-bucket', handleBackupBucketEffect),
-  deleteGithubEnv: finishThenReport('delete-github-env', deleteGithubEnvEffect),
   updateProjectConfig: finishThenReport('update-project-config', updateProjectConfigEffect),
   cleanupLocalFiles: finishThenReport('cleanup-local-files', cleanupLocalFilesEffect),
   printSummary: finishThenReport('print-summary', printSummaryEffect),
@@ -5912,7 +5867,6 @@ async function main(argv = []) {
     healthChecks: [],
     loadBalancers: [],
     s3Bucket: null,
-    github: false,
     // THE LEAK ACCOUNTING. Every teardown class records its verdicts here as it
     // goes — failed deletes, deferred/gated survivors, incomplete listings,
     // steps that threw. destroyOutro renders it as the end-of-destroy leak
@@ -5991,8 +5945,8 @@ async function main(argv = []) {
     cwd,
     spinner: s,
     tracker,
-    // k8s tiers alone fall back to the deploy-time bucket name, delete the
-    // GitHub environment, and print the summary note.
+    // k8s tiers alone fall back to the deploy-time bucket name and print the
+    // summary note.
     isK8s,
   };
 

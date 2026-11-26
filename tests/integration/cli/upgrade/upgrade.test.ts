@@ -462,6 +462,7 @@ describe('vibecarbon upgrade', () => {
 // literal placeholder.
 describe('vibecarbon upgrade after configure cicd', () => {
   const OWNER = 'acme';
+  const BUILD_YML = '.github/workflows/vibecarbon-build.yml';
   const CLUSTERS = ['primary', 'standby'];
   const TRAEFIK = 'k8s/base/traefik/deployment.yaml';
   const fluxFile = (cluster: string) => `k8s/flux/clusters/${cluster}/vibecarbon.yaml`;
@@ -521,11 +522,32 @@ describe('vibecarbon upgrade after configure cicd', () => {
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   }
 
+  /**
+   * Turn the fresh project into one created when Flux cloned over https: the
+   * cluster files' url as that create wrote it, and the checksums it
+   * recorded for them.
+   */
+  function createdWhenFluxClonedOverHttps() {
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    for (const cluster of CLUSTERS) {
+      const rel = fluxFile(cluster);
+      const text = read(rel).replace(
+        'url: ssh://git@github.com/test-app/test-app',
+        'url: https://github.com/test-app/test-app',
+      );
+      expect(text, `${rel} aged`).not.toBe(read(rel));
+      writeFileSync(join(project, rel), text);
+      config.fileChecksums[rel] = hashContent(text);
+    }
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  }
+
   function configureCicd() {
     const r = runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 });
     assertSuccess(r);
     for (const cluster of CLUSTERS) {
-      expect(read(fluxFile(cluster))).toContain(`url: https://github.com/${OWNER}/test-app`);
+      expect(read(fluxFile(cluster))).toContain(`url: ssh://git@github.com/${OWNER}/test-app`);
     }
   }
 
@@ -548,6 +570,58 @@ describe('vibecarbon upgrade after configure cicd', () => {
       expect(existsSync(join(project, `${fluxFile(cluster)}.upgrade-new`)), cluster).toBe(false);
     }
     expect(read('k8s/base/app/deployment.yaml')).toContain(`image: ghcr.io/${OWNER}/test-app:main`);
+  });
+
+  it('-y moves the cluster files configure cicd pointed at the real owner over https to ssh', () => {
+    // The project an older vibecarbon made and configured: Flux cloned
+    // github.com/acme/test-app over https with the workflow's token, which
+    // configure cicd now refuses. Upgrade is the way out it names.
+    createdWhenFluxClonedOverHttps();
+    assertSuccess(
+      runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 }),
+    );
+    for (const cluster of CLUSTERS) {
+      expect(read(fluxFile(cluster))).toContain(`url: https://github.com/${OWNER}/test-app\n`);
+    }
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    for (const cluster of CLUSTERS) {
+      expect(read(fluxFile(cluster)), cluster).toBe(shipped(fluxFile(cluster), OWNER));
+      expect(read(fluxFile(cluster)), cluster).toContain(
+        `url: ssh://git@github.com/${OWNER}/test-app\n`,
+      );
+      expect(existsSync(join(project, `${fluxFile(cluster)}.upgrade-new`)), cluster).toBe(false);
+    }
+    // Nothing left on https, so nothing to warn of.
+    expect(r.stdout + r.stderr).not.toMatch(/over https/);
+  });
+
+  it('a changed Flux file still on https is kept, and upgrade says so, naming its .upgrade-new and the ssh url', () => {
+    // The https-era project, with a line of the user's own in the cluster
+    // file configure cicd applies: -y keeps it and saves the new one beside
+    // it, so the next configure cicd would refuse it. Upgrade says so first.
+    createdWhenFluxClonedOverHttps();
+    assertSuccess(
+      runCli('configure', ['cicd'], { cwd: project, execStubs: stubs, timeoutMs: 60_000 }),
+    );
+    const primary = fluxFile('primary');
+    const custom = `${read(primary)}# site-specific\n`;
+    writeFileSync(join(project, primary), custom);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(read(primary)).toBe(custom);
+    expect(read(`${primary}.upgrade-new`)).toBe(shipped(primary, OWNER));
+    const out = (r.stdout + r.stderr).replace(/\s+/g, ' ');
+    expect(out).toContain(`${primary} still has flux read your repo over https`);
+    expect(out).toContain(
+      `apply ${primary}.upgrade-new, or change its url: to ssh://git@github.com/${OWNER}/test-app`,
+    );
   });
 
   it('a Flux file the user changed is offered with the real owner, and upgrade says Flux would apply the token', () => {
@@ -574,12 +648,12 @@ describe('vibecarbon upgrade after configure cicd', () => {
     expect(out).toContain(`${primary}.upgrade-new`);
   });
 
-  it('records the workflows configure installs, so the next upgrade can replace them', () => {
+  it('records the build workflow configure installs, so the next upgrade can replace it, and writes no deploy workflow', () => {
     configureCicd();
     const recorded = JSON.parse(read('.vibecarbon.json')).fileChecksums;
-    for (const rel of ['.github/workflows/deploy.yml', '.github/workflows/vibecarbon-build.yml']) {
-      expect(recorded[rel], rel).toBe(hashContent(read(rel)));
-    }
+    expect(recorded[BUILD_YML]).toBe(hashContent(read(BUILD_YML)));
+    expect(existsSync(join(project, '.github/workflows/deploy.yml'))).toBe(false);
+    expect(Object.keys(recorded)).not.toContain('.github/workflows/deploy.yml');
     expect(JSON.parse(read('.vibecarbon.json')).github).toEqual({ owner: OWNER, repo: 'test-app' });
   });
 
@@ -612,53 +686,50 @@ describe('vibecarbon upgrade after configure cicd', () => {
     expect(out).not.toMatch(/vibecarbon\.yaml\.upgrade-new|take the new k8s\/flux/);
   });
 
-  const DEPLOY_YML = '.github/workflows/deploy.yml';
-  /** The workflows as `configure cicd` left them before it recorded checksums. */
-  function workflowsWithoutChecksums(deployYml: string) {
+  /** The build workflow as `configure cicd` left it before it recorded checksums. */
+  function buildWorkflowWithoutChecksum(text: string) {
     configureCicd();
-    writeFileSync(join(project, DEPLOY_YML), deployYml);
+    writeFileSync(join(project, BUILD_YML), text);
     const configPath = join(project, '.vibecarbon.json');
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    delete config.fileChecksums[DEPLOY_YML];
-    delete config.fileChecksums['.github/workflows/vibecarbon-build.yml'];
+    delete config.fileChecksums[BUILD_YML];
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   }
 
   it('replaces a workflow a released configure installed before it recorded checksums', () => {
-    // Every project that ran configure cicd before this change has its
-    // deploy.yml with no checksum. The one v0.50.1 installed applies
-    // k8s/infra/traefik-crds raw, a file upgrade moves to its
-    // {{TRAEFIK_VERSION}} token. Byte for byte one this CLI shipped, so it is
-    // the CLI's to replace.
-    const shipped = readRepoFile('tests/fixtures/deploy-workflow-v0.50.1.yml');
-    expect(shipped).toContain('kubectl apply -k k8s/infra/traefik-crds/');
-    workflowsWithoutChecksums(shipped);
+    // Every project that ran configure cicd before checksums has its build
+    // workflow with no record. The one 075a91df shipped is older than the
+    // template's; byte for byte one this CLI shipped, so it is the CLI's to
+    // replace.
+    const shipped = readRepoFile('tests/fixtures/build-workflow-075a91df.yml');
+    expect(shipped).not.toBe(readRepoFile('carbon', BUILD_YML));
+    buildWorkflowWithoutChecksum(shipped);
 
     const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
     if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
     assertSuccess(r);
 
-    expect(read(DEPLOY_YML)).toBe(readRepoFile('carbon', DEPLOY_YML));
-    expect(existsSync(join(project, `${DEPLOY_YML}.upgrade-new`))).toBe(false);
-    expect(JSON.parse(read('.vibecarbon.json')).fileChecksums[DEPLOY_YML]).toBe(
-      hashContent(read(DEPLOY_YML)),
+    expect(read(BUILD_YML)).toBe(readRepoFile('carbon', BUILD_YML));
+    expect(existsSync(join(project, `${BUILD_YML}.upgrade-new`))).toBe(false);
+    expect(JSON.parse(read('.vibecarbon.json')).fileChecksums[BUILD_YML]).toBe(
+      hashContent(read(BUILD_YML)),
     );
   });
 
-  it('offers, never replaces, a deploy workflow with no checksum that no release shipped', () => {
+  it('offers, never replaces, a build workflow with no checksum that no release shipped', () => {
     // A workflow the user wrote (or edited) looks the same to upgrade as one
     // configure installed before checksums: no record. Only a byte-for-byte
     // shipped copy is the CLI's; anything else is the user's to review.
-    const theirs = `${readRepoFile('tests/fixtures/deploy-workflow-v0.50.1.yml')}# deploys our staging cluster too\n`;
-    workflowsWithoutChecksums(theirs);
+    const theirs = `${readRepoFile('tests/fixtures/build-workflow-075a91df.yml')}# builds our staging image too\n`;
+    buildWorkflowWithoutChecksum(theirs);
 
     const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
     if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
     assertSuccess(r);
 
-    expect(read(DEPLOY_YML)).toBe(theirs);
-    expect(read(`${DEPLOY_YML}.upgrade-new`)).toBe(readRepoFile('carbon', DEPLOY_YML));
-    expect(existsSync(join(project, `${DEPLOY_YML}.upgrade-backup`))).toBe(false);
+    expect(read(BUILD_YML)).toBe(theirs);
+    expect(read(`${BUILD_YML}.upgrade-new`)).toBe(readRepoFile('carbon', BUILD_YML));
+    expect(existsSync(join(project, `${BUILD_YML}.upgrade-backup`))).toBe(false);
   });
 });
 

@@ -29,7 +29,6 @@ const CRD_KUSTOMIZATION = 'carbon/k8s/infra/traefik-crds/kustomization.yaml';
 const K8S_DEPLOYMENT = 'carbon/k8s/base/traefik/deployment.yaml';
 const COMPOSE = 'carbon/docker-compose.yml';
 const COMPOSE_PROD = 'carbon/docker-compose.prod.yml';
-const DEPLOY_WORKFLOW = 'carbon/.github/workflows/deploy.yml';
 
 /** Tag from an `image: traefik:vX.Y.Z` line. */
 function imageTag(rel: string): string {
@@ -81,15 +80,5 @@ describe('Traefik CRD version matches the running Traefik version', () => {
     } finally {
       rmSync(project, { recursive: true, force: true });
     }
-  });
-
-  it('the GitOps workflow fills the same token and refuses a bad tag', () => {
-    const wf = repo(DEPLOY_WORKFLOW);
-    expect(wf).toMatch(/TRAEFIK_VERSION: \$\{\{ vars\.TRAEFIK_VERSION \}\}/);
-    expect(wf).toContain('{{TRAEFIK_VERSION}}');
-    // The tag reaches a sed and a URL, so its shape is checked before either.
-    expect(wf).toMatch(/\^v\[0-9\]/);
-    // Any `${{ }}` in a run script would be a shell injection, so it stays in env.
-    expect(wf).not.toMatch(/run:[^\n]*\$\{\{\s*vars\.TRAEFIK_VERSION/);
   });
 });

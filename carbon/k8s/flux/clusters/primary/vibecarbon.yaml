@@ -3,10 +3,10 @@
 #
 # URL is templated at project-create time via substitution of
 # {{GITHUB_OWNER}}/{{PROJECT_NAME}} (see src/create.js PLACEHOLDERS).
-# Applied by the GitHub Actions deploy workflow (.github/workflows/deploy.yml)
-# on every run, on each cluster it deploys, a k8s-ha standby's too. From then
-# on Flux fetches the repo every minute (GitRepository interval) and
-# reconciles the Kustomization every 10 min.
+# Applied by `vibecarbon configure cicd <env>` from the operator's machine,
+# on each cluster of the environment, a k8s-ha standby's too. From then on
+# Flux fetches the repo every minute (GitRepository interval) and reconciles
+# the Kustomization every 10 min.
 #
 # One Kustomization, vibecarbon-base, builds ./k8s/base, the tree the CLI's
 # deploy applies. k8s/overlays/production is built on that same base, so a
@@ -21,11 +21,12 @@ metadata:
 spec:
   # 1-min poll keeps the "git push → reconcile" feedback loop tight.
   interval: 1m
-  url: https://github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
+  url: ssh://git@github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
   ref:
     branch: main
-  # Secret populated by the deploy workflow at first run, containing a
-  # `username` + `password` (PAT or GitHub App token with repo:read).
+  # Written by `vibecarbon configure cicd`: this cluster's own read-only
+  # deploy key (identity, identity.pub) and GitHub's published host keys
+  # (known_hosts). Each run puts a new key in and removes the old one.
   secretRef:
     name: flux-system
 ---
@@ -69,7 +70,7 @@ spec:
         kind: StatefulSet
         name: db
     # The backup CronJob is DEPLOY-owned: its schedule and retention are per
-    # environment (the CLI deploy and deploy.yml fill them in from the
+    # environment (`vibecarbon deploy <env>` fills them in from the
     # environment's backup config, scripts/render-backup-settings.mjs), while
     # this k8s/base is shared by every environment on the branch. The live
     # object carries kustomize.toolkit.fluxcd.io/prune: disabled.

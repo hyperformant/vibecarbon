@@ -65,7 +65,7 @@ patches:
       kind: Deployment
       name: traefik
   # And the backup CronJob: deploy-owned, per environment (its schedule is
-  # filled in by the CLI deploy and deploy.yml, not by anything Flux builds).
+  # filled in by the CLI deploy, not by anything Flux builds).
   - patch: |
       $patch: delete
       apiVersion: batch/v1

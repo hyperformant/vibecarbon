@@ -1816,6 +1816,34 @@ must stay a pure read.
 `tests/unit/status/operator-ip-detect-budget.test.ts` and
 `tests/unit/access/operator-ip-everywhere.test.ts`.
 
+#### 2026-11-26: CI/CD on k8s is pull only (#591)
+
+`vibecarbon configure cicd <env>` hands each k8s cluster to Flux from the
+operator's machine: it installs Flux, gives each cluster its own read-only
+deploy key (`vibecarbon flux <cluster>`, rotated on every run), writes the app
+image's pull Secret when the package is private, applies the cluster file and
+waits for the first sync. Nothing at GitHub connects to a cluster any more. The
+`deploy.yml` workflow and the GitHub Environment copies it was seeded with
+(`KUBECONFIG_B64` among them) are retired: `vibecarbon deploy <env>` applies
+the secrets, the certificate and the backup settings from `.env.local` and
+`.vibecarbon.json`, and `configure cicd` names an earlier version's copies at
+GitHub without deleting them.
+
+**Why:** the workflow could not work. The runner could not reach the k8s API
+on 6443, which the firewall opens only to the operator's addresses; the
+`GITHUB_TOKEN` Flux cloned with died when the job ended; and no pull Secret
+existed, so a private app image could not be pulled.
+
+**Do not undo:** a workflow that reaches the cluster needs a provider token at
+GitHub, to open the firewall for the runner, or a 6443 open wider than the
+operator's addresses. `destroy` leaves GitHub alone, because vibecarbon creates
+no Environment: deleting one would delete an Environment it never made,
+possibly the operator's own.
+
+**Guard:** `tests/unit/deploy/gitops-retired-copies.test.ts`,
+`tests/unit/deploy/flux-deploy-key.test.ts` and
+`tests/unit/deploy/ghcr-pull-secret.test.ts`.
+
 ## Added and later removed
 
 | What | Removed | Why |
@@ -1841,6 +1869,7 @@ must stay a pure read.
 | Template `k8s:apply` and `k8s:delete` scripts | 2026-11-18 | Defaulted to an overlay the template does not ship |
 | `carbon/src/shared/types.ts` | 2026-11-18 | Unused hand copy of the schema that had drifted |
 | Per-provider k3s `*db-init.sh` scripts | 2026-11-18 | The worker script with three flags; now rendered from it |
+| The GitOps deploy workflow (`deploy.yml`) and its GitHub Environment copies | 2026-11-26 | Its runner could not reach the cluster; Flux pulls instead |
 
 ## Problems that keep coming back
 

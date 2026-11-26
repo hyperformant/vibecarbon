@@ -15,7 +15,6 @@ import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { APP_RUNTIME_KEYS } from '../../../src/lib/deploy/app-runtime-env.js';
-import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import {
   buildAppSecretData,
   buildInfraSecretData,
@@ -199,12 +198,6 @@ describe('the app password rides the app allowlist; the owner password never doe
     expect(infra.DB_PASSWORD).toBe('SENTINEL_DB_PASSWORD');
     expect(infra).not.toHaveProperty('APP_DB_PASSWORD');
     expect(INFRA_SECRET_KEYS).not.toContain('APP_DB_PASSWORD');
-  });
-
-  it('GitOps seeds APP_DB_PASSWORD into the environment secrets', () => {
-    expect(buildPerEnvSecrets({ APP_DB_PASSWORD: 'SENTINEL_APP_DB_PASSWORD' })).toMatchObject({
-      APP_DB_PASSWORD: 'SENTINEL_APP_DB_PASSWORD',
-    });
   });
 });
 

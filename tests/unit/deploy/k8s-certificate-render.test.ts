@@ -10,7 +10,10 @@ import { join, relative } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
-import { PROMOTE_ISSUER_ANNOTATION } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
+import {
+  PROMOTE_ISSUER_ANNOTATION,
+  STANDBY_SELFSIGNED_ISSUER,
+} from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 import { buildDbManifestValues, renderK8sBase } from '../../../src/lib/deploy/k8s/k3s.js';
 import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 import { createTempDir } from '../../_shared/temp-dir.js';
@@ -62,6 +65,32 @@ describe('renderTlsCertificateManifest', () => {
     expect(() => renderTlsCertificateManifest({ ...TLS, dnsNames: [] })).toThrow(/dnsNames/);
     expect(() => renderTlsCertificateManifest({ ...TLS, issuerName: '' })).toThrow(/issuer/);
     expect(() => renderTlsCertificateManifest({ ...TLS, effectiveIssuer: '' })).toThrow(/issuer/);
+  });
+
+  it('uses the same annotation and standby issuer names as the CLI', () => {
+    const doc = load(
+      renderTlsCertificateManifest({ ...TLS, effectiveIssuer: STANDBY_SELFSIGNED_ISSUER }),
+    ) as Doc;
+    expect(doc.metadata.annotations[PROMOTE_ISSUER_ANNOTATION]).toBe(TLS.issuerName);
+    expect(doc.spec.issuerRef.name).toBe(STANDBY_SELFSIGNED_ISSUER);
+  });
+
+  it.each([
+    [{ issuerName: 'letsencrypt-prod"\nx: y' }, /issuer/],
+    [{ issuerName: 'some-issuer' }, /issuer/],
+    [{ effectiveIssuer: 'letsencrypt-prod; rm' }, /issuer/],
+    [{ dnsNames: ['app.example.test\n- evil'] }, /DNS name/],
+    [{ dnsNames: ['app example.test'] }, /DNS name/],
+    [{ dnsNames: ['*.a.dev'] }, /DNS name/],
+    [
+      {
+        issuerName: 'letsencrypt-prod-digitalocean',
+        effectiveIssuer: 'letsencrypt-prod-digitalocean',
+      },
+      /issuer/,
+    ],
+  ])('refuses an unvalidated value (%j)', (over, pattern) => {
+    expect(() => renderTlsCertificateManifest({ ...TLS, ...over })).toThrow(pattern);
   });
 });
 

@@ -6,7 +6,7 @@
  *
  * ONE mechanism, the kubeconfig field, never a `--disable-compression` flag:
  * the field reaches every client that reads the file (kubectl, helm, the
- * operator's own kubectl inside `vibecarbon shell`, the GitOps runner), where
+ * operator's own kubectl inside `vibecarbon shell`), where
  * a flag reaches only the call sites that remember it, and helm has none.
  *
  * Why the arms below prove it for every spawn, present and future:
@@ -30,15 +30,14 @@
  *   from, so a new spawner is reviewed against the rule the day it appears.
  *   Master-side kubectl (ssh, the master's own loopback k3s.yaml) never
  *   crosses the operator's network path, so it needs nothing.
- *   (d) the GitOps workflow sets the field on the kubeconfig every job
- *   decodes, which also covers a secret an older CLI uploaded; configure
- *   cicd adds it in memory to what it uploads.
+ *   No kubeconfig leaves this machine: nothing at GitHub reaches a cluster
+ *   (configure cicd hands it to Flux from here).
  * Each detector is bitten by a synthetic source below.
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { REPO_ROOT, readRepoFile, sourceFiles } from '../../_shared/source-files.js';
+import { REPO_ROOT, sourceFiles } from '../../_shared/source-files.js';
 
 const MODULE = 'src/lib/kubeconfig.js';
 const K3S = 'src/lib/deploy/k8s/k3s.js';
@@ -114,17 +113,6 @@ function unUpgradedReads(file: string, text: string): string[] {
 const SPAWN = /(['"`])(kubectl|helm)\1\s*[,)\]]|kubectl\s+--kubeconfig\b/;
 function spawnsKubeClient(text: string): boolean {
   return codeLines(text).some(({ line }) => SPAWN.test(line));
-}
-
-/** (d) Workflow `run:` blocks that decode the kubeconfig secret without setting the field. */
-function workflowGaps(text: string): string[] {
-  const blocks = text.split(/\n(?=\s*- name: )/);
-  return blocks
-    .filter((b) => /base64 -d > "\$KUBECONFIG"/.test(b))
-    .filter(
-      (b) => !/kubectl config set "clusters\.\$\{cluster\}\.disable-compression" true/.test(b),
-    )
-    .map((b) => b.trim().split('\n')[0]);
 }
 
 /** (e) Calls of the two kubeconfig writers, as `file:function` call sites. */
@@ -284,12 +272,6 @@ describe('kubectl/helm read a kubeconfig with compression off', () => {
       expect(w.slice(0, w.indexOf('\n}\n')), writer).toContain('replaceAtomically(');
     }
   });
-
-  it('(d) every GitOps job that decodes the kubeconfig secret sets the field', () => {
-    const wf = readRepoFile('carbon/.github/workflows/deploy.yml');
-    expect(wf.match(/base64 -d > "\$KUBECONFIG"/g)?.length).toBeGreaterThanOrEqual(3);
-    expect(workflowGaps(wf)).toEqual([]);
-  });
 });
 
 describe('the census detectors bite', () => {
@@ -348,17 +330,5 @@ describe('the census detectors bite', () => {
     expect(writerCalls('src/shell.js', reader)).toEqual(['src/shell.js:run:upgradeKubeconfig']);
     expect(kubeconfigWrites('src/shell.js', reader)).toHaveLength(2);
     expect(kubeconfigWrites(MODULE, reader)).toEqual([]);
-  });
-
-  it('(d) flags a job that decodes the kubeconfig and leaves compression on', () => {
-    const wf = [
-      '      - name: Write kubeconfig from env secret',
-      '        run: |',
-      '          printf \'%s\' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"',
-      '          chmod 600 "$KUBECONFIG"',
-      '      - name: Next',
-      '        run: kubectl get pods',
-    ].join('\n');
-    expect(workflowGaps(wf)).toEqual(['- name: Write kubeconfig from env secret']);
   });
 });

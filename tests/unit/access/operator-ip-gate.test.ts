@@ -185,11 +185,13 @@ describe('requireEnvOperatorIpAccess', () => {
 });
 
 describe('the commands that need SSH share the one gate', () => {
-  // backup, restore and update gate the env as its record describes it.
+  // backup, restore, update and configure cicd gate the env as its record
+  // describes it.
   const gates: Record<string, string> = {
     'backup.js': 'await requireEnvOperatorIpAccess({',
     'restore.js': 'await requireEnvOperatorIpAccess({',
     'update.js': 'await requireEnvOperatorIpAccess({',
+    'configure.js': 'await requireEnvOperatorIpAccess({',
     'failover.js': 'await requireOperatorIpAccess({',
     'scale.js': 'await requireOperatorIpAccess({',
   };

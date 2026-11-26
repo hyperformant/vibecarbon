@@ -20,7 +20,7 @@ describe('getFilePolicy', () => {
     // The Garage config the dev override mounts: missing, Docker mounts a directory.
     expect(getFilePolicy('volumes/s3/garage.toml')).toBe('safe');
     expect(getFilePolicy('k8s/base/deep/nested/file.yaml')).toBe('safe');
-    expect(getFilePolicy('.github/workflows/deploy.yml')).toBe('safe');
+    expect(getFilePolicy('.github/workflows/vibecarbon-build.yml')).toBe('safe');
     expect(getFilePolicy('cloud-init/docker-ce-setup.yaml')).toBe('safe');
     // The compose db entrypoint docker-compose.yml mounts: missing, the db
     // container gets a directory there and never starts. The rest of

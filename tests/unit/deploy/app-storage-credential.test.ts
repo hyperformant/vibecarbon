@@ -15,7 +15,6 @@ import {
   resolveAppStorageCredential,
   revokeAppStorageCredential,
   storageAccessLine,
-  storedAppStoragePair,
 } from '../../../src/lib/deploy/app-storage-credential.js';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
 import { buildAppSecretData, buildInfraSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
@@ -813,53 +812,5 @@ describe('status: storage access row', () => {
     await expect(
       storageAccessRow({ provider: 'scaleway', s3: { bucket: 'proj-abc-prod' } }),
     ).resolves.toMatch(/^storage access: shared \(scaleway: /);
-  });
-});
-
-describe('GitOps gets the app pair, never the infra pair on a scoping provider', () => {
-  const names = appStorageSecretKeys('prod');
-  const record = {
-    id: 'SENTINEL_KEY_0',
-    scoping: 'mint',
-    tier: 'isolated',
-    bucket: 'proj-abc-prod',
-  };
-
-  it('a mint env hands GitOps its stored app pair', async () => {
-    const pair = await storedAppStoragePair({
-      provider: 'digitalocean',
-      environment: 'prod',
-      envConfig: { s3: { appKey: record } },
-      infraCredential: INFRA,
-      secrets: memorySecrets({
-        [names.accessKey]: 'SENTINEL_KEY_0',
-        [names.secretKey]: 'SENTINEL_S_0',
-      }),
-    });
-    expect(pair).toEqual({ accessKey: 'SENTINEL_KEY_0', secretKey: 'SENTINEL_S_0' });
-  });
-
-  it('a mint env without its secret here refuses rather than hand over the infra pair', async () => {
-    await expect(
-      storedAppStoragePair({
-        provider: 'digitalocean',
-        environment: 'prod',
-        envConfig: { s3: { appKey: record } },
-        infraCredential: INFRA,
-        secrets: memorySecrets(),
-      }),
-    ).rejects.toThrow(/not stored on this machine/);
-  });
-
-  it('no repo-level S3 pair is seeded; the per-env secrets carry the app pair', async () => {
-    const src = readRepoFile('src/lib/github-environments.js');
-    expect(src).not.toMatch(/setSecretFromBodyFile\('S3_(ACCESS|SECRET)_KEY'/);
-    const { buildPerEnvSecrets } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
-    const perEnv = buildPerEnvSecrets(
-      { S3_ACCESS_KEY: 'SENTINEL_INFRA_AK' },
-      { appStorage: { accessKey: 'SENTINEL_APP_AK', secretKey: 'SENTINEL_APP_SK' } },
-    );
-    expect(perEnv.S3_ACCESS_KEY).toBe('SENTINEL_APP_AK');
-    expect(perEnv.S3_SECRET_KEY).toBe('SENTINEL_APP_SK');
   });
 });

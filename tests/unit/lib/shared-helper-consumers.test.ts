@@ -305,7 +305,6 @@ const REGISTRY = [
       'src/destroy.js', // -purge and its holders, the preview facts
       'src/lib/destroy/preview.js', // the preview's backups line
       'src/lib/destroy/s3-credential-check.js', // the pre-teardown credential check
-      'src/configure.js', // the GitOps TLS snapshot prefix
       'src/lib/deploy/app-storage-credential.js', // unfenced-bucket marks
       'src/lib/deploy/orchestrator.js', // the deploy's skeleton record
       'tests/e2e/checks/backup-evidence.ts', // the e2e backup checks
@@ -581,10 +580,13 @@ const REGISTRY = [
     helper: 'quietClack',
     definition: 'tests/_shared/clack-fake.ts',
     consumers: [
+      'tests/unit/configure/cicd-operator-ip-gate.test.ts',
       'tests/unit/deploy/compose-ha-bundle-readers.test.ts',
       'tests/unit/deploy/compose-ha-early-tunnel.test.ts',
       'tests/unit/deploy/compose-ha-reconverge.test.ts',
       'tests/unit/deploy/compose-ha-streaming-fastpath.test.ts',
+      'tests/unit/deploy/flux-placeholders.test.ts',
+      'tests/unit/deploy/gitops-handover.test.ts',
       'tests/unit/destroy/failed-stack-second-pass.test.ts',
       'tests/unit/destroy/never-provisioned-k8s-destroy.test.ts',
       'tests/unit/destroy/unreadable-stack-purge-buckets.test.ts',
@@ -805,6 +807,18 @@ const REGISTRY = [
     ],
     deepTests: ['tests/unit/lib/state-passphrase-stub.test.ts'],
   },
+  // A created k8s project with a local bare origin, for the tests that run
+  // deployK8sGitOps for real: one copy of the k8s/ tree create lays down, so
+  // a template change reaches every such test at once.
+  ...(['createdK8sProject', 'withGitOrigin'] as const).map((helper) => ({
+    helper,
+    definition: 'tests/_shared/gitops-project.ts',
+    consumers: [
+      'tests/unit/deploy/flux-placeholders.test.ts',
+      'tests/unit/deploy/gitops-handover.test.ts',
+    ],
+    deepTests: ['tests/unit/deploy/flux-placeholders.test.ts'],
+  })),
   // The module stubs that take the real executeDeployment to its plan, each
   // spelled out the same way in every test that drives it there.
   ...(

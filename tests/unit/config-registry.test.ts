@@ -121,6 +121,9 @@ describe('config-registry', () => {
       // shell" test below and the DOCKER_HUB-specific test further down).
       'DOCKER_HUB_USERNAME',
       'DOCKER_HUB_TOKEN',
+      // The app image's pull token, read only for a headless `configure
+      // cicd <env>`; operator shell, and stored only in the cluster.
+      'GHCR_PULL_TOKEN',
       // Per-project Pulumi secrets passphrase (state-passphrase.js): .env.local only.
       'VIBECARBON_STATE_PASSPHRASE',
       // CLI-local operator override that rides the same guarantees
@@ -287,6 +290,7 @@ describe('config-registry', () => {
       for (const k of [
         'DOCKER_HUB_USERNAME',
         'DOCKER_HUB_TOKEN',
+        'GHCR_PULL_TOKEN',
         'ALLOWED_SSH_IPS',
         'HETZNER_STORAGE_REGION',
         'DIGITALOCEAN_STORAGE_REGION',

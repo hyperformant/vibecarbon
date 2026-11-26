@@ -713,8 +713,6 @@ interface RunOpts {
   restoreTls?: { restored: boolean; reason: string };
   /** projectConfig.cicdEnabled (GitOps layered on). */
   cicdEnabled?: boolean;
-  /** What the GitOps TLS refresh returns, or throws when an Error. */
-  gitopsRefresh?: { ok: boolean; reason?: string; refreshed?: string[] } | Error;
   /** `failover -server-type`. */
   serverType?: string;
 }
@@ -739,7 +737,6 @@ async function runFailoverHA(opts: RunOpts) {
     tlsCa,
     restoreTls,
     cicdEnabled = false,
-    gitopsRefresh = { ok: true, refreshed: ['e4-primary', 'e4-standby'] },
   } = opts;
   const order: string[] = [];
   let thrown: unknown;
@@ -892,12 +889,6 @@ async function runFailoverHA(opts: RunOpts) {
         ca: envConfigArg?.tls?.ca ?? null,
       };
     },
-    refreshGitopsTls: async (a: Record<string, unknown>) => {
-      captured.gitopsRefreshArgs = a;
-      order.push('gitopsRefresh');
-      if (gitopsRefresh instanceof Error) throw gitopsRefresh;
-      return gitopsRefresh;
-    },
     swapRoles: (envName: string, options?: unknown) => {
       captured.swapEnv = envName;
       captured.swapOptions = options;
@@ -1024,8 +1015,6 @@ describe('failoverHA step order', () => {
     expect(order.indexOf('promoteIssuer')).toBeGreaterThan(order.indexOf('dns'));
     expect(captured.promoteIssuerIp).toBe('10.0.0.9');
     expect(captured.promoteIssuerArgs).not.toHaveProperty('snapshot');
-    // No GitOps on this project: nothing is refreshed.
-    expect(order).not.toContain('gitopsRefresh');
     info.mockRestore();
   });
 
@@ -1038,35 +1027,17 @@ describe('failoverHA step order', () => {
     expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('saveConfig'));
   });
 
-  it('GitOps: the TLS vars are refreshed after the role swap, and a miss prints the repair command on its own line', async () => {
-    const ok = await runFailoverHA({ primaryReachable: true, cicdEnabled: true });
-    expect(ok.order.indexOf('saveConfig')).toBeLessThan(ok.order.indexOf('gitopsRefresh'));
-    expect(ok.captured.gitopsRefreshArgs).toMatchObject({ envName: 'e4' });
-    // A clean refresh says nothing.
-    expect(ok.thrown).toBeUndefined();
-    for (const gitopsRefresh of [
-      { ok: false, reason: 'gh: HTTP 502' },
-      new Error('gh crashed'),
-      // GitOps is on, yet no environment of this env carries the TLS vars.
-      { ok: true, refreshed: [] },
-    ]) {
-      const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
-      const message = vi.spyOn(p.log, 'message').mockImplementation(() => {});
-      const { thrown, order } = await runFailoverHA({
-        primaryReachable: true,
-        cicdEnabled: true,
-        gitopsRefresh,
-      });
-      // Never fails the failover.
-      expect(thrown).toBeUndefined();
-      expect(order).toContain('fenceRetired');
-      expect(
-        warn.mock.calls.map((c) => String(c[0])).some((w) => /GitOps TLS settings/.test(w)),
-      ).toBe(true);
-      expect(message.mock.calls.map((c) => String(c[0]))).toContain('vibecarbon configure cicd e4');
-      warn.mockRestore();
-      message.mockRestore();
-    }
+  it('GitOps: a failover touches nothing at GitHub', async () => {
+    // Flux pulls each cluster's own k8s/ tree, and the deploy owns the
+    // Certificate, so the roles swapping leaves no GitHub copy to refresh.
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const { thrown, order } = await runFailoverHA({ primaryReachable: true, cicdEnabled: true });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('fenceRetired');
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((w) => /GitOps|GitHub/.test(w))).toEqual(
+      [],
+    );
+    warn.mockRestore();
   });
 
   it('unplanned mode: no quiesce, no reseed; scale-down old primary is best-effort before dns', async () => {

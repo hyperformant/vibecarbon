@@ -17,7 +17,6 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PARKED_FEATURES } from '../../../src/add.js';
-import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
 import { addonSecretUpgradeNotes, ensureAddonSecrets } from '../../../src/upgrade.js';
@@ -94,9 +93,8 @@ describe('add-on database passwords', () => {
         }
       });
 
-      it(`${key} reaches the k8s Secret and the GitOps environment secrets`, () => {
+      it(`${key} reaches the k8s Secret`, () => {
         expect(SECRET_KEYS).toContain(key);
-        expect(buildPerEnvSecrets({ [key]: 'p'.repeat(32) })[key]).toBe('p'.repeat(32));
       });
 
       // A parked add-on is named in no user doc, .env.example included

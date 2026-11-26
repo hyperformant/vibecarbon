@@ -40,6 +40,8 @@ import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import {
   describeFluxPlaceholders,
+  FLUX_CLUSTER_FILE,
+  fluxHttpsSource,
   fluxPlaceholders,
 } from './lib/deploy/k8s/unrendered-placeholders.js';
 import { resolveDisplayName } from './lib/display-name.js';
@@ -860,8 +862,7 @@ async function main(cliArgs) {
     // the user took one out of reads as create made it, and is still
     // theirs). Without one: the user's, unless it is byte for byte a CI
     // workflow some release of `configure cicd` installed before it
-    // recorded checksums (an old deploy.yml applies k8s/infra/traefik-crds
-    // raw, a file upgrade moves to its {{TRAEFIK_VERSION}} token).
+    // recorded checksums.
     const userModified = storedHash
       ? recordedHash(relPath, currentContent) !== storedHash
       : !isShippedWorkflow(relPath, currentContent);
@@ -1255,6 +1256,20 @@ async function main(cliArgs) {
       p.log.warn(
         `Flux applies your committed k8s/ tree as it is, and it can't fill placeholders: ${describeFluxPlaceholders(findings).join('; ')}. ` +
           `Before you push, ${steps.join(', and ')}, or the next Flux sync ships that token to the cluster.`,
+      );
+    }
+    // The same for a cluster file left as it was that still clones over
+    // https (its new version saved as .upgrade-new, or not offered): the
+    // next configure cicd refuses it, so say what fixes it now.
+    const https = fluxHttpsSource(cwd);
+    if (https) {
+      const fix = existsSync(join(cwd, `${FLUX_CLUSTER_FILE}.upgrade-new`))
+        ? `apply ${FLUX_CLUSTER_FILE}.upgrade-new, or change its url: to ${https.ssh}`
+        : `change its url: to ${https.ssh}`;
+      p.log.warn(
+        `${FLUX_CLUSTER_FILE} still has flux read your repo over https, which needs a token github ` +
+          'takes back after every workflow run, so configure cicd refuses it. ' +
+          `before you push, ${fix}`,
       );
     }
   }

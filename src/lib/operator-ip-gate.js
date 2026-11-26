@@ -1,12 +1,12 @@
 /**
  * The operator-IP gate of the commands that cannot go on without SSH or the
- * k8s API (`backup`, `restore`, `update`, `failover`, both `scale` paths):
- * refresh the allowlist through ensureOperatorIpAccess, say so when the
- * firewall changed (or changed only in part), and exit 1 when the check
- * fails. A push that fails for an address already on the list warns and goes
- * on instead: before records existed, such a command pushed nothing at all,
- * and a failover must not stop on a firewall API that is down when the
- * address it comes from is already let in.
+ * k8s API (`backup`, `restore`, `update`, `configure cicd <env>`, `failover`,
+ * both `scale` paths): refresh the allowlist through ensureOperatorIpAccess,
+ * say so when the firewall changed (or changed only in part), and exit 1 when
+ * the check fails. A push that fails for an address already on the list warns
+ * and goes on instead: before records existed, such a command pushed nothing
+ * at all, and a failover must not stop on a firewall API that is down when
+ * the address it comes from is already let in.
  *
  * The other callers of ensureOperatorIpAccess differ on purpose and stay
  * their own: `deploy` runs it under a spinner and throws, `destroy` warns and
@@ -30,6 +30,7 @@ import { providerIdFor, resolveProviderToken } from './providers/index.js';
  * @param {boolean} o.yes
  * @param {string} [o.opened] what the success line says is open. Only the
  *   compose scale passes one ('SSH now allows'), the wording it has always had.
+ * @param {string[]} [o.sides] only these sides' firewalls (ensureOperatorIpAccess)
  */
 export async function requireOperatorIpAccess({
   projectConfig,
@@ -38,6 +39,7 @@ export async function requireOperatorIpAccess({
   apiToken,
   yes,
   opened = 'SSH/k8s API now allow',
+  sides,
 }) {
   if (!apiToken) return;
   try {
@@ -48,6 +50,7 @@ export async function requireOperatorIpAccess({
       apiToken,
       yes,
       onMessage: (msg) => p.log.info(msg),
+      ...(sides && { sides }),
     });
     if (result.missed?.length > 0) {
       p.log.warn(
@@ -71,20 +74,31 @@ export async function requireOperatorIpAccess({
 /**
  * requireOperatorIpAccess for an environment as its record describes it: both
  * firewalls for compose-HA and k8s HA, and the provider token from the
- * operator's environment. The gate of `backup`, `restore` and `update`.
+ * operator's environment. The gate of `backup`, `restore`, `update` and
+ * `configure cicd <env>`.
  *
  * @param {object} o
  * @param {object} o.projectConfig
  * @param {string} o.envName user-facing environment name
  * @param {{ deployMode?: string, ha?: { enabled?: boolean } }} o.envConfig
  * @param {boolean} o.yes
+ * @param {string[]} [o.sides] only these sides' firewalls, by stack
+ *   (`prod-primary`): `configure cicd` on k8s-ha passes the sides it hands
+ *   over, so a side whose kubeconfig is not here is not touched
  */
-export async function requireEnvOperatorIpAccess({ projectConfig, envName, envConfig, yes }) {
+export async function requireEnvOperatorIpAccess({
+  projectConfig,
+  envName,
+  envConfig,
+  yes,
+  sides,
+}) {
   await requireOperatorIpAccess({
     projectConfig,
     environment: envName,
     isHA: envConfig.deployMode === 'compose-ha' || !!envConfig.ha?.enabled,
     apiToken: resolveProviderToken(providerIdFor(envConfig)),
     yes,
+    ...(sides && { sides }),
   });
 }

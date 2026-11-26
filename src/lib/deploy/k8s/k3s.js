@@ -1910,15 +1910,25 @@ export async function readAppSecretVersions({ env }) {
   return versions.join(',');
 }
 
-/** A Secret manifest for `kubectl apply -f -`, values JSON-quoted, never on argv. */
-function secretManifest(name, stringData, namespace = 'vibecarbon') {
+/**
+ * A Secret manifest for kubectl to read on stdin (`-f -`), values
+ * JSON-quoted, never on argv.
+ *
+ * @param {string} name
+ * @param {Record<string, string>} stringData
+ * @param {string} [namespace]
+ * @param {string} [type] - Opaque, or a type whose keys Kubernetes checks
+ *   (kubernetes.io/dockerconfigjson)
+ * @returns {string}
+ */
+export function secretManifest(name, stringData, namespace = 'vibecarbon', type = 'Opaque') {
   return [
     'apiVersion: v1',
     'kind: Secret',
     'metadata:',
     `  name: ${name}`,
     `  namespace: ${namespace}`,
-    'type: Opaque',
+    `type: ${type}`,
     'stringData:',
     ...Object.entries(stringData).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
   ].join('\n');
@@ -3954,6 +3964,23 @@ export function renderK8sBase(
 }
 
 /**
+ * The vibecarbon-backup-settings ConfigMap an environment's backup CronJob
+ * reads: its retention, and where it saves the TLS Secret (none: no
+ * snapshot). applyK3sManifests pipes it to kubectl; it is in no manifest
+ * tree, so no Flux reconcile can touch it.
+ *
+ * @param {{schedule?: string, retentionDays?: number} | undefined} backupConfig
+ * @param {{ tlsSnapshotPrefix: string }} opts
+ * @returns {string}
+ */
+export function backupSettingsManifest(backupConfig, { tlsSnapshotPrefix }) {
+  return renderBackupSettingsConfigMap({
+    ...resolveBackupSettings(backupConfig),
+    tlsSnapshotPrefix,
+  });
+}
+
+/**
  * renderK8sBase's work on its fresh copy: the backup schedule, the replication
  * hostPort, the TLS Certificate, then the leftover-placeholder checks. Throws
  * on a placeholder it would otherwise apply; renderK8sBase removes the copy.
@@ -3963,7 +3990,7 @@ export function renderK8sBase(
  */
 function completeK8sBase(rendered, { backupConfig, tls, replicationHostPort, hasRegistry }) {
   // The backup CronJob's schedule is per environment (deploy-owned, Flux does
-  // not build it): filled in by the renderer deploy.yml also runs.
+  // not build it): filled in here, on a GitOps cluster too.
   const cronjob = join(rendered, 'backup', 'cronjob.yaml');
   if (existsSync(cronjob)) {
     writeFileSync(
@@ -4519,8 +4546,9 @@ export async function applyK3sManifests({
   const master = { ip: masterIp, sshKeyPath };
   // The schedule and retention this environment runs backups with, validated
   // before anything is created; rendered into the CronJob (renderK8sBase) and
-  // the vibecarbon-backup-settings ConfigMap applied below.
-  const backupSettings = resolveBackupSettings(backupConfig);
+  // the vibecarbon-backup-settings ConfigMap applied below
+  // (backupSettingsManifest).
+  resolveBackupSettings(backupConfig);
   // Pilot-light: on the standby cluster nothing app-tier runs until a
   // failover promotes it — no app pods, no CA-spawned workers. Everything
   // below gated on this const either declaratively zeroes a Deployment
@@ -4922,9 +4950,9 @@ export async function applyK3sManifests({
   };
   // 1. Install cert-manager: ONE apply of the upstream manifest with our
   //    settings rendered in as kustomize patches
-  //    (carbon/scripts/render-cert-manager.mjs, shared with the GitOps
-  //    workflow): the controller flag (a 5 minute minimum backoff) and the
-  //    control-plane pin of all three Deployments.
+  //    (carbon/scripts/render-cert-manager.mjs): the controller flag (a 5
+  //    minute minimum backoff) and the control-plane pin of all three
+  //    Deployments.
   //
   //    Nothing patches a cert-manager Deployment after this apply
   //    (tests/unit/deploy/cert-manager-no-post-apply-patch-census.test.ts).
@@ -5225,7 +5253,7 @@ export async function applyK3sManifests({
   // tree, so no Flux reconcile can touch it).
   await runKubectlWithRetry(['-n', 'vibecarbon', 'apply', '-f', '-'], {
     env,
-    input: renderBackupSettingsConfigMap({ ...backupSettings, tlsSnapshotPrefix }),
+    input: backupSettingsManifest(backupConfig, { tlsSnapshotPrefix }),
     description: 'applyK3sManifests: kubectl apply ConfigMap/vibecarbon-backup-settings',
   });
   if (pilotStandby) {

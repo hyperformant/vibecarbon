@@ -387,6 +387,8 @@ function sortedCidrs(operatorCidrs) {
  * @param {Array<{cidr: string}>} o.operatorCidrs
  * @param {string | null | undefined} o.apiToken the environment's provider token
  * @param {string} [o.cwd] the project directory whose .vibecarbon.json is updated
+ * @param {boolean} [o.record] false when `sides` are not all the
+ *   environment's: the record says what the whole environment allows
  * @returns {Promise<string[]>} the firewalls updated
  */
 export async function pushOperatorCidrs({
@@ -396,6 +398,7 @@ export async function pushOperatorCidrs({
   operatorCidrs,
   apiToken,
   cwd,
+  record = true,
 }) {
   const updated = await applyToFirewall({
     projectName: projectConfig.projectName,
@@ -404,7 +407,7 @@ export async function pushOperatorCidrs({
     apiToken,
     envConfig: projectConfig.environments?.[environment],
   });
-  if (updated.length === sides.length) {
+  if (record && updated.length === sides.length) {
     const pushed = sortedCidrs(operatorCidrs);
     updateProjectConfig((config) => {
       const env = config.environments?.[environment];
@@ -492,6 +495,9 @@ export class FirewallPushError extends Error {
  *   environment — user-facing env name
  *   isHA — whether to update both '<env>-primary' and '<env>-standby'
  *     firewalls (vs just '<env>')
+ *   sides - only these of them (`configure cicd` on k8s-ha, for the sides
+ *     whose kubeconfig is here); the record is left as it was, since it
+ *     speaks for every side
  *   apiToken — the environment's own provider API token (resolveProviderToken
  *     reads it from the shell or the project's .env.local); null pushes nothing
  *   yes — non-interactive mode flag
@@ -506,7 +512,8 @@ export class FirewallPushError extends Error {
  *   cidr — the CIDR that was added (or matched, when added=false)
  *   list — the updated list
  *   fromEnv — true if the list was bootstrapped from ALLOWED_SSH_IPS env var
- *   pushed — true if a push updated every firewall of this environment
+ *   pushed — true if a push updated every firewall it was given: every side
+ *     of this environment, or only the `sides` asked for
  *   updated / missed — the firewall names a push updated, and the ones it
  *     did not find (both empty when nothing was pushed)
  *
@@ -516,6 +523,7 @@ export async function ensureOperatorIpAccess({
   projectConfig,
   environment,
   isHA = false,
+  sides: only,
   apiToken,
   yes = false,
   onMessage,
@@ -591,7 +599,8 @@ export async function ensureOperatorIpAccess({
   let updated = [];
   let missed = [];
   if (envConfig && apiToken && !recordAllows(envConfig, cidr)) {
-    const sides = isHA ? [`${environment}-primary`, `${environment}-standby`] : [environment];
+    const all = isHA ? [`${environment}-primary`, `${environment}-standby`] : [environment];
+    const sides = only ?? all;
     try {
       updated = await pushOperatorCidrs({
         projectConfig,
@@ -600,6 +609,9 @@ export async function ensureOperatorIpAccess({
         operatorCidrs: updatedList,
         apiToken,
         cwd,
+        // The record is the whole environment's: a push to some of its
+        // sides leaves it, so the next command still pushes the rest.
+        record: all.every((side) => sides.includes(side)),
       });
     } catch (err) {
       throw new FirewallPushError(err, { added, cidr });

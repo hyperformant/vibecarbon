@@ -6,9 +6,9 @@ kind: Kustomization
 # Usage: kubectl apply -k k8s/infra/traefik-crds/
 
 # LOCKSTEP: the tag below is the Traefik tag this deploy runs. Traefik floats
-# with the version channel, so the CLI deploy and deploy.yml fill it in from the
-# same resolved set as the Traefik image (traefikVersion, src/lib/images.js), and
-# this file cannot be applied as it stands.
+# with the version channel, so the CLI deploy fills it in from the same
+# resolved set as the Traefik image (traefikVersion, src/lib/images.js), and
+# this file cannot be applied as it stands. Flux never applies it.
 # tests/unit/template/traefik-crd-version.test.ts holds the lockstep.
 #
 # Why it matters: the CRDs define the schema the API server validates against,

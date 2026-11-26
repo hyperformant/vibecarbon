@@ -540,6 +540,37 @@ describe('the command gates push their own environment on the same rule', () => 
     });
   });
 
+  it('a gate for some sides of an HA environment pushes only those, and records nothing', async () => {
+    // configure cicd on k8s-ha with only the primary's kubeconfig here hands
+    // over the primary alone, so its gate lets the operator through that
+    // side's firewall. The record is the environment's, both sides, so it is
+    // not written: the next gated command still pushes the standby.
+    const projectConfig = writeProject({ prod: prod() });
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    await requireEnvOperatorIpAccess({
+      projectConfig,
+      envName: 'prod',
+      envConfig: projectConfig.environments.prod,
+      yes: true,
+      sides: ['prod-primary'],
+    });
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall']);
+    expect(onDisk().environments.prod).not.toHaveProperty('operatorCidrsPushed');
+    expect(m.log.warn).not.toHaveBeenCalled();
+
+    // Both sides named are the whole environment: pushed and recorded.
+    m.pushes.length = 0;
+    await requireEnvOperatorIpAccess({
+      projectConfig,
+      envName: 'prod',
+      envConfig: projectConfig.environments.prod,
+      yes: true,
+      sides: ['prod-primary', 'prod-standby'],
+    });
+    expect(pushedTo()).toEqual(['demo-prod-primary-firewall', 'demo-prod-standby-firewall']);
+    expect(onDisk().environments.prod.operatorCidrsPushed).toEqual(sorted(TEAMMATE, ME));
+  });
+
   it('a push that throws carries whether the address was new', async () => {
     const run = (cidrs: string[]) =>
       ensureOperatorIpAccess({

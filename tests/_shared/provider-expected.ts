@@ -13,8 +13,7 @@
  * Each row pins the literal values a provider's identity/credentials
  * statics must hold. This is the "customer-visible contract" surface —
  * TOKEN_ENV in particular is pinned externally as a CI secret name (see
- * github-environments.test.ts, deploy-workflow-secret-sync.test.ts) and
- * must never be silently renamed.
+ * gitops-provider-token.test.ts) and must never be silently renamed.
  *
  * Adding a provider means adding a row here (required for
  * provider-contract.test.ts's per-provider suite to pass) — both consuming

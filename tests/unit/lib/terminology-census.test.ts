@@ -43,6 +43,10 @@
  *   - This file, which has to spell the terms to search for them.
  *   - docs/history.md, the project history, which has to name what was
  *     replaced to record that it was.
+ *   - SHIPPED_COPIES: a workflow as a release shipped it, byte for byte,
+ *     which the upgrade tests need unchanged (upgrade knows one by its
+ *     hash). Each must hash to a version SHIPPED_WORKFLOWS lists, so the
+ *     exemption cannot hold anything else.
  *
  * Scope: tracked files plus untracked files git does not ignore, so a new
  * file is caught before its first commit.
@@ -51,6 +55,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { isShippedWorkflow } from '../../../src/lib/shipped-workflows.js';
 import { REPO_ROOT } from '../../_shared/source-files.js';
 
 const SELF = 'tests/unit/lib/terminology-census.test.ts';
@@ -67,13 +72,24 @@ const hasTerm = (text: string) => TERM_PATTERNS.some((re) => re.test(text));
 
 const VENDORED: string[] = [];
 
+/**
+ * Fixture → the workflow path a release shipped it at. Fixtures only (under
+ * tests/fixtures/), so the exemption can never excuse a live file: the
+ * template's own workflow is a listed version too.
+ */
+const SHIPPED_COPIES: Record<string, string> = {
+  'tests/fixtures/build-workflow-075a91df.yml': '.github/workflows/vibecarbon-build.yml',
+};
+
 const BINARY_EXT =
   /\.(png|jpe?g|gif|webp|ico|icns|avif|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|br|wasm|mp4|webm|mov|db|sqlite)$/i;
 
 type Source = { rel: string; text: string };
 
 function isExempt(rel: string): boolean {
-  return rel === SELF || rel === HISTORY || VENDORED.includes(rel);
+  return (
+    rel === SELF || rel === HISTORY || VENDORED.includes(rel) || Object.hasOwn(SHIPPED_COPIES, rel)
+  );
 }
 
 /** Every `path` / `path:line: text` that carries a retired term. */
@@ -132,6 +148,13 @@ describe('terminology census: the retired stack vocabulary', () => {
 
   it('every exemption still points at something real', () => {
     for (const p of VENDORED) expect(existsSync(join(REPO_ROOT, p)), p).toBe(true);
+    for (const [p, shippedAs] of Object.entries(SHIPPED_COPIES)) {
+      expect(p.startsWith('tests/fixtures/'), p).toBe(true);
+      expect(isShippedWorkflow(shippedAs, readFileSync(join(REPO_ROOT, p), 'utf8')), p).toBe(true);
+    }
+    // Own keys only: a name the prototype carries is no exemption.
+    expect(isExempt('constructor')).toBe(false);
+    expect(isExempt('toString')).toBe(false);
   });
 
   it('catches a planted hit, in records of the past too', () => {

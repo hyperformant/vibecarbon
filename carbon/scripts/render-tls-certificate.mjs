@@ -1,14 +1,8 @@
-#!/usr/bin/env node
 /**
- * The vibecarbon-tls Certificate a k8s cluster runs with. ONE renderer for
- * both ways a cluster gets it:
- *
- * - the vibecarbon CLI imports this module when it applies a cluster
- *   (renderK8sBase writes it into the rendered k8s/base copy);
- * - the GitOps deploy workflow (.github/workflows/deploy.yml) runs it as a
- *   script, from the GitHub Environment vars TLS_CERT_ISSUER,
- *   TLS_CERT_EFFECTIVE_ISSUER and TLS_CERT_DNS_NAMES that
- *   `vibecarbon configure cicd` seeds per environment.
+ * The vibecarbon-tls Certificate a k8s cluster runs with. The vibecarbon CLI
+ * imports this module when it applies a cluster (renderK8sBase writes it into
+ * the rendered k8s/base copy); on a GitOps cluster too, where
+ * `vibecarbon deploy <env>` applies it.
  *
  * The names and issuer are per environment, but the committed `k8s/base` is
  * shared by every environment Flux reconciles from the same branch, so they
@@ -21,12 +15,7 @@
  * a pilot standby the local self-signed one. The real ACME issuer always
  * rides the vibecarbon.dev/promote-issuer annotation, which a failover
  * promotion re-points issuerRef from.
- *
- * Script usage: `node scripts/render-tls-certificate.mjs` prints the
- * Certificate as YAML on stdout. The three vars are required and validated:
- * no value is invented, and nothing unvalidated reaches the manifest.
  */
-import { fileURLToPath } from 'node:url';
 
 /** Annotation carrying the env's real ACME ClusterIssuer (acme-issuer-policy.js). */
 const PROMOTE_ISSUER_ANNOTATION = 'vibecarbon.dev/promote-issuer';
@@ -48,44 +37,22 @@ const DNS_NAME = /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([
  *
  * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} tls
  */
-/**
- * An invalid setting. `summary` names the variable without echoing its value,
- * for the workflow log; `message` keeps the value for callers that show it.
- */
-function invalid(field, message) {
-  return Object.assign(new Error(message), { field });
-}
-
-/** The only text the workflow log gets: fixed strings keyed by setting name, never a value. */
-const LOG_SUMMARY = {
-  TLS_CERT_DNS_NAMES: 'TLS_CERT_DNS_NAMES is not valid.',
-  TLS_CERT_ISSUER: 'TLS_CERT_ISSUER is not valid.',
-  TLS_CERT_EFFECTIVE_ISSUER: 'TLS_CERT_EFFECTIVE_ISSUER is not valid.',
-  missing:
-    'TLS_CERT_ISSUER, TLS_CERT_EFFECTIVE_ISSUER and TLS_CERT_DNS_NAMES are not set for this environment.',
-};
-
 export function validateTlsCertificate({ dnsNames, issuerName, effectiveIssuer }) {
   if (!Array.isArray(dnsNames) || dnsNames.length === 0) {
-    throw invalid('TLS_CERT_DNS_NAMES', 'the TLS Certificate dnsNames is empty');
+    throw new Error('the TLS Certificate dnsNames is empty');
   }
   for (const name of dnsNames) {
     if (typeof name !== 'string' || name.length > 253 || !DNS_NAME.test(name)) {
-      throw invalid(
-        'TLS_CERT_DNS_NAMES',
-        `the TLS Certificate DNS name ${JSON.stringify(name)} is not a DNS name`,
-      );
+      throw new Error(`the TLS Certificate DNS name ${JSON.stringify(name)} is not a DNS name`);
     }
   }
   if (!ACME_ISSUER.test(String(issuerName ?? ''))) {
-    throw invalid(
-      'TLS_CERT_ISSUER',
+    throw new Error(
       `the TLS Certificate issuer ${JSON.stringify(issuerName ?? null)} is not letsencrypt-prod or letsencrypt-staging`,
     );
   }
   if (effectiveIssuer !== issuerName && effectiveIssuer !== STANDBY_SELFSIGNED_ISSUER) {
-    throw invalid(
-      'TLS_CERT_EFFECTIVE_ISSUER',
+    throw new Error(
       `the TLS Certificate effective issuer ${JSON.stringify(effectiveIssuer ?? null)} is neither the ACME issuer nor ${STANDBY_SELFSIGNED_ISSUER}`,
     );
   }
@@ -121,41 +88,4 @@ export function renderTlsCertificateManifest(tls) {
     ...dnsNames.map((n) => `    - ${q(n)}`),
     '',
   ].join('\n');
-}
-
-/** The GitHub Environment vars `vibecarbon configure cicd` seeds, validated. */
-export function tlsCertificateVars(tls) {
-  const { dnsNames, issuerName, effectiveIssuer } = validateTlsCertificate(tls);
-  return {
-    TLS_CERT_ISSUER: issuerName,
-    TLS_CERT_EFFECTIVE_ISSUER: effectiveIssuer,
-    TLS_CERT_DNS_NAMES: dnsNames.join(','),
-  };
-}
-
-/** The settings back from those vars; throws when one is missing or invalid. */
-export function tlsCertificateFromVars(env) {
-  const { TLS_CERT_ISSUER, TLS_CERT_EFFECTIVE_ISSUER, TLS_CERT_DNS_NAMES } = env;
-  if (!TLS_CERT_ISSUER || !TLS_CERT_EFFECTIVE_ISSUER || !TLS_CERT_DNS_NAMES) {
-    throw Object.assign(new Error(LOG_SUMMARY.missing), { field: 'missing' });
-  }
-  return validateTlsCertificate({
-    dnsNames: TLS_CERT_DNS_NAMES.split(','),
-    issuerName: TLS_CERT_ISSUER,
-    effectiveIssuer: TLS_CERT_EFFECTIVE_ISSUER,
-  });
-}
-
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  try {
-    process.stdout.write(renderTlsCertificateManifest(tlsCertificateFromVars(process.env)));
-  } catch (err) {
-    // Name the variable, never its value: these come from the workflow's
-    // environment, and CI logs are wider-read than the settings themselves.
-    const what = Object.hasOwn(LOG_SUMMARY, err?.field) ? LOG_SUMMARY[err.field] : 'The TLS Certificate settings are not valid.';
-    console.error(
-      `${what} Run \`vibecarbon configure cicd <env>\` from the project to seed them, then re-run this workflow.`,
-    );
-    process.exit(1);
-  }
 }

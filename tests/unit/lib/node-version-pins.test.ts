@@ -71,7 +71,6 @@ const WORKFLOWS = [
   join('.github', 'workflows', 'scorecard.yml'),
   join('.github', 'workflows', 'test.yml'),
   join('.github', 'workflows', 'version-channel.yml'),
-  join('carbon', '.github', 'workflows', 'deploy.yml'),
   join('carbon', '.github', 'workflows', 'vibecarbon-build.yml'),
 ];
 

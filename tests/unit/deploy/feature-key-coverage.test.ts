@@ -1,16 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import {
-  clientBuildKeys,
-  featureConfigKeys,
-  featureRuntimeKeys,
-  featureSecretKeys,
-} from '../../../src/lib/config-registry.js';
-import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
+import { clientBuildKeys, featureRuntimeKeys } from '../../../src/lib/config-registry.js';
 import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 
 // The guarantee: every configure-managed runtime key the registry declares is
-// propagated by every k8s deploy path. If someone adds a feature key to the
-// registry but forgets a path, one of these fails — not a silent prod no-op.
+// propagated by the k8s deploy (a GitOps cluster gets its Secrets from it
+// too). If someone adds a feature key to the registry but forgets a path, one
+// of these fails — not a silent prod no-op.
 
 describe('k8s local — applyVibecarbonSecrets allowlist', () => {
   it('SECRET_KEYS ⊇ every feature runtime key (secret + non-secret)', () => {
@@ -30,39 +25,11 @@ describe('k8s local — applyVibecarbonSecrets allowlist', () => {
       expect(allowed.has(key), `${key} is build-time and must not be in the Secret`).toBe(false);
     }
   });
-});
 
-describe('k8s GitOps — buildPerEnvSecrets', () => {
-  // Fixture covers one key of each feature secret + non-secret + infra key,
-  // plus secrets of the removed services an older .env.local still carries.
-  const envLocal: Record<string, string> = {
-    DB_PASSWORD: 'pw',
-    JWT_SECRET: 'jwt',
-    VAULT_ENC_KEY: 'vault',
-    STRIPE_SECRET_KEY: 'sk_test_x',
-    BILLING_PROVIDER: 'stripe',
-    SMTP_PASS: 'smtp-secret',
-    SMTP_HOST: 'smtp.example.com',
-    GOOGLE_CLIENT_SECRET: 'g-secret',
-  };
-  const out = buildPerEnvSecrets(envLocal);
-
-  it('emits every feature runtime key present in .env.local', () => {
-    for (const key of [...featureSecretKeys(), ...featureConfigKeys()]) {
-      if (envLocal[key] !== undefined) {
-        expect(out[key], `buildPerEnvSecrets dropped ${key}`).toBe(envLocal[key]);
-      }
+  it("never carries the removed services' secrets, and SMTP's password is SMTP_PASS", () => {
+    for (const key of ['JWT_SECRET', 'VAULT_ENC_KEY', 'SMTP_PASSWORD']) {
+      expect(SECRET_KEYS, key).not.toContain(key);
     }
-  });
-
-  it("never uploads the removed services' secrets", () => {
-    for (const key of ['JWT_SECRET', 'VAULT_ENC_KEY']) {
-      expect(out, key).not.toHaveProperty(key);
-    }
-  });
-
-  it('uses canonical SMTP_PASS, never SMTP_PASSWORD', () => {
-    expect(out.SMTP_PASS).toBe('smtp-secret');
-    expect(out).not.toHaveProperty('SMTP_PASSWORD');
+    expect(SECRET_KEYS).toContain('SMTP_PASS');
   });
 });
